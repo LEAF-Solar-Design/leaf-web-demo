@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 import deps
@@ -31,7 +31,7 @@ class AuthorRequest(BaseModel):
 
 
 @router.post("/api/author")
-def author(req: AuthorRequest) -> Dict[str, Any]:
+def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     """Generate a tool package from a description, PERSIST its code to a real
     file, register it so it appears in /api/tools, and return
     {tool, code, preview} (contract section 4)."""
@@ -61,4 +61,6 @@ def author(req: AuthorRequest) -> Dict[str, Any]:
     deps._AUTHORED.append(tool)
     deps.save_authored_tools(deps._AUTHORED)
 
-    return with_envelope_fields({"tool": tool, "code": code, "preview": preview})
+    return deps.tenant_echo(
+        with_envelope_fields({"tool": tool, "code": code, "preview": preview}), tenant
+    )

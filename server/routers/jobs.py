@@ -65,7 +65,9 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
 
     return JSONResponse(
         status_code=202,
-        content=with_envelope_fields({"job_id": job_id, "status": "submitted"}),
+        content=deps.tenant_echo(
+            with_envelope_fields({"job_id": job_id, "status": "submitted"}), tenant_id
+        ),
     )
 
 
