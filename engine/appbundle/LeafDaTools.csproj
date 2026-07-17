@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Compiled DA tool bundle. Skeleton (Lane B step 4) - not required to fully
+    build for the demo; the LISP scripts in ../tools/ are the live path.
+
+    Pick the TargetFramework to match the DA engine you target:
+      Autodesk.AutoCAD+24_3  -> net48   (AutoCAD 2024 refs)
+      Autodesk.AutoCAD+25_1  -> net8.0-windows  (AutoCAD 2025 refs)
+      Autodesk.AutoCAD+26_0  -> net8.0-windows  (AutoCAD 2026 refs)
+    Default below targets the net8 engines (+25_1 / +26_0). For +24_3, flip
+    TargetFramework to net48 and repoint the HintPaths at AutoCAD 2024.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>LeafDaTools</AssemblyName>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Contents/LeafDaTools.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Managed AutoCAD refs are Private=false: the engine supplies them at
+         runtime; the AppBundle must NOT ship them. Repoint HintPath to the
+         AutoCAD version whose refs match your target engine. -->
+    <Reference Include="acdbmgd">
+      <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\acdbmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="accoremgd">
+      <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\accoremgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

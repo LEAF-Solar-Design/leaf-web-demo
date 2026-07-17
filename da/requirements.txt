@@ -1,0 +1,2 @@
+# Lane A DA client dependency (already present in this env: requests 2.32.5)
+requests>=2.28

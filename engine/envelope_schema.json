@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Leaf Web Demo Result Envelope",
+  "description": "CONTRACT.md section 3 - every tool run (mock OR real APS) returns EXACTLY this shape.",
+  "type": "object",
+  "required": ["ok", "tool", "version", "result", "timing_ms", "error"],
+  "additionalProperties": false,
+  "properties": {
+    "ok": { "type": "boolean" },
+    "tool": { "type": "string", "description": "kebab-case tool name (registry §2 name)." },
+    "version": { "type": "string" },
+    "result": { "type": "object", "description": "Tool-specific data, e.g. {\"counts\": {\"Panels\": 2345}}." },
+    "overlay": {
+      "type": ["object", "null"],
+      "description": "OPTIONAL - how the frontend shows the effect.",
+      "additionalProperties": true,
+      "properties": {
+        "highlight_handles": { "type": "array", "items": { "type": "string" } },
+        "markers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pt": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+              "label": { "type": "string" }
+            }
+          }
+        },
+        "polylines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pts": { "type": "array", "items": { "type": "array", "items": { "type": "number" } } },
+              "color": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "timing_ms": { "type": "number" },
+    "cost": {
+      "type": ["object", "null"],
+      "description": "null until a real APS run.",
+      "properties": {
+        "engine_seconds": { "type": "number" },
+        "usd_est": { "type": "number" }
+      }
+    },
+    "error": { "type": ["string", "null"] }
+  }
+}

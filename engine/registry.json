@@ -1,0 +1,67 @@
+{
+  "tools": [
+    {
+      "name": "count-by-layer",
+      "version": "1.0.0",
+      "description": "Counts every model-space entity per layer.",
+      "kind": "script",
+      "engine_op": "count_by_layer",
+      "script": "tools/count_by_layer.lsp",
+      "params": { "type": "object", "properties": {}, "required": [] },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "counts": { "type": "object", "additionalProperties": { "type": "integer" } }
+        }
+      },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    },
+    {
+      "name": "measure-panel-area",
+      "version": "1.0.0",
+      "description": "Sums closed-polyline area (total + per layer) in square feet; assumes 1 drawing unit = 1 inch.",
+      "kind": "script",
+      "engine_op": "measure_panel_area",
+      "script": "tools/measure_panel_area.lsp",
+      "params": { "type": "object", "properties": {}, "required": [] },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "area_sqft": { "type": "number" },
+          "by_layer_sqft": { "type": "object", "additionalProperties": { "type": "number" } },
+          "units_assumption": { "type": "string" }
+        }
+      },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    },
+    {
+      "name": "highlight-panels-near-edge",
+      "version": "1.0.0",
+      "description": "Returns handles of polylines on a layer whose centroid is within a distance of the drawing extents edge.",
+      "kind": "script",
+      "engine_op": "highlight_panels_near_edge",
+      "script": "tools/highlight_panels_near_edge.lsp",
+      "params": {
+        "type": "object",
+        "properties": {
+          "layer": { "type": "string", "default": "Panels", "description": "Layer whose polylines are tested." },
+          "distance": { "type": "number", "default": 200, "description": "Max distance (drawing units / inches) from an extents edge." }
+        },
+        "required": []
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "layer": { "type": "string" },
+          "distance": { "type": "number" },
+          "matched": { "type": "integer" },
+          "extents": { "type": "object" }
+        }
+      },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PackageContents.xml - APS Design Automation AppBundle manifest for the
+  Leaf Web Demo COMPILED-tool option (Lane B, step 4).
+
+  This is the alternative to the kind:"script" LISP tools in ../tools/: the same
+  three engine_ops implemented in C# against acdbmgd/accoremgd and loaded into the
+  headless AutoCAD engine as a NETLOAD AppBundle. A DA Activity references this
+  bundle by its AppName and invokes a CommandMethod (e.g. LEAFCOUNT) via its
+  command line; the command writes result.json (Result envelope, CONTRACT §3) to
+  the working dir, which the Activity uploads.
+
+  Engines (confirmed available): Autodesk.AutoCAD+24_3 (net48),
+  +25_1, +26_0 (net8). Set ProductType/SeriesMin to match the engine you target.
+  Skeleton only - see BUILD.md; not required to fully build for the demo.
+-->
+<ApplicationPackage
+    SchemaVersion="1.0"
+    Version="1.0.0"
+    ProductCode="{9C7E4A10-1F2B-4E33-9B00-LEAFDADEMO01}"
+    Name="LeafDaTools"
+    Description="Leaf Web Demo compiled DA tools (count/measure/highlight)"
+    Author="Leaf">
+  <CompanyDetails Name="Leaf" Url="https://leafdesign.ai" Email="ehaug@leafsolardesign.com" />
+  <Components Description="LeafDaTools managed module">
+    <!-- net8 engines (+25_1, +26_0). For +24_3 (net48) build a net48 DLL and
+         point a second RuntimeRequirements/@SeriesMax entry at it. -->
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD" SeriesMin="R25.0" />
+    <ComponentEntry
+        AppName="LeafDaTools"
+        Version="1.0.0"
+        ModuleName="./Contents/LeafDaTools.dll"
+        AppDescription="count-by-layer / measure-panel-area / highlight-panels-near-edge"
+        LoadOnAutoCADStartup="False"
+        LoadOnCommandInvocation="True">
+      <Commands GroupName="LeafDaTools">
+        <Command Global="LEAFCOUNT"     Local="LEAFCOUNT" />
+        <Command Global="LEAFAREA"      Local="LEAFAREA" />
+        <Command Global="LEAFHIGHLIGHT" Local="LEAFHIGHLIGHT" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>

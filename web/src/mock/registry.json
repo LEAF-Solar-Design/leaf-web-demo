@@ -1,0 +1,60 @@
+{
+  "tools": [
+    {
+      "name": "count-by-layer",
+      "version": "1.0.0",
+      "description": "Counts entities per layer. The safest read-only tool — a good first run.",
+      "kind": "script",
+      "engine_op": "count_by_layer",
+      "params": { "type": "object", "properties": {}, "required": [] },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    },
+    {
+      "name": "highlight-panels-near-edge",
+      "version": "1.0.0",
+      "description": "Highlights panels whose centroid is within a given distance of the roof edge.",
+      "kind": "script",
+      "engine_op": "highlight_near_edge",
+      "params": {
+        "type": "object",
+        "properties": {
+          "distance_in": { "type": "number", "title": "Distance (inches)", "default": 60 }
+        },
+        "required": []
+      },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    },
+    {
+      "name": "measure-panel-area",
+      "version": "1.0.0",
+      "description": "Measures the area of every panel and reports totals; highlights the largest.",
+      "kind": "script",
+      "engine_op": "measure_area",
+      "params": { "type": "object", "properties": {}, "required": [] },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    },
+    {
+      "name": "select-by-layer",
+      "version": "1.0.0",
+      "description": "Selects and highlights every entity on a chosen layer.",
+      "kind": "script",
+      "engine_op": "select_by_layer",
+      "params": {
+        "type": "object",
+        "properties": {
+          "layer": { "type": "string", "title": "Layer", "default": "Panels" }
+        },
+        "required": ["layer"]
+      },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    }
+  ]
+}
