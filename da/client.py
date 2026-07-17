@@ -118,16 +118,20 @@ def nickname() -> str:
 
 
 def bucket_key() -> str:
-    """Deterministic bucket key (lowercase, globally unique-ish per client id).
+    """Deterministic bucket key for the PERSISTENT drawing store.
 
-    ROOT creates this bucket once (see setup_live.md). Override with APS_BUCKET.
+    Stem is `leaf-web-store-` (was `leaf-web-demo-` for the old TRANSIENT bucket).
+    OSS bucket policy is immutable at creation, so the persistent store gets a
+    FRESH key rather than colliding (409) with the abandoned transient bucket —
+    the old `leaf-web-demo-*` bucket is intentionally left to expire on its own.
+    Override with APS_BUCKET. Bucket keys: 3-128 chars, [-_.a-z0-9].
     """
     if os.environ.get("APS_BUCKET"):
         return os.environ["APS_BUCKET"]
     c = _load_creds()
-    # bucket keys: 3-128 chars, [-_.a-z0-9]; derive a stable suffix from the client id
+    # derive a stable suffix from the client id
     suffix = "".join(ch for ch in c["client_id"].lower() if ch.isalnum())[:16]
-    return f"leaf-web-demo-{suffix}"
+    return f"leaf-web-store-{suffix}"
 
 
 def activity_qualified(name: str) -> str:
@@ -152,13 +156,19 @@ def _oss_rest_url(object_key: str) -> str:
     return f"{APS}/oss/v2/buckets/{bucket_key()}/objects/{_enc(object_key)}"
 
 
-def create_bucket(policy: str = "transient") -> dict:
-    """Create the OSS bucket (idempotent-ish: 409 = already exists). LIVE call."""
+def create_bucket(policy: str = "persistent") -> dict:
+    """Create the OSS bucket (idempotent-ish: 409 = already exists). LIVE call.
+
+    Default policy is PERSISTENT (objects do NOT expire) — this bucket backs the
+    per-tenant, per-drawing versioned drawing store. The old TRANSIENT bucket is
+    abandoned (OSS policy is immutable at creation; a fresh key is used instead).
+    """
+    body = {"bucketKey": bucket_key(), "policyKey": policy}
     r = requests.post(
         f"{APS}/oss/v2/buckets",
         headers={**_auth_headers(), "Content-Type": "application/json",
                  "x-ads-region": OSS_REGION},
-        data=json.dumps({"bucketKey": bucket_key(), "policyKey": policy}),
+        data=json.dumps(body),
         timeout=_HTTP_TIMEOUT)
     if r.status_code == 409:
         return {"bucketKey": bucket_key(), "existed": True}
@@ -245,16 +255,22 @@ def finalize_upload(object_key: str, upload_key: str) -> dict:
 # --------------------------------------------------------------------------- #
 # WorkItem argument builders
 # --------------------------------------------------------------------------- #
-def _input_arg(object_key: str) -> dict:
-    """Input argument referencing an OSS object; DA GETs it with the Bearer token."""
+def _input_arg(object_key: str, *, live: bool = True) -> dict:
+    """Input argument referencing an OSS object; DA GETs it with the Bearer token.
+
+    live=False builds the identical body shape WITHOUT minting a token (used by
+    dry_run so a dry run makes no live call — the header is redacted anyway).
+    """
+    auth = f"Bearer {auth_token()}" if live else "Bearer <minted at run time>"
     return {"url": _oss_rest_url(object_key), "verb": "get",
-            "headers": {"Authorization": f"Bearer {auth_token()}"}}
+            "headers": {"Authorization": auth}}
 
 
-def _output_arg(object_key: str) -> dict:
+def _output_arg(object_key: str, *, live: bool = True) -> dict:
     """Output argument; DA PUTs the produced file to the OSS object."""
+    auth = f"Bearer {auth_token()}" if live else "Bearer <minted at run time>"
     return {"url": _oss_rest_url(object_key), "verb": "put",
-            "headers": {"Authorization": f"Bearer {auth_token()}"}}
+            "headers": {"Authorization": auth}}
 
 
 def _json_arg(obj) -> dict:
@@ -336,20 +352,82 @@ def _engine_seconds(status: dict) -> float | None:
 # --------------------------------------------------------------------------- #
 # High-level §5 interface
 # --------------------------------------------------------------------------- #
-def extract(dwg_local_path: str, dry_run: bool = False) -> dict:
+def _resolve_store_key(tenant_id: str, drawing_id: str, version, backend, dry_run: bool):
+    """Resolve a (version_int, store_object_key) for the version-aware code path.
+
+    - With a backend (or LIVE with no backend -> default OSSBackend): consult the
+      real manifest via store.resolve_version (so "head"/"latest" mean what they say).
+    - dry_run with no backend (offline body preview): int/digit versions resolve
+      directly; "head"/"latest" fall back to v1 as a body-shape placeholder (the
+      key still matches the versioned scheme, /v/00000001.dwg).
+    """
+    import store as _store  # lazy (avoids import cycle: store imports client)
+    if backend is None and not dry_run:
+        backend = _store.OSSBackend()
+    if backend is not None:
+        return _store.resolve_version(backend, tenant_id, drawing_id, version)
+    if isinstance(version, int):
+        v = version
+    elif str(version).isdigit():
+        v = int(version)
+    else:  # "head"/"latest" without a manifest to consult
+        v = 1
+    return v, _store.drawing_version_key(tenant_id, drawing_id, v)
+
+
+def extract(dwg_local_path: str, dry_run: bool = False, *,
+            tenant_id: str | None = None, drawing_id: str | None = None,
+            version="head", backend=None) -> dict:
     """Run the extract WorkItem on APS and return Intake JSON (§1).
 
-    dry_run=True: mint a token, print/return the WorkItem submission body
-    (referencing the real engine via the extract Activity) WITHOUT any live call.
+    FROZEN §5: extract(dwg_local_path) still works exactly as before. The
+    tenant_id/drawing_id/version/backend kwargs are purely ADDITIVE: when
+    tenant_id AND drawing_id are supplied, the persistent, versioned store object
+    is referenced as HostDwg (no throwaway re-upload); otherwise the legacy
+    single-tenant demo path (upload a throwaway `in/<ts>_` object) is used.
+
+    dry_run=True returns the WorkItem submission body WITHOUT any live call.
     """
-    dwg_name = os.path.basename(dwg_local_path)
-    input_key = f"in/{int(time.time())}_{dwg_name}"
-    output_key = f"out/{int(time.time())}_{dwg_name}.families.txt"
     activity_id = activity_qualified(EXTRACT_ACTIVITY)
-    # The extract Activity's output parameter is named "Result" (localName result.txt).
-    arguments = {"HostDwg": _input_arg(input_key), "Result": _output_arg(output_key)}
+    version_aware = tenant_id is not None and drawing_id is not None
+    dwg_name = os.path.basename(dwg_local_path)
+    output_key = f"out/{int(time.time())}_{dwg_name}.families.txt"
+
+    if version_aware:
+        v, input_key = _resolve_store_key(tenant_id, drawing_id, version, backend, dry_run)
+        if dry_run:
+            arguments = {"HostDwg": _input_arg(input_key, live=False),
+                         "Result": _output_arg(output_key, live=False)}
+            wi = submit_workitem(activity_id, arguments, dry_run=True)
+            return {
+                "_dry_run": True,
+                "note": "extract: version-aware; references stored version, no re-upload",
+                "engine": ENGINE,
+                "activityId": activity_id,
+                "tenant_id": tenant_id, "drawing_id": drawing_id, "store_version": v,
+                "input_object": input_key,
+                "output_object": output_key,
+                "workitem": wi,
+            }
+        # LIVE version-aware — reference the persistent version's signed url (no upload)
+        in_url = signed_download_url(input_key)
+        up_key, out_url = signed_upload_url(output_key)
+        arguments = {"HostDwg": {"url": in_url, "verb": "get"},
+                     "Result": {"url": out_url, "verb": "put"}}
+        status = submit_workitem(activity_id, arguments, dry_run=False, poll=True)
+        if status.get("status") != "success":
+            raise RuntimeError(f"extract WorkItem {status.get('id')} status={status.get('status')} "
+                               f"report={status.get('reportUrl')}")
+        finalize_upload(output_key, up_key)
+        families = download_object(output_key).decode("utf-8", "replace")
+        return parse_text(families, dwg_local_path)
+
+    # ------- legacy single-tenant demo path (FROZEN behavior) -------
+    input_key = f"in/{int(time.time())}_{dwg_name}"
 
     if dry_run:
+        arguments = {"HostDwg": _input_arg(input_key, live=False),
+                     "Result": _output_arg(output_key, live=False)}
         wi = submit_workitem(activity_id, arguments, dry_run=True)
         return {
             "_dry_run": True,
@@ -377,32 +455,43 @@ def extract(dwg_local_path: str, dry_run: bool = False) -> dict:
 
 
 def run_tool(dwg_local_path: str, tool: dict, params: dict,
-             dry_run: bool = False) -> dict:
+             dry_run: bool = False, *,
+             tenant_id: str | None = None, drawing_id: str | None = None,
+             version="head", backend=None) -> dict:
     """Run a tool (§2 package) on APS and return a Result envelope (§3).
 
-    Convention: each tool has a DA Activity named  {TOOL_ACTIVITY_PREFIX}{engine_op}
-    (ROOT provisions it from Lane B's script/appbundle). The Activity:
-      - inputs  HostDwg (the drawing) and Params (inline data: JSON of `params`),
-      - outputs Result -> result.json whose content is EITHER a full §3 envelope
-        OR just the tool-specific {result, overlay?}; client wraps to full §3.
+    FROZEN §5: run_tool(dwg_local_path, tool, params) is unchanged. The
+    tenant_id/drawing_id/version/backend kwargs are purely ADDITIVE: when
+    tenant_id AND drawing_id are supplied, HostDwg references the persistent,
+    versioned store object instead of re-uploading a throwaway `in/<ts>_` object.
+    The Result output stays ephemeral (`out/<ts>_...result.json`) for read tools;
+    only the write path (out of scope) turns a result into a new store version.
+
+    Convention: each tool has a DA Activity named {TOOL_ACTIVITY_PREFIX}{engine_op}.
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
     activity_id = activity_qualified(f"{TOOL_ACTIVITY_PREFIX}{engine_op}")
     dwg_name = os.path.basename(dwg_local_path)
     ts = int(time.time())
-    input_key = f"in/{ts}_{dwg_name}"
     output_key = f"out/{ts}_{engine_op}.result.json"
-    arguments = {
-        "HostDwg": _input_arg(input_key),
-        "Params": _json_arg(params or {}),
-        "Result": _output_arg(output_key),
-    }
+    version_aware = tenant_id is not None and drawing_id is not None
+
+    if version_aware:
+        v, input_key = _resolve_store_key(tenant_id, drawing_id, version, backend, dry_run)
+    else:
+        input_key = f"in/{ts}_{dwg_name}"
 
     if dry_run:
+        arguments = {
+            "HostDwg": _input_arg(input_key, live=False),
+            "Params": _json_arg(params or {}),
+            "Result": _output_arg(output_key, live=False),
+        }
         wi = submit_workitem(activity_id, arguments, dry_run=True)
-        return {
+        out = {
             "_dry_run": True,
-            "note": "run_tool: no bucket/upload/workitem performed",
+            "note": ("run_tool: version-aware; references stored version, no re-upload"
+                     if version_aware else "run_tool: no bucket/upload/workitem performed"),
             "engine": ENGINE,
             "tool": tool.get("name"),
             "activityId": activity_id,
@@ -410,11 +499,18 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
             "output_object": output_key,
             "workitem": wi,
         }
+        if version_aware:
+            out.update({"tenant_id": tenant_id, "drawing_id": drawing_id, "store_version": v})
+        return out
 
     # LIVE path — signed S3 urls for input/output; Params stays an inline data: uri
     t0 = time.time()
-    upload_object(dwg_local_path, input_key)
-    in_url = signed_download_url(input_key)
+    if version_aware:
+        # input_key already resolved to the persistent version above (no re-upload)
+        in_url = signed_download_url(input_key)
+    else:
+        upload_object(dwg_local_path, input_key)
+        in_url = signed_download_url(input_key)
     up_key, out_url = signed_upload_url(output_key)
     arguments = {
         "HostDwg": {"url": in_url, "verb": "get"},

@@ -1,7 +1,10 @@
 """da/provision_live.py — ONE-TIME live provisioning. ROOT runs this, not lanes.
 
 Creates on APS Design Automation exactly what the client needs to submit WorkItems:
-  1. the OSS bucket (transient policy),
+  1. the OSS bucket (PERSISTENT policy — backs the versioned per-tenant drawing
+     store in da/store.py; objects do NOT expire). This provisions a FRESH bucket
+     key (`leaf-web-store-*`); the old `leaf-web-demo-*` transient bucket is
+     abandoned to expire on its own (OSS bucket policy is immutable at creation).
   2. the extract Activity (pure-LISP, no AppBundle) + a 'prod' alias.
 
 It performs LIVE mutating calls, so it is deliberately NOT invoked by any lane and
@@ -29,8 +32,11 @@ def _post(path, body):
 
 
 def ensure_bucket():
+    # create_bucket() now defaults to policyKey="persistent" (see da/client.py).
     res = client.create_bucket()
-    print(f"[bucket] {client.bucket_key()} -> {res}")
+    print(f"[bucket] key={client.bucket_key()} region={client.OSS_REGION} "
+          f"policy=persistent -> {res}")
+    print("[bucket] record this key+region in da/STORE.md (persistent drawing store)")
 
 
 def ensure_activity(spec):
