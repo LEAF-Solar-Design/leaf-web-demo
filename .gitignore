@@ -9,3 +9,7 @@ server/jobs.db
 server/broker_ledger.jsonl
 .env.local
 platform/.env.local
+server/jobs.db-shm
+server/jobs.db-wal
+server/broker_tenants.json
+server/authored_tools.json
