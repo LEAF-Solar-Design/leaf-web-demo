@@ -1,0 +1,46 @@
+{
+  "spike": "drawing.write",
+  "input_dwg": "data/rooftop_demo.dwg",
+  "probe_layer": "LEAF_WRITE_PROBE",
+  "generated_at": "2026-07-17T22:51:02.236450+00:00",
+  "engine": "Autodesk.AutoCAD+26_0",
+  "pass": true,
+  "activity_id": "iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp.LeafWriteProbe+prod",
+  "extract_input_workitem": {
+    "label": "extract(input)",
+    "id": "a9a4d53f961a46c0b156b1ea75080fcf",
+    "status": "success",
+    "reportUrl": "https://dasprod-store.s3.us-east-1.amazonaws.com/workItem/iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp/a9a4d53f961a46c0b156b1ea75080fcf/report?X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc3QtMSJGMEQCIEgZNww1%2BL7%2BLZxwtXmtTr3xE1xD%2BgUok%2B6QOHvNZBgHAiAFMebX89N0aNSqqoacaAEzgJQ%2F1nY8OwBh2FS7rd9s9SqFBAhoEAQaDDIyMDQ3MzE1MjMxMCIMzkIYgRLPPgd9nUzCKuIDPzaaBz%2FV%2B46Wwi4LG8d3mjZNMVoFoKlZf753rNCUsP36QaCtSRWdfKaLBcIaWJW6MehipnOO1WRFxPc1l6HseF492FzDKAoXf%2BhEYu1fgtQXttd2zMCRTqY%2FDt3ygc9nMEiSm4rcSlGak950obFRVHxuKd2DGbYpoCg0iU2fJeXhPAFutd0fZ7fb3KFAbXlQaPXLiHZ1Tm9BWyyXC6QcxP5pC%2BEdpVN%2BLPVExhmxuA%2BbM6PeMSFsoYVD6bdhwAEC3lWFv0ojTSC2yYXsSuZhBf%2BhcG14VYhIWuJJ1HXSkCXonktv4Gk68NAM1H1Cwjharrz9%2FHjyNdGAXkyXY3KiLcITBVWRuQq9EhJrVZsTFqnlOzYGhNQaDsXIKDUve3himWdkz%2BGpmFEoem8bQePqTZFUE3pzdIi8xfJJRSRsGhztiix2vgx9yY5w5qq1gf7Gf93aRU%2BzmUvYpDEW004J7trBQ9r%2BBIS9NpAyYg4f6tfMRjoRPr5xDHhigkBaw6ctFjaFolvIsQmFBJgR0hFNFs2VPvYWlzcKfQcj%2BCN9o9tCQexBKrFbcS3kuE66Jrw02zANMUEuWzZbOgzqaLp0tqo%2FNXzNCF%2FAqrCTphzhdoqz7MP6zGybmLzoBIlFiavPuiUw4%2BPq0gY6ngHeoludgpRPfAac6IqaGEMM3biyt2c0vdpANrO2eRWlXcGLdskf8bg46rN3a1CViJ2YOiKF0v42homFma%2Fhmf5knTUxHqwdreg7qtYmjhXoYpo0rKEG0ehslw9ZNxBemdDfvpIosulueZnE7d8XHKQ97aWtMvXIuafhvWiL5Y1FcODkwSllIyh3%2Fn0TNy9IK9Ls8fVphpmkHwWmJeCDgQ%3D%3D&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIATGVJZKM3JA3DL2TF%2F20260717%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260717T225115Z&X-Amz-SignedHeaders=host&X-Amz-Signature=7936762f815f2fadaf4e7e04c31145cab3a20777fa270bc3ba59ffdd77053665",
+    "engine_seconds": 3.42,
+    "usd_est": 0.0095
+  },
+  "len_H_in": 2345,
+  "write_workitem": {
+    "label": "write",
+    "id": "342202d1b262445098a7f1514e67738f",
+    "status": "success",
+    "reportUrl": "https://dasprod-store.s3.us-east-1.amazonaws.com/workItem/iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp/342202d1b262445098a7f1514e67738f/report?X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc3QtMSJHMEUCIQDsKll00Fi8U5iQKC%2BPk8X17pOnAzsvqJ7kNwFOENXvXQIgfWPXwfpN5VoRfttY%2BDcaom%2Fkl1EHD70x2yoJ0IphrkUqhgQIaBAEGgwyMjA0NzMxNTIzMTAiDFn8Y3xcrnVFFuPYrCrjAwsoW5XdaXQ384I6EijUppDZL281qjpw78lJaTSnjjg5otca2Udmyml1GBPc6XtbJkARF0CwluX4opjvlsZjiGA1%2BSO177m2lAjV8dlnrQhYfSKrVVLdo5P4%2FYYan9dVYmOrzRAwpaxaKbZfVOps1p6hFZf9EpFFYccYECshIyagTFG3zlK36Bumqnpuin4HGKRgqc5H9JjXf1Rc75Mk51LZO0LT1Auq8wpOEJuJgclt1cycv37SChnoiFtQ%2B8SJnwvlhGDqcBDBkmWE%2FK3hP0dPJBNgG%2BNYbmdz8tiVgZMSYoBHgrFWohzz1TsWv7ucisIIeKnBVJcWn0iWq37s7HdkbcfiQnqdsJuEEl7p8ZDYtAf3NC9TfYcNHyNv1mGTgbrZGTEFdFtK3TSqHi9ryk7ALGAgN5bmQiKtlp32DMEGQE16g7cs3ZLpOSnfGgr8ztSimlOkmhoy7JX%2BGcp9509T3r4ITQLgCc8fB9J2JOvIqlocvXNTPk0xH6ArQSbbWJgs7OueC1Mm598W2nRayEi1BqpfeEfJ%2BPJe%2BfcTADLNIK3HwhfT2hdi01ermcgXlM%2FaTPJxIFAqOMQgo1aJcS35vFuBJJvCWBPM8uhCaUJQX6O4EJAdWxDp3REAN2dBfPA2vTDu4%2BrSBjqdAU82RFXry06UeWWOCfAWamTJxDpXKr%2FEvxS%2FJdquy18pUh7ojB9oEb3ARKWkdWZrK%2FrZN8%2BUgZWdv7qgh3gBMfe5kbAZ5ACm7Usn9lz40yIWPUcoAScvHDIg1SKFMYxkPS01%2FboAxJLCIo9EEj5rPpwn%2BOzLw7oK1RdKT5Ui75%2FClQGRlddUt1PcL%2B2cSVbQa%2Fekr1fo0%2F2PS5Ti7UY%3D&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIATGVJZKM3L7PWRZXW%2F20260717%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260717T225126Z&X-Amz-SignedHeaders=host&X-Amz-Signature=8e87c0763e07e8a6213db4a5b8a50da6aea4d6d0dbd126086912c3bb0957f4ba",
+    "engine_seconds": 3.13,
+    "usd_est": 0.0087
+  },
+  "output_dwg_bytes": 137863,
+  "extract_output_workitem": {
+    "label": "extract(output)",
+    "id": "c68ddcb15cb142b1b0522072fcbae4d4",
+    "status": "success",
+    "reportUrl": "https://dasprod-store.s3.us-east-1.amazonaws.com/workItem/iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp/c68ddcb15cb142b1b0522072fcbae4d4/report?X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc3QtMSJHMEUCIQCmrggiaVi1poKOIwuVXHIcs1qWJQqllt0BfRXgHIGWPwIgXvUHVgo5MVKp%2FygVw35kd95ACy%2FQza%2F7m9aX6NXl2M4qhQQIaBAEGgwyMjA0NzMxNTIzMTAiDPo%2ByK7GzjgUJZ2enSriA%2F1YlBMAildXp2PZn63hxW3pe7wAjnbNjd1zCpXHUv5o%2BOOfoWTRQa6tH3dPNGRbD7RTW62NMTuxZgmcM5PkerwVYb2ApCRc3LtKT8wG7%2BEEOOZqTnn5Rv4uhtcUFRAZccSRUXkSE8wX5YXVitcj6QFoah%2FrA8HusOxqcYqp0WQ7LDbZbLCaSfx42LAuh7V%2BvKbvHR5xSeh8P4%2FxadqTiWCqRGtD5vXGAL5%2FWztSLDCwKRYRXGMhVQlWrz3rxTBHIPek65J3ObNui%2BPM5wdNelVFPjKCI1UZyAZDk3kKV48tIzZiQrkddD0CRcEMlrt%2B6ZJz128uuwh5XpEWFWnsV59GtZiq7pMJ4EmaHhKP7%2BmX4kBn25STas3WF%2B16kOZEian%2BSKXEYraJTTFWF8iYAWV%2BumQe1YRKm%2BMYacMqug%2BOYOqvMCx8lhKplm6QsujF3%2FPRZe1BjZwpdxs1vU5AS0hIOVkgMNNLh6At0Xx66sRzZV8KCdx2rohSRZFVKA%2FG9kkvM0mPLo6iOQWxZBja2RvVgfPjEnjuDEm9c9EjsQtI4LjsLw4Zlea8XWto8LZxD5HK1evUjqfeqrv1Zpf%2BTVrX1ber44PY5pDUwduwNCW7PG3EJPUhtd2gLbnl9ZqFu9%2BvMP7j6tIGOp0BcGazxizKUi7w1yCvC6ASiqxHaJvozX9Ug%2Fc6KOP0GtZ4rAQdFR7nWw4iSUDXASRabg7ZmbfXTlk4St4%2B5a0K2OmeLhjMWd%2F817ExPOA%2FwhXeAN2D5v003mUGq2%2FlWnQQE6XHNt%2BKK4naWF7ubo67xKN6kUWN%2FYCTWKFboTc9zFWTV2wU%2Bm%2B6qt%2FYH6UhF0BLeg%2FyIuRIGtU4mX%2BXeA%3D%3D&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIATGVJZKM3ARX5ANMY%2F20260717%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260717T225142Z&X-Amz-SignedHeaders=host&X-Amz-Signature=933d3127bff60c9e3ab105938748c274ae63b5b1def604bd95dbdd0970af8256",
+    "engine_seconds": 3.24,
+    "usd_est": 0.009
+  },
+  "len_H_out": 2345,
+  "add_confirmed": true,
+  "add_probe_layer_in_output": true,
+  "add_probe_layer_absent_from_input": true,
+  "add_probe_polyline_present": true,
+  "delete_confirmed": true,
+  "deleted_handle": "9462",
+  "deleted_count": 1,
+  "cumulative_usd_est": 0.0272,
+  "billable_workitem_count": 3,
+  "output_extract_polylines": 2345
+}

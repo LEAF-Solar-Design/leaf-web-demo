@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PackageContents.xml - APS Design Automation AppBundle manifest for the Leaf
+  drawing.write COMPILED productization path (skeleton).
+
+  The compiled alternative to the LISP mutate spike (da/write_lisp.py +
+  LeafWriteProbe Activity). One CommandMethod, LEAFWRITEPROBE, loaded into the
+  headless AutoCAD engine as a NETLOAD AppBundle: it deletes one polyline, adds a
+  probe polyline on LEAF_WRITE_PROBE, and SaveAs output.dwg (the Activity's Result
+  localName), which the Activity uploads.
+
+  Engines (confirmed available): Autodesk.AutoCAD+24_3 (net48), +25_1, +26_0 (net8).
+  Default targets +26_0 (net8), matching client.ENGINE. Skeleton only - see
+  BUILD.md; the LISP spike is the proof of capability.
+-->
+<ApplicationPackage
+    SchemaVersion="1.0"
+    Version="1.0.0"
+    ProductCode="{9C7E4A10-1F2B-4E33-9B00-LEAFWRITE001}"
+    Name="LeafWriteTools"
+    Description="Leaf drawing.write compiled DA tool (delete + add + save)"
+    Author="Leaf">
+  <CompanyDetails Name="Leaf" Url="https://leafdesign.ai" Email="ehaug@leafsolardesign.com" />
+  <Components Description="LeafWriteTools managed module">
+    <!-- net8 engines (+25_1, +26_0). For +24_3 (net48) build a net48 DLL and
+         point a second RuntimeRequirements/@SeriesMax entry at it. -->
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD" SeriesMin="R25.0" />
+    <ComponentEntry
+        AppName="LeafWriteTools"
+        Version="1.0.0"
+        ModuleName="./Contents/LeafWriteTools.dll"
+        AppDescription="drawing.write probe: delete one polyline + add probe polyline + save output.dwg"
+        LoadOnAutoCADStartup="False"
+        LoadOnCommandInvocation="True">
+      <Commands GroupName="LeafWriteTools">
+        <Command Global="LEAFWRITEPROBE" Local="LEAFWRITEPROBE" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>

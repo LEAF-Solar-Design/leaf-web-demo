@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Compiled DA drawing.write tool bundle. Skeleton (productization path) - NOT
+    required to build for the spike; the LISP recipe in da/write_lisp.py driven by
+    da/write_spike.py is the live proof of capability.
+
+    Pick the TargetFramework to match the DA engine you target:
+      Autodesk.AutoCAD+24_3  -> net48            (AutoCAD 2024 refs)
+      Autodesk.AutoCAD+25_1  -> net8.0-windows   (AutoCAD 2025 refs)
+      Autodesk.AutoCAD+26_0  -> net8.0-windows   (AutoCAD 2026 refs)  <- default (client.ENGINE)
+    For +24_3, flip TargetFramework to net48 and repoint the HintPaths at 2024.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>LeafWriteTools</AssemblyName>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Contents/LeafWriteTools.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Managed AutoCAD refs are Private=false: the engine supplies them at
+         runtime; the AppBundle must NOT ship them (version-clash = load fail).
+         Repoint HintPath to the AutoCAD version matching your target engine. -->
+    <Reference Include="acdbmgd">
+      <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\acdbmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="accoremgd">
+      <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\accoremgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
