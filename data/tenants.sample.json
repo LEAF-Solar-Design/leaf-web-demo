@@ -1,0 +1,17 @@
+{
+  "_comment": "DEMO token->workspace mapping consumed by server/tenancy.py (JsonTenantStore). Production impl backs onto cadwalk-studio Postgres tenancy (Deployment/DeploymentTier). tenant_id === the namespaced JWT claim https://leafdesign.ai/tenant_id (derived from app_metadata.leaf.organization_id, else the Auth0 sub). tier is surface-only here (no entitlement enforcement in this lane).",
+  "tenants": [
+    {
+      "tenant_id": "org_leaf_demo",
+      "org_id": "org_leaf_demo",
+      "tier": "hosted_pro",
+      "workspace_dir": "data/workspaces/org_leaf_demo"
+    },
+    {
+      "tenant_id": "org_acme_solar",
+      "org_id": "org_acme_solar",
+      "tier": "hosted_starter",
+      "workspace_dir": "data/workspaces/org_acme_solar"
+    }
+  ]
+}

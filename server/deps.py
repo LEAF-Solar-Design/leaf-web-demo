@@ -128,11 +128,93 @@ def find_tool(name: str) -> Optional[Dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
-# tenant identity (v1 stub — `auth0-identity-signup` session replaces this)
+# tenant identity  (owned by `auth0-identity-signup`)
+#
+# Two behaviors, selected by LEAF_AUTH_LIVE (read at call time, default off):
+#
+#   OFF (default) -> BYTE-IDENTICAL legacy: tenant identity is the `X-Tenant-Id`
+#                    header stub (default `demo-tenant`) that the jobs/broker
+#                    chain relies on. `require_tenant` returns the plain str.
+#                    PyJWT is never imported; no `Authorization` is required.
+#
+#   ON (=1)       -> `require_tenant` VERIFIES an Auth0 RS256 Bearer token
+#                    (auth.py), extracts the namespaced tenant claim, resolves a
+#                    workspace (tenancy.py), and returns a `TenantContext`.
+#                    The verified JWT claim SUPERSEDES the X-Tenant-Id header.
+#                    No token -> 401; verified-but-no-tenant-claim -> 403.
+#
+# `TenantContext` subclasses `str` and its string value IS the tenant_id, so
+# every legacy consumer (jobs.submit_job, the broker ledger, SQLite TEXT binds,
+# `==`/dict-key/json.dumps) keeps working unchanged in live mode too. This is
+# why adding `Depends(require_tenant)` to a router is a ONE-LINE change with no
+# downstream ripple. See contract/AUTH.md.
 # --------------------------------------------------------------------------- #
 DEFAULT_TENANT = "demo-tenant"
 
 
-def require_tenant(x_tenant_id: Optional[str] = Header(default=None)) -> str:
-    """FastAPI dependency: tenant identity from the X-Tenant-Id header stub."""
-    return x_tenant_id or DEFAULT_TENANT
+class TenantContext(str):
+    """Tenant identity that IS its `tenant_id` string (so legacy str consumers
+    keep working byte-for-byte) while also carrying the resolved org_id / tier /
+    workspace for the auth-live response echo. Only produced when auth is live."""
+
+    tenant_id: str
+    org_id: Optional[str]
+    tier: Optional[str]
+    workspace: Optional[str]
+
+    def __new__(cls, tenant_id: str, org_id: Optional[str] = None,
+                tier: Optional[str] = None, workspace: Optional[str] = None) -> "TenantContext":
+        obj = super().__new__(cls, tenant_id)
+        obj.tenant_id = str(tenant_id)
+        obj.org_id = org_id
+        obj.tier = tier
+        obj.workspace = workspace
+        return obj
+
+
+def auth_live() -> bool:
+    """LEAF_AUTH_LIVE gate. Read at call time so a single process can be toggled
+    in tests and subprocess env overrides apply."""
+    return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
+
+
+def require_tenant(
+    x_tenant_id: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """FastAPI dependency: resolve the calling tenant.
+
+    OFF: returns the plain `x_tenant_id or DEFAULT_TENANT` string (unchanged).
+    ON:  returns a verified `TenantContext` (raises 401 no-token / 403 no-claim).
+    """
+    if not auth_live():
+        # BYTE-IDENTICAL legacy path — X-Tenant-Id header stub, plain str.
+        return x_tenant_id or DEFAULT_TENANT
+
+    # LEAF_AUTH_LIVE=1: verified JWT claims win over the header stub.
+    # Imported lazily so PyJWT is only needed when auth is actually live.
+    import auth  # noqa: PLC0415
+    import tenancy  # noqa: PLC0415
+
+    payload = auth.verify_platform_token(authorization)   # -> 401 on bad/absent token
+    claims = auth.extract_tenant_claims(payload)           # -> 403 if tenant claim absent
+    ws = tenancy.get_store().resolve_workspace(claims["tenant_id"])
+    return TenantContext(
+        claims["tenant_id"],
+        org_id=claims.get("org_id"),
+        tier=claims.get("tier"),
+        workspace=ws.workspace_dir if ws is not None else None,
+    )
+
+
+def tenant_echo(body: Dict[str, Any], tenant: Any) -> Dict[str, Any]:
+    """Additively echo the resolved tenant identity into a success response body
+    WHEN auth is live. No-op when off (tenant is a plain str) -> byte-identical
+    legacy body. Used by routers/session.py and, at wave integration, by
+    routers/jobs.py for /api/run."""
+    if isinstance(tenant, TenantContext):
+        out = dict(body)
+        out["tenant_id"] = tenant.tenant_id
+        out["org_id"] = tenant.org_id
+        return out
+    return body

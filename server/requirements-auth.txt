@@ -1,0 +1,11 @@
+# Concern-1 (Auth0 PLATFORM identity) verification dependency.
+#
+# Installed ONLY when running with LEAF_AUTH_LIVE=1. The default demo (toggle
+# off) never imports PyJWT — auth.py is imported lazily by deps.require_tenant
+# only on the live path — so the byte-identical backward-compat behavior does
+# NOT require this file to be installed.
+#
+#   cd server && pip install -r requirements-auth.txt
+#
+# NOTE: this pulls the [crypto] extra (cryptography) for RS256 signature checks.
+PyJWT[crypto]>=2.8,<3
