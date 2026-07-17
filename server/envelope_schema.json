@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Leaf server extended response envelope (CONTRACT-ADDENDUM section 10)",
+  "description": "Every server endpoint body carries error + degraded_mode. Success: error is null and degraded_mode is boolean. Failure: error.error_code is one of the frozen ErrorCode enum values. The section-3 run envelope additionally carries ok/tool/version/result/overlay/timing_ms/cost (unchanged success fields).",
+  "type": "object",
+  "required": ["error", "degraded_mode"],
+  "properties": {
+    "degraded_mode": { "type": "boolean" },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["error_code", "message", "retryable"],
+          "properties": {
+            "error_code": {
+              "enum": [
+                "UNKNOWN_TOOL",
+                "BAD_PARAMS",
+                "APS_UNAVAILABLE",
+                "BROKER_UNREACHABLE",
+                "WORKITEM_FAILED",
+                "TIMEOUT",
+                "TENANT_DISABLED",
+                "INTERNAL"
+              ]
+            },
+            "message": { "type": "string" },
+            "retryable": { "type": "boolean" }
+          }
+        }
+      ]
+    }
+  }
+}

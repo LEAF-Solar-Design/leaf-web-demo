@@ -23,7 +23,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import deps
-from routers import author, jobs, session, tools
+from envelopes import install_error_handlers, with_envelope_fields
+from routers import author, capabilities, jobs, session, tools
 
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 app.add_middleware(
@@ -33,16 +34,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_error_handlers(app)
 
 app.include_router(session.router)
 app.include_router(tools.router)
 app.include_router(jobs.router)
+app.include_router(capabilities.router)
 app.include_router(author.router)
 
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
-    return {
+    return with_envelope_fields({
         "ok": True,
         "aps_live": deps.APS_LIVE,
         "data_file_present": deps.DATA_FILE.exists(),
@@ -50,7 +53,7 @@ def health() -> Dict[str, Any]:
         "da_client_present": (deps.DA_DIR / "client.py").exists(),
         "n_tools": len(deps.all_tools()),
         "n_authored": len(deps._AUTHORED),
-    }
+    })
 
 
 if __name__ == "__main__":

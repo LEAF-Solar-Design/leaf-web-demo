@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 import deps
 from deps import fb
+from envelopes import with_envelope_fields
 
 router = APIRouter()
 
@@ -33,4 +34,4 @@ def author(req: AuthorRequest) -> Dict[str, Any]:
     deps._AUTHORED.append(tool)
     deps.save_authored_tools(deps._AUTHORED)
 
-    return {"tool": tool, "code": code, "preview": preview}
+    return with_envelope_fields({"tool": tool, "code": code, "preview": preview})

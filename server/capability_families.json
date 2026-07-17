@@ -1,0 +1,60 @@
+{
+  "families": [
+    {
+      "family_id": "measurement",
+      "label": "Measurement",
+      "description": "Count and measure entities in the drawing."
+    },
+    {
+      "family_id": "selection",
+      "label": "Selection & highlighting",
+      "description": "Select or highlight entities matching spatial criteria."
+    },
+    {
+      "family_id": "custom",
+      "label": "Custom authored tools",
+      "description": "Tools authored in this workspace via /api/author."
+    },
+    {
+      "family_id": "internal_qa",
+      "label": "Internal / QA",
+      "description": "Internal QA-only tools. Filtered server-side; never shown to tenants."
+    }
+  ],
+  "tool_families": {
+    "count-by-layer": "measurement",
+    "measure-panel-area": "measurement",
+    "highlight-panels-near-edge": "selection",
+    "count_by_layer": "measurement",
+    "measure_panel_area": "measurement",
+    "measure_area_by_layer": "measurement",
+    "highlight_panels_near_edge": "selection",
+    "highlight_near_edge": "selection"
+  },
+  "filter_rules": {
+    "internal_flag": "internal",
+    "qa_prefixes": ["qa-", "_"]
+  },
+  "seed_tools": [
+    {
+      "name": "qa-sleep-count",
+      "internal": true,
+      "version": "1.0.0",
+      "description": "QA-only: sleeps _qa_sleep_s seconds (latency simulation), then counts by layer.",
+      "kind": "script",
+      "engine_op": "count_by_layer",
+      "params": {
+        "type": "object",
+        "properties": {
+          "_qa_sleep_s": { "type": "number", "default": 3 },
+          "layer": { "type": "string" }
+        },
+        "required": []
+      },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "qa", "created": "2026-07-17T00:00:00Z" },
+      "family_id": "internal_qa"
+    }
+  ]
+}
