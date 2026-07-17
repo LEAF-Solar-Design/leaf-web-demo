@@ -575,5 +575,69 @@ def extract_activity_spec() -> dict:
     }
 
 
+def tool_activity_spec(tool: dict) -> dict:
+    """POST /activities body for a tool's LeafTool_<engine_op> Activity.
+
+    Built from the tool's LISP source: `engine_script` if present, else the
+    contents of its `.lsp` `script`. Pure-LISP via accoreconsole, same shape as
+    the extract Activity, plus a Params (get) input for the tool's arguments.
+    """
+    engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
+    script_src = tool.get("engine_script")
+    if not script_src:
+        sp = tool.get("script")
+        if sp and str(sp).endswith(".lsp"):
+            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            path = sp if os.path.isabs(sp) else os.path.join(base, sp)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    script_src = fh.read()
+            except OSError:
+                script_src = ""
+    return {
+        "id": f"{TOOL_ACTIVITY_PREFIX}{engine_op}",
+        "engine": ENGINE,
+        "commandLine": [
+            r'$(engine.path)\accoreconsole.exe /i "$(args[HostDwg].path)" '
+            r'/s "$(settings[script].path)"'
+        ],
+        "parameters": {
+            "HostDwg": {"verb": "get", "required": True, "localName": HOSTDWG_LOCALNAME},
+            "Params": {"verb": "get", "required": False, "localName": "params.json"},
+            "Result": {"verb": "put", "required": True, "localName": TOOL_RESULT_LOCALNAME},
+        },
+        "settings": {"script": {"value": script_src or ""}},
+        "description": f"Leaf authored tool {tool.get('name')} (engine_op={engine_op}).",
+    }
+
+
+def ensure_tool_activity(tool: dict, dry_run: bool = False) -> dict:
+    """Idempotently provision the tool's DA Activity + `prod` alias. LIVE call.
+
+    Called before submitting a WorkItem for a tool whose Activity may not exist
+    yet (e.g. a newly authored tool). 409 on POST /activities == already exists.
+    ADDITIVE: does not change any frozen §5 signature (auth_token/extract/run_tool).
+    """
+    engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
+    activity_id = f"{TOOL_ACTIVITY_PREFIX}{engine_op}"
+    spec = tool_activity_spec(tool)
+    if dry_run:
+        return {"_dry_run": True, "endpoint": f"POST {DA}/activities",
+                "activity": activity_id, "alias": ALIAS, "body": spec}
+    headers = {**_auth_headers(), "Content-Type": "application/json"}
+    r = requests.post(f"{DA}/activities", headers=headers, data=json.dumps(spec),
+                      timeout=_HTTP_TIMEOUT)
+    if r.status_code == 409:
+        created = False  # already exists
+    else:
+        r.raise_for_status()
+        created = True
+    # ensure the `prod` alias -> version 1 (409 == alias already exists)
+    a = requests.post(f"{DA}/activities/{activity_id}/aliases", headers=headers,
+                      data=json.dumps({"id": ALIAS, "version": 1}), timeout=_HTTP_TIMEOUT)
+    alias_ok = a.status_code in (200, 201, 409)
+    return {"activity": activity_id, "created": created, "alias": ALIAS, "alias_ok": alias_ok}
+
+
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()

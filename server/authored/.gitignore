@@ -1,0 +1,3 @@
+# Generated authored tool files are runtime artifacts (like authored_tools.json).
+# Keep the directory tracked but never commit the generated tool bodies.
+*.py

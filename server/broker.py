@@ -41,7 +41,7 @@ for p in (str(PROJECT_ROOT), str(SERVER_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-import tools_fallback as fb  # noqa: E402
+import tools_fallback as fb  # noqa: E402,F401  (compat: builtins delegate here)
 from envelopes import (  # noqa: E402
     DEFAULT_HTTP_STATUS,
     ErrorCode,
@@ -50,6 +50,8 @@ from envelopes import (  # noqa: E402
     ok_envelope,
     with_envelope_fields,
 )
+from tool_loader import run_tool_dynamic  # noqa: E402
+from tool_validate import validate_params  # noqa: E402
 
 LEDGER_PATH = Path(os.environ.get("BROKER_LEDGER", str(SERVER_DIR / "broker_ledger.jsonl")))
 TENANTS_PATH = Path(os.environ.get("BROKER_TENANTS", str(SERVER_DIR / "broker_tenants.json")))
@@ -251,6 +253,18 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     params = dict(req.params or {})
     degraded = False
 
+    # QA latency hook is NOT a tool param — pull it out before validation.
+    qa_sleep = params.pop("_qa_sleep_s", None)
+
+    # 1b) PRE-VALIDATE params against the tool's own JSON Schema (§8.4 step 1).
+    # A schema violation returns a BAD_PARAMS envelope and the tool body NEVER
+    # runs — for BOTH the live and the mock paths.
+    perrs = validate_params(tool, params)
+    if perrs:
+        return (err_envelope(ErrorCode.BAD_PARAMS, "params schema: " + "; ".join(perrs),
+                             retryable=False, tool=tool.get("name")),
+                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+
     # 2) live path — the ONLY code path that touches da/client.py + the credential
     if req.aps_live:
         da = _get_da()
@@ -259,6 +273,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         else:
             try:
                 local = str(DATA_DIR / f"{req.dwg}.dwg")
+                # provision the tool's DA Activity on demand (idempotent; 409 =
+                # already exists) so a newly authored tool's LeafTool_<op> exists
+                # before the WorkItem is submitted.
+                if hasattr(da, "ensure_tool_activity"):
+                    da.ensure_tool_activity(tool)
                 env = dict(da.run_tool(local, tool, params) or {})
                 env.setdefault("ok", True)
                 env.setdefault("tool", tool.get("name"))
@@ -291,8 +310,9 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                                      retryable=True, tool=tool.get("name")),
                         DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
 
-    # 3) mock / pure-python path (APS_LIVE=0, or degraded fallback)
-    qa_sleep = params.pop("_qa_sleep_s", None)
+    # 3) mock / pure-python path (APS_LIVE=0, or degraded live fallback):
+    #    run_tool_dynamic loads and executes the TOOL FILE the registry entry
+    #    references (the FILE is the tool) — no hardcoded engine_op dispatch.
     if qa_sleep is not None:
         try:
             time.sleep(min(float(qa_sleep), QA_SLEEP_CAP_S))  # QA latency-simulation hook
@@ -303,15 +323,12 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     except Exception as exc:  # noqa: BLE001
         return (err_envelope(ErrorCode.INTERNAL, f"cached intake unavailable: {exc}",
                              retryable=False, tool=tool.get("name")), 500)
-    try:
-        result, overlay = fb.run_op(engine_op, intake, params)
-    except KeyError as exc:
-        return (err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                             tool=tool.get("name")),
-                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
-    env = ok_envelope(tool.get("name"), tool.get("version", "1.0.0"), result, overlay,
-                      timing_ms=int((time.perf_counter() - t0) * 1000),
-                      cost=None, degraded_mode=degraded)
+    env = run_tool_dynamic(tool, intake, params, aps_live=False, da=None, t0=t0)
+    if not env.get("ok"):
+        code = (env.get("error") or {}).get("error_code", ErrorCode.INTERNAL)
+        return env, DEFAULT_HTTP_STATUS.get(code, 500)
+    if degraded:
+        env["degraded_mode"] = True  # requested live but fell back to pure-python
     return env, 200
 
 
