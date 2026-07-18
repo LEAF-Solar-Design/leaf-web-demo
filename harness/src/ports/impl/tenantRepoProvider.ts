@@ -9,6 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { gitWorkerAvailable, workerCommit } from "./gitWorker.js";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +65,16 @@ class GitTenantRepo implements TenantRepo {
   constructor(readonly dir: string) {}
 
   async commit(message: string, identity: HarnessIdentity): Promise<{ commit: string }> {
+    // Preferred path: the boot-time git worker (clean spawn context, immune to the
+    // 0xC0000142 spawn failures this process suffers after hosting an SDK tree).
+    if (gitWorkerAvailable()) {
+      const r = await workerCommit({
+        dir: this.dir, message, name: identity.name, email: identity.email,
+      });
+      if (r.ok && r.commit) return { commit: r.commit };
+      console.error('[harness] git worker commit failed, falling back in-process:', r.error);
+      // fall through to the in-process retry path on worker failure
+    }
     // Windows spawn-pressure: the Agent SDK turn spawns a large `claude` process
     // tree; spawning `git.exe` immediately after can fail with 0xC0000142
     // (STATUS_DLL_INIT_FAILED) until that tree fully releases desktop-heap/handles.

@@ -47,9 +47,12 @@ import type { HarnessPorts } from "../src/ports/index.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { FileTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
+import { startGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 
 const HARNESS_PORT = Number(process.env.HARNESS_PORT || 8150);
+const gitWorkerUp = startGitWorker();
+console.log(`[harness] git worker: ${gitWorkerUp ? "started (clean spawn context)" : "UNAVAILABLE - in-process fallback"}`);
 const REPO_ROOT = process.env.LEAF_REPO_ROOT ?? "C:/tmp/leaf-web-demo";
 const TENANTS_DIR = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
 const SINGLE_REPO_OVERRIDE = (process.env.LEAF_TENANT_REPO ?? "").trim(); // demo back-compat
