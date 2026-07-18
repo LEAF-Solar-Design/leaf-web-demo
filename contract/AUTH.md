@@ -58,6 +58,12 @@ leaf_website already stores — see `leaf_website/lib/auth0.ts SubscriptionMetad
   enum (default `hosted_starter`). **Surface-only** — this lane does NOT enforce
   entitlement; downstream (credential broker / metering) consumes the tier.
 
+> **Update (Wave 5, §17):** the `tier` claim now **DRIVES entitlement enforcement**
+> server-side — `run_read` / `run_write` / `build` per tier via `server/entitlements.py`
+> + `server/entitlements.json`, enforced in `POST /api/run` and `POST /api/author` (403),
+> readable at `GET /api/entitlements`. See `server/CONTRACT-ADDENDUM.md` §17. Off-auth
+> tenants resolve tier `demo` (full access).
+
 Standard verified claims used by the server: `iss`, `aud`, `exp`, `iat`.
 
 ---

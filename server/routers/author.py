@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import deps
+import entitlements
 from deps import fb
 from envelopes import error_obj, with_envelope_fields
 from tool_validate import static_scan
@@ -64,6 +65,13 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
     """Generate a tool package from a description, PERSIST its code to a real
     file, register it so it appears in /api/tools, and return
     {tool, code, preview} (contract section 4)."""
+    # ENTITLEMENT GATE (§17): the Build lane requires the tenant tier's `build` capability.
+    # Enforced FIRST — before the harness delegation or the templater — so a plan without
+    # Build cannot author tools via either path. Off-auth/demo tier grants build.
+    tier = entitlements.resolve_tier(tenant)
+    if not entitlements.entitlements_for(tier).get("build", False):
+        return entitlements.entitlement_denied_response("build", tier)
+
     use_llm = os.environ.get("LEAF_AUTHOR_LLM", "0") == "1"
 
     # Env-gated seam to the Agent SDK author harness (harness/ - HARNESS-CONTRACT.md).

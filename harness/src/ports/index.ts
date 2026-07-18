@@ -115,6 +115,9 @@ export type AgentGrant =
   | { kind: "oauth"; oauthToken: string } // consumed as CLAUDE_CODE_OAUTH_TOKEN
   | { kind: "api_key"; apiKey: string }; //  consumed as ANTHROPIC_API_KEY
 
+/** The credential kind of a linked grant (web-lane OAuth vs enterprise BYO API key). */
+export type GrantKind = AgentGrant["kind"];
+
 export interface OAuthGrantProvider {
   /** Resolve the per-tenant Agent SDK grant. Concern 2 only. */
   getGrant(tenantId: string): Promise<AgentGrant>;
@@ -128,6 +131,12 @@ export interface GrantStatus {
   linked: boolean;
   /** ISO-8601 when the token file was last written, or null (e.g. env-fallback grant). */
   linked_at: string | null;
+  /**
+   * Which credential kind is linked: `"oauth"` (web-lane per-user "sign in with Claude"
+   * token) or `"api_key"` (enterprise BYO key). Present when `linked` is true; omitted
+   * when unlinked. NEVER the token value itself.
+   */
+  kind?: GrantKind;
 }
 
 /**
@@ -137,9 +146,14 @@ export interface GrantStatus {
  * `status()` and every method return NEVER carry the token value.
  */
 export interface TenantGrantAdminStore {
-  /** Store (or replace) the tenant's token. Returns the resulting link status. */
-  put(tenantId: string, token: string): Promise<GrantStatus>;
-  /** Report link status only — never the token. */
+  /**
+   * Store (or replace) the tenant's token. `kind` is the credential kind; when omitted
+   * it is AUTO-DETECTED from the token prefix (`sk-ant-api…` → api_key; `sk-ant-oat…` →
+   * oauth; otherwise oauth). The kind is persisted alongside the token (never logged).
+   * Returns the resulting link status (carrying `kind`, never the token).
+   */
+  put(tenantId: string, token: string, kind?: GrantKind): Promise<GrantStatus>;
+  /** Report link status + kind only — never the token. */
   status(tenantId: string): Promise<GrantStatus>;
   /** Remove the tenant's stored token (idempotent). */
   remove(tenantId: string): Promise<void>;

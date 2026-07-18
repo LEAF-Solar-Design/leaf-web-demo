@@ -23,10 +23,31 @@ import { join } from "node:path";
 import { DEFAULT_TENANT } from "../index.js";
 import type {
   AgentGrant,
+  GrantKind,
   GrantStatus,
   OAuthGrantProvider,
   TenantGrantAdminStore,
 } from "../index.js";
+
+/**
+ * Auto-detect a grant's credential kind from the token PREFIX (CONTRACT-ADDENDUM §17):
+ *   `sk-ant-api…` → api_key (enterprise BYO key)
+ *   `sk-ant-oat…` → oauth   ("sign in with Claude" per-user token)
+ *   anything else → oauth   (the web-lane default; the proven demo token has no fixed
+ *                            public prefix, so oauth is the safe default).
+ * The token VALUE is never logged here — only its leading marker informs the kind.
+ */
+export function detectGrantKind(token: string): GrantKind {
+  const t = (token ?? "").trim();
+  if (t.startsWith("sk-ant-api")) return "api_key";
+  if (t.startsWith("sk-ant-oat")) return "oauth";
+  return "oauth";
+}
+
+/** Build the AgentGrant of a given kind from a raw token value. */
+function grantFor(kind: GrantKind, token: string): AgentGrant {
+  return kind === "api_key" ? { kind: "api_key", apiKey: token } : { kind: "oauth", oauthToken: token };
+}
 
 /** The per-tenant grant store the OAuthGrantProviderImpl reads from. */
 export interface TenantGrantStore {
@@ -91,15 +112,24 @@ const DEFAULT_GRANTS_DIR = "C:/tmp/leaf-grants";
 
 /**
  * Reject anything but a single, traversal-free path component so a crafted tenant id
- * can never escape `$LEAF_GRANTS_DIR`. Returns the `.token` filename.
+ * can never escape `$LEAF_GRANTS_DIR`. Returns the safe base name.
  */
-function grantFileName(tenantId: string): string {
+function safeBase(tenantId: string): string {
   const tid = (tenantId ?? "").trim();
   const base = tid.replace(/\\/g, "/").split("/").pop() ?? "";
   if (!base || base === "." || base === ".." || base !== tid || !/^[A-Za-z0-9._-]+$/.test(base)) {
     throw new Error(`invalid tenant id for grant store: ${JSON.stringify(tenantId)}`);
   }
-  return `${base}.token`;
+  return base;
+}
+
+function grantFileName(tenantId: string): string {
+  return `${safeBase(tenantId)}.token`;
+}
+
+/** Sidecar file recording the grant KIND (never the token). */
+function grantKindFileName(tenantId: string): string {
+  return `${safeBase(tenantId)}.kind`;
 }
 
 export interface FileTenantGrantStoreOptions {
@@ -119,7 +149,14 @@ export interface FileTenantGrantStoreOptions {
  *
  * Secret discipline: the token is written to / read from its own file and returned only
  * inside an AgentGrant. `status()` NEVER reads-and-returns the token — only linked +
- * mtime. Nothing here logs the token. `linked_at` is the token file's mtime.
+ * mtime + kind. Nothing here logs the token. `linked_at` is the token file's mtime.
+ *
+ * Grant KIND (§17): the credential kind (`oauth` per-user token vs `api_key` enterprise
+ * BYO key) is persisted in a sidecar `<tid>.kind` file. On `put`, an omitted kind is
+ * AUTO-DETECTED from the token prefix. On `get`, an api_key grant surfaces as
+ * `{kind:"api_key", apiKey}` (→ `ANTHROPIC_API_KEY`); an oauth grant as
+ * `{kind:"oauth", oauthToken}` (→ `CLAUDE_CODE_OAUTH_TOKEN`). A legacy token file with
+ * no sidecar falls back to prefix auto-detection (so pre-§17 files keep working).
  *
  * BACK-COMPAT: if the demo tenant has no per-tenant file, `get()`/`status()` fall back
  * to the env/file grant (EnvOrFileGrantStore), so the proven demo loop is unchanged.
@@ -140,6 +177,10 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     return join(this.dir, grantFileName(tenantId));
   }
 
+  private kindFile(tenantId: string): string {
+    return join(this.dir, grantKindFileName(tenantId));
+  }
+
   private readToken(tenantId: string): string | null {
     const p = this.file(tenantId);
     if (!existsSync(p)) return null;
@@ -147,18 +188,32 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     return raw ? raw : null;
   }
 
+  /** The persisted grant kind for a tenant (sidecar), or null when no sidecar exists. */
+  private readKind(tenantId: string): GrantKind | null {
+    const p = this.kindFile(tenantId);
+    if (!existsSync(p)) return null;
+    const raw = readFileSync(p, "utf8").trim();
+    return raw === "api_key" || raw === "oauth" ? raw : null;
+  }
+
   async get(tenantId: string): Promise<AgentGrant | null> {
     const tok = this.readToken(tenantId);
-    if (tok) return { kind: "oauth", oauthToken: tok };
+    if (tok) {
+      // Sidecar kind wins; a legacy file with no sidecar falls back to prefix detection.
+      const kind = this.readKind(tenantId) ?? detectGrantKind(tok);
+      return grantFor(kind, tok);
+    }
     if (tenantId === this.defaultTenant) return this.envFallback.get(tenantId);
     return null;
   }
 
-  async put(tenantId: string, token: string): Promise<GrantStatus> {
+  async put(tenantId: string, token: string, kind?: GrantKind): Promise<GrantStatus> {
     const t = (token ?? "").trim();
+    const k: GrantKind = kind ?? detectGrantKind(t);
     mkdirSync(this.dir, { recursive: true });
     // 0600 where the platform honors it; content is the raw token and is NEVER logged.
     writeFileSync(this.file(tenantId), t, { encoding: "utf8", mode: 0o600 });
+    writeFileSync(this.kindFile(tenantId), k, { encoding: "utf8", mode: 0o600 });
     return this.status(tenantId);
   }
 
@@ -167,18 +222,20 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     if (existsSync(p)) {
       const raw = readFileSync(p, "utf8").trim();
       if (raw) {
-        return { linked: true, linked_at: statSync(p).mtime.toISOString() };
+        const kind = this.readKind(tenantId) ?? detectGrantKind(raw);
+        return { linked: true, linked_at: statSync(p).mtime.toISOString(), kind };
       }
     }
     if (tenantId === this.defaultTenant) {
       const g = await this.envFallback.get(tenantId);
-      if (g) return { linked: true, linked_at: null };
+      if (g) return { linked: true, linked_at: null, kind: g.kind };
     }
     return { linked: false, linked_at: null };
   }
 
   async remove(tenantId: string): Promise<void> {
     rmSync(this.file(tenantId), { force: true });
+    rmSync(this.kindFile(tenantId), { force: true });
   }
 }
 

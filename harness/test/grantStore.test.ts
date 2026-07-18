@@ -6,7 +6,7 @@
  * scripted fake so the real file/env path is never constructed here.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -51,11 +51,13 @@ describe("FileTenantGrantStore", () => {
     expect(readFileSync(file, "utf8")).toBe(FAKE);
   });
 
-  it("status NEVER returns the token (only linked + linked_at)", async () => {
+  it("status NEVER returns the token (only linked + linked_at + kind)", async () => {
     const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
     await store.put("acme", FAKE);
     const status = await store.status("acme");
-    expect(Object.keys(status).sort()).toEqual(["linked", "linked_at"]);
+    // §17: status now also carries `kind` — still NEVER the token.
+    expect(Object.keys(status).sort()).toEqual(["kind", "linked", "linked_at"]);
+    expect(status.kind).toBe("oauth");
     expect(JSON.stringify(status)).not.toContain(FAKE);
   });
 
@@ -84,7 +86,8 @@ describe("FileTenantGrantStore", () => {
     });
     // no per-tenant file -> env fallback resolves (linked, but no file mtime)
     expect(await store.get("demo-tenant")).toEqual({ kind: "oauth", oauthToken: FAKE });
-    expect(await store.status("demo-tenant")).toEqual({ linked: true, linked_at: null });
+    // §17: env-fallback status carries the fallback grant's kind (oauth).
+    expect(await store.status("demo-tenant")).toEqual({ linked: true, linked_at: null, kind: "oauth" });
 
     // a per-tenant file WINS over the env fallback
     await store.put("demo-tenant", FAKE2);
@@ -97,5 +100,53 @@ describe("FileTenantGrantStore", () => {
     await expect(store.put("../evil", FAKE)).rejects.toThrow(/invalid tenant id/);
     await expect(store.get("a/b")).rejects.toThrow(/invalid tenant id/);
     await expect(store.status("..")).rejects.toThrow(/invalid tenant id/);
+  });
+
+  // ------------------------------------------------------------------------- //
+  // §17 — BYO API key as a grant kind
+  // ------------------------------------------------------------------------- //
+  const FAKE_API = "sk-ant-api03-FAKE-not-a-real-key-999888777";
+  const FAKE_OAT = "sk-ant-oat01-FAKE-not-a-real-token-111222";
+
+  it("explicit kind:'api_key' -> get returns an api_key grant; status.kind is api_key", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    const status = await store.put("ent", FAKE, "api_key"); // explicit kind wins over prefix
+    expect(status).toEqual({ linked: true, linked_at: status.linked_at, kind: "api_key" });
+    expect(await store.get("ent")).toEqual({ kind: "api_key", apiKey: FAKE });
+    expect((await store.status("ent")).kind).toBe("api_key");
+    expect(JSON.stringify(await store.status("ent"))).not.toContain(FAKE);
+  });
+
+  it("auto-detects api_key from the sk-ant-api prefix when kind is omitted", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("ent2", FAKE_API); // no explicit kind
+    expect(await store.get("ent2")).toEqual({ kind: "api_key", apiKey: FAKE_API });
+    expect((await store.status("ent2")).kind).toBe("api_key");
+  });
+
+  it("auto-detects oauth from the sk-ant-oat prefix; unknown prefix defaults to oauth", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("oat", FAKE_OAT);
+    expect(await store.get("oat")).toEqual({ kind: "oauth", oauthToken: FAKE_OAT });
+    await store.put("plain", FAKE); // no recognizable prefix -> oauth
+    expect(await store.get("plain")).toEqual({ kind: "oauth", oauthToken: FAKE });
+  });
+
+  it("remove clears the kind sidecar too (a later put re-detects fresh)", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("ent3", FAKE, "api_key");
+    await store.remove("ent3");
+    expect(await store.get("ent3")).toBeNull();
+    // no stale sidecar: a fresh oauth token now resolves as oauth, not api_key.
+    await store.put("ent3", FAKE_OAT);
+    expect(await store.get("ent3")).toEqual({ kind: "oauth", oauthToken: FAKE_OAT });
+  });
+
+  it("legacy token file with NO kind sidecar falls back to prefix detection", async () => {
+    // simulate a pre-§17 store: write only the .token file, no .kind sidecar.
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    writeFileSync(join(dir, "legacy.token"), FAKE_API, "utf8");
+    expect(await store.get("legacy")).toEqual({ kind: "api_key", apiKey: FAKE_API });
+    expect((await store.status("legacy")).kind).toBe("api_key");
   });
 });

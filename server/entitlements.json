@@ -1,0 +1,7 @@
+{
+  "_note": "Tier -> capability policy (CONTRACT-ADDENDUM §17). Operator-tunable: edit these booleans (or point LEAF_ENTITLEMENTS_FILE at another file) to change what each Auth0 tier may do. Read at request time by server/entitlements.py. Off-auth (and unknown) tenants resolve tier 'demo' (full access, friction-free). run_read gates POST /api/run of drawing.read tools; run_write gates drawing.write tools; build gates POST /api/author.",
+  "demo": { "run_read": true, "run_write": true, "build": true },
+  "self_hosted": { "run_read": true, "run_write": true, "build": true },
+  "hosted_starter": { "run_read": true, "run_write": true, "build": false },
+  "hosted_pro": { "run_read": true, "run_write": true, "build": true }
+}

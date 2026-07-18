@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import deps
+import entitlements
 import jobs
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_response, with_envelope_fields
 
@@ -59,6 +60,15 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     if tool is None:
         return error_response(ErrorCode.UNKNOWN_TOOL, f"unknown tool: {req.tool}",
                               retryable=False, tool=req.tool)
+
+    # ENTITLEMENT GATE (§17): the tenant's tier must grant the capability this tool needs
+    # (run_write for a drawing.write tool, else run_read). Enforced HERE in the execution
+    # chain — before job submission, on BOTH the async and ?wait=1 paths — so it cannot be
+    # bypassed by the UI. Off-auth/demo tier grants everything (friction-free).
+    tier = entitlements.resolve_tier(tenant_id)
+    required = entitlements.tool_required_capability(tool)
+    if not entitlements.entitlements_for(tier).get(required, False):
+        return entitlements.entitlement_denied_response(required, tier)
 
     # merge authored default_params under caller params
     params = dict(tool.get("default_params", {}))

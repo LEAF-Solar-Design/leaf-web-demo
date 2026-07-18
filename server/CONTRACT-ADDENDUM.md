@@ -604,3 +604,75 @@ tenant_id=)`, so entry resolution + execution read the SAME tenant's repo.
   fold (the production harness authoring path).
 - `POST /api/nl-prompt` remains GLOBAL (frozen §12: "no tenant/auth dependency"); making NL
   classification tenant-scoped would be a §12 change and is out of scope for this lane.
+
+## §17 Wave 5 — enterprise readiness (BYO API-key grant kind + tier entitlement enforcement)
+
+Session: `wave5-backend`, 2026-07-18. Two enterprise-lane pieces. Verified offline by
+`server/tests/test_wave5.py` (14) + the harness hermetic suite
+(`grantStore` api_key coverage + `runnerEnv` env-injection). Pre-wave-5 behaviour is
+BYTE-IDENTICAL when the new knobs are unset (grants default to `oauth`; off-auth tier is
+`demo` = full access).
+
+### A. BYO API key as a grant kind (the enterprise auth lane)
+
+The Agent-SDK grant is either an OAuth per-user "sign in with Claude" token (web lane,
+individual-use — `research/agentsdk-usage-visibility.md`) OR a **BYO API key** (enterprise
+lane, where Leaf holds/settles the bill — the MATRIX ToS-cleanest path). The `kind` is now
+first-class end-to-end.
+
+- **Harness store** (`FileTenantGrantStore`): persists the kind in a sidecar `<tid>.kind`
+  file next to `<tid>.token`. `put(tenantId, token, kind?)` — an omitted `kind` is
+  **AUTO-DETECTED** from the token prefix: `sk-ant-api…` → `api_key`; `sk-ant-oat…` →
+  `oauth`; otherwise `oauth`. `get()` returns `{kind:"api_key", apiKey}` or
+  `{kind:"oauth", oauthToken}`. A legacy token file with no sidecar falls back to prefix
+  detection. The token is NEVER logged; `remove()` clears both files.
+- **Harness admin**: `PUT /grants/{tenantId}` body gains optional `kind` (else auto-detect);
+  `GET /grants/{tenantId}` → **`{linked, linked_at, kind}`** (kind present when linked;
+  never the token).
+- **SDK runner env injection** (`buildScrubbedEnv`): an `api_key` grant injects
+  `ANTHROPIC_API_KEY`; an `oauth` grant injects `CLAUDE_CODE_OAUTH_TOKEN`; the other cred
+  var (and every ambient Anthropic identity) is stripped from the scrubbed child env. The
+  demo-tenant env fallback is unchanged (kind `oauth`).
+- **App proxy** (`server/routers/tenant.py`): `POST /api/tenant/claude-grant` body gains
+  optional `kind` (forwarded only when set, so the harness auto-detects otherwise);
+  `GET` returns §10 `{linked, linked_at, kind}`. The token is still never persisted,
+  logged, or echoed app-side; `kind` is not a secret.
+
+### B. Tier-driven entitlement enforcement (MATRIX gap 6 — the tier schema was 0% enforced)
+
+The Auth0 `tier` claim (AUTH.md §1) now DRIVES capability enforcement server-side. Policy
+lives in the tracked, operator-tunable `server/entitlements.json` (override:
+`LEAF_ENTITLEMENTS_FILE`), read at request time:
+
+```json
+{ "demo":           { "run_read": true, "run_write": true,  "build": true  },
+  "self_hosted":    { "run_read": true, "run_write": true,  "build": true  },
+  "hosted_starter": { "run_read": true, "run_write": true,  "build": false },
+  "hosted_pro":     { "run_read": true, "run_write": true,  "build": true  } }
+```
+
+- **Tier source**: live auth (`LEAF_AUTH_LIVE=1`) → the verified `TenantContext.tier`
+  (Auth0 claim). Off-auth / missing tier → **`demo`** (full access — the open demo stays
+  friction-free, by design). Unknown tier → the `demo` entry (a tier only ever arrives from
+  a VERIFIED claim, so an unrecognized value is operator config drift, not an attacker
+  vector).
+- **Enforcement (non-bypassable, in the execution chain — not the UI):**
+  - `POST /api/run` rejects a `drawing.write`-capability tool when the tier lacks
+    `run_write` (checked before job submit → covers async **and** `?wait=1`).
+  - `POST /api/author` rejects when the tier lacks `build` (checked FIRST → before the
+    harness delegation or the templater).
+- **Rejection = HTTP 403**, §10-compatible body mirroring the §16 grant_required pattern:
+
+```json
+{ "entitlement_required": true, "required": "run_write" | "build", "tier": "<tier>",
+  "error": { "error_code": "BAD_PARAMS", "message": "…plain sentence…", "retryable": false },
+  "degraded_mode": false }
+```
+
+  The frozen §10 `error.error_code` enum is UNCHANGED (`BAD_PARAMS`); the frontend keys on
+  the additive top-level `entitlement_required` / `required` / `tier`.
+- **`GET /api/entitlements`** (`server/routers/tools.py`) → §10
+  `{tier, entitlements: {run_read, run_write, build}, source: "policy"}` (from
+  `require_tenant`'s tier; under live auth the tenant echo additively stamps
+  `tenant_id`/`org_id` like every other echoed body). This is a READ of policy — the actual
+  gate lives in the run/author chains and cannot be bypassed via this endpoint.

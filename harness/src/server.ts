@@ -81,9 +81,10 @@ export function createHarness(ports: HarnessPorts): Harness {
         return send(res, 200, { ok: true, service: "leaf-tenant-author-harness" });
       }
 
-      // Per-tenant grant admin (wave 4): PUT/GET/DELETE /grants/{tenantId}. Backs the
-      // app's /api/tenant/claude-grant proxy. Returns ONLY {linked, linked_at} — never
-      // the token. 501 when no grantAdmin store is wired (the hermetic author tests).
+      // Per-tenant grant admin (wave 4 + §17): PUT/GET/DELETE /grants/{tenantId}. Backs
+      // the app's /api/tenant/claude-grant proxy. Returns ONLY {linked, linked_at, kind}
+      // — never the token. PUT body may carry an optional `kind` (else auto-detected).
+      // 501 when no grantAdmin store is wired (the hermetic author tests).
       if (path.startsWith("/grants/")) {
         const tenantId = decodeURIComponent(path.slice("/grants/".length));
         if (!tenantId) return send(res, 400, { error: { message: "tenant id required" } });
@@ -95,8 +96,12 @@ export function createHarness(ports: HarnessPorts): Harness {
             const gbody = await readJsonBody(req);
             const token = typeof gbody.token === "string" ? gbody.token : "";
             if (!token.trim()) return send(res, 400, { error: { message: "token is required" } });
-            const st = await ports.grantAdmin.put(tenantId, token);
-            return send(res, 200, st); // {linked, linked_at} — token never echoed
+            // Optional explicit kind; when absent/invalid the store AUTO-DETECTS from the
+            // token prefix (§17). Only the two valid literals are forwarded.
+            const rawKind = typeof gbody.kind === "string" ? gbody.kind.trim() : "";
+            const kind = rawKind === "oauth" || rawKind === "api_key" ? rawKind : undefined;
+            const st = await ports.grantAdmin.put(tenantId, token, kind);
+            return send(res, 200, st); // {linked, linked_at, kind} — token never echoed
           }
           if (method === "GET") {
             return send(res, 200, await ports.grantAdmin.status(tenantId));
