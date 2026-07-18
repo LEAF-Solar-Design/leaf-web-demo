@@ -3,15 +3,26 @@
   "title": "Leaf server extended response envelope (CONTRACT-ADDENDUM section 10)",
   "description": "Every server endpoint body carries error + degraded_mode. Success: error is null and degraded_mode is boolean. Failure: error.error_code is one of the frozen ErrorCode enum values. The section-3 run envelope additionally carries ok/tool/version/result/overlay/timing_ms/cost (unchanged success fields).",
   "type": "object",
-  "required": ["error", "degraded_mode"],
+  "required": [
+    "error",
+    "degraded_mode"
+  ],
   "properties": {
-    "degraded_mode": { "type": "boolean" },
+    "degraded_mode": {
+      "type": "boolean"
+    },
     "error": {
       "oneOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "object",
-          "required": ["error_code", "message", "retryable"],
+          "required": [
+            "error_code",
+            "message",
+            "retryable"
+          ],
           "properties": {
             "error_code": {
               "enum": [
@@ -22,11 +33,16 @@
                 "WORKITEM_FAILED",
                 "TIMEOUT",
                 "TENANT_DISABLED",
-                "INTERNAL"
+                "INTERNAL",
+                "quota_exceeded"
               ]
             },
-            "message": { "type": "string" },
-            "retryable": { "type": "boolean" }
+            "message": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            }
           }
         }
       ]

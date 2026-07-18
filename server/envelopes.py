@@ -29,6 +29,7 @@ class ErrorCode:
     WORKITEM_FAILED = "WORKITEM_FAILED"
     TIMEOUT = "TIMEOUT"
     TENANT_DISABLED = "TENANT_DISABLED"
+    QUOTA_EXCEEDED = "quota_exceeded"  # promoted 2026-07-17 (broker hard cap, HTTP 402)
     INTERNAL = "INTERNAL"
 
     ALL = (
@@ -39,12 +40,14 @@ class ErrorCode:
         WORKITEM_FAILED,
         TIMEOUT,
         TENANT_DISABLED,
+        QUOTA_EXCEEDED,
         INTERNAL,
     )
 
 
 # sane default HTTP status per error code (body carries the machine-readable part)
 DEFAULT_HTTP_STATUS: Dict[str, int] = {
+    ErrorCode.QUOTA_EXCEEDED: 402,
     ErrorCode.UNKNOWN_TOOL: 404,
     ErrorCode.BAD_PARAMS: 400,
     ErrorCode.APS_UNAVAILABLE: 502,

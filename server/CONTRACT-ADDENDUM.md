@@ -9,6 +9,10 @@ below is verified by `server/tests/test_backbone.py` at `APS_LIVE=0`.
 
 ---
 
+> **PROMOTED 2026-07-17:** sections 7-10 below were promoted verbatim into the frozen
+> `contract/CONTRACT.md` (operator-approved). This file remains the authoring record;
+> `contract/CONTRACT.md` is now authoritative for these sections.
+
 ## §7 Async job model
 
 ### BREAKING CHANGE — `POST /api/run`
