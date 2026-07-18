@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+#
+# Leaf platform — APS credential BROKER process (CONTRACT-ADDENDUM §8).
+#
+# THE security chokepoint: the ONLY process that imports da/client.py and the
+# ONLY one that may read the APS credential. Tenant-facing code calls it over
+# HTTP (POST /broker/run) and never holds the secret. Also the attribution
+# ledger + per-tenant kill-switch + in-process egress allowlist.
+#
+# Listens on :8140.  The APS credential is provided at RUNTIME via a mounted
+# file referenced by APS_CRED (default ~/.aps/credentials.json) — it is NEVER
+# baked into this image and is only read on live (APS_LIVE=1) runs.
+FROM python:3.12-slim AS broker
+
+WORKDIR /app
+
+# --- Python deps: server (fastapi/uvicorn/pydantic/requests/jsonschema) + da
+#     (requests). No platform deps — the broker never imports the platform pkg. -
+COPY server/requirements.txt /app/server/requirements.txt
+COPY da/requirements.txt     /app/da/requirements.txt
+RUN pip install --no-cache-dir \
+      -r /app/server/requirements.txt \
+      -r /app/da/requirements.txt
+
+# --- Broker source + the siblings it resolves via PROJECT_ROOT = /app --------
+# (broker.py: SERVER_DIR.parent; inserts /app + /app/server on sys.path, then
+# imports da/, engine tools, data/rooftop_demo.intake.json for the mock path).
+COPY server/  /app/server/
+COPY da/      /app/da/
+COPY engine/  /app/engine/
+COPY contract/ /app/contract/
+COPY data/    /app/data/
+
+# Run from the server workdir (broker.py caches stdlib `platform`/`queue` before
+# the PROJECT_ROOT sys.path insert, so the local da/queue.py never shadows them).
+WORKDIR /app/server
+
+ENV APS_LIVE=0 \
+    BROKER_PORT=8140 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 8140
+
+# GET /broker/health -> 200.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8140/broker/health', timeout=4)" || exit 1
+
+# uvicorn --host 0.0.0.0 is REQUIRED here: `python broker.py` binds 127.0.0.1
+# (loopback only) and would be unreachable from the app/harness containers.
+CMD ["uvicorn", "broker:app", "--host", "0.0.0.0", "--port", "8140"]

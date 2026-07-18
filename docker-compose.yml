@@ -1,0 +1,138 @@
+# Leaf platform — local deploy stack (WAVE 5 deploy pack).
+#
+# The first deploy-readiness artifact: containerize app + broker + harness + web
+# and prove the env contract (RUN.md, server/README.md, CONTRACT-ADDENDUM §7-§16)
+# wires up under `docker compose`. Everything runs at APS_LIVE=0 with NO secrets;
+# operator opt-ins (APS creds, a Claude grant, DATABASE_URL) are commented below.
+#
+#   docker compose build          # build all four images
+#   docker compose up -d          # start; wait for healthchecks
+#   open http://localhost:8080    # the app; API at http://localhost:8130
+#   docker compose down -v        # stop + drop the named volumes
+name: leaf-platform
+
+services:
+  # --- APS credential broker (§8): the only secret-holder; :8140 -------------
+  broker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.broker
+    image: leaf-broker:local
+    environment:
+      APS_LIVE: "0"
+      BROKER_LEDGER: /data/state/broker_ledger.jsonl   # shared with the app (usage reads it)
+      BROKER_TENANTS: /data/state/broker_tenants.json  # persisted kill-switch
+      LEAF_STORE_DIR: /data/drawings                   # shared with the app (write loop)
+      # --- operator opt-in for APS_LIVE=1 (NEVER baked into the image): -------
+      # APS_CRED: /run/secrets/aps/credentials.json
+    volumes:
+      - leaf-state:/data/state
+      - leaf-drawings:/data/drawings
+      # - ${HOME:-~}/.aps:/run/secrets/aps:ro          # mount your ~/.aps for live APS
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8140/broker/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+  # --- Author harness sidecar (§15/§16): real Agent SDK build lane; :8150 -----
+  harness:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.harness
+    image: leaf-harness:local
+    environment:
+      HARNESS_PORT: "8150"
+      BROKER_URL: http://broker:8140
+      LEAF_TENANTS_DIR: /data/tenants     # MUST match the app's LEAF_TENANTS_DIR (§16.H)
+      LEAF_GRANTS_DIR: /data/grants       # per-tenant Claude token files (harness-only)
+      LEAF_TENANT_FIXTURE: /app/test/fixtures/tenant-repo
+      # --- operator opt-ins (NEVER baked): ------------------------------------
+      # LEAF_TENANT_REPO: /data/tenants/demo-tenant  # demo single-repo back-compat override
+      # LEAF_GRANT_FILE: /run/secrets/claude-grant   # a demo-tenant grant token file
+    volumes:
+      - leaf-tenants:/data/tenants        # shared with the app (§16.H)
+      - leaf-grants:/data/grants
+      # - ./.secrets/claude-grant:/run/secrets/claude-grant:ro
+    depends_on:
+      broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8150/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+  # --- Tenant-facing app (§7-§16): async spine + catalog + write loop; :8130 --
+  app:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.app
+    image: leaf-app:local
+    ports:
+      - "8130:8130"
+    environment:
+      APS_LIVE: "0"
+      BROKER_URL: http://broker:8140
+      LEAF_AUTHOR_HARNESS_URL: http://harness:8150
+      LEAF_TENANTS_DIR: /data/tenants                  # MUST match the harness (§16.H)
+      LEAF_STORE_DIR: /data/drawings                   # shared with the broker (write loop)
+      BROKER_LEDGER: /data/state/broker_ledger.jsonl   # app reads the broker's ledger for /api/usage
+      JOBS_DB: /data/state/jobs.db                     # durable async job records (restart-survivable)
+      # --- operator opt-in: platform Project/Job persistence (Neon/Postgres) ---
+      DATABASE_URL: ${DATABASE_URL:-}                  # empty => platform DB endpoints stay dark (demo-safe)
+    volumes:
+      - leaf-tenants:/data/tenants
+      - leaf-drawings:/data/drawings
+      - leaf-state:/data/state
+    depends_on:
+      broker:
+        condition: service_healthy
+      harness:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8130/api/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+  # --- Web frontend (static nginx): :8080 -------------------------------------
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+      args:
+        VITE_API_BASE: http://localhost:8130   # the browser (on the host) hits the app's published port
+        VITE_MOCK: "0"
+    image: leaf-web:local
+    ports:
+      - "8080:8080"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      # IPv4 literal: nginx listens on 0.0.0.0:8080 and busybox wget resolves
+      # `localhost` to ::1 (IPv6) with no fallback -> a false "unhealthy".
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+# Named volumes. `down -v` drops them all (fresh state next up).
+#   leaf-tenants  : per-tenant mushy repos      — SHARED app <-> harness (§16.H)
+#   leaf-grants   : per-tenant Claude tokens     — harness only
+#   leaf-drawings : versioned drawing store      — SHARED app <-> broker (write loop)
+#   leaf-state    : broker ledger + kill-switch + app jobs.db — SHARED app <-> broker
+volumes:
+  leaf-tenants:
+  leaf-grants:
+  leaf-drawings:
+  leaf-state:

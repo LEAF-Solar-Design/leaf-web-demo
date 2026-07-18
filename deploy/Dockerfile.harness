@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+#
+# Leaf platform — tenant author HARNESS sidecar (CONTRACT-ADDENDUM §15/§16).
+#
+# The Build lane's real Agent SDK author loop over HTTP. Per-tenant Claude grant
+# store + per-tenant "mushy" git repos. The design-time author path is the ONLY
+# Anthropic egress; registered tools run with ZERO LLM.  Listens on :8150.
+#
+# The Claude grant is provided at RUNTIME (per-tenant token files under
+# LEAF_GRANTS_DIR, or the demo LEAF_GRANT_FILE) — NEVER baked into the image.
+FROM node:22-slim AS harness
+
+# git: the tenant repos are REAL git repos (provision + one seed commit + commit
+# on each authoring). The git worker (scripts/git-worker.cjs) is spawned at boot;
+# on Linux the SDK-process-tree spawn hazard it guards against does not occur, so
+# it is harmless-but-present here (load-bearing on a Windows host).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install against the lockfile first (layer cache), then bring source + compile.
+COPY harness/package.json harness/package-lock.json /app/
+RUN npm ci
+
+# Source. scripts/git-worker.cjs is NOT compiled by tsc; gitWorker.js resolves it
+# at ../../../../scripts/git-worker.cjs relative to dist/src/ports/impl, i.e.
+# /app/scripts/git-worker.cjs — so it must live at the harness root.
+COPY harness/tsconfig.json harness/tsconfig.build.json /app/
+COPY harness/src/     /app/src/
+COPY harness/scripts/ /app/scripts/
+COPY harness/test/    /app/test/
+
+# Compile TS -> /app/dist (dist/scripts/serve.js + dist/src/**), then drop the
+# dev toolchain (typescript/vitest/@types) — the runtime keeps only the SDK dep.
+RUN npx tsc -p tsconfig.build.json \
+  && npm prune --omit=dev
+
+ENV HARNESS_PORT=8150 \
+    LEAF_REPO_ROOT=/app \
+    LEAF_TENANT_FIXTURE=/app/test/fixtures/tenant-repo \
+    LEAF_TENANTS_DIR=/data/tenants \
+    LEAF_GRANTS_DIR=/data/grants \
+    BROKER_URL=http://broker:8140 \
+    NODE_ENV=production
+
+EXPOSE 8150
+
+# GET /health -> 200 (needs no grant).
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
+  CMD node -e "require('http').get('http://localhost:8150/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+
+CMD ["node", "dist/scripts/serve.js"]

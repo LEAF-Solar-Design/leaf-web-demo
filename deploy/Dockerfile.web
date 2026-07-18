@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+#
+# Leaf platform — WEB frontend (Vite + React + three.js), served static by nginx.
+#
+# LIVE build: VITE_MOCK=0 (default) bakes the app to hit the backend; the browser
+# calls VITE_API_BASE directly (default http://localhost:8130 — the app's
+# published port on the host), so this bundle is host-portable via the build arg.
+# The header Mock toggle still lets a viewer flip to client-side data at runtime.
+
+# ---- build stage: vite build (env baked at BUILD time) ----------------------
+FROM node:22-slim AS build
+WORKDIR /web
+
+ARG VITE_API_BASE=http://localhost:8130
+ARG VITE_MOCK=0
+ENV VITE_API_BASE=${VITE_API_BASE} \
+    VITE_MOCK=${VITE_MOCK}
+
+COPY web/package.json web/package-lock.json /web/
+RUN npm ci
+COPY web/ /web/
+RUN npm run build   # -> /web/dist (includes public/sample.intake.json)
+
+# ---- serve stage: nginx on :8080 --------------------------------------------
+FROM nginx:alpine AS web
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /web/dist /usr/share/nginx/html
+EXPOSE 8080
+
+# GET / -> 200 (busybox wget; nginx:alpine has no curl). Use the IPv4 literal:
+# nginx listens on 0.0.0.0:8080 (IPv4) and busybox wget resolves `localhost` to
+# ::1 (IPv6) with no fallback -> a false "unhealthy".
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=6 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
+
+# nginx:alpine's default entrypoint runs nginx in the foreground.

@@ -1,0 +1,35 @@
+# Build-context prune for the deploy pack (WAVE 5). Keep the context small and
+# NEVER ship host-installed deps, compiled output, runtime state, or secrets.
+.git
+.gitignore
+**/node_modules
+**/dist
+web/dist
+harness/dist
+**/__pycache__
+**/*.pyc
+.pytest_cache
+**/.pytest_cache
+.serena
+**/*.log
+
+# Runtime artifacts (regenerated inside the containers / on named volumes)
+server/jobs.db
+server/jobs.db-shm
+server/jobs.db-wal
+server/broker_ledger.jsonl
+server/broker_tenants.json
+server/authored_tools.json
+server/drawings/
+
+# Local env / secrets — must never enter an image layer
+**/.env.local
+.env
+.secrets/
+**/.grant/
+# demo tenant checkouts the harness tests create
+harness/.tmp/
+harness/tenant-checkouts/
+
+# The deploy pack itself is referenced by dockerfile path, not copied wholesale
+# (kept out of the python/node source COPYs implicitly).
