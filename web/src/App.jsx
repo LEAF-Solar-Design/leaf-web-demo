@@ -12,10 +12,15 @@ import DegradedBanner from './components/DegradedBanner.jsx'
 import EntitlementGate from './components/EntitlementGate.jsx'
 import QuotaCard from './components/QuotaCard.jsx'
 import VersionHistory from './components/VersionHistory.jsx'
+import ProjectSwitcher from './components/ProjectSwitcher.jsx'
+import WorkspaceSummary from './components/WorkspaceSummary.jsx'
+import OpsDrawer from './components/OpsDrawer.jsx'
+import CheckoutChip from './components/CheckoutChip.jsx'
 import {
   config, getSession, getTools, getCapabilities, getUsage, runTool, runToolAsync,
   attachToJob, getJob, listJobs, recordToEnvelope, authorTool, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, nlPrompt, closeJobBeacon,
+  getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
@@ -45,6 +50,26 @@ const fixtureParam = new URLSearchParams(window.location.search).get('fixture')
 // run falls back; at APS_LIVE=0 it never trips). It only forces the banner's
 // visibility — it fabricates no result numbers.
 const demoDegraded = new URLSearchParams(window.location.search).get('demo') === 'degraded'
+
+// `?ops=1` reveals the INTERNAL ops drawer (tenant kill-switch surface). Absent
+// by default — the tenant-facing app never shows it.
+const opsFlag = new URLSearchParams(window.location.search).get('ops') === '1'
+
+// `?demo=locked` is a DEV-only hook that injects a synthetic single-writer
+// checkout (held by another session) so the checkout chip + write-Run
+// suppression can be exercised without touching the demo drawing's real
+// manifest. It fabricates no result numbers — only a lock display.
+const demoLocked = new URLSearchParams(window.location.search).get('demo') === 'locked'
+
+// The run's dwg (intake source name) — unchanged from the original demo.
+const DEFAULT_DRAWING_ID = 'rooftop_demo'
+
+// The versioned-store drawing id the /versions + checkout reads key on. The
+// write loop bootstraps the well-known `demo` drawing (write runs target it),
+// so checkout/version reads default to `demo`. `?drawing=<id>` overrides it to
+// drive a scratch drawing's checkout state through the real fetch path.
+const CHECKOUT_DRAWING_ID =
+  new URLSearchParams(window.location.search).get('drawing') || 'demo'
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path).
@@ -111,6 +136,23 @@ export default function App() {
   const [authorSeed, setAuthorSeed] = useState('')       // build-lane prefill text
   const [authorSignal, setAuthorSignal] = useState(0)    // bump to re-seed the author flow
 
+  // --- projects / orgs workspace (UI wave 2, item 1) ---
+  const [orgId, setOrgId] = useState(getStoredOrgId())   // stored workspace org (localStorage leaf.org_id)
+  const [projects, setProjects] = useState([])           // GET /api/projects
+  const [projectsErr, setProjectsErr] = useState(null)   // platform unavailable (no DB) -> graceful note
+  const [projectsLoading, setProjectsLoading] = useState(false)
+  const [openProjectId, setOpenProjectId] = useState(null)
+  const [workspace, setWorkspace] = useState(null)       // hydration payload {project, drawing_versions[], jobs[], built_tools[]}
+  const [wsLoading, setWsLoading] = useState(false)      // re-hydration in flight
+  const [orgBusy, setOrgBusy] = useState(false)
+  const [projectBusy, setProjectBusy] = useState(false)
+
+  // --- single-writer checkout lock (item 3) ---
+  const [checkout, setCheckout] = useState(null)         // {holder, acquired, expires} | null (from /versions)
+
+  // --- ops drawer (item 2) ---
+  const [opsDismissed, setOpsDismissed] = useState(false)
+
   const viewerRef = useRef(null)
   const authorSectionRef = useRef(null)
   const runningSinceRef = useRef(null)  // ms epoch the job entered 'running'
@@ -126,6 +168,25 @@ export default function App() {
   const tenantLabel = tenant || 'demo'
   const tierDisplay = tier || '—'
   const gateTier = tier || 'demo'
+
+  // --- single-writer checkout (item 3) ---
+  // Our own holder id (best-effort): the echoed tenant, else the configured stub.
+  // A checkout held by US is not a lock; only a checkout held by ANOTHER session
+  // suppresses write-Run. `?demo=locked` injects a synthetic other-session lock.
+  const ownHolder = tenant || config.tenant || 'demo-tenant'
+  const rawCheckout = demoLocked
+    ? { holder: 'another-session', acquired: new Date().toISOString(), expires: new Date(Date.now() + 3600e3).toISOString() }
+    : checkout
+  const otherHeldCheckout =
+    (rawCheckout && rawCheckout.holder && rawCheckout.holder !== ownHolder) ? rawCheckout : null
+  const writeLocked = !mock && !!otherHeldCheckout
+
+  // Current open project's display name (from the hydration payload, else the list).
+  const currentProjectName = openProjectId
+    ? (workspace?.project?.name
+        || projects.find((p) => (p.project_id || p.id) === openProjectId)?.name
+        || null)
+    : null
 
   // color-by-layer, stable across renders (keyed to base intake identity)
   const colorForLayer = useMemo(() => {
@@ -208,6 +269,41 @@ export default function App() {
   }, [mock])
 
   useEffect(() => { loadUsage() }, [loadUsage])
+
+  // Projects workspace (item 1): fetch the org's projects (live only). No org
+  // stored -> empty list + no error (the switcher offers "create workspace org").
+  // Platform down (no DATABASE_URL / 500) -> projectsErr drives the graceful
+  // "projects unavailable" note. Mock -> zero /api calls (no surface).
+  const loadProjects = useCallback(async () => {
+    if (mock || !orgId) { setProjects([]); setProjectsErr(null); return }
+    setProjectsLoading(true); setProjectsErr(null)
+    try {
+      setProjects(await listProjects(orgId))
+    } catch (e) {
+      setProjects([]); setProjectsErr(String(e.message || e))
+    } finally {
+      setProjectsLoading(false)
+    }
+  }, [mock, orgId])
+
+  useEffect(() => { loadProjects() }, [loadProjects])
+
+  // Checkout lock (item 3): read the current drawing's version manifest and pick
+  // up its `checkout` (sibling contract adds it to /versions). Live only; any
+  // error -> null (no chip, no write-Run suppression). Refetched when the drawing
+  // version changes and after runs (a write may acquire/release the lock).
+  const loadCheckout = useCallback(async () => {
+    if (mock) { setCheckout(null); return }
+    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    try {
+      const v = await getDrawingVersions(did)
+      setCheckout(v?.checkout || null)
+    } catch {
+      setCheckout(null)
+    }
+  }, [mock, drawingState])
+
+  useEffect(() => { loadCheckout() }, [loadCheckout])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -427,9 +523,71 @@ export default function App() {
     if (drawingState) onPreviewVersion(drawingState.head)
   }, [drawingState, onPreviewVersion])
 
+  // --- projects / orgs workspace handlers (item 1) -------------------------
+  const onOpenProject = useCallback(async (pid) => {
+    if (!pid) return
+    setOpenProjectId(pid); setWsLoading(true); setProjectsErr(null)
+    try {
+      setWorkspace(await openProject(pid, orgId))
+    } catch (e) {
+      setWorkspace(null); setProjectsErr(String(e.message || e))
+    } finally {
+      setWsLoading(false)
+    }
+  }, [orgId])
+
+  // Re-hydrate the open project (after a terminal run so jobs[] visibly grows).
+  const rehydrate = useCallback(async () => {
+    if (!openProjectId) return
+    setWsLoading(true)
+    try {
+      setWorkspace(await openProject(openProjectId, orgId))
+    } catch { /* transient — keep the last good hydration */ } finally {
+      setWsLoading(false)
+    }
+  }, [openProjectId, orgId])
+
+  const onCloseProject = useCallback(() => {
+    setOpenProjectId(null); setWorkspace(null)
+  }, [])
+
+  const onCreateOrg = useCallback(async () => {
+    const name = window.prompt('Name your workspace org', 'My workspace')
+    if (name == null) return
+    setOrgBusy(true); setProjectsErr(null)
+    try {
+      const org = await createOrg(name.trim() || 'My workspace')
+      const id = org.org_id || org.id
+      setStoredOrgId(id); setOrgId(id); setProjects([])
+    } catch (e) {
+      setProjectsErr(String(e.message || e))
+    } finally {
+      setOrgBusy(false)
+    }
+  }, [])
+
+  const onCreateProject = useCallback(async () => {
+    const name = window.prompt('New project name', 'rooftop demo')
+    if (name == null || !name.trim()) return
+    setProjectBusy(true); setProjectsErr(null)
+    try {
+      const p = await createProject(name.trim(), orgId)
+      setProjects((prev) => [...prev, p])
+      await onOpenProject(p.project_id || p.id)
+    } catch (e) {
+      setProjectsErr(String(e.message || e))
+    } finally {
+      setProjectBusy(false)
+    }
+  }, [orgId, onOpenProject])
+
   const onRun = useCallback(async (tool, params) => {
     // Read-only version preview never mutates head — Run is disabled while previewing.
     if (previewing) return
+    // Single-writer lock (item 3): write tools are suppressed while another
+    // session holds the checkout; read tools are unaffected. Defensive guard —
+    // the Run buttons for write tools are already disabled while locked.
+    if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
@@ -448,7 +606,11 @@ export default function App() {
         // Mock stays fully client-side — no jobs API, no progress phases.
         env = await runTool(mock, tool, merged, shown)
       } else {
-        env = await runToolAsync(tool, merged, 'rooftop_demo', {
+        env = await runToolAsync(tool, merged, DEFAULT_DRAWING_ID, {
+          // When a project is open, link the run so a platform Job row is recorded
+          // (X-Org-Id + X-Project-Id) and the workspace jobs[] grows.
+          orgId: (openProjectId && orgId) ? orgId : undefined,
+          projectId: openProjectId || undefined,
           onSubmit: (job_id) => { saveInflight(job_id, tool.name); setCurrentJobId(job_id) },
           onStatus: (st) => {
             if (st.status === 'running') markRunning()
@@ -473,9 +635,14 @@ export default function App() {
     } finally {
       setRunning(false)
       setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
-      if (!mock) { clearInflight(); refreshJobs(); loadUsage() }
+      if (!mock) {
+        clearInflight(); refreshJobs(); loadUsage(); loadCheckout()
+        // re-hydrate the open project so its jobs[] reflects the just-finished run
+        if (openProjectId) rehydrate()
+      }
     }
-  }, [mock, shown, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage])
+  }, [mock, shown, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
+      loadCheckout, writeLocked, openProjectId, orgId, rehydrate])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
@@ -619,8 +786,21 @@ export default function App() {
       <header className="top">
         <div className="mark"><span className="diamond" aria-hidden="true" /> LEAF / unified surface</div>
         <div className="proj">
-          <span className="tag">Project</span>
-          <span className="name">{projectName}</span>
+          <ProjectSwitcher
+            mock={mock}
+            projectName={projectName}
+            orgId={orgId}
+            projects={projects}
+            openProjectId={openProjectId}
+            currentName={currentProjectName}
+            unavailable={projectsErr}
+            loading={projectsLoading}
+            orgBusy={orgBusy}
+            projectBusy={projectBusy}
+            onCreateOrg={onCreateOrg}
+            onCreateProject={onCreateProject}
+            onOpenProject={onOpenProject}
+          />
           <span className="meta">
             {shown ? `${shown.polylines.length} polylines · ${shown.layers.length} layers` : 'loading'}
           </span>
@@ -660,6 +840,7 @@ export default function App() {
             <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={() => setToolsOpen((o) => !o)}>
               <ToolsPanel
                 tools={tools}
+                writeLocked={writeLocked}
                 error={toolsErr}
                 running={running || !!previewing}
                 selectedTool={selectedTool}
@@ -682,6 +863,7 @@ export default function App() {
           >
             <ToolsPanel
               tools={fam.capabilities}
+              writeLocked={writeLocked}
               subtitle={fam.description}
               error={toolsErr}
               running={running || !!previewing}
@@ -726,6 +908,7 @@ export default function App() {
           route={route}
           tools={tools}
           running={running || !!previewing}
+          writeLocked={writeLocked}
           onRun={onRun}
           onPickAlternative={onPickAlternative}
           onOpenAuthor={onOpenAuthor}
@@ -734,6 +917,10 @@ export default function App() {
         {quotaError && <QuotaCard message={quotaError.message} remaining={usage?.cap?.remaining} />}
 
         {degraded && <DegradedBanner />}
+
+        {!mock && openProjectId && (
+          <WorkspaceSummary workspace={workspace} loading={wsLoading} onClose={onCloseProject} />
+        )}
 
         <div className="workspace-card">
           <div className="viewer-toolbar">
@@ -753,6 +940,7 @@ export default function App() {
               {!mock && previewing && (
                 <span className="version-note">viewing v{previewing.version} · read-only</span>
               )}
+              {!mock && otherHeldCheckout && <CheckoutChip checkout={otherHeldCheckout} />}
               {!mock && drawingState && (
                 <>
                   <button
@@ -875,6 +1063,8 @@ export default function App() {
         <span>entitlement · tier {gateTier}</span>
         <span style={{ marginLeft: 'auto' }}>build v2026.07 · {mock ? 'sample data' : 'live'}</span>
       </footer>
+
+      {opsFlag && !opsDismissed && <OpsDrawer onDismiss={() => setOpsDismissed(true)} />}
     </div>
   )
 }

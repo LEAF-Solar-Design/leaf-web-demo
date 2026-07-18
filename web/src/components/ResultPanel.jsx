@@ -74,9 +74,9 @@ function ResultBody({ result }) {
   return <KeyValue data={scalars} />
 }
 
-function ErrorLine({ err, onRetry, retry }) {
+function ErrorLine({ err, onRetry, retry, quota }) {
   return (
-    <div className="inline-error">
+    <div className={`inline-error ${quota ? 'quota' : ''}`}>
       <span>{errText(err)}</span>
       {retry && onRetry && (
         <button type="button" className="btn ghost retry" onClick={onRetry}>Retry</button>
@@ -86,6 +86,10 @@ function ErrorLine({ err, onRetry, retry }) {
 }
 
 export default function ResultPanel({ running, runStatus, runElapsedMs, error, result, tool, onRetry }) {
+  // A quota rejection (broker hard cap, HTTP 402) is an expected budget state,
+  // not a failure to alarm about — render it in the amber calm posture (matching
+  // QuotaCard), never red FAILED. Only this error_code softens; all others stay red.
+  const isQuota = !!(result && !result.ok && result.error && result.error.error_code === 'quota_exceeded')
   return (
     <section className="card result-panel">
       <h3>Result</h3>
@@ -103,7 +107,9 @@ export default function ResultPanel({ running, runStatus, runElapsedMs, error, r
       {result && !running && (
         <div className="result-card">
           <div className="result-head">
-            <span className={`ok ${result.ok ? 'yes' : 'no'}`}>{result.ok ? 'OK' : 'FAILED'}</span>
+            <span className={`ok ${result.ok ? 'yes' : (isQuota ? 'quota' : 'no')}`}>
+              {result.ok ? 'OK' : (isQuota ? 'SPEND CAP' : 'FAILED')}
+            </span>
             <span className="result-tool">{result.tool} <span className="dim">v{result.version}</span></span>
             {result.degraded_mode && (
               <span className="degraded" title="Ran on the local fallback, not the cloud solver">local fallback</span>
@@ -111,7 +117,7 @@ export default function ResultPanel({ running, runStatus, runElapsedMs, error, r
           </div>
 
           {result.ok && <ResultBody result={result} />}
-          {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={isRetryable(result.error)} />}
+          {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={isRetryable(result.error)} quota={isQuota} />}
 
           {result.overlay && (
             <div className="overlay-summary">

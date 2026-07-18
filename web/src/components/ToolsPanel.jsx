@@ -36,7 +36,7 @@ function defaultsOf(schema) {
   return out
 }
 
-export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool, subtitle }) {
+export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool, subtitle, writeLocked }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
@@ -49,6 +49,8 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
           const open = openName === t.name
           const params = paramsByTool[t.name] ?? defaultsOf(t.params)
           const isRunningThis = running && selectedTool?.name === t.name
+          const isWrite = (t.capabilities || []).includes('drawing.write')
+          const locked = !!writeLocked && isWrite
           return (
             <div key={t.name} className={`tool-card ${open ? 'open' : ''}`}>
               <button
@@ -82,11 +84,14 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
                   />
                   <button
                     className="btn primary"
-                    disabled={running}
+                    disabled={running || locked}
                     onClick={() => onRun(t, params)}
                   >
                     {isRunningThis ? 'Running on Leaf…' : 'Run'}
                   </button>
+                  {locked && (
+                    <p className="lock-note">Editing is locked by another session — this write tool is paused. Read tools still run.</p>
+                  )}
                 </div>
               )}
             </div>

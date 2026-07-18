@@ -154,6 +154,98 @@ export async function getCapabilities(mock) {
   }
 }
 
+// --- Projects / Orgs workspace (platform/api.py; UI wave 2) --------------
+// The canonical org-scoped Project/Job entity. Every project/job read is scoped
+// by an `X-Org-Id` header; the org id is minted by POST /api/orgs and persisted
+// in localStorage under `leaf.org_id`. LIVE only — mock mode never calls these
+// (the header chip stays a static label with zero /api calls).
+const ORG_KEY = 'leaf.org_id'
+
+export function getStoredOrgId() {
+  try { return localStorage.getItem(ORG_KEY) || null } catch { return null }
+}
+export function setStoredOrgId(id) {
+  try { if (id) localStorage.setItem(ORG_KEY, id); else localStorage.removeItem(ORG_KEY) } catch { /* noop */ }
+}
+// X-Org-Id header for the stored org (or {} when none — a no-op off-workspace).
+function orgHeaders(orgId) {
+  const id = orgId || getStoredOrgId()
+  return id ? { 'X-Org-Id': id } : {}
+}
+
+// POST /api/orgs {name, tier?} -> {org:{org_id,name,tier,status,created_at}}.
+// Sibling contract (backend lane lands it concurrently); throws if not live yet
+// so the caller can surface a calm "couldn't create workspace" note.
+export async function createOrg(name, tier) {
+  const body = tier ? { name, tier } : { name }
+  const data = await http('/api/orgs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return data.org
+}
+
+// GET /api/orgs/{org_id} -> {org}. X-Org-Id scoped. Used to confirm a stored org
+// still resolves; returns null on any error (stale/unknown id) so the UI can
+// re-offer the create affordance instead of wedging.
+export async function getOrg(orgId) {
+  try {
+    const data = await http(`/api/orgs/${encodeURIComponent(orgId)}`, { headers: { ...orgHeaders(orgId) } })
+    return data.org || null
+  } catch {
+    return null
+  }
+}
+
+// GET /api/projects -> {projects:[{project_id,name,status,created_at,...}]}. X-Org-Id scoped.
+export async function listProjects(orgId) {
+  const data = await http('/api/projects', { headers: { ...orgHeaders(orgId) } })
+  return data.projects || []
+}
+
+// POST /api/projects {name} -> {project}. X-Org-Id scoped.
+export async function createProject(name, orgId) {
+  const data = await http('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...orgHeaders(orgId) },
+    body: JSON.stringify({ name }),
+  })
+  return data.project
+}
+
+// GET /api/projects/{id} -> {project, drawing_versions[], jobs[], built_tools[]}.
+// The workspace hydration payload the summary card renders. X-Org-Id scoped.
+export async function openProject(projectId, orgId) {
+  return http(`/api/projects/${encodeURIComponent(projectId)}`, { headers: { ...orgHeaders(orgId) } })
+}
+
+// --- Ops surface (INTERNAL; ?ops=1 only) ---------------------------------
+// GET /api/ops/tenants (X-Internal-Role: qa) -> {tenants:[{tenant_id,runs,usd_est,disabled}]}.
+// POST /api/ops/tenants/{tid}/disable|enable -> enveloped ack. A 403 (role not
+// granted) throws an Error tagged .status=403 so the drawer renders a calm
+// "ops role required" instead of a red failure. Sibling contract.
+const OPS_HEADERS = { 'X-Internal-Role': 'qa' }
+
+export async function getOpsTenants() {
+  const res = await fetch(`${API_BASE}/api/ops/tenants`, { headers: { ...OPS_HEADERS, ...authHeaders() } })
+  if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
+  if (!res.ok) throw new Error(`GET /api/ops/tenants -> ${res.status}`)
+  const body = await res.json()
+  return body.tenants || []
+}
+
+export async function setTenantDisabled(tenantId, disabled) {
+  const action = disabled ? 'disable' : 'enable'
+  const res = await fetch(
+    `${API_BASE}/api/ops/tenants/${encodeURIComponent(tenantId)}/${action}`,
+    { method: 'POST', headers: { ...OPS_HEADERS, ...authHeaders() } },
+  )
+  if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
+  if (!res.ok) throw new Error(`POST /api/ops/tenants/${tenantId}/${action} -> ${res.status}`)
+  return res.json()
+}
+
 // --- Per-tenant spend / quota meter (thin ledger-backed read) -----------
 // GET /api/usage -> {tenant_id, today:{runs, usd_est}, total:{runs, usd_est},
 //   cap:{usd_cap, remaining, enabled}, updated_at} (§10-enveloped). LIVE only —
@@ -299,9 +391,15 @@ export function closeJobBeacon(jobId) {
 // localStorage persistence); `opts.onStatus` streams progress.
 export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}) {
   const toolName = typeof tool === 'string' ? tool : tool.name
+  // When a project is open, X-Org-Id + X-Project-Id make the backend record a
+  // canonical platform Job row (spine_ref-linked) so the workspace jobs[] grows.
+  // Absent -> byte-identical to the plain tenant-only run (no linkage).
+  const linkHeaders = {}
+  if (opts.orgId) linkHeaders['X-Org-Id'] = opts.orgId
+  if (opts.projectId) linkHeaders['X-Project-Id'] = opts.projectId
   const res = await fetch(`${API_BASE}/api/run`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...linkHeaders, ...authHeaders() },
     body: JSON.stringify({ tool: toolName, params: params || {}, dwg }),
   })
   const body = await res.json().catch(() => null)

@@ -54,7 +54,7 @@ function Alternatives({ alts, onPick }) {
   )
 }
 
-export default function RoutePanel({ route, tools, running, onRun, onPickAlternative, onOpenAuthor }) {
+export default function RoutePanel({ route, tools, running, writeLocked, onRun, onPickAlternative, onOpenAuthor }) {
   if (!route) return null
 
   // ---- BUILD lane -----------------------------------------------------------
@@ -104,6 +104,7 @@ export default function RoutePanel({ route, tools, running, onRun, onPickAlterna
   const confident = route.confidence >= 0.7
   const params = toolObj ? { ...defaultsOf(toolObj.params), ...(route.params || {}) } : (route.params || {})
   const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
+  const locked = !!writeLocked && isWrite
 
   return (
     <div className={`route ${confident ? '' : 'lowconf'}`}>
@@ -124,10 +125,14 @@ export default function RoutePanel({ route, tools, running, onRun, onPickAlterna
               <>
                 <ParamRows params={params} />
                 <div className="route-actions">
-                  <button className="btn primary" disabled={running} onClick={() => onRun(toolObj, params)}>
+                  <button className="btn primary" disabled={running || locked} onClick={() => onRun(toolObj, params)}>
                     {running ? 'Running' : (isWrite ? 'Run (creates a new version)' : 'Run')}
                   </button>
-                  <span className="route-note">You confirm before anything runs.</span>
+                  <span className="route-note">
+                    {locked
+                      ? 'Editing is locked by another session — this write tool is paused.'
+                      : 'You confirm before anything runs.'}
+                  </span>
                 </div>
               </>
             ) : (
@@ -144,7 +149,7 @@ export default function RoutePanel({ route, tools, running, onRun, onPickAlterna
           <>
             {toolObj && (
               <div className="route-actions" style={{ marginBottom: 10 }}>
-                <button className="btn primary" disabled={running} onClick={() => onRun(toolObj, params)}>
+                <button className="btn primary" disabled={running || locked} onClick={() => onRun(toolObj, params)}>
                   Run best guess: {route.tool}
                 </button>
               </div>

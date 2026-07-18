@@ -28,9 +28,10 @@ function readTokens() {
     bg: v('--cv-bg', '#f4f6f8'),
     insert: v('--cv-insert', '#3b6ea5'),
     face: v('--cv-face', '#5f8a6a'),
-    select: v('--cv-select', '#d1852f'),
+    select: v('--cv-select', '#a76a00'),
     ghost: v('--cv-ghost', '#8b98a5'),
     ghostRemove: v('--cv-ghost-remove', '#c07d7d'),
+    danger: v('--cv-danger', '#8a1c1c'),
   }
 }
 
@@ -427,7 +428,7 @@ const Viewer = forwardRef(function Viewer(
     }
     const fg = new THREE.BufferGeometry()
     fg.setAttribute('position', new THREE.Float32BufferAttribute(fillPos, 3))
-    const fm = new THREE.MeshBasicMaterial({ color: '#ffb300', transparent: true, opacity: 0.35, depthTest: false, depthWrite: false })
+    const fm = new THREE.MeshBasicMaterial({ color: s.tokens.select, transparent: true, opacity: 0.35, depthTest: false, depthWrite: false })
     const fMesh = new THREE.Mesh(fg, fm); fMesh.renderOrder = 10; g.add(fMesh)
 
     const lg = new THREE.BufferGeometry()
@@ -507,7 +508,7 @@ const Viewer = forwardRef(function Viewer(
     }
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
-    const mat = new THREE.LineBasicMaterial({ color: '#ff5c5c', depthTest: false })
+    const mat = new THREE.LineBasicMaterial({ color: s.tokens.danger, depthTest: false })
     const mesh = new THREE.LineSegments(geo, mat); mesh.renderOrder = 12; g.add(mesh)
   }, [markers, buildTick])
 

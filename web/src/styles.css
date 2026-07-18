@@ -40,6 +40,7 @@
   --cv-insert: #3b6ea5;
   --cv-face: #5f8a6a;
   --cv-select: #a76a00;
+  --cv-danger: #8a1c1c;
   --cv-ghost: #8b98a5;
   --cv-ghost-remove: #c07d7d;
 
@@ -683,3 +684,113 @@ footer .warn-txt { color: var(--amber); }
 .vh-row-sub { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; }
 .vh-note-txt { font-size: 11.5px; color: var(--ink-2); line-height: 1.4; }
 .vh-when { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-2); white-space: nowrap; }
+
+/* ==================== UI wave 2: projects · ops · checkout · quota ==================== */
+
+/* --- item 1: project switcher (header chip -> menu) --- */
+.proj-switch { position: relative; display: inline-block; }
+.proj-chip {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: inherit;
+}
+.proj-chip.static { cursor: default; }
+.proj-chip .name { font-weight: 600; color: var(--ink); }
+.proj-caret {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--leaf); border: 1px solid var(--rule-2); border-radius: 2px; padding: 0 5px;
+}
+.proj-chip:hover .proj-caret { border-color: var(--leaf); }
+.proj-menu {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
+  width: 280px; background: var(--white); border: 1px solid var(--rule-2); border-radius: 2px;
+  box-shadow: 0 6px 20px rgba(20, 26, 21, .14); padding: 10px; text-align: left;
+}
+.proj-menu-head {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-2); padding-bottom: 6px; border-bottom: 1px solid var(--rule);
+}
+.proj-list { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; }
+.proj-row {
+  width: 100%; text-align: left; cursor: pointer; display: flex; align-items: center; gap: 8px;
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 2px; padding: 7px 9px;
+  font-size: 12.5px; color: var(--ink);
+}
+.proj-row:hover { border-color: var(--leaf); }
+.proj-row.active { border-color: var(--leaf); background: var(--leaf-tint); }
+.proj-row-name { font-weight: 500; }
+.proj-mark {
+  margin-left: auto; font-family: var(--mono); font-size: 9.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--leaf); border: 1px solid var(--leaf); border-radius: 2px; padding: 1px 5px;
+}
+.proj-empty { display: flex; flex-direction: column; gap: 8px; }
+.proj-note { font-family: var(--mono); font-size: 11.5px; color: var(--amber); }
+.proj-sub { font-size: 12px; color: var(--ink-2); line-height: 1.5; }
+.proj-note-li { font-family: var(--mono); font-size: 11px; color: var(--ink-2); padding: 6px 2px; list-style: none; }
+.proj-act { margin-top: 4px; align-self: flex-start; }
+
+/* --- item 1: workspace summary card --- */
+.workspace-summary { margin-top: 16px; }
+.ws-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.ws-title { display: flex; align-items: baseline; gap: 8px; }
+.ws-title b { font-weight: 600; color: var(--ink); }
+.ws-close { padding: 4px 10px; }
+.ws-metrics { display: flex; gap: 22px; margin-bottom: 14px; flex-wrap: wrap; }
+.ws-metric { display: flex; flex-direction: column; gap: 2px; }
+.ws-n { font-family: var(--mono); font-size: 20px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.ws-k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; color: var(--ink-2); }
+.ws-jobs-head { font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); margin-bottom: 6px; }
+.ws-note { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); line-height: 1.5; }
+.ws-job-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ws-job { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--rule); border-radius: 2px; padding: 7px 10px; background: var(--white); flex-wrap: wrap; }
+.ws-job-main { display: flex; align-items: baseline; gap: 8px; }
+.ws-job-main b { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.ws-job-kind { font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); }
+.ws-job-meta { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); }
+.ws-job-cost { font-variant-numeric: tabular-nums; }
+
+/* --- item 2: ops drawer (INTERNAL surface, ?ops=1) --- */
+.ops-drawer {
+  position: fixed; right: 16px; bottom: 16px; z-index: 60;
+  width: min(560px, calc(100vw - 32px)); max-height: 60vh; overflow: auto;
+  background: var(--white); border: 1px solid var(--rule-2); border-top: 3px solid var(--ink);
+  border-radius: 3px; box-shadow: 0 10px 30px rgba(20, 26, 21, .22); padding: 12px 14px;
+}
+.ops-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ops-badge {
+  font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: .08em;
+  color: var(--white); background: var(--ink); border-radius: 2px; padding: 2px 7px;
+}
+.ops-title { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.ops-x { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); background: none; border: 0; cursor: pointer; text-decoration: underline; padding: 0; }
+.ops-head .ops-x:first-of-type { margin-left: auto; }
+.ops-head .ops-x + .ops-x { margin-left: 8px; }
+.ops-note { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); padding: 8px 2px; line-height: 1.5; }
+.ops-note.ops-err { color: var(--red); }
+.ops-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ops-table th { text-align: left; font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); border-bottom: 1px solid var(--rule); padding: 4px 8px; }
+.ops-table th.num, .ops-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ops-table td { padding: 6px 8px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+.ops-tid { font-family: var(--mono); font-size: 11.5px; color: var(--ink); word-break: break-all; }
+.ops-row-off .ops-tid { color: var(--ink-2); }
+.ops-act-cell { text-align: right; white-space: nowrap; }
+.ops-toggle { padding: 3px 10px; }
+.ops-confirm { display: inline-flex; align-items: center; gap: 6px; }
+.ops-confirm-q { font-family: var(--mono); font-size: 10.5px; color: var(--red); }
+.ops-yes { color: var(--red); }
+.ops-foot { font-family: var(--mono); font-size: 10px; color: var(--ink-2); margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--rule); }
+
+/* --- item 3: single-writer checkout chip --- */
+.checkout-chip {
+  font-family: var(--mono); font-size: 11px; color: var(--amber);
+  border: 1px solid var(--amber); background: var(--white); border-radius: 2px;
+  padding: 2px 8px; white-space: nowrap;
+}
+.checkout-chip b { color: var(--amber); }
+.lock-note { font-family: var(--mono); font-size: 11px; color: var(--amber); margin: 8px 0 0; line-height: 1.5; }
+
+/* --- item 4: quota softening (amber calm posture, never red) --- */
+.ok.quota { color: var(--amber); background: var(--amber-tint); border: 1px solid var(--amber); }
+.state.quota { background: var(--amber-tint); color: var(--amber); border: 1px solid var(--amber); }
+.job.quota { border-left: 3px solid var(--amber); }
+.inline-error.quota { color: var(--ink); background: var(--amber-tint); border-color: var(--amber); }
+.inline-error.quota span { color: var(--ink); }

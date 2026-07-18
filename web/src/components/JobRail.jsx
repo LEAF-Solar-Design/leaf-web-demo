@@ -11,10 +11,18 @@ function shortId(id) {
   return `job·${s.slice(0, 4)}-${s.slice(4, 8)}`
 }
 
+// A quota rejection (broker hard cap) rides in as a failed job whose error_code
+// is 'quota_exceeded'. It is an expected budget state, not an alarm — render it
+// amber (calm), never red. Only this code softens; all other failures stay red.
+function isQuota(job) {
+  const c = (job.error && job.error.error_code) || job.error_code
+  return job.status === 'failed' && c === 'quota_exceeded'
+}
+
 function stateTag(job) {
   if (job.status === 'running') return { cls: 'prog', label: 'running' }
   if (job.status === 'submitted') return { cls: 'sub', label: 'submitted' }
-  if (job.status === 'failed') return { cls: 'fail', label: 'failed' }
+  if (job.status === 'failed') return isQuota(job) ? { cls: 'quota', label: 'spend cap' } : { cls: 'fail', label: 'failed' }
   if (job.status === 'complete') {
     return job.degraded_mode ? { cls: 'deg', label: 'degraded' } : { cls: 'done', label: 'complete' }
   }
@@ -35,10 +43,12 @@ function JobCard({ job, current, onSelect }) {
   const st = stateTag(job)
   const terminal = job.status === 'complete' || job.status === 'failed'
   const elapsed = job.elapsed_ms != null ? `${(job.elapsed_ms / 1000).toFixed(1)}s` : null
+  const quota = isQuota(job)
   const cls = [
     'job',
     job.degraded_mode ? 'deg' : '',
-    job.status === 'failed' ? 'fail' : '',
+    (job.status === 'failed' && !quota) ? 'fail' : '',
+    quota ? 'quota' : '',
     current ? 'current' : '',
   ].filter(Boolean).join(' ')
 
