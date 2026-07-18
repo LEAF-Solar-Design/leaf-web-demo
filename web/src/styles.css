@@ -594,6 +594,14 @@ footer .warn-txt { color: var(--amber); }
 .authored-desc { font-size: 12px; color: var(--ink-2); margin: 0 0 8px; }
 .code { background: var(--paper-2); border: 1px solid var(--rule); border-radius: 2px; padding: 10px; font-size: 11px; line-height: 1.45; color: var(--ink); overflow-x: auto; max-height: 220px; font-family: var(--mono); }
 
+/* calm long-running authoring line — plain ticking text, no spinner */
+.authoring { margin-top: 8px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; line-height: 1.4; }
+.authoring .dim { color: var(--ink-3, var(--ink-2)); opacity: .8; }
+
+/* advisory static-scan flags — calm amber tags, non-blocking */
+.scan-flags { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
+.scan-flag { font-family: var(--mono); font-size: 10px; padding: 1px 6px; border-radius: 2px; color: var(--amber); border: 1px solid var(--amber); background: var(--white); }
+
 .inline-error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--red); background: var(--red-tint); border: 1px solid var(--red); border-radius: 2px; padding: 8px 10px; }
 .btn.retry { padding: 3px 10px; font-size: 12px; }
 

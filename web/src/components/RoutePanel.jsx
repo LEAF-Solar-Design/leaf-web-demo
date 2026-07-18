@@ -40,14 +40,25 @@ function ParamRows({ params }) {
   )
 }
 
-function Alternatives({ alts, onPick }) {
+// "or did you mean" secondary options. The LIVE server router returns
+// alternatives as `{tool, confidence}` (no description), so resolve the calm
+// one-line description from the live catalog; the mock/fallback stub still
+// carries `description` inline, which wins when present. Confidence, when the
+// server supplies it, rides along as a muted match hint.
+function Alternatives({ alts, tools, onPick }) {
   if (!alts || alts.length === 0) return null
+  const descOf = (name) => tools.find((t) => t.name === name)?.description || ''
   return (
     <div className="route-alts">
       {alts.map((a) => (
         <button key={a.tool} className="route-alt" onClick={() => onPick(a.tool)}>
           <span className="an">{a.tool}</span>
-          <span className="ad">{a.description}</span>
+          <span className="ad">
+            {a.description || descOf(a.tool)}
+            {typeof a.confidence === 'number'
+              ? <span className="dim"> · {Math.round(a.confidence * 100)}% match</span>
+              : null}
+          </span>
         </button>
       ))}
     </div>
@@ -141,7 +152,7 @@ export default function RoutePanel({ route, tools, running, writeLocked, onRun, 
                   “{route.tool}” is a live-mode capability — it is not in the mock catalog. Switch off
                   mock mode to run it, or pick one of these:
                 </span>
-                <Alternatives alts={route.alternatives} onPick={onPickAlternative} />
+                <Alternatives alts={route.alternatives} tools={tools} onPick={onPickAlternative} />
               </div>
             )}
           </>
@@ -155,7 +166,7 @@ export default function RoutePanel({ route, tools, running, writeLocked, onRun, 
               </div>
             )}
             <div className="route-note">Did you mean:</div>
-            <Alternatives alts={route.alternatives} onPick={onPickAlternative} />
+            <Alternatives alts={route.alternatives} tools={tools} onPick={onPickAlternative} />
           </>
         )}
       </div>

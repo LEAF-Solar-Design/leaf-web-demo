@@ -17,12 +17,17 @@ function isRetryable(e) {
   return !!(e && typeof e === 'object' && e.retryable)
 }
 
-// Calm, loader-free progress line: "submitted", then "running · 3.2s".
-function progressText(runStatus, runElapsedMs) {
+// Calm, loader-free progress line: "submitted", then "running · 3.2s", and
+// when the backend emits a richer step string, "running · storing version · 3.2s".
+function progressText(runStatus, runElapsedMs, runProgress) {
   const status = runStatus || 'running'
   if (status === 'submitted') return 'submitted'
   const secs = runElapsedMs != null ? ` · ${(runElapsedMs / 1000).toFixed(1)}s` : ''
-  return `${status}${secs}`
+  // Only show the step when it adds information beyond the plain status.
+  const step = (runProgress && runProgress !== status && runProgress !== 'running')
+    ? ` · ${runProgress}`
+    : ''
+  return `${status}${step}${secs}`
 }
 
 function CountsTable({ counts }) {
@@ -85,7 +90,7 @@ function ErrorLine({ err, onRetry, retry, quota }) {
   )
 }
 
-export default function ResultPanel({ running, runStatus, runElapsedMs, error, result, tool, onRetry }) {
+export default function ResultPanel({ running, runStatus, runProgress, runElapsedMs, error, result, tool, onRetry }) {
   // A quota rejection (broker hard cap, HTTP 402) is an expected budget state,
   // not a failure to alarm about — render it in the amber calm posture (matching
   // QuotaCard), never red FAILED. Only this error_code softens; all others stay red.
@@ -98,7 +103,7 @@ export default function ResultPanel({ running, runStatus, runElapsedMs, error, r
       )}
       {running && (
         <div className="running">
-          <span>{progressText(runStatus, runElapsedMs)}{tool?.name ? ` · ${tool.name}` : ''}</span>
+          <span>{progressText(runStatus, runElapsedMs, runProgress)}{tool?.name ? ` · ${tool.name}` : ''}</span>
           <span className="bar" aria-hidden="true"><i /></span>
         </div>
       )}

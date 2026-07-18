@@ -17,7 +17,7 @@ import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
 import CheckoutChip from './components/CheckoutChip.jsx'
 import {
-  config, getSession, getTools, getCapabilities, getUsage, runTool, runToolAsync,
+  config, getSession, getTools, getCapabilities, getUsage, getHealth, runTool, runToolAsync,
   attachToJob, getJob, listJobs, recordToEnvelope, authorTool, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, nlPrompt, closeJobBeacon,
   getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
@@ -96,6 +96,7 @@ export default function App() {
   const [selectedTool, setSelectedTool] = useState(null)
   const [running, setRunning] = useState(false)
   const [runStatus, setRunStatus] = useState(null)   // live job phase: 'submitted' | 'running'
+  const [runProgress, setRunProgress] = useState(null) // richer progress string (e.g. 'storing version')
   const [runElapsedMs, setRunElapsedMs] = useState(null) // ticking wall-clock while running
   const [result, setResult] = useState(null)
   const [runErr, setRunErr] = useState(null)
@@ -117,6 +118,7 @@ export default function App() {
   const [catalogErr, setCatalogErr] = useState(null)     // families load failure (falls back to flat tools)
   const [openFamilies, setOpenFamilies] = useState({})   // per-family collapse state (family_id -> bool)
   const [usage, setUsage] = useState(null)               // GET /api/usage aggregate (live; null hides chip)
+  const [health, setHealth] = useState(null)             // GET /api/health (live; null -> static footer)
   // Version-history browser (§ version chain) + read-only preview state.
   const [historyOpen, setHistoryOpen] = useState(false)
   const [history, setHistory] = useState(null)           // {drawing_id, head, latest, versions[]}
@@ -201,7 +203,7 @@ export default function App() {
     let alive = true
     setIntake(null); setVersionIntake(null); setLoadErr(null)
     setResult(null); setSelectedHandle(null); setPendingEdit(null)
-    setRunning(false); setRunStatus(null); setRunElapsedMs(null); setRunErr(null)
+    setRunning(false); setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); setRunErr(null)
     setDrawingState(null); setVersionNote(null); setVersionBusy(false)
     setOverlayStale(false); setOpenTool(null)
     setRoute(null); setRouting(false); setCurrentJobId(null); setTenant(null)
@@ -269,6 +271,15 @@ export default function App() {
   }, [mock])
 
   useEffect(() => { loadUsage() }, [loadUsage])
+
+  // Real backend diagnostics for the footer chips (live only). Mock keeps the
+  // static footer (setHealth(null)); any error -> null -> calm static fallback.
+  const loadHealth = useCallback(async () => {
+    if (mock) { setHealth(null); return }
+    try { setHealth(await getHealth()) } catch { setHealth(null) }
+  }, [mock])
+
+  useEffect(() => { loadHealth() }, [loadHealth])
 
   // Projects workspace (item 1): fetch the org's projects (live only). No org
   // stored -> empty list + no error (the switcher offers "create workspace org").
@@ -401,6 +412,7 @@ export default function App() {
         const env = await attachToJob(saved.job_id, {
           onStatus: (st) => {
             if (!alive) return
+            setRunProgress(st.progress || null)
             if (st.status === 'running') markRunning()
             else setRunStatus(st.status || 'running')
           },
@@ -410,7 +422,7 @@ export default function App() {
         if (alive) setRunErr(String(e.message || e))
       } finally {
         if (alive) {
-          setRunning(false); setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
+          setRunning(false); setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
           setReattaching(false); setInflightPtr(null)
         }
         clearInflight()
@@ -420,10 +432,15 @@ export default function App() {
     return () => { alive = false }
   }, [mock, markRunning, refreshJobs])
 
+  // Count ALL entity kinds per layer (polylines + inserts + 3DFACEs) so
+  // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
+  // stop reading 0 in the legend.
   const layerCounts = useMemo(() => {
     const c = {}
     for (const l of shown?.layers || []) c[l] = 0
     for (const pl of shown?.polylines || []) c[pl.layer] = (c[pl.layer] || 0) + 1
+    for (const ins of shown?.inserts || []) c[ins.layer] = (c[ins.layer] || 0) + 1
+    for (const f of shown?.faces3d || []) c[f.layer] = (c[f.layer] || 0) + 1
     return c
   }, [shown])
 
@@ -590,7 +607,7 @@ export default function App() {
     if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
-    setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
+    setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
     setOverlayStale(false); setCurrentJobId(null)
     lastRunRef.current = { tool, params }
     // feed the picked entity to the tool so an edit tool can target it. A write
@@ -613,6 +630,9 @@ export default function App() {
           projectId: openProjectId || undefined,
           onSubmit: (job_id) => { saveInflight(job_id, tool.name); setCurrentJobId(job_id) },
           onStatus: (st) => {
+            // Richer progress string (e.g. 'executing' · 'storing version' ·
+            // 'extracting') when the backend emits it; null falls back to status.
+            setRunProgress(st.progress || null)
             if (st.status === 'running') markRunning()
             else setRunStatus(st.status || 'running')
           },
@@ -634,7 +654,7 @@ export default function App() {
       setRunErr(String(e.message || e))
     } finally {
       setRunning(false)
-      setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
+      setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
       if (!mock) {
         clearInflight(); refreshJobs(); loadUsage(); loadCheckout()
         // re-hydrate the open project so its jobs[] reflects the just-finished run
@@ -656,10 +676,25 @@ export default function App() {
       const rest = prev.filter((t) => t.name !== res.tool.name)
       return [...rest, res.tool]
     })
-    // Re-group the catalog so the new tool lands in "Custom authored tools".
+    // Re-group the catalog so the new tool lands in "Custom authored tools"
+    // (visible re-fetch of the grouped capabilities).
     loadCatalog()
     return res
   }, [mock, loadCatalog])
+
+  // "Run it now" from the author card — prefill the RUN lane (RoutePanel) with
+  // the just-authored tool so the user confirms before it runs (paid actions
+  // never auto-execute). The tool is already in `tools` (onAuthor added it), so
+  // RoutePanel resolves it and shows a single Run.
+  const onUseAuthored = useCallback((tool) => {
+    if (!tool) return
+    setRoute({
+      lane: 'run', tool: tool.name, params: {}, confidence: 0.99,
+      rationale: `Authored just now — confirm to run “${tool.name}”.`,
+      alternatives: [],
+    })
+    setTimeout(() => document.querySelector('main')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
+  }, [])
 
   // --- prompt-first dispatch (§12) -----------------------------------------
   // Live preview of which lane the text will route to (lights the hero's dots).
@@ -761,12 +796,13 @@ export default function App() {
       job_id: currentJobId,
       tool: toolName,
       status,
-      progress: runStatus || 'running',
+      // Prefer the richer progress string ('storing version' etc.) when present.
+      progress: runProgress || runStatus || 'running',
       elapsed_ms: runElapsedMs != null ? runElapsedMs : (result?.timing_ms ?? null),
       degraded_mode: !!result?.degraded_mode,
       error: result?.error || null,
     }
-  }, [selectedTool, running, runStatus, result, runElapsedMs, currentJobId])
+  }, [selectedTool, running, runStatus, runProgress, result, runElapsedMs, currentJobId])
 
   const degraded = !!result?.degraded_mode || demoDegraded
 
@@ -881,7 +917,7 @@ export default function App() {
         >
           <AuthorPanel
             onAuthor={onAuthor}
-            onRunAuthored={onRun}
+            onUseAuthored={onUseAuthored}
             seed={authorSeed}
             seedSignal={authorSignal}
           />
@@ -1033,6 +1069,7 @@ export default function App() {
           <ResultPanel
             running={running}
             runStatus={runStatus}
+            runProgress={runProgress}
             runElapsedMs={runElapsedMs}
             error={runErr}
             result={result}
@@ -1055,8 +1092,28 @@ export default function App() {
 
       <footer className="foot-bar">
         <span>capability catalog · <span className="ok-txt">{capCount} caps · {catalog.families.length} families</span></span>
-        <span>backend · {mock ? <span className="warn-txt">mock (no cloud)</span> : <span className="ok-txt">live</span>}</span>
-        <span>local solver · <span className="ok-txt">ready</span></span>
+        {/* backend chip: real GET /api/health aps_live in plain words (live);
+            static in mock; calm "live" fallback when health hasn't loaded. */}
+        {mock ? (
+          <span>backend · <span className="warn-txt">mock (no cloud)</span></span>
+        ) : health ? (
+          <span>backend · <span className="ok-txt">{health.aps_live ? 'cloud live' : 'local only'}</span></span>
+        ) : (
+          <span>backend · <span className="ok-txt">live</span></span>
+        )}
+        {/* data-agent + tool-count chip: real da_client_present + n_tools (live);
+            static "local solver · ready" in mock / pre-health. */}
+        {mock ? (
+          <span>local solver · <span className="ok-txt">ready</span></span>
+        ) : health ? (
+          <span>
+            data agent · <span className={health.da_client_present ? 'ok-txt' : 'warn-txt'}>
+              {health.da_client_present ? 'ready' : 'absent'}
+            </span> · <span className="ok-txt">{health.n_tools} tools</span>
+          </span>
+        ) : (
+          <span>local solver · <span className="ok-txt">ready</span></span>
+        )}
         {!mock && usage && (
           <span>spend · <span className="ok-txt">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span></span>
         )}

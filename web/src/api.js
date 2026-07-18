@@ -94,6 +94,19 @@ export async function nlPrompt(mock, text, tools = []) {
   }
 }
 
+// --- Health (GET /api/health) -------------------------------------------
+// {ok, aps_live, data_file_present, engine_registry_present, da_client_present,
+//  n_tools, n_authored, ...}. Feeds the footer's real diagnostic chips (live
+// only). Returns null on any error so the footer falls back to calm static text
+// instead of surfacing a red failure.
+export async function getHealth() {
+  try {
+    return await http('/api/health')
+  } catch {
+    return null
+  }
+}
+
 // --- Tools --------------------------------------------------------------
 export async function getTools(mock) {
   if (mock) {
