@@ -30,7 +30,7 @@ from typing import Any, Dict
 
 from fastapi.responses import JSONResponse
 
-from envelopes import error_obj
+from envelopes import ErrorCode, error_obj
 
 # The three capability flags every tier entry carries.
 CAPABILITIES = ("run_read", "run_write", "build")
@@ -118,12 +118,12 @@ def _denied_message(required: str, tier: str) -> str:
 def entitlement_denied_response(required: str, tier: str) -> JSONResponse:
     """HTTP 403 rejection mirroring the §16 grant_required pattern: an additive top-level
     marker (`entitlement_required`) + a §10-valid `error` object (frozen enum BAD_PARAMS,
-    non-retryable). The frontend keys on `entitlement_required` / `required` / `tier`."""
+    non-retryable, code ENTITLEMENT_REQUIRED). The frontend keys on `entitlement_required` / `required` / `tier`."""
     body = {
         "entitlement_required": True,
         "required": required,
         "tier": tier,
-        "error": error_obj("BAD_PARAMS", _denied_message(required, tier), retryable=False),
+        "error": error_obj(ErrorCode.ENTITLEMENT_REQUIRED, _denied_message(required, tier), retryable=False),
         "degraded_mode": False,
     }
     return JSONResponse(status_code=403, content=body)

@@ -676,3 +676,5 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
   `require_tenant`'s tier; under live auth the tenant echo additively stamps
   `tenant_id`/`org_id` like every other echoed body). This is a READ of policy — the actual
   gate lives in the run/author chains and cannot be bypassed via this endpoint.
+
+> **§10 enum update (2026-07-18):** `GRANT_REQUIRED` (HTTP 401) and `ENTITLEMENT_REQUIRED` (HTTP 403) promoted into the frozen ErrorCode enum + `envelope_schema.json`. The grant-required (§16) and entitlement-denied (§17) responses now carry these dedicated `error.error_code`s instead of `BAD_PARAMS`; the additive top-level markers (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are unchanged, so existing consumers keep working.

@@ -29,6 +29,8 @@ class ErrorCode:
     WORKITEM_FAILED = "WORKITEM_FAILED"
     TIMEOUT = "TIMEOUT"
     TENANT_DISABLED = "TENANT_DISABLED"
+    GRANT_REQUIRED = "GRANT_REQUIRED"      # per-tenant Claude grant absent (HTTP 401)
+    ENTITLEMENT_REQUIRED = "ENTITLEMENT_REQUIRED"  # tier lacks the capability (HTTP 403)
     QUOTA_EXCEEDED = "quota_exceeded"  # promoted 2026-07-17 (broker hard cap, HTTP 402)
     INTERNAL = "INTERNAL"
 
@@ -40,6 +42,8 @@ class ErrorCode:
         WORKITEM_FAILED,
         TIMEOUT,
         TENANT_DISABLED,
+        GRANT_REQUIRED,
+        ENTITLEMENT_REQUIRED,
         QUOTA_EXCEEDED,
         INTERNAL,
     )
@@ -55,6 +59,8 @@ DEFAULT_HTTP_STATUS: Dict[str, int] = {
     ErrorCode.WORKITEM_FAILED: 502,
     ErrorCode.TIMEOUT: 504,
     ErrorCode.TENANT_DISABLED: 403,
+    ErrorCode.GRANT_REQUIRED: 401,
+    ErrorCode.ENTITLEMENT_REQUIRED: 403,
     ErrorCode.INTERNAL: 500,
 }
 

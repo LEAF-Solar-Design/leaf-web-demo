@@ -55,7 +55,7 @@ def _grant_required_response(tenant_id: str, harness_message: str | None) -> JSO
         "static_scan": [],
         # §10-valid error object (frozen enum) so strict §10 consumers see an error;
         # the frontend keys on the additive `grant_required` / `reason` fields.
-        "error": error_obj("BAD_PARAMS", msg, retryable=False),
+        "error": error_obj(GRANT_REQUIRED, msg, retryable=False),
     })
     return JSONResponse(status_code=401, content=body)
 

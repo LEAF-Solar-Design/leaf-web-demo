@@ -310,7 +310,7 @@ def test_author_build_denied_for_hosted_starter(live_auth):
     assert b["entitlement_required"] is True
     assert b["required"] == "build"
     assert b["tier"] == "hosted_starter"
-    assert b["error"]["error_code"] == "BAD_PARAMS" and b["error"]["retryable"] is False
+    assert b["error"]["error_code"] == "ENTITLEMENT_REQUIRED" and b["error"]["retryable"] is False
     assert b["degraded_mode"] is False
 
 
@@ -361,7 +361,7 @@ def test_run_write_denied_for_restricted_tier(live_auth, monkeypatch, tmp_path):
     assert b["entitlement_required"] is True
     assert b["required"] == "run_write"
     assert b["tier"] == "locked"
-    assert b["error"]["error_code"] == "BAD_PARAMS" and b["error"]["retryable"] is False
+    assert b["error"]["error_code"] == "ENTITLEMENT_REQUIRED" and b["error"]["retryable"] is False
     assert b["degraded_mode"] is False
 
     # a read tool on the same restricted tier is still allowed.

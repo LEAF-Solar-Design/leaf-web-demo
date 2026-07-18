@@ -240,7 +240,7 @@ def test_author_grant_required_shape(monkeypatch, harness_stub):
     assert b["reason"] == "GRANT_REQUIRED"
     assert b["source"] == "grant_required"
     assert b["tool"] is None
-    assert b["error"]["error_code"] == "BAD_PARAMS" and b["error"]["retryable"] is False
+    assert b["error"]["error_code"] == "GRANT_REQUIRED" and b["error"]["retryable"] is False
 
 
 # =========================================================================== #

@@ -465,6 +465,16 @@ def stack(tmp_path_factory):
     try:
         wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
         wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        # WARM-UP: the broker's FIRST /broker/run lazily loads the engine registry +
+        # the 2345-polyline intake; under sustained parallel load that cold call can be
+        # CPU-starved past the poll timeout (gate-runner flake follow-up). Force it now,
+        # best-effort, so the timed assertions below run against a warm broker.
+        try:
+            requests.post(f"http://127.0.0.1:{app_port}/api/run?wait=1",
+                          json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo"},
+                          headers={"X-Tenant-Id": "warmup"}, timeout=120)
+        except Exception:
+            pass
         yield {"app": f"http://127.0.0.1:{app_port}",
                "broker": f"http://127.0.0.1:{broker_port}",
                "app_log": tmp / "app.log"}

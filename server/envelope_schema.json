@@ -34,7 +34,9 @@
                 "TIMEOUT",
                 "TENANT_DISABLED",
                 "INTERNAL",
-                "quota_exceeded"
+                "quota_exceeded",
+                "GRANT_REQUIRED",
+                "ENTITLEMENT_REQUIRED"
               ]
             },
             "message": {
