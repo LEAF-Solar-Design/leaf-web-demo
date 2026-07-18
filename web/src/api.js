@@ -205,6 +205,34 @@ export async function runTool(mock, tool, params, intake, dwg = 'rooftop_demo') 
   return runToolAsync(tool, params, dwg)
 }
 
+// --- Versioned drawing write loop (CONTRACT-ADDENDUM §11) ----------------
+// A `drawing.write` run stamps `result.new_version` into its §3 envelope; these
+// endpoints serve the versions it creates. Each returns the enveloped body
+// verbatim: intake reads carry {intake, version, head, latest}; undo/redo carry
+// {version, head, latest, intake}. The X-Tenant-Id header MUST match the one
+// /api/run uses (same TENANT) so the per-tenant store resolves the same drawing.
+// LIVE only — mock mode edits stay the client-side fixture flow.
+export async function getDrawingIntake(drawingId, version = 'head') {
+  return http(
+    `/api/drawings/${encodeURIComponent(drawingId)}/intake?version=${encodeURIComponent(version)}`,
+    { headers: { 'X-Tenant-Id': TENANT } },
+  )
+}
+
+export async function undoDrawing(drawingId) {
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/undo`, {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': TENANT },
+  })
+}
+
+export async function redoDrawing(drawingId) {
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/redo`, {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': TENANT },
+  })
+}
+
 // --- Author -------------------------------------------------------------
 export async function authorTool(mock, description) {
   if (mock) {

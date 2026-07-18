@@ -125,6 +125,8 @@ body { background: var(--bg); color: var(--text); font-size: 14px; }
 .viewer-title { font-size: 13px; font-weight: 500; color: var(--cv-text); }
 .viewer-title .dim { color: var(--cv-dim); font-weight: 400; }
 .viewer-actions { display: flex; align-items: center; gap: 8px; }
+/* calm inline write-loop note: plain warm text, no status decoration */
+.version-note { font-size: 12px; font-weight: 500; color: var(--cv-select); margin-right: 2px; }
 /* calm ghost buttons on the light surface */
 .viewer-toolbar .btn.ghost {
   background: none; color: var(--cv-text); border-color: var(--cv-border);

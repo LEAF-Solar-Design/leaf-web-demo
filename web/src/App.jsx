@@ -7,7 +7,7 @@ import AuthorPanel from './components/AuthorPanel.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import {
   config, getSession, getTools, runTool, runToolAsync, attachToJob, getJob,
-  recordToEnvelope, authorTool,
+  recordToEnvelope, authorTool, getDrawingIntake, undoDrawing, redoDrawing,
 } from './api.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 
@@ -47,6 +47,13 @@ export default function App() {
   const [runErr, setRunErr] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
   const [pendingEdit, setPendingEdit] = useState(null)
+  // Write-loop (§11, live mode): the current drawing/version chain from the last
+  // drawing response, a calm inline note, and an undo/redo-in-flight guard.
+  const [drawingState, setDrawingState] = useState(null) // {drawing_id, version, head, latest}
+  const [versionNote, setVersionNote] = useState(null)   // e.g. "version 2 created"
+  const [versionBusy, setVersionBusy] = useState(false)  // undo/redo request in flight
+  const [overlayStale, setOverlayStale] = useState(false) // last result overlay no longer matches shown version
+  const [openTool, setOpenTool] = useState(null)         // the tool card expanded in ToolsPanel (for the write ghost)
   const viewerRef = useRef(null)
   const runningSinceRef = useRef(null)  // ms epoch the job entered 'running'
   const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
@@ -69,6 +76,8 @@ export default function App() {
     setIntake(null); setVersionIntake(null); setLoadErr(null)
     setResult(null); setSelectedHandle(null); setPendingEdit(null)
     setRunning(false); setRunStatus(null); setRunElapsedMs(null); setRunErr(null)
+    setDrawingState(null); setVersionNote(null); setVersionBusy(false)
+    setOverlayStale(false); setOpenTool(null)
     runningSinceRef.current = null
     const seat = (d) => {
       if (!alive) return
@@ -183,13 +192,57 @@ export default function App() {
     return { handle: selectedHandle, kind: 'entity', layer: null }
   }, [selectedHandle, shown])
 
+  // Swap the viewer + panels to a drawing version (§11). `view` is a drawing
+  // response body ({intake, head, latest, ...}); applyVersion rebuilds scene
+  // geometry and clears the optimistic ghost. Panels/legend reflect `shown`.
+  const seatVersion = useCallback((view, drawingId, note) => {
+    viewerRef.current?.applyVersion(view.intake)
+    setVersionIntake(view.intake)
+    setPendingEdit(null)
+    setSelectedHandle(null)
+    setDrawingState({ drawing_id: drawingId, version: view.head, head: view.head, latest: view.latest })
+    setVersionNote(note)
+  }, [])
+
+  const onUndo = useCallback(async () => {
+    if (!drawingState || versionBusy) return
+    setVersionBusy(true); setOverlayStale(true)
+    try {
+      const view = await undoDrawing(drawingState.drawing_id)
+      seatVersion(view, drawingState.drawing_id, `reverted to version ${view.head}`)
+    } catch (e) {
+      setRunErr(String(e.message || e))
+    } finally {
+      setVersionBusy(false)
+    }
+  }, [drawingState, versionBusy, seatVersion])
+
+  const onRedo = useCallback(async () => {
+    if (!drawingState || versionBusy) return
+    setVersionBusy(true); setOverlayStale(true)
+    try {
+      const view = await redoDrawing(drawingState.drawing_id)
+      seatVersion(view, drawingState.drawing_id, `advanced to version ${view.head}`)
+    } catch (e) {
+      setRunErr(String(e.message || e))
+    } finally {
+      setVersionBusy(false)
+    }
+  }, [drawingState, versionBusy, seatVersion])
+
   const onRun = useCallback(async (tool, params) => {
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
+    setOverlayStale(false)
     lastRunRef.current = { tool, params }
-    // feed the picked entity to the tool so an edit tool can target it
-    const merged = selectedHandle ? { ...(params || {}), target_handle: selectedHandle } : params
+    // feed the picked entity to the tool so an edit tool can target it. A write
+    // tool (delete-marked-panel) reads `handle`, so map the selection onto it
+    // too — that makes the pending ghost's previewed deletion the real target.
+    const isWrite = (tool.capabilities || []).includes('drawing.write')
+    const merged = selectedHandle
+      ? { ...(params || {}), target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
+      : params
     try {
       let env
       if (mock) {
@@ -205,6 +258,17 @@ export default function App() {
         })
       }
       setResult(env)
+      // Write loop (§11): a drawing.write run stamps result.new_version. Fetch
+      // the fresh head intake and swap the viewer to the new version.
+      if (!mock && env?.ok && env.result?.new_version) {
+        const nv = env.result.new_version
+        try {
+          const view = await getDrawingIntake(nv.drawing_id, 'head')
+          seatVersion(view, nv.drawing_id, `version ${nv.version} created`)
+        } catch {
+          setVersionNote(`version ${nv.version} created (viewer refresh failed)`)
+        }
+      }
     } catch (e) {
       setRunErr(String(e.message || e))
     } finally {
@@ -212,7 +276,7 @@ export default function App() {
       setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
       if (!mock) clearInflight()
     }
-  }, [mock, shown, selectedHandle, markRunning])
+  }, [mock, shown, selectedHandle, markRunning, seatVersion])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
@@ -242,8 +306,20 @@ export default function App() {
     setSelectedHandle(null)
   }, [])
 
-  const overlay = result?.overlay || null
+  // The last run's overlay only describes the version it produced; once the user
+  // undoes/redoes to a different version, suppress it so the viewer never shows a
+  // stale "deleted" marker over restored geometry (the result receipt still shows).
+  const overlay = (result && !overlayStale) ? (result.overlay || null) : null
   const applied = versionIntake != null
+
+  // Pending-edit ghost (live, §11 nicety): when an open write tool + a picked
+  // handle line up, preview the deletion before Run. Self-clears when the handle
+  // is deselected or the completed run clears the selection.
+  const writeGhost = useMemo(() => {
+    if (mock || !selectedHandle) return null
+    const caps = openTool?.capabilities || []
+    return caps.includes('drawing.write') ? { removed: [selectedHandle] } : null
+  }, [mock, selectedHandle, openTool])
 
   return (
     <div className="app">
@@ -274,6 +350,7 @@ export default function App() {
             running={running}
             selectedTool={selectedTool}
             onRun={onRun}
+            onOpenTool={setOpenTool}
           />
           <AuthorPanel onAuthor={onAuthor} onRunAuthored={onRun} />
         </aside>
@@ -292,6 +369,25 @@ export default function App() {
               )}
             </div>
             <div className="viewer-actions">
+              {!mock && versionNote && <span className="version-note">{versionNote}</span>}
+              {!mock && drawingState && (
+                <>
+                  <button
+                    className="btn ghost"
+                    onClick={onUndo}
+                    disabled={versionBusy || running || drawingState.head <= 1}
+                  >
+                    Undo
+                  </button>
+                  <button
+                    className="btn ghost"
+                    onClick={onRedo}
+                    disabled={versionBusy || running || drawingState.head >= drawingState.latest}
+                  >
+                    Redo
+                  </button>
+                </>
+              )}
               {isEditFixture && (
                 <>
                   <button
@@ -323,7 +419,7 @@ export default function App() {
                 overlayPolylines={overlay?.polylines}
                 selectedHandle={selectedHandle}
                 onSelectEntity={setSelectedHandle}
-                pendingEdit={pendingEdit}
+                pendingEdit={pendingEdit || writeGhost}
               />
             )}
             {shown && (

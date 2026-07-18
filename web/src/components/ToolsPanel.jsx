@@ -36,7 +36,7 @@ function defaultsOf(schema) {
   return out
 }
 
-export default function ToolsPanel({ tools, error, running, selectedTool, onRun }) {
+export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
@@ -54,7 +54,11 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun 
             <div key={t.name} className={`tool-card ${open ? 'open' : ''}`}>
               <button
                 className="tool-head"
-                onClick={() => setOpenName(open ? null : t.name)}
+                onClick={() => {
+                  const next = open ? null : t.name
+                  setOpenName(next)
+                  onOpenTool?.(next ? t : null)
+                }}
               >
                 <div className="tool-head-main">
                   <span className="tool-name">{t.name}</span>
