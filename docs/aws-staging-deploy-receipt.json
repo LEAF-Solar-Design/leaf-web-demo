@@ -1,0 +1,65 @@
+{
+  "recorded_at": "2026-07-18T12:50:47-05:00",
+  "account_id": "807034087062",
+  "region": "us-east-1",
+  "environment": "staging",
+  "hostname": "platform-staging.leafdesign.ai",
+  "source_commit": "2dac5e358624ec64b2a4e65c4f61d32dcef93b49",
+  "image_tag": "sha-2dac5e3",
+  "terraform_source_commit": "ff1aefb",
+  "terraform_branch": "codex/leaf-platform-ecs-20260718",
+  "terraform_apply": {
+    "created": 84,
+    "changed": 0,
+    "destroyed": 0,
+    "postdeploy_audit": "0 add, 5 unrelated legacy updates, 0 destroy"
+  },
+  "services": {
+    "web": {
+      "task_definition_revision": 2,
+      "desired": 1,
+      "running": 1
+    },
+    "app": {
+      "task_definition_revision": 3,
+      "desired": 1,
+      "running": 1
+    },
+    "broker": {
+      "task_definition_revision": 2,
+      "desired": 0,
+      "running": 0,
+      "blocked_on": "APS free-plan payment-method verification and application credentials"
+    },
+    "harness": {
+      "task_definition_revision": 2,
+      "desired": 0,
+      "running": 0,
+      "blocked_on": "APS broker activation"
+    }
+  },
+  "verification": {
+    "cloudflare_proxied_dns": true,
+    "tls_verified": true,
+    "web_http": 200,
+    "api_health_http": 200,
+    "auth_matrix": {
+      "no_bearer": 401,
+      "real_token_session": 200,
+      "entitlements": 200,
+      "tier_denied_author": 403
+    },
+    "auth_tier": "hosted_starter",
+    "neon_schema_tables": [
+      "built_tools",
+      "drawing_versions",
+      "jobs",
+      "orgs",
+      "projects"
+    ]
+  },
+  "secrets": {
+    "database_url": "stored in AWS Secrets Manager; value omitted",
+    "aps_credentials": "secret shell exists; value pending"
+  }
+}
