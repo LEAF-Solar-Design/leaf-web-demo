@@ -49,6 +49,33 @@ UI shows `2.28s engine · ~$0.0063`). Re-provision if needed: `python da/provisi
 The **Mock mode** toggle (header checkbox) flips the whole app between instant pure-python results
 and real APS WorkItems — demo tip: show it real, then toggle to mock for speed.
 
+## Multi-tenant (APS hardening — aps-multitenant-provisioning)
+
+The APS leg is multi-tenant. `X-Tenant-Id` threads from the routers → jobs →
+broker; each tenant's per-run OSS keys are isolated under `t/<tenant>/in|out/...`
+(shared bucket + key prefix; `tenant_id=None` = byte-identical legacy keys). Four
+guarantees, all pure-python-tested (no live APS) in `da/test_multitenant.py`:
+
+- **Isolation** — same DWG under tenant `a` vs `b` → disjoint object-key prefixes.
+- **Fair queue** — `APS_MAX_CONCURRENCY` (default 1) caps WorkItems in flight
+  across all tenants; `da/queue.FairQueue` dispatches round-robin fair.
+- **Usage cap** — broker-side hard pre-flight cap (`da/usage.py`); over-cap tenant
+  → `{error_code:"quota_exceeded"}` (HTTP 402), APS never touched. OFF unless a
+  cap is configured (`LEAF_TENANT_CAP_USD` / `LEAF_USAGE_CAPS`).
+- **Orphan reaper** — closed tab / expired lease → `da/reaper.sweep` cancels the
+  WorkItem (`DELETE /workitems/{id}`, broker-side, behind `APS_LIVE=1` +
+  `BROKER_REAP_LIVE=1`). Tab-close signal: `POST /api/jobs/{job_id}/close`.
+
+```bash
+cd C:/tmp/leaf-web-demo
+python da/test_multitenant.py                       # 4 acceptance sub-suites, exit 0
+python da/provision_live.py --dry-run --tenant demo-a   # per-tenant ids, zero APS mutation
+```
+
+Isolation strategy + billing posture (both reversible defaults) and the
+per-run-vs-versioned-store namespace split are documented in `da/setup_live.md`.
+The Autodesk Flex concurrency-raise draft is `docs/aps-concurrency-raise-request.md`.
+
 ## What's real vs staged
 - REAL: DWG→JSON extraction AND all three tool-runs on APS (measured, oracle-matched), the renderer,
   the cost receipts, the frontend, the 4 tools, the author→runnable-tool flow.

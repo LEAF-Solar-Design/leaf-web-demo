@@ -153,6 +153,10 @@ def list_jobs(tenant_id: Optional[str] = None, limit: int = 20) -> List[Dict[str
 
 TERMINAL = ("complete", "failed")
 
+# progress sentinel: an in-flight job whose owning tab/session was closed. The
+# orphan reaper fails such jobs on its next sweep (tab-close -> reap seam).
+CLOSED_PROGRESS = "closed"
+
 
 def wait_for_terminal(job_id: str, timeout_s: float, poll_s: float = 0.15) -> Optional[Dict[str, Any]]:
     """Poll until the job is terminal (or timeout). Returns the final record."""
@@ -253,14 +257,66 @@ def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
 # orphan reaper
 # --------------------------------------------------------------------------- #
 def _reap_orphans_once() -> int:
+    """Fail in-flight jobs that are orphaned: heartbeat stale OR flagged closed
+    (tab-close). Marking a closed job's row failed is the durable-spine half of
+    orphan reaping; cancelling its APS WorkItem is the broker's half
+    (POST /broker/reap, da/reaper.py)."""
     stale_before = time.time() - heartbeat_stale_s()
     rows = _query(
-        "SELECT job_id, started_at FROM jobs WHERE status IN ('submitted','running')"
-        " AND updated_at < ?", (stale_before,))
+        "SELECT job_id, started_at, progress FROM jobs WHERE status IN ('submitted','running')"
+        " AND (updated_at < ? OR progress = ?)", (stale_before, CLOSED_PROGRESS))
     for r in rows:
+        reason = ("orphaned: session closed (tab-close)" if r["progress"] == CLOSED_PROGRESS
+                  else "orphaned: heartbeat stale")
         _finish(r["job_id"], "failed", r["started_at"] or stale_before,
-                error=error_obj(ErrorCode.INTERNAL, "orphaned: heartbeat stale", retryable=True))
+                error=error_obj(ErrorCode.INTERNAL, reason, retryable=True))
     return len(rows)
+
+
+# --------------------------------------------------------------------------- #
+# session-close seam (tab-close / session-end -> orphan reaping signal)
+# --------------------------------------------------------------------------- #
+def mark_job_closed(job_id: str) -> bool:
+    """Flag ONE in-flight job's owner as gone (progress -> 'closed'). The orphan
+    reaper fails it on its next sweep. No-op on terminal/unknown jobs. Returns
+    True iff a live job was flagged."""
+    rows = _query("SELECT status FROM jobs WHERE job_id = ?", (job_id,))
+    if not rows or rows[0]["status"] in TERMINAL:
+        return False
+    _exec("UPDATE jobs SET progress = ?, updated_at = ? WHERE job_id = ?"
+          " AND status IN ('submitted','running')",
+          (CLOSED_PROGRESS, time.time(), job_id))
+    return True
+
+
+def close_tenant_jobs(tenant_id: str) -> int:
+    """Flag ALL of a tenant's in-flight jobs closed (session-end). Returns count."""
+    rows = _query("SELECT job_id FROM jobs WHERE tenant_id = ?"
+                  " AND status IN ('submitted','running')", (tenant_id,))
+    now = time.time()
+    for r in rows:
+        _exec("UPDATE jobs SET progress = ?, updated_at = ? WHERE job_id = ?",
+              (CLOSED_PROGRESS, now, r["job_id"]))
+    return len(rows)
+
+
+def orphan_lease_records(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Lease records for in-flight jobs that are closed OR heartbeat-stale — the
+    payload the app POSTs to the broker's /broker/reap so their APS WorkItems get
+    cancelled. workitem_id is broker-side (job_id is carried for correlation)."""
+    stale_before = time.time() - heartbeat_stale_s()
+    sql = ("SELECT job_id, tenant_id, progress FROM jobs WHERE status IN ('submitted','running')"
+           " AND (updated_at < ? OR progress = ?)")
+    args: list = [stale_before, CLOSED_PROGRESS]
+    if tenant_id:
+        sql += " AND tenant_id = ?"
+        args.append(tenant_id)
+    out: List[Dict[str, Any]] = []
+    for r in _query(sql, tuple(args)):
+        out.append({"job_id": r["job_id"], "tenant_id": r["tenant_id"],
+                    "status": "inprogress", "workitem_id": None,
+                    "session_closed": r["progress"] == CLOSED_PROGRESS})
+    return out
 
 
 def _reaper_loop() -> None:

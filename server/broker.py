@@ -20,6 +20,12 @@ Env:
 """
 from __future__ import annotations
 
+# Cache the STDLIB `queue` module now, before this process ever inserts `da/`
+# onto sys.path (it does so lazily in _get_da, and da/queue.py — a transparent
+# stdlib superset — otherwise shadows it). Belt-and-suspenders: da/queue.py is
+# already a superset, but pinning the stdlib module here removes all ambiguity.
+import queue as _stdlib_queue  # noqa: F401
+
 import json
 import os
 import sys
@@ -27,7 +33,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -170,6 +176,70 @@ def _get_da():
 
 
 # --------------------------------------------------------------------------- #
+# da/usage.py + da/reaper.py loaders (pure modules — no credential; safe to load
+# in the broker, which is the metering + cap + reap chokepoint). Loaded by path
+# under distinct names so they never depend on sys.path ordering.
+# --------------------------------------------------------------------------- #
+def _load_da_module(filename: str, mod_name: str):
+    import importlib.util
+
+    path = PROJECT_ROOT / "da" / filename
+    if not path.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception as exc:  # noqa: BLE001
+        print(f"[broker] {filename} import failed: {exc}", file=sys.stderr)
+        return None
+
+
+_usage_mod = None
+_reaper_mod = None
+
+
+def _get_usage():
+    global _usage_mod
+    if _usage_mod is None:
+        _usage_mod = _load_da_module("usage.py", "leaf_usage")
+    return _usage_mod
+
+
+def _get_reaper():
+    global _reaper_mod
+    if _reaper_mod is None:
+        _reaper_mod = _load_da_module("reaper.py", "leaf_reaper")
+    return _reaper_mod
+
+
+def _cap_preflight(tenant_id: str, tool: Dict[str, Any]):
+    """Broker-side HARD pre-flight cost cap (the kill-switch chokepoint).
+
+    Returns (quota_env, http_status) to REJECT, or None to proceed. OFF unless a
+    positive cap is configured for the tenant (env LEAF_TENANT_CAP_USD, per-tenant
+    LEAF_USAGE_CAPS[_FILE]) — so a demo/backbone run with no cap configured is
+    never gated and this adds no ledger I/O. The broker ledger is the
+    AUTHORITATIVE prior-spend source; usage.py is the local fallback.
+    """
+    usage = _get_usage()
+    if usage is None:
+        return None
+    cap = usage.cap_for(tenant_id)
+    if cap is None:
+        return None  # uncapped -> proceed (no ledger read)
+    spent = usage.spent_from_broker_ledger(tenant_id, LEDGER_PATH)
+    decision = usage.check_cap(tenant_id, cap=cap, spent=spent, tool=tool.get("name"))
+    if decision.get("ok"):
+        return None
+    # reject: coerce degraded_mode to a boolean for the schema-valid wire body
+    env = dict(decision)
+    env["degraded_mode"] = False
+    return env, 402  # 402 Payment Required — tenant spend cap reached
+
+
+# --------------------------------------------------------------------------- #
 # app
 # --------------------------------------------------------------------------- #
 app = FastAPI(title="Leaf APS broker v1", version="1.0.0")
@@ -205,6 +275,35 @@ def disable_tenant(tid: str) -> Dict[str, Any]:
 def enable_tenant(tid: str) -> Dict[str, Any]:
     set_tenant_disabled(tid, False)
     return with_envelope_fields({"ok": True, "tenant_id": tid, "disabled": False})
+
+
+class BrokerReapRequest(BaseModel):
+    # each record: {status, workitem_id, session_closed?|lease_expires?}
+    records: List[Dict[str, Any]] = []
+    live: Optional[bool] = None  # None -> reaper decides (APS_LIVE + BROKER_REAP_LIVE)
+
+
+@app.post("/broker/reap")
+def broker_reap(req: BrokerReapRequest) -> JSONResponse:
+    """Cancel orphaned WorkItems (closed tab / expired lease). Only the
+    credential-holding broker can issue the DA cancel; the app/jobs side supplies
+    the orphan records. Live DELETE is gated (APS_LIVE + BROKER_REAP_LIVE, or an
+    explicit `live:true`); otherwise a stub client records intent without touching
+    APS. Returns the reaped WorkItem ids."""
+    reaper = _get_reaper()
+    if reaper is None:
+        return JSONResponse(status_code=500,
+                            content=err_envelope(ErrorCode.INTERNAL,
+                                                 "reaper module unavailable", retryable=False))
+    use_live = reaper.reap_live_enabled() if req.live is None else bool(req.live)
+    cc = reaper.cancel_client_for(live=use_live, da_client=_get_da() if use_live else None)
+    reaped = reaper.sweep(req.records, cancel_client=cc)
+    return JSONResponse(status_code=200, content=with_envelope_fields({
+        "ok": True,
+        "reaped": [r.get("workitem_id") for r in reaped],
+        "count": len(reaped),
+        "live": not isinstance(cc, reaper.StubCancelClient),
+    }))
 
 
 @app.post("/broker/run")
@@ -245,6 +344,12 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                            f"tenant {req.tenant_id!r} is disabled by the kill-switch",
                            retryable=False, tool=tool.get("name"))
         return env, DEFAULT_HTTP_STATUS[ErrorCode.TENANT_DISABLED]
+
+    # 1a) HARD pre-flight cost cap — a tenant over its spend cap is rejected
+    #     BEFORE any APS call (off unless a cap is configured for the tenant).
+    capped = _cap_preflight(req.tenant_id, tool)
+    if capped is not None:
+        return capped  # (quota_exceeded envelope, HTTP 402)
 
     if not tool.get("name"):
         return (err_envelope(ErrorCode.BAD_PARAMS, "tool package missing 'name'", retryable=False),

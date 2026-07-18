@@ -25,6 +25,70 @@ After this one-time provisioning, `da/client.py` can submit WorkItems with `APS_
 
 ---
 
+## Multi-tenant model (aps-multitenant-provisioning)
+
+The APS leg is multi-tenant. Two ROOT-assumed defaults are in force (both
+reversible; flip only after operator confirmation for a production promotion):
+
+- **Isolation strategy = shared bucket + per-tenant key PREFIX** (default). Every
+  per-run scratch object is keyed `t/<tenant_id>/in|out/...` in the single shared
+  persistent bucket `leaf-web-store-ibzfsm0zj8sgcjm4`. A tenant id is validated to
+  a safe `[a-z0-9-]` segment (UuidV7 or slug) so it can never traverse out of its
+  prefix. `tenant_id=None` reproduces the exact legacy single-tenant keys
+  (`in/...`, `out/...`) byte-for-byte, so the existing live path is unchanged.
+  **Reversible alternative:** a per-tenant BUCKET (`da.tenant.tenant_bucket`,
+  e.g. `leaf-web-store-t-<tenant>`) — cleaner blast radius, but bounded by
+  OSS bucket-count limits + per-tenant provisioning cost. Provision it with
+  `python da/provision_live.py --tenant <id> --per-bucket`.
+
+- **Billing posture = central broker-side HARD pre-flight cap** (default). The
+  broker (`server/broker.py`) is the attribution + kill-switch chokepoint: it
+  reads prior spend from its authoritative ledger (`server/broker_ledger.jsonl`)
+  and calls `da/usage.check_cap` BEFORE any APS call; over-cap tenants get a
+  `{error_code:"quota_exceeded", retryable:false}` envelope (HTTP 402) and never
+  touch APS. `da/usage.py` is the local fallback + cap logic. Caps are **OFF**
+  unless a positive cap is configured (`LEAF_TENANT_CAP_USD`, or per-tenant
+  `LEAF_USAGE_CAPS`/`LEAF_USAGE_CAPS_FILE`). **Reversible alternative:** tenant
+  BYO-APS credentials, which would make the cap advisory instead of a hard gate.
+
+### Two OSS key namespaces (no collision)
+
+| Namespace | Key shape | Owner | Lifetime |
+|---|---|---|---|
+| Persistent versioned drawing store | `tenants/<t>/drawings/<d>/v/<n>.dwg` | `da/store.py` (Wave 1) | permanent, immutable versions |
+| Per-run ephemeral scratch | `t/<t>/in/<ts>_...`, `t/<t>/out/<ts>_...` | `da/tenant.py` + `da/client.py` | throwaway per WorkItem |
+
+The roots `tenants/` and `t/` never overlap, so the versioned store and per-run
+scratch space are isolated from each other and per tenant.
+
+### Concurrency ceiling
+
+`APS_MAX_CONCURRENCY` (env, default **1**) is the account Flex ceiling: at most
+that many WorkItems are in flight across ALL tenants. `da/queue.py` provides the
+round-robin-fair scheduler (`FairQueue`) and the process-global `admit()` gate
+that `da/client.submit_workitem` wraps around the LIVE submit. Raise it **in
+lockstep** with the Autodesk Flex-limit raise drafted in
+`docs/aps-concurrency-raise-request.md`.
+
+### Orphan reaping
+
+A closed tab / expired lease must not leave a WorkItem billing forever. The
+app/jobs side marks orphaned jobs (`server/jobs.mark_job_closed`, tab-close
+endpoint `POST /api/jobs/{job_id}/close`, heartbeat-stale reaper). The
+credential-holding broker performs the actual `DELETE /workitems/{id}` via
+`POST /broker/reap` → `da/reaper.sweep` → `da/client.cancel_workitem`, gated by
+`APS_LIVE=1` + `BROKER_REAP_LIVE=1`. `da/callbacks.py` is the event-driven
+(`onComplete`) upgrade path for when the platform has a public callback host.
+
+### Dry-run (no APS mutation, no network)
+
+```powershell
+python da/provision_live.py --dry-run --tenant demo-a           # prints per-tenant ids
+python da/provision_live.py --dry-run --tenant demo-a --per-bucket
+```
+
+---
+
 ## Fast path (recommended): one script
 
 ```powershell

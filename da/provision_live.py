@@ -14,6 +14,22 @@ per 'kind:script' tool that carries an inline LISP body under tool["engine_scrip
 (Lane B supplies those scripts; this is a convenience for the demo's tools).
 
 Safe to re-run: bucket 409 and activity/alias 409 are treated as 'already exists'.
+
+Multi-tenant (ADDITIVE):
+  python da/provision_live.py --dry-run [--tenant <id>] [--per-bucket]
+      Print the exact bucket key(s), Activity ids, tenant key prefix, and example
+      per-run object keys it WOULD create/use — with ZERO APS mutation and ZERO
+      network call (no token, no nickname fetch). Safe to run anywhere.
+  python da/provision_live.py --tenant <id>
+      LIVE, idempotent: provision/verify per-tenant isolation. Default isolation
+      is SHARED BUCKET + per-tenant key prefix (`t/<id>/...`), so the only live
+      resources are the shared bucket + GLOBAL Activities (already 409-idempotent);
+      the tenant is realized purely by key discipline (no per-tenant provisioning).
+  python da/provision_live.py --tenant <id> --per-bucket
+      LIVE: the reversible per-bucket alternative — create a per-tenant OSS bucket
+      (da.tenant.tenant_bucket) instead of relying on the shared-bucket prefix.
+
+The legacy no-arg path (shared bucket + extract Activity) is unchanged.
 """
 import json
 import os
@@ -21,6 +37,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import client  # noqa: E402
+import tenant as tenant_mod  # noqa: E402  (pure; no network/creds)
 import requests  # noqa: E402
 
 
@@ -87,17 +104,112 @@ def tool_activity_spec(tool):
     }
 
 
+def _safe_bucket_key(tenant_id=None, per_bucket=False):
+    """Best-effort bucket key for the dry-run report — reads only the LOCAL creds
+    file (no network). Falls back to a placeholder if creds are absent."""
+    try:
+        base = client.bucket_key()
+    except Exception:  # noqa: BLE001  (creds missing / unreadable)
+        base = "leaf-web-store-<client_id_suffix>"
+    if per_bucket and tenant_id is not None:
+        try:
+            return tenant_mod.tenant_bucket(tenant_id, base=base if not base.startswith("leaf-web-store-<") else None)
+        except Exception:  # noqa: BLE001
+            return f"{base}-t-{tenant_id}"
+    return base
+
+
+def dry_run_report(tenant_id=None, per_bucket=False, tools_path=None):
+    """Print the exact ids + keys that would be created/used. ZERO APS mutation,
+    ZERO network — no token, no nickname fetch (uses env APS_NICKNAME or a
+    placeholder)."""
+    nick = os.environ.get("APS_NICKNAME", "<nickname>")
+    strategy = "per-bucket (reversible alternative)" if per_bucket else "shared bucket + per-tenant key prefix (default)"
+    print("=== provision_live --dry-run (no APS mutation, no network) ===")
+    print(f"[engine]      {client.ENGINE}")
+    print(f"[isolation]   {strategy}")
+    print(f"[concurrency] APS_MAX_CONCURRENCY (Flex ceiling) reads at run time; see da/queue.py")
+    bucket = _safe_bucket_key(tenant_id, per_bucket)
+    print(f"[bucket]      key={bucket} region={client.OSS_REGION} policy=persistent (409=exists tolerated)")
+    ext = f"{nick}.{client.EXTRACT_ACTIVITY}+{client.ALIAS}"
+    print(f"[activity]    extract: {ext}  (GLOBAL - shared across tenants)")
+    print(f"[activity]    tools:   {nick}.{client.TOOL_ACTIVITY_PREFIX}<engine_op>+{client.ALIAS}  (GLOBAL)")
+    if tenant_id is not None:
+        tid = tenant_mod.validate_tenant_id(tenant_id)
+        prefix = tenant_mod.tenant_key_prefix(tid)
+        print(f"[tenant]      id={tid}")
+        print(f"[tenant]      key prefix (per-run scratch): {prefix}")
+        print(f"[tenant]      example input key:  {prefix}in/<ts>_rooftop_demo.dwg")
+        print(f"[tenant]      example output key: {prefix}out/<ts>_count_by_layer.result.json")
+        print(f"[tenant]      versioned store (da/store.py) namespace: tenants/{tid}/drawings/<drawing_id>/v/<n>.dwg")
+        if per_bucket:
+            print(f"[tenant]      per-tenant bucket: {tenant_mod.tenant_bucket(tid)}")
+        else:
+            print(f"[tenant]      NOTE: shared-bucket strategy => no per-tenant bucket to create; "
+                  f"isolation is by key prefix. No live provisioning needed for this tenant.")
+    if tools_path:
+        try:
+            reg = json.load(open(tools_path))
+            for t in reg.get("tools", []):
+                if t.get("kind") == "script" and t.get("engine_script"):
+                    print(f"[activity]    would ensure {nick}.{client.TOOL_ACTIVITY_PREFIX}"
+                          f"{t.get('engine_op') or t['name'].replace('-', '_')}+{client.ALIAS}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[tools]       could not read {tools_path}: {exc}")
+    print("DONE (dry-run). No APS calls were made.")
+
+
+def provision_tenant(tenant_id, per_bucket=False):
+    """LIVE, idempotent per-tenant provisioning. Default (shared bucket + key
+    prefix) needs NO per-tenant live resource beyond the shared bucket + global
+    Activities; --per-bucket creates a per-tenant OSS bucket instead."""
+    tid = tenant_mod.validate_tenant_id(tenant_id)
+    print(f"[tenant] id={tid} isolation={'per-bucket' if per_bucket else 'shared-bucket+key-prefix'}")
+    print(f"[tenant] key prefix (per-run scratch): {tenant_mod.tenant_key_prefix(tid)}")
+    if per_bucket:
+        bkey = tenant_mod.tenant_bucket(tid)
+        os.environ["APS_BUCKET"] = bkey  # target the per-tenant bucket for create_bucket()
+        res = client.create_bucket()
+        print(f"[tenant] per-tenant bucket key={bkey} -> {res} (409=exists tolerated)")
+    else:
+        print("[tenant] shared-bucket strategy: no per-tenant bucket created; the shared bucket "
+              "+ global Activities already cover this tenant (isolation is by key prefix).")
+    print(f"[tenant] DONE. Client can submit WorkItems as tenant {tid!r} (APS_LIVE=1).")
+
+
 def main():
+    argv = sys.argv[1:]
+    dry = "--dry-run" in argv
+    per_bucket = "--per-bucket" in argv
+    tenant_id = None
+    if "--tenant" in argv:
+        i = argv.index("--tenant")
+        if i + 1 < len(argv):
+            tenant_id = argv[i + 1]
+        else:
+            print("--tenant requires an id", file=sys.stderr)
+            sys.exit(2)
+    tools_path = None
+    if "--tools" in argv:
+        tools_path = argv[argv.index("--tools") + 1]
+
+    if dry:
+        dry_run_report(tenant_id=tenant_id, per_bucket=per_bucket, tools_path=tools_path)
+        return
+
+    # ---- LIVE from here (mutating calls) ----
     print(f"[auth] nickname={client.nickname()} engine={client.ENGINE}")
     ensure_bucket()
     ensure_activity(client.extract_activity_spec())
-    if "--tools" in sys.argv:
-        reg = json.load(open(sys.argv[sys.argv.index("--tools") + 1]))
+    if tools_path:
+        reg = json.load(open(tools_path))
         for t in reg.get("tools", []):
             if t.get("kind") == "script" and t.get("engine_script"):
                 ensure_activity(tool_activity_spec(t))
             else:
                 print(f"[skip] {t.get('name')} (kind={t.get('kind')}, no inline engine_script)")
+    if tenant_id is not None:
+        provision_tenant(tenant_id, per_bucket=per_bucket)
     print("DONE. Client can now submit WorkItems (APS_LIVE=1).")
 
 

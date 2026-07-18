@@ -140,6 +140,55 @@ def activity_qualified(name: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Per-tenant ephemeral (per-run scratch) object keys — ADDITIVE.
+#
+# tenant_id=None reproduces today's exact single-tenant keys (`in/...`, `out/...`)
+# BYTE-FOR-BYTE. A tenant scopes throwaway run keys under `t/<tenant>/` (see
+# da/tenant.py). This is a DIFFERENT namespace from the persistent versioned
+# drawing store (da/store.py: `tenants/<t>/drawings/...`) — no collision.
+# --------------------------------------------------------------------------- #
+def _ephemeral_prefix(tenant_id: str | None) -> str:
+    if tenant_id is None:
+        return ""
+    import tenant as _tenant  # sibling da/tenant.py — pure, no network/creds
+    return _tenant.tenant_key_prefix(tenant_id)
+
+
+def ephemeral_input_key(dwg_name: str, tenant_id: str | None = None,
+                        ts: int | None = None) -> str:
+    """Per-run throwaway INPUT key. None -> `in/<ts>_<dwg>` (unchanged);
+    tenant -> `t/<tenant>/in/<ts>_<dwg>`."""
+    ts = int(time.time()) if ts is None else int(ts)
+    return f"{_ephemeral_prefix(tenant_id)}in/{ts}_{dwg_name}"
+
+
+def ephemeral_output_key(name: str, tenant_id: str | None = None,
+                         ts: int | None = None, suffix: str = ".result.json") -> str:
+    """Per-run throwaway OUTPUT key. None -> `out/<ts>_<name><suffix>` (unchanged);
+    tenant -> `t/<tenant>/out/<ts>_<name><suffix>`."""
+    ts = int(time.time()) if ts is None else int(ts)
+    return f"{_ephemeral_prefix(tenant_id)}out/{ts}_{name}{suffix}"
+
+
+# lazy loader for the sibling submit QUEUE (da/queue.py). Loaded by PATH under a
+# distinct module name so it never depends on `import queue` resolving to our
+# module (the stdlib `queue` may already be cached in this process).
+_leaf_queue_mod = None
+
+
+def _leaf_queue():
+    global _leaf_queue_mod
+    if _leaf_queue_mod is None:
+        import importlib.util
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue.py")
+        spec = importlib.util.spec_from_file_location("leaf_aps_queue", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _leaf_queue_mod = mod
+    return _leaf_queue_mod
+
+
+# --------------------------------------------------------------------------- #
 # OSS (Object Storage) — Direct-to-S3 upload / download
 # --------------------------------------------------------------------------- #
 def _enc(object_key: str) -> str:
@@ -176,11 +225,17 @@ def create_bucket(policy: str = "persistent") -> dict:
     return r.json()
 
 
-def upload_object(local_path: str, object_key: str) -> str:
+def upload_object(local_path: str, object_key: str, tenant_id: str | None = None) -> str:
     """Upload a local file to OSS via signed S3 (3-step). Returns the OSS object id.
 
-    LIVE call. Uses a single-part signed upload (demo DWGs are small).
+    LIVE call. Uses a single-part signed upload (demo DWGs are small). ADDITIVE:
+    if `tenant_id` is given and `object_key` is not already tenant-scoped, the key
+    is prefixed with `t/<tenant>/` so the upload lands in the tenant's scratch
+    namespace. Existing callers pass a fully-built key and no tenant_id -> byte
+    identical behavior.
     """
+    if tenant_id is not None and not object_key.startswith("t/"):
+        object_key = _ephemeral_prefix(tenant_id) + object_key
     H = _auth_headers()
     # 1) request a signed S3 upload url
     g = requests.get(
@@ -297,24 +352,53 @@ def _redact(obj):
 # WorkItem submit + poll (low level)
 # --------------------------------------------------------------------------- #
 def submit_workitem(activity_id: str, arguments: dict,
-                    dry_run: bool = False, poll: bool = True) -> dict:
+                    dry_run: bool = False, poll: bool = True,
+                    tenant_id: str | None = None) -> dict:
     """Submit a WorkItem for `activity_id` with `arguments`.
 
     dry_run=True  -> return the exact POST body WITHOUT calling APS.
     dry_run=False -> POST, then (poll=True) poll to a terminal status and return it.
+
+    The LIVE submit (dry_run=False) is the head-of-line-blocking point, so it is
+    routed through the account Flex CEILING gate (da/queue.admit): at most
+    APS_MAX_CONCURRENCY WorkItems are in flight across all tenants in this
+    process. With poll=True the slot is held for the WorkItem's whole lifetime
+    (submit -> terminal), which is exactly what the ceiling should count. dry_run
+    returns BEFORE the gate, so APS_LIVE=0 / dry-run paths are unaffected.
     """
     body = {"activityId": activity_id, "arguments": arguments}
     if dry_run:
         return {"_dry_run": True, "endpoint": f"POST {DA}/workitems",
                 "body": _redact(body)}
-    r = requests.post(f"{DA}/workitems",
-                      headers={**_auth_headers(), "Content-Type": "application/json"},
-                      data=json.dumps(body), timeout=_HTTP_TIMEOUT)
-    r.raise_for_status()
-    wi = r.json()
-    if not poll:
-        return wi
-    return _poll_workitem(wi["id"])
+    _q = _leaf_queue()
+    with _q.admit(tenant_id):
+        r = requests.post(f"{DA}/workitems",
+                          headers={**_auth_headers(), "Content-Type": "application/json"},
+                          data=json.dumps(body), timeout=_HTTP_TIMEOUT)
+        r.raise_for_status()
+        wi = r.json()
+        if not poll:
+            return wi
+        return _poll_workitem(wi["id"])
+
+
+def cancel_workitem(workitem_id: str, dry_run: bool = False) -> dict:
+    """Cancel a running WorkItem: DELETE /workitems/{id} (orphan reaping).
+
+    dry_run=True returns the request descriptor WITHOUT calling APS. Otherwise a
+    LIVE DELETE is issued (reachable only when a caller explicitly asks — the
+    reaper does so only behind APS_LIVE + BROKER_REAP_LIVE). 404 is tolerated
+    (the WorkItem already finished/vanished). Mirrors submit_workitem's dry_run
+    discipline so no unguarded live call exists.
+    """
+    endpoint = f"{DA}/workitems/{workitem_id}"
+    if dry_run:
+        return {"_dry_run": True, "endpoint": f"DELETE {endpoint}",
+                "workitem_id": workitem_id}
+    r = requests.delete(endpoint, headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
+    cancelled = r.status_code in (200, 202, 204, 404)
+    return {"workitem_id": workitem_id, "status_code": r.status_code,
+            "cancelled": cancelled}
 
 
 def _poll_workitem(workitem_id: str, timeout_s: int = 900, interval_s: float = 2.0) -> dict:
@@ -391,7 +475,8 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
     activity_id = activity_qualified(EXTRACT_ACTIVITY)
     version_aware = tenant_id is not None and drawing_id is not None
     dwg_name = os.path.basename(dwg_local_path)
-    output_key = f"out/{int(time.time())}_{dwg_name}.families.txt"
+    # per-run scratch OUTPUT key; tenant-scoped when a tenant is supplied
+    output_key = f"{_ephemeral_prefix(tenant_id)}out/{int(time.time())}_{dwg_name}.families.txt"
 
     if version_aware:
         v, input_key = _resolve_store_key(tenant_id, drawing_id, version, backend, dry_run)
@@ -414,7 +499,8 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
         up_key, out_url = signed_upload_url(output_key)
         arguments = {"HostDwg": {"url": in_url, "verb": "get"},
                      "Result": {"url": out_url, "verb": "put"}}
-        status = submit_workitem(activity_id, arguments, dry_run=False, poll=True)
+        status = submit_workitem(activity_id, arguments, dry_run=False, poll=True,
+                                 tenant_id=tenant_id)
         if status.get("status") != "success":
             raise RuntimeError(f"extract WorkItem {status.get('id')} status={status.get('status')} "
                                f"report={status.get('reportUrl')}")
@@ -423,7 +509,7 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
         return parse_text(families, dwg_local_path)
 
     # ------- legacy single-tenant demo path (FROZEN behavior) -------
-    input_key = f"in/{int(time.time())}_{dwg_name}"
+    input_key = f"{_ephemeral_prefix(tenant_id)}in/{int(time.time())}_{dwg_name}"
 
     if dry_run:
         arguments = {"HostDwg": _input_arg(input_key, live=False),
@@ -445,7 +531,8 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
     up_key, out_url = signed_upload_url(output_key)
     arguments = {"HostDwg": {"url": in_url, "verb": "get"},
                  "Result": {"url": out_url, "verb": "put"}}
-    status = submit_workitem(activity_id, arguments, dry_run=False, poll=True)
+    status = submit_workitem(activity_id, arguments, dry_run=False, poll=True,
+                             tenant_id=tenant_id)
     if status.get("status") != "success":
         raise RuntimeError(f"extract WorkItem {status.get('id')} status={status.get('status')} "
                            f"report={status.get('reportUrl')}")
@@ -473,13 +560,14 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
     activity_id = activity_qualified(f"{TOOL_ACTIVITY_PREFIX}{engine_op}")
     dwg_name = os.path.basename(dwg_local_path)
     ts = int(time.time())
-    output_key = f"out/{ts}_{engine_op}.result.json"
+    # per-run scratch OUTPUT key; tenant-scoped when a tenant is supplied
+    output_key = ephemeral_output_key(engine_op, tenant_id, ts)
     version_aware = tenant_id is not None and drawing_id is not None
 
     if version_aware:
         v, input_key = _resolve_store_key(tenant_id, drawing_id, version, backend, dry_run)
     else:
-        input_key = f"in/{ts}_{dwg_name}"
+        input_key = ephemeral_input_key(dwg_name, tenant_id, ts)
 
     if dry_run:
         arguments = {
@@ -517,7 +605,8 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
         "Params": _json_arg(params or {}),
         "Result": {"url": out_url, "verb": "put"},
     }
-    status = submit_workitem(activity_id, arguments, dry_run=False, poll=True)
+    status = submit_workitem(activity_id, arguments, dry_run=False, poll=True,
+                             tenant_id=tenant_id)
     timing_ms = int((time.time() - t0) * 1000)
     if status.get("status") != "success":
         return {

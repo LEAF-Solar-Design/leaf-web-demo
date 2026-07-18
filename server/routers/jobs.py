@@ -116,3 +116,20 @@ def stream_job(job_id: str):
 @router.get("/api/jobs")
 def list_jobs(tenant_id: Optional[str] = None, limit: int = 20):
     return with_envelope_fields({"jobs": [_record_body(r) for r in jobs.list_jobs(tenant_id, limit)]})
+
+
+@router.post("/api/jobs/{job_id}/close")
+def close_job(job_id: str, tenant_id: str = Depends(deps.require_tenant)):
+    """Tab-close / session-end signal: mark this in-flight job's owner gone so the
+    orphan reaper fails it (and its APS WorkItem can be reaped broker-side).
+    Idempotent. 404s (not 403) on a job owned by another tenant — never leaks
+    existence across the tenant boundary."""
+    rec = jobs.get_job(job_id)
+    if rec is None or str(tenant_id) != rec["tenant_id"]:
+        return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
+                              retryable=False, status_code=404)
+    flagged = jobs.mark_job_closed(job_id)
+    after = jobs.get_job(job_id)
+    return with_envelope_fields(deps.tenant_echo(
+        {"job_id": job_id, "closed": bool(flagged),
+         "status": after["status"] if after else "unknown"}, tenant_id))
