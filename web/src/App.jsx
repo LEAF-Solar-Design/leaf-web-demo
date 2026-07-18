@@ -5,11 +5,27 @@ import ToolsPanel from './components/ToolsPanel.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
 import AuthorPanel from './components/AuthorPanel.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
-import { config, getSession, getTools, runTool, authorTool } from './api.js'
+import {
+  config, getSession, getTools, runTool, runToolAsync, attachToJob, getJob,
+  recordToEnvelope, authorTool,
+} from './api.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 
 // Calm, muted ink palette — reads on the light "paper" CADViewport canvas.
 const PALETTE = ['#3b6ea5', '#5f8a6a', '#8a6ea0', '#b08a4a', '#a5637a', '#4f8a94']
+
+// Durable pointer to the one in-flight live job, so a closed/reloaded tab can
+// re-attach instead of orphaning the UI (CONTRACT-ADDENDUM §7, MATRIX gap #1).
+const INFLIGHT_KEY = 'leaf.inflightJob'
+const saveInflight = (job_id, tool) => {
+  try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify({ job_id, tool, ts: Date.now() })) } catch { /* noop */ }
+}
+const clearInflight = () => {
+  try { localStorage.removeItem(INFLIGHT_KEY) } catch { /* noop */ }
+}
+const readInflight = () => {
+  try { return JSON.parse(localStorage.getItem(INFLIGHT_KEY) || 'null') } catch { return null }
+}
 
 // `?fixture=edit` (mock only) loads the synthetic edit fixture that exercises
 // inserts + 3DFACEs + picking + the pending/version flow.
@@ -25,11 +41,15 @@ export default function App() {
   const [visibleLayers, setVisibleLayers] = useState({})
   const [selectedTool, setSelectedTool] = useState(null)
   const [running, setRunning] = useState(false)
+  const [runStatus, setRunStatus] = useState(null)   // live job phase: 'submitted' | 'running'
+  const [runElapsedMs, setRunElapsedMs] = useState(null) // ticking wall-clock while running
   const [result, setResult] = useState(null)
   const [runErr, setRunErr] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
   const [pendingEdit, setPendingEdit] = useState(null)
   const viewerRef = useRef(null)
+  const runningSinceRef = useRef(null)  // ms epoch the job entered 'running'
+  const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
 
   const isEditFixture = mock && fixtureParam === 'edit'
   // What the panels/legend/selection reflect: the applied version if present.
@@ -48,6 +68,8 @@ export default function App() {
     let alive = true
     setIntake(null); setVersionIntake(null); setLoadErr(null)
     setResult(null); setSelectedHandle(null); setPendingEdit(null)
+    setRunning(false); setRunStatus(null); setRunElapsedMs(null); setRunErr(null)
+    runningSinceRef.current = null
     const seat = (d) => {
       if (!alive) return
       setIntake(d)
@@ -74,6 +96,74 @@ export default function App() {
     return () => { alive = false }
   }, [mock])
 
+  // A live job entered 'running' — begin (or resume) the wall-clock, using the
+  // server's started_at when known (localhost clocks match) so a re-attach
+  // continues the real elapsed time instead of restarting at zero. Declared
+  // before the effects that depend on it (avoids a TDZ in their deps arrays).
+  const markRunning = useCallback((startedAtSec) => {
+    if (runningSinceRef.current == null) {
+      runningSinceRef.current = startedAtSec ? startedAtSec * 1000 : Date.now()
+    }
+    setRunStatus('running')
+    setRunElapsedMs(Math.max(0, Date.now() - runningSinceRef.current))
+  }, [])
+
+  // Tick the calm "running · N.Ns" clock while a live job runs (no animated loader).
+  useEffect(() => {
+    if (runStatus !== 'running') return
+    const id = setInterval(() => {
+      if (runningSinceRef.current != null) setRunElapsedMs(Date.now() - runningSinceRef.current)
+    }, 200)
+    return () => clearInterval(id)
+  }, [runStatus])
+
+  // Tab-close survivability: on load in live mode, if a durable in-flight job
+  // pointer exists, re-attach. Terminal already -> render its envelope; still
+  // running -> resume calm progress + final render. Clear the pointer either
+  // way (and on a stale/unknown job) so a closed tab never orphans the UI.
+  useEffect(() => {
+    if (mock) return
+    const saved = readInflight()
+    if (!saved || !saved.job_id) return
+    let alive = true
+    ;(async () => {
+      let rec
+      try {
+        rec = await getJob(saved.job_id)
+      } catch {
+        clearInflight() // 404 / unreachable -> stale pointer
+        return
+      }
+      if (!alive) return
+      setSelectedTool((t) => t || { name: saved.tool })
+      if (rec.status === 'complete' || rec.status === 'failed') {
+        setResult(recordToEnvelope(rec))
+        clearInflight()
+        return
+      }
+      // still in flight — resume progress and await the terminal envelope
+      setRunning(true); setRunErr(null); setResult(null)
+      if (rec.status === 'running') markRunning(rec.started_at)
+      else setRunStatus(rec.status || 'submitted')
+      try {
+        const env = await attachToJob(saved.job_id, {
+          onStatus: (st) => {
+            if (!alive) return
+            if (st.status === 'running') markRunning()
+            else setRunStatus(st.status || 'running')
+          },
+        })
+        if (alive) setResult(env)
+      } catch (e) {
+        if (alive) setRunErr(String(e.message || e))
+      } finally {
+        if (alive) { setRunning(false); setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null }
+        clearInflight()
+      }
+    })()
+    return () => { alive = false }
+  }, [mock, markRunning])
+
   const layerCounts = useMemo(() => {
     const c = {}
     for (const l of shown?.layers || []) c[l] = 0
@@ -96,18 +186,39 @@ export default function App() {
   const onRun = useCallback(async (tool, params) => {
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
+    setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
+    lastRunRef.current = { tool, params }
     // feed the picked entity to the tool so an edit tool can target it
     const merged = selectedHandle ? { ...(params || {}), target_handle: selectedHandle } : params
     try {
-      const env = await runTool(mock, tool, merged, shown)
-      if (env && env.ok === false) setRunErr(env.error || 'tool run failed')
+      let env
+      if (mock) {
+        // Mock stays fully client-side — no jobs API, no progress phases.
+        env = await runTool(mock, tool, merged, shown)
+      } else {
+        env = await runToolAsync(tool, merged, 'rooftop_demo', {
+          onSubmit: (job_id) => saveInflight(job_id, tool.name),
+          onStatus: (st) => {
+            if (st.status === 'running') markRunning()
+            else setRunStatus(st.status || 'running')
+          },
+        })
+      }
       setResult(env)
     } catch (e) {
       setRunErr(String(e.message || e))
     } finally {
       setRunning(false)
+      setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
+      if (!mock) clearInflight()
     }
-  }, [mock, shown, selectedHandle])
+  }, [mock, shown, selectedHandle, markRunning])
+
+  // Retry the last run (plain affordance for retryable failures / transport hiccups).
+  const onRetry = useCallback(() => {
+    const last = lastRunRef.current
+    if (last) onRun(last.tool, last.params)
+  }, [onRun])
 
   const onAuthor = useCallback(async (description) => {
     const res = await authorTool(mock, description)
@@ -233,9 +344,12 @@ export default function App() {
         <aside className="right">
           <ResultPanel
             running={running}
+            runStatus={runStatus}
+            runElapsedMs={runElapsedMs}
             error={runErr}
             result={result}
             tool={selectedTool}
+            onRetry={onRetry}
           />
         </aside>
       </div>

@@ -1,5 +1,29 @@
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
-// key/value), overlay summary, timing + cost receipt. Plus loading/error.
+// key/value), overlay summary, timing + cost receipt. Plus calm live progress
+// and a normalized error.
+//
+// The §10 error is an OBJECT ({error_code, message, retryable}); mock errors
+// are plain strings. `errText`/`isRetryable` handle both so the same panel
+// renders live and mock without ever passing a raw object to React.
+
+function errText(e) {
+  if (!e) return ''
+  if (typeof e === 'string') return e
+  const code = e.error_code ? `${e.error_code}: ` : ''
+  return `${code}${e.message || 'error'}`
+}
+
+function isRetryable(e) {
+  return !!(e && typeof e === 'object' && e.retryable)
+}
+
+// Calm, loader-free progress line: "submitted", then "running · 3.2s".
+function progressText(runStatus, runElapsedMs) {
+  const status = runStatus || 'running'
+  if (status === 'submitted') return 'submitted'
+  const secs = runElapsedMs != null ? ` · ${(runElapsedMs / 1000).toFixed(1)}s` : ''
+  return `${status}${secs}`
+}
 
 function CountsTable({ counts }) {
   const rows = Object.entries(counts)
@@ -50,7 +74,18 @@ function ResultBody({ result }) {
   return <KeyValue data={scalars} />
 }
 
-export default function ResultPanel({ running, error, result, tool }) {
+function ErrorLine({ err, onRetry, retry }) {
+  return (
+    <div className="inline-error">
+      <span>{errText(err)}</span>
+      {retry && onRetry && (
+        <button type="button" className="btn ghost retry" onClick={onRetry}>Retry</button>
+      )}
+    </div>
+  )
+}
+
+export default function ResultPanel({ running, runStatus, runElapsedMs, error, result, tool, onRetry }) {
   return (
     <section className="panel result-panel">
       <h2>Result</h2>
@@ -59,20 +94,23 @@ export default function ResultPanel({ running, error, result, tool }) {
       )}
       {running && (
         <div className="running">
-          <div className="spinner" />
-          <span>Running {tool?.name} on Leaf…</span>
+          <span>{progressText(runStatus, runElapsedMs)}{tool?.name ? ` · ${tool.name}` : ''}</span>
         </div>
       )}
-      {error && !running && <div className="inline-error">{error}</div>}
+      {/* transport-level error (network / submit failure) — always retryable */}
+      {error && !running && <ErrorLine err={error} onRetry={onRetry} retry />}
       {result && !running && (
         <div className="result-card">
           <div className="result-head">
             <span className={`ok ${result.ok ? 'yes' : 'no'}`}>{result.ok ? 'OK' : 'FAILED'}</span>
             <span className="result-tool">{result.tool} <span className="dim">v{result.version}</span></span>
+            {result.degraded_mode && (
+              <span className="degraded" title="Ran on the local fallback, not the cloud solver">local fallback</span>
+            )}
           </div>
 
           {result.ok && <ResultBody result={result} />}
-          {result.error && <div className="inline-error">{result.error}</div>}
+          {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={isRetryable(result.error)} />}
 
           {result.overlay && (
             <div className="overlay-summary">

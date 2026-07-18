@@ -169,7 +169,7 @@ body { background: var(--bg); color: var(--text); font-size: 14px; }
 
 /* --- result --- */
 /* Calm running state — a static indicator, no animated loader. */
-.running { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 13px; padding: 8px 0; }
+.running { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 13px; padding: 8px 0; font-variant-numeric: tabular-nums; }
 .running::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; opacity: .8; }
 .result-card { display: flex; flex-direction: column; gap: 12px; }
 .result-head { display: flex; align-items: center; gap: 8px; }
@@ -193,7 +193,10 @@ table.counts td, table.kv td { padding: 6px; border-bottom: 1px solid rgba(38,48
 .receipt { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--dim); border-top: 1px solid var(--border); padding-top: 10px; font-variant-numeric: tabular-nums; }
 
 /* --- errors --- */
-.inline-error { font-size: 12px; color: var(--danger); background: rgba(255,107,107,.08); border: 1px solid rgba(255,107,107,.25); border-radius: 6px; padding: 8px 10px; }
+.inline-error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--danger); background: rgba(255,107,107,.08); border: 1px solid rgba(255,107,107,.25); border-radius: 6px; padding: 8px 10px; }
+.btn.retry { padding: 3px 10px; font-size: 12px; color: var(--text); }
+/* plain-text "local fallback" note — no chip badge (calm standard) */
+.degraded { font-size: 10px; letter-spacing: .3px; color: var(--amber); border: 1px solid rgba(255,179,0,.35); border-radius: 4px; padding: 2px 6px; }
 
 /* scrollbars */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
