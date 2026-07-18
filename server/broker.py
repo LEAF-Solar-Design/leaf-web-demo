@@ -25,6 +25,8 @@ from __future__ import annotations
 # stdlib superset — otherwise shadows it). Belt-and-suspenders: da/queue.py is
 # already a superset, but pinning the stdlib module here removes all ambiguity.
 import queue as _stdlib_queue  # noqa: F401
+import sys as _sys_early
+_sys_early.dont_write_bytecode = True  # tenant tool files: no __pycache__ (races git add in the tenant repo during authoring)
 import platform as _stdlib_platform  # noqa: F401  (cache stdlib before the
 #   PROJECT_ROOT sys.path insert below makes the local platform/ package shadow it;
 #   requests/urllib3 import `platform` lazily inside request handlers)

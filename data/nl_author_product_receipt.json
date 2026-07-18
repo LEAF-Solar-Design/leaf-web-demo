@@ -1,0 +1,29 @@
+{
+  "milestone": "wave3-finale: real NL authoring through the PRODUCT path",
+  "date": "2026-07-18",
+  "path": "app POST /api/author -> LEAF_AUTHOR_HARNESS_URL -> harness serve.ts -> real Agent SDK (operator grant) -> tenant mushy repo -> app catalog fold -> zero-LLM run",
+  "source": "harness",
+  "tool_name": "count-closed-open-polylines",
+  "tenant_repo_commit": "188cd6d",
+  "run_result": {
+    "closed_count": 2345,
+    "open_count": 0,
+    "total_count": 2345
+  },
+  "independent_check": {
+    "closed": 2345,
+    "open": 0,
+    "match": true
+  },
+  "also_proven_direct": {
+    "tool": "polyline-vertex-count",
+    "commit": "e9290fc",
+    "result": {
+      "total_vertices": 9380,
+      "polyline_count": 2345,
+      "avg": 4.0
+    }
+  },
+  "root_cause_fix": "harness commit() 0xC0000142 (STATUS_DLL_INIT_FAILED) under Agent-SDK spawn pressure -> 800ms settle + 8x exponential-backoff git retry; broker sys.dont_write_bytecode=True to keep the tenant mushy repo pyc-free",
+  "pass": true
+}

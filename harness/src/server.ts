@@ -104,6 +104,8 @@ export function createHarness(ports: HarnessPorts): Harness {
 
       return send(res, 404, { error: { message: `no route for ${method} ${path}` } });
     } catch (err) {
+      // Diagnostic: full stack to stderr (never contains the grant; see serve.ts note).
+      console.error("[harness] request error:", (err as Error).stack ?? String(err));
       if (err instanceof AuthorLoopError) {
         return send(res, err.status, {
           error: { message: err.message, diagnostics: err.diagnostics ?? [] },
