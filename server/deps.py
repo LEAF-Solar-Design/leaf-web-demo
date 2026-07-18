@@ -119,15 +119,59 @@ def save_authored_tools(tools: List[Dict[str, Any]]) -> None:
     AUTHORED_STORE.write_text(json.dumps({"tools": tools}, indent=2), encoding="utf-8")
 
 
+# --------------------------------------------------------------------------- #
+# tenant-repo registry fold (UI wave 3, Contract 2)
+# --------------------------------------------------------------------------- #
+def tenant_repo_dir() -> Optional[Path]:
+    """The per-tenant mushy-codebase checkout root, from env LEAF_TENANT_REPO (read
+    at CALL time so a subprocess/test override applies). None => the tenant fold is
+    OFF and all_tools() is byte-identical to the pre-wave-3 registry union."""
+    root = os.environ.get("LEAF_TENANT_REPO", "").strip()
+    return Path(root) if root else None
+
+
+def load_tenant_repo_tools() -> List[Dict[str, Any]]:
+    """Fold the tenant repo's registry.json tools when LEAF_TENANT_REPO is set.
+
+    These are the tools a real harness author session registered into the tenant's
+    OWN repo (``registry.json`` at the repo root — see harness/registry/registerTool).
+    Their ``entry`` stays RELATIVE to the repo root (e.g. ``tools/<name>/tool.py``);
+    ``tool_loader.resolve_local_file`` resolves it against the SAME LEAF_TENANT_REPO
+    root, so the execution chain no longer depends on the broker's cwd (the M1 hack).
+    Missing env / file / bad JSON -> [] (never raises)."""
+    root = tenant_repo_dir()
+    if root is None:
+        return []
+    reg = root / "registry.json"
+    if not reg.exists():
+        return []
+    try:
+        data = json.loads(reg.read_text(encoding="utf-8"))
+        tools = data.get("tools") if isinstance(data, dict) else None
+        if not isinstance(tools, list):
+            return []
+        return [t for t in tools if isinstance(t, dict) and t.get("name")]
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[leaf-demo] bad tenant registry.json at {reg}: {exc}", file=sys.stderr)
+        return []
+
+
 # in-memory authored registry (seeded from disk at startup).
 # IDENTITY MATTERS: routers mutate this list in place (`_AUTHORED[:] = ...`).
 _AUTHORED: List[Dict[str, Any]] = load_authored_tools()
 
 
 def all_tools() -> List[Dict[str, Any]]:
-    """Registry tools + authored tools, de-duplicated by name (authored wins)."""
+    """Registry tools + tenant-repo tools + write seed + authored tools, de-duped by
+    name. PRECEDENCE (last wins): engine registry < tenant-repo (LEAF_TENANT_REPO) <
+    write seed < authored_tools.json — so a tenant-repo tool overrides an engine tool
+    of the same name, and an authored tool overrides both (CONTRACT-ADDENDUM §15).
+    With LEAF_TENANT_REPO unset the tenant fold is empty and this is BYTE-IDENTICAL
+    to the pre-wave-3 union."""
     by_name: Dict[str, Dict[str, Any]] = {}
     for t in load_engine_registry_tools():
+        by_name[t["name"]] = t
+    for t in load_tenant_repo_tools():  # wave 3: the tenant's OWN registry (when env set)
         by_name[t["name"]] = t
     for t in load_seed_write_tools():  # tracked drawing.write seed (M2)
         by_name[t["name"]] = t

@@ -94,10 +94,16 @@ def _distinct_tenants(ledger_path: Path) -> Set[str]:
 
 
 def _disabled_set() -> Set[str]:
-    """Kill-switch state. Authoritative: GET /broker/health `tenants_disabled`.
-    Fallback (broker unreachable): read broker_tenants.json directly. Never raises."""
+    """Kill-switch state, resolved FRESH on every request (read-your-write, Contract
+    5b): a tenant disabled via the proxy route is reflected by the very next
+    GET /api/ops/tenants — there is NO cached /health. Authoritative source is a
+    per-request GET /broker/health `tenants_disabled` (the broker updates its state
+    synchronously before acking the disable, so the next health read sees it); a
+    Cache-Control: no-cache header defeats any intermediary cache. Fallback (broker
+    unreachable): read broker_tenants.json directly, also fresh per call. Never raises."""
     try:
-        resp = requests.get(f"{broker_client.broker_url()}/broker/health", timeout=3)
+        resp = requests.get(f"{broker_client.broker_url()}/broker/health", timeout=3,
+                            headers={"Cache-Control": "no-cache"})
         data = resp.json()
         return {str(t) for t in (data.get("tenants_disabled") or [])}
     except Exception:  # noqa: BLE001

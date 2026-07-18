@@ -38,11 +38,11 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
     use_llm = os.environ.get("LEAF_AUTHOR_LLM", "0") == "1"
 
     # Env-gated seam to the Agent SDK author harness (harness/ - HARNESS-CONTRACT.md).
-    # When LEAF_AUTHOR_HARNESS_URL is set, authoring is delegated to the harness and
-    # the returned package flows through the SAME persistence/registration pipeline
-    # below, so /api/tools and the dynamic loader treat both sources identically.
-    # Any harness failure falls back to the local templater (noted in the preview).
+    # When LEAF_AUTHOR_HARNESS_URL is set, authoring is delegated to the harness, which
+    # registers the tool into the TENANT repo (registry.json) itself. Any harness
+    # failure falls back to the local templater (noted in the preview).
     tool = None
+    source = "template"
     harness_url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
     if harness_url:
         try:
@@ -52,11 +52,13 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
             r.raise_for_status()
             body = r.json()
             tool, code, preview = body["tool"], body["code"], body["preview"]
+            source = "harness"
         except Exception as exc:
             tool = None
             print(f"[author] harness unreachable, templated fallback: {exc}")
     if tool is None:
         tool, code, preview = fb.author_tool(req.description)
+        source = "template"
         if harness_url:
             preview = "[harness unreachable; templated fallback] " + preview
     if use_llm:
@@ -64,25 +66,33 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
         # back to templating and note it in the preview rather than fail.
         preview = "[LLM gate on, but no provider wired — templated] " + preview
 
-    # PERSIST the authored file + point the registry entry at it (the FILE is
-    # the tool). entry is stored relative to server/ so the broker resolves it
-    # regardless of cwd.
-    AUTHORED_DIR.mkdir(parents=True, exist_ok=True)
-    fname = f"{tool['name']}.py"
-    (AUTHORED_DIR / fname).write_text(code, encoding="utf-8")
-    tool["entry"] = f"authored/{fname}"
-
-    # advisory static scan (non-blocking v1): surface in provenance + preview
+    # advisory static scan (SPEC §10.2) — runs consistently for BOTH sources over the
+    # tool's `code`; surfaced in provenance AND at the top level (Contract 3) + preview.
     findings = static_scan(code)
     tool.setdefault("provenance", {})["static_scan"] = findings
     if findings:
         preview = f"{preview}  [static-scan flags: {', '.join(findings)}]"
 
-    # register (in-memory + persisted to our lane's store; additive)
-    deps._AUTHORED[:] = [t for t in deps._AUTHORED if t["name"] != tool["name"]]
-    deps._AUTHORED.append(tool)
-    deps.save_authored_tools(deps._AUTHORED)
+    if source == "harness":
+        # The harness already registered this tool into the TENANT repo (its build
+        # route commits registry.json + tools/<name>/). It surfaces in /api/tools via
+        # deps.all_tools()'s tenant-repo fold (Contract 2) — NOT the local authored
+        # store. So we do NOT persist to server/authored/ or touch _AUTHORED here; the
+        # returned tool keeps its tenant-repo-relative entry.
+        pass
+    else:
+        # TEMPLATE path (unchanged): PERSIST the authored file + point the registry
+        # entry at it (the FILE is the tool). entry is stored relative to server/ so
+        # the broker resolves it regardless of cwd. Register into our lane's store.
+        AUTHORED_DIR.mkdir(parents=True, exist_ok=True)
+        fname = f"{tool['name']}.py"
+        (AUTHORED_DIR / fname).write_text(code, encoding="utf-8")
+        tool["entry"] = f"authored/{fname}"
+        deps._AUTHORED[:] = [t for t in deps._AUTHORED if t["name"] != tool["name"]]
+        deps._AUTHORED.append(tool)
+        deps.save_authored_tools(deps._AUTHORED)
 
     return deps.tenant_echo(
-        with_envelope_fields({"tool": tool, "code": code, "preview": preview}), tenant
+        with_envelope_fields({"tool": tool, "code": code, "preview": preview,
+                              "source": source, "static_scan": findings}), tenant
     )

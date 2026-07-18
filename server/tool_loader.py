@@ -21,6 +21,7 @@ passed in by the broker (the only process allowed to hold it).
 from __future__ import annotations
 
 import importlib.util
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
@@ -65,17 +66,36 @@ def _load_module(path: Path):
     return mod
 
 
+def _tenant_repo_root() -> Optional[Path]:
+    """The tenant mushy-repo checkout root from env LEAF_TENANT_REPO (read at CALL
+    time; same env deps.load_tenant_repo_tools folds against). None => not configured.
+    """
+    root = os.environ.get("LEAF_TENANT_REPO", "").strip()
+    return Path(root) if root else None
+
+
 def resolve_local_file(tool: Dict[str, Any]) -> Optional[Path]:
     """Return the local .py file that IS this tool, or None (=> APS path).
 
-    Resolution order: explicit `entry` (authored/ or builtins/), a `.py`
-    `script`, then the built-in-op compat lookup. Authored tools always resolve
-    via their `entry`, so they run their OWN persisted body.
+    Resolution order: explicit `entry` (resolved against the tenant repo root when
+    LEAF_TENANT_REPO is set, then authored/ or builtins/), a `.py` `script`, then the
+    built-in-op compat lookup. Authored tools always resolve via their `entry`, so
+    they run their OWN persisted body.
+
+    Wave 3 (Contract 2): a tenant-repo tool carries a repo-RELATIVE entry (e.g.
+    ``tools/<name>/tool.py``). We resolve it against ``$LEAF_TENANT_REPO`` (absolute),
+    so the broker resolves it regardless of its cwd — removing the M1 broker-cwd hack.
     """
     entry = tool.get("entry")
     if entry:
         name = Path(entry).name
-        for cand in (Path(entry), SERVER_DIR / entry, AUTHORED_DIR / name, BUILTIN_DIR / name):
+        cands = [Path(entry), SERVER_DIR / entry, AUTHORED_DIR / name, BUILTIN_DIR / name]
+        troot = _tenant_repo_root()
+        if troot is not None:
+            # resolve the tenant entry against the repo root (absolute), ahead of the
+            # authored/builtins fallbacks so a tenant tool runs its OWN repo file.
+            cands.insert(1, troot / entry)
+        for cand in cands:
             if cand.suffix == ".py" and cand.exists():
                 return cand
     script = tool.get("script")

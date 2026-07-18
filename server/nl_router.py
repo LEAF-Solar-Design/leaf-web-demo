@@ -36,7 +36,7 @@ This module has NO FastAPI / HTTP dependency so it is unit-testable offline
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 # --------------------------------------------------------------------------- #
@@ -101,6 +101,22 @@ _AUTHORING_NOUNS: Set[str] = {
 }
 # strong, unambiguous authoring phrasing (verb-independent).
 _AUTHORING_PHRASE = re.compile(r"\btools?\s+(that|to|which|for)\b", re.IGNORECASE)
+
+# EXPLICIT build phrasing (Contract 4b BUILD-INTENT BOOST): "make/build/create/author
+# (me )?a tool (that|to) ...". When this is present the request is a NEW tool even if a
+# registered tool partially matches — UNLESS the text essentially names an existing tool
+# exactly (see _names_tool_exactly).
+_EXPLICIT_BUILD_RE = re.compile(
+    r"\b(make|build|create|author)(\s+me)?\s+an?\s+tools?\s+(that|to)\b", re.IGNORECASE
+)
+# Scaffolding tokens stripped before checking whether the text just NAMES an existing
+# tool (normalised vocabulary — matches _norm_tokens output).
+_BUILD_SCAFFOLD: Set[str] = {
+    "make", "build", "create", "author", "generate", "write", "need", "want",
+    "design", "develop", "scaffold", "new", "tool", "command", "capability",
+    "widget", "feature", "function", "script", "utility", "macro", "report",
+    "something",
+}
 
 # explicit optimisation / solver intent (the future Solve lane).
 _SOLVE_VERBS: Set[str] = {
@@ -228,17 +244,51 @@ def _confidence(s: _Score) -> float:
     return round(min(conf, 0.95), 2)
 
 
-def _best_match(q: Set[str], q_seq: List[str], docs: List[_ToolDoc]) -> Optional[_Score]:
+def _ranked(q: Set[str], q_seq: List[str], docs: List[_ToolDoc]) -> List[_Score]:
+    """All tools with any overlap, best-first. Deterministic ranking: raw, then name
+    coverage, then a SHORTER name (more specific), then alphabetical for stability."""
     scored = [_score(d, q, q_seq) for d in docs]
     scored = [s for s in scored if s.raw > 0]
-    if not scored:
-        return None
-    # deterministic ranking: raw, then name coverage, then a SHORTER name
-    # (more specific), then alphabetical for total stability.
     scored.sort(key=lambda s: (
         -s.raw, -s.name_cov, len(s.doc.name), str(s.doc.tool.get("name", "")),
     ))
-    return scored[0]
+    return scored
+
+
+def _alternatives(ranked: List[_Score], exclude_first: bool) -> List[Dict[str, Any]]:
+    """Top ≤3 non-winning tool matches as [{tool, confidence}] (Contract 4a). For a
+    RUN match the winner is ranked[0] (excluded); for build/solve there is no winning
+    tool, so the top matches are all 'non-winning'. May be empty."""
+    items = ranked[1:] if exclude_first else ranked
+    out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for s in items:
+        name = str(s.doc.tool.get("name"))
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({"tool": name, "confidence": _confidence(s)})
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _explicit_build(text: str) -> bool:
+    """Explicit authoring phrasing: 'make/build/create/author (me )?a tool (that|to)'."""
+    return _EXPLICIT_BUILD_RE.search(text or "") is not None
+
+
+def _names_tool_exactly(best: "_Score", q_seq: List[str]) -> bool:
+    """True iff, after stripping authoring scaffolding, the remaining CONTENT tokens are
+    all within the matched tool's name tokens — i.e. the text essentially NAMES that
+    existing tool exactly (e.g. 'make a tool: count panels'), so the RUN match is honoured
+    even under explicit build phrasing. A longer novel description (extra content tokens
+    beyond the name, e.g. '... smaller than 10 sqft') is NOT an exact name -> Build."""
+    name = set(best.doc.name)
+    residual = [t for t in q_seq if t not in _BUILD_SCAFFOLD]
+    if not residual:
+        return False
+    return set(residual) <= name
 
 
 # --------------------------------------------------------------------------- #
@@ -284,6 +334,7 @@ class Classification:
     params: Dict[str, Any]
     confidence: float
     rationale: str
+    alternatives: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -292,6 +343,7 @@ class Classification:
             "params": dict(self.params),
             "confidence": round(float(self.confidence), 2),
             "rationale": self.rationale,
+            "alternatives": [dict(a) for a in self.alternatives],
         }
 
 
@@ -334,9 +386,10 @@ def classify(
 
     catalog = [t for t in (tools or []) if isinstance(t, dict) and t.get("name") and not _is_internal(t)]
     docs = [_tool_doc(t) for t in catalog]
-    best = _best_match(q, q_seq, docs)
+    ranked = _ranked(q, q_seq, docs)
+    best = ranked[0] if ranked else None
 
-    result = _decide(text, q_seq, raw_toks, best)
+    result = _decide(text, q_seq, raw_toks, best, ranked)
 
     # --- documented LLM-classifier seam (OFF in v1) -------------------------- #
     if llm_classifier is not None and result.confidence < LLM_ESCALATION_CONF:
@@ -363,11 +416,21 @@ def _decide(
     q_seq: List[str],
     raw_toks: List[str],
     best: Optional[_Score],
+    ranked: List[_Score],
 ) -> Classification:
     # 1. AUTHORING intent -> Build lane (unless the user named an EXISTING tool
     #    almost exactly, in which case honour the run match).
     if _is_authoring(text, raw_toks):
-        if not (best is not None and best.exact):
+        honor_run = False
+        if best is not None and best.exact:
+            # A contiguous tool-name match. Under EXPLICIT build phrasing ("make/build/
+            # create/author (me )?a tool that|to ..."), honour it as a RUN ONLY when the
+            # text essentially NAMES that tool exactly; otherwise the explicit build
+            # intent wins even though a tool partially matched (Contract 4b BUILD-INTENT
+            # BOOST — fixes "make a tool that counts panels smaller than 10 sqft" -> build).
+            if not _explicit_build(text) or _names_tool_exactly(best, q_seq):
+                honor_run = True
+        if not honor_run:
             strong = _AUTHORING_PHRASE.search(text or "") is not None
             return Classification(
                 lane=LANE_BUILD,
@@ -376,6 +439,7 @@ def _decide(
                 confidence=0.90 if strong else 0.82,
                 rationale=("This describes a new tool to build, so it is routed "
                            "to the Build lane; nothing runs until it is authored."),
+                alternatives=_alternatives(ranked, exclude_first=False),
             )
 
     # 2. Explicit SOLVE / optimisation intent -> Solve lane (future).
@@ -387,6 +451,7 @@ def _decide(
             confidence=0.80,
             rationale=("This is an optimisation request. The Solve lane is not "
                        "available yet, so nothing runs — it is routed for when it lands."),
+            alternatives=_alternatives(ranked, exclude_first=False),
         )
 
     # 3. RUN lane — a catalog match (possibly low confidence).
@@ -405,6 +470,7 @@ def _decide(
         return Classification(
             lane=LANE_RUN, tool=tool_name, params=params,
             confidence=conf, rationale=rationale,
+            alternatives=_alternatives(ranked, exclude_first=True),
         )
 
     # 4. Nothing matched — honest low-confidence Run with no tool.
@@ -415,4 +481,5 @@ def _decide(
         confidence=0.10,
         rationale=("I couldn't match this to an existing capability — try rephrasing, "
                    "or describe a tool to build."),
+        alternatives=[],
     )

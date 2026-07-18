@@ -182,6 +182,17 @@ def wait_for_terminal(job_id: str, timeout_s: float, poll_s: float = 0.15) -> Op
 # --------------------------------------------------------------------------- #
 # execution
 # --------------------------------------------------------------------------- #
+def _progress_phase(tool: Dict[str, Any], aps_live: bool) -> str:
+    """The progress phase a run ENTERS before the (blocking) broker call (Contract 5c,
+    §15). Read tools -> 'executing'; write tools -> 'storing version' (mock APS_LIVE=0)
+    / 'extracting' (live re-extract APS_LIVE=1). Short + stable strings; documented in
+    §15 as the vocabulary SSE/poll consumers can render."""
+    caps = (tool or {}).get("capabilities") or []
+    if "drawing.write" in caps:
+        return "extracting" if aps_live else "storing version"
+    return "executing"
+
+
 def _heartbeat(job_id: str, progress: Optional[str] = None) -> None:
     if progress is None:
         _exec("UPDATE jobs SET updated_at = ? WHERE job_id = ?", (time.time(), job_id))
@@ -215,6 +226,10 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     _exec("UPDATE jobs SET status = 'running', progress = 'running', started_at = ?,"
           " updated_at = ? WHERE job_id = ?", (started, started, job_id))
     platform_link.on_running(job_id)  # best-effort; no-op if unlinked
+
+    # Richer progress (Contract 5c, §15): mark the real phase this run is ENTERING
+    # before the (blocking) broker call, so SSE/poll consumers see more than status flips.
+    _heartbeat(job_id, _progress_phase(tool, aps_live))
 
     holder: Dict[str, Any] = {}
 

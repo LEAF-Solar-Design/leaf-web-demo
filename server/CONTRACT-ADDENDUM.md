@@ -427,3 +427,78 @@ The versions response now carries `"checkout": {holder, acquired, expires} | nul
 straight from the store manifest's single-writer lock — read-only (no
 acquire/release endpoints this wave), for a calm "someone else is editing" chip.
 Ownership: extends `server/routers/drawings.py` (`da/store.py` unchanged).
+
+## §15 UI wave 3 — the Build lane made REAL (harness sidecar) + hygiene
+
+Session: `ui-wave-3-backend`, 2026-07-18. Makes the web UI's authoring path drive the
+real Agent SDK harness end to end, and closes four hygiene gaps. Verified offline by
+`server/tests/test_wave3.py` (+ the harness `npm test` 4/4 and a boot probe of the
+sidecar). The pre-wave-3 behavior is BYTE-IDENTICAL when the new env knobs are unset.
+
+### A. Harness sidecar (Contract 1) — `harness/scripts/serve.ts`
+
+A runnable HTTP sidecar composing the SAME four real ports as `harness/scripts/drive.ts`
+(EnvOrFileGrantStore → OAuthGrantProviderImpl; in-place TenantRepoProviderImpl at
+`LEAF_TENANT_REPO`; real `BrokerApsClientHttp` at `BROKER_URL`; `AgentSdkRunner`) and
+listening on `HARNESS_PORT` (default **8150**). Compile with `npx tsc -p tsconfig.build.json`
+and run `npm run serve` (`node dist/scripts/serve.js`). Point the app at it with
+`LEAF_AUTHOR_HARNESS_URL=http://127.0.0.1:8150`. Secret discipline: the code reads only
+the grant PATH (env `LEAF_GRANT_FILE`, default `C:/tmp/hosted-oauth-spike/.grant/token`);
+the token value flows only into a scrubbed SDK child env and is never printed/logged. A
+missing/malformed grant yields a clean HTTP-500 auth error from `POST /author` BEFORE any
+SDK session is constructed (no LLM credit spent). `GET /health` needs no grant.
+
+### B. Tenant-repo registry fold + entry resolution (Contract 2)
+
+`deps.all_tools()`: when `LEAF_TENANT_REPO` is set, the tenant repo's `registry.json`
+tools are folded in. **PRECEDENCE (last wins): engine registry < tenant-repo < write
+seed < `authored_tools.json`** — a tenant-repo tool overrides an engine tool of the same
+name, and an authored tool overrides both. With `LEAF_TENANT_REPO` unset the fold is
+empty and `all_tools()` is BYTE-IDENTICAL to before. A tenant tool keeps its repo-RELATIVE
+`entry` (e.g. `tools/<name>/tool.py`); `tool_loader.resolve_local_file` resolves it against
+`$LEAF_TENANT_REPO` (absolute), so the broker resolves the file regardless of its cwd —
+**removing the M1 broker-cwd hack**. Both the app (fold) and the broker (resolution) read
+`LEAF_TENANT_REPO` from env. The M1-authored `layer-bounding-boxes` in the demo tenant repo
+now appears in `/api/tools` and runs correctly at `APS_LIVE=0` through the normal broker
+(Panels bbox matches `data/nl_author_receipt.json`).
+
+### C. Author provenance (Contract 3)
+
+`POST /api/author` gains top-level **`source: "harness"|"template"`** and
+**`static_scan: [...]`** (the advisory SPEC §10.2 scan, surfaced consistently for both
+sources — also mirrored in `tool.provenance.static_scan` + the preview). Harness-authored
+tools are ALREADY registered into the TENANT repo by the harness build route, so they
+surface in `/api/tools` via §15.B's fold — the app does NOT persist them to the local
+`server/authored/` store or `_AUTHORED`. The template path (local persistence into
+`server/authored/<name>.py` + `authored_tools.json`) is UNCHANGED.
+
+### D. NL-router alternatives + build-intent boost (Contract 4)
+
+`POST /api/nl-prompt` (and `nl_router.classify`) gain **`alternatives: [{tool, confidence}]`**
+— the top ≤3 non-winning tool matches (for a RUN match, the ranked runners-up; for
+build/solve, the top catalog matches; may be empty). **BUILD-INTENT BOOST:** explicit
+authoring phrasing (`make/build/create/author (me )?a tool (that|to) …`) routes `lane=build`
+even when a registered tool partially (contiguously) matches — UNLESS the text essentially
+NAMES an existing tool exactly (after stripping authoring scaffolding, the residual content
+tokens are all within the tool's name). Fixes the known miss: *"make a tool that counts
+panels smaller than 10 sqft"* → **build** (previously misrouted to a `count-panels` RUN when
+that tool exists in the catalog).
+
+### E. Hygiene (Contract 5)
+
+- **(a) Durable platform Job terminal sync** (`server/platform_link.py`): the running /
+  terminal transitions now `UPDATE jobs … WHERE spine_ref = <spine job_id>` (globally-unique
+  uuid4) instead of an in-process map, so the sync **survives a full app-process restart**
+  (e.g. when the orphan reaper terminates a restarted job). Still best-effort + env-gated
+  (no-op without project headers or a resolvable platform DB); a vestigial `_MAP` is kept for
+  cheap within-process correlation but is no longer depended on.
+- **(b) Ops read-your-write** (`server/routers/ops.py`): `GET /api/ops/tenants` resolves the
+  kill-switch set FRESH on every request (per-request `GET /broker/health`, `Cache-Control:
+  no-cache`, broker_tenants.json fallback) — a just-disabled tenant is reflected immediately,
+  with no cached `/health`.
+- **(c) Richer job progress** (`server/jobs.py`): the worker sets a `progress` phase before
+  the (blocking) broker call so SSE/poll consumers see more than status flips. **Vocabulary
+  (short + stable):** `queued` → `running` → **`executing`** (read tools) | **`storing
+  version`** (write tools, mock `APS_LIVE=0`) | **`extracting`** (write tools, live re-extract
+  `APS_LIVE=1`) → `done` | `error`. The reaper/timeout paths are unchanged (they key off
+  `status`, not `progress`).

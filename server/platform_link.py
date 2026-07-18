@@ -18,12 +18,16 @@ failure must never affect the run. So the DB-less demo (no headers OR no DB) is
 BYTE-IDENTICAL to before (``server/tests/test_backbone.py`` depends on this): the
 spine INSERT, execution, and HTTP bodies are untouched.
 
-Correlation is in-process: ``on_submit`` records ``spine_job_id ->
-(platform_job_id, org_id)``; the terminal transition looks it up and UPDATEs
-status/result/cost, then drops the mapping. The row is CREATED via
-``leaf_platform.store.create_job`` (which is org-scoped + ``spine_ref``-carrying);
-the terminal UPDATE is issued here — ``store.py`` has no update path and is not
-this lane's to edit — and is org-scoped (``WHERE org_id = ... AND job_id = ...``).
+Correlation is DURABLE (wave 3, Contract 5a): the row is CREATED via
+``leaf_platform.store.create_job`` (org-scoped + carrying ``spine_ref=<spine job_id>``),
+and the running/terminal transitions UPDATE ``WHERE spine_ref = <spine job_id>`` — so
+the sync SURVIVES a full app-process restart (the in-process map is gone after a
+restart, but the durable row is still found by its unique ``spine_ref``, e.g. when the
+orphan reaper terminates a restarted job). ``store.py`` has no update path and is not
+this lane's to edit, so the UPDATE is issued here. A vestigial in-process ``_MAP`` is
+still populated on submit (cheap within-process correlation) but the terminal sync no
+longer DEPENDS on it. ``spine_ref`` is a globally-unique uuid4, so a spine-ref-scoped
+UPDATE targets exactly one row (no cross-org contamination).
 
 Imports the platform package under the ``leaf_platform`` alias, exactly as
 ``server/app.py`` does (the directory name ``platform/`` shadows the stdlib).
@@ -120,12 +124,14 @@ def on_submit(spine_job_id: str, org_id: Optional[str], project_id: Optional[str
 
 
 def on_running(spine_job_id: str) -> None:
-    """Flip the linked platform Job to 'running'. No-op if unlinked."""
-    entry = _get(spine_job_id)
-    if entry is None:
+    """Flip the linked platform Job to 'running' by its durable ``spine_ref``.
+
+    Gated on a resolvable platform DB; a spine_ref with no matching row (e.g. a run
+    submitted WITHOUT project headers) is a harmless 0-row UPDATE. Never raises."""
+    if not _db_configured():
         return
     try:
-        _update(entry, status="running")
+        _update_by_spine(spine_job_id, status="running")
     except Exception as exc:  # noqa: BLE001
         _log(f"running link failed (run unaffected): {type(exc).__name__}: {exc}")
 
@@ -133,14 +139,16 @@ def on_running(spine_job_id: str) -> None:
 def on_terminal(spine_job_id: str, spine_status: str,
                 result_env: Optional[Dict[str, Any]] = None,
                 error: Optional[Dict[str, Any]] = None) -> None:
-    """Sync the linked platform Job to its terminal state and drop the mapping.
+    """Sync the linked platform Job to its terminal state by its durable ``spine_ref``.
 
     succeeded/failed from the spine's complete/failed; on success ``result`` = the
-    §3 envelope and ``cost_usd`` = ``result_env['cost']['usd_est']`` (may be null
-    for a mock run). No-op if unlinked. Never raises.
+    §3 envelope and ``cost_usd`` = ``result_env['cost']['usd_est']`` (may be null for a
+    mock run). Finds the row by ``spine_ref`` — so it works even after an app restart
+    dropped the in-process map (the durable-sync property, Contract 5a). Best-effort +
+    env-gated; a spine_ref with no matching row is a harmless 0-row UPDATE. Never raises.
     """
-    entry = _pop(spine_job_id)
-    if entry is None:
+    _pop(spine_job_id)  # housekeeping only: drop any in-process correlation (not depended on)
+    if not _db_configured():
         return
     try:
         status = _STATUS_MAP.get(spine_status, "failed")
@@ -153,7 +161,7 @@ def on_terminal(spine_job_id: str, spine_status: str,
                 usd = cost.get("usd_est")
                 if isinstance(usd, (int, float)):
                     cost_usd = float(usd)
-        _update(entry, status=status, result=result_json, cost_usd=cost_usd)
+        _update_by_spine(spine_job_id, status=status, result=result_json, cost_usd=cost_usd)
     except Exception as exc:  # noqa: BLE001
         _log(f"terminal link failed (run unaffected): {type(exc).__name__}: {exc}")
 
@@ -161,31 +169,23 @@ def on_terminal(spine_job_id: str, spine_status: str,
 # --------------------------------------------------------------------------- #
 # internals
 # --------------------------------------------------------------------------- #
-def _get(spine_job_id: str) -> Optional[Dict[str, Any]]:
-    with _lock:
-        e = _MAP.get(str(spine_job_id))
-        return dict(e) if e else None
-
-
 def _pop(spine_job_id: str) -> Optional[Dict[str, Any]]:
     with _lock:
         return _MAP.pop(str(spine_job_id), None)
 
 
-def _update(entry: Dict[str, Any], *, status: str,
-            result: Optional[Dict[str, Any]] = None,
-            cost_usd: Optional[float] = None) -> None:
-    """Issue the org-scoped terminal/running UPDATE via the platform pool. The
-    ``result``/``cost_usd`` columns are only touched on a terminal sync (they are
-    passed None for the 'running' flip and left as-is by COALESCE-free assignment
-    only when provided)."""
+def _update_by_spine(spine_job_id: str, *, status: str,
+                     result: Optional[Dict[str, Any]] = None,
+                     cost_usd: Optional[float] = None) -> None:
+    """Issue the DURABLE terminal/running UPDATE via the platform pool, matched by the
+    globally-unique ``spine_ref``. Survives an app restart (no in-process state needed).
+    ``result``/``cost_usd`` are only touched on a terminal sync (passed None for the
+    'running' flip, and left as-is by assigning them only when provided)."""
     from psycopg.types.json import Jsonb  # noqa: PLC0415
 
     _store, db = _load_platform()
     sets = ["status = %(status)s", "updated_at = NOW()"]
-    args: Dict[str, Any] = {"status": status,
-                            "org_id": entry["org_id"],
-                            "job_id": entry["platform_job_id"]}
+    args: Dict[str, Any] = {"status": status, "spine_ref": str(spine_job_id)}
     if result is not None:
         sets.append("result = %(result)s")
         args["result"] = Jsonb(result)
@@ -193,6 +193,6 @@ def _update(entry: Dict[str, Any], *, status: str,
         sets.append("cost_usd = %(cost_usd)s")
         args["cost_usd"] = cost_usd
     sql = ("UPDATE jobs SET " + ", ".join(sets)
-           + " WHERE org_id = %(org_id)s AND job_id = %(job_id)s")
+           + " WHERE spine_ref = %(spine_ref)s")
     with db.cursor() as cur:
         cur.execute(sql, args)
