@@ -39,6 +39,7 @@ CAPABILITIES = ("run_read", "run_write", "build")
 # MUST mirror server/entitlements.json so enforcement is identical with or without it.
 _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
     "demo": {"run_read": True, "run_write": True, "build": True},
+    "restricted": {"run_read": True, "run_write": False, "build": False},
     "self_hosted": {"run_read": True, "run_write": True, "build": True},
     "hosted_starter": {"run_read": True, "run_write": True, "build": False},
     "hosted_pro": {"run_read": True, "run_write": True, "build": True},
@@ -67,11 +68,22 @@ def load_policy() -> Dict[str, Dict[str, Any]]:
     return {k: v for k, v in raw.items() if not k.startswith("_") and isinstance(v, dict)}
 
 
+# Sentinel: absent `.tier` ATTRIBUTE means a plain-str (auth-OFF) tenant => demo.
+# A present-but-empty `.tier` means an AUTHENTICATED tenant whose Auth0 claim carried
+# no tier — that must NOT fail open to full access (security-audit F9).
+_NO_TIER_ATTR = object()
+RESTRICTED_TIER = "restricted"  # authenticated, no tier claim: read-only, no write/build
+
+
 def resolve_tier(tenant: Any) -> str:
-    """The tenant's tier. Live auth -> the verified `TenantContext.tier`; a plain-str
-    (off-auth) tenant or a missing/empty tier -> "demo" (friction-free full access)."""
-    tier = getattr(tenant, "tier", None)
-    return str(tier) if tier else DEFAULT_TIER
+    """The tenant's tier. Off-auth (plain str, no `.tier` attribute) -> "demo"
+    (friction-free full access, by design). Authenticated (`TenantContext`) uses the
+    verified claim; an authenticated tenant with a MISSING/empty tier -> "restricted"
+    (fail CLOSED — never full access on a missing claim)."""
+    tier = getattr(tenant, "tier", _NO_TIER_ATTR)
+    if tier is _NO_TIER_ATTR:
+        return DEFAULT_TIER          # plain-str tenant => auth off => demo
+    return str(tier) if tier else RESTRICTED_TIER
 
 
 def entitlements_for(tier: str) -> Dict[str, bool]:

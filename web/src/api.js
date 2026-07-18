@@ -359,12 +359,16 @@ const TERMINAL = new Set(['complete', 'failed'])
 // complete), `error` ({error_code,message,retryable} on failed), `status`,
 // `progress`, `elapsed_ms`, `degraded_mode`.
 export async function getJob(jobId) {
-  return http(`/api/jobs/${encodeURIComponent(jobId)}`)
+  // Job reads are tenant-scoped server-side (security-audit F8) — send our tenant so
+  // a non-default VITE_TENANT_ID still resolves to its own jobs. (SSE + sendBeacon
+  // cannot set headers and rely on the demo-tenant default; documented follow-up.)
+  return http(`/api/jobs/${encodeURIComponent(jobId)}`, { headers: { 'X-Tenant-Id': TENANT } })
 }
 
 // GET recent jobs for a tenant (reconnect-after-tab-close list).
 export async function listJobs(tenantId = TENANT, limit = 20) {
-  const data = await http(`/api/jobs?tenant_id=${encodeURIComponent(tenantId)}&limit=${limit}`)
+  // tenant scope is enforced from the header server-side; the query param is legacy/ignored
+  const data = await http(`/api/jobs?limit=${limit}`, { headers: { 'X-Tenant-Id': tenantId } })
   return data.jobs || []
 }
 

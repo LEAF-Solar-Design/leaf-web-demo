@@ -537,7 +537,8 @@ def test_C5c_executing_progress_observable(stack):
     deadline = time.time() + 30
     rec = None
     while time.time() < deadline:
-        rec = requests.get(f"{stack['app']}/api/jobs/{job_id}", timeout=10).json()
+        rec = requests.get(f"{stack['app']}/api/jobs/{job_id}",
+                           headers=_h("wave3-prog"), timeout=10).json()
         if rec.get("progress"):
             seen_progress.add(rec["progress"])
         seen_status.add(rec["status"])

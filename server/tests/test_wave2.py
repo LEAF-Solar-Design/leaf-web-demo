@@ -407,7 +407,9 @@ def test_B_linkage_happy_path_before_and_after_terminal(stack):
     # wait for the spine to reach terminal
     deadline = time.time() + 30
     while time.time() < deadline:
-        jr = requests.get(f"{stack['app']}/api/jobs/{spine_job_id}", timeout=10).json()
+        # poll as the OWNING tenant (per-tenant job isolation, security-audit F8)
+        jr = requests.get(f"{stack['app']}/api/jobs/{spine_job_id}",
+                          headers=_h("wave2-link"), timeout=10).json()
         if jr["status"] in ("complete", "failed"):
             break
         time.sleep(0.3)

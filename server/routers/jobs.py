@@ -96,18 +96,21 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
 
 
 @router.get("/api/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
     rec = jobs.get_job(job_id)
-    if rec is None:
+    # 404 (never 403) both when the job is unknown AND when it belongs to another
+    # tenant — no cross-tenant existence leak (security-audit F8).
+    if rec is None or rec.get("tenant_id") != str(tenant):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
     return _record_body(rec)
 
 
 @router.get("/api/jobs/{job_id}/stream")
-def stream_job(job_id: str):
+def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
     """SSE: emit each (status, progress) transition; close after terminal."""
-    if jobs.get_job(job_id) is None:
+    _rec0 = jobs.get_job(job_id)
+    if _rec0 is None or _rec0.get("tenant_id") != str(tenant):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
 
@@ -138,8 +141,12 @@ def stream_job(job_id: str):
 
 
 @router.get("/api/jobs")
-def list_jobs(tenant_id: Optional[str] = None, limit: int = 20):
-    return with_envelope_fields({"jobs": [_record_body(r) for r in jobs.list_jobs(tenant_id, limit)]})
+def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
+    # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
+    # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
+    return with_envelope_fields(
+        {"jobs": [_record_body(r) for r in jobs.list_jobs(str(tenant), limit)]}
+    )
 
 
 @router.post("/api/jobs/{job_id}/close")
@@ -152,6 +159,11 @@ def close_job(job_id: str, tenant_id: str = Depends(deps.require_tenant)):
     if rec is None or str(tenant_id) != rec["tenant_id"]:
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
+    _rec = jobs.get_job(job_id)
+    if _rec is not None and _rec.get("tenant_id") != str(tenant_id):
+        # Another tenant's job — silently no-op (beacon path, keep it 200/idempotent).
+        return JSONResponse(status_code=200,
+                            content=with_envelope_fields({"job_id": job_id, "closed": False}))
     flagged = jobs.mark_job_closed(job_id)
     after = jobs.get_job(job_id)
     return with_envelope_fields(deps.tenant_echo(
