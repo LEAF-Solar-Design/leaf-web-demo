@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -163,6 +164,62 @@ def spent_from_broker_ledger(tenant_id: str, ledger_path) -> float:
         if isinstance(usd, (int, float)):
             total += float(usd)
     return round(total, 6)
+
+
+def aggregate_usage(tenant_id: str, ledger_path, now_ts: Optional[float] = None) -> Dict[str, Any]:
+    """Aggregate a tenant's runs + spend from the broker ledger for GET /api/usage.
+
+    Returns::
+
+        {"today": {"runs": int, "usd_est": float},
+         "total": {"runs": int, "usd_est": float}}
+
+    A ledger line counts iff its ``tenant_id`` matches AND its ``status`` is NOT a
+    pre-flight denial (``quota_exceeded`` / ``TENANT_DISABLED``) — a denied run
+    never touched APS and never spent, so it is neither a run nor a charge. This
+    is the SAME filter ``spent_from_broker_ledger`` applies, so
+    ``total.usd_est == spent_from_broker_ledger(tenant_id, ledger_path)``.
+
+    ``usd_est`` sums only numeric ``usd_est`` values (a mock ``APS_LIVE=0`` run
+    whose ``usd_est`` is ``null`` still counts as a run but adds $0). ``today`` is
+    the UTC-date bucket of each line's ``ts`` (epoch seconds); ``now_ts`` overrides
+    "now" for deterministic tests. A missing/empty/corrupt ledger yields all
+    zeros — this read NEVER raises.
+    """
+    today = (datetime.fromtimestamp(now_ts, tz=timezone.utc).date()
+             if now_ts is not None else datetime.now(timezone.utc).date())
+    total_runs = today_runs = 0
+    total_usd = today_usd = 0.0
+    p = Path(ledger_path)
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if e.get("tenant_id") != tenant_id:
+                continue
+            if e.get("status") in (QUOTA_EXCEEDED, "TENANT_DISABLED"):
+                continue
+            total_runs += 1
+            usd = e.get("usd_est")
+            usd = float(usd) if isinstance(usd, (int, float)) else 0.0
+            total_usd += usd
+            ts = e.get("ts")
+            if isinstance(ts, (int, float)):
+                try:
+                    if datetime.fromtimestamp(ts, tz=timezone.utc).date() == today:
+                        today_runs += 1
+                        today_usd += usd
+                except (OverflowError, OSError, ValueError):
+                    pass
+    return {
+        "today": {"runs": today_runs, "usd_est": round(today_usd, 6)},
+        "total": {"runs": total_runs, "usd_est": round(total_usd, 6)},
+    }
 
 
 # --------------------------------------------------------------------------- #

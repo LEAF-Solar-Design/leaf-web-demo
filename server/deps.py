@@ -232,5 +232,6 @@ def tenant_echo(body: Dict[str, Any], tenant: Any) -> Dict[str, Any]:
         out = dict(body)
         out["tenant_id"] = tenant.tenant_id
         out["org_id"] = tenant.org_id
+        out["tier"] = tenant.tier
         return out
     return body

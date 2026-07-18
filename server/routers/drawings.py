@@ -66,3 +66,46 @@ def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
+
+
+def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
+    """One manifest `versions[]` entry → the version-history row shape
+    (CONTRACT-ADDENDUM §11 manifest fields; missing optional fields → null)."""
+    parent = e.get("parent")
+    return {
+        "v": int(e["v"]),
+        "parent": (int(parent) if parent is not None else None),
+        "created": e.get("created"),
+        "bytes": e.get("bytes"),
+        "sha256": e.get("sha256"),
+        "tool": e.get("tool"),
+        "workitem_id": e.get("workitem_id"),
+        "note": e.get("note"),
+    }
+
+
+@router.get("/api/drawings/{drawing_id}/versions")
+def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """Full version-history chain straight from the store manifest — the read the
+    UI's version-chain popover needs (undo/redo only stepped head one hop).
+
+    §10-enveloped `{drawing_id, head, latest, versions:[{v, parent, created, bytes,
+    sha256, tool, workitem_id, note}]}`. Same 404 pattern as the intake route for
+    an unknown drawing (the well-known `demo` bootstraps on first read at
+    APS_LIVE=0; any other unknown drawing → BAD_PARAMS 404)."""
+    import store  # da/store.py; importable via write_loop's sys.path setup (imported above)
+
+    backend = _backend()
+    try:
+        write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+        m = store.load_manifest(backend, str(tenant_id), drawing_id)
+    except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
+                              retryable=False, status_code=404)
+    view = {
+        "drawing_id": drawing_id,
+        "head": int(m["head"]),
+        "latest": int(m["latest"]),
+        "versions": [_version_row(e) for e in m.get("versions", [])],
+    }
+    return with_envelope_fields(deps.tenant_echo(view, tenant_id))

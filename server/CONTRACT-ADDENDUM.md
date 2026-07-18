@@ -285,3 +285,88 @@ v1 always passes `None`, so the zero-LLM runtime is the default and the LLM neve
 enters the hot path unless a caller explicitly opts a request in. Ownership:
 `server/nl_router.py` (pure logic), `server/routers/prompt.py` (endpoint), one
 `include_router` line in `server/app.py`.
+
+## §13 UI wave 1 — spend meter, tier echo, version history
+
+Session: `ui-wave-1-backend`, 2026-07-18. Three additive reads the exposure map
+(`docs/backend-frontend-exposure-map.md`) declared ready-to-wrap, built against
+root-frozen shapes a sibling frontend lane consumes. All verified offline
+(`APS_LIVE=0`) by `server/tests/test_ui_wave.py`; no live APS, no LLM.
+
+### GET /api/usage — per-tenant spend / quota meter
+
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/api/usage` | `X-Tenant-Id` stub (default `demo-tenant`) or the live JWT `TenantContext` → §10-enveloped usage summary |
+
+```json
+{ "tenant_id": "demo-tenant",
+  "today": { "runs": 0, "usd_est": 0.0 },
+  "total": { "runs": 0, "usd_est": 0.0 },
+  "cap":   { "usd_cap": null, "remaining": null, "enabled": false },
+  "updated_at": "<UTC ISO-8601>",
+  "error": null, "degraded_mode": false }
+```
+
+- **Source = the broker attribution ledger**, aggregated app-side per tenant via
+  `da/usage.py::aggregate_usage(tenant, ledger)`. `today` is the **UTC-date**
+  bucket of each line's `ts`; `total` is lifetime. A line counts as a run iff its
+  `tenant_id` matches and its `status` is NOT a pre-flight denial
+  (`quota_exceeded` / `TENANT_DISABLED`) — a denied run never touched APS and
+  never spent. `usd_est` sums only numeric `usd_est` (a mock `APS_LIVE=0` run with
+  `usd_est:null` counts as a run, adds $0), so
+  `total.usd_est == usage.spent_from_broker_ledger(...)`.
+- **Ledger read app-side is deliberate and safe.** The ledger
+  (`server/broker_ledger.jsonl`) holds **no credential** — it IS the metering
+  surface — so the tenant-facing app process reads it directly rather than adding
+  a broker round-trip. Path resolved at request time:
+  `LEAF_USAGE_LEDGER` > `BROKER_LEDGER` (point the app at the broker's file) >
+  default `server/broker_ledger.jsonl`. A **missing/empty/corrupt ledger yields
+  zeros — never an error.**
+- **Cap fields** reflect `da/usage.py::cap_for(tenant)` (the same configured cap
+  the broker's hard pre-flight gate enforces): caps are **OFF by default**, so
+  `enabled:false` with `usd_cap:null` / `remaining:null` on a demo. When a cap is
+  configured (`LEAF_TENANT_CAP_USD` / `LEAF_USAGE_CAPS[_FILE]`): `enabled:true`,
+  `usd_cap` = the cap, `remaining` = `max(0, usd_cap − total.usd_est)`.
+- Ownership: new `server/routers/usage.py`, one `include_router` line in
+  `server/app.py`, additive read helper `aggregate_usage` in `da/usage.py`.
+
+### Claim echo now carries `tier` (`deps.tenant_echo`)
+
+Under `LEAF_AUTH_LIVE=1`, `deps.tenant_echo` additively stamps **`tier`** (from the
+verified `TenantContext`) alongside the existing `tenant_id` / `org_id`, so a
+live-auth `GET /api/session` (and every echoed body) can render an honest tier
+chip. **Off-auth behaviour is byte-identical** — a plain-string tenant leaves the
+body untouched (`tests/test_backbone.py` depends on this). See `contract/AUTH.md`
+§5. `GET /api/session` already routes through `tenant_echo`, so it carries `tier`
+through automatically — no route change.
+
+### GET /api/drawings/{drawing_id}/versions — version-history chain
+
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/api/drawings/{drawing_id}/versions` | §10-enveloped full version chain straight from the store manifest |
+
+```json
+{ "drawing_id": "demo", "head": 3, "latest": 3,
+  "versions": [ { "v", "parent", "created", "bytes", "sha256",
+                  "tool", "workitem_id", "note" } ],
+  "error": null, "degraded_mode": false }
+```
+
+Rows come verbatim from the `da/store.py` manifest `versions[]` (missing optional
+fields → null); this upgrades undo/redo from "step head one hop" to "browse the
+chain" and pairs with the existing `GET …/intake?version={n}` to preview a version.
+Unknown-drawing 404 is **identical to the intake route** (the well-known `demo`
+bootstraps on first read at `APS_LIVE=0`; any other unknown drawing →
+`BAD_PARAMS` HTTP 404). Ownership: extends `server/routers/drawings.py` (read-only;
+`da/store.py` unchanged).
+
+### `POST /api/jobs/{job_id}/close` accepts a bodyless POST (verified)
+
+The frontend fires the tab-close reap via `navigator.sendBeacon`, which cannot set
+`Content-Type: application/json` or custom headers. The `close_job` route declares
+**no request body** (only `job_id` path param + the `require_tenant` header dep),
+so an empty `text/plain` beacon body is accepted and never 422s. Verified by
+`test_ui_wave.py` (TestClient `post` with no `json`); **no signature change was
+needed.**

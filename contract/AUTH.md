@@ -151,6 +151,10 @@ to a route is a one-liner: add the dependency, and (optionally) echo the tenant
 into the success body via `deps.tenant_echo(body, tenant)` (a no-op when the
 toggle is off → byte-identical).
 
+**Claim echo (live only):** under `LEAF_AUTH_LIVE=1`, `deps.tenant_echo` additively
+stamps **`tenant_id`, `org_id`, and `tier`** (all three §1 claims) into the success
+body so the UI can render an honest tier chip; off-auth the body is unchanged.
+
 **`GET /api/session`** — DONE by this lane (`server/routers/session.py`):
 ```python
 def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_tenant)):
