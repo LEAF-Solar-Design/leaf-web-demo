@@ -1,0 +1,60 @@
+{
+  "loop": "drawing.write.product",
+  "input_dwg": "data/rooftop_demo.dwg",
+  "generated_at": "2026-07-18T03:51:52.298646+00:00",
+  "engine": "Autodesk.AutoCAD+26_0",
+  "activity": "LeafWriteProbe",
+  "tenant": "m2live",
+  "pass": true,
+  "undo_verified": true,
+  "drawing_id": "019f735a-1c59-75e5-81b5-ae94bdc2b620",
+  "extract_v1_workitem": {
+    "label": "extract-v1",
+    "id": "179bfc7f86f3454a9e498638f06f81cf",
+    "status": "success",
+    "engine_seconds": 2.68,
+    "usd_est": 0.0074
+  },
+  "new_version": {
+    "drawing_id": "019f735a-1c59-75e5-81b5-ae94bdc2b620",
+    "version": 2,
+    "parent": 1
+  },
+  "versions": [
+    1,
+    2
+  ],
+  "v2_probe_layer_present": true,
+  "v2_probe_polyline_present": true,
+  "deleted_handles": [
+    "9462"
+  ],
+  "delete_confirmed": true,
+  "v2_head_version": 2,
+  "undo_head_version": 1,
+  "cumulative_spend": 0.0163,
+  "workitems": [
+    {
+      "label": "extract-v1",
+      "id": "179bfc7f86f3454a9e498638f06f81cf",
+      "status": "success",
+      "engine_seconds": 2.68,
+      "usd_est": 0.0074
+    },
+    {
+      "label": "write",
+      "id": "a4a56655ac004c55a357a6053b536fcd",
+      "status": "success",
+      "engine_seconds": 3.19,
+      "usd_est": 0.0089
+    },
+    {
+      "label": "extract-v2",
+      "id": null,
+      "status": "success",
+      "engine_seconds": null,
+      "usd_est": null,
+      "note": "internal to run_write_live re-extract; engine_seconds not itemized (client.extract hides WorkItem status). ~1 billable WI (~$0.01)."
+    }
+  ]
+}

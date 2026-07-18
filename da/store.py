@@ -161,6 +161,49 @@ class OSSBackend(StorageBackend):
             raise
 
 
+class FilesystemBackend(StorageBackend):
+    """Local-filesystem backend: blobs are files under `root_dir`, one file per
+    object key (the key's `/`-segments become directories). Makes ZERO network /
+    APS calls — this is the backend the demo bootstrap ("demo" drawing) uses at
+    APS_LIVE=0 so the write loop persists real, durable, undo-able versions on
+    disk without touching OSS.
+
+    Object keys are the store's own deterministic, already-sanitized keys
+    (`tenants/.../v/00000001.dwg`, `.../manifest.json`); a normpath + prefix
+    check refuses any key that would escape `root_dir`.
+    """
+
+    def __init__(self, root_dir: str) -> None:
+        self.root = os.path.abspath(root_dir)
+
+    def _path(self, key: str) -> str:
+        p = os.path.normpath(os.path.join(self.root, key))
+        root = self.root if self.root.endswith(os.sep) else self.root + os.sep
+        if p != self.root and not p.startswith(root):
+            raise ValueError(f"object key {key!r} escapes store root")
+        return p
+
+    def get(self, key: str) -> bytes:
+        try:
+            with open(self._path(key), "rb") as fh:
+                return fh.read()
+        except FileNotFoundError as exc:
+            raise KeyError(key) from exc
+
+    def put(self, key: str, data: bytes) -> None:
+        p = self._path(key)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        # atomic-ish write (tmp in the same dir, then replace) so a crash mid-write
+        # never leaves a half-written immutable version or manifest behind.
+        tmp = p + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(bytes(data))
+        os.replace(tmp, p)
+
+    def exists(self, key: str) -> bool:
+        return os.path.exists(self._path(key))
+
+
 # --------------------------------------------------------------------------- #
 # Small helpers
 # --------------------------------------------------------------------------- #
@@ -306,6 +349,47 @@ def undo(backend: StorageBackend, tenant_id: str, drawing_id: str) -> int:
     m["head"] = int(parent)
     save_manifest(backend, tid, did, m)
     return int(parent)
+
+
+def redo(backend: StorageBackend, tenant_id: str, drawing_id: str) -> int:
+    """Re-advance head one step toward `latest` — the inverse of `undo`.
+
+    `undo` repointed head at its parent WITHOUT deleting any object, so the
+    forward chain (head -> ... -> latest via parent linkage) is still intact.
+    `redo` walks from `latest` back along `parent` pointers until it finds the
+    version whose parent IS the current head; that version is head's immediate
+    child on the path to latest, and head is repointed onto it. Stepping one
+    version at a time makes repeated redo mirror repeated undo.
+
+    Raises ValueError when head is already `latest` (nothing to redo) or the
+    forward chain is broken (no child of head leads to latest).
+    """
+    tid = sanitize_id(tenant_id)
+    did = sanitize_id(drawing_id)
+    m = load_manifest(backend, tid, did)
+
+    head = int(m["head"])
+    latest = int(m["latest"])
+    if head == latest:
+        raise ValueError("nothing to redo: head is already the latest version")
+
+    parent_of = {int(e["v"]): (int(e["parent"]) if e["parent"] is not None else None)
+                 for e in m["versions"]}
+    cur = latest
+    target = None
+    seen = set()
+    while cur is not None and cur not in seen:
+        seen.add(cur)
+        if parent_of.get(cur) == head:
+            target = cur
+            break
+        cur = parent_of.get(cur)
+    if target is None:
+        raise ValueError(f"nothing to redo: no child of head {head} leads to latest {latest}")
+
+    m["head"] = target
+    save_manifest(backend, tid, did, m)
+    return target
 
 
 # --------------------------------------------------------------------------- #

@@ -61,6 +61,7 @@ from envelopes import (  # noqa: E402
 )
 from tool_loader import run_tool_dynamic  # noqa: E402
 from tool_validate import validate_params  # noqa: E402
+import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 
 LEDGER_PATH = Path(os.environ.get("BROKER_LEDGER", str(SERVER_DIR / "broker_ledger.jsonl")))
 TENANTS_PATH = Path(os.environ.get("BROKER_TENANTS", str(SERVER_DIR / "broker_tenants.json")))
@@ -372,6 +373,26 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         return (err_envelope(ErrorCode.BAD_PARAMS, "params schema: " + "; ".join(perrs),
                              retryable=False, tool=tool.get("name")),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+
+    # 1c) WRITE BRANCH (M2): a drawing.write tool produces a NEW immutable store
+    #     version (undo/redo-able). Read tools do NOT match here and take the
+    #     unchanged live/mock paths below, so the read backbone is byte-identical.
+    if write_loop.is_write_tool(tool):
+        if req.aps_live:
+            da = _get_da()
+            if da is not None and hasattr(da, "run_tool"):
+                backend = write_loop.default_backend(aps_live=True, da=da)
+                return write_loop.run_write_live(tool, params, req.tenant_id,
+                                                 backend=backend, da=da, t0=t0,
+                                                 ledger_entry=entry)
+            # requested live but no da client -> degraded pure-python write
+            backend = write_loop.default_backend(aps_live=False)
+            return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
+                                             t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
+                                             degraded=True)
+        backend = write_loop.default_backend(aps_live=False)
+        return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
+                                         t0=t0, run_tool_dynamic_fn=run_tool_dynamic)
 
     # 2) live path — the ONLY code path that touches da/client.py + the credential
     if req.aps_live:

@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import deps
 from envelopes import install_error_handlers, with_envelope_fields
-from routers import author, capabilities, jobs, session, tools
+from routers import author, capabilities, drawings, jobs, session, tools
 
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 app.add_middleware(
@@ -42,6 +42,7 @@ app.include_router(tools.router)
 app.include_router(jobs.router)
 app.include_router(capabilities.router)
 app.include_router(author.router)
+app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoints
 
 
 # --- platform Project/Job router (org-scoped persistence; platform/README.md) --- #

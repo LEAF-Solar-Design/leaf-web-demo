@@ -28,6 +28,7 @@ ENGINE_DIR = PROJECT_ROOT / "engine"
 DA_DIR = PROJECT_ROOT / "da"
 ENGINE_REGISTRY = ENGINE_DIR / "registry.json"
 AUTHORED_STORE = SERVER_DIR / "authored_tools.json"  # our lane persists authored tools here
+WRITE_TOOLS_STORE = SERVER_DIR / "write_tools.json"  # tracked server-lane seed for drawing.write tools (M2)
 
 # make sibling lanes importable (engine.selfcheck, da.client)
 for p in (str(PROJECT_ROOT), str(SERVER_DIR)):
@@ -101,6 +102,19 @@ def load_authored_tools() -> List[Dict[str, Any]]:
     return []
 
 
+def load_seed_write_tools() -> List[Dict[str, Any]]:
+    """Tracked server-lane seed tools (drawing.write, M2). Kept separate from the
+    engine registry (Lane B) and the gitignored authored store so a fresh checkout
+    always resolves the write tool by name via /api/run."""
+    if WRITE_TOOLS_STORE.exists():
+        try:
+            tools = json.loads(WRITE_TOOLS_STORE.read_text(encoding="utf-8")).get("tools", [])
+            return [t for t in tools if isinstance(t, dict) and t.get("name")]
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[leaf-demo] bad write_tools.json: {exc}", file=sys.stderr)
+    return []
+
+
 def save_authored_tools(tools: List[Dict[str, Any]]) -> None:
     AUTHORED_STORE.write_text(json.dumps({"tools": tools}, indent=2), encoding="utf-8")
 
@@ -114,6 +128,8 @@ def all_tools() -> List[Dict[str, Any]]:
     """Registry tools + authored tools, de-duplicated by name (authored wins)."""
     by_name: Dict[str, Dict[str, Any]] = {}
     for t in load_engine_registry_tools():
+        by_name[t["name"]] = t
+    for t in load_seed_write_tools():  # tracked drawing.write seed (M2)
         by_name[t["name"]] = t
     for t in _AUTHORED:  # in-memory authored list (also persisted)
         by_name[t["name"]] = t

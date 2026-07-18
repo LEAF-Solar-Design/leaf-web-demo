@@ -133,3 +133,91 @@ Every server response body (app AND broker) carries at minimum:
   Validation errors (422) are also enveloped (`BAD_PARAMS`).
 - Machine-checkable schema: `server/envelope_schema.json` (does not touch
   Lane B's `engine/envelope_schema.json`).
+
+## §11 Drawing write loop (versioned edits + undo/redo)
+
+Session: `m2-write-loop-backend`, 2026-07-18. Wires the proven `drawing.write`
+capability into the product loop: a registered `drawing.write` tool run produces
+a NEW immutable drawing version in the versioned store (`da/store.py`), with
+undo/redo, working offline (`APS_LIVE=0`) and live (`APS_LIVE=1`). Verified by
+`server/tests/test_write_loop.py` (offline) and `data/write_loop_receipt.json`
+(one live loop: v1 ingest → v2 write → undo, `pass:true`, $0.0163, 3 WorkItems).
+
+### Additive §3 envelope field
+
+A successful `drawing.write` run's §3 envelope carries, inside `result`:
+
+```json
+"new_version": { "drawing_id": "demo", "version": 2, "parent": 1 }
+```
+
+This is ADDITIVE — the 8 core §3 keys are unchanged; read tools never carry it.
+The mock envelope's `result` also carries `mutations` / `deleted_handle` /
+`added_marker_handle` (tool-specific data).
+
+### Endpoints (`server/routers/drawings.py`, envelope-wrapped per §10)
+
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/api/drawings/{drawing_id}/intake?version=head\|latest\|<n>` | `{intake, version, head, latest}` — the intake for the resolved version |
+| POST | `/api/drawings/{drawing_id}/undo` | `{version, head, latest, intake}` — repoints head to its parent (objects never deleted → redo stays possible) |
+| POST | `/api/drawings/{drawing_id}/redo` | `{version, head, latest, intake}` — re-advances head one step toward `latest` along the parent chain |
+
+`undo` at the root version and `redo` when `head==latest` return a clean
+`BAD_PARAMS` (HTTP 400); an unknown drawing/version returns `BAD_PARAMS` (404).
+Tenant identity is the usual `X-Tenant-Id` stub (or the live JWT claim); the
+store is per-tenant, per-drawing.
+
+### Version-payload representation (read this — it is honest, not DWG-in-mock)
+
+The store is a generic versioned blob store; a version's `…/v/NNNNNNNN.dwg` key
+holds different bytes by mode:
+
+- **`APS_LIVE=0` (mock):** the version blob IS the intake JSON (not DWG bytes).
+  The `.dwg` key extension is the store's fixed key scheme, not a claim about the
+  content. `read_intake` reads that blob directly.
+- **`APS_LIVE=1` (live):** the version blob is real DWG bytes; a sibling
+  `…/v/NNNNNNNN.intake.json` cache key holds the re-extracted intake, and
+  `read_intake` prefers that cache (falling back to the blob-as-JSON for mock).
+
+### Mock write semantics (`APS_LIVE=0`)
+
+A write tool's `run(intake, params) -> (result, overlay)` is a PURE function that
+DECLARES its edit as `result["mutations"] = {"added": [<intake entities>],
+"removed": [<handles>]}`. The execution chain (`server/write_loop.py`) applies
+those to the CURRENT version's intake → new intake → `store.put_drawing`
+(parent = head) → stamps `result.new_version`. At `APS_LIVE=1` the chain instead
+runs the proven `LeafWriteProbe+prod` Activity (HostDwg = current version's DWG,
+Result = `output.dwg`), stores `output.dwg` via `put_drawing`, re-extracts for
+the intake cache — same envelope shape.
+
+### Demo bootstrap + registration
+
+- Well-known `drawing_id` **`demo`** bootstraps on first use at `APS_LIVE=0`: its
+  v1 payload is the cached `data/rooftop_demo.intake.json`, backed by a LOCAL
+  `FilesystemBackend` rooted at `server/drawings/` (gitignored; env
+  `LEAF_STORE_DIR` overrides so the app + broker share an isolated dir).
+- Shipped write tool: **`delete-marked-panel`** (`capabilities:["drawing.write"]`,
+  file `server/builtins/delete_marked_panel.py`) — mock: removes one polyline by
+  `handle` (default = first on `layer`, default `Panels`) and adds a marker
+  polyline on `LEAF_WRITE_PROBE`; live: reuses `LeafWriteProbe+prod`. Registered
+  via the tracked, server-lane seed `server/write_tools.json` (folded into
+  `deps.all_tools()` additively; read tools stay in `engine/registry.json`,
+  authored tools in the gitignored `authored_tools.json`).
+
+### Where the write branch hooks in
+
+`server/broker.py::_execute` — right after params pre-validation, a
+`write_loop.is_write_tool(tool)` guard delegates to
+`write_loop.run_write_mock` (or `run_write_live` at `APS_LIVE=1`). Read tools do
+NOT match and take the unchanged live/mock paths, so the read backbone is
+byte-identical.
+
+### v1 credential-boundary note
+
+At `APS_LIVE=0` the drawing endpoints use the `FilesystemBackend` and read NO APS
+credential (the tested condition; the app still runs with `APS_CRED=/nonexistent`).
+At `APS_LIVE=1` the app-side drawing reads use `OSSBackend` directly; promoting
+those reads through the broker (to keep strict credential isolation at live too,
+matching §8) is a documented follow-up. `da/store.py` gained an additive `redo`
+primitive and a `FilesystemBackend`; `da/client.py` is unchanged.

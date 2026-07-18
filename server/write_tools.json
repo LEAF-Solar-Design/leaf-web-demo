@@ -1,0 +1,36 @@
+{
+  "_note": "Tracked, server-lane seed registry for drawing.write tools (M2). deps.all_tools() folds these in additively so /api/run resolves them by name. Read tools stay in engine/registry.json; authored tools stay in the gitignored authored_tools.json.",
+  "tools": [
+    {
+      "name": "delete-marked-panel",
+      "version": "1.0.0",
+      "description": "Deletes one marked panel polyline (by handle; default = first on layer Panels) and adds a marker entity — produces a new immutable drawing version.",
+      "kind": "script",
+      "engine_op": "delete_marked_panel",
+      "entry": "builtins/delete_marked_panel.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "default": "demo",
+            "description": "Target drawing in the versioned store (well-known demo id at APS_LIVE=0)."
+          },
+          "handle": {
+            "type": "string",
+            "description": "Handle of the polyline to delete; default = first polyline on `layer`."
+          },
+          "layer": {
+            "type": "string",
+            "default": "Panels",
+            "description": "Layer to pick the default deletion target from."
+          }
+        },
+        "required": []
+      },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.write"],
+      "provenance": { "author": "agent", "created": "2026-07-18T00:00:00Z" }
+    }
+  ]
+}
