@@ -13,7 +13,7 @@ import json
 import time
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -40,8 +40,16 @@ def _record_body(rec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.post("/api/run")
-def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_tenant)):
-    """Submit a tool run as a durable background job (202), or block with ?wait=1."""
+def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_tenant),
+        x_org_id: Optional[str] = Header(default=None),
+        x_project_id: Optional[str] = Header(default=None)):
+    """Submit a tool run as a durable background job (202), or block with ?wait=1.
+
+    OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
+    ``X-Project-Id``, the run is additionally recorded as a canonical platform
+    Job (best-effort, env-gated — see server/platform_link.py). Absent either
+    header the behaviour is byte-identical to before.
+    """
     tool = deps.find_tool(req.tool)
     if tool is None:
         return error_response(ErrorCode.UNKNOWN_TOOL, f"unknown tool: {req.tool}",
@@ -51,7 +59,8 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
 
-    job_id = jobs.submit_job(tenant_id, tool, params, req.dwg, aps_live=deps.APS_LIVE)
+    job_id = jobs.submit_job(tenant_id, tool, params, req.dwg, aps_live=deps.APS_LIVE,
+                             org_id=x_org_id, project_id=x_project_id)
 
     if wait:
         rec = jobs.wait_for_terminal(job_id, timeout_s=jobs.job_max_s() + 30)

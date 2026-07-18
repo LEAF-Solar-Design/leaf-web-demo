@@ -19,8 +19,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from . import store
+from .db import cursor
 from .deps import get_org_id
-from .models import JOB_KINDS
+from .models import JOB_KINDS, TIERS, Org
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 
 router = APIRouter(prefix="/api", tags=["platform"])
@@ -29,6 +30,11 @@ router = APIRouter(prefix="/api", tags=["platform"])
 # --------------------------------------------------------------------------- #
 # request bodies
 # --------------------------------------------------------------------------- #
+class CreateOrgBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    tier: Optional[str] = None
+
+
 class CreateProjectBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
@@ -37,6 +43,45 @@ class CreateJobBody(BaseModel):
     kind: str
     tool: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
+
+
+# --------------------------------------------------------------------------- #
+# orgs — the tenant anchor every project/job route requires
+# --------------------------------------------------------------------------- #
+# DEV POSTURE (open endpoint): POST /api/orgs mints an org with NO auth gate so
+# the demo can bootstrap the first org_id (chicken/egg: you cannot present an
+# org you do not yet have). In PRODUCTION this MUST be gated behind the
+# auth/identity layer — org creation becomes a side effect of first login /
+# provisioning, and a client-supplied identity is never trusted here. Documented
+# in platform/README.md. GET /api/orgs/{org_id} keeps the same 404-not-403
+# isolation posture as the project/job reads: a caller may only read THEIR OWN
+# org (X-Org-Id must match the path), and a cross-org (or unknown) org yields 404.
+@router.post("/orgs")
+def create_org(body: CreateOrgBody):
+    if body.tier is not None and body.tier not in TIERS:
+        raise HTTPException(status_code=422, detail=f"tier must be one of {list(TIERS)}")
+    org = (store.create_org(body.name, tier=body.tier) if body.tier is not None
+           else store.create_org(body.name))
+    return {"org": org.to_dict()}
+
+
+@router.get("/orgs/{org_id}")
+def get_org(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id)):
+    # 404-not-403: a caller may only read its own org; a mismatch leaks nothing.
+    if org_id != caller_org:
+        raise HTTPException(status_code=404, detail="org not found")
+    # store.py has no get_org (and is not this lane's to edit); this read is
+    # org-scoped by construction (WHERE org_id = the caller's verified org).
+    with cursor() as cur:
+        cur.execute(
+            "SELECT org_id, name, tier, status, created_at, offboarded_at "
+            "FROM orgs WHERE org_id = %(org_id)s",
+            {"org_id": org_id},
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    return {"org": Org.from_row(row).to_dict()}
 
 
 # --------------------------------------------------------------------------- #

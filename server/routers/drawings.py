@@ -68,6 +68,16 @@ def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
 
 
+def _checkout_view(co: Any) -> Any:
+    """Manifest `checkout` lock → the read-only surface shape
+    `{holder, acquired, expires}` or null. No acquire/release endpoints this wave
+    (read-only): the frontend renders a calm "someone else is editing" chip."""
+    if not co:
+        return None
+    return {"holder": co.get("holder"), "acquired": co.get("acquired"),
+            "expires": co.get("expires")}
+
+
 def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
     """One manifest `versions[]` entry → the version-history row shape
     (CONTRACT-ADDENDUM §11 manifest fields; missing optional fields → null)."""
@@ -90,7 +100,9 @@ def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_tenant))
     UI's version-chain popover needs (undo/redo only stepped head one hop).
 
     §10-enveloped `{drawing_id, head, latest, versions:[{v, parent, created, bytes,
-    sha256, tool, workitem_id, note}]}`. Same 404 pattern as the intake route for
+    sha256, tool, workitem_id, note}], checkout: {holder, acquired, expires}|null}`
+    (§14: `checkout` is the single-writer lock from the manifest, read-only — no
+    acquire/release this wave). Same 404 pattern as the intake route for
     an unknown drawing (the well-known `demo` bootstraps on first read at
     APS_LIVE=0; any other unknown drawing → BAD_PARAMS 404)."""
     import store  # da/store.py; importable via write_loop's sys.path setup (imported above)
@@ -107,5 +119,6 @@ def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_tenant))
         "head": int(m["head"]),
         "latest": int(m["latest"]),
         "versions": [_version_row(e) for e in m.get("versions", [])],
+        "checkout": _checkout_view(m.get("checkout")),  # single-writer lock (read-only)
     }
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))

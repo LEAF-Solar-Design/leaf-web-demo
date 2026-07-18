@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import broker_client
+import platform_link
 from envelopes import ErrorCode, err_envelope, error_obj
 
 SERVER_DIR = Path(__file__).resolve().parent
@@ -118,8 +119,16 @@ def _row_to_record(row: sqlite3.Row) -> Dict[str, Any]:
 # public API (used by routers/jobs.py)
 # --------------------------------------------------------------------------- #
 def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg: str,
-               aps_live: bool) -> str:
-    """Insert the durable job row and hand it to the executor. Returns job_id."""
+               aps_live: bool, org_id: Optional[str] = None,
+               project_id: Optional[str] = None) -> str:
+    """Insert the durable job row and hand it to the executor. Returns job_id.
+
+    ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
+    ``X-Org-Id`` / ``X-Project-Id`` headers on ``POST /api/run``. When both are
+    present AND a platform DB resolves, a canonical platform Job row is recorded
+    (best-effort, env-gated; see platform_link). With no project context this is
+    a no-op and the spine is byte-identical to before.
+    """
     ensure_started()
     job_id = str(uuid.uuid4())
     now = time.time()
@@ -129,6 +138,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         (job_id, tenant_id, tool["name"], json.dumps(params), dwg, "submitted",
          "queued", now, now),
     )
+    # best-effort platform Job linkage (never raises, never affects the run)
+    platform_link.on_submit(job_id, org_id, project_id, tool.get("name"), params)
     assert _executor is not None
     _executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live)
     return job_id
@@ -192,6 +203,9 @@ def _finish(job_id: str, status: str, started: float,
          json.dumps(error) if error is not None else None,
          job_id),
     )
+    # best-effort platform Job terminal sync (all terminal paths funnel here:
+    # success, timeout, exception, and the orphan reaper). No-op if unlinked.
+    platform_link.on_terminal(job_id, status, result_env, error)
 
 
 def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
@@ -200,6 +214,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     max_s = job_max_s()
     _exec("UPDATE jobs SET status = 'running', progress = 'running', started_at = ?,"
           " updated_at = ? WHERE job_id = ?", (started, started, job_id))
+    platform_link.on_running(job_id)  # best-effort; no-op if unlinked
 
     holder: Dict[str, Any] = {}
 

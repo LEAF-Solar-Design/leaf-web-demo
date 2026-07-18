@@ -370,3 +370,60 @@ The frontend fires the tab-close reap via `navigator.sendBeacon`, which cannot s
 so an empty `text/plain` beacon body is accepted and never 422s. Verified by
 `test_ui_wave.py` (TestClient `post` with no `json`); **no signature change was
 needed.**
+
+## §14 UI wave 2 — Projects workspace made real + ops controls
+
+Session: `ui-wave-2-backend`, 2026-07-18. Four additive surfaces the exposure map
+(`docs/backend-frontend-exposure-map.md`) named as the "ready-but-dark" targets
+for the Projects workspace, built against root-frozen shapes a sibling frontend
+lane consumes. Verified by `server/tests/test_wave2.py` (Neon-backed create_org +
+linkage, offline broker/app subprocess for ops + versions). The DB-less demo is
+BYTE-IDENTICAL (`tests/test_backbone.py` unaffected).
+
+### A. `POST /api/orgs` + `GET /api/orgs/{org_id}` (platform router)
+
+| Method | Path | Behaviour |
+|---|---|---|
+| POST | `/api/orgs` | `{name, tier?}` → `{org: {org_id, name, tier, status, created_at, offboarded_at}}` (via `store.create_org`). **OPEN endpoint in dev** (no auth gate — bootstraps the first `org_id`; chicken/egg); **production gates it behind the auth/identity layer** (`platform/README.md`). `tier` optional, validated against `models.TIERS` (else 422); omitted → store default `hosted_starter`. |
+| GET | `/api/orgs/{org_id}` | `{org}` — **404-not-403 isolation**: a caller may read only its OWN org (`X-Org-Id` must equal the path); cross-org or unknown → 404, missing header → 400. |
+
+Org responses use the platform router's resource-wrapper convention (`{org: …}`),
+not the §10 `error`/`degraded_mode` envelope (matches its `{project}`/`{job}`
+siblings). Store read is org-scoped by construction; `store.py` unchanged.
+
+### B. Platform Job linkage — the piece that makes workspaces non-hollow
+
+`POST /api/run` gains two OPTIONAL headers, **`X-Org-Id` + `X-Project-Id`**. When
+BOTH are present AND a platform `DATABASE_URL` resolves, the async spine records a
+canonical platform **Job** row: `kind="run"`, `tool_name`, `params`,
+`spine_ref=<spine job_id>`, `status` synced `queued → running → succeeded|failed`,
+`result` = the §3 envelope on success, `cost_usd` = the envelope's `cost.usd_est`.
+
+**STRICTLY BEST-EFFORT + ENV-GATED** (`server/platform_link.py`): a no-op unless
+both headers are present AND the DB resolves; any DB/import error logs exactly one
+line and NEVER affects the run (everything wrapped). Absent either header → the
+spine + HTTP bodies are byte-identical to before. Correlation is in-process
+(`spine_job_id → platform_job_id`); the create goes through `store.create_job`,
+the terminal `UPDATE` is issued in `platform_link` (org-scoped) since `store.py`
+has no update path. Ownership: new `server/platform_link.py`, call sites in
+`server/jobs.py` (`submit_job` + `_run_job` + `_finish`), header plumbing in
+`server/routers/jobs.py`.
+
+### C. Ops surface (role-gated; app-side proxy of the broker chokepoint)
+
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/api/ops/tenants` | `X-Internal-Role: qa` (else 403) → `{tenants:[{tenant_id, runs, usd_est, disabled}]}` — per-tenant runs/spend from the broker ledger (`da/usage.aggregate_usage`) joined with kill-switch state (broker `/broker/health`, `broker_tenants.json` fallback) |
+| POST | `/api/ops/tenants/{tid}/disable` / `.../enable` | same role gate → **proxy** the broker's `/broker/tenants/{tid}/disable\|enable` over `BROKER_URL`; return the broker's §-enveloped ack. Broker unreachable → `BROKER_UNREACHABLE` envelope, HTTP 502 |
+
+Internal-only surface (NOT the tenant surface), gated exactly like the QA catalog
+filter. The 403 body is `BAD_PARAMS` at HTTP 403 (no frozen ErrorCode names
+authorization). Ownership: new `server/routers/ops.py` + one `include_router`
+line in `server/app.py`.
+
+### D. `GET /api/drawings/{id}/versions` gains `checkout`
+
+The versions response now carries `"checkout": {holder, acquired, expires} | null`
+straight from the store manifest's single-writer lock — read-only (no
+acquire/release endpoints this wave), for a calm "someone else is editing" chip.
+Ownership: extends `server/routers/drawings.py` (`da/store.py` unchanged).

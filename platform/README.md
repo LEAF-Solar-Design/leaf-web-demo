@@ -109,6 +109,26 @@ The Wave-1 build ran against an **ephemeral Neon branch** `leaf-platform-dev-w1`
 (`postgres:16`, `docker run -d --name leaf-platform-pg -e POSTGRES_PASSWORD=leafdev
 -p 5433:5432 postgres:16`).
 
+## Org bootstrap route — `POST /api/orgs` (dev posture: OPEN)
+
+`POST /api/orgs {name, tier?}` mints an org and returns `{org: {org_id, name,
+tier, status, created_at, ...}}` (calls `store.create_org`). It is the HTTP way
+to mint the `org_id` every project/job route requires — the true blocker the
+exposure map named (`create_org` existed in the store but was unexposed).
+
+**This endpoint is intentionally OPEN in dev** (no auth gate) to solve the
+bootstrap chicken/egg: you cannot present an `X-Org-Id` you do not yet have.
+**In production it MUST be gated behind the auth/identity layer** — org creation
+becomes a side effect of first login / provisioning, and a client-supplied
+identity is never trusted here (same seam as `deps.get_org_id`). `tier` is
+optional and, when supplied, validated against `models.TIERS` (else 422);
+omitted → the store default (`hosted_starter`).
+
+`GET /api/orgs/{org_id}` keeps the **404-not-403** isolation posture of the
+project/job reads: a caller may read only its OWN org (the `X-Org-Id` header
+must equal the path `org_id`); a cross-org or unknown id returns 404, never 403
+(a 403 leaks existence).
+
 ## Open integration note — orgs-table ownership
 
 The chosen dev DB (`leaf-portal-db`) already contains a Prisma-style `Organization`
