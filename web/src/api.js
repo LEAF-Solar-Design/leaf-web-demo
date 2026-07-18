@@ -14,6 +14,7 @@ import registry from './mock/registry.json'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
+import { groupToolsByFamily } from './mock/mockCapabilities.js'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8130'
 // Default to mock unless explicitly disabled (VITE_MOCK=0).
@@ -21,14 +22,29 @@ const MOCK_DEFAULT = import.meta.env.VITE_MOCK !== '0'
 // Tenant stub (X-Tenant-Id header) until real auth lands — matches the
 // server default so the broker ledger / job list stay consistent.
 const TENANT = import.meta.env.VITE_TENANT_ID || 'demo-tenant'
+// Auth seam (auth0-identity-signup): the platform JWT lives in localStorage
+// under `leaf.jwt`. When present we attach `Authorization: Bearer <token>` to
+// EVERY /api call so LEAF_AUTH_LIVE=1 works from the UI; when absent, headers are
+// byte-identical to the open-demo path (zero behavior change off-auth).
+const AUTH_KEY = 'leaf.jwt'
 
 export const config = { apiBase: API_BASE, mockDefault: MOCK_DEFAULT, tenant: TENANT }
+
+// Read the bearer token at CALL time (not module load) so a sign-in mid-session
+// is picked up. Returns {} when absent -> merging it is a no-op off-auth.
+export function authHeaders() {
+  try {
+    const tok = localStorage.getItem(AUTH_KEY)
+    return tok ? { Authorization: `Bearer ${tok}` } : {}
+  } catch { return {} }
+}
 
 // A tiny artificial delay so mock runs show loading states like the real thing.
 const nap = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function http(path, opts) {
-  const res = await fetch(`${API_BASE}${path}`, opts)
+  const headers = { ...(opts?.headers || {}), ...authHeaders() }
+  const res = await fetch(`${API_BASE}${path}`, { ...opts, headers })
   if (!res.ok) throw new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
   return res.json()
 }
@@ -42,10 +58,16 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
   if (mock) {
     const res = await fetch('/sample.intake.json')
     if (!res.ok) throw new Error('failed to load sample.intake.json')
-    return { intake: await res.json(), tenant: null }
+    return { intake: await res.json(), tenant: null, tier: null, org: null }
   }
   const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`)
-  return { intake: data.intake, tenant: data.tenant_id || null }
+  // tier/org_id are echoed by deps.tenant_echo only when auth is live; null off-auth.
+  return {
+    intake: data.intake,
+    tenant: data.tenant_id || null,
+    tier: data.tier || null,
+    org: data.org_id || null,
+  }
 }
 
 // --- NL prompt routing (CONTRACT-ADDENDUM §12) --------------------------
@@ -60,7 +82,7 @@ export async function nlPrompt(mock, text, tools = []) {
   try {
     const res = await fetch(`${API_BASE}/api/nl-prompt`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
       body: JSON.stringify({ text }),
     })
     if (!res.ok) throw new Error(`POST /api/nl-prompt -> ${res.status}`)
@@ -81,6 +103,68 @@ export async function getTools(mock) {
   }
   const data = await http('/api/tools')
   return data.tools
+}
+
+// --- Capability families (CONTRACT-ADDENDUM §9) -------------------------
+// GET /api/capabilities -> { families: [{family_id, label, description,
+//   capabilities:[{name, version, description, params_schema, capabilities,
+//   provenance}]}] }. Returns a normalized shape the left-rail catalog renders
+// grouped:  { families:[{..., capabilities:[toolShaped]}], source }.
+//   source: 'endpoint'      — real /api/capabilities (server-side filtered)
+//           'flat-fallback' — endpoint errored; grouped the flat /api/tools into
+//                             one "Tools" family so the rail stays populated
+//           'mock'          — grouped the local registry client-side (no /api)
+// Capability entries carry `params_schema`; ToolsPanel consumes `params` + `kind`,
+// so we normalize each into the tool shape it already renders.
+const normalizeCap = (c) => ({
+  ...c,
+  params: c.params_schema || c.params || { type: 'object', properties: {} },
+  kind: c.kind || 'script',
+})
+
+const normalizeFamilies = (families) =>
+  (families || []).map((f) => ({
+    family_id: f.family_id,
+    label: f.label || f.family_id,
+    description: f.description || '',
+    capabilities: (f.capabilities || []).map(normalizeCap),
+  }))
+
+export async function getCapabilities(mock) {
+  if (mock) {
+    await nap(150)
+    const tools = registry.tools.map((t) => ({ ...t }))
+    return { families: normalizeFamilies(groupToolsByFamily(tools)), source: 'mock' }
+  }
+  try {
+    const data = await http('/api/capabilities')
+    return { families: normalizeFamilies(data.families || []), source: 'endpoint' }
+  } catch {
+    // Endpoint unavailable — fall back calmly to the flat catalog as one family.
+    const tools = await getTools(false)
+    return {
+      families: [{
+        family_id: 'all',
+        label: 'Tools',
+        description: 'The classic flat catalog (families endpoint unavailable).',
+        capabilities: tools.map(normalizeCap),
+      }],
+      source: 'flat-fallback',
+    }
+  }
+}
+
+// --- Per-tenant spend / quota meter (thin ledger-backed read) -----------
+// GET /api/usage -> {tenant_id, today:{runs, usd_est}, total:{runs, usd_est},
+//   cap:{usd_cap, remaining, enabled}, updated_at} (§10-enveloped). LIVE only —
+// mock hides the spend chip (no fabricated numbers). Returns null when the
+// sibling endpoint isn't deployed yet (404/unreachable) so the chip stays hidden.
+export async function getUsage() {
+  try {
+    return await http('/api/usage', { headers: { 'X-Tenant-Id': TENANT } })
+  } catch {
+    return null
+  }
 }
 
 // --- Async job model (CONTRACT-ADDENDUM §7) -----------------------------
@@ -193,6 +277,22 @@ export function attachToJob(jobId, opts = {}) {
   return subscribeJob(jobId, opts.onStatus)
 }
 
+// --- Tab-close reap beacon (CONTRACT-ADDENDUM §7 / routers/jobs.py:121) --
+// Fire-and-forget POST /api/jobs/{id}/close via navigator.sendBeacon on tab-close
+// so an abandoned in-flight WorkItem is flagged closable server-side (the orphan
+// reaper fails it / cancels the WorkItem broker-side) instead of billing until the
+// heartbeat-stale window. Bodyless; the tenant resolves to the demo default when
+// no header is sent (off-auth), matching the run's tenant. Absolute URL so it
+// respects VITE_API_BASE. Returns the sendBeacon boolean (queued or not).
+export function closeJobBeacon(jobId) {
+  if (!jobId || typeof navigator === 'undefined' || !navigator.sendBeacon) return false
+  try {
+    return navigator.sendBeacon(`${API_BASE}/api/jobs/${encodeURIComponent(jobId)}/close`)
+  } catch {
+    return false
+  }
+}
+
 // --- Run (LIVE async) ---------------------------------------------------
 // POST /api/run -> 202 {job_id} -> subscribe -> resolve with the §3 envelope.
 // `opts.onSubmit(job_id)` fires the instant the job_id is known (for durable
@@ -201,7 +301,7 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
   const toolName = typeof tool === 'string' ? tool : tool.name
   const res = await fetch(`${API_BASE}/api/run`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify({ tool: toolName, params: params || {}, dwg }),
   })
   const body = await res.json().catch(() => null)
@@ -246,6 +346,16 @@ export async function getDrawingIntake(drawingId, version = 'head') {
     `/api/drawings/${encodeURIComponent(drawingId)}/intake?version=${encodeURIComponent(version)}`,
     { headers: { 'X-Tenant-Id': TENANT } },
   )
+}
+
+// Version-history chain (sibling contract): GET /api/drawings/{id}/versions ->
+// {drawing_id, head, latest, versions:[{v, parent, created, bytes, sha256, tool,
+// workitem_id, note}]}. LIVE only. Throws if the sibling endpoint isn't live yet
+// so the caller can render a calm "history unavailable" note.
+export async function getDrawingVersions(drawingId) {
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions`, {
+    headers: { 'X-Tenant-Id': TENANT },
+  })
 }
 
 export async function undoDrawing(drawingId) {

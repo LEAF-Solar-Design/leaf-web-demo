@@ -36,13 +36,13 @@ function defaultsOf(schema) {
   return out
 }
 
-export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool }) {
+export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool, subtitle }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
   return (
     <div className="tools-inner">
-      <p className="panel-sub">The classic catalog — click one, set params, run on Leaf. The prompt box above is the primary path.</p>
+      <p className="panel-sub">{subtitle || 'The classic catalog — click one, set params, run on Leaf. The prompt box above is the primary path.'}</p>
       {error && <div className="inline-error">Couldn’t load tools: {error}</div>}
       <div className="tool-list">
         {tools.map((t) => {

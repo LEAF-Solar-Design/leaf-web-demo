@@ -10,9 +10,12 @@ import RoutePanel from './components/RoutePanel.jsx'
 import JobRail from './components/JobRail.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import EntitlementGate from './components/EntitlementGate.jsx'
+import QuotaCard from './components/QuotaCard.jsx'
+import VersionHistory from './components/VersionHistory.jsx'
 import {
-  config, getSession, getTools, runTool, runToolAsync, attachToJob, getJob, listJobs,
-  recordToEnvelope, authorTool, getDrawingIntake, undoDrawing, redoDrawing, nlPrompt,
+  config, getSession, getTools, getCapabilities, getUsage, runTool, runToolAsync,
+  attachToJob, getJob, listJobs, recordToEnvelope, authorTool, getDrawingIntake,
+  getDrawingVersions, undoDrawing, redoDrawing, nlPrompt, closeJobBeacon,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
@@ -83,6 +86,19 @@ export default function App() {
 
   // --- unified surface state ---
   const [tenant, setTenant] = useState(null)             // /api/session tenant echo (else "demo")
+  const [tier, setTier] = useState(null)                 // real tier from the session echo (auth-live)
+  const [org, setOrg] = useState(null)                   // org_id from the session echo (auth-live)
+  const [catalog, setCatalog] = useState({ families: [], source: null }) // grouped families catalog
+  const [catalogErr, setCatalogErr] = useState(null)     // families load failure (falls back to flat tools)
+  const [openFamilies, setOpenFamilies] = useState({})   // per-family collapse state (family_id -> bool)
+  const [usage, setUsage] = useState(null)               // GET /api/usage aggregate (live; null hides chip)
+  // Version-history browser (§ version chain) + read-only preview state.
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [history, setHistory] = useState(null)           // {drawing_id, head, latest, versions[]}
+  const [historyErr, setHistoryErr] = useState(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [previewing, setPreviewing] = useState(null)     // {version} while previewing a non-head version
+  const [previewIntake, setPreviewIntake] = useState(null) // that version's intake, seated read-only
   const [prompt, setPrompt] = useState('')               // dispatch box text
   const [route, setRoute] = useState(null)               // §12 nl-prompt routing decision
   const [routing, setRouting] = useState(false)          // awaiting the router
@@ -101,10 +117,15 @@ export default function App() {
   const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
 
   const isEditFixture = mock && fixtureParam === 'edit'
-  // What the panels/legend/selection reflect: the applied version if present.
-  const shown = versionIntake || intake
+  // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
+  // else the applied write-loop version, else the base intake.
+  const shown = previewIntake || versionIntake || intake
   const projectName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : 'your project'
-  const tierLabel = tenant || 'demo'
+  // Honest identity: tenant id and tier are DISTINCT. tenant defaults to "demo"
+  // off-auth; tier is only known when the session echo carries it (auth live).
+  const tenantLabel = tenant || 'demo'
+  const tierDisplay = tier || '—'
+  const gateTier = tier || 'demo'
 
   // color-by-layer, stable across renders (keyed to base intake identity)
   const colorForLayer = useMemo(() => {
@@ -123,6 +144,9 @@ export default function App() {
     setDrawingState(null); setVersionNote(null); setVersionBusy(false)
     setOverlayStale(false); setOpenTool(null)
     setRoute(null); setRouting(false); setCurrentJobId(null); setTenant(null)
+    setTier(null); setOrg(null)
+    setHistoryOpen(false); setHistory(null); setHistoryErr(null)
+    setPreviewing(null); setPreviewIntake(null)
     runningSinceRef.current = null
     const seat = (d) => {
       if (!alive) return
@@ -136,7 +160,10 @@ export default function App() {
       return () => { alive = false }
     }
     getSession(mock)
-      .then(({ intake: d, tenant: t }) => { if (!alive) return; seat(d); setTenant(t) })
+      .then(({ intake: d, tenant: t, tier: ti, org: o }) => {
+        if (!alive) return
+        seat(d); setTenant(t); setTier(ti); setOrg(o)
+      })
       .catch((e) => alive && setLoadErr(String(e.message || e)))
     return () => { alive = false }
   }, [mock, isEditFixture])
@@ -148,6 +175,61 @@ export default function App() {
       .then((t) => alive && setTools(t))
       .catch((e) => alive && setToolsErr(String(e.message || e)))
     return () => { alive = false }
+  }, [mock])
+
+  // Families catalog (left rail): GET /api/capabilities grouped, or the mock
+  // registry grouped client-side. Refetched on mode change and after authoring a
+  // tool (so it lands in "Custom authored tools"). Falls back to the flat list
+  // inside getCapabilities; a total failure surfaces catalogErr (flat ToolsPanel).
+  const loadCatalog = useCallback(async () => {
+    setCatalogErr(null)
+    try {
+      const cat = await getCapabilities(mock)
+      setCatalog(cat)
+      // default every family collapsed (keeps the left catalog secondary to the prompt)
+      setOpenFamilies((prev) => {
+        const next = { ...prev }
+        for (const f of cat.families) if (!(f.family_id in next)) next[f.family_id] = false
+        return next
+      })
+    } catch (e) {
+      setCatalog({ families: [], source: null })
+      setCatalogErr(String(e.message || e))
+    }
+  }, [mock])
+
+  useEffect(() => { loadCatalog() }, [loadCatalog])
+
+  // Per-tenant spend chip: poll GET /api/usage on load (live only). null hides
+  // the chip (mock, or the sibling endpoint not deployed yet) — no fake numbers.
+  const loadUsage = useCallback(async () => {
+    if (mock) { setUsage(null); return }
+    try { setUsage(await getUsage()) } catch { setUsage(null) }
+  }, [mock])
+
+  useEffect(() => { loadUsage() }, [loadUsage])
+
+  // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
+  // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
+  // abandoned WorkItem closable (orphan reaper fails it) instead of billing until
+  // the heartbeat window. Live only (mock has no server job). Idempotent
+  // server-side; the localStorage re-attach path is untouched — if the user
+  // returns quickly the re-attach still re-fetches the record (which may have
+  // completed before the reaper swept). Absolute URL respects VITE_API_BASE.
+  useEffect(() => {
+    if (mock) return
+    const fire = () => {
+      const saved = readInflight()
+      if (saved && saved.job_id) closeJobBeacon(saved.job_id)
+    }
+    const onHide = () => fire()
+    const onVis = () => { if (document.visibilityState === 'hidden') fire() }
+    window.addEventListener('pagehide', onHide)
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      window.removeEventListener('pagehide', onHide)
+      document.removeEventListener('visibilitychange', onVis)
+    }
   }, [mock])
 
   // Refresh the live job rail on demand (after a run completes, so the job shows
@@ -269,6 +351,8 @@ export default function App() {
     setSelectedHandle(null)
     setDrawingState({ drawing_id: drawingId, version: view.head, head: view.head, latest: view.latest })
     setVersionNote(note)
+    // the version chain changed — drop any open history popover / active preview.
+    setHistoryOpen(false); setHistory(null); setPreviewing(null); setPreviewIntake(null)
   }, [])
 
   const onUndo = useCallback(async () => {
@@ -297,7 +381,55 @@ export default function App() {
     }
   }, [drawingState, versionBusy, seatVersion])
 
+  // --- version-history browser + read-only preview -------------------------
+  const toggleFamily = useCallback((id) => {
+    setOpenFamilies((o) => ({ ...o, [id]: !o[id] }))
+  }, [])
+
+  const onToggleHistory = useCallback(async () => {
+    if (historyOpen) { setHistoryOpen(false); return }
+    setHistoryOpen(true)
+    if (!drawingState) return
+    setHistoryLoading(true); setHistoryErr(null)
+    try {
+      setHistory(await getDrawingVersions(drawingState.drawing_id))
+    } catch (e) {
+      setHistoryErr(String(e.message || e)); setHistory(null)
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [historyOpen, drawingState])
+
+  // Read-only preview of a version. Head -> restore head + clear preview; any
+  // other version -> seat that intake in the viewer WITHOUT touching head/latest
+  // (undo/redo remain the only mutations; confirm via /intake?version=head).
+  const onPreviewVersion = useCallback(async (v) => {
+    if (!drawingState) return
+    const isHead = v === drawingState.head
+    try {
+      const view = await getDrawingIntake(drawingState.drawing_id, isHead ? 'head' : v)
+      viewerRef.current?.applyVersion(view.intake)
+      setSelectedHandle(null)
+      if (isHead) {
+        setVersionIntake(view.intake)   // re-sync the seated head
+        setPreviewIntake(null); setPreviewing(null)
+      } else {
+        setPreviewIntake(view.intake)
+        setPreviewing({ version: v })
+        setOverlayStale(true)           // last run's overlay describes a different version
+      }
+    } catch (e) {
+      setHistoryErr(String(e.message || e))
+    }
+  }, [drawingState])
+
+  const onBackToHead = useCallback(() => {
+    if (drawingState) onPreviewVersion(drawingState.head)
+  }, [drawingState, onPreviewVersion])
+
   const onRun = useCallback(async (tool, params) => {
+    // Read-only version preview never mutates head — Run is disabled while previewing.
+    if (previewing) return
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
@@ -341,9 +473,9 @@ export default function App() {
     } finally {
       setRunning(false)
       setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
-      if (!mock) { clearInflight(); refreshJobs() }
+      if (!mock) { clearInflight(); refreshJobs(); loadUsage() }
     }
-  }, [mock, shown, selectedHandle, markRunning, seatVersion, refreshJobs])
+  }, [mock, shown, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
@@ -357,8 +489,10 @@ export default function App() {
       const rest = prev.filter((t) => t.name !== res.tool.name)
       return [...rest, res.tool]
     })
+    // Re-group the catalog so the new tool lands in "Custom authored tools".
+    loadCatalog()
     return res
-  }, [mock])
+  }, [mock, loadCatalog])
 
   // --- prompt-first dispatch (§12) -----------------------------------------
   // Live preview of which lane the text will route to (lights the hero's dots).
@@ -469,6 +603,17 @@ export default function App() {
 
   const degraded = !!result?.degraded_mode || demoDegraded
 
+  // Total capabilities across families (footer + fam-title, honest count).
+  const capCount = useMemo(
+    () => catalog.families.reduce((n, f) => n + f.capabilities.length, 0),
+    [catalog],
+  )
+
+  // A run rejected by the hard spend cap (§ broker 402) -> calm amber quota card,
+  // not a red failure. The backend's message is authoritative.
+  const quotaError = (result && !result.ok && result.error &&
+    result.error.error_code === 'quota_exceeded') ? result.error : null
+
   return (
     <div className="app">
       <header className="top">
@@ -490,22 +635,62 @@ export default function App() {
             <input type="checkbox" checked={mock} onChange={(e) => setMock(e.target.checked)} />
             <span>Mock</span>
           </label>
-          <span>tier <b>{tierLabel}</b></span>
+          {!mock && usage && (
+            <span className="spend-chip" title="Aggregated from the broker ledger (GET /api/usage)">
+              ${Number(usage.today?.usd_est || 0).toFixed(3)} today · {usage.today?.runs || 0} runs
+              {usage.cap?.enabled && typeof usage.cap?.remaining === 'number'
+                ? ` · $${Number(usage.cap.remaining).toFixed(2)} left`
+                : ''}
+            </span>
+          )}
+          {org && <span className="who-id">org <b>{org}</b></span>}
+          <span className="who-id">tenant <b>{tenantLabel}</b> · tier <b>{tierDisplay}</b></span>
         </div>
       </header>
 
       <aside className="nav">
-        <div className="fam-title">Catalog · {tools.length} caps</div>
-        <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={() => setToolsOpen((o) => !o)}>
-          <ToolsPanel
-            tools={tools}
-            error={toolsErr}
-            running={running}
-            selectedTool={selectedTool}
-            onRun={onRun}
-            onOpenTool={setOpenTool}
-          />
-        </Section>
+        <div className="fam-title">
+          Catalog · {catalog.families.length} famil{catalog.families.length === 1 ? 'y' : 'ies'} · {capCount} caps
+          {catalog.source === 'flat-fallback' ? ' · flat' : ''}
+          {catalog.source === 'mock' ? ' · stub' : ''}
+        </div>
+        {catalogErr && (
+          <>
+            <div className="inline-error" style={{ margin: '0 4px 8px' }}>Couldn’t load families: {catalogErr}</div>
+            <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={() => setToolsOpen((o) => !o)}>
+              <ToolsPanel
+                tools={tools}
+                error={toolsErr}
+                running={running || !!previewing}
+                selectedTool={selectedTool}
+                onRun={onRun}
+                onOpenTool={setOpenTool}
+              />
+            </Section>
+          </>
+        )}
+        {!catalogErr && catalog.families.length === 0 && (
+          <div className="dim" style={{ margin: '4px' }}>Loading catalog…</div>
+        )}
+        {catalog.families.map((fam) => (
+          <Section
+            key={fam.family_id}
+            title={fam.label}
+            count={fam.capabilities.length}
+            open={!!openFamilies[fam.family_id]}
+            onToggle={() => toggleFamily(fam.family_id)}
+          >
+            <ToolsPanel
+              tools={fam.capabilities}
+              subtitle={fam.description}
+              error={toolsErr}
+              running={running || !!previewing}
+              selectedTool={selectedTool}
+              onRun={onRun}
+              onOpenTool={setOpenTool}
+            />
+          </Section>
+        ))}
         <Section
           title="Author a tool"
           open={authorOpen}
@@ -540,11 +725,13 @@ export default function App() {
         <RoutePanel
           route={route}
           tools={tools}
-          running={running}
+          running={running || !!previewing}
           onRun={onRun}
           onPickAlternative={onPickAlternative}
           onOpenAuthor={onOpenAuthor}
         />
+
+        {quotaError && <QuotaCard message={quotaError.message} remaining={usage?.cap?.remaining} />}
 
         {degraded && <DegradedBanner />}
 
@@ -562,23 +749,47 @@ export default function App() {
               )}
             </div>
             <div className="viewer-actions">
-              {!mock && versionNote && <span className="version-note">{versionNote}</span>}
+              {!mock && versionNote && !previewing && <span className="version-note">{versionNote}</span>}
+              {!mock && previewing && (
+                <span className="version-note">viewing v{previewing.version} · read-only</span>
+              )}
               {!mock && drawingState && (
                 <>
                   <button
                     className="btn ghost"
                     onClick={onUndo}
-                    disabled={versionBusy || running || drawingState.head <= 1}
+                    disabled={versionBusy || running || !!previewing || drawingState.head <= 1}
                   >
                     Undo
                   </button>
                   <button
                     className="btn ghost"
                     onClick={onRedo}
-                    disabled={versionBusy || running || drawingState.head >= drawingState.latest}
+                    disabled={versionBusy || running || !!previewing || drawingState.head >= drawingState.latest}
                   >
                     Redo
                   </button>
+                  <div className="vh-anchor">
+                    <button
+                      className="btn ghost"
+                      onClick={onToggleHistory}
+                      aria-expanded={historyOpen}
+                      disabled={versionBusy}
+                    >
+                      History{previewing ? ` · v${previewing.version}` : ''}
+                    </button>
+                    {historyOpen && (
+                      <VersionHistory
+                        data={history}
+                        error={historyErr}
+                        loading={historyLoading}
+                        previewingVersion={previewing?.version ?? null}
+                        onPreview={onPreviewVersion}
+                        onBackToHead={onBackToHead}
+                        onClose={() => setHistoryOpen(false)}
+                      />
+                    )}
+                  </div>
                 </>
               )}
               {isEditFixture && (
@@ -642,7 +853,7 @@ export default function App() {
           />
         </div>
 
-        <EntitlementGate tier={tierLabel} />
+        <EntitlementGate tier={gateTier} />
       </main>
 
       <JobRail
@@ -655,10 +866,13 @@ export default function App() {
       />
 
       <footer className="foot-bar">
-        <span>capability catalog · <span className="ok-txt">{tools.length} loaded</span></span>
+        <span>capability catalog · <span className="ok-txt">{capCount} caps · {catalog.families.length} families</span></span>
         <span>backend · {mock ? <span className="warn-txt">mock (no cloud)</span> : <span className="ok-txt">live</span>}</span>
         <span>local solver · <span className="ok-txt">ready</span></span>
-        <span>entitlement · tier {tierLabel}</span>
+        {!mock && usage && (
+          <span>spend · <span className="ok-txt">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span></span>
+        )}
+        <span>entitlement · tier {gateTier}</span>
         <span style={{ marginLeft: 'auto' }}>build v2026.07 · {mock ? 'sample data' : 'live'}</span>
       </footer>
     </div>
