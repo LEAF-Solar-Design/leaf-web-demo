@@ -13,3 +13,6 @@ server/jobs.db-shm
 server/jobs.db-wal
 server/broker_tenants.json
 server/authored_tools.json
+engine/appbundle-write/bin/
+engine/appbundle-write/obj/
+engine/appbundle-write/build/
