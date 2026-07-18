@@ -24,6 +24,14 @@ export interface TenantRepoProviderOptions {
   locator: TenantRepoLocator;
   /** Base dir for per-session checkouts (default: OS temp). */
   workBase?: string;
+  /**
+   * In-place mode: treat the locator's ref as a LOCAL working directory and operate
+   * on it directly (no clone into a temp dir). This is the single-node demo model
+   * where the tenant's mushy-repo is checked out on the app host at a known path, so
+   * a `build` commit and a later `run` read the SAME registry.json + tool files.
+   * The broker (whose cwd is that dir) then resolves the authored `entry` file.
+   */
+  inPlace?: boolean;
 }
 
 function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
@@ -52,6 +60,10 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
 
   async checkout(tenantId: string): Promise<TenantRepo> {
     const ref = await this.opts.locator.repoRef(tenantId);
+    if (this.opts.inPlace) {
+      // ref IS the local working dir; operate on it directly (no temp clone).
+      return new GitTenantRepo(ref);
+    }
     const base = this.opts.workBase ?? tmpdir();
     const dir = mkdtempSync(join(base, `mushy-${tenantId}-`));
     git(dir, ["clone", "--depth", "1", ref, "."]);

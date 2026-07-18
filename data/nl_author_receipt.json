@@ -1,0 +1,257 @@
+{
+  "pass": true,
+  "prompt": "Report the bounding box (min/max x,y) of each layer's geometry, sorted by area (largest first).",
+  "sdk_package_version": "0.3.214",
+  "broker_url": "http://127.0.0.1:8140",
+  "tenant_repo": "C:/tmp/leaf-tenants/demo-tenant",
+  "ran_at": "2026-07-18T03:24:42.506Z",
+  "tool_name": "layer-bounding-boxes",
+  "engine_op": "layer_bounding_boxes",
+  "tool": {
+    "name": "layer-bounding-boxes",
+    "version": "1.0.0",
+    "description": "Computes the bounding box (min/max X and Y) of each layer's geometry, using polyline and 3D-face vertices, and returns the layers sorted by bounding-box area, largest first.",
+    "kind": "script",
+    "engine_op": "layer_bounding_boxes",
+    "entry": "tools/layer-bounding-boxes/tool.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional list of layer names to restrict the report to. If omitted, all layers with geometry are included."
+        }
+      },
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object",
+      "properties": {
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "layer": {
+                "type": "string"
+              },
+              "min_x": {
+                "type": "number"
+              },
+              "max_x": {
+                "type": "number"
+              },
+              "min_y": {
+                "type": "number"
+              },
+              "max_y": {
+                "type": "number"
+              },
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              },
+              "area": {
+                "type": "number"
+              },
+              "geometry_count": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "layer",
+              "min_x",
+              "max_x",
+              "min_y",
+              "max_y",
+              "width",
+              "height",
+              "area",
+              "geometry_count"
+            ]
+          }
+        },
+        "layer_count": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "layers",
+        "layer_count"
+      ]
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "timeout_ms": 30000,
+    "idempotent": true,
+    "review": {
+      "status": "unreviewed"
+    },
+    "provenance": {
+      "author": "agent",
+      "created": "2026-07-18T03:25:11.568Z",
+      "modified": "2026-07-18T03:25:11.568Z",
+      "session": "agent-sdk",
+      "static_scan": []
+    }
+  },
+  "preview": "Tool \"layer-bounding-boxes\" authored via the Agent SDK (engine_op=layer_bounding_boxes); runs zero-LLM at runtime.",
+  "turns": 5,
+  "usage_totals": {
+    "input_tokens": 10,
+    "output_tokens": 3643,
+    "cache_creation_input_tokens": 8901,
+    "cache_read_input_tokens": 162063,
+    "total_tokens": 174617
+  },
+  "per_turn_usage": [
+    {
+      "turn": 1,
+      "model": "claude-sonnet-5",
+      "input_tokens": 2,
+      "output_tokens": 5,
+      "cache_creation_input_tokens": 4621,
+      "cache_read_input_tokens": 27089
+    },
+    {
+      "turn": 2,
+      "model": "claude-sonnet-5",
+      "input_tokens": 2,
+      "output_tokens": 5,
+      "cache_creation_input_tokens": 4621,
+      "cache_read_input_tokens": 27089
+    },
+    {
+      "turn": 3,
+      "model": "claude-sonnet-5",
+      "input_tokens": 2,
+      "output_tokens": 2,
+      "cache_creation_input_tokens": 822,
+      "cache_read_input_tokens": 31710
+    },
+    {
+      "turn": 4,
+      "model": "claude-sonnet-5",
+      "input_tokens": 2,
+      "output_tokens": 2,
+      "cache_creation_input_tokens": 822,
+      "cache_read_input_tokens": 31710
+    },
+    {
+      "turn": 5,
+      "model": "claude-sonnet-5",
+      "input_tokens": 2,
+      "output_tokens": 54,
+      "cache_creation_input_tokens": 2492,
+      "cache_read_input_tokens": 32532
+    },
+    {
+      "turn": 6,
+      "model": "claude-sonnet-5",
+      "input_tokens": 2,
+      "output_tokens": 35,
+      "cache_creation_input_tokens": 684,
+      "cache_read_input_tokens": 35024
+    },
+    {
+      "turn": 7,
+      "model": "claude-sonnet-5",
+      "input_tokens": 2,
+      "output_tokens": 1,
+      "cache_creation_input_tokens": 282,
+      "cache_read_input_tokens": 35708
+    }
+  ],
+  "total_cost_usd": 0.1582199,
+  "models": [
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-5"
+  ],
+  "session_id": "d8aa4965-4777-49f8-991b-1a2dff2e6850",
+  "author_ms": 36012,
+  "authored_files": [
+    "tools/layer-bounding-boxes/tool.py",
+    "tools/layer-bounding-boxes/tool.json"
+  ],
+  "entry_code": "\"\"\"\nlayer-bounding-boxes\n\nDeterministic, pure-stdlib tool. Computes the 2D bounding box (min/max X, Y)\nof every layer's geometry (from polylines and 3D faces) and returns the\nlayers sorted by bounding-box area, largest first.\n\nNo I/O, no network, no LLM involvement at run time.\n\"\"\"\n\n\ndef run(intake, params):\n    params = params or {}\n    layer_filter = params.get(\"layers\")\n    layer_filter_set = set(layer_filter) if layer_filter else None\n\n    stats = {}\n\n    def consider(layer, pts):\n        if not pts:\n            return\n        if layer_filter_set is not None and layer not in layer_filter_set:\n            return\n        entry = stats.get(layer)\n        if entry is None:\n            entry = {\n                \"min_x\": None,\n                \"max_x\": None,\n                \"min_y\": None,\n                \"max_y\": None,\n                \"count\": 0,\n            }\n            stats[layer] = entry\n        for pt in pts:\n            if pt is None or len(pt) < 2:\n                continue\n            x = float(pt[0])\n            y = float(pt[1])\n            if entry[\"min_x\"] is None or x < entry[\"min_x\"]:\n                entry[\"min_x\"] = x\n            if entry[\"max_x\"] is None or x > entry[\"max_x\"]:\n                entry[\"max_x\"] = x\n            if entry[\"min_y\"] is None or y < entry[\"min_y\"]:\n                entry[\"min_y\"] = y\n            if entry[\"max_y\"] is None or y > entry[\"max_y\"]:\n                entry[\"max_y\"] = y\n        entry[\"count\"] += 1\n\n    for pl in intake.get(\"polylines\") or []:\n        consider(pl.get(\"layer\", \"\"), pl.get(\"pts\") or [])\n\n    for f in intake.get(\"faces3d\") or []:\n        consider(f.get(\"layer\", \"\"), f.get(\"pts\") or [])\n\n    layers_out = []\n    for layer, entry in stats.items():\n        if entry[\"min_x\"] is None:\n            continue\n        width = entry[\"max_x\"] - entry[\"min_x\"]\n        height = entry[\"max_y\"] - entry[\"min_y\"]\n        area = width * height\n        layers_out.append(\n            {\n                \"layer\": layer,\n                \"min_x\": entry[\"min_x\"],\n                \"max_x\": entry[\"max_x\"],\n                \"min_y\": entry[\"min_y\"],\n                \"max_y\": entry[\"max_y\"],\n                \"width\": width,\n                \"height\": height,\n                \"area\": area,\n                \"geometry_count\": entry[\"count\"],\n            }\n        )\n\n    layers_out.sort(key=lambda r: r[\"area\"], reverse=True)\n\n    result = {\n        \"layers\": layers_out,\n        \"layer_count\": len(layers_out),\n    }\n    return (result, None)\n",
+  "validation_result": {
+    "ok": true,
+    "diagnostics": []
+  },
+  "tenant_repo_commit": "c534031a9cd1f02838799544adfc3ad174b44348",
+  "tenant_repo_commit_subject": "Leaf Tool Harness|author tool: layer-bounding-boxes",
+  "run_registered_result_summary": {
+    "http_status": 200,
+    "ok": true,
+    "tool": "layer-bounding-boxes",
+    "version": "1.0.0",
+    "timing_ms": 10,
+    "degraded_mode": false,
+    "error": null,
+    "result": {
+      "layers": [
+        {
+          "layer": "Panels",
+          "min_x": 13940.333,
+          "max_x": 21108.478,
+          "min_y": 1125.414,
+          "max_y": 4856.626,
+          "width": 7168.144999999999,
+          "height": 3731.2120000000004,
+          "area": 26745868.641739998,
+          "geometry_count": 2345
+        }
+      ],
+      "layer_count": 1
+    }
+  },
+  "zero_llm_on_run_path": true,
+  "independent_check": {
+    "expected": {
+      "Panels": {
+        "min_x": 13940.333,
+        "min_y": 1125.414,
+        "max_x": 21108.478,
+        "max_y": 4856.626,
+        "area": 26745868.642,
+        "count": 9380
+      }
+    },
+    "got": {
+      "layers": [
+        {
+          "layer": "Panels",
+          "min_x": 13940.333,
+          "max_x": 21108.478,
+          "min_y": 1125.414,
+          "max_y": 4856.626,
+          "width": 7168.144999999999,
+          "height": 3731.2120000000004,
+          "area": 26745868.641739998,
+          "geometry_count": 2345
+        }
+      ],
+      "layer_count": 1
+    },
+    "per_layer_match": {
+      "Panels": {
+        "expected": {
+          "min_x": 13940.333,
+          "min_y": 1125.414,
+          "max_x": 21108.478,
+          "max_y": 4856.626,
+          "area": 26745868.642,
+          "count": 9380
+        },
+        "matched": true
+      }
+    },
+    "match": true
+  }
+}

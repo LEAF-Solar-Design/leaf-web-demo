@@ -16,12 +16,51 @@
  * (encrypted-at-rest, per-tenant) is the sibling lane's deliverable.
  */
 
+import { existsSync, readFileSync } from "node:fs";
 import type { AgentGrant, OAuthGrantProvider } from "../index.js";
 
 /** The per-tenant grant store the hosted-oauth-spike lane will provide. */
 export interface TenantGrantStore {
   /** Return the tenant's stored grant, or null if the tenant has not linked one. */
   get(tenantId: string): Promise<AgentGrant | null>;
+}
+
+/**
+ * Concrete grant store for the demo/single-operator lane: resolves ONE OAuth grant
+ * from the env var `CLAUDE_CODE_OAUTH_TOKEN`, else from the file named by env
+ * `LEAF_GRANT_FILE` (default the proven hosted-oauth-spike grant path). This is the
+ * operator's OWN 1-year subscription token (individual-use). The token VALUE is only
+ * ever returned inside the AgentGrant; it is NEVER printed or logged here.
+ *
+ * NOTE: a real multi-tenant deployment replaces this with a per-tenant, encrypted-
+ * at-rest store keyed by tenantId (each user's OWN "sign in with Claude" token). A
+ * single operator token serving many tenants is the individual-use / anti-bridging
+ * violation the research doc flags; this store is a single-operator demo convenience.
+ */
+export interface EnvOrFileGrantStoreOptions {
+  /** Default: env LEAF_GRANT_FILE, then C:/tmp/hosted-oauth-spike/.grant/token. */
+  grantFile?: string;
+}
+
+const DEFAULT_GRANT_FILE = "C:/tmp/hosted-oauth-spike/.grant/token";
+
+export class EnvOrFileGrantStore implements TenantGrantStore {
+  private readonly grantFile: string;
+  constructor(opts: EnvOrFileGrantStoreOptions = {}) {
+    this.grantFile = opts.grantFile ?? process.env.LEAF_GRANT_FILE ?? DEFAULT_GRANT_FILE;
+  }
+
+  async get(_tenantId: string): Promise<AgentGrant | null> {
+    const fromEnv = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    if (fromEnv && fromEnv.trim()) {
+      return { kind: "oauth", oauthToken: fromEnv.trim() };
+    }
+    if (existsSync(this.grantFile)) {
+      const fromFile = readFileSync(this.grantFile, "utf8").trim();
+      if (fromFile) return { kind: "oauth", oauthToken: fromFile };
+    }
+    return null;
+  }
 }
 
 export interface OAuthGrantProviderOptions {
