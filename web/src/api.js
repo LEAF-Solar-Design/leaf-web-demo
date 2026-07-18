@@ -272,6 +272,24 @@ export async function getUsage() {
   }
 }
 
+// --- Entitlements (REAL plan gates) --------------------------------------
+// GET /api/entitlements -> {tier, entitlements:{run_read, run_write, build},
+// source:"policy"} (§10-enveloped: those fields sit at top level alongside
+// error/degraded_mode). This drives the UI's REAL gates — write-tool Run and the
+// Build lane's Generate — and the entitlement panel. It is ENFORCED server-side
+// (POST /api/run write tools + POST /api/author return 403 entitlement_required
+// on a disallowed tier), so the UI states the real plan, never a fake claim.
+// LIVE only. Returns null in the caller's mock path, and null here when the
+// sibling endpoint isn't deployed yet (404/unreachable) — the UI treats null as
+// the honest off-auth demo state (full access, all capabilities permitted).
+export async function getEntitlements() {
+  try {
+    return await http('/api/entitlements', { headers: { 'X-Tenant-Id': TENANT } })
+  } catch {
+    return null
+  }
+}
+
 // --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
 // This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
 // (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
@@ -295,11 +313,17 @@ export async function getClaudeGrant() {
 
 // POST the token ONCE. Callers must clear their field immediately after; this
 // layer keeps no reference to it beyond the request body and logs nothing.
-export async function linkClaudeGrant(token) {
+// `kind` ("oauth" = a Claude subscription token from `claude setup-token`;
+// "api_key" = an Anthropic org API key billed at API rates) is sent explicitly
+// from the user's choice. It is OPTIONAL in the contract (the server auto-detects
+// from the token shape when omitted); we send it so the linked kind is honest
+// even if detection is ambiguous. The token itself is never stored/echoed/logged.
+export async function linkClaudeGrant(token, kind) {
+  const body = kind ? { token, kind } : { token }
   return http('/api/tenant/claude-grant', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify(body),
   })
 }
 
@@ -474,6 +498,20 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
   const body = await res.json().catch(() => null)
 
   if (res.status !== 202 || !body || !body.job_id) {
+    // Entitlement rejection (HTTP 403 {entitlement_required, required, tier}) —
+    // a write tool the tenant's plan doesn't include. Tag the envelope so the UI
+    // renders it CALM (amber), like a spend cap, not a red failure. Checked FIRST
+    // so the tag survives even when the body also carries `ok`.
+    if (res.status === 403 && body && body.entitlement_required) {
+      return {
+        ok: false, tool: toolName, version: null, result: null, overlay: null,
+        timing_ms: 0, cost: null, degraded_mode: false,
+        error: body.error || { error_code: 'ENTITLEMENT_REQUIRED', message: 'This action is not included in your plan.', retryable: false },
+        entitlement_required: true,
+        required: body.required || null,
+        tier: body.tier || null,
+      }
+    }
     // Submission itself failed. If the server already returned a §3 envelope
     // (e.g. UNKNOWN_TOOL 404), pass it straight through; else synthesize one.
     if (body && 'ok' in body) return body
@@ -566,6 +604,12 @@ export async function authorTool(mock, description) {
     err.status = res.status
     err.body = body
     err.grantRequired = isGrantRequired(body)
+    // Build-lane entitlement rejection (HTTP 403 {entitlement_required}) — the
+    // tenant's plan doesn't include tool authoring. Distinct from grantRequired
+    // (which is about linking a Claude account). The AuthorPanel renders this as
+    // a calm "upgrade to build" gate, not a red failure.
+    err.entitlementRequired = res.status === 403 && !!(body && body.entitlement_required)
+    if (err.entitlementRequired) { err.required = body.required || 'build'; err.tier = body.tier || null }
     throw err
   }
   return body

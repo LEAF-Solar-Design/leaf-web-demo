@@ -6,13 +6,19 @@ import { useEffect, useRef, useState } from 'react'
 // to; this grant says WHOSE Anthropic credit runs the authoring agent. The two
 // are kept strictly apart — this panel touches only the Claude OAuth grant.
 //
-// The token is WRITE-ONLY here: it is typed into a masked field, POSTed once,
-// and the field is cleared immediately. We never read it back (GET returns only
-// {linked, linked_at}), never echo it, never log it.
+// The user links one of two credential KINDS, one masked field either way:
+//   • "oauth"   — a Claude SUBSCRIPTION token from `claude setup-token` (runs
+//                 authoring on their Claude Pro/Max/Team seat).
+//   • "api_key" — an Anthropic org API KEY (enterprise; usage billed to their
+//                 Anthropic account at API rates).
+// The choice is sent EXPLICITLY as `kind`; the linked state names the kind
+// plainly ("linked · subscription" / "linked · API key"). A recognizable token
+// prefix (sk-ant-api… / sk-ant-oat…) auto-selects the matching kind as a
+// convenience — the user can still override.
 //
-// States (LIVE only — mock renders nothing):
-//   not linked — plain copy + a masked paste field + Link.
-//   linked     — the linked date + Unlink (inline confirm).
+// The token/key is WRITE-ONLY here: it is typed into a masked field, POSTed once,
+// and the field is cleared immediately. We never read it back (GET returns only
+// {linked, linked_at, kind}), never echo it, never log it.
 //
 // Calm vocabulary: a square mono trigger in the header .who cluster, a plain
 // bordered popover, word actions — no emoji, no rounded status pills, no spinner.
@@ -23,8 +29,26 @@ function fmtWhen(iso) {
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
+// Plain-word label for a credential kind. Unknown/absent -> null (show "linked").
+function kindLabel(kind) {
+  if (kind === 'api_key') return 'API key'
+  if (kind === 'oauth') return 'subscription'
+  return null
+}
+
+// Recognize a definitive token prefix so we can auto-select the matching kind.
+// sk-ant-api… = an Anthropic API key; sk-ant-oat… = a setup-token (subscription).
+// Anything ambiguous returns null (leave the manual choice untouched).
+function detectKind(tok) {
+  const s = (tok || '').trim()
+  if (/^sk-ant-api/i.test(s)) return 'api_key'
+  if (/^sk-ant-oat/i.test(s)) return 'oauth'
+  return null
+}
+
 export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, open, onToggle, onLink, onUnlink }) {
   const [token, setToken] = useState('')
+  const [kind, setKind] = useState('oauth') // the chosen credential kind (setup-token by default)
   const [confirmUnlink, setConfirmUnlink] = useState(false)
   const rootRef = useRef(null)
 
@@ -38,24 +62,33 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
     return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }
   }, [open, onToggle])
 
-  // Reset the inline unlink confirm whenever the popover closes or linkage flips.
-  useEffect(() => { if (!open) setConfirmUnlink(false) }, [open])
+  // Reset the inline unlink confirm + the chooser whenever the popover closes.
+  useEffect(() => { if (!open) { setConfirmUnlink(false); setKind('oauth') } }, [open])
   const linked = !!(grant && grant.linked)
   useEffect(() => { if (linked) setToken('') }, [linked])
 
   // Mock: Concern 2 is a live-mode surface only — render nothing.
   if (mock) return null
 
+  const changeToken = (v) => {
+    setToken(v)
+    // Auto-select the kind when the pasted value has a definitive prefix.
+    const d = detectKind(v)
+    if (d) setKind(d)
+  }
+
   const submit = async () => {
     const t = token.trim()
     if (!t || busy) return
-    // Hand the token off ONCE; clear our field immediately regardless of outcome
-    // so it never lingers in component state. Never logged/echoed.
-    await onLink(t)
+    // Hand the token off ONCE with the explicit kind; clear our field immediately
+    // regardless of outcome so it never lingers in component state. Never logged.
+    await onLink(t, kind)
     setToken('')
   }
 
-  const state = linked ? 'linked' : 'not linked'
+  const kl = kindLabel(grant && grant.kind)
+  const stateLabel = loading ? 'checking' : (linked ? (kl ? `linked · ${kl}` : 'linked') : 'not linked')
+  const isApiKey = kind === 'api_key'
 
   return (
     <span className="claude-acct" ref={rootRef}>
@@ -67,7 +100,7 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
         title="Link the Claude account that funds agent authoring (Concern 2 — separate from platform sign-in)"
       >
         <span className="ca-k">Claude account</span>
-        <span className={`ca-state ${linked ? 'on' : ''}`}>{loading ? 'checking' : state}</span>
+        <span className={`ca-state ${linked ? 'on' : ''}`}>{stateLabel}</span>
       </button>
 
       {open && (
@@ -79,8 +112,12 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
 
           {linked ? (
             <div className="ca-linked">
+              <div className="ca-kindline">linked · {kl || 'account'}</div>
               <p className="ca-copy">
-                Agent authoring is running on <b>your Claude subscription</b>.
+                Agent authoring is running on{' '}
+                {grant.kind === 'api_key'
+                  ? <b>your Anthropic API key</b>
+                  : <b>your Claude subscription</b>}.
                 {grant.linked_at ? <> Linked <b>{fmtWhen(grant.linked_at)}</b>.</> : null}
               </p>
               {error && <div className="ca-err">{error}</div>}
@@ -103,34 +140,83 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
             </div>
           ) : (
             <div className="ca-setup">
-              <p className="ca-copy">
-                Build authoring uses <b>your Claude subscription</b>. To link it:
-              </p>
-              <ol className="ca-steps">
-                <li>Run <code>claude setup-token</code> in a terminal.</li>
-                <li>Approve the request in the browser it opens.</li>
-                <li>Paste the token it prints below.</li>
-              </ol>
-              <label className="ca-field">
-                <span className="ca-field-k">Claude token</span>
-                <input
-                  type="password"
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
-                  placeholder="sk-ant-oat01-…"
-                  autoComplete="off"
-                  spellCheck={false}
+              <div className="ca-choice" role="radiogroup" aria-label="Credential type">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={!isApiKey}
+                  className={`ca-opt ${!isApiKey ? 'on' : ''}`}
+                  onClick={() => setKind('oauth')}
                   disabled={busy}
-                />
-              </label>
+                >
+                  Claude subscription token
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={isApiKey}
+                  className={`ca-opt ${isApiKey ? 'on' : ''}`}
+                  onClick={() => setKind('api_key')}
+                  disabled={busy}
+                >
+                  Anthropic API key
+                </button>
+              </div>
+
+              {isApiKey ? (
+                <>
+                  <p className="ca-copy">
+                    Paste an <b>Anthropic API key</b> — for org API keys — usage billed to your Anthropic
+                    account at API rates.
+                  </p>
+                  <label className="ca-field">
+                    <span className="ca-field-k">Anthropic API key</span>
+                    <input
+                      type="password"
+                      value={token}
+                      onChange={(e) => changeToken(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
+                      placeholder="sk-ant-api03-…"
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={busy}
+                    />
+                  </label>
+                </>
+              ) : (
+                <>
+                  <p className="ca-copy">
+                    Build authoring uses <b>your Claude subscription</b>. To link it:
+                  </p>
+                  <ol className="ca-steps">
+                    <li>Run <code>claude setup-token</code> in a terminal.</li>
+                    <li>Approve the request in the browser it opens.</li>
+                    <li>Paste the token it prints below.</li>
+                  </ol>
+                  <label className="ca-field">
+                    <span className="ca-field-k">Claude token</span>
+                    <input
+                      type="password"
+                      value={token}
+                      onChange={(e) => changeToken(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
+                      placeholder="sk-ant-oat01-…"
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={busy}
+                    />
+                  </label>
+                </>
+              )}
+
               {error && <div className="ca-err">{error}</div>}
               <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim()}>
-                {busy ? 'linking…' : 'Link Claude account'}
+                {busy ? 'linking…' : (isApiKey ? 'Link API key' : 'Link Claude account')}
               </button>
               <p className="ca-note">
-                The token is stored securely for this workspace and never shown again. It is not your
-                Leaf sign-in — it only funds the authoring agent.
+                {isApiKey
+                  ? 'The key is stored securely for this workspace and never shown again. It is not your Leaf sign-in — it only funds the authoring agent.'
+                  : 'The token is stored securely for this workspace and never shown again. It is not your Leaf sign-in — it only funds the authoring agent.'}
               </p>
             </div>
           )}

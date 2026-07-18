@@ -65,7 +65,7 @@ function Alternatives({ alts, tools, onPick }) {
   )
 }
 
-export default function RoutePanel({ route, tools, running, writeLocked, onRun, onPickAlternative, onOpenAuthor }) {
+export default function RoutePanel({ route, tools, running, writeLocked, writeEntitled = true, onRun, onPickAlternative, onOpenAuthor }) {
   if (!route) return null
 
   // ---- BUILD lane -----------------------------------------------------------
@@ -116,6 +116,9 @@ export default function RoutePanel({ route, tools, running, writeLocked, onRun, 
   const params = toolObj ? { ...defaultsOf(toolObj.params), ...(route.params || {}) } : (route.params || {})
   const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
   const locked = !!writeLocked && isWrite
+  // Plan gate (real, enforced server-side): a write tool the tenant's plan
+  // doesn't include. Distinct from `locked` (another session holds the checkout).
+  const entBlocked = isWrite && !writeEntitled
 
   return (
     <div className={`route ${confident ? '' : 'lowconf'}`}>
@@ -136,13 +139,15 @@ export default function RoutePanel({ route, tools, running, writeLocked, onRun, 
               <>
                 <ParamRows params={params} />
                 <div className="route-actions">
-                  <button className="btn primary" disabled={running || locked} onClick={() => onRun(toolObj, params)}>
+                  <button className="btn primary" disabled={running || locked || entBlocked} onClick={() => onRun(toolObj, params)}>
                     {running ? 'Running' : (isWrite ? 'Run (creates a new version)' : 'Run')}
                   </button>
-                  <span className="route-note">
+                  <span className={`route-note ${entBlocked && !locked ? 'amber' : ''}`}>
                     {locked
                       ? 'Editing is locked by another session — this write tool is paused.'
-                      : 'You confirm before anything runs.'}
+                      : entBlocked
+                        ? 'Your plan doesn’t include editing tools — upgrade to run them.'
+                        : 'You confirm before anything runs.'}
                   </span>
                 </div>
               </>
@@ -160,9 +165,12 @@ export default function RoutePanel({ route, tools, running, writeLocked, onRun, 
           <>
             {toolObj && (
               <div className="route-actions" style={{ marginBottom: 10 }}>
-                <button className="btn primary" disabled={running || locked} onClick={() => onRun(toolObj, params)}>
+                <button className="btn primary" disabled={running || locked || entBlocked} onClick={() => onRun(toolObj, params)}>
                   Run best guess: {route.tool}
                 </button>
+                {entBlocked && !locked && (
+                  <span className="route-note amber">Your plan doesn’t include editing tools — upgrade to run them.</span>
+                )}
               </div>
             )}
             {route.alternatives?.length > 0 && <div className="route-note">Did you mean:</div>}

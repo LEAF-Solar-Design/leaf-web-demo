@@ -859,3 +859,61 @@ footer .warn-txt { color: var(--amber); }
 .author-gate-body { line-height: 1.5; }
 .author-gate-body b { color: var(--amber); }
 .author-gate-act { margin-top: 8px; }
+
+/* ==================== UI wave 5: BYO key kind · real entitlements · cost ==================== */
+
+/* --- Claude account: subscription vs API-key chooser + linked kind line --- */
+.ca-choice { display: flex; gap: 0; margin-top: 10px; }
+.ca-opt {
+  flex: 1 1 0; font-family: var(--mono); font-size: 10.5px; letter-spacing: .02em;
+  padding: 6px 8px; border: 1px solid var(--rule-2); background: var(--white); color: var(--ink-2);
+  cursor: pointer; text-align: center; white-space: nowrap;
+}
+.ca-opt:not(:last-child) { border-right: 0; }
+.ca-opt.on { background: var(--leaf-tint); color: var(--leaf); border-color: var(--leaf); }
+.ca-opt:disabled { cursor: default; opacity: .6; }
+.ca-kindline {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--leaf); border: 1px solid var(--leaf); background: var(--leaf-tint);
+  border-radius: 2px; padding: 2px 7px; align-self: flex-start;
+}
+
+/* --- real entitlements panel (replaces the placeholder gate) --- */
+.ent-panel {
+  margin-top: 16px; border: 1px solid var(--rule); background: var(--white);
+  border-radius: 3px; padding: 14px 16px;
+}
+.ent-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding-bottom: 10px; border-bottom: 1px solid var(--rule);
+}
+.ent-k { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink); }
+.ent-tier {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-2); border: 1px solid var(--rule-2); border-radius: 2px; padding: 1px 7px; background: var(--paper-2);
+}
+.ent-src { font-family: var(--mono); font-size: 10.5px; color: var(--leaf); margin-left: auto; }
+.ent-src.dim { color: var(--ink-2); }
+.ent-rows { display: flex; flex-direction: column; gap: 0; margin: 10px 0 2px; }
+.ent-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 0; border-bottom: 1px solid var(--rule);
+}
+.ent-row:last-child { border-bottom: 0; }
+.ent-label { font-size: 12.5px; color: var(--ink); }
+.ent-label .dim { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.ent-state {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--amber); border: 1px solid var(--amber); border-radius: 2px; padding: 1px 6px; background: var(--white);
+  white-space: nowrap;
+}
+.ent-state.on { color: var(--leaf); border-color: var(--leaf); background: var(--leaf-tint); }
+.ent-note { margin: 10px 0 0; font-size: 12px; color: var(--ink-2); line-height: 1.5; }
+.ent-note.amber { color: var(--amber); }
+
+/* --- calm plan-gate note copy in RoutePanel (amber, not red) --- */
+.route-note.amber { color: var(--amber); }
+
+/* --- itemized per-run cost --- */
+.receipt .usd { color: var(--ink); font-weight: 600; }
+.job-meta { font-variant-numeric: tabular-nums; }

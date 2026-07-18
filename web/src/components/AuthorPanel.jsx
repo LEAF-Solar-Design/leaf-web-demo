@@ -76,12 +76,30 @@ function AuthorGate({ onLinkClaude }) {
   )
 }
 
-export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal, notLinked, onLinkClaude }) {
+// The REAL build-entitlement gate. Unlike the Claude-account nudge above, this is
+// a plan boundary ENFORCED server-side (POST /api/author returns 403 when the
+// tier lacks `build`) — so authoring is genuinely unavailable here (Generate is
+// disabled), stated in plain words with no fake enforcement claim.
+function BuildGate() {
+  return (
+    <div className="author-gate" role="status">
+      <span className="tag amber">Plan</span>
+      <div className="author-gate-body">
+        <b>Your plan doesn’t include tool authoring — upgrade to build.</b>{' '}
+        Authoring new tools is a build-lane capability enforced on Leaf. Upgrade your plan to
+        generate tools with the agent.
+      </div>
+    </div>
+  )
+}
+
+export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal, notLinked, onLinkClaude, buildEntitled = true }) {
   const [desc, setDesc] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [err, setErr] = useState(null)
   const [grantGate, setGrantGate] = useState(false) // a grant-required rejection (calm gate, not red)
+  const [buildGate, setBuildGate] = useState(false) // a build-entitlement rejection (calm plan gate, not red)
   const [authored, setAuthored] = useState(null)
   const lastSignal = useRef(null)
   const startRef = useRef(null)
@@ -105,15 +123,17 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
   }, [busy])
 
   async function submit() {
-    if (!desc.trim()) return
-    setBusy(true); setErr(null); setGrantGate(false); setAuthored(null)
+    if (!desc.trim() || !buildEntitled) return
+    setBusy(true); setErr(null); setGrantGate(false); setBuildGate(false); setAuthored(null)
     try {
       const res = await onAuthor(desc.trim())
       setAuthored(res)
     } catch (e) {
-      // A grant-required rejection is an expected "link your Claude account"
-      // state, not an error to alarm about — surface the calm gate, never red.
-      if (e && e.grantRequired) setGrantGate(true)
+      // Two expected "not-an-alarm" rejections surface as calm gates, never red:
+      //   entitlementRequired — the plan doesn't include authoring (build).
+      //   grantRequired       — no Claude account linked to fund the agent.
+      if (e && e.entitlementRequired) setBuildGate(true)
+      else if (e && e.grantRequired) setGrantGate(true)
       else setErr(String(e.message || e))
     } finally {
       setBusy(false)
@@ -126,7 +146,11 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
   return (
     <div className="author-panel author-inner">
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf generates it and adds it to the catalog.</p>
-      {(notLinked || grantGate) && <AuthorGate onLinkClaude={onLinkClaude} />}
+      {(!buildEntitled || buildGate)
+        ? <BuildGate />
+        : (notLinked || grantGate)
+          ? <AuthorGate onLinkClaude={onLinkClaude} />
+          : null}
       <textarea
         value={desc}
         onChange={(e) => setDesc(e.target.value)}
@@ -139,7 +163,7 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
           <button key={ex} className="chip" onClick={() => setDesc(ex)} disabled={busy}>{ex}</button>
         ))}
       </div>
-      <button className="btn primary" disabled={busy || !desc.trim()} onClick={submit}>
+      <button className="btn primary" disabled={busy || !desc.trim() || !buildEntitled} onClick={submit}>
         {busy ? 'authoring…' : 'Generate tool'}
       </button>
       {busy && (

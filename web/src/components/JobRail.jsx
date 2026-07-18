@@ -19,10 +19,31 @@ function isQuota(job) {
   return job.status === 'failed' && c === 'quota_exceeded'
 }
 
+// An entitlement rejection (a write tool the plan doesn't include) also rides in
+// as a failed job — carried as `entitlement_required` on the current-session card.
+// Same calm amber treatment as quota (a plan boundary, not a failure to alarm).
+function isEnt(job) {
+  return job.status === 'failed' && !!job.entitlement_required
+}
+function isCalm(job) { return isQuota(job) || isEnt(job) }
+
+// Per-run cost (live APS runs). Read from the job's own cost or its stored §3
+// envelope; null for mock runs (no APS cost) -> nothing shown.
+function costUsd(job) {
+  const c = job.cost || (job.result && job.result.cost)
+  const v = c && c.usd_est
+  const n = Number(v)
+  return Number.isFinite(n) ? `$${n.toFixed(4)}` : null
+}
+
 function stateTag(job) {
   if (job.status === 'running') return { cls: 'prog', label: 'running' }
   if (job.status === 'submitted') return { cls: 'sub', label: 'submitted' }
-  if (job.status === 'failed') return isQuota(job) ? { cls: 'quota', label: 'spend cap' } : { cls: 'fail', label: 'failed' }
+  if (job.status === 'failed') {
+    if (isQuota(job)) return { cls: 'quota', label: 'spend cap' }
+    if (isEnt(job)) return { cls: 'quota', label: 'plan' }
+    return { cls: 'fail', label: 'failed' }
+  }
   if (job.status === 'complete') {
     return job.degraded_mode ? { cls: 'deg', label: 'degraded' } : { cls: 'done', label: 'complete' }
   }
@@ -43,14 +64,18 @@ function JobCard({ job, current, onSelect }) {
   const st = stateTag(job)
   const terminal = job.status === 'complete' || job.status === 'failed'
   const elapsed = job.elapsed_ms != null ? `${(job.elapsed_ms / 1000).toFixed(1)}s` : null
-  const quota = isQuota(job)
+  const calm = isCalm(job)
+  const usd = job.status === 'complete' ? costUsd(job) : null
   const cls = [
     'job',
     job.degraded_mode ? 'deg' : '',
-    (job.status === 'failed' && !quota) ? 'fail' : '',
-    quota ? 'quota' : '',
+    (job.status === 'failed' && !calm) ? 'fail' : '',
+    calm ? 'quota' : '',
     current ? 'current' : '',
   ].filter(Boolean).join(' ')
+
+  // Bottom-right meta: cost (live APS complete) preferred over bare elapsed.
+  const meta = usd ? `${usd}${elapsed ? ` · ${elapsed}` : ''}` : (elapsed || '')
 
   const inner = (
     <>
@@ -64,7 +89,7 @@ function JobCard({ job, current, onSelect }) {
         <span>{footText(job)}</span>
         {job.status === 'running'
           ? <span className="safe">safe to leave</span>
-          : <span>{elapsed || ''}</span>}
+          : <span className="job-meta">{meta}</span>}
       </div>
     </>
   )

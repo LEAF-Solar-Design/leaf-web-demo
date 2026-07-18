@@ -90,11 +90,24 @@ function ErrorLine({ err, onRetry, retry, quota }) {
   )
 }
 
+// Format a per-run cost in dollars, itemized (e.g. "$0.0083"). Small runs need
+// 4 decimals to read as non-zero; larger ones stay legible. usd_est is a Number
+// or a numeric string in the §3 envelope.
+function fmtUsd(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return null
+  return `$${n.toFixed(4)}`
+}
+
 export default function ResultPanel({ running, runStatus, runProgress, runElapsedMs, error, result, tool, onRetry }) {
   // A quota rejection (broker hard cap, HTTP 402) is an expected budget state,
   // not a failure to alarm about — render it in the amber calm posture (matching
   // QuotaCard), never red FAILED. Only this error_code softens; all others stay red.
   const isQuota = !!(result && !result.ok && result.error && result.error.error_code === 'quota_exceeded')
+  // An entitlement rejection (HTTP 403 {entitlement_required}) is a plan boundary,
+  // also calm amber (not a red failure). Same softening path as quota.
+  const isEnt = !!(result && result.entitlement_required)
+  const calm = isQuota || isEnt
   return (
     <section className="card result-panel">
       <h3>Result</h3>
@@ -112,8 +125,8 @@ export default function ResultPanel({ running, runStatus, runProgress, runElapse
       {result && !running && (
         <div className="result-card">
           <div className="result-head">
-            <span className={`ok ${result.ok ? 'yes' : (isQuota ? 'quota' : 'no')}`}>
-              {result.ok ? 'OK' : (isQuota ? 'SPEND CAP' : 'FAILED')}
+            <span className={`ok ${result.ok ? 'yes' : (calm ? 'quota' : 'no')}`}>
+              {result.ok ? 'OK' : (isQuota ? 'SPEND CAP' : (isEnt ? 'PLAN' : 'FAILED'))}
             </span>
             <span className="result-tool">{result.tool} <span className="dim">v{result.version}</span></span>
             {result.degraded_mode && (
@@ -122,7 +135,7 @@ export default function ResultPanel({ running, runStatus, runProgress, runElapse
           </div>
 
           {result.ok && <ResultBody result={result} />}
-          {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={isRetryable(result.error)} quota={isQuota} />}
+          {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} />}
 
           {result.overlay && (
             <div className="overlay-summary">
@@ -149,9 +162,16 @@ export default function ResultPanel({ running, runStatus, runProgress, runElapse
           <div className="receipt">
             <span>{result.timing_ms} ms</span>
             <span className="dim">·</span>
-            {result.cost
-              ? <span>{result.cost.engine_seconds}s engine · ~${result.cost.usd_est}</span>
-              : <span className="dim">no APS cost (mock)</span>}
+            {result.cost ? (
+              <span>
+                {result.cost.engine_seconds}s engine
+                {fmtUsd(result.cost.usd_est)
+                  ? <> · <b className="usd">{fmtUsd(result.cost.usd_est)}</b></>
+                  : <span className="dim"> · no billable cost</span>}
+              </span>
+            ) : (
+              <span className="dim">no APS cost (mock)</span>
+            )}
           </div>
         </div>
       )}

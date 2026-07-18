@@ -36,7 +36,7 @@ function defaultsOf(schema) {
   return out
 }
 
-export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool, subtitle, writeLocked }) {
+export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool, subtitle, writeLocked, writeEntitled = true }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
@@ -51,6 +51,8 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
           const isRunningThis = running && selectedTool?.name === t.name
           const isWrite = (t.capabilities || []).includes('drawing.write')
           const locked = !!writeLocked && isWrite
+          // Real plan gate: a write tool the tenant's plan doesn't include.
+          const entBlocked = isWrite && !writeEntitled
           return (
             <div key={t.name} className={`tool-card ${open ? 'open' : ''}`}>
               <button
@@ -84,13 +86,16 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
                   />
                   <button
                     className="btn primary"
-                    disabled={running || locked}
+                    disabled={running || locked || entBlocked}
                     onClick={() => onRun(t, params)}
                   >
                     {isRunningThis ? 'Running on Leaf…' : 'Run'}
                   </button>
                   {locked && (
                     <p className="lock-note">Editing is locked by another session — this write tool is paused. Read tools still run.</p>
+                  )}
+                  {entBlocked && !locked && (
+                    <p className="lock-note">Your plan doesn’t include editing tools — upgrade to run write tools. Read tools still run.</p>
                   )}
                 </div>
               )}

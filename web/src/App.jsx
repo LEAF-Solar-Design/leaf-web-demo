@@ -9,7 +9,7 @@ import PromptBox from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
 import JobRail from './components/JobRail.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
-import EntitlementGate from './components/EntitlementGate.jsx'
+import EntitlementGate, { EntitlementNotice } from './components/EntitlementGate.jsx'
 import QuotaCard from './components/QuotaCard.jsx'
 import VersionHistory from './components/VersionHistory.jsx'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
@@ -22,7 +22,7 @@ import {
   attachToJob, getJob, listJobs, recordToEnvelope, authorTool, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, nlPrompt, closeJobBeacon,
   getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
-  getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant,
+  getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant, getEntitlements,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
@@ -121,6 +121,10 @@ export default function App() {
   const [openFamilies, setOpenFamilies] = useState({})   // per-family collapse state (family_id -> bool)
   const [usage, setUsage] = useState(null)               // GET /api/usage aggregate (live; null hides chip)
   const [health, setHealth] = useState(null)             // GET /api/health (live; null -> static footer)
+  // Real entitlements (GET /api/entitlements): drives the write-tool + build gates.
+  // null in mock, or when the endpoint isn't deployed -> treated as full access.
+  const [entitlements, setEntitlements] = useState(null) // {tier, entitlements:{run_read,run_write,build}, source}
+  const [entLoading, setEntLoading] = useState(false)
   // Version-history browser (§ version chain) + read-only preview state.
   const [historyOpen, setHistoryOpen] = useState(false)
   const [history, setHistory] = useState(null)           // {drawing_id, head, latest, versions[]}
@@ -180,7 +184,21 @@ export default function App() {
   // off-auth; tier is only known when the session echo carries it (auth live).
   const tenantLabel = tenant || 'demo'
   const tierDisplay = tier || '—'
-  const gateTier = tier || 'demo'
+  // Entitlement tier prefers the policy read (authoritative) over the session echo.
+  const entTier = entitlements?.tier || tier || 'demo'
+  const gateTier = entTier
+
+  // Real entitlement gates. Unknown capability (mock, or endpoint undeployed ->
+  // entitlements null) resolves permissive (true) — byte-identical to today's
+  // ungated demo. When a policy IS present, a false value genuinely disables the
+  // affordance (the server enforces it too, so this only mirrors reality).
+  const entOf = useCallback((key) => {
+    const e = entitlements && entitlements.entitlements
+    if (!e || typeof e[key] === 'undefined' || e[key] === null) return true
+    return e[key] !== false
+  }, [entitlements])
+  const canRunWrite = entOf('run_write')
+  const canBuild = entOf('build')
 
   // Claude account (Concern 2) authoring gate. Only fires when we DEFINITELY know
   // the tenant has no linked Claude grant (live + grant read + linked === false).
@@ -289,6 +307,17 @@ export default function App() {
 
   useEffect(() => { loadUsage() }, [loadUsage])
 
+  // Real entitlements (live only): fetch on load so the write-tool + build gates
+  // reflect the tenant's actual plan. null in mock (full access, all true) or when
+  // the sibling endpoint isn't deployed yet (degrades to ungated — honest demo).
+  const loadEntitlements = useCallback(async () => {
+    if (mock) { setEntitlements(null); return }
+    setEntLoading(true)
+    try { setEntitlements(await getEntitlements()) } catch { setEntitlements(null) } finally { setEntLoading(false) }
+  }, [mock])
+
+  useEffect(() => { loadEntitlements() }, [loadEntitlements])
+
   // Real backend diagnostics for the footer chips (live only). Mock keeps the
   // static footer (setHealth(null)); any error -> null -> calm static fallback.
   const loadHealth = useCallback(async () => {
@@ -310,12 +339,14 @@ export default function App() {
 
   useEffect(() => { loadGrant() }, [loadGrant])
 
-  const onLinkClaude = useCallback(async (token) => {
-    // token is passed straight to the API and never stored/logged here.
+  const onLinkClaude = useCallback(async (token, kind) => {
+    // token is passed straight to the API and never stored/logged here. `kind`
+    // ("oauth" | "api_key") is the user's explicit choice; the server may echo the
+    // authoritative kind back (it auto-detects), so prefer the response kind.
     setGrantBusy(true); setGrantErr(null)
     try {
-      const res = await linkClaudeGrant(token)
-      setGrant({ linked: true, linked_at: res?.linked_at || new Date().toISOString() })
+      const res = await linkClaudeGrant(token, kind)
+      setGrant({ linked: true, linked_at: res?.linked_at || new Date().toISOString(), kind: res?.kind || kind || null })
     } catch (e) {
       setGrantErr(String(e.message || e))
     } finally {
@@ -855,6 +886,10 @@ export default function App() {
       elapsed_ms: runElapsedMs != null ? runElapsedMs : (result?.timing_ms ?? null),
       degraded_mode: !!result?.degraded_mode,
       error: result?.error || null,
+      // Per-run cost (live APS) for the rail card; null for mock runs.
+      cost: result?.cost || null,
+      // Plan-boundary rejection -> calm amber rail card (not red failed).
+      entitlement_required: !!result?.entitlement_required,
     }
   }, [selectedTool, running, runStatus, runProgress, result, runElapsedMs, currentJobId])
 
@@ -870,6 +905,10 @@ export default function App() {
   // not a red failure. The backend's message is authoritative.
   const quotaError = (result && !result.ok && result.error &&
     result.error.error_code === 'quota_exceeded') ? result.error : null
+
+  // A run rejected by a plan boundary (HTTP 403 entitlement_required) -> calm
+  // amber plan notice, also not a red failure. Nothing ran / was billed.
+  const entitlementError = (result && result.entitlement_required) ? result : null
 
   return (
     <div className="app">
@@ -942,6 +981,7 @@ export default function App() {
               <ToolsPanel
                 tools={tools}
                 writeLocked={writeLocked}
+                writeEntitled={canRunWrite}
                 error={toolsErr}
                 running={running || !!previewing}
                 selectedTool={selectedTool}
@@ -965,6 +1005,7 @@ export default function App() {
             <ToolsPanel
               tools={fam.capabilities}
               writeLocked={writeLocked}
+              writeEntitled={canRunWrite}
               subtitle={fam.description}
               error={toolsErr}
               running={running || !!previewing}
@@ -987,6 +1028,7 @@ export default function App() {
             seedSignal={authorSignal}
             notLinked={claudeNotLinked}
             onLinkClaude={() => setClaudeOpen(true)}
+            buildEntitled={canBuild}
           />
         </Section>
       </aside>
@@ -1012,12 +1054,21 @@ export default function App() {
           tools={tools}
           running={running || !!previewing}
           writeLocked={writeLocked}
+          writeEntitled={canRunWrite}
           onRun={onRun}
           onPickAlternative={onPickAlternative}
           onOpenAuthor={onOpenAuthor}
         />
 
         {quotaError && <QuotaCard message={quotaError.message} remaining={usage?.cap?.remaining} />}
+
+        {entitlementError && (
+          <EntitlementNotice
+            required={entitlementError.required}
+            tier={entitlementError.tier || entTier}
+            message={entitlementError.error?.message}
+          />
+        )}
 
         {degraded && <DegradedBanner />}
 
@@ -1145,7 +1196,12 @@ export default function App() {
           />
         </div>
 
-        <EntitlementGate tier={gateTier} />
+        <EntitlementGate
+          tier={entTier}
+          entitlements={entitlements}
+          loading={entLoading}
+          mock={mock}
+        />
       </main>
 
       <JobRail
