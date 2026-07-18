@@ -20,15 +20,25 @@
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
+import { GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
+import { DEFAULT_TENANT } from "./ports/index.js";
 import type { HarnessPorts } from "./ports/index.js";
 
-export const DEFAULT_TENANT = "demo-tenant";
+export { DEFAULT_TENANT };
 
 function tenantOf(req: IncomingMessage): string {
   const h = req.headers["x-tenant-id"];
   const v = Array.isArray(h) ? h[0] : h;
   return v && v.trim() ? v.trim() : DEFAULT_TENANT;
+}
+
+/** Resolve the request tenant: body `tenant_id` wins, else the X-Tenant-Id header,
+ *  else DEFAULT_TENANT. Lets the app forward the RESOLVED tenant per request. */
+function tenantForRequest(req: IncomingMessage, body: Record<string, unknown>): string {
+  const t = body.tenant_id;
+  if (typeof t === "string" && t.trim()) return t.trim();
+  return tenantOf(req);
 }
 
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -71,9 +81,40 @@ export function createHarness(ports: HarnessPorts): Harness {
         return send(res, 200, { ok: true, service: "leaf-tenant-author-harness" });
       }
 
+      // Per-tenant grant admin (wave 4): PUT/GET/DELETE /grants/{tenantId}. Backs the
+      // app's /api/tenant/claude-grant proxy. Returns ONLY {linked, linked_at} — never
+      // the token. 501 when no grantAdmin store is wired (the hermetic author tests).
+      if (path.startsWith("/grants/")) {
+        const tenantId = decodeURIComponent(path.slice("/grants/".length));
+        if (!tenantId) return send(res, 400, { error: { message: "tenant id required" } });
+        if (!ports.grantAdmin) {
+          return send(res, 501, { error: { message: "grant admin store not configured" } });
+        }
+        try {
+          if (method === "PUT") {
+            const gbody = await readJsonBody(req);
+            const token = typeof gbody.token === "string" ? gbody.token : "";
+            if (!token.trim()) return send(res, 400, { error: { message: "token is required" } });
+            const st = await ports.grantAdmin.put(tenantId, token);
+            return send(res, 200, st); // {linked, linked_at} — token never echoed
+          }
+          if (method === "GET") {
+            return send(res, 200, await ports.grantAdmin.status(tenantId));
+          }
+          if (method === "DELETE") {
+            await ports.grantAdmin.remove(tenantId);
+            return send(res, 200, { linked: false, linked_at: null });
+          }
+        } catch (e) {
+          // e.g. a malformed/traversal tenant id — a client error, never a token leak.
+          return send(res, 400, { error: { message: (e as Error).message } });
+        }
+        return send(res, 405, { error: { message: `method ${method} not allowed on ${path}` } });
+      }
+
       if (method === "POST" && path === "/author") {
         const body = await readJsonBody(req);
-        const tenant = tenantOf(req);
+        const tenant = tenantForRequest(req, body);
         const description = typeof body.description === "string" ? body.description : "";
         if (!description.trim()) {
           return send(res, 400, { error: { message: "description is required" } });
@@ -90,7 +131,7 @@ export function createHarness(ports: HarnessPorts): Harness {
 
       if (method === "POST" && path === "/run-registered") {
         const body = await readJsonBody(req);
-        const tenant = tenantOf(req);
+        const tenant = tenantForRequest(req, body);
         const toolName = typeof body.tool === "string" ? body.tool : "";
         if (!toolName) {
           return send(res, 400, { error: { message: "tool (registered tool name) is required" } });
@@ -106,6 +147,14 @@ export function createHarness(ports: HarnessPorts): Harness {
     } catch (err) {
       // Diagnostic: full stack to stderr (never contains the grant; see serve.ts note).
       console.error("[harness] request error:", (err as Error).stack ?? String(err));
+      // Missing per-tenant grant -> a clean 401 with a machine-detectable marker the app
+      // proxy maps to GRANT_REQUIRED (frontend prompts "sign in with Claude"). No token.
+      if (err instanceof GrantRequiredError) {
+        return send(res, 401, {
+          grant_required: true,
+          error: { message: err.message, code: "grant_required" },
+        });
+      }
       if (err instanceof AuthorLoopError) {
         return send(res, err.status, {
           error: { message: err.message, diagnostics: err.diagnostics ?? [] },
@@ -138,17 +187,20 @@ export function createHarness(ports: HarnessPorts): Harness {
 export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
-  const { OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
+  const { FileTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
+
+  const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
+  const grantStore = new FileTenantGrantStore(); // per-tenant grant + admin (one store)
 
   const ports: HarnessPorts = {
     agentRunner: new AgentSdkRunner(),
     broker: new BrokerApsClientHttp(),
-    oauth: new OAuthGrantProviderImpl({
-      store: { async get() { return null; } }, // operator supplies the real store
-    }),
+    oauth: new OAuthGrantProviderImpl({ store: grantStore }),
+    grantAdmin: grantStore,
     tenantRepo: new TenantRepoProviderImpl({
-      locator: { async repoRef(t) { throw new Error(`no repo locator configured for ${t}`); } },
+      locator: { async repoRef(t) { return `${tenantsDir}/${t}`; } },
+      inPlace: true,
     }),
   };
   return createHarness(ports).listen(port);

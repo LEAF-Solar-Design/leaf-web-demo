@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Depends, Header
 
 import catalog
 import deps
@@ -17,7 +17,10 @@ router = APIRouter()
 
 
 @router.get("/api/capabilities")
-def capabilities(x_internal_role: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def capabilities(x_internal_role: Optional[str] = Header(default=None),
+                 tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """Capability catalog, TENANT-SCOPED for the folded portion (wave 4): globals for
+    everyone, only the requesting tenant's OWN repo tools folded in."""
     include_internal = (x_internal_role or "").strip().lower() == "qa"
-    families = catalog.build_catalog(deps.all_tools(), include_internal=include_internal)
+    families = catalog.build_catalog(deps.all_tools(str(tenant)), include_internal=include_internal)
     return with_envelope_fields({"families": families})

@@ -454,7 +454,8 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     except Exception as exc:  # noqa: BLE001
         return (err_envelope(ErrorCode.INTERNAL, f"cached intake unavailable: {exc}",
                              retryable=False, tool=tool.get("name")), 500)
-    env = run_tool_dynamic(tool, intake, params, aps_live=False, da=None, t0=t0)
+    env = run_tool_dynamic(tool, intake, params, aps_live=False, da=None, t0=t0,
+                           tenant_id=req.tenant_id)
     if not env.get("ok"):
         code = (env.get("error") or {}).get("error_code", ErrorCode.INTERNAL)
         return env, DEFAULT_HTTP_STATUS.get(code, 500)

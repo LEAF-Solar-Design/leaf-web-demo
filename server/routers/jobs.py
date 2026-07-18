@@ -50,7 +50,12 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     Job (best-effort, env-gated — see server/platform_link.py). Absent either
     header the behaviour is byte-identical to before.
     """
-    tool = deps.find_tool(req.tool)
+    # TENANT-SCOPED resolution (wave 4): resolve the tool from the REQUESTING tenant's
+    # catalog (globals + that tenant's own repo tools). A tool authored by another
+    # tenant is not in this tenant's catalog -> UNKNOWN_TOOL, so it can never be run
+    # cross-tenant. The tenant_id then threads jobs -> broker -> tool_loader so entry
+    # resolution + execution read the same tenant's repo.
+    tool = deps.find_tool(req.tool, str(tenant_id))
     if tool is None:
         return error_response(ErrorCode.UNKNOWN_TOOL, f"unknown tool: {req.tool}",
                               retryable=False, tool=req.tool)

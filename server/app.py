@@ -25,7 +25,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import deps
 from envelopes import install_error_handlers, with_envelope_fields
-from routers import author, capabilities, drawings, jobs, ops, prompt, session, tools, usage
+from routers import (
+    author,
+    capabilities,
+    drawings,
+    jobs,
+    ops,
+    prompt,
+    session,
+    tenant,
+    tools,
+    usage,
+)
 
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 app.add_middleware(
@@ -46,6 +57,7 @@ app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoint
 app.include_router(prompt.router)  # M3: NL prompt router (MATRIX gap #2 — one prompt box -> lanes)
 app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET /api/usage)
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
+app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 
 
 # --- platform Project/Job router (org-scoped persistence; platform/README.md) --- #

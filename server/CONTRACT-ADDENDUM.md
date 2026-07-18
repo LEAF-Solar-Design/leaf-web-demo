@@ -502,3 +502,105 @@ that tool exists in the catalog).
   version`** (write tools, mock `APS_LIVE=0`) | **`extracting`** (write tools, live re-extract
   `APS_LIVE=1`) → `done` | `error`. The reaper/timeout paths are unchanged (they key off
   `status`, not `progress`).
+
+## §16 Wave 4 — the Build lane made MULTI-TENANT (per-tenant grant + repo + catalog + exec)
+
+Session: `wave4-backend-multitenant`, 2026-07-18. Turns the single-grant / single-repo
+Build lane into a per-tenant one so it satisfies the individual-use OAuth rule
+(`research/agentsdk-usage-visibility.md`: ONE Claude token per end user, never pooled).
+Verified offline (`APS_LIVE=0`) by `server/tests/test_wave4.py` (7) + the harness hermetic
+suite (`grantStore` / `tenantProvision` / `grantAdmin.e2e`). Pre-wave-4 behavior is
+BYTE-IDENTICAL when the new env knobs are unset.
+
+### A. Tenant → mushy-repo resolution (`server/tenant_paths.py`, shared by deps + tool_loader)
+
+`resolve_tenant_repo_dir(tenant_id)` is the single source of truth both the catalog fold
+(`deps`) and entry resolution (`tool_loader`) use, so they always agree on where a tenant's
+repo lives. Two modes, chosen by env (read at call time):
+
+- **MULTI-TENANT** — `$LEAF_TENANTS_DIR` set → `<base>/<tenant_id>` (path-safe: a tenant_id
+  is a single traversal-free component or it resolves to *no repo*). `$LEAF_TENANT_REPO`
+  additionally OVERRIDES the **demo** tenant to a specific path. Tenant A and tenant B resolve
+  to DIFFERENT dirs — the wave-4 isolation mode.
+- **LEGACY SINGLE-REPO** — only `$LEAF_TENANT_REPO` set → that ONE repo serves EVERY tenant
+  (the proven wave-3 demo: one repo, one grant; no isolation, by design).
+- **NEITHER** → `None` (fold + entry resolution OFF; byte-identical to pre-wave-3).
+
+`deps.all_tools(tenant_id)` / `deps.find_tool(name, tenant_id)` / `tool_loader.resolve_local_file(tool, tenant_id)`
+/ `run_tool_dynamic(..., tenant_id=)` all default to the demo tenant, so every legacy no-arg
+caller is unchanged.
+
+### B. Per-tenant Claude grant store (harness TS) + admin endpoints
+
+`harness/.../oauthGrantProvider.ts::FileTenantGrantStore` persists ONE token file per tenant
+at `$LEAF_GRANTS_DIR/<tenant_id>.token` (default `C:/tmp/leaf-grants`; mkdir-safe, `mode 0600`,
+token NEVER logged). **BACK-COMPAT:** the **demo** tenant with no per-tenant file falls back to
+the existing env/file grant (`LEAF_GRANT_FILE` / `CLAUDE_CODE_OAUTH_TOKEN`), so the proven demo
+loop is unchanged. **PRODUCTION swaps this class for a vault/DPAPI store** (same interface).
+Harness admin endpoints (backed by the same store): `PUT /grants/{tenantId}` `{token}` →
+`{linked, linked_at}`; `GET /grants/{tenantId}` → `{linked, linked_at}`; `DELETE /grants/{tenantId}`.
+**`status()` and every wire return NEVER carry the token** (`linked_at` is the token file's mtime).
+
+### C. Per-request tenant in the author loop
+
+`POST /author` body gains **`tenant_id`** (default `demo-tenant`; body wins, else `X-Tenant-Id`
+header). The author loop resolves THAT tenant's grant + repo. A missing grant → a clean **HTTP
+401** `{ grant_required: true, error:{ message, code:"grant_required" } }` (the SDK is never
+constructed — no LLM credit spent).
+
+### D. Auto-provisioned per-tenant repos (harness TS)
+
+`TenantRepoProviderImpl({ inPlace, autoProvisionFrom })`: the FIRST authoring for a brand-new
+tenant materializes its repo from `harness/test/fixtures/tenant-repo` (copy + ensure the
+`__pycache__` `.gitignore` + `git init` + ONE seed commit). Later checkouts skip provisioning;
+an existing repo is never clobbered. The Windows spawn-pressure retry in `commit()` is intact.
+
+### E. App grant-linking proxy (`server/routers/tenant.py`)
+
+| Method | Path | Behaviour |
+|---|---|---|
+| POST | `/api/tenant/claude-grant` | `{token}` (tenant from `require_tenant`) → forwards to the harness `PUT /grants/{tenant}` → §10 `{linked:true, linked_at}`. **The app NEVER persists, logs, or echoes the token** (forwarded in one request; asserted in code + `test_wave4`). |
+| GET | `/api/tenant/claude-grant` | → §10 `{linked, linked_at}` — never the token. |
+| DELETE | `/api/tenant/claude-grant` | → §10 `{linked:false, linked_at:null}`. |
+
+Harness unreachable / not configured → **`BROKER_UNREACHABLE`** envelope (HTTP 502).
+
+### F. Author grant-required mapping (`server/routers/author.py`, error name `GRANT_REQUIRED`)
+
+When the harness signals a missing grant (401 + `grant_required:true`), the app proxy returns
+**HTTP 401** with a §10-COMPATIBLE body and does NOT fall back to the templater:
+
+```json
+{ "tool": null, "code": null, "preview": "Sign in with Claude to author tools …",
+  "source": "grant_required", "grant_required": true, "reason": "GRANT_REQUIRED",
+  "static_scan": [],
+  "error": { "error_code": "BAD_PARAMS", "message": "…sign in with Claude…", "retryable": false },
+  "degraded_mode": false }
+```
+
+The frozen §10 `error.error_code` enum is UNCHANGED — `GRANT_REQUIRED` is the app-proxy's name
+(constant `GRANT_REQUIRED` in `author.py`), surfaced additively via top-level `grant_required` /
+`reason` / `source` for the frontend to key on, while the `error` object keeps a valid enum code
+(`BAD_PARAMS`, `retryable:false`). A harness that is *unreachable* still falls back to the
+templater (unchanged); only an explicit grant-required signal short-circuits.
+
+### G. Tenant-scoped catalog + execution (Python)
+
+`GET /api/tools` and `GET /api/capabilities` now `Depends(require_tenant)` and fold **only the
+REQUESTING tenant's** repo tools; the engine registry, write seed, and the process-global
+authored store stay GLOBAL (visible to everyone). So tenant A's harness-authored tools are
+invisible to tenant B, while shared globals are visible to both. `POST /api/run` resolves the
+tool from the requesting tenant's catalog (a cross-tenant tool → `UNKNOWN_TOOL`) and threads
+`tenant_id` → `jobs.submit_job` → `broker_client` → `POST /broker/run` → `run_tool_dynamic(...,
+tenant_id=)`, so entry resolution + execution read the SAME tenant's repo.
+
+### H. Deployment consistency + scope notes
+
+- The app (`deps.resolve_tenant_repo_dir`) and the harness (`serve.ts`) MUST resolve a tenant to
+  the SAME repo dir: set `$LEAF_TENANTS_DIR` on BOTH processes (and, for the demo tenant, the same
+  `$LEAF_TENANT_REPO`). The proven demo loop uses only the demo tenant, where both sides agree.
+- The process-global template store (`authored_tools.json` / `deps._AUTHORED`) is the single-node
+  demo fallback and remains global; the per-tenant isolation guarantee is about the tenant-repo
+  fold (the production harness authoring path).
+- `POST /api/nl-prompt` remains GLOBAL (frozen §12: "no tenant/auth dependency"); making NL
+  classification tenant-scoped would be a §12 change and is out of scope for this lane.

@@ -120,26 +120,31 @@ def save_authored_tools(tools: List[Dict[str, Any]]) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# tenant-repo registry fold (UI wave 3, Contract 2)
+# per-tenant mushy-repo registry fold (UI wave 3 Contract 2; wave 4 multi-tenant)
 # --------------------------------------------------------------------------- #
-def tenant_repo_dir() -> Optional[Path]:
-    """The per-tenant mushy-codebase checkout root, from env LEAF_TENANT_REPO (read
-    at CALL time so a subprocess/test override applies). None => the tenant fold is
-    OFF and all_tools() is byte-identical to the pre-wave-3 registry union."""
-    root = os.environ.get("LEAF_TENANT_REPO", "").strip()
-    return Path(root) if root else None
+from tenant_paths import DEFAULT_TENANT as _DEFAULT_TENANT  # noqa: E402
+from tenant_paths import resolve_tenant_repo_dir  # noqa: E402
 
 
-def load_tenant_repo_tools() -> List[Dict[str, Any]]:
-    """Fold the tenant repo's registry.json tools when LEAF_TENANT_REPO is set.
+def tenant_repo_dir(tenant_id: str = _DEFAULT_TENANT) -> Optional[Path]:
+    """The mushy-codebase checkout root for ONE tenant, from ``$LEAF_TENANTS_DIR/<tid>``
+    (wave 4), with ``$LEAF_TENANT_REPO`` as the demo-tenant back-compat override. Read
+    at CALL time so a subprocess/test override applies. None => the tenant fold is OFF
+    for this tenant and all_tools(tid) is byte-identical to the pre-wave-3 union."""
+    return resolve_tenant_repo_dir(tenant_id)
+
+
+def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
+    """Fold ONE tenant's registry.json tools when that tenant's repo resolves.
 
     These are the tools a real harness author session registered into the tenant's
     OWN repo (``registry.json`` at the repo root — see harness/registry/registerTool).
     Their ``entry`` stays RELATIVE to the repo root (e.g. ``tools/<name>/tool.py``);
-    ``tool_loader.resolve_local_file`` resolves it against the SAME LEAF_TENANT_REPO
-    root, so the execution chain no longer depends on the broker's cwd (the M1 hack).
-    Missing env / file / bad JSON -> [] (never raises)."""
-    root = tenant_repo_dir()
+    ``tool_loader.resolve_local_file`` resolves it against the SAME per-tenant root,
+    so the execution chain no longer depends on the broker's cwd (the M1 hack), and
+    tenant A's authored tools never leak into tenant B's catalog. Missing env / dir /
+    file / bad JSON -> [] (never raises)."""
+    root = tenant_repo_dir(tenant_id)
     if root is None:
         return []
     reg = root / "registry.json"
@@ -161,17 +166,22 @@ def load_tenant_repo_tools() -> List[Dict[str, Any]]:
 _AUTHORED: List[Dict[str, Any]] = load_authored_tools()
 
 
-def all_tools() -> List[Dict[str, Any]]:
-    """Registry tools + tenant-repo tools + write seed + authored tools, de-duped by
-    name. PRECEDENCE (last wins): engine registry < tenant-repo (LEAF_TENANT_REPO) <
+def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
+    """Registry tools + THIS TENANT's repo tools + write seed + authored tools, de-duped
+    by name. PRECEDENCE (last wins): engine registry < tenant-repo (per tenant) <
     write seed < authored_tools.json — so a tenant-repo tool overrides an engine tool
     of the same name, and an authored tool overrides both (CONTRACT-ADDENDUM §15).
-    With LEAF_TENANT_REPO unset the tenant fold is empty and this is BYTE-IDENTICAL
-    to the pre-wave-3 union."""
+
+    TENANT SCOPE (wave 4): only the tenant-repo fold is per-tenant — the engine
+    registry, write seed, and the process-global authored store are GLOBAL (visible to
+    every tenant). So tenant A's harness-authored tools (in A's repo) are invisible to
+    tenant B, while shared globals are visible to both. With no tenant repo resolvable
+    (neither $LEAF_TENANTS_DIR nor $LEAF_TENANT_REPO set) the tenant fold is empty and
+    this is BYTE-IDENTICAL to the pre-wave-3 union."""
     by_name: Dict[str, Dict[str, Any]] = {}
     for t in load_engine_registry_tools():
         by_name[t["name"]] = t
-    for t in load_tenant_repo_tools():  # wave 3: the tenant's OWN registry (when env set)
+    for t in load_tenant_repo_tools(tenant_id):  # the REQUESTING tenant's OWN registry
         by_name[t["name"]] = t
     for t in load_seed_write_tools():  # tracked drawing.write seed (M2)
         by_name[t["name"]] = t
@@ -180,8 +190,8 @@ def all_tools() -> List[Dict[str, Any]]:
     return list(by_name.values())
 
 
-def find_tool(name: str) -> Optional[Dict[str, Any]]:
-    for t in all_tools():
+def find_tool(name: str, tenant_id: str = _DEFAULT_TENANT) -> Optional[Dict[str, Any]]:
+    for t in all_tools(tenant_id):
         if t.get("name") == name:
             return t
     return None

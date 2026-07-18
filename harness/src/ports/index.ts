@@ -120,6 +120,31 @@ export interface OAuthGrantProvider {
   getGrant(tenantId: string): Promise<AgentGrant>;
 }
 
+/** The default tenant id when a request carries none (the proven demo loop). */
+export const DEFAULT_TENANT = "demo-tenant";
+
+/** Grant link state for a tenant — NEVER carries the token value. */
+export interface GrantStatus {
+  linked: boolean;
+  /** ISO-8601 when the token file was last written, or null (e.g. env-fallback grant). */
+  linked_at: string | null;
+}
+
+/**
+ * Admin surface for the per-tenant grant store (wave 4). Backs the harness
+ * PUT/GET/DELETE /grants/{tenantId} endpoints so the app can link / check / unlink a
+ * tenant's own "sign in with Claude" grant WITHOUT the app ever persisting the token.
+ * `status()` and every method return NEVER carry the token value.
+ */
+export interface TenantGrantAdminStore {
+  /** Store (or replace) the tenant's token. Returns the resulting link status. */
+  put(tenantId: string, token: string): Promise<GrantStatus>;
+  /** Report link status only — never the token. */
+  status(tenantId: string): Promise<GrantStatus>;
+  /** Remove the tenant's stored token (idempotent). */
+  remove(tenantId: string): Promise<void>;
+}
+
 // --------------------------------------------------------------------------- //
 // Port 2 - TenantRepoProvider (the tenant's mushy-codebase git repo)
 // --------------------------------------------------------------------------- //
@@ -227,4 +252,10 @@ export interface HarnessPorts {
   tenantRepo: TenantRepoProvider;
   broker: BrokerApsClient;
   agentRunner: AgentRunner;
+  /**
+   * OPTIONAL per-tenant grant admin store (wave 4). When present, the harness serves
+   * PUT/GET/DELETE /grants/{tenantId}; when absent those routes return 501. The
+   * hermetic author tests wire the four required ports and omit this.
+   */
+  grantAdmin?: TenantGrantAdminStore;
 }

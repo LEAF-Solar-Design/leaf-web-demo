@@ -66,31 +66,35 @@ def _load_module(path: Path):
     return mod
 
 
-def _tenant_repo_root() -> Optional[Path]:
-    """The tenant mushy-repo checkout root from env LEAF_TENANT_REPO (read at CALL
-    time; same env deps.load_tenant_repo_tools folds against). None => not configured.
-    """
-    root = os.environ.get("LEAF_TENANT_REPO", "").strip()
-    return Path(root) if root else None
+def _tenant_repo_root(tenant_id: Optional[str] = None) -> Optional[Path]:
+    """The mushy-repo checkout root for a tenant (read at CALL time; the SAME resolver
+    deps.load_tenant_repo_tools folds against — server/tenant_paths.py). Wave 4:
+    ``$LEAF_TENANTS_DIR/<tenant_id>``, with ``$LEAF_TENANT_REPO`` as the demo-tenant
+    back-compat override; a None/empty tenant_id resolves the demo tenant (legacy
+    no-tenant callers). None => not configured for this tenant."""
+    from tenant_paths import resolve_tenant_repo_dir  # local import: no import cycle
+    return resolve_tenant_repo_dir(tenant_id)
 
 
-def resolve_local_file(tool: Dict[str, Any]) -> Optional[Path]:
+def resolve_local_file(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> Optional[Path]:
     """Return the local .py file that IS this tool, or None (=> APS path).
 
-    Resolution order: explicit `entry` (resolved against the tenant repo root when
-    LEAF_TENANT_REPO is set, then authored/ or builtins/), a `.py` `script`, then the
+    Resolution order: explicit `entry` (resolved against the REQUESTING tenant's repo
+    root when configured, then authored/ or builtins/), a `.py` `script`, then the
     built-in-op compat lookup. Authored tools always resolve via their `entry`, so
     they run their OWN persisted body.
 
-    Wave 3 (Contract 2): a tenant-repo tool carries a repo-RELATIVE entry (e.g.
-    ``tools/<name>/tool.py``). We resolve it against ``$LEAF_TENANT_REPO`` (absolute),
-    so the broker resolves it regardless of its cwd — removing the M1 broker-cwd hack.
+    Wave 3/4 (Contract 2/5): a tenant-repo tool carries a repo-RELATIVE entry (e.g.
+    ``tools/<name>/tool.py``). We resolve it against the requesting tenant's repo root
+    (absolute — ``$LEAF_TENANTS_DIR/<tenant_id>``, or ``$LEAF_TENANT_REPO`` for the demo
+    tenant), so the broker resolves it regardless of its cwd AND scopes execution to the
+    calling tenant's own files (tenant A's tool never resolves against tenant B's repo).
     """
     entry = tool.get("entry")
     if entry:
         name = Path(entry).name
         cands = [Path(entry), SERVER_DIR / entry, AUTHORED_DIR / name, BUILTIN_DIR / name]
-        troot = _tenant_repo_root()
+        troot = _tenant_repo_root(tenant_id)
         if troot is not None:
             # resolve the tenant entry against the repo root (absolute), ahead of the
             # authored/builtins fallbacks so a tenant tool runs its OWN repo file.
@@ -112,9 +116,9 @@ def resolve_local_file(tool: Dict[str, Any]) -> Optional[Path]:
     return None
 
 
-def _needs_aps(tool: Dict[str, Any]) -> bool:
+def _needs_aps(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> bool:
     """True when the tool has no local .py and must run on APS DA."""
-    return resolve_local_file(tool) is None
+    return resolve_local_file(tool, tenant_id) is None
 
 
 def _coerce(ret: Any) -> Union[Tuple[dict, Any], dict]:
@@ -148,8 +152,12 @@ def _normalize_aps_envelope(raw: Dict[str, Any], name: Optional[str], version: s
 def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[str, Any],
                      aps_live: bool, da: Any = None, *,
                      dwg_path: Optional[str] = None,
-                     t0: Optional[float] = None) -> Dict[str, Any]:
-    """Execute the tool the registry entry references. Returns an extended §3 envelope."""
+                     t0: Optional[float] = None,
+                     tenant_id: Optional[str] = None) -> Dict[str, Any]:
+    """Execute the tool the registry entry references. Returns an extended §3 envelope.
+
+    ``tenant_id`` scopes entry resolution to the requesting tenant's repo (wave 4). A
+    None tenant_id keeps the legacy demo-tenant behaviour (honours $LEAF_TENANT_REPO)."""
     t0 = t0 if t0 is not None else time.perf_counter()
     name = (tool or {}).get("name")
     version = (tool or {}).get("version", "1.0.0")
@@ -164,7 +172,7 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         return err_envelope(ErrorCode.BAD_PARAMS, "params schema: " + "; ".join(perrs),
                             retryable=False, tool=name, version=version, timing_ms=_ms())
 
-    local = resolve_local_file(tool)
+    local = resolve_local_file(tool, tenant_id)
 
     # 2) APS path (kind:appbundle OR kind:script with only .lsp/engine_script)
     if aps_live and da is not None and hasattr(da, "run_tool") and local is None:

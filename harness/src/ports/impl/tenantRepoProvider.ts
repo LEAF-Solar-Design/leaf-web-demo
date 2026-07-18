@@ -9,9 +9,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
 import type { HarnessIdentity, TenantRepo, TenantRepoProvider } from "../index.js";
 
 /** Resolves a tenant to its mushy-codebase git remote/worktree. */
@@ -32,6 +33,16 @@ export interface TenantRepoProviderOptions {
    * The broker (whose cwd is that dir) then resolves the authored `entry` file.
    */
   inPlace?: boolean;
+  /**
+   * Wave 4 auto-provision (in-place only): when set, the FIRST checkout of a tenant
+   * whose repo does not yet exist materializes it from this pristine fixture dir
+   * (copy + ensure the __pycache__ .gitignore + `git init` + ONE seed commit). Later
+   * checkouts see the existing repo and skip provisioning. This is what makes a brand
+   * new tenant's first authoring "just work" with no manual repo setup.
+   */
+  autoProvisionFrom?: string;
+  /** Git identity for the seed commit (default HARNESS_IDENTITY). */
+  seedIdentity?: HarnessIdentity;
 }
 
 function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
@@ -79,13 +90,50 @@ class GitTenantRepo implements TenantRepo {
   }
 }
 
+const GITIGNORE_PYCACHE = "__pycache__/\n*.pyc\n";
+
+/** True iff `dir` already looks like a provisioned tenant repo (has registry.json). */
+function repoExists(dir: string): boolean {
+  return existsSync(join(dir, "registry.json"));
+}
+
 export class TenantRepoProviderImpl implements TenantRepoProvider {
   constructor(private readonly opts: TenantRepoProviderOptions) {}
+
+  /**
+   * Materialize a brand-new tenant repo from the pristine fixture: copy + ensure the
+   * __pycache__ .gitignore + `git init` + ONE seed commit. Idempotent-safe: callers
+   * only invoke it when `repoExists(dir)` is false.
+   */
+  private provision(dir: string): void {
+    const fixture = this.opts.autoProvisionFrom!;
+    const identity = this.opts.seedIdentity ?? HARNESS_IDENTITY;
+    mkdirSync(dir, { recursive: true });
+    cpSync(fixture, dir, { recursive: true });
+    // ensure the __pycache__ .gitignore exists (keeps the tenant mushy repo pyc-free,
+    // matching the broker's sys.dont_write_bytecode discipline).
+    const gitignore = join(dir, ".gitignore");
+    const current = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
+    if (!current.split(/\r?\n/).some((l) => l.trim() === "__pycache__/")) {
+      writeFileSync(gitignore, current + (current && !current.endsWith("\n") ? "\n" : "") + GITIGNORE_PYCACHE, "utf8");
+    }
+    git(dir, ["init", "-q"], identity);
+    git(dir, ["add", "-A"], identity);
+    git(
+      dir,
+      ["commit", "-q", "-m", "seed: provision tenant repo", `--author=${identity.name} <${identity.email}>`],
+      identity,
+    );
+  }
 
   async checkout(tenantId: string): Promise<TenantRepo> {
     const ref = await this.opts.locator.repoRef(tenantId);
     if (this.opts.inPlace) {
       // ref IS the local working dir; operate on it directly (no temp clone).
+      // Wave 4: auto-provision a brand-new tenant's repo from the fixture on first use.
+      if (this.opts.autoProvisionFrom && !repoExists(ref)) {
+        this.provision(ref);
+      }
       return new GitTenantRepo(ref);
     }
     const base = this.opts.workBase ?? tmpdir();
