@@ -17,6 +17,7 @@ Env:
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, Dict
 
 from fastapi import FastAPI
@@ -41,6 +42,36 @@ app.include_router(tools.router)
 app.include_router(jobs.router)
 app.include_router(capabilities.router)
 app.include_router(author.router)
+
+
+# --- platform Project/Job router (org-scoped persistence; platform/README.md) --- #
+# Loaded under the `leaf_platform` alias because the directory name shadows the
+# stdlib `platform` module (mechanism mirrors platform/tests/conftest.py).
+# Mounted LAST deliberately: the async spine keeps precedence on
+# GET /api/jobs/{job_id}; the platform Job row is served via
+# /api/projects/{project_id}/jobs. DB connects lazily (DATABASE_URL env or
+# platform/.env.local); import failure only logs — the demo runs without it.
+def _mount_platform_router() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    pkg_dir = Path(__file__).resolve().parent.parent / "platform"
+    try:
+        if "leaf_platform" not in sys.modules:
+            spec = importlib.util.spec_from_file_location(
+                "leaf_platform", pkg_dir / "__init__.py",
+                submodule_search_locations=[str(pkg_dir)])
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["leaf_platform"] = mod
+            spec.loader.exec_module(mod)
+        from leaf_platform.api import router as platform_router
+        app.include_router(platform_router)
+        print("[leaf-demo] platform router mounted (/api/projects, /api/orgs)")
+    except Exception as exc:  # pragma: no cover - env-dependent
+        print(f"[leaf-demo] platform router NOT mounted: {exc}", file=sys.stderr)
+
+
+_mount_platform_router()
 
 
 @app.get("/api/health")

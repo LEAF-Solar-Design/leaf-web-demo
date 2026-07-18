@@ -36,7 +36,29 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
     file, register it so it appears in /api/tools, and return
     {tool, code, preview} (contract section 4)."""
     use_llm = os.environ.get("LEAF_AUTHOR_LLM", "0") == "1"
-    tool, code, preview = fb.author_tool(req.description)
+
+    # Env-gated seam to the Agent SDK author harness (harness/ - HARNESS-CONTRACT.md).
+    # When LEAF_AUTHOR_HARNESS_URL is set, authoring is delegated to the harness and
+    # the returned package flows through the SAME persistence/registration pipeline
+    # below, so /api/tools and the dynamic loader treat both sources identically.
+    # Any harness failure falls back to the local templater (noted in the preview).
+    tool = None
+    harness_url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
+    if harness_url:
+        try:
+            import requests
+            r = requests.post(f"{harness_url}/author",
+                              json={"description": req.description}, timeout=120)
+            r.raise_for_status()
+            body = r.json()
+            tool, code, preview = body["tool"], body["code"], body["preview"]
+        except Exception as exc:
+            tool = None
+            print(f"[author] harness unreachable, templated fallback: {exc}")
+    if tool is None:
+        tool, code, preview = fb.author_tool(req.description)
+        if harness_url:
+            preview = "[harness unreachable; templated fallback] " + preview
     if use_llm:
         # Real LLM authoring is optional and gated. No key wired here; we fall
         # back to templating and note it in the preview rather than fail.
