@@ -1,0 +1,20 @@
+{
+  "name": "leaf-tenant-author-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tenant-facing design-time author loop on the Anthropic Agent SDK (NL prompt -> deterministic tool package -> register). Design-time only: registered tools run with ZERO LLM.",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "node --experimental-strip-types src/server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.5",
+    "typescript": "5.7.3",
+    "vitest": "2.1.9"
+  }
+}

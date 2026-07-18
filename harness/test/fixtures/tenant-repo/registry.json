@@ -1,0 +1,16 @@
+{
+  "tools": [
+    {
+      "name": "count-by-layer",
+      "version": "1.0.0",
+      "description": "Counts every model-space entity per layer.",
+      "kind": "script",
+      "engine_op": "count_by_layer",
+      "entry": "tools/count-by-layer/tool.py",
+      "params": { "type": "object", "properties": {}, "required": [] },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    }
+  ]
+}

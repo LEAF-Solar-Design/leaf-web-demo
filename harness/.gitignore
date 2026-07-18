@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.grant/
+# temp tenant checkouts the tests create (never commit a working clone)
+.tmp/
+tenant-checkouts/
