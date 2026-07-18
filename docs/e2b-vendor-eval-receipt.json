@@ -1,0 +1,46 @@
+{
+  "schema": "leaf.e2b.vendor-eval.v1",
+  "startedAt": "2026-07-18T14:50:04.189Z",
+  "completedAt": "2026-07-18T14:50:05.811Z",
+  "sdkVersion": "2.35.0",
+  "sandboxId": "ijizfogzavzjo35vxw2i2",
+  "coldBootMs": 569,
+  "network": {
+    "allowOut": [
+      "httpbingo.org"
+    ],
+    "denyOut": [
+      "0.0.0.0/0"
+    ],
+    "allowPublicTraffic": false
+  },
+  "processShape": {
+    "capabilities": [
+      "read_intake",
+      "emit_tool_package"
+    ],
+    "event": "authoring_process_booted",
+    "tenant": "vendor-eval",
+    "tool": "draft_panel_layout"
+  },
+  "broker": {
+    "host": "httpbingo.org",
+    "reached": true
+  },
+  "deniedProbes": {
+    "https://1.1.1.1/": {
+      "blocked": true,
+      "error_type": "URLError"
+    },
+    "https://api.github.com/": {
+      "blocked": true,
+      "error_type": "URLError"
+    },
+    "https://example.com/": {
+      "blocked": true,
+      "error_type": "URLError"
+    }
+  },
+  "commandExitCode": 0,
+  "passed": true
+}

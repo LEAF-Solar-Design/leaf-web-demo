@@ -1,9 +1,12 @@
 # APS Design Automation — Flex concurrency-limit raise request
 
-> **Status: DRAFT, ready to send.** This is addressed to Autodesk Platform
-> Services (APS) Support / Design Automation team. The account owner is the only
-> person who can file it. Fill the one bracketed confirmation in §2 from the APS
-> console if you want an exact current-limit figure, then send as-is.
+> **Status: SUBMITTED VIA APS ONBOARDING FALLBACK (2026-07-18).** Autodesk's
+> logged-in Assistant confirmed that direct API tickets require an active ADN
+> membership, which this account does not have. The complete concurrency request
+> below was therefore submitted in the special-request field for an official APS
+> Onboarding call with Peter Schlipf on **Thursday, 2026-07-23 at 5:30 AM Central**.
+> Microsoft Bookings confirmed the appointment and will send the calendar receipt
+> to `ehaug@leafautomation.ai`. This path does not issue a support ticket number.
 >
 > Send via: APS support ticket at https://aps.autodesk.com/en/support/get-help
 > (category: Design Automation API), or your Autodesk account/partner contact.
@@ -36,10 +39,9 @@ In practice our submit path is throttled to a conservative in-app ceiling of
 **`APS_MAX_CONCURRENCY = 1–2`** concurrent WorkItems to stay safely under that
 limit, which serializes all tenants behind a single in-flight WorkItem.
 
-> [Confirm your app's exact current Design Automation concurrency limit in the APS
-> console → Design Automation → Usage/Limits, and replace this sentence with the
-> exact figure before sending. If you cannot find it, sending without the exact
-> number is fine — Support can look it up from the app id above.]
+The exact account-side limit was not exposed in the available APS console. The
+request was submitted using the observed/assumed **1–2** figure; APS can confirm
+the authoritative limit from the app id above.
 
 ## 3. Requested limit
 

@@ -109,6 +109,11 @@ The Wave-1 build ran against an **ephemeral Neon branch** `leaf-platform-dev-w1`
 (`postgres:16`, `docker run -d --name leaf-platform-pg -e POSTGRES_PASSWORD=leafdev
 -p 5433:5432 postgres:16`).
 
+**Resource decision (2026-07-18): KEEP both.** The Neon branch is ready and the
+`leaf-platform-pg` container is healthy/running. They remain the low-cost,
+reproducible backing stores for platform integration tests; do not delete them
+until those tests have moved to the deployed environment.
+
 ## Org bootstrap route — `POST /api/orgs` (dev posture: OPEN)
 
 `POST /api/orgs {name, tier?}` mints an org and returns `{org: {org_id, name,

@@ -75,11 +75,27 @@ _token_cache = {"access_token": None, "expires_at": 0.0}
 
 
 def _load_creds() -> dict:
-    if not os.path.exists(CRED_PATH):
-        raise FileNotFoundError(f"APS creds missing: {CRED_PATH}")
-    c = json.load(open(CRED_PATH))
-    if not c.get("client_id") or c.get("client_id") == "PASTE_ME":
-        raise ValueError(f"fill client_id/client_secret in {CRED_PATH}")
+    # ECS injects the complete JSON object from Secrets Manager into this
+    # process only. Local/operator runs keep using the established credential
+    # file. Never log either source or its values.
+    inline = os.environ.get("APS_CREDENTIALS_JSON", "").strip()
+    if inline:
+        try:
+            c = json.loads(inline)
+        except json.JSONDecodeError as exc:
+            raise ValueError("APS_CREDENTIALS_JSON is not valid JSON") from exc
+    else:
+        if not os.path.exists(CRED_PATH):
+            raise FileNotFoundError(f"APS creds missing: {CRED_PATH}")
+        with open(CRED_PATH, encoding="utf-8") as handle:
+            c = json.load(handle)
+    if (
+        not c.get("client_id")
+        or c.get("client_id") == "PASTE_ME"
+        or not c.get("client_secret")
+        or c.get("client_secret") == "PASTE_ME"
+    ):
+        raise ValueError("APS credentials must include client_id and client_secret")
     return c
 
 

@@ -131,11 +131,10 @@ All commented in `docker-compose.yml` — uncomment + provide the artifact:
   `.env` next to the compose file (compose substitutes it into the app). Empty by
   default, so `POST /api/orgs` etc. stay dark on a plain demo.
 
-- **Platform live auth (`LEAF_AUTH_LIVE=1`)** — needs PyJWT
-  (`server/requirements-auth.txt`), which the app image does **not** install by
-  default (keeps the image lean; the default demo never imports it). Add a
-  `RUN pip install -r /app/server/requirements-auth.txt` line to `Dockerfile.app`
-  and rebuild if you need RS256 JWT verification in-container.
+- **Platform live auth (`LEAF_AUTH_LIVE=1`)** — PyJWT and its crypto dependency
+  from `server/requirements-auth.txt` are installed in the app image. The
+  verifier remains dormant when `LEAF_AUTH_LIVE=0`, while the ECS deployment can
+  enable RS256 verification through environment configuration alone.
 
 ---
 

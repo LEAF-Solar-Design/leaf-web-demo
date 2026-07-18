@@ -16,10 +16,12 @@ WORKDIR /app
 # PyJWT (server/requirements-auth.txt) is an OPERATOR OPT-IN for LEAF_AUTH_LIVE=1
 # (see deploy/README.md) — the default demo never imports it.
 COPY server/requirements.txt        /app/server/requirements.txt
+COPY server/requirements-auth.txt   /app/server/requirements-auth.txt
 COPY platform/requirements.txt      /app/platform/requirements.txt
 COPY da/requirements.txt            /app/da/requirements.txt
 RUN pip install --no-cache-dir \
       -r /app/server/requirements.txt \
+      -r /app/server/requirements-auth.txt \
       -r /app/platform/requirements.txt \
       -r /app/da/requirements.txt
 

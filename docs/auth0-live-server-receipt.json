@@ -1,0 +1,26 @@
+{
+  "auth_live": true,
+  "issuer": "https://leafautomation.us.auth0.com/",
+  "audience": "https://api.leafdesign.ai",
+  "matrix": {
+    "no_bearer": 401,
+    "real_token_session": 200,
+    "tier_denied_author": 403
+  },
+  "echo": {
+    "tenant_id": "cmko86m8c000210p4gurmb17y",
+    "org_id": "cmko86m8c000210p4gurmb17y",
+    "tier": "hosted_starter"
+  },
+  "entitlements": {
+    "run_read": true,
+    "run_write": true,
+    "build": false
+  },
+  "denied": {
+    "entitlement_required": true,
+    "required": "build",
+    "tier": "hosted_starter"
+  },
+  "token_file": "C:\\tmp\\leaf-grants\\auth0-access-token.txt"
+}

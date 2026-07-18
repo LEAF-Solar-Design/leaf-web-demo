@@ -106,15 +106,45 @@ On a 429 whose reset horizon indicates the subscription window (not a transient 
 
 ---
 
-## Open questions / login-gated gaps (for the operator — NOT guessed)
+## Operator login-gated check (completed 2026-07-18)
 
-1. **Is there a formal third-party OAuth *app registration/approval* program?** Public docs describe the *user* OAuth flow and `claude setup-token`, but no self-serve developer flow to register a third-party OAuth **client** (client ID, redirect-URI allowlist, review/approval). If this exists, it is behind console/developer login. Operator: check console.anthropic.com / platform.claude.com developer settings and claude.com developer/OAuth app settings.
+The operator inspected the authenticated `console.anthropic.com` / Claude
+developer settings and the logged-in Claude settings surfaces. **No third-party
+OAuth application-registration surface was present**: no client-id creation,
+redirect-URI allowlist, review/approval application, or per-app quota page. The
+relevant visible product surfaces were Connectors and Plugins, neither of which
+registers an Agent SDK OAuth client. This is a `confirmed-negative for the
+inspected account and current UI`, not proof that no private partner program can
+exist.
+
+The current Commercial Terms and related service terms were also reviewed for a
+clause expressly authorizing a hosted application where every end user brings
+their own Claude subscription OAuth. **No such clause was found.** The strongest
+official product-language evidence remains the Help Center article, which
+expressly recognizes "third-party apps that authenticate with your Claude
+subscription through the Agent SDK" and says the credit/usage is per-user, while
+also directing teams running shared production automation toward Claude Platform
+API keys. That establishes product support for the mechanism, but it is **not an
+explicit legal safe harbor for Leaf's hosted-many-users model**.
+
+Decision: do not build a fictional developer-registration redirect flow. Keep
+the proven per-user grant linking (`claude setup-token` / captured OAuth grant)
+for development and controlled pilots; treat hosted subscription-OAuth for
+strangers as an unresolved launch-policy bet. The production-safe commercial
+fallback is per-tenant BYO Anthropic API key or a Leaf-controlled Platform API
+account with explicit billing/terms.
+
+## Remaining open questions / policy gaps
+
+1. **Private partner registration, if any.** No self-serve registration surface exists in the authenticated account inspected on 2026-07-18. A private/partner-only program could still exist; confirmation would require Anthropic sales/support, not another dashboard search.
 2. **Exact current per-plan usage limits (5h + weekly) for Pro/Max/Team/Enterprise** that subscription Agent SDK usage draws from — the numeric caps are shown in the logged-in claude.ai `/usage` view, not in the fetched public docs.
-3. **The precise Terms/Usage-Policy clause governing a *hosted third-party app* authenticating many end-users each via their own subscription OAuth** — i.e., is Leaf's "each tenant signs in with their own Claude" model explicitly permitted, versus the blocked "bridge one subscription into a harness" pattern? The dev.to source says multi-user-on-one-token violates terms; whether per-user-OAuth-in-a-hosted-app is sanctioned needs the actual Commercial Terms / Usage Policy text (login/legal page).
+3. **Hosted-many-users legal posture.** The Commercial Terms review found no clause expressly permitting Leaf's "each tenant signs in with their own Claude subscription" model. Official product docs acknowledge third-party Agent SDK apps, but that is not an explicit contractual authorization. Obtain written Anthropic confirmation before general availability, or use the Platform API-key lane.
 4. **Whether/when Anthropic resumes the paused monthly-credit program**, and its final exhaustion semantics (usage-credits-enabled overflow, non-rollover reset date). The paused design is documented; the resumption timing is not announced. `confirmed-negative` per the Help Center pause note.
 5. **Per-app or per-user quotas specific to the (paused) Agent SDK credit** beyond the headline $20/$100/$200 — any rate/throughput caps distinct from normal subscription limits are not in public docs.
 
-*Executor did NOT log in, create a developer account, accept terms, call the Anthropic API, or run any OAuth flow. The above are listed precisely for the operator to retrieve.*
+*The original research executor did not log in or run OAuth. The operator
+completed the two login-gated inspections above on 2026-07-18; no new developer
+application was created and no terms were accepted as part of that inspection.*
 
 ---
 
