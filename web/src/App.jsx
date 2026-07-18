@@ -16,11 +16,13 @@ import ProjectSwitcher from './components/ProjectSwitcher.jsx'
 import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
 import CheckoutChip from './components/CheckoutChip.jsx'
+import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import {
   config, getSession, getTools, getCapabilities, getUsage, getHealth, runTool, runToolAsync,
   attachToJob, getJob, listJobs, recordToEnvelope, authorTool, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, nlPrompt, closeJobBeacon,
   getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
+  getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
@@ -155,6 +157,15 @@ export default function App() {
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
 
+  // --- Claude account grant (Concern 2 — the user's Claude login) ---
+  // Kept strictly apart from the platform identity above (AUTH.md §0). The token
+  // is write-only: we hold linkage status only, never the token itself.
+  const [grant, setGrant] = useState(null)        // {linked, linked_at} | null (null = unknown/undeployed)
+  const [grantLoading, setGrantLoading] = useState(false)
+  const [grantBusy, setGrantBusy] = useState(false) // link/unlink request in flight
+  const [grantErr, setGrantErr] = useState(null)
+  const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
+
   const viewerRef = useRef(null)
   const authorSectionRef = useRef(null)
   const runningSinceRef = useRef(null)  // ms epoch the job entered 'running'
@@ -170,6 +181,12 @@ export default function App() {
   const tenantLabel = tenant || 'demo'
   const tierDisplay = tier || '—'
   const gateTier = tier || 'demo'
+
+  // Claude account (Concern 2) authoring gate. Only fires when we DEFINITELY know
+  // the tenant has no linked Claude grant (live + grant read + linked === false).
+  // Unknown linkage (mock, or the endpoint undeployed -> grant === null) never
+  // gates — authoring stays byte-identical to today (template path unaffected).
+  const claudeNotLinked = !mock && !!grant && grant.linked === false
 
   // --- single-writer checkout (item 3) ---
   // Our own holder id (best-effort): the echoed tenant, else the configured stub.
@@ -280,6 +297,43 @@ export default function App() {
   }, [mock])
 
   useEffect(() => { loadHealth() }, [loadHealth])
+
+  // Claude account grant (Concern 2): read linkage status on load (live only).
+  // null in mock (panel hidden) or when the sibling endpoint isn't deployed yet
+  // (the affordance then degrades to today's ungated authoring — no gate, no
+  // fabricated "linked" claim). Never fetches or holds the token itself.
+  const loadGrant = useCallback(async () => {
+    if (mock) { setGrant(null); return }
+    setGrantLoading(true); setGrantErr(null)
+    try { setGrant(await getClaudeGrant()) } catch { setGrant(null) } finally { setGrantLoading(false) }
+  }, [mock])
+
+  useEffect(() => { loadGrant() }, [loadGrant])
+
+  const onLinkClaude = useCallback(async (token) => {
+    // token is passed straight to the API and never stored/logged here.
+    setGrantBusy(true); setGrantErr(null)
+    try {
+      const res = await linkClaudeGrant(token)
+      setGrant({ linked: true, linked_at: res?.linked_at || new Date().toISOString() })
+    } catch (e) {
+      setGrantErr(String(e.message || e))
+    } finally {
+      setGrantBusy(false)
+    }
+  }, [])
+
+  const onUnlinkClaude = useCallback(async () => {
+    setGrantBusy(true); setGrantErr(null)
+    try {
+      await unlinkClaudeGrant()
+      setGrant({ linked: false, linked_at: null })
+    } catch (e) {
+      setGrantErr(String(e.message || e))
+    } finally {
+      setGrantBusy(false)
+    }
+  }, [])
 
   // Projects workspace (item 1): fetch the org's projects (live only). No org
   // stored -> empty list + no error (the switcher offers "create workspace org").
@@ -861,6 +915,17 @@ export default function App() {
           )}
           {org && <span className="who-id">org <b>{org}</b></span>}
           <span className="who-id">tenant <b>{tenantLabel}</b> · tier <b>{tierDisplay}</b></span>
+          <ClaudeAccountPanel
+            mock={mock}
+            grant={grant}
+            loading={grantLoading}
+            busy={grantBusy}
+            error={grantErr}
+            open={claudeOpen}
+            onToggle={setClaudeOpen}
+            onLink={onLinkClaude}
+            onUnlink={onUnlinkClaude}
+          />
         </div>
       </header>
 
@@ -920,6 +985,8 @@ export default function App() {
             onUseAuthored={onUseAuthored}
             seed={authorSeed}
             seedSignal={authorSignal}
+            notLinked={claudeNotLinked}
+            onLinkClaude={() => setClaudeOpen(true)}
           />
         </Section>
       </aside>

@@ -54,11 +54,34 @@ function ProvenanceBadge({ prov }) {
   return <span className="badge" title="Generated from a built-in template.">templated</span>
 }
 
-export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal }) {
+// The calm authoring gate (CONCERN 2). Shown when the tenant has no linked Claude
+// account — proactively (notLinked) or reactively (a grant-required rejection).
+// It is a NUDGE, never a red failure: templated authoring stays fully usable, so
+// the copy points at the Claude account panel without blocking the Generate flow.
+function AuthorGate({ onLinkClaude }) {
+  return (
+    <div className="author-gate" role="status">
+      <span className="tag amber">Claude account</span>
+      <div className="author-gate-body">
+        <b>Link your Claude account to author with the agent.</b>{' '}
+        Templated authoring still works below without it — linking your Claude subscription lets the
+        real agent write richer tools.
+        {onLinkClaude && (
+          <div className="author-gate-act">
+            <button className="btn ghost" onClick={onLinkClaude}>Link Claude account</button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal, notLinked, onLinkClaude }) {
   const [desc, setDesc] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [err, setErr] = useState(null)
+  const [grantGate, setGrantGate] = useState(false) // a grant-required rejection (calm gate, not red)
   const [authored, setAuthored] = useState(null)
   const lastSignal = useRef(null)
   const startRef = useRef(null)
@@ -83,12 +106,15 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal 
 
   async function submit() {
     if (!desc.trim()) return
-    setBusy(true); setErr(null); setAuthored(null)
+    setBusy(true); setErr(null); setGrantGate(false); setAuthored(null)
     try {
       const res = await onAuthor(desc.trim())
       setAuthored(res)
     } catch (e) {
-      setErr(String(e.message || e))
+      // A grant-required rejection is an expected "link your Claude account"
+      // state, not an error to alarm about — surface the calm gate, never red.
+      if (e && e.grantRequired) setGrantGate(true)
+      else setErr(String(e.message || e))
     } finally {
       setBusy(false)
     }
@@ -100,6 +126,7 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal 
   return (
     <div className="author-panel author-inner">
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf generates it and adds it to the catalog.</p>
+      {(notLinked || grantGate) && <AuthorGate onLinkClaude={onLinkClaude} />}
       <textarea
         value={desc}
         onChange={(e) => setDesc(e.target.value)}

@@ -272,6 +272,62 @@ export async function getUsage() {
   }
 }
 
+// --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
+// This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
+// (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
+// a per-user Claude OAuth token minted by `claude setup-token`, stored per tenant
+// server-side. The token is WRITE-ONLY from the UI: we POST it once and never
+// read it back (GET never returns it), never log it, never echo it.
+//   GET    /api/tenant/claude-grant -> {linked: bool, linked_at: str|null}
+//   POST   /api/tenant/claude-grant {token} -> {linked: true, linked_at}
+//   DELETE /api/tenant/claude-grant -> {linked: false}
+// All tenant-scoped (X-Tenant-Id / auth). LIVE only — mock hides the panel.
+// getClaudeGrant returns null when the sibling endpoint isn't deployed yet
+// (404/unreachable) so the affordance degrades to today's ungated behavior
+// (no proactive authoring gate) instead of surfacing a red failure.
+export async function getClaudeGrant() {
+  try {
+    return await http('/api/tenant/claude-grant', { headers: { 'X-Tenant-Id': TENANT } })
+  } catch {
+    return null
+  }
+}
+
+// POST the token ONCE. Callers must clear their field immediately after; this
+// layer keeps no reference to it beyond the request body and logs nothing.
+export async function linkClaudeGrant(token) {
+  return http('/api/tenant/claude-grant', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ token }),
+  })
+}
+
+export async function unlinkClaudeGrant() {
+  return http('/api/tenant/claude-grant', {
+    method: 'DELETE',
+    headers: { 'X-Tenant-Id': TENANT },
+  })
+}
+
+// Defensive detector for the authoring "grant required" signal (Concern 2). The
+// sibling backend documents the exact field; until it lands we key on EITHER an
+// explicit `grant_required` flag OR the §10 error code/message mentioning a
+// Claude grant / sign-in. Turns an authoring rejection into the calm "link your
+// Claude account" gate instead of a red failure. Accepts a §10 error object, a
+// full envelope, or an Error carrying a parsed `.body`.
+export function isGrantRequired(input) {
+  if (!input) return false
+  const body = input.body || input
+  if (body.grant_required === true) return true
+  const e = body.error || body
+  if (e && e.grant_required === true) return true
+  const code = String((e && e.error_code) || '').toLowerCase()
+  const msg = String((e && e.message) || input.message || '').toLowerCase()
+  const hay = `${code} ${msg}`
+  return /grant[_ -]?required|link (your )?claude|sign ?in with claude|claude account|claude subscription|claude (grant|token|oauth|login)/.test(hay)
+}
+
 // --- Async job model (CONTRACT-ADDENDUM §7) -----------------------------
 const TERMINAL = new Set(['complete', 'failed'])
 
@@ -484,14 +540,33 @@ export async function redoDrawing(drawingId) {
 }
 
 // --- Author -------------------------------------------------------------
+// LIVE authoring is tenant-scoped (X-Tenant-Id) — the same tenant whose Claude
+// grant (Concern 2) funds the agent. On a non-2xx we parse the §10 body and
+// throw an Error carrying it (`.body`, `.status`, `.grantRequired`) so the
+// AuthorPanel can render the calm "link your Claude account" gate for a
+// grant-required rejection instead of a red failure. The templated path (no
+// agent) still returns a normal 2xx envelope, so template authoring is
+// unaffected by whether a Claude account is linked.
 export async function authorTool(mock, description) {
   if (mock) {
     await nap(700)
     return authorMock(description)
   }
-  return http('/api/author', {
+  const res = await fetch(`${API_BASE}/api/author`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify({ description }),
   })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const err = new Error(
+      (body && body.error && (body.error.message || body.error.error_code)) ||
+      `POST /api/author -> ${res.status}`,
+    )
+    err.status = res.status
+    err.body = body
+    err.grantRequired = isGrantRequired(body)
+    throw err
+  }
+  return body
 }

@@ -802,3 +802,60 @@ footer .warn-txt { color: var(--amber); }
 .job.quota { border-left: 3px solid var(--amber); }
 .inline-error.quota { color: var(--ink); background: var(--amber-tint); border-color: var(--amber); }
 .inline-error.quota span { color: var(--ink); }
+
+/* ==================== UI wave 4: Claude account (Concern 2) ==================== */
+
+/* header trigger — square mono affordance in the .who cluster */
+.claude-acct { position: relative; display: inline-block; }
+.claude-trigger {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: inherit;
+}
+.claude-trigger .ca-k { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); white-space: nowrap; }
+.ca-state {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--amber); border: 1px solid var(--amber); border-radius: 2px; padding: 1px 6px; background: var(--white);
+  white-space: nowrap;
+}
+.ca-state.on { color: var(--leaf); border-color: var(--leaf); background: var(--leaf-tint); }
+.claude-trigger:hover .ca-state { border-color: var(--leaf); }
+
+/* popover — plain bordered card, right-anchored (trigger sits at header right) */
+.claude-pop {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 55;
+  width: 320px; max-width: calc(100vw - 32px);
+  background: var(--white); border: 1px solid var(--rule-2); border-radius: 2px;
+  box-shadow: 0 6px 20px rgba(20, 26, 21, .14); padding: 12px; text-align: left;
+}
+.ca-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-2); padding-bottom: 8px; border-bottom: 1px solid var(--rule);
+}
+.ca-x { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); background: none; border: 0; cursor: pointer; text-decoration: underline; padding: 0; }
+.ca-setup, .ca-linked { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.ca-copy { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; margin: 0; }
+.ca-copy b { color: var(--ink); }
+.ca-steps { margin: 0; padding-left: 18px; font-size: 12px; color: var(--ink-2); line-height: 1.6; display: flex; flex-direction: column; gap: 2px; }
+.ca-steps code, .ca-copy code { font-family: var(--mono); font-size: 11.5px; background: var(--paper-2); border: 1px solid var(--rule); border-radius: 2px; padding: 0 4px; color: var(--ink); }
+.ca-field { display: flex; flex-direction: column; gap: 4px; }
+.ca-field-k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; color: var(--ink-2); }
+.ca-field input { width: 100%; }
+.ca-act { align-self: flex-start; }
+.ca-note { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); line-height: 1.5; margin: 0; opacity: .9; }
+/* linking hiccup — calm amber, not a red alarm (retryable coordination state) */
+.ca-err { font-family: var(--mono); font-size: 11.5px; color: var(--amber); border-left: 3px solid var(--amber); background: var(--amber-tint); padding: 6px 8px; line-height: 1.4; }
+.ca-confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ca-confirm-q { font-family: var(--mono); font-size: 11px; color: var(--ink); }
+.ca-yes { color: var(--red); border-color: var(--red); }
+.ca-yes:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
+
+/* authoring gate — calm nudge in AuthorPanel; never red, template path stays live */
+.author-gate {
+  display: flex; align-items: flex-start; gap: 10px;
+  border-left: 3px solid var(--amber); background: var(--amber-tint);
+  padding: 10px 12px; margin: 0 0 12px; font-size: 12.5px; color: var(--ink);
+}
+.author-gate-body { line-height: 1.5; }
+.author-gate-body b { color: var(--amber); }
+.author-gate-act { margin-top: 8px; }

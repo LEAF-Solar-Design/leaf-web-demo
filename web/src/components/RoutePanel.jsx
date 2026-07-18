@@ -165,7 +165,7 @@ export default function RoutePanel({ route, tools, running, writeLocked, onRun, 
                 </button>
               </div>
             )}
-            <div className="route-note">Did you mean:</div>
+            {route.alternatives?.length > 0 && <div className="route-note">Did you mean:</div>}
             <Alternatives alts={route.alternatives} tools={tools} onPick={onPickAlternative} />
           </>
         )}
