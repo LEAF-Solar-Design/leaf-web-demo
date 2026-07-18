@@ -5,10 +5,16 @@ import ToolsPanel from './components/ToolsPanel.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
 import AuthorPanel from './components/AuthorPanel.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
+import PromptBox from './components/PromptBox.jsx'
+import RoutePanel from './components/RoutePanel.jsx'
+import JobRail from './components/JobRail.jsx'
+import DegradedBanner from './components/DegradedBanner.jsx'
+import EntitlementGate from './components/EntitlementGate.jsx'
 import {
-  config, getSession, getTools, runTool, runToolAsync, attachToJob, getJob,
-  recordToEnvelope, authorTool, getDrawingIntake, undoDrawing, redoDrawing,
+  config, getSession, getTools, runTool, runToolAsync, attachToJob, getJob, listJobs,
+  recordToEnvelope, authorTool, getDrawingIntake, undoDrawing, redoDrawing, nlPrompt,
 } from './api.js'
+import { matchPrompt } from './mock/mockNlPrompt.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 
 // Calm, muted ink palette — reads on the light "paper" CADViewport canvas.
@@ -30,6 +36,26 @@ const readInflight = () => {
 // `?fixture=edit` (mock only) loads the synthetic edit fixture that exercises
 // inserts + 3DFACEs + picking + the pending/version flow.
 const fixtureParam = new URLSearchParams(window.location.search).get('fixture')
+
+// `?demo=degraded` is a DEV-only demo hook to show the §10 degraded banner
+// without a real APS_LIVE=1 fallback (degraded_mode is only true when a cloud
+// run falls back; at APS_LIVE=0 it never trips). It only forces the banner's
+// visibility — it fabricates no result numbers.
+const demoDegraded = new URLSearchParams(window.location.search).get('demo') === 'degraded'
+
+// Collapsible left-rail section (keeps the classic catalog reachable but
+// secondary to the prompt box — the primary path).
+function Section({ title, count, open, onToggle, children, innerRef }) {
+  return (
+    <div className={`section ${open ? '' : 'collapsed'}`} ref={innerRef}>
+      <button className="section-head" onClick={onToggle} aria-expanded={open}>
+        <span>{title}{count != null ? <span className="n"> · {count}</span> : null}</span>
+        <span className="chev">{open ? 'hide' : 'show'}</span>
+      </button>
+      {open && <div className="section-body">{children}</div>}
+    </div>
+  )
+}
 
 export default function App() {
   const [mock, setMock] = useState(config.mockDefault)
@@ -54,13 +80,31 @@ export default function App() {
   const [versionBusy, setVersionBusy] = useState(false)  // undo/redo request in flight
   const [overlayStale, setOverlayStale] = useState(false) // last result overlay no longer matches shown version
   const [openTool, setOpenTool] = useState(null)         // the tool card expanded in ToolsPanel (for the write ghost)
+
+  // --- unified surface state ---
+  const [tenant, setTenant] = useState(null)             // /api/session tenant echo (else "demo")
+  const [prompt, setPrompt] = useState('')               // dispatch box text
+  const [route, setRoute] = useState(null)               // §12 nl-prompt routing decision
+  const [routing, setRouting] = useState(false)          // awaiting the router
+  const [jobs, setJobs] = useState([])                   // live rail: recent GET /api/jobs
+  const [currentJobId, setCurrentJobId] = useState(null) // this session's live job id (dedupe)
+  const [inflightPtr, setInflightPtr] = useState(null)   // localStorage re-attach pointer
+  const [reattaching, setReattaching] = useState(false)  // auto re-attach in progress
+  const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
+  const [authorOpen, setAuthorOpen] = useState(false)    // author flow (opens on build lane)
+  const [authorSeed, setAuthorSeed] = useState('')       // build-lane prefill text
+  const [authorSignal, setAuthorSignal] = useState(0)    // bump to re-seed the author flow
+
   const viewerRef = useRef(null)
+  const authorSectionRef = useRef(null)
   const runningSinceRef = useRef(null)  // ms epoch the job entered 'running'
   const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
 
   const isEditFixture = mock && fixtureParam === 'edit'
   // What the panels/legend/selection reflect: the applied version if present.
   const shown = versionIntake || intake
+  const projectName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : 'your project'
+  const tierLabel = tenant || 'demo'
 
   // color-by-layer, stable across renders (keyed to base intake identity)
   const colorForLayer = useMemo(() => {
@@ -70,7 +114,7 @@ export default function App() {
     return (layer) => map[layer] || '#8aa0b5'
   }, [intake])
 
-  // load session (intake) + reset transient state when mode/fixture changes
+  // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
     setIntake(null); setVersionIntake(null); setLoadErr(null)
@@ -78,6 +122,7 @@ export default function App() {
     setRunning(false); setRunStatus(null); setRunElapsedMs(null); setRunErr(null)
     setDrawingState(null); setVersionNote(null); setVersionBusy(false)
     setOverlayStale(false); setOpenTool(null)
+    setRoute(null); setRouting(false); setCurrentJobId(null); setTenant(null)
     runningSinceRef.current = null
     const seat = (d) => {
       if (!alive) return
@@ -91,7 +136,7 @@ export default function App() {
       return () => { alive = false }
     }
     getSession(mock)
-      .then(seat)
+      .then(({ intake: d, tenant: t }) => { if (!alive) return; seat(d); setTenant(t) })
       .catch((e) => alive && setLoadErr(String(e.message || e)))
     return () => { alive = false }
   }, [mock, isEditFixture])
@@ -105,10 +150,28 @@ export default function App() {
     return () => { alive = false }
   }, [mock])
 
+  // Refresh the live job rail on demand (after a run completes, so the job shows
+  // immediately rather than waiting for the next poll). No-op in mock.
+  const refreshJobs = useCallback(async () => {
+    if (mock) return
+    try { setJobs(await listJobs()) } catch { /* transient */ }
+  }, [mock])
+
+  // Poll the recent-jobs list (live only; zero /api calls in mock).
+  useEffect(() => {
+    if (mock) { setJobs([]); return }
+    let alive = true
+    const tick = async () => {
+      try { const js = await listJobs(); if (alive) setJobs(js) } catch { /* transient */ }
+    }
+    tick()
+    const id = setInterval(tick, 2500)
+    return () => { alive = false; clearInterval(id) }
+  }, [mock])
+
   // A live job entered 'running' — begin (or resume) the wall-clock, using the
   // server's started_at when known (localhost clocks match) so a re-attach
-  // continues the real elapsed time instead of restarting at zero. Declared
-  // before the effects that depend on it (avoids a TDZ in their deps arrays).
+  // continues the real elapsed time instead of restarting at zero.
   const markRunning = useCallback((startedAtSec) => {
     if (runningSinceRef.current == null) {
       runningSinceRef.current = startedAtSec ? startedAtSec * 1000 : Date.now()
@@ -128,30 +191,32 @@ export default function App() {
 
   // Tab-close survivability: on load in live mode, if a durable in-flight job
   // pointer exists, re-attach. Terminal already -> render its envelope; still
-  // running -> resume calm progress + final render. Clear the pointer either
-  // way (and on a stale/unknown job) so a closed tab never orphans the UI.
+  // running -> resume calm progress + final render. The rail shows a re-attach
+  // chip while this runs. Clear the pointer either way.
   useEffect(() => {
-    if (mock) return
+    if (mock) { setInflightPtr(null); setReattaching(false); return }
     const saved = readInflight()
     if (!saved || !saved.job_id) return
+    setInflightPtr(saved)
     let alive = true
     ;(async () => {
       let rec
       try {
         rec = await getJob(saved.job_id)
       } catch {
-        clearInflight() // 404 / unreachable -> stale pointer
+        clearInflight(); setInflightPtr(null) // 404 / unreachable -> stale pointer
         return
       }
       if (!alive) return
       setSelectedTool((t) => t || { name: saved.tool })
+      setCurrentJobId(saved.job_id)
       if (rec.status === 'complete' || rec.status === 'failed') {
         setResult(recordToEnvelope(rec))
-        clearInflight()
+        clearInflight(); setInflightPtr(null)
         return
       }
       // still in flight — resume progress and await the terminal envelope
-      setRunning(true); setRunErr(null); setResult(null)
+      setRunning(true); setRunErr(null); setResult(null); setReattaching(true)
       if (rec.status === 'running') markRunning(rec.started_at)
       else setRunStatus(rec.status || 'submitted')
       try {
@@ -166,12 +231,16 @@ export default function App() {
       } catch (e) {
         if (alive) setRunErr(String(e.message || e))
       } finally {
-        if (alive) { setRunning(false); setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null }
+        if (alive) {
+          setRunning(false); setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
+          setReattaching(false); setInflightPtr(null)
+        }
         clearInflight()
+        refreshJobs()
       }
     })()
     return () => { alive = false }
-  }, [mock, markRunning])
+  }, [mock, markRunning, refreshJobs])
 
   const layerCounts = useMemo(() => {
     const c = {}
@@ -192,9 +261,7 @@ export default function App() {
     return { handle: selectedHandle, kind: 'entity', layer: null }
   }, [selectedHandle, shown])
 
-  // Swap the viewer + panels to a drawing version (§11). `view` is a drawing
-  // response body ({intake, head, latest, ...}); applyVersion rebuilds scene
-  // geometry and clears the optimistic ghost. Panels/legend reflect `shown`.
+  // Swap the viewer + panels to a drawing version (§11).
   const seatVersion = useCallback((view, drawingId, note) => {
     viewerRef.current?.applyVersion(view.intake)
     setVersionIntake(view.intake)
@@ -234,7 +301,7 @@ export default function App() {
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
-    setOverlayStale(false)
+    setOverlayStale(false); setCurrentJobId(null)
     lastRunRef.current = { tool, params }
     // feed the picked entity to the tool so an edit tool can target it. A write
     // tool (delete-marked-panel) reads `handle`, so map the selection onto it
@@ -250,7 +317,7 @@ export default function App() {
         env = await runTool(mock, tool, merged, shown)
       } else {
         env = await runToolAsync(tool, merged, 'rooftop_demo', {
-          onSubmit: (job_id) => saveInflight(job_id, tool.name),
+          onSubmit: (job_id) => { saveInflight(job_id, tool.name); setCurrentJobId(job_id) },
           onStatus: (st) => {
             if (st.status === 'running') markRunning()
             else setRunStatus(st.status || 'running')
@@ -274,9 +341,9 @@ export default function App() {
     } finally {
       setRunning(false)
       setRunStatus(null); setRunElapsedMs(null); runningSinceRef.current = null
-      if (!mock) clearInflight()
+      if (!mock) { clearInflight(); refreshJobs() }
     }
-  }, [mock, shown, selectedHandle, markRunning, seatVersion])
+  }, [mock, shown, selectedHandle, markRunning, seatVersion, refreshJobs])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
@@ -293,13 +360,73 @@ export default function App() {
     return res
   }, [mock])
 
+  // --- prompt-first dispatch (§12) -----------------------------------------
+  // Live preview of which lane the text will route to (lights the hero's dots).
+  const hintLane = useMemo(() => {
+    const s = prompt.trim()
+    if (!s) return null
+    try { return matchPrompt(s, tools).lane } catch { return null }
+  }, [prompt, tools])
+
+  const onDispatch = useCallback(async () => {
+    const text = prompt.trim()
+    if (!text || routing) return
+    setRouting(true); setRoute(null)
+    try {
+      const r = await nlPrompt(mock, text, tools)
+      setRoute(r)
+      if (r.lane === 'build') {
+        setAuthorSeed(text)
+        setAuthorSignal((n) => n + 1)
+        setAuthorOpen(true)
+        // bring the (left-rail) author flow into view
+        setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+      }
+    } catch (e) {
+      setRoute({
+        lane: 'run', tool: null, params: {}, confidence: 0, alternatives: [],
+        rationale: `Routing failed: ${e.message || e}`,
+      })
+    } finally {
+      setRouting(false)
+    }
+  }, [prompt, routing, mock, tools])
+
+  // Pick an alternative from a low-confidence / live-only route -> a user-picked
+  // (high-confidence) run route for that capability.
+  const onPickAlternative = useCallback((name) => {
+    setRoute((prev) => ({
+      lane: 'run', tool: name, params: {}, confidence: 0.99,
+      rationale: 'You picked this capability from the alternatives.',
+      alternatives: (prev?.alternatives || []).filter((a) => a.tool !== name),
+      stub: prev?.stub, stubReason: prev?.stubReason,
+    }))
+  }, [])
+
+  const onOpenAuthor = useCallback(() => {
+    setAuthorOpen(true)
+    setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+  }, [])
+
+  // Click a terminal job in the rail -> re-render its stored envelope (§3/§7).
+  const onSelectJob = useCallback(async (job) => {
+    if (!job || (job.status !== 'complete' && job.status !== 'failed')) return
+    try {
+      const rec = await getJob(job.job_id)
+      setSelectedTool({ name: rec.tool || job.tool })
+      setResult(recordToEnvelope(rec))
+      setRunErr(null); setRunning(false); setOverlayStale(false)
+      setCurrentJobId(job.job_id)
+    } catch (e) {
+      setRunErr(String(e.message || e))
+    }
+  }, [])
+
   const toggleLayer = useCallback((layer) => {
     setVisibleLayers((v) => ({ ...v, [layer]: !v[layer] }))
   }, [])
 
   const applyVersion = useCallback(() => {
-    // exercise the viewer's imperative version-apply path, then clear the
-    // optimistic ghost and stale selection; panels reflect the new version.
     viewerRef.current?.applyVersion(editFixtureV2)
     setVersionIntake(editFixtureV2)
     setPendingEdit(null)
@@ -313,37 +440,63 @@ export default function App() {
   const applied = versionIntake != null
 
   // Pending-edit ghost (live, §11 nicety): when an open write tool + a picked
-  // handle line up, preview the deletion before Run. Self-clears when the handle
-  // is deselected or the completed run clears the selection.
+  // handle line up, preview the deletion before Run.
   const writeGhost = useMemo(() => {
     if (mock || !selectedHandle) return null
     const caps = openTool?.capabilities || []
     return caps.includes('drawing.write') ? { removed: [selectedHandle] } : null
   }, [mock, selectedHandle, openTool])
 
+  // The current in-session run, shown as a rail card until it appears in the
+  // polled live list (deduped by job_id in JobRail).
+  const currentJob = useMemo(() => {
+    const toolName = selectedTool?.name
+    if (!toolName) return null
+    let status
+    if (running) status = runStatus || 'running'
+    else if (result) status = result.ok ? 'complete' : 'failed'
+    else return null
+    return {
+      job_id: currentJobId,
+      tool: toolName,
+      status,
+      progress: runStatus || 'running',
+      elapsed_ms: runElapsedMs != null ? runElapsedMs : (result?.timing_ms ?? null),
+      degraded_mode: !!result?.degraded_mode,
+      error: result?.error || null,
+    }
+  }, [selectedTool, running, runStatus, result, runElapsedMs, currentJobId])
+
+  const degraded = !!result?.degraded_mode || demoDegraded
+
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true" />
-          <div>
-            <h1>Leaf</h1>
-            <p>build CAD tools with AI, run on Leaf</p>
-          </div>
+      <header className="top">
+        <div className="mark"><span className="diamond" aria-hidden="true" /> LEAF / unified surface</div>
+        <div className="proj">
+          <span className="tag">Project</span>
+          <span className="name">{projectName}</span>
+          <span className="meta">
+            {shown ? `${shown.polylines.length} polylines · ${shown.layers.length} layers` : 'loading'}
+          </span>
+          <span className={`tag ${mock ? '' : 'live'}`}>{mock ? 'mock data' : 'in design'}</span>
         </div>
-        <div className="topbar-right">
-          <span className={`mode-label ${mock ? 'mock' : 'live'}`}>
-            {mock ? 'mock data' : `live · ${config.apiBase}`}
+        <div className="spacer" />
+        <div className="who">
+          <span className={`mode-label ${mock ? '' : 'live'}`}>
+            {mock ? 'mock' : `live · ${config.apiBase}`}
           </span>
           <label className="switch" title="Toggle mock vs live backend">
             <input type="checkbox" checked={mock} onChange={(e) => setMock(e.target.checked)} />
-            <span>Mock mode</span>
+            <span>Mock</span>
           </label>
+          <span>tier <b>{tierLabel}</b></span>
         </div>
       </header>
 
-      <div className="workspace">
-        <aside className="left">
+      <aside className="nav">
+        <div className="fam-title">Catalog · {tools.length} caps</div>
+        <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={() => setToolsOpen((o) => !o)}>
           <ToolsPanel
             tools={tools}
             error={toolsErr}
@@ -352,13 +505,53 @@ export default function App() {
             onRun={onRun}
             onOpenTool={setOpenTool}
           />
-          <AuthorPanel onAuthor={onAuthor} onRunAuthored={onRun} />
-        </aside>
+        </Section>
+        <Section
+          title="Author a tool"
+          open={authorOpen}
+          onToggle={() => setAuthorOpen((o) => !o)}
+          innerRef={authorSectionRef}
+        >
+          <AuthorPanel
+            onAuthor={onAuthor}
+            onRunAuthored={onRun}
+            seed={authorSeed}
+            seedSignal={authorSignal}
+          />
+        </Section>
+      </aside>
 
-        <main className="center">
+      <main>
+        <div className="kicker">Home · one prompt, three lanes</div>
+        <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
+
+        <PromptBox
+          value={prompt}
+          onChange={setPrompt}
+          onDispatch={onDispatch}
+          routing={routing}
+          hintLane={hintLane}
+        />
+        <div className="hint">
+          One prompt, routed across <b>Run</b> · <b>Solve</b> · <b>Build</b>. You confirm before
+          anything runs — paid actions never auto-execute.
+        </div>
+
+        <RoutePanel
+          route={route}
+          tools={tools}
+          running={running}
+          onRun={onRun}
+          onPickAlternative={onPickAlternative}
+          onOpenAuthor={onOpenAuthor}
+        />
+
+        {degraded && <DegradedBanner />}
+
+        <div className="workspace-card">
           <div className="viewer-toolbar">
             <div className="viewer-title">
-              {shown ? shown.dwg?.split(/[\\/]/).pop() : 'loading…'}
+              {shown ? `${projectName}.dwg` : 'loading…'}
               {shown && (
                 <span className="dim">
                   {' · '}{shown.polylines.length} polylines
@@ -435,9 +628,9 @@ export default function App() {
               <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
             )}
           </div>
-        </main>
+        </div>
 
-        <aside className="right">
+        <div className="result-block">
           <ResultPanel
             running={running}
             runStatus={runStatus}
@@ -447,8 +640,27 @@ export default function App() {
             tool={selectedTool}
             onRetry={onRetry}
           />
-        </aside>
-      </div>
+        </div>
+
+        <EntitlementGate tier={tierLabel} />
+      </main>
+
+      <JobRail
+        mock={mock}
+        jobs={jobs}
+        currentJob={currentJob}
+        inflight={inflightPtr}
+        reattaching={reattaching}
+        onSelectJob={onSelectJob}
+      />
+
+      <footer className="foot-bar">
+        <span>capability catalog · <span className="ok-txt">{tools.length} loaded</span></span>
+        <span>backend · {mock ? <span className="warn-txt">mock (no cloud)</span> : <span className="ok-txt">live</span>}</span>
+        <span>local solver · <span className="ok-txt">ready</span></span>
+        <span>entitlement · tier {tierLabel}</span>
+        <span style={{ marginLeft: 'auto' }}>build v2026.07 · {mock ? 'sample data' : 'live'}</span>
+      </footer>
     </div>
   )
 }

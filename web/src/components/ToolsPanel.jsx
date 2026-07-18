@@ -41,9 +41,8 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
   const [paramsByTool, setParamsByTool] = useState({})
 
   return (
-    <section className="panel">
-      <h2>Tools</h2>
-      <p className="panel-sub">AI-authored CAD tools. Click one, set params, run on Leaf.</p>
+    <div className="tools-inner">
+      <p className="panel-sub">The classic catalog — click one, set params, run on Leaf. The prompt box above is the primary path.</p>
       {error && <div className="inline-error">Couldn’t load tools: {error}</div>}
       <div className="tool-list">
         {tools.map((t) => {
@@ -95,6 +94,6 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
         })}
         {tools.length === 0 && !error && <div className="dim">Loading tools…</div>}
       </div>
-    </section>
+    </div>
   )
 }

@@ -13,6 +13,7 @@
 import registry from './mock/registry.json'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
+import { matchPrompt } from './mock/mockNlPrompt.js'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8130'
 // Default to mock unless explicitly disabled (VITE_MOCK=0).
@@ -33,14 +34,42 @@ async function http(path, opts) {
 }
 
 // --- Session / intake ---------------------------------------------------
+// Returns {intake, tenant}. `tenant` is the resolved tenant id echoed by
+// /api/session when auth is live (deps.tenant_echo adds tenant_id/org_id);
+// null in mock or when auth is off. The UI uses it for the honest tier chip
+// (falls back to "demo" when absent).
 export async function getSession(mock, dwg = 'rooftop_demo') {
   if (mock) {
     const res = await fetch('/sample.intake.json')
     if (!res.ok) throw new Error('failed to load sample.intake.json')
-    return await res.json()
+    return { intake: await res.json(), tenant: null }
   }
   const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`)
-  return data.intake
+  return { intake: data.intake, tenant: data.tenant_id || null }
+}
+
+// --- NL prompt routing (CONTRACT-ADDENDUM §12) --------------------------
+// POST /api/nl-prompt {text} -> {lane, tool, params, confidence, rationale}.
+// MOCK: pure client-side stub (matchPrompt) — zero network. LIVE: hits the
+// server router; if the sibling lane has not deployed it yet (404/unreachable),
+// falls back to the SAME client stub and flags `stub:true` so the UI can say it
+// routed locally. Always resolves to a normalized route object with
+// `alternatives` defaulted to [].
+export async function nlPrompt(mock, text, tools = []) {
+  if (mock) return { ...matchPrompt(text, tools), stub: true }
+  try {
+    const res = await fetch(`${API_BASE}/api/nl-prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+      body: JSON.stringify({ text }),
+    })
+    if (!res.ok) throw new Error(`POST /api/nl-prompt -> ${res.status}`)
+    const body = await res.json()
+    return { alternatives: [], ...body, stub: false }
+  } catch (e) {
+    // Endpoint not live yet (sibling lands it concurrently) — route locally.
+    return { ...matchPrompt(text, tools), stub: true, stubReason: String(e.message || e) }
+  }
 }
 
 // --- Tools --------------------------------------------------------------

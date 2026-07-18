@@ -87,14 +87,15 @@ function ErrorLine({ err, onRetry, retry }) {
 
 export default function ResultPanel({ running, runStatus, runElapsedMs, error, result, tool, onRetry }) {
   return (
-    <section className="panel result-panel">
-      <h2>Result</h2>
+    <section className="card result-panel">
+      <h3>Result</h3>
       {!running && !result && !error && (
-        <p className="panel-sub">Run a tool to see its result and overlay here.</p>
+        <p className="panel-sub">Dispatch a prompt or run a tool to see its result and overlay here.</p>
       )}
       {running && (
         <div className="running">
           <span>{progressText(runStatus, runElapsedMs)}{tool?.name ? ` · ${tool.name}` : ''}</span>
+          <span className="bar" aria-hidden="true"><i /></span>
         </div>
       )}
       {/* transport-level error (network / submit failure) — always retryable */}
