@@ -221,3 +221,67 @@ At `APS_LIVE=1` the app-side drawing reads use `OSSBackend` directly; promoting
 those reads through the broker (to keep strict credential isolation at live too,
 matching §8) is a documented follow-up. `da/store.py` gained an additive `redo`
 primitive and a `FilesystemBackend`; `da/client.py` is unchanged.
+
+## §12 NL prompt router (one prompt box → lanes)
+
+Session: `m3-nl-prompt-router`, 2026-07-17. MATRIX frontend gap #2: the
+product's single prompt box dispatches across the **Run / Solve / Build** lanes.
+This section adds the backend classifier the frontend lane builds against.
+Verified by `server/tests/test_nl_router.py` (offline: no APS, no LLM, no
+subprocess).
+
+### Endpoint
+
+| Method | Path | Behaviour |
+|---|---|---|
+| POST | `/api/nl-prompt` | `{text}` → §10-enveloped `{lane, tool, params, confidence, rationale}` |
+
+```json
+{ "lane": "run" | "solve" | "build",
+  "tool": "<registered tool name>" | null,
+  "params": { },
+  "confidence": 0.0,
+  "rationale": "<one calm, user-visible sentence>",
+  "error": null, "degraded_mode": false }
+```
+
+Empty/whitespace `text` → `BAD_PARAMS` (HTTP 400); missing `text` →
+`BAD_PARAMS` (422, enveloped via the app validation handler). No tenant/auth
+dependency — classification is read-only and side-effect-free.
+
+### Matching (v1 is deterministic, ZERO-LLM)
+
+Resolves the MATRIX "LLM in the request hot path vs zero-LLM runtime" tension in
+favour of the **zero-LLM runtime**: no model runs per request. `nl_router.classify`
+is a pure function over the **live** catalog (`deps.all_tools()` at request time —
+authored + write tools included, internal/QA tools filtered exactly as
+`/api/capabilities` does).
+
+- **Scoring** — normalised token/synonym overlap between the prompt and each
+  tool's name / engine_op / description / param names / capabilities. The tool
+  **name is weighted 3×** the other fields, so grouping intent ("count panels
+  **per layer**" → `count-by-layer`) beats a shallower panel-name match
+  (`count-panels`). Confidence is calibrated: exact name phrase ≈ 0.97, strong
+  overlap 0.7–0.9, weak ≤ 0.5; an unmatched prompt returns 0.10 with `tool:null`
+  (never a fake high score).
+- **Lane rules** — authoring verbs + a tool noun, or "a tool that/to …" →
+  **build** (`tool:null`, `params:{description:<original text>}`); explicit
+  optimise/solve verbs → **solve** (`tool:null`; rationale states the Solve lane
+  is future and nothing runs); otherwise the best catalog match → **run** with
+  prefilled params. Precedence: build → solve → run.
+- **Param extraction** — numbers with/without units fill the matched tool's
+  numeric params in schema order (e.g. `distance=200`); a hex-ish token fills a
+  `handle` param as a **string** (e.g. `handle="9462"`), so DWG handles never get
+  coerced to ints.
+
+### LLM-classifier seam (explicit, OFF in v1)
+
+`classify(text, tools, llm_classifier=None)` is the documented forward seam. A
+future lane may inject `llm_classifier(text, tools, deterministic) -> dict|None`;
+it is consulted **only** when the deterministic confidence is below
+`LLM_ESCALATION_CONF` (0.55) **and** a classifier was passed, and a broken
+classifier can never take down routing (exceptions fall back to deterministic).
+v1 always passes `None`, so the zero-LLM runtime is the default and the LLM never
+enters the hot path unless a caller explicitly opts a request in. Ownership:
+`server/nl_router.py` (pure logic), `server/routers/prompt.py` (endpoint), one
+`include_router` line in `server/app.py`.
