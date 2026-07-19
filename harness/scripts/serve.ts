@@ -45,6 +45,7 @@ import { createHarness } from "../src/server.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { HarnessPorts } from "../src/ports/index.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
+import { E2bAgentRunner } from "../src/ports/impl/e2bAgentRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { FileTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker } from "../src/ports/impl/gitWorker.js";
@@ -89,6 +90,12 @@ function tenantRepoDir(tenantId: string): string {
 /** Compose the real multi-tenant ports. */
 function buildPorts(): HarnessPorts {
   const grantStore = new FileTenantGrantStore(); // reads $LEAF_GRANTS_DIR (default C:/tmp/leaf-grants)
+  // F2 (2A): when LEAF_SANDBOX=e2b, run the design-time author session INSIDE an
+  // egress-locked E2B sandbox instead of in-process. Default (unset/anything else) keeps
+  // AgentSdkRunner so the proven demo + hermetic tests are unchanged. LEAF_SANDBOX_BROKER_HOST
+  // sets the ONE allowlisted egress host (defaults to the proven public stand-in).
+  const useE2b = (process.env.LEAF_SANDBOX ?? "").trim().toLowerCase() === "e2b";
+  log(`[harness] author runner: ${useE2b ? "E2bAgentRunner (LEAF_SANDBOX=e2b, egress-locked sandbox)" : "AgentSdkRunner (in-process; default)"}`);
   return {
     oauth: new OAuthGrantProviderImpl({ store: grantStore }),
     grantAdmin: grantStore,
@@ -98,7 +105,9 @@ function buildPorts(): HarnessPorts {
       autoProvisionFrom: TENANT_FIXTURE,
     }),
     broker: new BrokerApsClientHttp({ brokerUrl: BROKER_URL }),
-    agentRunner: new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
+    agentRunner: useE2b
+      ? new E2bAgentRunner({ brokerHost: process.env.LEAF_SANDBOX_BROKER_HOST || undefined })
+      : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
   };
 }
 

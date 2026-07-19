@@ -6,10 +6,15 @@ has no operator UI. These routes give the ops/QA operator a read of per-tenant
 spend/runs joined with kill-switch state, plus a proxied disable/enable — WITHOUT
 the tenant-facing UI ever seeing them.
 
-ROLE GATE (like the QA catalog filter, GET /api/capabilities): every route
-requires the ``X-Internal-Role: qa`` header (v1 stub until real role identity from
-the auth sibling); anything else → 403. This is an internal surface, NOT part of
-the tenant surface.
+CREDENTIAL GATE (F7): every route requires a real internal shared secret — the
+value of the ``LEAF_OPS_SECRET`` env, presented in the ``X-Ops-Secret`` header and
+compared CONSTANT-TIME (``hmac.compare_digest``). The old plain ``X-Internal-Role:
+qa`` header let anyone read every tenant's spend and flip kill-switches; it is gone.
+Fail-closed: in live-auth mode (``LEAF_AUTH_LIVE=1``) a server with no
+``LEAF_OPS_SECRET`` configured refuses the surface entirely (503). A wrong/absent
+presented secret is always 403. With auth OFF and no secret configured the surface
+stays open (byte-identical to the local single-operator demo, mirroring
+``deps.require_tenant``). This is an internal surface, NOT part of the tenant surface.
 
     GET  /api/ops/tenants                  -> {tenants:[{tenant_id, runs, usd_est, disabled}]}
     POST /api/ops/tenants/{tid}/disable     -> proxy broker disable; broker's §-enveloped ack
@@ -25,6 +30,7 @@ is unreachable yields a ``BROKER_UNREACHABLE`` envelope at HTTP 502.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 from pathlib import Path
@@ -42,18 +48,44 @@ router = APIRouter()
 
 
 # --------------------------------------------------------------------------- #
-# role gate (stub — real role identity arrives with the auth sibling)
+# credential gate (F7) — real internal shared secret, constant-time compared
 # --------------------------------------------------------------------------- #
-def _require_qa(role: Optional[str]) -> Optional[JSONResponse]:
-    """None when the caller holds the internal QA role; else a 403 envelope.
+def _ops_secret() -> Optional[str]:
+    """The configured internal ops shared secret, or None when unset/blank.
 
-    No frozen ErrorCode names authorization; BAD_PARAMS at HTTP 403 is the honest
-    machine-readable choice for a missing/incorrect required internal-role header.
-    """
-    if (role or "").strip().lower() == "qa":
+    Read from the ``LEAF_OPS_SECRET`` env at CALL TIME (so subprocess/test env
+    overrides apply). Codex injects the value at deploy; this code only reads it —
+    the secret is never hardcoded or logged."""
+    val = os.environ.get("LEAF_OPS_SECRET", "").strip()
+    return val or None
+
+
+def _require_ops(presented: Optional[str]) -> Optional[JSONResponse]:
+    """None when the caller presents the correct internal ops secret; else an
+    error envelope.
+
+    * secret configured → require ``hmac.compare_digest(presented, secret)``
+      (constant-time); wrong/absent → 403.
+    * secret UNSET + live-auth (``LEAF_AUTH_LIVE=1``) → FAIL-CLOSED 503: the ops
+      surface never serves unguarded in live mode.
+    * secret UNSET + auth off (local demo) → open passthrough (byte-identical to
+      the rest of the auth-off demo; mirrors ``deps.require_tenant``).
+
+    No frozen ErrorCode names authorization; BAD_PARAMS at HTTP 403 stays the
+    honest machine-readable choice for a missing/incorrect credential, and INTERNAL
+    at HTTP 503 flags the misconfigured (unusable) surface."""
+    secret = _ops_secret()
+    if secret is None:
+        if deps.auth_live():
+            return error_response(
+                ErrorCode.INTERNAL,
+                "ops surface unavailable: LEAF_OPS_SECRET is not configured",
+                retryable=False, status_code=503)
+        return None  # local demo, unguarded like the rest of the off-auth surface
+    if hmac.compare_digest(presented or "", secret):
         return None
     return error_response(ErrorCode.BAD_PARAMS,
-                          "X-Internal-Role: qa required for the ops surface",
+                          "valid X-Ops-Secret required for the ops surface",
                           retryable=False, status_code=403)
 
 
@@ -124,7 +156,7 @@ def _proxy(tid: str, action: str) -> JSONResponse:
     base = broker_client.broker_url()
     url = f"{base}/broker/tenants/{tid}/{action}"
     try:
-        resp = requests.post(url, timeout=10)
+        resp = requests.post(url, headers=broker_client.broker_headers(), timeout=10)
     except (requests.ConnectionError, requests.Timeout) as exc:
         return error_response(ErrorCode.BROKER_UNREACHABLE,
                               f"broker at {base} unreachable: {exc}", retryable=True)
@@ -140,8 +172,8 @@ def _proxy(tid: str, action: str) -> JSONResponse:
 # routes
 # --------------------------------------------------------------------------- #
 @router.get("/api/ops/tenants")
-def ops_tenants(x_internal_role: Optional[str] = Header(default=None)) -> Any:
-    gate = _require_qa(x_internal_role)
+def ops_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
     ledger = _ledger_path()
@@ -162,16 +194,16 @@ def ops_tenants(x_internal_role: Optional[str] = Header(default=None)) -> Any:
 
 
 @router.post("/api/ops/tenants/{tid}/disable")
-def ops_disable(tid: str, x_internal_role: Optional[str] = Header(default=None)) -> Any:
-    gate = _require_qa(x_internal_role)
+def ops_disable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
     return _proxy(tid, "disable")
 
 
 @router.post("/api/ops/tenants/{tid}/enable")
-def ops_enable(tid: str, x_internal_role: Optional[str] = Header(default=None)) -> Any:
-    gate = _require_qa(x_internal_role)
+def ops_enable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
     return _proxy(tid, "enable")

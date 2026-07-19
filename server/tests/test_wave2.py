@@ -246,7 +246,11 @@ def _dead_broker_url() -> str:
 
 
 def test_C_ops_role_gate_403_without_qa(monkeypatch):
+    # F7: the ops surface now requires the LEAF_OPS_SECRET shared secret, presented
+    # in the X-Ops-Secret header (constant-time compared) — the old plain
+    # X-Internal-Role: qa header no longer grants access.
     monkeypatch.setenv("LEAF_USAGE_LEDGER", str(Path(tempfile.mkdtemp()) / "nope.jsonl"))
+    monkeypatch.setenv("LEAF_OPS_SECRET", "s3cr3t-wave2")
     c = _ops_client()
 
     no_hdr = c.get("/api/ops/tenants")
@@ -255,13 +259,21 @@ def test_C_ops_role_gate_403_without_qa(monkeypatch):
     jsonschema.validate(_body, ENVELOPE_SCHEMA)
     assert _body["error"] is not None and _body["error"]["error_code"]
 
-    wrong = c.get("/api/ops/tenants", headers={"X-Internal-Role": "user"})
+    wrong = c.get("/api/ops/tenants", headers={"X-Ops-Secret": "wrong"})
     assert wrong.status_code == 403, wrong.text
 
-    # the mutating routes are gated too
+    # the old role header no longer grants access
+    old = c.get("/api/ops/tenants", headers={"X-Internal-Role": "qa"})
+    assert old.status_code == 403, old.text
+
+    # correct secret -> 200 (empty ledger -> empty tenants list)
+    ok = c.get("/api/ops/tenants", headers={"X-Ops-Secret": "s3cr3t-wave2"})
+    assert ok.status_code == 200, ok.text
+
+    # the mutating routes are gated too (wrong/absent secret -> 403, before any proxy)
     assert c.post("/api/ops/tenants/t1/disable").status_code == 403
     assert c.post("/api/ops/tenants/t1/enable",
-                  headers={"X-Internal-Role": "nope"}).status_code == 403
+                  headers={"X-Ops-Secret": "nope"}).status_code == 403
 
 
 def test_C_ops_tenants_shape_and_disabled_from_file(monkeypatch, tmp_path):

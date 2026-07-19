@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Callable, Iterable, List, Optional
 
 from .db import connection
@@ -34,6 +35,9 @@ class OffboardResult:
     blob_refs: List[str] = field(default_factory=list)
     deleted_projects: int = 0
     status: str = "deleted"
+    # hard-PURGE audit window (migration 0002; DELETION-OFFBOARDING-DESIGN.md sec 3 step 2)
+    purge_requested_at: Optional[datetime] = None
+    purge_completed_at: Optional[datetime] = None
 
 
 def _default_secret_ref_provider(org_id: uuid.UUID) -> List[str]:
@@ -70,13 +74,17 @@ def offboard_org(org_id: uuid.UUID, *,
                  secret_ref_provider: Optional[SecretRefProvider] = None) -> OffboardResult:
     """Delete everything owned by ``org_id`` and purge its out-of-band material.
 
+    0. Stamp ``purge_requested_at`` (COALESCE first-wins) — opens the auditable
+       erasure window (design sec 3 step 2) — and mark the org 'offboarding'.
     1. Collect secret refs (via provider) and blob refs (from the DB), org-scoped.
     2. Fire ``key_purge_hook`` once per secret ref and ``blob_purge_hook`` once per blob.
     3. Delete the org's projects (ON DELETE CASCADE wipes versions/jobs/built_tools).
-    4. Tombstone the org row: status='deleted', offboarded_at=NOW().
+    4. Tombstone the org row: status='deleted', offboarded_at=NOW(),
+       ``purge_completed_at``=NOW() — closes the erasure window.
 
     Never touches any other org's rows. Idempotency: a second call on a tombstoned
-    org purges an empty ref set and deletes zero projects.
+    org keeps the original ``purge_requested_at`` (COALESCE), purges an empty ref
+    set, and deletes zero projects.
     """
     provider = secret_ref_provider or _default_secret_ref_provider
 
@@ -87,8 +95,11 @@ def offboard_org(org_id: uuid.UUID, *,
             )
             if cur.fetchone() is None:
                 raise OrgNotFound(str(org_id))
+            # step 0/2: record erasure intent (first-request-wins) + in-progress status
             cur.execute(
-                "UPDATE orgs SET status = 'offboarding' WHERE org_id = %(org_id)s",
+                "UPDATE orgs SET status = 'offboarding', "
+                "purge_requested_at = COALESCE(purge_requested_at, NOW()) "
+                "WHERE org_id = %(org_id)s",
                 {"org_id": org_id},
             )
 
@@ -109,13 +120,18 @@ def offboard_org(org_id: uuid.UUID, *,
                 "DELETE FROM projects WHERE org_id = %(org_id)s", {"org_id": org_id}
             )
             deleted_projects = cur.rowcount
+            # step 4: tombstone + close the erasure window (purge_completed_at=NOW())
             cur.execute(
-                "UPDATE orgs SET status = 'deleted', offboarded_at = NOW() "
-                "WHERE org_id = %(org_id)s",
+                "UPDATE orgs SET status = 'deleted', offboarded_at = NOW(), "
+                "purge_completed_at = NOW() WHERE org_id = %(org_id)s "
+                "RETURNING purge_requested_at, purge_completed_at",
                 {"org_id": org_id},
             )
+            stamps = cur.fetchone() or {}
 
     return OffboardResult(
         org_id=org_id, secret_refs=secret_refs, blob_refs=blob_refs,
         deleted_projects=deleted_projects, status="deleted",
+        purge_requested_at=stamps.get("purge_requested_at"),
+        purge_completed_at=stamps.get("purge_completed_at"),
     )

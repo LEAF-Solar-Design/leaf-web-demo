@@ -38,10 +38,33 @@ from routers import (
     usage,
 )
 
+def _cors_origins() -> list[str]:
+    """CORS allow-list, ENV-driven and default-deny in live-auth mode (F17).
+
+    ``LEAF_CORS_ORIGINS`` — a comma-separated allow-list (e.g.
+    ``https://app.leafdesign.ai,https://staging.leafdesign.ai``) — is
+    authoritative in EVERY mode when set; blanks are trimmed out.
+
+    When it is unset the fallback depends on the auth mode (``deps.auth_live()``,
+    read at call time):
+      * auth OFF (``LEAF_AUTH_LIVE=0`` — the local single-operator demo) → ``["*"]``
+        so localhost dev keeps working (``allow_credentials`` stays ``False``, so a
+        wildcard carries no cookie/credential risk).
+      * auth ON  (``LEAF_AUTH_LIVE=1`` — live / public) → ``[]`` (DEFAULT-DENY): no
+        bare ``*`` ever ships in live mode. The deploy config supplies the prod
+        origin VALUE via ``LEAF_CORS_ORIGINS``.
+    """
+    raw = os.environ.get("LEAF_CORS_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    # env unset: bare "*" ONLY when auth is off (local demo); default-deny when live.
+    return ["*"] if not deps.auth_live() else []
+
+
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # permissive for localhost dev
+    allow_origins=_cors_origins(),  # F17: env-driven allow-list, default-deny in live-auth
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -14,7 +14,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import deps
 import entitlements
@@ -34,9 +34,14 @@ AUTHORED_DIR = SERVER_DIR / "authored"
 # CONTRACT-ADDENDUM §16.
 GRANT_REQUIRED = "GRANT_REQUIRED"
 
+# Bound the tool-description so an unbounded body can't exhaust the author /
+# templater / harness pipeline (security-audit F15). An over-cap body is rejected at
+# the validation layer before any harness/template work runs.
+MAX_AUTHOR_DESCRIPTION = 8_000
+
 
 class AuthorRequest(BaseModel):
-    description: str
+    description: str = Field(..., max_length=MAX_AUTHOR_DESCRIPTION)
 
 
 def _grant_required_response(tenant_id: str, harness_message: str | None) -> JSONResponse:
@@ -88,9 +93,11 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
         resp = None
         try:
             import requests
+            import broker_client
             resp = requests.post(f"{harness_url}/author",
                                  json={"description": req.description,
-                                       "tenant_id": str(tenant)}, timeout=120)
+                                       "tenant_id": str(tenant)},
+                                 headers=broker_client.harness_headers(), timeout=120)
         except Exception as exc:
             print(f"[author] harness unreachable, templated fallback: {exc}")
         if resp is not None:

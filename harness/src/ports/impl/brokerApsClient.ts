@@ -45,7 +45,10 @@ export class BrokerApsClientHttp implements BrokerApsClient {
     try {
       const res = await this.doFetch(`${this.baseUrl}/broker/run`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...(process.env.LEAF_BROKER_SECRET ? { "X-Broker-Secret": process.env.LEAF_BROKER_SECRET } : {}),
+        },
         body: JSON.stringify(body),
         signal: ctrl.signal,
       });

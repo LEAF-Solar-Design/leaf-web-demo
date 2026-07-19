@@ -86,7 +86,8 @@ def link_grant(req: GrantLinkRequest, tenant=Depends(deps.require_tenant)):
         payload["kind"] = req.kind
     try:
         import requests
-        r = requests.put(url, json=payload, timeout=30)
+        import broker_client
+        r = requests.put(url, json=payload, headers=broker_client.harness_headers(), timeout=30)
     except Exception as exc:  # noqa: BLE001  (connection/timeout/etc.)
         return _unreachable(str(exc))
     if r.status_code >= 500:
@@ -106,7 +107,8 @@ def grant_status(tenant=Depends(deps.require_tenant)):
         return _unreachable("LEAF_AUTHOR_HARNESS_URL not configured")
     try:
         import requests
-        r = requests.get(url, timeout=30)
+        import broker_client
+        r = requests.get(url, headers=broker_client.harness_headers(), timeout=30)
     except Exception as exc:  # noqa: BLE001
         return _unreachable(str(exc))
     if r.status_code >= 500:
@@ -126,7 +128,8 @@ def unlink_grant(tenant=Depends(deps.require_tenant)):
         return _unreachable("LEAF_AUTHOR_HARNESS_URL not configured")
     try:
         import requests
-        r = requests.delete(url, timeout=30)
+        import broker_client
+        r = requests.delete(url, headers=broker_client.harness_headers(), timeout=30)
     except Exception as exc:  # noqa: BLE001
         return _unreachable(str(exc))
     if r.status_code >= 500:

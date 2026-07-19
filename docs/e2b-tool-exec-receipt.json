@@ -1,0 +1,58 @@
+{
+  "schema": "leaf.e2b.tool-exec.v1",
+  "finding": "F2 (CRITICAL) \u2014 tenant tool.py executed in-process in the credential-holding broker",
+  "generatedAt": "2026-07-19T18:24:47Z",
+  "host": {
+    "platform": "Windows",
+    "python": "3.13.5"
+  },
+  "flag": {
+    "env": "LEAF_SANDBOX",
+    "on_value": "e2b",
+    "default": "unset => in-process (byte-identical)"
+  },
+  "substrate_shipped": "subprocess-sandbox-v1 (separate python -I process; default-deny env allowlist; PEP-578 audit-hook jail denying credential/token/grant reads, all network egress, and subprocess/exec/native escape; cwd jailed to a throwaway temp dir)",
+  "deferred": "full E2B micro-VM round-trip (reference substrate, harness/scripts/e2b-vendor-eval.mjs) + Linux seccomp/namespace hardening; the KEY security property is enforced + tested by the shipped substrate",
+  "key_property": "the tenant tool body cannot read the APS credential (~/.aps/credentials.json, absolute cred paths, APS_CREDENTIALS_JSON env) or other tenants' .token/.grant files, and cannot reach off-broker egress",
+  "boots": [
+    {
+      "boot": 1,
+      "scenario": "benign tool round-trip (\u00a73 result)",
+      "tool": "count-by-layer",
+      "envelope_ok": true,
+      "result": {
+        "n": 3,
+        "layers": [
+          "Panels",
+          "Roof",
+          "Setbacks"
+        ]
+      },
+      "ms": 950
+    },
+    {
+      "boot": 2,
+      "scenario": "RED-TEAM: read absolute ~/.aps/credentials.json + APS_CREDENTIALS_JSON env + egress",
+      "tool": "redteam-exfil",
+      "read_credential": false,
+      "read_blocked_by": "PermissionError",
+      "credential_env_seen_in_sandbox": null,
+      "egress": false,
+      "egress_blocked_by": "URLError",
+      "credential_bytes_exfiltrated": false,
+      "ms": 118
+    },
+    {
+      "boot": 3,
+      "scenario": "CONTROL (in-process, LEAF_SANDBOX unset): SAME red-team tool \u2014 proves F2 exists without the sandbox",
+      "tool": "redteam-exfil",
+      "read_credential": true,
+      "credential_env_seen_in_process": "{\"client_secret\":\"TOP-SECRET-DEADBEEF\"}",
+      "egress": true,
+      "ms": 78
+    }
+  ],
+  "boot_count": 3,
+  "f2_closed": true,
+  "passed": true
+}

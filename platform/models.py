@@ -37,12 +37,19 @@ class Org:
     status: str = "active"
     created_at: Optional[datetime] = None
     offboarded_at: Optional[datetime] = None
+    # deletion/compliance columns (migration 0002; DELETION-OFFBOARDING-DESIGN.md sec 4)
+    deleted_at: Optional[datetime] = None
+    purge_requested_at: Optional[datetime] = None
+    purge_completed_at: Optional[datetime] = None
 
     @classmethod
     def from_row(cls, r: Dict[str, Any]) -> "Org":
         return cls(
             org_id=r["org_id"], name=r["name"], tier=r["tier"], status=r["status"],
             created_at=r.get("created_at"), offboarded_at=r.get("offboarded_at"),
+            deleted_at=r.get("deleted_at"),
+            purge_requested_at=r.get("purge_requested_at"),
+            purge_completed_at=r.get("purge_completed_at"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -50,6 +57,9 @@ class Org:
             "org_id": str(self.org_id), "name": self.name, "tier": self.tier,
             "status": self.status, "created_at": _iso(self.created_at),
             "offboarded_at": _iso(self.offboarded_at),
+            "deleted_at": _iso(self.deleted_at),
+            "purge_requested_at": _iso(self.purge_requested_at),
+            "purge_completed_at": _iso(self.purge_completed_at),
         }
 
 
@@ -61,12 +71,19 @@ class Project:
     status: str = "active"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # deletion/compliance columns (migration 0002; DELETION-OFFBOARDING-DESIGN.md sec 4)
+    deleted_at: Optional[datetime] = None
+    purge_requested_at: Optional[datetime] = None
+    purge_completed_at: Optional[datetime] = None
 
     @classmethod
     def from_row(cls, r: Dict[str, Any]) -> "Project":
         return cls(
             project_id=r["project_id"], org_id=r["org_id"], name=r["name"],
             status=r["status"], created_at=r.get("created_at"), updated_at=r.get("updated_at"),
+            deleted_at=r.get("deleted_at"),
+            purge_requested_at=r.get("purge_requested_at"),
+            purge_completed_at=r.get("purge_completed_at"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -74,6 +91,9 @@ class Project:
             "project_id": str(self.project_id), "org_id": str(self.org_id),
             "name": self.name, "status": self.status,
             "created_at": _iso(self.created_at), "updated_at": _iso(self.updated_at),
+            "deleted_at": _iso(self.deleted_at),
+            "purge_requested_at": _iso(self.purge_requested_at),
+            "purge_completed_at": _iso(self.purge_completed_at),
         }
 
 
@@ -87,6 +107,10 @@ class DrawingVersion:
     intake_ref: Optional[str] = None
     created_by: Optional[str] = None
     created_at: Optional[datetime] = None
+    # deletion/compliance columns (migration 0002; DELETION-OFFBOARDING-DESIGN.md sec 4)
+    deleted_at: Optional[datetime] = None
+    purge_requested_at: Optional[datetime] = None
+    purge_completed_at: Optional[datetime] = None
 
     @classmethod
     def from_row(cls, r: Dict[str, Any]) -> "DrawingVersion":
@@ -94,6 +118,9 @@ class DrawingVersion:
             version_id=r["version_id"], project_id=r["project_id"], org_id=r["org_id"],
             seq=r["seq"], oss_object=r.get("oss_object"), intake_ref=r.get("intake_ref"),
             created_by=r.get("created_by"), created_at=r.get("created_at"),
+            deleted_at=r.get("deleted_at"),
+            purge_requested_at=r.get("purge_requested_at"),
+            purge_completed_at=r.get("purge_completed_at"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -102,6 +129,9 @@ class DrawingVersion:
             "org_id": str(self.org_id), "seq": self.seq, "oss_object": self.oss_object,
             "intake_ref": self.intake_ref, "created_by": self.created_by,
             "created_at": _iso(self.created_at),
+            "deleted_at": _iso(self.deleted_at),
+            "purge_requested_at": _iso(self.purge_requested_at),
+            "purge_completed_at": _iso(self.purge_completed_at),
         }
 
 
@@ -121,6 +151,10 @@ class Job:
     cost_usd: Optional[Decimal] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # deletion/compliance columns (migration 0002; DELETION-OFFBOARDING-DESIGN.md sec 4)
+    deleted_at: Optional[datetime] = None
+    purge_requested_at: Optional[datetime] = None
+    purge_completed_at: Optional[datetime] = None
 
     @classmethod
     def from_row(cls, r: Dict[str, Any]) -> "Job":
@@ -130,6 +164,9 @@ class Job:
             spine_ref=r.get("spine_ref"), params=r.get("params"), result=r.get("result"),
             input_version_id=r.get("input_version_id"), output_version_id=r.get("output_version_id"),
             cost_usd=r.get("cost_usd"), created_at=r.get("created_at"), updated_at=r.get("updated_at"),
+            deleted_at=r.get("deleted_at"),
+            purge_requested_at=r.get("purge_requested_at"),
+            purge_completed_at=r.get("purge_completed_at"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -142,6 +179,9 @@ class Job:
             "output_version_id": _s(self.output_version_id),
             "cost_usd": (float(self.cost_usd) if self.cost_usd is not None else None),
             "created_at": _iso(self.created_at), "updated_at": _iso(self.updated_at),
+            "deleted_at": _iso(self.deleted_at),
+            "purge_requested_at": _iso(self.purge_requested_at),
+            "purge_completed_at": _iso(self.purge_completed_at),
         }
 
 
@@ -156,6 +196,10 @@ class BuiltTool:
     source_ref: Optional[str] = None
     provenance: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None
+    # deletion/compliance columns (migration 0002; DELETION-OFFBOARDING-DESIGN.md sec 4)
+    deleted_at: Optional[datetime] = None
+    purge_requested_at: Optional[datetime] = None
+    purge_completed_at: Optional[datetime] = None
 
     @classmethod
     def from_row(cls, r: Dict[str, Any]) -> "BuiltTool":
@@ -164,6 +208,9 @@ class BuiltTool:
             name=r["name"], manifest=r["manifest"], version=r["version"],
             source_ref=r.get("source_ref"), provenance=r.get("provenance"),
             created_at=r.get("created_at"),
+            deleted_at=r.get("deleted_at"),
+            purge_requested_at=r.get("purge_requested_at"),
+            purge_completed_at=r.get("purge_completed_at"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -172,6 +219,9 @@ class BuiltTool:
             "org_id": str(self.org_id), "name": self.name, "version": self.version,
             "manifest": self.manifest, "source_ref": self.source_ref,
             "provenance": self.provenance, "created_at": _iso(self.created_at),
+            "deleted_at": _iso(self.deleted_at),
+            "purge_requested_at": _iso(self.purge_requested_at),
+            "purge_completed_at": _iso(self.purge_completed_at),
         }
 
 

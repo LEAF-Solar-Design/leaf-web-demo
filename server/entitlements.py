@@ -87,15 +87,20 @@ def resolve_tier(tenant: Any) -> str:
 
 
 def entitlements_for(tier: str) -> Dict[str, bool]:
-    """Resolve the {run_read, run_write, build} booleans for a tier.
+    """Resolve the {run_read, run_write, build} booleans for a tier — FAIL CLOSED.
 
-    Unknown tier -> the "demo" entry (friction-free; a tier only ever arrives from a
-    VERIFIED Auth0 claim, so an unrecognized value is operator config drift, not an
-    attacker vector). A per-key omission defaults True (permissive), so a partial entry
-    never accidentally locks a capability the operator did not intend to restrict."""
+    Unknown/absent tier -> the most-restrictive ("restricted") entry, NOT "demo"
+    (security-audit F9 residue: an unrecognised tier must never fall open to full
+    access — the auth-off *demo* path stays full-access because it resolves to the
+    "demo" tier upstream in `resolve_tier`, which IS a known policy entry). A per-key
+    omission defaults **False** (only an explicit `true` grants a capability), so a
+    partial policy entry can never accidentally hand out a capability the operator did
+    not explicitly enable."""
     policy = load_policy()
-    entry = policy.get(tier) or policy.get(DEFAULT_TIER) or _HARDCODED_DEFAULTS[DEFAULT_TIER]
-    return {cap: bool(entry.get(cap, True)) for cap in CAPABILITIES}
+    entry = (policy.get(tier)
+             or policy.get(RESTRICTED_TIER)
+             or _HARDCODED_DEFAULTS[RESTRICTED_TIER])
+    return {cap: bool(entry.get(cap, False)) for cap in CAPABILITIES}
 
 
 def tool_required_capability(tool: Dict[str, Any]) -> str:

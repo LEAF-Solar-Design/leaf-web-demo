@@ -15,6 +15,7 @@ saveDeployment) to org-scoped list/get/create.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from psycopg.types.json import Jsonb
@@ -42,7 +43,8 @@ def create_org(name: str, tier: str = "hosted_starter",
     with cursor() as cur:
         cur.execute(
             "INSERT INTO orgs (org_id, name, tier) VALUES (%(org_id)s, %(name)s, %(tier)s) "
-            "RETURNING org_id, name, tier, status, created_at, offboarded_at",
+            "RETURNING org_id, name, tier, status, created_at, offboarded_at, "
+            "deleted_at, purge_requested_at, purge_completed_at",
             {"org_id": oid, "name": name, "tier": tier},
         )
         return Org.from_row(cur.fetchone())
@@ -53,7 +55,8 @@ def create_project(org_id: uuid.UUID, name: str) -> Project:
         cur.execute(
             "INSERT INTO projects (project_id, org_id, name) "
             "VALUES (%(project_id)s, %(org_id)s, %(name)s) "
-            "RETURNING project_id, org_id, name, status, created_at, updated_at",
+            "RETURNING project_id, org_id, name, status, created_at, updated_at, "
+            "deleted_at, purge_requested_at, purge_completed_at",
             {"project_id": new_uuid(), "org_id": org_id, "name": name},
         )
         return Project.from_row(cur.fetchone())
@@ -79,7 +82,7 @@ def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
                 "VALUES (%(version_id)s, %(project_id)s, %(org_id)s, %(seq)s, "
                 "%(oss_object)s, %(intake_ref)s, %(created_by)s) "
                 "RETURNING version_id, project_id, org_id, seq, oss_object, intake_ref, "
-                "created_by, created_at",
+                "created_by, created_at, deleted_at, purge_requested_at, purge_completed_at",
                 {
                     "version_id": new_uuid(), "project_id": project_id, "org_id": org_id,
                     "seq": next_seq, "oss_object": oss_object, "intake_ref": intake_ref,
@@ -101,7 +104,8 @@ def create_job(org_id: uuid.UUID, project_id: uuid.UUID, kind: str, *,
             "VALUES (%(job_id)s, %(project_id)s, %(org_id)s, %(kind)s, %(tool_name)s, "
             "%(params)s, %(spine_ref)s, %(input_version_id)s) "
             "RETURNING job_id, project_id, org_id, kind, tool_name, status, spine_ref, "
-            "params, result, input_version_id, output_version_id, cost_usd, created_at, updated_at",
+            "params, result, input_version_id, output_version_id, cost_usd, created_at, updated_at, "
+            "deleted_at, purge_requested_at, purge_completed_at",
             {
                 "job_id": new_uuid(), "project_id": project_id, "org_id": org_id, "kind": kind,
                 "tool_name": tool_name, "params": Jsonb(params) if params is not None else None,
@@ -122,7 +126,7 @@ def create_built_tool(org_id: uuid.UUID, project_id: uuid.UUID, name: str,
             "VALUES (%(tool_id)s, %(project_id)s, %(org_id)s, %(name)s, %(version)s, "
             "%(manifest)s, %(source_ref)s, %(provenance)s) "
             "RETURNING tool_id, project_id, org_id, name, version, manifest, source_ref, "
-            "provenance, created_at",
+            "provenance, created_at, deleted_at, purge_requested_at, purge_completed_at",
             {
                 "tool_id": new_uuid(), "project_id": project_id, "org_id": org_id, "name": name,
                 "version": version, "manifest": Jsonb(manifest),
@@ -140,8 +144,10 @@ def create_built_tool(org_id: uuid.UUID, project_id: uuid.UUID, name: str,
 def list_projects(org_id: uuid.UUID) -> List[Project]:
     with cursor() as cur:
         cur.execute(
-            "SELECT project_id, org_id, name, status, created_at, updated_at "
-            "FROM projects WHERE org_id = %(org_id)s ORDER BY created_at DESC",
+            "SELECT project_id, org_id, name, status, created_at, updated_at, "
+            "deleted_at, purge_requested_at, purge_completed_at "
+            "FROM projects WHERE org_id = %(org_id)s AND deleted_at IS NULL "
+            "ORDER BY created_at DESC",
             {"org_id": org_id},
         )
         return [Project.from_row(r) for r in cur.fetchall()]
@@ -150,8 +156,10 @@ def list_projects(org_id: uuid.UUID) -> List[Project]:
 def get_project(org_id: uuid.UUID, project_id: uuid.UUID) -> Optional[Project]:
     with cursor() as cur:
         cur.execute(
-            "SELECT project_id, org_id, name, status, created_at, updated_at "
-            "FROM projects WHERE org_id = %(org_id)s AND project_id = %(project_id)s",
+            "SELECT project_id, org_id, name, status, created_at, updated_at, "
+            "deleted_at, purge_requested_at, purge_completed_at "
+            "FROM projects WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+            "AND deleted_at IS NULL",
             {"org_id": org_id, "project_id": project_id},
         )
         row = cur.fetchone()
@@ -162,8 +170,10 @@ def list_drawing_versions(org_id: uuid.UUID, project_id: uuid.UUID) -> List[Draw
     with cursor() as cur:
         cur.execute(
             "SELECT version_id, project_id, org_id, seq, oss_object, intake_ref, created_by, "
-            "created_at FROM drawing_versions "
-            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s ORDER BY seq ASC",
+            "created_at, deleted_at, purge_requested_at, purge_completed_at "
+            "FROM drawing_versions "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s AND deleted_at IS NULL "
+            "ORDER BY seq ASC",
             {"org_id": org_id, "project_id": project_id},
         )
         return [DrawingVersion.from_row(r) for r in cur.fetchall()]
@@ -173,8 +183,10 @@ def list_jobs(org_id: uuid.UUID, project_id: uuid.UUID) -> List[Job]:
     with cursor() as cur:
         cur.execute(
             "SELECT job_id, project_id, org_id, kind, tool_name, status, spine_ref, params, "
-            "result, input_version_id, output_version_id, cost_usd, created_at, updated_at "
+            "result, input_version_id, output_version_id, cost_usd, created_at, updated_at, "
+            "deleted_at, purge_requested_at, purge_completed_at "
             "FROM jobs WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+            "AND deleted_at IS NULL "
             "ORDER BY created_at DESC",
             {"org_id": org_id, "project_id": project_id},
         )
@@ -185,8 +197,10 @@ def get_job(org_id: uuid.UUID, job_id: uuid.UUID) -> Optional[Job]:
     with cursor() as cur:
         cur.execute(
             "SELECT job_id, project_id, org_id, kind, tool_name, status, spine_ref, params, "
-            "result, input_version_id, output_version_id, cost_usd, created_at, updated_at "
-            "FROM jobs WHERE org_id = %(org_id)s AND job_id = %(job_id)s",
+            "result, input_version_id, output_version_id, cost_usd, created_at, updated_at, "
+            "deleted_at, purge_requested_at, purge_completed_at "
+            "FROM jobs WHERE org_id = %(org_id)s AND job_id = %(job_id)s "
+            "AND deleted_at IS NULL",
             {"org_id": org_id, "job_id": job_id},
         )
         row = cur.fetchone()
@@ -197,8 +211,10 @@ def list_built_tools(org_id: uuid.UUID, project_id: uuid.UUID) -> List[BuiltTool
     with cursor() as cur:
         cur.execute(
             "SELECT tool_id, project_id, org_id, name, version, manifest, source_ref, "
-            "provenance, created_at FROM built_tools "
-            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s ORDER BY created_at DESC",
+            "provenance, created_at, deleted_at, purge_requested_at, purge_completed_at "
+            "FROM built_tools "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s AND deleted_at IS NULL "
+            "ORDER BY created_at DESC",
             {"org_id": org_id, "project_id": project_id},
         )
         return [BuiltTool.from_row(r) for r in cur.fetchall()]
@@ -219,3 +235,66 @@ def hydrate_project(org_id: uuid.UUID, project_id: uuid.UUID) -> Optional[Dict[s
         "jobs": [j.to_dict() for j in list_jobs(org_id, project_id)],
         "built_tools": [t.to_dict() for t in list_built_tools(org_id, project_id)],
     }
+
+
+# --------------------------------------------------------------------------- #
+# deletion / compliance helpers (migration 0002; DELETION-OFFBOARDING-DESIGN.md)
+#
+# soft_delete_project = the routine, REVERSIBLE soft-delete (design sec 2): set
+# deleted_at so the row drops out of every default read (WHERE deleted_at IS NULL)
+# but is retained and recoverable. mark_purge_requested / mark_purge_completed
+# bracket the gated, audited hard-PURGE-on-request window (design sec 3) on the org
+# tombstone. All three are org-scoped writes (WHERE org_id = ...) — they never
+# reach across tenants — and issue no SELECT, so the store-guard read invariants
+# are unaffected.
+# --------------------------------------------------------------------------- #
+
+def soft_delete_project(org_id: uuid.UUID, project_id: uuid.UUID) -> bool:
+    """Soft-delete a project the caller's org owns (idempotent, reversible).
+
+    Sets ``deleted_at = NOW()`` only when the project is live (``deleted_at IS
+    NULL``) AND owned by ``org_id``. Returns True if a live row was just hidden,
+    False if it was already soft-deleted, unknown, or owned by another org. The
+    underlying data is retained — recovery is ``UPDATE ... SET deleted_at = NULL``.
+    """
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET deleted_at = NOW(), updated_at = NOW() "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+            "AND deleted_at IS NULL",
+            {"org_id": org_id, "project_id": project_id},
+        )
+        return cur.rowcount == 1
+
+
+def mark_purge_requested(org_id: uuid.UUID) -> Optional[datetime]:
+    """Stamp the hard-PURGE request time on the org tombstone (design sec 3, step 2).
+
+    First-request-wins: ``purge_requested_at = COALESCE(purge_requested_at, NOW())``
+    so re-invoking the purge does not move the audit window's opening edge. Returns
+    the effective ``purge_requested_at`` (None only if the org row does not exist).
+    """
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE orgs SET purge_requested_at = COALESCE(purge_requested_at, NOW()) "
+            "WHERE org_id = %(org_id)s RETURNING purge_requested_at",
+            {"org_id": org_id},
+        )
+        row = cur.fetchone()
+        return row["purge_requested_at"] if row else None
+
+
+def mark_purge_completed(org_id: uuid.UUID) -> Optional[datetime]:
+    """Stamp the hard-PURGE completion time on the org tombstone (design sec 3, step 2).
+
+    Set once the cascade across all sec-1 stores has finished. Returns the effective
+    ``purge_completed_at`` (None only if the org row does not exist).
+    """
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE orgs SET purge_completed_at = NOW() "
+            "WHERE org_id = %(org_id)s RETURNING purge_completed_at",
+            {"org_id": org_id},
+        )
+        row = cur.fetchone()
+        return row["purge_completed_at"] if row else None

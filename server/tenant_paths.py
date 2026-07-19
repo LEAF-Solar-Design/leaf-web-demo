@@ -25,17 +25,26 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from tenant_id_validator import is_valid_tenant_id  # F13: the ONE shared reject-don't-collapse rule
+
 DEFAULT_TENANT = "demo-tenant"
 
 
 def _safe_component(tenant_id: str) -> Optional[str]:
-    """Return tenant_id iff it is a single, traversal-free path component, else None."""
-    tid = str(tenant_id or "").strip()
+    """Return tenant_id iff it is a single, traversal-free component that also matches
+    the ONE shared tenant-id rule (server/tenant_id_validator, security-audit F13), else None.
+
+    Previously permitted ``.`` / ``_`` / unicode, DISAGREEING with da/store.py's
+    (then-collapsing) ``sanitize_id`` — a distinct tenant differing only in those
+    chars could resolve to its own repo dir here yet COLLIDE with another tenant on a
+    single store key. Now both accept exactly the same charset (``[a-z0-9_-]``).
+    """
+    tid = "" if tenant_id is None else str(tenant_id)
     if not tid:
         return None
-    # collapse any separator form; a well-formed tenant id is its own basename.
+    # a well-formed tenant id is its own basename (no embedded separator).
     basename = tid.replace("\\", "/").split("/")[-1]
-    if basename in ("", ".", "..") or basename != tid:
+    if basename != tid or not is_valid_tenant_id(basename):
         return None
     return basename
 

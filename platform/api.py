@@ -11,6 +11,7 @@ the caller's org yields HTTP 404, never 403 (a 403 would leak existence).
 """
 from __future__ import annotations
 
+import hmac
 import os
 import uuid
 from typing import Any, Dict, Optional
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from . import store
 from .db import cursor
-from .deps import get_org_id
+from .deps import get_org_id, require_auth_when_live
 from .models import JOB_KINDS, TIERS, Org
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 
@@ -48,16 +49,18 @@ class CreateJobBody(BaseModel):
 # --------------------------------------------------------------------------- #
 # orgs — the tenant anchor every project/job route requires
 # --------------------------------------------------------------------------- #
-# DEV POSTURE (open endpoint): POST /api/orgs mints an org with NO auth gate so
-# the demo can bootstrap the first org_id (chicken/egg: you cannot present an
-# org you do not yet have). In PRODUCTION this MUST be gated behind the
-# auth/identity layer — org creation becomes a side effect of first login /
-# provisioning, and a client-supplied identity is never trusted here. Documented
-# in platform/README.md. GET /api/orgs/{org_id} keeps the same 404-not-403
+# DEV POSTURE (open endpoint) vs LIVE AUTH (F6): POST /api/orgs mints an org.
+# With auth OFF (demo) it is UNGATED so the demo can bootstrap the first org_id
+# (chicken/egg: you cannot present an org you do not yet have). With
+# LEAF_AUTH_LIVE=1 it is GATED behind require_auth_when_live — org creation
+# becomes a side effect of a real, verified login and an UNAUTHENTICATED call is
+# rejected (401); a client-supplied identity is never trusted. Documented in
+# platform/README.md. GET /api/orgs/{org_id} keeps the same 404-not-403
 # isolation posture as the project/job reads: a caller may only read THEIR OWN
-# org (X-Org-Id must match the path), and a cross-org (or unknown) org yields 404.
+# org, and a cross-org (or unknown) org yields 404. In live-auth mode the caller
+# org is the VERIFIED session's org (deps.get_org_id), never the X-Org-Id header.
 @router.post("/orgs")
-def create_org(body: CreateOrgBody):
+def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)):
     if body.tier is not None and body.tier not in TIERS:
         raise HTTPException(status_code=422, detail=f"tier must be one of {list(TIERS)}")
     org = (store.create_org(body.name, tier=body.tier) if body.tier is not None
@@ -153,8 +156,14 @@ blob_purge_hook: PurgeHook = lambda ref: None
 def offboard(org_id: uuid.UUID, x_admin_token: str | None = Header(default=None)):
     admin_token = os.environ.get("PLATFORM_ADMIN_TOKEN")
     if not admin_token:
+        # fail closed when the env is unset (no token configured => no offboarding)
         raise HTTPException(status_code=503, detail="offboarding not configured (no admin token)")
-    if x_admin_token != admin_token:
+    # F16: constant-time compare (hmac.compare_digest) so the admin token cannot be
+    # recovered byte-by-byte via response-timing. Guard None first (compare_digest
+    # rejects None) and compare as bytes so a non-ASCII header can't raise.
+    if x_admin_token is None or not hmac.compare_digest(
+        x_admin_token.encode("utf-8"), admin_token.encode("utf-8")
+    ):
         raise HTTPException(status_code=403, detail="admin token required")
     try:
         result = offboard_org(
@@ -167,4 +176,11 @@ def offboard(org_id: uuid.UUID, x_admin_token: str | None = Header(default=None)
         "deleted_projects": result.deleted_projects,
         "purged_secret_refs": len(result.secret_refs),
         "purged_blob_refs": len(result.blob_refs),
+        # hard-PURGE audit window (migration 0002; DELETION-OFFBOARDING-DESIGN.md sec 3)
+        "purge_requested_at": (
+            result.purge_requested_at.isoformat() if result.purge_requested_at else None
+        ),
+        "purge_completed_at": (
+            result.purge_completed_at.isoformat() if result.purge_completed_at else None
+        ),
     }

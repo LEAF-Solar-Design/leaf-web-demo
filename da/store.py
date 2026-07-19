@@ -35,31 +35,37 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # da/ sibling imports (highest precedence)
+# The shared F13 tenant/opaque-id validator lives in server/; APPEND it (lowest
+# precedence) so da/ modules still win any name clash while `tenant_id_validator`
+# (unique to server/) still resolves in both the da- and server-rooted test runs.
+_SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server")
+if _SERVER_DIR not in sys.path:
+    sys.path.append(_SERVER_DIR)
 import client  # noqa: E402  (OSSBackend delegates to client's OSS helpers)
 import requests  # noqa: E402  (only OSSBackend.exists references requests.HTTPError)
+import tenant_id_validator as _tid  # noqa: E402  (the ONE shared reject-don't-collapse rule)
 
 # --------------------------------------------------------------------------- #
 # Key scheme
 # --------------------------------------------------------------------------- #
-_ID_DISALLOWED = re.compile(r"[^a-z0-9-]+")
-_ID_COLLAPSE = re.compile(r"-+")
-
-# The canonical key contract every stored version key must satisfy.
-VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9-]+/drawings/[a-z0-9-]+/v/\d{8}\.dwg$")
+# The canonical key contract every stored version key must satisfy. The id segments
+# admit the same charset as the shared validator (`[a-z0-9_-]`, underscores included
+# for real Auth0 tenant ids like `org_acme_solar`).
+VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9_-]+/drawings/[a-z0-9_-]+/v/\d{8}\.dwg$")
 
 
 def sanitize_id(raw: str) -> str:
-    """Lowercase and reduce an id to `[a-z0-9-]`, collapsing runs of '-'.
+    """Validate an id against the ONE shared tenant/opaque-id rule and return it
+    UNCHANGED — REJECT-don't-collapse (server/tenant_id_validator, security-audit F13).
 
-    Guarantees the result is non-empty and safe as a single OSS key path segment.
-    (drawing_id is ideally a UuidV7 to match cadwalk-studio `UuidV7`; a uuid string
-    is already `[a-z0-9-]`, so it passes through unchanged.)
+    Was: collapsed to `[a-z0-9-]`, which let DISTINCT ids collide on a single store
+    key — e.g. `acme_corp` and `acme-corp`, or `Acme Corp` and `acme-corp`, all
+    folded to `acme-corp`. Now anything not already canonical is REJECTED, so no two
+    distinct tenants/drawings can ever share a key. A UUIDv7 drawing id is already
+    canonical and passes through unchanged.
     """
-    s = _ID_COLLAPSE.sub("-", _ID_DISALLOWED.sub("-", str(raw).strip().lower())).strip("-")
-    if not s:
-        raise ValueError(f"id {raw!r} sanitizes to empty (needs at least one [a-z0-9] char)")
-    return s
+    return _tid.validate_tenant_id(raw, kind="id")
 
 
 def new_drawing_id() -> str:

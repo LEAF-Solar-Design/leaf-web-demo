@@ -31,6 +31,7 @@ import platform as _stdlib_platform  # noqa: F401  (cache stdlib before the
 #   PROJECT_ROOT sys.path insert below makes the local platform/ package shadow it;
 #   requests/urllib3 import `platform` lazily inside request handlers)
 
+import hmac
 import json
 import os
 import re
@@ -41,7 +42,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -54,6 +55,7 @@ for p in (str(PROJECT_ROOT), str(SERVER_DIR)):
         sys.path.insert(0, p)
 
 import tools_fallback as fb  # noqa: E402,F401  (compat: builtins delegate here)
+import entitlements  # noqa: E402  (F10: broker-side tier re-check; IMPORT/CALL only)
 from envelopes import (  # noqa: E402
     DEFAULT_HTTP_STATUS,
     ErrorCode,
@@ -246,11 +248,139 @@ def _cap_preflight(tenant_id: str, tool: Dict[str, Any]):
     return env, 402  # 402 Payment Required — tenant spend cap reached
 
 
+def _run_quota_preflight(tenant_id: str, tier: str, tool: Dict[str, Any]):
+    """Broker-side coarse per-tenant DAILY RUN quota (F12 + A4) — a COUNT-based cap on
+    APS-money runs/tenant/UTC-day, keyed on ``tier``, standing ALONGSIDE the USD spend
+    cap (_cap_preflight) and ORDER-INDEPENDENT of it.
+
+    Returns ``(quota_env, 429)`` to REJECT, or ``None`` to proceed. The count is the
+    tenant's APS_LIVE=1 runs today from the AUTHORITATIVE broker ledger (spec §a excludes
+    mock/free runs); a new UTC day resets the window with NO cron (the count keys on
+    YYYY-MM-DD). Unmetered tiers (hosted_pro) always proceed. Unlike the spend cap (OFF
+    unless a cap is configured) this guard is ON BY DEFAULT for metered tiers (free N=20)
+    — a demo tenant on the live path is capped, never uncapped — and a DIFFERENT tenant
+    under its own cap is unaffected. The caller invokes this only on the APS_LIVE=1 path.
+    If the usage module can't load, the guard is absent and the run is not blocked
+    (fail-open only when the guard itself is missing)."""
+    usage = _get_usage()
+    if usage is None:
+        return None
+    decision = usage.daily_run_quota_check(tenant_id, tier, LEDGER_PATH)
+    if decision.get("ok"):
+        return None
+    # reject: coerce degraded_mode to a boolean for the schema-valid wire body
+    env = dict(decision)
+    env["degraded_mode"] = False
+    return env, 429  # 429 Too Many Requests — daily run cap reached (distinct from 402 spend cap)
+
+
 # --------------------------------------------------------------------------- #
 # app
 # --------------------------------------------------------------------------- #
 app = FastAPI(title="Leaf APS broker v1", version="1.0.0")
 install_error_handlers(app)
+
+
+# --------------------------------------------------------------------------- #
+# F4(a): caller-auth on every /broker/* route (health stays OPEN for liveness
+# probes). The app→broker client (broker_client.py) sends X-Broker-Secret read
+# from the SAME env; Codex injects the value at deploy. Discipline:
+#   * secret SET             -> ALWAYS enforced, constant-time (hmac.compare_digest)
+#   * live mode + secret unset -> 503 (fail-closed: refuse to serve an exposed,
+#                                       mis-configured broker)
+#   * off-live + secret unset  -> friction-free demo (byte-identical to today)
+# Raising HTTPException routes through install_error_handlers -> a §10 envelope
+# body with the correct status (401 wrong/absent, 503 unconfigured).
+# --------------------------------------------------------------------------- #
+BROKER_SECRET_ENV = "LEAF_BROKER_SECRET"
+
+
+def _broker_secret() -> Optional[str]:
+    val = os.environ.get(BROKER_SECRET_ENV)
+    return val if val else None
+
+
+def _auth_live() -> bool:
+    """Live/public mode — read at call time so one process can be toggled (mirrors
+    deps.auth_live_enabled)."""
+    return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
+
+
+def _qa_hooks_enabled() -> bool:
+    """F12: whether QA-only latency/test hooks (the ``_qa_sleep_s`` run param) are
+    HONORED. Explicit env ``LEAF_QA_HOOKS`` wins (``1``/``true``/``yes``/``on`` -> ON,
+    anything else -> OFF). When UNSET the default tracks the deployment posture, mirroring
+    the friction-free-demo / fail-closed-live broker-auth rule:
+
+        * local / demo / test (LEAF_AUTH_LIVE != 1)  -> ON   (the backbone + tests use it)
+        * live / public prod   (LEAF_AUTH_LIVE == 1)  -> OFF  (a tenant can't starve the
+                                                               shared worker pool with a
+                                                               large sleep)
+
+    So the EXACT default is: ON everywhere EXCEPT live/public mode, and a literal
+    ``LEAF_QA_HOOKS=0`` forces it OFF even locally.
+    """
+    raw = os.environ.get("LEAF_QA_HOOKS")
+    if raw is not None:
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return not _auth_live()
+
+
+def require_broker_auth(x_broker_secret: Optional[str] = Header(default=None)) -> None:
+    """Reject any /broker/* caller lacking the shared secret. Never logs the secret."""
+    secret = _broker_secret()
+    if secret is None:
+        if _auth_live():
+            raise HTTPException(
+                status_code=503,
+                detail="broker caller-auth is not configured (LEAF_BROKER_SECRET unset)",
+            )
+        return  # off-live demo: no secret required (unchanged behaviour)
+    provided = x_broker_secret or ""
+    if not hmac.compare_digest(provided.encode("utf-8"), secret.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="invalid or missing X-Broker-Secret")
+
+
+# --------------------------------------------------------------------------- #
+# F10: broker-side tier ENTITLEMENT re-check (defense-in-depth) — a DIRECT broker
+# call must not bypass the app-side tier gate. The tier is resolved from a
+# broker-TRUSTED source keyed by tenant_id (NEVER the request body — a direct
+# caller could forge it): the persisted broker tenants record, then env
+# LEAF_BROKER_TENANT_TIERS (JSON {tenant_id: tier}). Unknown tenant -> "demo"
+# (friction-free; matches the platform's open-demo design and keeps the async
+# spine unbroken). Operators provision real tiers here to make the re-check bite.
+# --------------------------------------------------------------------------- #
+class _TenantTier:
+    """Minimal tenant carrier so entitlements.resolve_tier applies its own fail-closed
+    rule (present-but-empty tier -> 'restricted')."""
+
+    __slots__ = ("tier",)
+
+    def __init__(self, tier: Any) -> None:
+        self.tier = tier
+
+
+def _provisioned_tier(tenant_id: str) -> Optional[str]:
+    with _tenants_lock:
+        rec = _tenants.get(tenant_id) or {}
+    if isinstance(rec, dict) and "tier" in rec:
+        return str(rec.get("tier") or "")
+    raw = os.environ.get("LEAF_BROKER_TENANT_TIERS")
+    if raw:
+        try:
+            m = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            m = None
+        if isinstance(m, dict) and tenant_id in m:
+            return str(m.get(tenant_id) or "")
+    return None
+
+
+def _tenant_tier(tenant_id: str) -> str:
+    provisioned = _provisioned_tier(tenant_id)
+    if provisioned is None:
+        return entitlements.DEFAULT_TIER  # no verified tier at the broker -> friction-free demo
+    return entitlements.resolve_tier(_TenantTier(provisioned))
 
 
 class BrokerRunRequest(BaseModel):
@@ -305,13 +435,13 @@ def health() -> Dict[str, Any]:
     })
 
 
-@app.post("/broker/tenants/{tid}/disable")
+@app.post("/broker/tenants/{tid}/disable", dependencies=[Depends(require_broker_auth)])
 def disable_tenant(tid: str) -> Dict[str, Any]:
     set_tenant_disabled(tid, True)
     return with_envelope_fields({"ok": True, "tenant_id": tid, "disabled": True})
 
 
-@app.post("/broker/tenants/{tid}/enable")
+@app.post("/broker/tenants/{tid}/enable", dependencies=[Depends(require_broker_auth)])
 def enable_tenant(tid: str) -> Dict[str, Any]:
     set_tenant_disabled(tid, False)
     return with_envelope_fields({"ok": True, "tenant_id": tid, "disabled": False})
@@ -323,7 +453,7 @@ class BrokerReapRequest(BaseModel):
     live: Optional[bool] = None  # None -> reaper decides (APS_LIVE + BROKER_REAP_LIVE)
 
 
-@app.post("/broker/reap")
+@app.post("/broker/reap", dependencies=[Depends(require_broker_auth)])
 def broker_reap(req: BrokerReapRequest) -> JSONResponse:
     """Cancel orphaned WorkItems (closed tab / expired lease). Only the
     credential-holding broker can issue the DA cancel; the app/jobs side supplies
@@ -346,7 +476,7 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
     }))
 
 
-@app.post("/broker/extract")
+@app.post("/broker/extract", dependencies=[Depends(require_broker_auth)])
 def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     """Extract intake through the credential-holding process only."""
     if tenant_disabled(req.tenant_id):
@@ -402,7 +532,7 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
         )
 
 
-@app.post("/broker/run")
+@app.post("/broker/run", dependencies=[Depends(require_broker_auth)])
 def broker_run(req: BrokerRunRequest) -> JSONResponse:
     """Run one tool for one tenant. Appends exactly ONE attribution line."""
     t0 = time.perf_counter()
@@ -451,11 +581,41 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         return (err_envelope(ErrorCode.BAD_PARAMS, "tool package missing 'name'", retryable=False),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
+    # 1b) F10: re-check the tenant's TIER entitlement at the broker (defense-in-depth).
+    #     A direct broker call must not bypass the app-side tier gate — a write tool or
+    #     build the tier lacks is denied here too. Tier comes from a broker-TRUSTED source
+    #     (never the request body); unknown tenant -> demo -> full (open-demo design).
+    required_cap = entitlements.tool_required_capability(tool)
+    tier = _tenant_tier(req.tenant_id)
+    if not entitlements.entitlements_for(tier).get(required_cap, False):
+        return (err_envelope(
+            ErrorCode.ENTITLEMENT_REQUIRED,
+            f"tier {tier!r} is not entitled to {required_cap!r} for tool {tool.get('name')!r}",
+            retryable=False, tool=tool.get("name")),
+            DEFAULT_HTTP_STATUS[ErrorCode.ENTITLEMENT_REQUIRED])
+
+    # 1d) F12 + A4: coarse per-tenant DAILY RUN quota (tier-keyed, count-based) — a
+    #     liability cap on the NUMBER of APS-money runs/tenant/UTC-day, standing
+    #     ALONGSIDE the USD spend cap (1a). Only the APS_LIVE=1 path spends real money
+    #     (spec §a: APS_LIVE=0 is un-metered/free), so the cap applies ONLY to live runs
+    #     and is checked HERE — before the WorkItem is dispatched. Over-cap -> the §10
+    #     quota_exceeded envelope (HTTP 429). Reuses the F10-resolved `tier`; a DIFFERENT
+    #     tenant under its own cap is unaffected.
+    if req.aps_live:
+        capped_runs = _run_quota_preflight(req.tenant_id, tier, tool)
+        if capped_runs is not None:
+            return capped_runs  # (quota_exceeded envelope, HTTP 429)
+
     params = dict(req.params or {})
     degraded = False
 
-    # QA latency hook is NOT a tool param — pull it out before validation.
+    # QA latency hook is NOT a tool param — pull it out before validation so it never
+    # reaches the tool or the schema check. F12: it is HONORED only when QA hooks are
+    # enabled (LEAF_QA_HOOKS; non-live default ON) — otherwise it is IGNORED ENTIRELY
+    # so a tenant can't starve the shared worker pool with a large sleep in prod.
     qa_sleep = params.pop("_qa_sleep_s", None)
+    if qa_sleep is not None and not _qa_hooks_enabled():
+        qa_sleep = None
 
     # 1b) PRE-VALIDATE params against the tool's own JSON Schema (§8.4 step 1).
     # A schema violation returns a BAD_PARAMS envelope and the tool body NEVER
@@ -478,6 +638,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # 1c) WRITE BRANCH (M2): a drawing.write tool produces a NEW immutable store
     #     version (undo/redo-able). Read tools do NOT match here and take the
     #     unchanged live/mock paths below, so the read backbone is byte-identical.
+    #     F2 / lane 2B: the mock write branch executes the tenant tool body via
+    #     run_tool_dynamic (passed as run_tool_dynamic_fn) — so it inherits the SAME
+    #     LEAF_SANDBOX=e2b out-of-process sandbox as the read path (no tenant-code exec in
+    #     this credential-holding PID when sandboxed).
     if write_loop.is_write_tool(tool):
         if req.aps_live:
             da = _get_da()
@@ -556,6 +720,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     except Exception as exc:  # noqa: BLE001
         return (err_envelope(ErrorCode.INTERNAL, f"cached intake unavailable: {exc}",
                              retryable=False, tool=tool.get("name")), 500)
+    # F2 / lane 2B: run_tool_dynamic executes the tenant tool FILE. When LEAF_SANDBOX=e2b it
+    # runs that body OUT of this credential-holding broker PID, in a locked-down sandbox with
+    # no APS credential / token reachability and no egress (tool_loader._run_in_sandbox). With
+    # LEAF_SANDBOX unset this is the unchanged in-process path.
     env = run_tool_dynamic(tool, intake, params, aps_live=False, da=None, t0=t0,
                            tenant_id=req.tenant_id)
     if not env.get("ok"):

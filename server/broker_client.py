@@ -16,6 +16,26 @@ def broker_url() -> str:
     return os.environ.get("BROKER_URL", "http://127.0.0.1:8140").rstrip("/")
 
 
+def broker_headers() -> Dict[str, str]:
+    """F4 caller-auth: the header the app→broker senders MUST attach. Sends
+    ``X-Broker-Secret`` from ``LEAF_BROKER_SECRET`` (the SAME env the broker reads;
+    Codex injects the value at deploy). Empty dict when the env is unset (off-live
+    demo) so the local demo stays byte-identical to today. EVERY app-side POST to a
+    protected ``/broker/*`` route must include these headers (``/broker/run`` here;
+    the extract sender in ``routers/session.py`` and the disable/enable proxy in
+    ``routers/ops.py`` must adopt this helper too — one-line change per site)."""
+    secret = os.environ.get("LEAF_BROKER_SECRET")
+    return {"X-Broker-Secret": secret} if secret else {}
+
+
+def harness_headers() -> Dict[str, str]:
+    """F5 app->harness caller-auth: ``X-Harness-Secret`` from ``LEAF_HARNESS_SECRET``
+    (same env the harness reads; Codex injects at deploy). Empty when unset so the
+    off-live demo stays byte-identical."""
+    secret = os.environ.get("LEAF_HARNESS_SECRET")
+    return {"X-Harness-Secret": secret} if secret else {}
+
+
 class BrokerUnreachable(Exception):
     """The broker process could not be reached (connection/timeout)."""
 
@@ -28,6 +48,7 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             f"{broker_url()}/broker/run",
             json={"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live)},
+            headers=broker_headers(),
             timeout=timeout_s or 600,
         )
         return resp.json()
