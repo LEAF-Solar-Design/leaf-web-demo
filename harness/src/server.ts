@@ -6,8 +6,13 @@
  * Routes:
  *   GET  /health          -> { ok: true }
  *   POST /author          -> author route (build | one-off). Body {description, mode?}.
- *                            build:   200 { tool, code, preview }         (CONTRACT section 4)
- *                            one-off: 200 { tool, code, preview, run }
+ *                            build:   200 { tool, code, preview, telemetry? } (CONTRACT section 4)
+ *                            one-off: 200 { tool, code, preview, run, telemetry? }
+ *                            `telemetry` (A1) is ADDITIVE + OPTIONAL — a provenance chip source:
+ *                            { turns?, input_tokens?, output_tokens?, total_cost_usd?, models?[] }.
+ *                            It is present ONLY when the runner metered the build (the real Agent
+ *                            SDK runner); absent-safe, so a non-metering runner keeps the frozen
+ *                            {tool, code, preview} shape. Forwarded verbatim from AuthorLoop.
  *   POST /run-registered  -> run route (design-time-ONLY invariant). Body
  *                            {tool, params?, dwg?, aps_live?}. 200 section-3 envelope.
  *                            NEVER constructs the Agent SDK / touches AgentRunner.

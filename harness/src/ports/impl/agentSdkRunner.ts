@@ -33,6 +33,7 @@ import type {
   AgentRunInput,
   AgentRunResult,
   AgentRunner,
+  AuthorTelemetry,
   ToolPackage,
 } from "../index.js";
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
@@ -439,8 +440,29 @@ export class AgentSdkRunner implements AgentRunner {
       code,
       preview: `Tool "${finalPkg.name}" authored via the Agent SDK (engine_op=${finalPkg.engine_op}); runs zero-LLM at runtime.`,
       files: finalPkg.entry ? [finalPkg.entry, `tools/${finalPkg.name}/tool.json`] : [],
+      // A1: surface the REAL self-metered authoring telemetry (turns/tokens/cost/models)
+      // from the run just completed, so /author can carry a provenance/telemetry chip.
+      // `lastRun` is unconditionally assigned in step 6 above before we reach here.
+      telemetry: telemetryFromSummary(this.lastRun!),
     };
   }
+}
+
+/**
+ * Project the runner's self-metered {@link RunUsageSummary} into the additive
+ * {@link AuthorTelemetry} surfaced on the /author response. Absent-safe: a dimension
+ * the SDK did not report is OMITTED (never a fabricated 0/null) — `total_cost_usd` is
+ * dropped when the SDK gave no cost, and `models` is dropped when empty.
+ */
+function telemetryFromSummary(summary: RunUsageSummary): AuthorTelemetry {
+  const t: AuthorTelemetry = {
+    turns: summary.turns,
+    input_tokens: summary.usage_totals.input_tokens,
+    output_tokens: summary.usage_totals.output_tokens,
+  };
+  if (typeof summary.total_cost_usd === "number") t.total_cost_usd = summary.total_cost_usd;
+  if (summary.models.length > 0) t.models = summary.models;
+  return t;
 }
 
 function safeRead(path: string): string {

@@ -83,7 +83,15 @@ export class AuthorLoop {
     const { repo, run } = await this.author(tenantId, description);
     registerTool(repo.dir, run.tool);
     await repo.commit(`author tool: ${run.tool.name}`, HARNESS_IDENTITY);
-    return { tool: run.tool, code: run.code, preview: run.preview };
+    // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
+    // to /author, ADDITIVELY. A runner that did not meter (the fake) leaves it undefined,
+    // so the response stays exactly {tool, code, preview} — the frozen shape is preserved.
+    return {
+      tool: run.tool,
+      code: run.code,
+      preview: run.preview,
+      ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+    };
   }
 
   /** one-off route: author + (optionally) test-run once, but DO NOT persist. */
@@ -99,7 +107,14 @@ export class AuthorLoop {
       dwg: "rooftop_demo",
       apsLive: false,
     });
-    return { tool: run.tool, code: run.code, preview: run.preview, run: envelope };
+    // A1: same additive, absent-safe telemetry threading as build().
+    return {
+      tool: run.tool,
+      code: run.code,
+      preview: run.preview,
+      run: envelope,
+      ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+    };
   }
 
   /**

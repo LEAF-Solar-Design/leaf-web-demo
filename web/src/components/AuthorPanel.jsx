@@ -40,6 +40,39 @@ function readProvenance(res) {
   return { source, agent, fallback, scan }
 }
 
+// Calm authoring telemetry chip (3A). The /api/author response OPTIONALLY carries
+// `telemetry` on a REAL agent build only — { turns, input_tokens, output_tokens,
+// total_cost_usd, models[] }. It is ABSENT for template + fallback authoring, so
+// this renders nothing unless genuine agent metrics are present (absent-safe). No
+// alarm, no spinner — a quiet receipt of what the agent actually did.
+function fmtAgentCost(usd) {
+  const n = Number(usd)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n < 0.01 ? `~$${n.toFixed(4)}` : `~$${n.toFixed(2)}`
+}
+function TelemetryChip({ telemetry }) {
+  if (!telemetry || typeof telemetry !== 'object') return null
+  const turns = Number(telemetry.turns)
+  const cost = fmtAgentCost(telemetry.total_cost_usd)
+  const model = Array.isArray(telemetry.models) && telemetry.models.length ? telemetry.models[0] : null
+  const parts = ['agent']
+  if (Number.isFinite(turns)) parts.push(`${turns} turn${turns === 1 ? '' : 's'}`)
+  if (cost) parts.push(cost)
+  if (model) parts.push(model)
+  // Nothing beyond the bare "agent" tag -> stay silent (absent-safe).
+  if (parts.length <= 1) return null
+  const inT = Number(telemetry.input_tokens)
+  const outT = Number(telemetry.output_tokens)
+  const tokTitle = (Number.isFinite(inT) || Number.isFinite(outT))
+    ? `tokens · in ${Number.isFinite(inT) ? inT.toLocaleString() : '—'} · out ${Number.isFinite(outT) ? outT.toLocaleString() : '—'}`
+    : 'authoring-agent telemetry'
+  return (
+    <span className="telemetry-chip" role="status" title={tokTitle}>
+      {parts.join(' · ')}
+    </span>
+  )
+}
+
 function ProvenanceBadge({ prov }) {
   if (prov.fallback) {
     return (
@@ -93,6 +126,32 @@ function BuildGate() {
   )
 }
 
+// B2: the authoring agent's harness/broker was unreachable (a 502 / 503 / 504 or
+// an explicit BROKER_UNREACHABLE code on POST /api/author). This is a transient
+// infrastructure hiccup, not a user error and not a plan boundary — surface it as
+// calm "service temporarily unavailable" copy, never a raw red failure.
+function isServiceDown(e) {
+  if (!e) return false
+  if (e.status === 502 || e.status === 503 || e.status === 504) return true
+  const code = String((e.body && e.body.error && e.body.error.error_code) || '').toUpperCase()
+  if (code === 'BROKER_UNREACHABLE' || code === 'SERVICE_UNAVAILABLE' || code === 'HARNESS_UNREACHABLE') return true
+  const msg = String((e.message || '')).toLowerCase()
+  return /unreachable|service unavailable|bad gateway|gateway timeout|\b50[234]\b/.test(msg)
+}
+
+function ServiceGate() {
+  return (
+    <div className="author-gate" role="status">
+      <span className="tag amber">Service</span>
+      <div className="author-gate-body">
+        <b>Authoring service is temporarily unavailable.</b>{' '}
+        The tool-authoring agent couldn’t be reached just now. Nothing was charged —
+        please try Generate again in a moment.
+      </div>
+    </div>
+  )
+}
+
 export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal, notLinked, onLinkClaude, buildEntitled = true }) {
   const [desc, setDesc] = useState('')
   const [busy, setBusy] = useState(false)
@@ -100,6 +159,7 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
   const [err, setErr] = useState(null)
   const [grantGate, setGrantGate] = useState(false) // a grant-required rejection (calm gate, not red)
   const [buildGate, setBuildGate] = useState(false) // a build-entitlement rejection (calm plan gate, not red)
+  const [svcGate, setSvcGate] = useState(false) // authoring service unreachable (B2; calm, not red)
   const [authored, setAuthored] = useState(null)
   const lastSignal = useRef(null)
   const startRef = useRef(null)
@@ -124,16 +184,18 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
 
   async function submit() {
     if (!desc.trim() || !buildEntitled) return
-    setBusy(true); setErr(null); setGrantGate(false); setBuildGate(false); setAuthored(null)
+    setBusy(true); setErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setAuthored(null)
     try {
       const res = await onAuthor(desc.trim())
       setAuthored(res)
     } catch (e) {
-      // Two expected "not-an-alarm" rejections surface as calm gates, never red:
+      // Expected "not-an-alarm" rejections surface as calm gates, never red:
       //   entitlementRequired — the plan doesn't include authoring (build).
       //   grantRequired       — no Claude account linked to fund the agent.
+      //   serviceDown (B2)    — the authoring agent was unreachable (502/503/504).
       if (e && e.entitlementRequired) setBuildGate(true)
       else if (e && e.grantRequired) setGrantGate(true)
+      else if (isServiceDown(e)) setSvcGate(true)
       else setErr(String(e.message || e))
     } finally {
       setBusy(false)
@@ -148,9 +210,11 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf generates it and adds it to the catalog.</p>
       {(!buildEntitled || buildGate)
         ? <BuildGate />
-        : (notLinked || grantGate)
-          ? <AuthorGate onLinkClaude={onLinkClaude} />
-          : null}
+        : svcGate
+          ? <ServiceGate />
+          : (notLinked || grantGate)
+            ? <AuthorGate onLinkClaude={onLinkClaude} />
+            : null}
       <textarea
         value={desc}
         onChange={(e) => setDesc(e.target.value)}
@@ -179,6 +243,7 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
           <div className="authored-head">
             <span className="tool-name">{authored.tool.name}</span>
             <ProvenanceBadge prov={prov} />
+            <TelemetryChip telemetry={authored.telemetry} />
           </div>
           {prov.scan.length > 0 && (
             <div className="scan-flags" title="Advisory static-scan findings — non-blocking.">

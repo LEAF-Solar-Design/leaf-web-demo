@@ -15,12 +15,12 @@ import VersionHistory from './components/VersionHistory.jsx'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
 import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
-import CheckoutChip from './components/CheckoutChip.jsx'
+import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import {
   config, getSession, getTools, getCapabilities, getUsage, getHealth, runTool, runToolAsync,
   attachToJob, getJob, listJobs, recordToEnvelope, authorTool, getDrawingIntake,
-  getDrawingVersions, undoDrawing, redoDrawing, nlPrompt, closeJobBeacon,
+  getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt, closeJobBeacon,
   getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
   getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant, getEntitlements,
 } from './api.js'
@@ -157,6 +157,7 @@ export default function App() {
 
   // --- single-writer checkout lock (item 3) ---
   const [checkout, setCheckout] = useState(null)         // {holder, acquired, expires} | null (from /versions)
+  const [checkoutBusy, setCheckoutBusy] = useState(false) // take/release request in flight (3B)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
@@ -217,6 +218,9 @@ export default function App() {
   const otherHeldCheckout =
     (rawCheckout && rawCheckout.holder && rawCheckout.holder !== ownHolder) ? rawCheckout : null
   const writeLocked = !mock && !!otherHeldCheckout
+  // We hold the single-writer lock (3B): our own holder id owns the checkout.
+  // Not a lock on us (write-Run stays enabled) — it just offers a Release.
+  const heldByUs = !mock && !!(rawCheckout && rawCheckout.holder && rawCheckout.holder === ownHolder)
 
   // Current open project's display name (from the hydration payload, else the list).
   const currentProjectName = openProjectId
@@ -400,6 +404,36 @@ export default function App() {
   }, [mock, drawingState])
 
   useEffect(() => { loadCheckout() }, [loadCheckout])
+
+  // Take / Release the single-writer checkout (3B). Both refetch /versions after
+  // the call so the chip reflects the real lock (source of truth), and both stay
+  // calm on failure — a 409 (someone else took it) / 403 (not the holder) just
+  // means the refetched manifest shows the truth. Live only.
+  const onTakeCheckout = useCallback(async () => {
+    if (mock) return
+    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    setCheckoutBusy(true)
+    try {
+      await takeCheckout(did, ownHolder)
+    } catch { /* calm — the refetch below shows the real state */ }
+    finally {
+      await loadCheckout()
+      setCheckoutBusy(false)
+    }
+  }, [mock, drawingState, ownHolder, loadCheckout])
+
+  const onReleaseCheckout = useCallback(async () => {
+    if (mock) return
+    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    setCheckoutBusy(true)
+    try {
+      await releaseCheckout(did, ownHolder)
+    } catch { /* calm — the refetch below shows the real state */ }
+    finally {
+      await loadCheckout()
+      setCheckoutBusy(false)
+    }
+  }, [mock, drawingState, ownHolder, loadCheckout])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -901,10 +935,18 @@ export default function App() {
     [catalog],
   )
 
-  // A run rejected by the hard spend cap (§ broker 402) -> calm amber quota card,
-  // not a red failure. The backend's message is authoritative.
+  // A run rejected by the hard SPEND cap (§ broker 402) -> calm amber quota card,
+  // not a red failure. The backend's message is authoritative. The coarse DAILY
+  // run-count limit (429) shares the quota_exceeded code but carries a distinct
+  // `quota_kind` — it renders its OWN card below, so exclude it here.
   const quotaError = (result && !result.ok && result.error &&
-    result.error.error_code === 'quota_exceeded') ? result.error : null
+    result.error.error_code === 'quota_exceeded' && result.quota_kind !== 'daily_runs')
+    ? result.error : null
+
+  // A run rejected by the coarse per-tenant DAILY run limit (HTTP 429) -> calm
+  // amber "daily limit reached" card (distinct from the spend cap). Nothing ran.
+  const runQuotaError = (result && !result.ok && result.quota_kind === 'daily_runs')
+    ? result : null
 
   // A run rejected by a plan boundary (HTTP 403 entitlement_required) -> calm
   // amber plan notice, also not a red failure. Nothing ran / was billed.
@@ -1062,6 +1104,16 @@ export default function App() {
 
         {quotaError && <QuotaCard message={quotaError.message} remaining={usage?.cap?.remaining} />}
 
+        {runQuotaError && (
+          <QuotaCard
+            kind="daily_runs"
+            message={runQuotaError.error?.message}
+            tier={runQuotaError.tier}
+            limit={runQuotaError.limit}
+            used={runQuotaError.used}
+          />
+        )}
+
         {entitlementError && (
           <EntitlementNotice
             required={entitlementError.required}
@@ -1094,7 +1146,15 @@ export default function App() {
               {!mock && previewing && (
                 <span className="version-note">viewing v{previewing.version} · read-only</span>
               )}
-              {!mock && otherHeldCheckout && <CheckoutChip checkout={otherHeldCheckout} />}
+              {!mock && (
+                <CheckoutControls
+                  lockedByOther={otherHeldCheckout}
+                  heldByUs={heldByUs}
+                  busy={checkoutBusy}
+                  onTake={onTakeCheckout}
+                  onRelease={onReleaseCheckout}
+                />
+              )}
               {!mock && drawingState && (
                 <>
                   <button

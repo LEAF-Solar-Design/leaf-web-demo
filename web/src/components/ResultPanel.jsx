@@ -90,13 +90,15 @@ function ErrorLine({ err, onRetry, retry, quota }) {
   )
 }
 
-// Format a per-run cost in dollars, itemized (e.g. "$0.0083"). Small runs need
-// 4 decimals to read as non-zero; larger ones stay legible. usd_est is a Number
-// or a numeric string in the §3 envelope.
+// Format a per-run cost in dollars (e.g. "$0.0083"). Small live runs need 4
+// decimals to read as non-zero; larger ones stay legible at 2. A ZERO or
+// non-finite cost (a mock run, or a live run that did no billable cloud work)
+// returns null so the caller shows a clean "no cloud cost" — never "$0.0000"
+// (B1). usd_est is a Number or a numeric string in the §3 envelope.
 function fmtUsd(v) {
   const n = Number(v)
-  if (!Number.isFinite(n)) return null
-  return `$${n.toFixed(4)}`
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`
 }
 
 export default function ResultPanel({ running, runStatus, runProgress, runElapsedMs, error, result, tool, onRetry }) {
@@ -104,6 +106,10 @@ export default function ResultPanel({ running, runStatus, runProgress, runElapse
   // not a failure to alarm about — render it in the amber calm posture (matching
   // QuotaCard), never red FAILED. Only this error_code softens; all others stay red.
   const isQuota = !!(result && !result.ok && result.error && result.error.error_code === 'quota_exceeded')
+  // The coarse DAILY run-count limit (HTTP 429) rides in with the same quota
+  // error_code but a distinct `quota_kind` — label it honestly ("DAILY LIMIT")
+  // rather than "SPEND CAP". Still calm amber.
+  const isDailyQuota = !!(result && result.quota_kind === 'daily_runs')
   // An entitlement rejection (HTTP 403 {entitlement_required}) is a plan boundary,
   // also calm amber (not a red failure). Same softening path as quota.
   const isEnt = !!(result && result.entitlement_required)
@@ -126,7 +132,7 @@ export default function ResultPanel({ running, runStatus, runProgress, runElapse
         <div className="result-card">
           <div className="result-head">
             <span className={`ok ${result.ok ? 'yes' : (calm ? 'quota' : 'no')}`}>
-              {result.ok ? 'OK' : (isQuota ? 'SPEND CAP' : (isEnt ? 'PLAN' : 'FAILED'))}
+              {result.ok ? 'OK' : (isDailyQuota ? 'DAILY LIMIT' : (isQuota ? 'SPEND CAP' : (isEnt ? 'PLAN' : 'FAILED')))}
             </span>
             <span className="result-tool">{result.tool} <span className="dim">v{result.version}</span></span>
             {result.degraded_mode && (
@@ -159,18 +165,29 @@ export default function ResultPanel({ running, runStatus, runProgress, runElapse
             </div>
           )}
 
-          <div className="receipt">
+          {/* Itemized per-run cost receipt (B3): wall-clock, engine seconds, and
+              dollars — each a distinct item. Tied to the header spend chip via the
+              tooltip (this run rolls up into "today"). A zero / non-billable run
+              reads as a clean "no cloud cost", never "$0.0000" (B1). */}
+          <div
+            className="receipt"
+            title="This run’s cost — it rolls up into today’s spend (see the spend chip in the header)."
+          >
             <span>{result.timing_ms} ms</span>
-            <span className="dim">·</span>
             {result.cost ? (
-              <span>
-                {result.cost.engine_seconds}s engine
+              <>
+                <span className="dim">·</span>
+                <span>engine {result.cost.engine_seconds}s</span>
+                <span className="dim">·</span>
                 {fmtUsd(result.cost.usd_est)
-                  ? <> · <b className="usd">{fmtUsd(result.cost.usd_est)}</b></>
-                  : <span className="dim"> · no billable cost</span>}
-              </span>
+                  ? <b className="usd">{fmtUsd(result.cost.usd_est)}</b>
+                  : <span className="dim">no cloud cost</span>}
+              </>
             ) : (
-              <span className="dim">no APS cost (mock)</span>
+              <>
+                <span className="dim">·</span>
+                <span className="dim">no cloud cost (mock)</span>
+              </>
             )}
           </div>
         </div>

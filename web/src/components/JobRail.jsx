@@ -28,12 +28,15 @@ function isEnt(job) {
 function isCalm(job) { return isQuota(job) || isEnt(job) }
 
 // Per-run cost (live APS runs). Read from the job's own cost or its stored §3
-// envelope; null for mock runs (no APS cost) -> nothing shown.
+// envelope; null for mock runs (no APS cost) -> nothing shown. A ZERO cost also
+// returns null so the compact card shows just elapsed, never an awkward
+// "$0.0000" (B1).
 function costUsd(job) {
   const c = job.cost || (job.result && job.result.cost)
   const v = c && c.usd_est
   const n = Number(v)
-  return Number.isFinite(n) ? `$${n.toFixed(4)}` : null
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`
 }
 
 function stateTag(job) {

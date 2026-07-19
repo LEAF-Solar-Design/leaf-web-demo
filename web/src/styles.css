@@ -796,6 +796,21 @@ footer .warn-txt { color: var(--amber); }
 .checkout-chip b { color: var(--amber); }
 .lock-note { font-family: var(--mono); font-size: 11px; color: var(--amber); margin: 8px 0 0; line-height: 1.5; }
 
+/* --- 3B: checkout take/release affordances (calm, not amber-alarm) --- */
+.checkout-controls { display: inline-flex; align-items: center; gap: 8px; }
+.checkout-mine {
+  font-family: var(--mono); font-size: 11px; color: var(--leaf);
+  border: 1px solid var(--leaf); background: var(--leaf-tint); border-radius: 2px;
+  padding: 2px 8px; white-space: nowrap;
+}
+
+/* --- 3A: authoring telemetry chip (neutral informational, never a warning) --- */
+.telemetry-chip {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .04em;
+  color: var(--ink-2); border: 1px solid var(--rule-2); background: var(--paper-2);
+  border-radius: 2px; padding: 1px 6px; white-space: nowrap;
+}
+
 /* --- item 4: quota softening (amber calm posture, never red) --- */
 .ok.quota { color: var(--amber); background: var(--amber-tint); border: 1px solid var(--amber); }
 .state.quota { background: var(--amber-tint); color: var(--amber); border: 1px solid var(--amber); }
