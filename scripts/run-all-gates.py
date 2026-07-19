@@ -138,7 +138,7 @@ def build_suites() -> List[Suite]:
         Suite("server-wave3", "server tests/test_wave3.py", "pytest", SERVER,
               _py_pytest("tests/test_wave3.py"), 19),
         Suite("server-wave4", "server tests/test_wave4.py", "pytest", SERVER,
-              _py_pytest("tests/test_wave4.py"), 7),
+              _py_pytest("tests/test_wave4.py"), 9),
         Suite("server-wave5", "server tests/test_wave5.py", "pytest", SERVER,
               _py_pytest("tests/test_wave5.py"), 14),
         # --- the golden-path composed e2e (this runner's sibling deliverable) --- #

@@ -85,6 +85,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
     # failure falls back to the local templater (noted in the preview).
     tool = None
     source = "template"
+    _telemetry = None  # A1: real authoring telemetry from the harness (harness path only)
     harness_url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
     if harness_url:
         # Contract 6: forward the RESOLVED tenant so the harness resolves THAT tenant's
@@ -115,6 +116,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
                 resp.raise_for_status()
                 body = jb if jb is not None else resp.json()
                 tool, code, preview = body["tool"], body["code"], body["preview"]
+                _telemetry = body.get("telemetry")  # A1: forward real telemetry (was dropped)
                 source = "harness"
             except Exception as exc:
                 tool = None
@@ -157,5 +159,6 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
 
     return deps.tenant_echo(
         with_envelope_fields({"tool": tool, "code": code, "preview": preview,
-                              "source": source, "static_scan": findings}), tenant
+                              "source": source, "static_scan": findings,
+                              **({"telemetry": _telemetry} if _telemetry else {})}), tenant
     )

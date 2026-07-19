@@ -338,3 +338,57 @@ def test_demo_tenant_single_repo_backcompat(monkeypatch, tmp_path):
     # legacy single-repo mode: the ONE repo serves every tenant (documented back-compat;
     # isolation is the $LEAF_TENANTS_DIR mode exercised above).
     assert "demo-fallback-tool" in [t["name"] for t in deps.all_tools("some-other-tenant")]
+
+# =========================================================================== #
+# A1 regression - the /api/author proxy MUST forward the harness `telemetry`.
+# Gap that let the bug through: telemetry was wired in harness/src/server.ts +
+# web AuthorPanel, but NO server-side test asserted the proxy forwards it, so the
+# proxy silently dropped it on the REAL AgentSdkRunner path while fakes stayed green.
+# =========================================================================== #
+_A1_TELEMETRY = {"turns": 3, "input_tokens": 4200, "output_tokens": 512,
+                 "total_cost_usd": 0.0123, "models": ["claude-opus-4-8"]}
+_A1_HARNESS_TOOL = {"name": "count-elec", "version": "1.0.0",
+                    "description": "count circles on layer ELEC", "kind": "script",
+                    "engine_op": "count_by_layer"}
+_A1_CODE = 'def run(*a, **k): return {}'
+
+
+def test_author_forwards_harness_telemetry(monkeypatch, harness_stub):
+    """A real harness build returns {tool, code, preview, telemetry}; the app proxy
+    must surface `telemetry` verbatim at the top level (the AuthorPanel chip source)."""
+    url, stub = harness_stub
+    stub.AUTHOR_STATUS = 200
+    stub.AUTHOR_BODY = {"tool": dict(_A1_HARNESS_TOOL), "code": _A1_CODE,
+                        "preview": "counts circles on layer ELEC",
+                        "telemetry": dict(_A1_TELEMETRY)}
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    c = _client()
+
+    r = c.post("/api/author", json={"description": "count circles on ELEC"},
+               headers=_h("acme"))
+    assert r.status_code == 200, r.text
+    b = r.json()
+    jsonschema.validate(b, ENVELOPE_SCHEMA)
+    assert b["source"] == "harness"
+    assert b["telemetry"] == _A1_TELEMETRY, b  # forwarded, not dropped
+    assert b["telemetry"]["turns"] == 3
+    assert b["telemetry"]["input_tokens"] == 4200
+    assert b["telemetry"]["output_tokens"] == 512
+
+
+def test_author_omits_telemetry_key_when_harness_sends_none(monkeypatch, harness_stub):
+    """A harness build WITHOUT telemetry (or the template fallback) must NOT emit a
+    null `telemetry` key - the chip renders on presence, so absence stays absent."""
+    url, stub = harness_stub
+    stub.AUTHOR_STATUS = 200
+    stub.AUTHOR_BODY = {"tool": dict(_A1_HARNESS_TOOL), "code": _A1_CODE,
+                        "preview": "counts circles on layer ELEC"}  # no telemetry
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    c = _client()
+
+    r = c.post("/api/author", json={"description": "count circles on ELEC"},
+               headers=_h("acme"))
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["source"] == "harness"
+    assert "telemetry" not in b, b  # no null field when the harness sends none
