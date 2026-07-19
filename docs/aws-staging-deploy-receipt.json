@@ -1,41 +1,48 @@
 {
-  "recorded_at": "2026-07-18T12:50:47-05:00",
+  "recorded_at": "2026-07-19T12:00:01-05:00",
   "account_id": "807034087062",
   "region": "us-east-1",
   "environment": "staging",
   "hostname": "platform-staging.leafdesign.ai",
-  "source_commit": "2dac5e358624ec64b2a4e65c4f61d32dcef93b49",
-  "image_tag": "sha-2dac5e3",
-  "terraform_source_commit": "ff1aefb",
+  "source_commit": "cfd99fc1f00b7ca97443dc0b18675b9166182053",
+  "image_tag": "sha-cfd99fc",
+  "terraform_source_commit": "10f973af21cb10095c6cdc0638e96ef2d32c46d8",
   "terraform_branch": "codex/leaf-platform-ecs-20260718",
-  "terraform_apply": {
-    "created": 84,
-    "changed": 0,
+  "deployment_owner": "ECS CI/CD task-definition revisions; Terraform intentionally ignores task_definition and desired_count",
+  "terraform_reconciliation": {
+    "platform_changes": 0,
+    "unrelated_legacy_changes": 5,
     "destroyed": 0,
-    "postdeploy_audit": "0 add, 5 unrelated legacy updates, 0 destroy"
+    "applied": false,
+    "reason": "The full plan contained only unrelated legacy drift, so it was not applied."
   },
   "services": {
     "web": {
-      "task_definition_revision": 2,
-      "desired": 1,
-      "running": 1
-    },
-    "app": {
       "task_definition_revision": 3,
       "desired": 1,
-      "running": 1
+      "running": 1,
+      "rollout": "COMPLETED"
+    },
+    "app": {
+      "task_definition_revision": 4,
+      "desired": 1,
+      "running": 1,
+      "rollout": "COMPLETED",
+      "aps_live": true
     },
     "broker": {
-      "task_definition_revision": 2,
-      "desired": 0,
-      "running": 0,
-      "blocked_on": "APS free-plan payment-method verification and application credentials"
+      "task_definition_revision": 3,
+      "desired": 1,
+      "running": 1,
+      "rollout": "COMPLETED",
+      "aps_live": true,
+      "aps_max_concurrency": 1
     },
     "harness": {
-      "task_definition_revision": 2,
-      "desired": 0,
-      "running": 0,
-      "blocked_on": "APS broker activation"
+      "task_definition_revision": 3,
+      "desired": 1,
+      "running": 1,
+      "rollout": "COMPLETED"
     }
   },
   "verification": {
@@ -43,6 +50,7 @@
     "tls_verified": true,
     "web_http": 200,
     "api_health_http": 200,
+    "cloudwatch_error_hits": 0,
     "auth_matrix": {
       "no_bearer": 401,
       "real_token_session": 200,
@@ -50,6 +58,24 @@
       "tier_denied_author": 403
     },
     "auth_tier": "hosted_starter",
+    "entitlements": {
+      "run_read": true,
+      "run_write": true,
+      "build": false
+    },
+    "real_aps_run": {
+      "tool": "count-by-layer",
+      "panels": 2345,
+      "degraded_mode": false,
+      "engine_seconds": 4.08,
+      "usd_est": 0.0113
+    },
+    "usage_meter": {
+      "before_runs": 0,
+      "after_runs": 1,
+      "after_usd_est": 0.0113,
+      "efs_cache_propagation_observed": true
+    },
     "neon_schema_tables": [
       "built_tools",
       "drawing_versions",
@@ -60,6 +86,20 @@
   },
   "secrets": {
     "database_url": "stored in AWS Secrets Manager; value omitted",
-    "aps_credentials": "secret shell exists; value pending"
+    "aps_credentials": {
+      "secret_id": "stg/leaf/platform-aps-credentials",
+      "version_id": "04357f67-f3e5-42e0-8c3b-7d6d79529c4b",
+      "value_omitted": true
+    }
+  },
+  "rollback": {
+    "web": "leaf-platform-web:2",
+    "app": "leaf-platform-app:3",
+    "broker": "leaf-platform-broker:2 and desired_count=0",
+    "harness": "leaf-platform-harness:2 and desired_count=0"
+  },
+  "external_dependencies": {
+    "autodesk_concurrency_raise": "submitted by email; Autodesk response and ticket number pending",
+    "current_aps_max_concurrency": 1
   }
 }
