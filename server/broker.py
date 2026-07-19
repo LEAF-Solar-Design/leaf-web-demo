@@ -33,6 +33,7 @@ import platform as _stdlib_platform  # noqa: F401  (cache stdlib before the
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -260,6 +261,39 @@ class BrokerRunRequest(BaseModel):
     aps_live: bool = False
 
 
+class BrokerExtractRequest(BaseModel):
+    tenant_id: str
+    dwg: str = "rooftop_demo"
+
+
+_DWG_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+
+
+def _resolve_live_dwg(dwg: str) -> Path:
+    """Resolve a registry-style drawing name inside the broker-owned data root.
+
+    The public contract is a bare drawing identifier, never a path and never a
+    filename.  Keeping this check in the credential-holding broker means a
+    compromised app process cannot use ``..``, platform-specific separators,
+    absolute paths, symlinks, or a double/misleading suffix to make APS upload
+    an arbitrary local file.
+    """
+    if not isinstance(dwg, str) or not _DWG_NAME_RE.fullmatch(dwg):
+        raise ValueError("dwg must be a bare drawing name (letters, digits, '_' or '-')")
+
+    root = DATA_DIR.resolve(strict=True)
+    candidate = DATA_DIR / f"{dwg}.dwg"
+    if candidate.is_symlink():
+        raise ValueError("dwg symlinks are not allowed")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError(f"unknown drawing: {dwg}") from exc
+    if resolved.parent != root or not resolved.is_file():
+        raise ValueError("dwg must resolve to a regular file in the drawing store")
+    return resolved
+
+
 @app.get("/broker/health")
 def health() -> Dict[str, Any]:
     return with_envelope_fields({
@@ -310,6 +344,62 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
         "count": len(reaped),
         "live": not isinstance(cc, reaper.StubCancelClient),
     }))
+
+
+@app.post("/broker/extract")
+def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
+    """Extract intake through the credential-holding process only."""
+    if tenant_disabled(req.tenant_id):
+        return JSONResponse(
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.TENANT_DISABLED],
+            content=err_envelope(
+                ErrorCode.TENANT_DISABLED,
+                f"tenant {req.tenant_id!r} is disabled by the kill-switch",
+                retryable=False,
+            ),
+        )
+    try:
+        local = _resolve_live_dwg(req.dwg)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS],
+            content=err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False),
+        )
+
+    da = _get_da()
+    if da is None or not hasattr(da, "extract"):
+        return JSONResponse(
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE],
+            content=err_envelope(
+                ErrorCode.APS_UNAVAILABLE,
+                "APS extraction client is unavailable in the broker",
+                retryable=False,
+            ),
+        )
+    try:
+        return JSONResponse(
+            status_code=200,
+            content=with_envelope_fields({"intake": da.extract(str(local))}),
+        )
+    except EgressBlocked as exc:
+        return JSONResponse(
+            status_code=500,
+            content=err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False),
+        )
+    except FileNotFoundError as exc:
+        return JSONResponse(
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE],
+            content=err_envelope(ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED],
+            content=err_envelope(
+                ErrorCode.WORKITEM_FAILED,
+                f"{type(exc).__name__}: {exc}",
+                retryable=True,
+            ),
+        )
 
 
 @app.post("/broker/run")
@@ -376,6 +466,15 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                              retryable=False, tool=tool.get("name")),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
+    live_dwg: Optional[Path] = None
+    if req.aps_live:
+        try:
+            live_dwg = _resolve_live_dwg(req.dwg)
+        except ValueError as exc:
+            return (err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                 tool=tool.get("name")),
+                    DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+
     # 1c) WRITE BRANCH (M2): a drawing.write tool produces a NEW immutable store
     #     version (undo/redo-able). Read tools do NOT match here and take the
     #     unchanged live/mock paths below, so the read backbone is byte-identical.
@@ -403,7 +502,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             degraded = True  # fall back to the pure-python path, flagged
         else:
             try:
-                local = str(DATA_DIR / f"{req.dwg}.dwg")
+                # Validated before any live branch: app input is a drawing name,
+                # never an arbitrary broker-local path.
+                assert live_dwg is not None
+                local = str(live_dwg)
                 # provision the tool's DA Activity on demand (idempotent; 409 =
                 # already exists) so a newly authored tool's LeafTool_<op> exists
                 # before the WorkItem is submitted.

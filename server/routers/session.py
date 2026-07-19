@@ -1,8 +1,11 @@
 """GET /api/session — Intake JSON (contract section 1)."""
 from __future__ import annotations
 
+import requests
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
+import broker_client
 import deps
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
@@ -18,24 +21,27 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_tenant)):
     (401 no-token / 403 no-tenant-claim) BEFORE this body runs, and the success
     body additively echoes the resolved `tenant_id`/`org_id` (deps.tenant_echo).
 
-    LEGACY NOTE: the APS_LIVE=1 extract path still runs in-process via Lane A's
-    client (pre-broker). Migrating extract through the broker is a follow-up for
-    the session that owns extract/provisioning; the async TOOL-RUN path never
-    touches da.* in this process.
+    APS_LIVE=1 extraction crosses the same internal broker boundary as tool
+    runs. The app process never imports the APS client or reads its credential.
     """
     if deps.APS_LIVE:
-        da = deps.get_da_client()
-        if da is None or not hasattr(da, "extract"):
-            return error_response(ErrorCode.APS_UNAVAILABLE,
-                                  "APS_LIVE=1 but da/client.py (Lane A) is not importable",
-                                  retryable=False, status_code=500)
         try:
-            # root/Lane A owns the actual dwg path resolution; use the known sample path
-            local = str(deps.DATA_FILE.parent / f"{dwg}.dwg")
-            return deps.tenant_echo(with_envelope_fields({"intake": da.extract(local)}), tenant)
-        except Exception as exc:  # noqa: BLE001
-            return error_response(ErrorCode.APS_UNAVAILABLE, f"DA extract failed: {exc}",
-                                  retryable=True, status_code=502)
+            response = requests.post(
+                f"{broker_client.broker_url()}/broker/extract",
+                json={"tenant_id": str(tenant), "dwg": dwg},
+                timeout=600,
+            )
+            body = response.json()
+        except (requests.ConnectionError, requests.Timeout, ValueError) as exc:
+            return error_response(
+                ErrorCode.BROKER_UNREACHABLE,
+                f"APS broker extraction failed: {exc}",
+                retryable=True,
+                status_code=502,
+            )
+        if response.status_code >= 400:
+            return JSONResponse(status_code=response.status_code, content=body)
+        return deps.tenant_echo(body, tenant)
     if not deps.DATA_FILE.exists():
         return error_response(ErrorCode.INTERNAL, f"cached intake not found: {deps.DATA_FILE}",
                               retryable=False, status_code=404)
