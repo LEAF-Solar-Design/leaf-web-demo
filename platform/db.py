@@ -110,10 +110,22 @@ def _split_sql_statements(sql: str) -> List[str]:
     return [s.strip() for s in body.split(";") if s.strip()]
 
 
-def apply_migration(sql_path: Optional[Path] = None) -> None:
-    """Apply a migration file. Idempotent for 0001 (CREATE TABLE IF NOT EXISTS)."""
-    path = sql_path or (_PKG_DIR / "migrations" / "0001_project_job.sql")
+def _apply_one(path: Path) -> None:
     sql = Path(path).read_text(encoding="utf-8")
     with get_pool().connection() as conn:
         for stmt in _split_sql_statements(sql):
             conn.execute(stmt)
+
+
+def apply_migration(sql_path: Optional[Path] = None) -> None:
+    """Apply migrations. With no arg, apply EVERY ``NNNN_*.sql`` in ``migrations/``
+    in sorted (numeric-prefix) order — so a fresh deploy gets 0001 (tables) AND
+    0002 (deletion/purge columns) and any future migration, not just 0001. All
+    migrations are idempotent (CREATE TABLE / ADD COLUMN IF NOT EXISTS), so
+    re-running is safe. Pass ``sql_path`` to apply a single file (back-compat)."""
+    if sql_path is not None:
+        _apply_one(Path(sql_path))
+        return
+    mig_dir = _PKG_DIR / "migrations"
+    for path in sorted(mig_dir.glob("[0-9][0-9][0-9][0-9]_*.sql")):
+        _apply_one(path)
