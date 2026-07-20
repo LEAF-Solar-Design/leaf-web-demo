@@ -81,8 +81,10 @@ export default function PromptBox({
 
   // While a route decision or the scope resolver is showing, that surface owns
   // the keys — the menu stands down entirely (typing clears the route App-side,
-  // which brings the menu straight back).
-  const menuOpen = completing && !menuDismissed && !routeActive && !scopeOpen
+  // which brings the menu straight back). Gate on scopeMenu.shown, NOT scopeOpen:
+  // the scope resolver stays mounted for its 180 ms exit fade after scopeOpen
+  // flips false, and two listboxes must never be visible at once.
+  const menuOpen = completing && !menuDismissed && !routeActive && !scopeMenu.shown
 
   // Any edit re-arms a dismissed menu and re-anchors the highlight.
   useEffect(() => { setMenuDismissed(false); setMenuIdx(0) }, [value])
