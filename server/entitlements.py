@@ -32,17 +32,34 @@ from fastapi.responses import JSONResponse
 
 from envelopes import ErrorCode, error_obj
 
-# The three capability flags every tier entry carries.
-CAPABILITIES = ("run_read", "run_write", "build")
+# The capability flags every tier entry carries (agent spine extends 3 -> 7:
+# `converse` gates the conversational session surface, `agent_write_autopilot`
+# lets the agent auto-dispatch write tools without a confirm chip, `deploy`
+# gates registering an authored tool (R6, split from `build`), and
+# `platform_customize` gates R7 — false everywhere at launch).
+CAPABILITIES = (
+    "run_read", "run_write", "build",
+    "converse", "agent_write_autopilot", "deploy", "platform_customize",
+)
 
 # Fail-safe defaults — used verbatim if the JSON file is absent or unreadable. These
 # MUST mirror server/entitlements.json so enforcement is identical with or without it.
 _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
-    "demo": {"run_read": True, "run_write": True, "build": True},
-    "restricted": {"run_read": True, "run_write": False, "build": False},
-    "self_hosted": {"run_read": True, "run_write": True, "build": True},
-    "hosted_starter": {"run_read": True, "run_write": True, "build": False},
-    "hosted_pro": {"run_read": True, "run_write": True, "build": True},
+    "demo": {"run_read": True, "run_write": True, "build": True,
+             "converse": True, "agent_write_autopilot": True, "deploy": True,
+             "platform_customize": False},
+    "restricted": {"run_read": True, "run_write": False, "build": False,
+                   "converse": False, "agent_write_autopilot": False, "deploy": False,
+                   "platform_customize": False},
+    "self_hosted": {"run_read": True, "run_write": True, "build": True,
+                    "converse": True, "agent_write_autopilot": True, "deploy": True,
+                    "platform_customize": False},
+    "hosted_starter": {"run_read": True, "run_write": True, "build": False,
+                       "converse": True, "agent_write_autopilot": False, "deploy": False,
+                       "platform_customize": False},
+    "hosted_pro": {"run_read": True, "run_write": True, "build": True,
+                   "converse": True, "agent_write_autopilot": True, "deploy": True,
+                   "platform_customize": False},
 }
 
 DEFAULT_TIER = "demo"

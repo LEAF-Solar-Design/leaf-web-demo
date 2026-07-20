@@ -143,6 +143,26 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave5.py"), 14),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 11),
+        # --- conversational agent spine (CONTRACT-ADDENDUM section 18) --- #
+        # Separate suites for the same reason as the waves above: the gate/ledger
+        # suites share on-disk approval + audit state and the router suites toggle
+        # dispatch-secret env, so one pytest process cross-contaminates them.
+        Suite("server-agent-policy", "server tests/test_agent_policy.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_policy.py"), 22),
+        Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_gate.py"), 30),
+        Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_router.py"), 23),
+        Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
+              _py_pytest("tests/test_sessions_router.py"), 25),
+        Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
+              _py_pytest("tests/test_context_packet.py"), 16),
+        Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
+              _py_pytest("tests/test_contract_freeze.py"), 4),
+        Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
+              _py_pytest("tests/test_job_lanes.py"), 11),
+        Suite("server-agent-e2e", "server tests/test_agent_e2e.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_e2e.py"), 4),
         # --- the golden-path composed e2e (this runner's sibling deliverable) --- #
         Suite("server-e2e-golden", "server tests/test_e2e_golden.py", "pytest", SERVER,
               _py_pytest("tests/test_e2e_golden.py"), 1),

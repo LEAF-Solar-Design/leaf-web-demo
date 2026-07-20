@@ -2,9 +2,11 @@
 Async job spine (CONTRACT-ADDENDUM section 7).
 
 Durable, tab-survivable background jobs: a POST /api/run submits a row into
-SQLite (server/jobs.db) and returns immediately; a bounded ThreadPoolExecutor
-executes the tool THROUGH THE BROKER (broker_client — this module never imports
-da.* / never sees the APS credential), heartbeating updated_at while it waits.
+SQLite (server/jobs.db) and returns immediately; two bounded ThreadPoolExecutor
+lanes (§10: "fast" for mock read runs, "slow" for drawing.write or live-APS runs,
+so a 10ms read never queues behind a 540s write) execute the tool THROUGH THE
+BROKER (broker_client — this module never imports da.* / never sees the APS
+credential), heartbeating updated_at while it waits.
 
 Timeout: JOB_MAX_S (default 540, env-overridable) — an over-limit job is marked
 failed/TIMEOUT; the underlying broker call is abandoned best-effort (its HTTP
@@ -50,9 +52,17 @@ def heartbeat_stale_s() -> float:
 REAPER_INTERVAL_S = float(os.environ.get("REAPER_INTERVAL_S", "10"))
 MAX_WORKERS = int(os.environ.get("JOB_WORKERS", "4"))
 
+# Worker lanes (CONTRACT-ADDENDUM §10 / wire contract 10): "fast" runs mock reads
+# (tools without drawing.write, APS_LIVE=0) so they never queue behind long writes;
+# "slow" runs drawing.write or live-APS jobs and must stay ≤ the APS concurrency
+# grant. With JOB_WORKERS_FAST/SLOW unset, the slow lane is exactly today's
+# JOB_WORKERS pool — write behavior is unchanged.
+LANE_FAST = "fast"
+LANE_SLOW = "slow"
+
 _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
-_executor: Optional[ThreadPoolExecutor] = None
+_executors: Dict[str, ThreadPoolExecutor] = {}
 _reaper_started = False
 
 _SCHEMA = """
@@ -147,6 +157,29 @@ def _reject_oversized_params(params: Dict[str, Any]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# worker lanes (§10)
+# --------------------------------------------------------------------------- #
+def lane_for(tool: Dict[str, Any], aps_live: bool) -> str:
+    """Lane selection at submit time from the resolved tool dict (§10): a
+    drawing.write tool OR any live-APS run -> slow; everything else (mock reads,
+    ~10ms broker round-trips) -> fast."""
+    caps = (tool or {}).get("capabilities") or []
+    if aps_live or "drawing.write" in caps:
+        return LANE_SLOW
+    return LANE_FAST
+
+
+def lane_workers() -> Dict[str, int]:
+    """Per-lane pool sizes, read from env at executor creation. JOB_WORKERS_SLOW
+    defaults to the legacy JOB_WORKERS value so unset env == today's write
+    behavior; JOB_WORKERS_FAST defaults to 8."""
+    return {
+        LANE_FAST: int(os.environ.get("JOB_WORKERS_FAST", "8")),
+        LANE_SLOW: int(os.environ.get("JOB_WORKERS_SLOW", str(MAX_WORKERS))),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # public API (used by routers/jobs.py)
 # --------------------------------------------------------------------------- #
 def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg: str,
@@ -175,8 +208,9 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     )
     # best-effort platform Job linkage (never raises, never affects the run)
     platform_link.on_submit(job_id, org_id, project_id, tool.get("name"), params)
-    assert _executor is not None
-    _executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live)
+    executor = _executors.get(lane_for(tool, aps_live))
+    assert executor is not None
+    executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live)
     return job_id
 
 
@@ -394,11 +428,13 @@ def _reaper_loop() -> None:
 
 
 def ensure_started() -> None:
-    """Idempotent: open the DB, start the executor + reaper daemon."""
-    global _executor, _reaper_started
+    """Idempotent: open the DB, start the lane executors + reaper daemon."""
+    global _reaper_started
     _db()
-    if _executor is None:
-        _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="jobworker")
+    if not _executors:
+        for lane, workers in lane_workers().items():
+            _executors[lane] = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix=f"jobworker-{lane}")
     if not _reaper_started:
         threading.Thread(target=_reaper_loop, daemon=True, name="job-reaper").start()
         _reaper_started = True

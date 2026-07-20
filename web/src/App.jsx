@@ -30,6 +30,11 @@ import {
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
+import ConversePanel from './components/ConversePanel.jsx'
+import {
+  THRESHOLDS, ensureSession, resetSession, classifyAgentError,
+  postMessage as sendConverseMessage,
+} from './converse.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -80,6 +85,19 @@ const demoLocked = new URLSearchParams(window.location.search).get('demo') === '
 
 // The run's dwg (intake source name) — unchanged from the original demo.
 const DEFAULT_DRAWING_ID = 'rooftop_demo'
+
+// Calm degraded copy for the agent tier (two-tier dispatch, wire §11). The
+// deterministic path is never blocked by any of these — the banner just says
+// so honestly. Keyed off classifyAgentError, never message text.
+const agentBannerFor = (e) => {
+  const kind = classifyAgentError(e)
+  if (kind === 'quota') return { kind, message: 'AI paused — your built tools keep working.' }
+  if (kind === 'grant') return { kind, message: 'Chat needs a linked Claude account.' }
+  if (kind === 'entitlement') return { kind, message: 'Chat isn’t included in your plan — your built tools keep working.' }
+  if (kind === 'busy') return { kind, message: 'The assistant is mid-turn — routed deterministically instead.' }
+  if (kind === 'rate_limited') return { kind, message: 'AI rate-limited — routed deterministically; retry shortly.' }
+  return { kind: 'unreachable', message: 'AI assistant unavailable — routed deterministically.' }
+}
 
 // The versioned-store drawing id the /versions + checkout reads key on. The
 // write loop bootstraps the well-known `demo` drawing (write runs target it),
@@ -220,6 +238,13 @@ export default function App() {
   const [grantErr, setGrantErr] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
 
+  // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
+  const [agentSessionId, setAgentSessionId] = useState(null) // this drawing's converse session
+  const [agentMode, setAgentMode] = useState(null)  // null | 'race' (chip primary) | 'primary' (panel primary)
+  const [agentTurns, setAgentTurns] = useState([])  // [{turnId, text}] turns dispatched from the bar
+  const [agentBanner, setAgentBanner] = useState(null) // {kind, message} calm degraded note
+  const agentSessionRef = useRef(null)              // sessionId without a render dependency
+
   const viewerRef = useRef(null)
   const authorSectionRef = useRef(null)
   const runningSinceRef = useRef(null)  // ms epoch the job entered 'running'
@@ -254,6 +279,11 @@ export default function App() {
   }, [entitlements])
   const canRunWrite = entOf('run_write')
   const canBuild = entOf('build')
+  // Agent tier gate: LIVE only (mock has no harness — behavior stays exactly
+  // today's), and only when the plan doesn't explicitly exclude `converse`
+  // (unknown/undeployed policy resolves permissive, like every other gate).
+  const canConverse = entOf('converse')
+  const agentDisabled = mock || !canConverse
 
   // Claude account (Concern 2) authoring gate. Only fires when we DEFINITELY know
   // the tenant has no linked Claude grant (live + grant read + linked === false).
@@ -304,6 +334,8 @@ export default function App() {
     setTier(null); setOrg(null)
     setHistoryOpen(false); setHistory(null); setHistoryErr(null)
     setPreviewing(null); setPreviewIntake(null)
+    setAgentMode(null); setAgentBanner(null); setAgentTurns([]); setAgentSessionId(null)
+    agentSessionRef.current = null
     runningSinceRef.current = null
     const seat = (d) => {
       if (!alive) return
@@ -841,6 +873,10 @@ export default function App() {
     if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return
     const seq = ++runSeqRef.current // Esc-interrupt detaches this run's handlers
     setRoute(null); setRouteErr(null) // the decision strip is consumed by the run
+    // Race tier (wire §11): taking the chip makes the deterministic run the
+    // answer — stop RENDERING the agent stream. The turn itself may complete
+    // server-side and stays persisted in the transcript; it is never cancelled.
+    setAgentMode((m) => (m === 'race' ? null : m))
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
@@ -913,6 +949,42 @@ export default function App() {
     if (last) onRun(last.tool, last.params)
   }, [onRun])
 
+  // An agent-dispatched job (job_linked event) -> the SAME §7 attach
+  // affordance the tab-close re-attach uses: subscribe to the job, stream
+  // progress into the result pane, toast on completion. Never re-submits.
+  const onAttachAgentJob = useCallback(async (jobId, toolName) => {
+    if (!jobId || mock) return
+    const seq = ++runSeqRef.current // Esc-interrupt detaches, like any run
+    setSelectedTool({ name: toolName || 'job' })
+    setCurrentJobId(jobId)
+    setRunning(true); setRunErr(null); setResult(null)
+    setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
+    try {
+      const env = await attachToJob(jobId, {
+        onStatus: (st) => {
+          if (runSeqRef.current !== seq) return
+          setRunProgress(st.progress || null)
+          if (st.status === 'running') markRunning()
+          else setRunStatus(st.status || 'running')
+        },
+      })
+      if (runSeqRef.current === seq) {
+        setResult(env)
+        if (env?.ok) {
+          showToast({ text: `${toolName || env.tool || 'job'} complete`, action: { label: 'View', onClick: viewResult } })
+        }
+      }
+    } catch (e) {
+      if (runSeqRef.current === seq) setRunErr(String(e.message || e))
+    } finally {
+      if (runSeqRef.current === seq) {
+        setRunning(false)
+        setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
+      }
+      refreshJobs()
+    }
+  }, [mock, markRunning, refreshJobs, showToast, viewResult])
+
   const onAuthor = useCallback(async (description) => {
     const res = await authorTool(mock, description)
     setTools((prev) => {
@@ -968,6 +1040,31 @@ export default function App() {
     [tools, canRunWrite],
   )
 
+  // Start (or continue) the drawing's converse session and post one turn.
+  // The session create is idempotent per (tenant, drawing); a stale cached
+  // session (harness restarted -> session_not_found) re-attaches once.
+  const startAgentTurn = useCallback(async (text, hint) => {
+    const drawingId = DEFAULT_DRAWING_ID
+    const attach = async () => {
+      const sid = (await ensureSession(drawingId)).session_id
+      agentSessionRef.current = sid
+      setAgentSessionId(sid)
+      return sid
+    }
+    const sid = agentSessionRef.current || (await attach())
+    try {
+      const res = await sendConverseMessage(sid, { text, classifier_hint: hint })
+      setAgentTurns((prev) => [...prev, { turnId: res.turn_id, text }])
+    } catch (e) {
+      if (classifyAgentError(e) !== 'not_found') throw e
+      resetSession(drawingId)
+      agentSessionRef.current = null
+      const fresh = await attach()
+      const res = await sendConverseMessage(fresh, { text, classifier_hint: hint })
+      setAgentTurns((prev) => [...prev, { turnId: res.turn_id, text }])
+    }
+  }, [])
+
   const onDispatch = useCallback(async (override) => {
     // `override` carries the menu-picked "/tool" (state hasn't flushed yet);
     // the Dispatch button's onClick passes a click event — ignore non-strings.
@@ -1012,13 +1109,49 @@ export default function App() {
     setRouting(true); setRoute(null); setRouteErr(null)
     try {
       const r = await nlPrompt(mock, text, tools)
-      setRoute(r)
-      if (r.lane === 'build') {
+      // Two-tier dispatch (wire contract §11). Tier 1 (the deterministic §12
+      // classifier above) never changes; the agent tier is ADDITIVE and only
+      // exists in live mode with the converse entitlement (agentDisabled).
+      const conf = Number(r.confidence) || 0
+      const openAuthorFlow = () => {
         setAuthorSeed(text)
         setAuthorSignal((n) => n + 1)
         setAuthorOpen(true)
         // bring the (left-rail) author flow into view
         setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+      }
+      const chipOnly = agentDisabled ||
+        (r.lane === 'run' && !!r.tool && conf >= THRESHOLDS.CHIP_ONLY)
+      if (chipOnly) {
+        // Today's behavior verbatim (also the whole story when the agent tier
+        // is disabled: mock, or a plan without converse).
+        setRoute(r)
+        if (r.lane === 'build') openAuthorFlow()
+      } else {
+        const hint = { lane: r.lane, tool: r.tool || null, confidence: conf, rationale: r.rationale || null }
+        setAgentBanner(null)
+        if (r.lane === 'run' && !!r.tool && conf >= THRESHOLDS.RACE_MIN) {
+          // RACE band: today's chip stays primary AND an agent turn starts
+          // alongside. A failed agent start never degrades the chip.
+          setRoute(r)
+          try {
+            await startAgentTurn(text, hint)
+            setAgentMode('race')
+          } catch (e) {
+            setAgentBanner(agentBannerFor(e))
+          }
+        } else {
+          // AGENT primary: low confidence, build/solve lane, or no match.
+          try {
+            await startAgentTurn(text, hint)
+            setAgentMode('primary')
+          } catch (e) {
+            // Degraded fallback: EXACTLY today's Tier-1 rendering + calm banner.
+            setRoute(r)
+            if (r.lane === 'build') openAuthorFlow()
+            setAgentBanner(agentBannerFor(e))
+          }
+        }
       }
     } catch (e) {
       // A failed routing call is a FAILED act — it rides the red strip above
@@ -1027,7 +1160,7 @@ export default function App() {
     } finally {
       setRouting(false)
     }
-  }, [prompt, routing, running, mock, tools])
+  }, [prompt, routing, running, mock, tools, agentDisabled, startAgentTurn])
 
   // Typing invalidates a shown route/failure — the decision must match the text.
   const onPromptChange = useCallback((v) => {
@@ -1640,6 +1773,21 @@ export default function App() {
           )}
         </div>
 
+        {/* Agent tier (wire §11): the conversational surface for this drawing's
+            session. LIVE only — never rendered in mock. 'race' keeps the chip
+            primary; taking the chip unmounts this (onRun) without cancelling
+            the server-side turn. */}
+        {!mock && agentMode && agentSessionId && (
+          <ConversePanel
+            sessionId={agentSessionId}
+            userTurns={agentTurns}
+            onDismiss={() => setAgentMode(null)}
+            onLinkClaude={() => setClaudeOpen(true)}
+            onAttachJob={onAttachAgentJob}
+            onJobLinked={refreshJobs}
+          />
+        )}
+
         <EntitlementGate
           tier={entTier}
           entitlements={entitlements}
@@ -1680,6 +1828,23 @@ export default function App() {
                 Retry
               </button>
               <span className="key">R</span>
+            </div>
+          )}
+          {/* Calm agent-tier advisory (degraded fallback / quota / grant):
+              amber square dot + sentence — the deterministic result above it
+              rendered exactly as today; this only says why there's no chat. */}
+          {agentBanner && !running && (
+            <div className="strip-decision enter" role="status">
+              <span className="dot square" aria-hidden="true" />
+              <span className="strip-sentence">{agentBanner.message}</span>
+              {agentBanner.kind === 'grant' && (
+                <button type="button" className="chip-act" onClick={() => setClaudeOpen(true)}>
+                  Link account
+                </button>
+              )}
+              <button type="button" className="chip-neutral" onClick={() => setAgentBanner(null)}>
+                Dismiss
+              </button>
             </div>
           )}
           <RoutePanel

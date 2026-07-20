@@ -1,0 +1,416 @@
+"""
+Binary acceptance for the agent gate chain (server/agent_gate.py).
+
+Chain-order contracts under test:
+  * the kill switch beats EVERYTHING (even an unknown action reports it);
+  * unknown action / disabled action / invalid args deny, naming the gate;
+  * entitlement runs BEFORE rate limiting (denied calls never burn budget);
+  * the rate limit denies per tenant per hour by category;
+  * policy tiers: auto allows; confirm-once files an approval once then
+    persists a per-session grant; always-confirm files EVERY time (never
+    persisted); approval binding is args-exact and session-bound; a granted
+    approval redeems exactly once (replay denies); TTL expiry auto-denies.
+
+Hermetic: every state file (policy, kill, approvals, grants, rate, audit,
+ledger, tenants) points into tmp_path via env.
+
+Run:  cd server && python -m pytest tests/test_agent_gate.py -q
+"""
+from __future__ import annotations
+
+# Cache the STDLIB `platform` module BEFORE PROJECT_ROOT lands on sys.path
+# (repo-root platform/ package shadows it; mirrors test_wave4/5).
+import platform as _stdlib_platform  # noqa: E402
+_stdlib_platform.python_implementation()
+
+import json  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+SERVER_DIR = Path(__file__).resolve().parent.parent
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
+
+import agent_gate  # noqa: E402
+import agent_policy  # noqa: E402
+
+FULL_CAPS = {"run_read": True, "run_write": True, "build": True, "converse": True,
+             "agent_write_autopilot": True, "deploy": True, "platform_customize": True}
+
+
+@pytest.fixture(autouse=True)
+def agent_env(tmp_path, monkeypatch):
+    """Point every agent state file into tmp_path (shipped policy file stays
+    the default catalog — it is read-only here)."""
+    monkeypatch.delenv("LEAF_AGENT_POLICY_FILE", raising=False)
+    monkeypatch.setenv("LEAF_AGENT_KILL_FILE", str(tmp_path / "agent.disabled"))
+    monkeypatch.setenv("LEAF_AGENT_APPROVALS_DIR", str(tmp_path / "approvals"))
+    monkeypatch.setenv("LEAF_AGENT_GRANTS_FILE", str(tmp_path / "grants.json"))
+    monkeypatch.setenv("LEAF_AGENT_RATE_FILE", str(tmp_path / "rate.json"))
+    monkeypatch.setenv("LEAF_AGENT_AUDIT", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("LEAF_AGENT_LEDGER", str(tmp_path / "ledger.jsonl"))
+    monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(tmp_path / "agent_tenants.json"))
+    yield tmp_path
+
+
+def _gate(action: str, args=None, *, tenant="t-gate", session="s-1", turn="turn-1",
+          caps=FULL_CAPS, tier=None):
+    return agent_gate.gate(tenant, session, turn, action, args or {}, caps, tier=tier)
+
+
+def _custom_policy(tmp_path, monkeypatch, mutate):
+    raw = json.loads((SERVER_DIR / "agent_policy.json").read_text(encoding="utf-8"))
+    mutate(raw)
+    p = tmp_path / "custom_policy.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("LEAF_AGENT_POLICY_FILE", str(p))
+
+
+# --------------------------------------------------------------------------- #
+# chain order
+# --------------------------------------------------------------------------- #
+def test_kill_switch_beats_everything(agent_env):
+    agent_gate.kill_file().write_text("drill\n", encoding="utf-8")
+    # even an action that is not in the catalog reports the kill switch
+    res = _gate("no_such_action")
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("kill_switch_active")
+    res2 = _gate("read_platform_state")
+    assert res2["decision"] == "deny"
+    assert "drill" in res2["reason"]
+    assert agent_gate.kill_switch_active() is True
+
+
+def test_unknown_action_denies():
+    res = _gate("no_such_action")
+    assert res["decision"] == "deny"
+    assert res["reason"] == "unknown_action"
+
+
+def test_disabled_action_denies():
+    res = _gate("customize_platform")
+    assert res["decision"] == "deny"
+    assert res["reason"] == "action_disabled"
+
+
+def test_invalid_args_deny_names_gate():
+    res = _gate("run_read_tool", {})  # missing required "tool"
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("invalid_args")
+    res2 = _gate("run_read_tool", {"tool": "layer-report", "bogus": 1})
+    assert res2["decision"] == "deny"
+    assert res2["reason"].startswith("invalid_args")
+
+
+def test_invalid_args_reason_never_embeds_raw_values():
+    """The deny reason lands verbatim in the audit file, so it must name only
+    the JSON-pointer path and validator keyword — never the offending value."""
+    secret_value = "free text the audit must never carry verbatim"
+    res = _gate("run_read_tool", {"tool": secret_value, "bogus": {"leak": secret_value}})
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("invalid_args")
+    assert secret_value not in res["reason"]
+    assert "leak" not in res["reason"]
+
+
+def test_args_validation_wins_over_entitlement():
+    """Chain-order pin: a call that is BOTH invalid-args and missing the
+    capability denies at the args gate (docstring chain: catalog/args checks
+    before entitlement) — flipping those gates must fail this test."""
+    res = _gate("run_read_tool", {}, caps=dict(FULL_CAPS, run_read=False))
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("invalid_args")
+
+
+def test_entitlement_denies_without_capability():
+    caps = dict(FULL_CAPS, run_read=False)
+    res = _gate("run_read_tool", {"tool": "layer-report"}, caps=caps)
+    assert res["decision"] == "deny"
+    assert res["reason"] == "entitlement_required: tier lacks 'run_read'"
+
+
+def test_entitlement_before_rate_limit_denied_calls_never_burn_budget(tmp_path, monkeypatch):
+    _custom_policy(tmp_path, monkeypatch,
+                   lambda raw: raw["rate_limits"].update({"medium_per_hour": 3}))
+    no_caps = dict(FULL_CAPS, run_read=False)
+    # ten entitlement-denied calls must not consume the 3-call medium budget
+    for _ in range(10):
+        res = _gate("run_read_tool", {"tool": "layer-report"}, caps=no_caps)
+        assert res["reason"].startswith("entitlement_required")
+    for _ in range(3):
+        assert _gate("run_read_tool", {"tool": "layer-report"})["decision"] == "allow"
+    res = _gate("run_read_tool", {"tool": "layer-report"})
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("rate_limit_exceeded: medium (3/3)")
+
+
+def test_split_turn_confirmed_write_consumes_exactly_two_budget_units(tmp_path, monkeypatch):
+    """Rate consumption records at step 6, BEFORE the policy tier — so one
+    confirmed write burns budget TWICE (the proposal AND the resume), and an
+    awaiting_approval outcome consumes budget. Pin that contract: with a
+    2/hour medium budget, propose + resume exhausts it exactly."""
+    _custom_policy(tmp_path, monkeypatch,
+                   lambda raw: raw["rate_limits"].update({"medium_per_hour": 2}))
+    args = {"tool": "add-panel"}
+    first = _gate("run_write_tool", args, session="s-budget")
+    assert first["decision"] == "awaiting_approval"  # unit 1: the proposal
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid, by="t-gate")
+    resumed = _gate("run_write_tool", dict(args, confirmation_id=cid), session="s-budget")
+    assert resumed["decision"] == "allow"
+    assert resumed["reason"] == "allow_via_approval"  # unit 2: the resume
+    # third call for the same tenant: budget exhausted at propose+resume = 2
+    third = _gate("run_write_tool", args, session="s-budget")
+    assert third["decision"] == "deny"
+    assert third["reason"] == "rate_limit_exceeded: medium (2/2)"
+
+
+def test_rate_limit_is_per_tenant(tmp_path, monkeypatch):
+    _custom_policy(tmp_path, monkeypatch,
+                   lambda raw: raw["rate_limits"].update({"medium_per_hour": 1}))
+    assert _gate("run_read_tool", {"tool": "x"}, tenant="t-a")["decision"] == "allow"
+    assert _gate("run_read_tool", {"tool": "x"}, tenant="t-a")["decision"] == "deny"
+    # a different tenant has its own bucket
+    assert _gate("run_read_tool", {"tool": "x"}, tenant="t-b")["decision"] == "allow"
+
+
+def test_tenant_agent_disabled_denies():
+    agent_policy.set_tenant_agent_disabled("t-off", True)
+    res = _gate("read_platform_state", tenant="t-off")
+    assert res["decision"] == "deny"
+    assert res["reason"] == "tenant_agent_disabled"
+    agent_policy.set_tenant_agent_disabled("t-off", False)
+    assert _gate("read_platform_state", tenant="t-off")["decision"] == "allow"
+
+
+def test_tenant_disabled_wins_over_unknown_action_but_loses_to_kill_switch():
+    """Chain-order pin for the tenant kill flag's slot: after the global kill
+    switch (1), before the catalog lookup (2)."""
+    agent_policy.set_tenant_agent_disabled("t-off2", True)
+    res = _gate("no_such_action", tenant="t-off2")
+    assert res["decision"] == "deny"
+    assert res["reason"] == "tenant_agent_disabled"
+    agent_gate.kill_file().write_text("drill\n", encoding="utf-8")
+    res2 = _gate("no_such_action", tenant="t-off2")
+    assert res2["reason"].startswith("kill_switch_active")
+
+
+# --------------------------------------------------------------------------- #
+# policy tiers
+# --------------------------------------------------------------------------- #
+def test_auto_allows_with_policy_and_rung():
+    res = _gate("read_platform_state")
+    assert res == {"decision": "allow", "reason": "allow", "policy": "auto", "rung": 1}
+
+
+def test_request_confirmation_allows_at_rung_zero():
+    """The UI-consent tool (wire contract section 5): converseLoop consults the
+    REAL gate for it, so the catalog must auto-allow it at rung 0 — otherwise
+    every confirmation card dies as unknown_action."""
+    res = _gate("request_confirmation", {"kind": "write_confirm", "payload": {"tool": "add-panel"}})
+    assert res == {"decision": "allow", "reason": "allow", "policy": "auto", "rung": 0}
+    # bare-minimum harness shape (payload optional) also passes
+    assert _gate("request_confirmation", {"kind": "confirm"})["decision"] == "allow"
+
+
+def test_confirm_once_flow_and_session_grant_persists():
+    args = {"tool": "add-panel", "params": {"n": 2}, "dwg": "rooftop_demo"}
+    first = _gate("run_write_tool", args, session="s-A")
+    assert first["decision"] == "awaiting_approval"
+    cid = first["confirmation_id"]
+    assert cid
+
+    ok, record, reason = agent_gate.grant_approval(cid, by="t-gate")
+    assert ok and record["granted"] and reason == "granted"
+
+    # re-invoke carries confirmation_id inside args (wire contract §7)
+    resumed = _gate("run_write_tool", dict(args, confirmation_id=cid), session="s-A")
+    assert resumed["decision"] == "allow"
+    assert resumed["reason"] == "allow_via_approval"
+
+    # confirm-once persisted per session: same session skips the chip...
+    again = _gate("run_write_tool", args, session="s-A")
+    assert again["decision"] == "allow"
+    assert again["reason"] == "allow_via_session_grant"
+    # ...a DIFFERENT session files a fresh approval
+    other = _gate("run_write_tool", args, session="s-B")
+    assert other["decision"] == "awaiting_approval"
+    assert other["confirmation_id"] != cid
+
+
+def test_granted_approval_redeems_exactly_once_always_confirm():
+    """Single-use pin: within the 300s TTL a granted always-confirm approval
+    must not be replayable — one human click authorizes ONE execution, not a
+    rate-limit budget of duplicates."""
+    args = {"tool": "my-tool", "manifest_sha256": "b" * 64}
+    first = _gate("register_tool", args, session="s-once")
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+    resumed = _gate("register_tool", dict(args, confirmation_id=cid), session="s-once")
+    assert resumed["reason"] == "allow_via_approval"
+    replay = _gate("register_tool", dict(args, confirmation_id=cid), session="s-once")
+    assert replay["decision"] == "deny"
+    assert replay["reason"] == "approval_consumed"
+    assert agent_gate.read_pending(cid)["consumed_at"]
+
+
+def test_confirm_once_replay_denies_but_grant_covers_repeats():
+    """Confirm-once consumes the record too; repeats in the session ride the
+    session grant, never a re-redeemed approval."""
+    args = {"tool": "add-panel"}
+    first = _gate("run_write_tool", args, session="s-consume")
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+    assert _gate("run_write_tool", dict(args, confirmation_id=cid),
+                 session="s-consume")["reason"] == "allow_via_approval"
+    replay = _gate("run_write_tool", dict(args, confirmation_id=cid), session="s-consume")
+    assert replay["decision"] == "deny"
+    assert replay["reason"] == "approval_consumed"
+    # the plain (no-id) repeat still allows — via the grant, not the record
+    again = _gate("run_write_tool", args, session="s-consume")
+    assert again["reason"] == "allow_via_session_grant"
+
+
+def test_cross_session_confirmation_id_denies_as_mismatch():
+    """An approval filed in session A must not redeem in session B of the same
+    tenant — redeeming there would plant a confirm-once grant in a session that
+    was never shown the chip."""
+    args = {"tool": "add-panel"}
+    first = _gate("run_write_tool", args, session="s-filed")
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+    res = _gate("run_write_tool", dict(args, confirmation_id=cid), session="s-other")
+    assert res["decision"] == "deny"
+    assert res["reason"] == "args_mismatch"
+    assert agent_gate.has_session_grant("s-other", "run_write_tool") is False
+    # the filing session still redeems normally
+    assert _gate("run_write_tool", dict(args, confirmation_id=cid),
+                 session="s-filed")["reason"] == "allow_via_approval"
+
+
+def test_args_mismatch_after_approval_denies():
+    args = {"tool": "add-panel", "params": {"n": 2}}
+    first = _gate("run_write_tool", args)
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+    drifted = dict(args, params={"n": 999}, confirmation_id=cid)
+    res = _gate("run_write_tool", drifted)
+    assert res["decision"] == "deny"
+    assert res["reason"] == "args_mismatch"
+
+
+def test_cross_tenant_confirmation_id_denies_as_mismatch():
+    first = _gate("run_write_tool", {"tool": "add-panel"}, tenant="t-owner")
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+    res = _gate("run_write_tool", {"tool": "add-panel", "confirmation_id": cid},
+                tenant="t-thief")
+    assert res["decision"] == "deny"
+    assert res["reason"] == "args_mismatch"
+
+
+def test_denied_approval_denies_resume():
+    first = _gate("run_write_tool", {"tool": "add-panel"})
+    cid = first["confirmation_id"]
+    agent_gate.deny_approval(cid)
+    res = _gate("run_write_tool", {"tool": "add-panel", "confirmation_id": cid})
+    assert res["decision"] == "deny"
+    assert res["reason"] == "approval_denied"
+
+
+def test_unknown_confirmation_id_denies():
+    res = _gate("run_write_tool", {"tool": "add-panel", "confirmation_id": "deadbeef"})
+    assert res["decision"] == "deny"
+    assert res["reason"] == "approval_not_found"
+
+
+def _backdate(cid: str) -> None:
+    record = agent_gate.read_pending(cid)
+    record["expires_at"] = "2000-01-01T00:00:00Z"
+    agent_gate._write_pending(record)
+
+
+def test_ttl_expiry_auto_denies_resume():
+    first = _gate("run_write_tool", {"tool": "add-panel"})
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+    _backdate(cid)
+    res = _gate("run_write_tool", {"tool": "add-panel", "confirmation_id": cid})
+    assert res["decision"] == "deny"
+    assert res["reason"] == "approval_expired"
+    # the record was durably auto-denied
+    assert agent_gate.read_pending(cid)["denied"] is True
+
+
+def test_grant_refuses_expired_request():
+    first = _gate("run_write_tool", {"tool": "add-panel"})
+    cid = first["confirmation_id"]
+    _backdate(cid)
+    ok, record, reason = agent_gate.grant_approval(cid)
+    assert not ok and reason == "expired"
+    assert record["denied"] is True  # expiry racing the click auto-denies
+
+
+def test_pending_not_yet_decided_stays_awaiting():
+    first = _gate("run_write_tool", {"tool": "add-panel"})
+    cid = first["confirmation_id"]
+    res = _gate("run_write_tool", {"tool": "add-panel", "confirmation_id": cid})
+    assert res["decision"] == "awaiting_approval"
+    assert res["confirmation_id"] == cid
+
+
+def test_always_confirm_never_persists_session_grant():
+    args = {"tool": "my-tool", "manifest_sha256": "a" * 64}
+    first = _gate("register_tool", args, session="s-R")
+    assert first["decision"] == "awaiting_approval"
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+    resumed = _gate("register_tool", dict(args, confirmation_id=cid), session="s-R")
+    assert resumed["decision"] == "allow"
+    # the NEXT call in the SAME session must file a FRESH approval
+    again = _gate("register_tool", args, session="s-R")
+    assert again["decision"] == "awaiting_approval"
+    assert again["confirmation_id"] != cid
+    assert agent_gate.has_session_grant("s-R", "register_tool") is False
+
+
+def test_tenant_overlay_tightens_gate(tmp_path):
+    agent_policy.tenants_file().write_text(json.dumps({
+        "t-tight": {"overlay": {"run_read_tool": {"policy": "confirm-once"}}}
+    }), encoding="utf-8")
+    res = _gate("run_read_tool", {"tool": "layer-report"}, tenant="t-tight")
+    assert res["decision"] == "awaiting_approval"
+    assert res["policy"] == "confirm-once"
+    # untightened tenant still auto-allows
+    assert _gate("run_read_tool", {"tool": "layer-report"}, tenant="t-loose")["decision"] == "allow"
+
+
+def test_corrupt_policy_file_fails_closed(tmp_path, monkeypatch):
+    bad = tmp_path / "bad_policy.json"
+    bad.write_text("{nope", encoding="utf-8")
+    monkeypatch.setenv("LEAF_AGENT_POLICY_FILE", str(bad))
+    res = _gate("read_platform_state")
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("policy_load_failed")
+
+
+def test_tier_override_reaches_gate(tmp_path, monkeypatch):
+    _custom_policy(tmp_path, monkeypatch, lambda raw: raw.update(
+        {"tier_overrides": {"hosted_pro": {"run_write_tool": {"policy": "auto"}}}}))
+    res = _gate("run_write_tool", {"tool": "add-panel"}, tier="hosted_pro")
+    assert res["decision"] == "allow"
+    res2 = _gate("run_write_tool", {"tool": "add-panel"}, tier="hosted_starter")
+    assert res2["decision"] == "awaiting_approval"
+
+
+# --------------------------------------------------------------------------- #
+# args binding
+# --------------------------------------------------------------------------- #
+def test_canonical_hash_excludes_confirmation_id():
+    args = {"tool": "add-panel", "params": {"n": 2}}
+    with_id = dict(args, confirmation_id="abc123")
+    assert agent_gate.canonical_args_hash(args) == agent_gate.canonical_args_hash(with_id)
+    assert agent_gate.canonical_args_hash(args) != agent_gate.canonical_args_hash(
+        {"tool": "add-panel", "params": {"n": 3}})

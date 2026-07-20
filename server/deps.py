@@ -9,6 +9,7 @@ Sibling-session ownership (see README.md): `auth0-identity-signup` owns
 """
 from __future__ import annotations
 
+import hmac
 import importlib.util
 import json
 import os
@@ -16,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Header
+from fastapi import Header, Request
 
 # --------------------------------------------------------------------------- #
 # paths + sibling-lane import wiring
@@ -29,6 +30,12 @@ DA_DIR = PROJECT_ROOT / "da"
 ENGINE_REGISTRY = ENGINE_DIR / "registry.json"
 AUTHORED_STORE = SERVER_DIR / "authored_tools.json"  # our lane persists authored tools here
 WRITE_TOOLS_STORE = SERVER_DIR / "write_tools.json"  # tracked server-lane seed for drawing.write tools (M2)
+
+import platform as _stdlib_platform  # noqa: F401,E402  (cache stdlib before the
+#   PROJECT_ROOT sys.path insert below makes the local platform/ package shadow it;
+#   jsonschema imports `platform` lazily inside agent_policy's schema validation,
+#   and the shadow turns every gate call into policy_load_failed. Same guard as
+#   broker.py — this process needs it too.
 
 # make sibling lanes importable (engine.selfcheck, da.client)
 for p in (str(PROJECT_ROOT), str(SERVER_DIR)):
@@ -248,18 +255,60 @@ def auth_live() -> bool:
     return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
 
 
+# --------------------------------------------------------------------------- #
+# harness back-edge trust (wire contract §0): with LEAF_AUTH_LIVE=1 the spine's
+# AppRunClient authenticates with X-Dispatch-Secret + X-Tenant-Id instead of a
+# JWT — same trust model as the broker's X-Broker-Secret — but ONLY on the
+# contract-listed read/dispatch routes. Secret unset in env => back-edge
+# disabled => the ordinary JWT path (which 401s without a token).
+# --------------------------------------------------------------------------- #
+def _dispatch_backedge_route(method: str, path: str) -> bool:
+    """True iff (method, path) is one of the §0 back-edge routes: POST /api/run,
+    GET /api/jobs/{id}, GET /api/capabilities, GET /api/tools, GET /api/drawings/*."""
+    if method == "POST":
+        return path == "/api/run"
+    if method != "GET":
+        return False
+    if path in ("/api/capabilities", "/api/tools"):
+        return True
+    if path.startswith("/api/drawings/"):
+        return True
+    if path.startswith("/api/jobs/"):
+        rest = path[len("/api/jobs/"):]
+        return bool(rest) and "/" not in rest  # the job read only, not /stream etc.
+    return False
+
+
+def _dispatch_secret_ok(presented: Optional[str]) -> bool:
+    secret = os.environ.get("LEAF_APP_DISPATCH_SECRET", "").strip()
+    if not secret or not presented:
+        return False
+    return hmac.compare_digest(presented, secret)
+
+
 def require_tenant(
+    request: Request,
     x_tenant_id: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
+    x_dispatch_secret: Optional[str] = Header(default=None),
 ):
     """FastAPI dependency: resolve the calling tenant.
 
     OFF: returns the plain `x_tenant_id or DEFAULT_TENANT` string (unchanged).
-    ON:  returns a verified `TenantContext` (raises 401 no-token / 403 no-claim).
+    ON:  returns a verified `TenantContext` (raises 401 no-token / 403 no-claim),
+         EXCEPT the harness back-edge: a valid `X-Dispatch-Secret` on a §0-listed
+         route trusts `X-Tenant-Id` as the resolved tenant (plain str — the tier
+         then resolves like the gate route's off-auth caller, and the broker
+         re-checks entitlement from its own trusted tier source on dispatch).
     """
     if not auth_live():
         # BYTE-IDENTICAL legacy path — X-Tenant-Id header stub, plain str.
         return x_tenant_id or DEFAULT_TENANT
+
+    if (x_dispatch_secret is not None and x_tenant_id
+            and _dispatch_backedge_route(request.method, request.url.path)
+            and _dispatch_secret_ok(x_dispatch_secret)):
+        return x_tenant_id
 
     # LEAF_AUTH_LIVE=1: verified JWT claims win over the header stub.
     # Imported lazily so PyJWT is only needed when auth is actually live.

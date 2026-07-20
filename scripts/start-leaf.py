@@ -324,6 +324,9 @@ def main() -> int:
             HARNESS_PORT=str(harness_port),
             BROKER_URL=broker_url,
             LEAF_REPO_ROOT=str(REPO),
+            # Converse back-edge: the harness must call the SAME app this launcher
+            # boots even when the app moved off its default port (stale squatter).
+            LEAF_APP_URL=app_url,
         )
         spawn("harness", [node, str(HARNESS_ENTRY)], HARNESS_DIR, harness_env)
 
@@ -331,6 +334,7 @@ def main() -> int:
     app_env = dict(base_env, APP_PORT=str(app_port), BROKER_URL=broker_url)
     if harness_url:
         app_env["LEAF_AUTHOR_HARNESS_URL"] = harness_url
+        app_env["LEAF_CONVERSE_HARNESS_URL"] = harness_url
     spawn("app", [sys.executable, "app.py"], SERVER_DIR, app_env)
 
     # ---- 4) web (Vite dev; VITE_MOCK=0 so the browser hits the live app) -----
