@@ -327,6 +327,14 @@ def test_ops_write_refuses_to_clobber_a_corrupt_tenant_file(tmp_path, monkeypatc
     with pytest.raises(PolicyError, match="must be a mapping"):
         agent_policy.set_tenant_agent_disabled("t-a", True)
 
+    # A PRESENT null is corrupt state, not an absent tenant. `.get()` conflates
+    # the two, so the mutator would have rewritten it permissive — repairing
+    # corruption into an allow instead of refusing the write.
+    p.write_text('{"t-a": null, "t-b": {"agent_disabled": true}}', encoding="utf-8")
+    with pytest.raises(PolicyError, match="must be a mapping"):
+        agent_policy.set_tenant_agent_disabled("t-a", True)
+    assert p.read_text(encoding="utf-8").count("null") == 1  # not rewritten
+
     # tenant B's flag survives a well-formed write for tenant A
     p.write_text('{"t-b": {"agent_disabled": true}}', encoding="utf-8")
     agent_policy.set_tenant_agent_disabled("t-a", True)

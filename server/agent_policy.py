@@ -584,11 +584,18 @@ def set_tenant_agent_disabled(tenant_id: str, disabled: bool) -> Dict[str, Any]:
             raise PolicyError(f"agent tenants file invalid JSON at {path}: {exc}") from exc
         if not isinstance(raw, dict):
             raise PolicyError(f"agent tenants top level must be a mapping ({path})")
-    entry = raw.get(str(tenant_id))
-    if entry is None:
-        entry = {}
-    elif not isinstance(entry, dict):
-        raise PolicyError(f"agent_tenants.{tenant_id}: must be a mapping ({path})")
+    # Membership, not .get(): a PRESENT `null` is corrupt state, not an absent
+    # tenant, and .get() conflates them — rewriting it permissive would repair
+    # corruption into an allow rather than refusing the write.
+    key = str(tenant_id)
+    if key not in raw:
+        entry: Dict[str, Any] = {}
+    else:
+        entry = raw[key]
+        if not isinstance(entry, dict):
+            raise PolicyError(
+                f"agent_tenants.{tenant_id}: must be a mapping ({path}); got "
+                f"{type(entry).__name__} — refusing to overwrite corrupt state")
     entry["agent_disabled"] = bool(disabled)
     raw[str(tenant_id)] = entry
     path.parent.mkdir(parents=True, exist_ok=True)
