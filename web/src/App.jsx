@@ -1087,10 +1087,12 @@ export default function App() {
         if (selectedHandle) { setSelectedHandle(null) }
         return
       }
-      if (!typing && (e.key === 'r' || e.key === 'R') && !running && (runErr || routeErr)) {
+      // R retries the ROUTING failed strip only — ResultPanel owns the R mnemonic
+      // for run errors (its own window listener; duplicating it here double-fired
+      // the retry: two POST /api/run from one keypress).
+      if (!typing && (e.key === 'r' || e.key === 'R') && !running && routeErr && !runErr) {
         e.preventDefault()
-        if (routeErr) onDispatch()
-        else onRetry()
+        onDispatch()
         return
       }
       // Type-to-fall-through (operator rule): a bare printable keystroke on the
@@ -1099,14 +1101,20 @@ export default function App() {
       // rungs above (⌘K, Esc, R-on-failed-strip) keep priority. Never steals
       // from an editable element.
       const editable = typing || tag === 'select' || (e.target && e.target.isContentEditable)
-      if (!editable && !e.metaKey && !e.ctrlKey && !e.altKey && e.key.length === 1) {
+      // A focused interactive control keeps its keys (Space must ACTIVATE a
+      // button, not yank focus); Space never falls through; overlays (drawer,
+      // history) keep typing local to themselves.
+      const interactive = e.target instanceof Element &&
+        e.target.closest('button, a, summary, [role="button"], [role="option"], [role="menuitem"]')
+      if (!editable && !interactive && !drawer && !historyOpen &&
+          !e.metaKey && !e.ctrlKey && !e.altKey && e.key.length === 1 && e.key !== ' ') {
         barInputRef.current?.focus()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
-      interruptRun, onDispatch, onRetry])
+      interruptRun, onDispatch])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
@@ -1118,8 +1126,8 @@ export default function App() {
       const t = e.target
       if (!(t instanceof Element)) return
       if (t.closest('button, a, input, textarea, select, label, summary, canvas, '
-        + '[role="button"], [contenteditable="true"], '
-        + '.drawer, .vh-pop, .proj-menu, .claude-pop, .ops-drawer')) return
+        + '[role="button"], [role="option"], [role="listbox"], [contenteditable="true"], '
+        + '.drawer, .vh-pop, .proj-menu, .claude-pop, .ops-drawer, .resolver, .bar')) return
       const sel = window.getSelection && window.getSelection()
       if (sel && sel.toString()) return
       barInputRef.current?.focus()

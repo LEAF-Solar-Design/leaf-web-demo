@@ -45,7 +45,7 @@ main.center-scroll {
   right: 0;
   bottom: calc(100% + 8px);
   margin: 0;
-  z-index: 20;
+  /* z-index intentionally unset here: styles.css owns it (35, above the bar) */
 }
 
 /* DT2 drawer overlay layer: occupies the SAME grid cell as aside.rail (row 2

@@ -25,7 +25,7 @@ export default function PromptBox({
 }) {
   const [focused, setFocused] = useState(false)
   const onKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { // isComposing: IME confirm-Enter must not dispatch
       if (routeActive) return // the resolver / decision strip owns Enter
       e.preventDefault()
       onDispatch()

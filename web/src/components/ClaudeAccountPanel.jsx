@@ -72,7 +72,7 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
   useEffect(() => {
     if (!open) return
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) onToggle(false) }
-    const onKey = (e) => { if (e.key === 'Escape') onToggle(false) }
+    const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('.drawer-layer .drawer')) onToggle(false) } // an open drawer owns Esc
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }

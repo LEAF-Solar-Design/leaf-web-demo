@@ -39,7 +39,7 @@ export default function VersionHistory({
 
   // Esc closes — the header cap is the affordance, the key must actually work.
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('.drawer-layer .drawer')) onClose() } // an open drawer owns Esc
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])

@@ -33,7 +33,7 @@ export default function ProjectSwitcher({
     if (!open) return
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false) }
     const onKey = (e) => {
-      if (e.key === 'Escape') { setOpen(false); return }
+      if (e.key === 'Escape' && !document.querySelector('.drawer-layer .drawer')) { setOpen(false); return } // an open drawer owns Esc
       const n = (projects || []).length
       if (unavailable || !orgId || n === 0) return
       if (e.key === 'ArrowDown') { e.preventDefault(); setHi((h) => (h + 1) % n) }
