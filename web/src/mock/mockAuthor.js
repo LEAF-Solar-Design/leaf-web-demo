@@ -1,16 +1,42 @@
 // Mock tool-author — turns a natural-language description into a tool
 // package (CONTRACT §2) + generated code + preview. Templated for a
-// constrained family (select-by-layer / count / measure / near-edge),
-// mirroring the "Stub allowed" note in CONTRACT §6. Marked provenance
-// author=agent, kind=script so it is runnable by the mock engine.
+// constrained family (select-by-layer / count / measure / near-edge /
+// delete), mirroring the "Stub allowed" note in CONTRACT §6. Marked
+// provenance author=agent, kind=script so it is runnable by the mock engine.
 
+// Greedy WHOLE-WORD slug: join words with '-', appending the next word only
+// while the result stays <=40 chars. If the very first word exceeds 40, keep
+// just that first word sliced to 40. Never cut mid-word or leave a trailing '-'.
 function slugify(text) {
-  const base = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
-  return base || 'authored-tool'
+  const words = String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return 'authored-tool'
+  let slug = words[0].slice(0, 40)
+  for (let i = 1; i < words.length; i++) {
+    const candidate = slug + '-' + words[i]
+    if (candidate.length <= 40) slug = candidate
+    else break
+  }
+  return slug.replace(/-+$/g, '') || 'authored-tool'
 }
+
+// Parse a distance from the description: the first number followed by
+// in/inch/inches/" — or, failing that, the first standalone integer.
+function parseDistance(desc) {
+  const d = String(desc)
+  let m = d.match(/(\d+(?:\.\d+)?)\s*(?:in\b|inch(?:es)?|")/i)
+  if (m) return Number(m[1])
+  m = d.match(/\b(\d+)\b/)
+  if (m) return Number(m[1])
+  return null
+}
+
+const WRITE_VERBS = /\b(delete|remove|erase|move|insert|add)\b/
 
 function classify(desc) {
   const d = desc.toLowerCase()
+  // Write verbs win first — a "delete panels near the edge" request is a write,
+  // not a read-only near-edge highlight.
+  if (WRITE_VERBS.test(d)) return 'delete_marked_panel'
   if (/(area|square|sqft|sq ft|size|coverage)/.test(d)) return 'measure_area'
   if (/(edge|perimeter|within|near|setback|border|inches|distance)/.test(d)) return 'highlight_near_edge'
   if (/(count|how many|number of|tally)/.test(d)) return 'count_by_layer'
@@ -70,26 +96,61 @@ const TEMPLATES = {
   (setq ss (ssget "X" (list (cons 8 lyr))))
   (leaf:highlight ss))`,
   },
+  // Write template — aligns with M3's engine op `delete_marked_panel`. Creates
+  // a new undoable version instead of reading the drawing read-only.
+  delete_marked_panel: {
+    caps: ['drawing.read', 'drawing.write'],
+    params: {
+      type: 'object',
+      properties: { handle: { type: 'string', title: 'Handle', default: '' } },
+      required: [],
+    },
+    code: (n) => `; ${n} — generated LISP (script) tool
+(defun c:${n.replace(/-/g, '')} ( / h ent)
+  (setq h (leaf:param "handle" ""))
+  (setq ent (handent h))
+  (if ent (progn (entdel ent) (leaf:emit (list (cons "removed" h))))
+          (leaf:emit (list (cons "removed" nil)))))`,
+  },
 }
 
 export function authorMock(description) {
   const op = classify(description)
   const tmpl = TEMPLATES[op]
   const name = slugify(description)
+
+  // Numeric-param parse: the near-edge template respects the distance the user
+  // typed instead of the hardcoded 60. Build a fresh params object so the shared
+  // template is never mutated.
+  let params = tmpl.params
+  if (op === 'highlight_near_edge') {
+    const dist = parseDistance(description)
+    params = {
+      type: 'object',
+      properties: { distance_in: { type: 'number', title: 'Distance (inches)', default: dist == null ? 60 : dist } },
+      required: [],
+    }
+  }
+
+  const caps = [...tmpl.caps]
+  const isWrite = caps.includes('drawing.write')
+
   const tool = {
     name,
     version: '1.0.0',
     description: description.trim(),
     kind: 'script',
     engine_op: op,
-    params: tmpl.params,
+    params,
     returns: { type: 'object' },
-    capabilities: tmpl.caps,
+    capabilities: caps,
     provenance: { author: 'agent', created: new Date().toISOString() },
   }
   const code = tmpl.code(name)
-  const preview =
-    `Generated a "${op}" script tool from your description.\n` +
-    `It runs read-only on the drawing and is ready to run on Leaf.`
+  const preview = isWrite
+    ? `Generated a "${op}" script tool from your description.\n` +
+      `It creates a new undoable version of the drawing when you run it on Leaf.`
+    : `Generated a "${op}" script tool from your description.\n` +
+      `It runs read-only on the drawing and is ready to run on Leaf.`
   return { tool, code, preview }
 }
