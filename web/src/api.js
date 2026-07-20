@@ -45,7 +45,11 @@ const nap = (ms) => new Promise((r) => setTimeout(r, ms))
 async function http(path, opts) {
   const headers = { ...(opts?.headers || {}), ...authHeaders() }
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers })
-  if (!res.ok) throw new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
+  if (!res.ok) {
+    const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
+    e.status = res.status // callers gate on 401/403 without string-matching
+    throw e
+  }
   return res.json()
 }
 

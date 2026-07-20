@@ -152,6 +152,7 @@ export default function App() {
   const [routing, setRouting] = useState(false)          // awaiting the router
   const [routeErr, setRouteErr] = useState(null)         // routing call failed -> failed strip
   const [jobs, setJobs] = useState([])                   // live rail: recent GET /api/jobs
+  const [authRequired, setAuthRequired] = useState(false) // live mode with no session: 401s observed -> polls stop, footer says so
   const [currentJobId, setCurrentJobId] = useState(null) // this session's live job id (dedupe)
   const [inflightPtr, setInflightPtr] = useState(null)   // localStorage re-attach pointer
   const [reattaching, setReattaching] = useState(false)  // auto re-attach in progress
@@ -491,16 +492,28 @@ export default function App() {
     try { setJobs(await listJobs()) } catch { /* transient */ }
   }, [mock])
 
-  // Poll the recent-jobs list (live only; zero /api calls in mock).
+  // Poll the recent-jobs list (live only; zero /api calls in mock). A 401 means
+  // there is NO session — polling forever would just hammer the API with error
+  // traffic, so the poll STOPS on the first 401 and resumes only when the mode
+  // flips (the effect re-runs). Transient non-auth errors keep polling.
   useEffect(() => {
-    if (mock) { setJobs([]); return }
+    if (mock) { setJobs([]); setAuthRequired(false); return }
     let alive = true
+    let id = null
     const tick = async () => {
-      try { const js = await listJobs(); if (alive) setJobs(js) } catch { /* transient */ }
+      try {
+        const js = await listJobs()
+        if (alive) { setJobs(js); setAuthRequired(false) }
+      } catch (e) {
+        if (e?.status === 401) {
+          if (alive) setAuthRequired(true)
+          if (id) { clearInterval(id); id = null }
+        } /* other errors: transient, keep polling */
+      }
     }
     tick()
-    const id = setInterval(tick, 2500)
-    return () => { alive = false; clearInterval(id) }
+    id = setInterval(tick, 2500)
+    return () => { alive = false; if (id) clearInterval(id) }
   }, [mock])
 
   // A live job entered 'running' — begin (or resume) the wall-clock, using the
@@ -1616,6 +1629,10 @@ export default function App() {
             spend are muted metadata (green is reserved for genuine states). */}
         {mock ? (
           <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">mock (no cloud)</span></span>
+        ) : authRequired ? (
+          /* the ONLY unauthenticated signal is the public /api/health ping — a
+             rosy "cloud live · N tools" over a 401-walled app would be a lie */
+          <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">sign-in required</span></span>
         ) : health ? (
           health.aps_live
             ? <span className="foot-stat"><span className="dot" aria-hidden="true" />backend · <span className="ok-txt">cloud live</span></span>
@@ -1625,7 +1642,7 @@ export default function App() {
         )}
         {mock ? (
           <span className="foot-stat"><span className="dot" aria-hidden="true" />local solver · <span className="ok-txt">ready</span></span>
-        ) : health ? (
+        ) : authRequired ? null : health ? (
           <span className="foot-stat">
             <span className={health.da_client_present ? 'dot' : 'dot square'} aria-hidden="true" />
             data agent · <span className={health.da_client_present ? 'ok-txt' : 'warn-txt'}>
