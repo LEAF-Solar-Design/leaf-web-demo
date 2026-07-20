@@ -31,6 +31,10 @@ main.center-scroll {
   bottom: 18px;
   z-index: 30;
   padding: 0;
+  /* narrower than the content behind it, centered — the island must read as
+     its own object, never edge-align with the cards it floats over */
+  max-width: 700px;
+  margin: 0 auto;
 }
 .bar-dock > * + * { margin-top: 8px; }
 /* The resolver is a floating card attached ABOVE the well — absolutely

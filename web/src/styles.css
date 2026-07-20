@@ -1156,6 +1156,8 @@ footer .warn-txt { color: var(--status-warning); }
   left: 26px; right: 26px; bottom: 18px;
   z-index: 30;
   padding: 0;
+  max-width: 700px;   /* narrower than the content behind — island reads as its own object */
+  margin: 0 auto;     /* centered between the l/r insets */
   display: flex;
   flex-direction: column;
   gap: 8px;
