@@ -101,6 +101,29 @@ function Section({ title, count, open, onToggle, children, innerRef }) {
   )
 }
 
+// Live-mode landing when there is no session: instead of a wall of red 401s with
+// no way forward, a calm gate — sign-in for the live surface is coming; the demo
+// is one click away. Shown only when a 401 was actually observed (not offline).
+function SignedOutGate({ onDemo }) {
+  return (
+    <div className="card enter" style={{ margin: '0 0 16px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--foreground)' }}>You’re not signed in</div>
+        <p className="panel-sub" style={{ margin: 0 }}>
+          This is a live preview of Leaf against the cloud workspace. Sign-in for the
+          live surface is coming soon — explore the interactive demo to try the prompt
+          lanes, tool catalog, and viewer on a sample rooftop drawing.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <button type="button" className="btn primary" onClick={onDemo}>Explore the demo</button>
+          <span className="dim" style={{ fontSize: 12 }}>No sign-in needed · sample data</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 export default function App() {
   const [mock, setMock] = useState(config.mockDefault)
   const [intake, setIntake] = useState(null)
@@ -153,6 +176,7 @@ export default function App() {
   const [routeErr, setRouteErr] = useState(null)         // routing call failed -> failed strip
   const [jobs, setJobs] = useState([])                   // live rail: recent GET /api/jobs
   const [authRequired, setAuthRequired] = useState(false) // live mode with no session: 401s observed -> polls stop, footer says so
+  const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [currentJobId, setCurrentJobId] = useState(null) // this session's live job id (dedupe)
   const [inflightPtr, setInflightPtr] = useState(null)   // localStorage re-attach pointer
   const [reattaching, setReattaching] = useState(false)  // auto re-attach in progress
@@ -293,7 +317,7 @@ export default function App() {
         if (!alive) return
         seat(d); setTenant(t); setTier(ti); setOrg(o)
       })
-      .catch((e) => alive && setLoadErr(String(e.message || e)))
+      .catch((e) => { if (!alive) return; setLoadErr(String(e.message || e)); if (!mock && is401(e)) setAuthRequired(true) })
     return () => { alive = false }
   }, [mock, isEditFixture])
 
@@ -324,6 +348,7 @@ export default function App() {
     } catch (e) {
       setCatalog({ families: [], source: null })
       setCatalogErr(String(e.message || e))
+      if (!mock && is401(e)) setAuthRequired(true)
     }
   }, [mock])
 
@@ -1238,6 +1263,8 @@ export default function App() {
 
   // NR: the active ongoing conditions, docked at the result pane. Two or more
   // collapse to ONE line with a count instead of stacking banners.
+  const signedOut = !mock && authRequired // live, no session -> calm gate, hush the 401 red
+
   const advisories = [
     quotaShown && 'spend cap',
     runQuotaShown && 'daily limit',
@@ -1303,7 +1330,7 @@ export default function App() {
           Catalog · {catalog.families.length} famil{catalog.families.length === 1 ? 'y' : 'ies'} · {capCount} caps
           {catalog.source === 'flat-fallback' ? ' · flat' : ''}
         </div>
-        {catalogErr && (
+        {catalogErr && !signedOut && (
           <>
             <div className="inline-error" style={{ margin: '0 4px 8px' }}>Couldn’t load families: {catalogErr}</div>
             <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={() => setToolsOpen((o) => !o)}>
@@ -1369,6 +1396,7 @@ export default function App() {
 
       <div className="center-col">
         <main className="center-scroll">
+        {signedOut && <SignedOutGate onDemo={() => setMock(true)} />}
         <div className="kicker">Home · one prompt, three lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
@@ -1465,8 +1493,9 @@ export default function App() {
             </div>
           </div>
           <div className="viewer-wrap">
-            {loadErr && <div className="overlay-msg error">Couldn’t load drawing — {loadErr}</div>}
-            {!intake && !loadErr && (
+            {loadErr && !signedOut && <div className="overlay-msg error">Couldn’t load drawing — {loadErr}</div>}
+            {signedOut && <div className="overlay-msg">Sign in or explore the demo to load a drawing.</div>}
+            {!intake && !loadErr && !signedOut && (
               // Indeterminate load: content-shaped pulse dot + verb, top-left —
               // the centered takeover position is reserved for failures (X3).
               <div className="loading-line dim" style={{ position: 'absolute', top: 14, left: 14 }}>
