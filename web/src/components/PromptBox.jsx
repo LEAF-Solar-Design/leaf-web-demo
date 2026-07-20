@@ -1,25 +1,27 @@
 // The SB3 command bar well (crib §1), docked at the bottom of the center
 // column. Two rows — a 40 px input row (accent › caret, 13 px text, placeholder
-// "Find, act, or build…") and a light controls row inside the well: the 20 px
-// "+" add chip and ONE "scope ▾" chip left (the chip opens the O2 resolver
-// offering the find · act · build scopes, each row carrying its lane's live
-// hit dot); project context, the summon keycap (⌘K, swapping to an emphasized
-// Enter cap while focused) and a quiet Run chip right (SB3: no primary in the
-// well). Enter dispatches; while a route decision is showing above the well,
-// Enter belongs to the resolver (routeActive) and typing clears the stale
-// route (App-side).
-//
-// G2 ingest: the bar is the ONE drop catcher — mid-drag the well border goes
-// dashed accent with "Drop manifest to ingest — runs sandboxed". No ingest
-// path exists in src/api.js, so a drop surfaces the honest X1-style red strip
-// (never a silent ignore).
+// "Find, act, or build… ( / for tools)") and a light controls row inside the
+// well: the 20 px "+" add chip and ONE "scope ▾" chip left (the chip opens the
+// O2 resolver offering the find · act · build scopes, each row carrying its
+// lane's live hit dot); project context, the summon keycap (⌘K, swapping to an
+// emphasized Enter cap while focused) and a quiet Run chip right (SB3: no
+// primary in the well). Enter dispatches; while a route decision is showing
+// above the well, Enter belongs to the resolver (routeActive) and typing clears
+// the stale route (App-side).
 //
 // Slash commands: a leading "/" lists the runnable tool catalog as an O2
 // resolver menu above the well (same anatomy as the route resolver), filtered
 // live by the text after the slash — ↑/↓ move, Tab completes the name into the
 // input, Enter completes AND dispatches (the route decision strip still asks
 // for confirmation — paid actions never auto-execute). Esc closes just the
-// menu; a space after the tool name closes it too (args mode).
+// menu; a space after the tool name closes it too (args mode). The menu stands
+// down entirely whenever ANOTHER resolver owns the well — a route decision
+// (routeActive) or the scope menu — so only one listbox ever owns the keys.
+//
+// G2 ingest: the bar is the ONE drop catcher — mid-drag the well border goes
+// dashed accent with "Drop manifest to ingest — runs sandboxed". No ingest
+// path exists in src/api.js, so a drop surfaces the honest X1-style red strip
+// (never a silent ignore).
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
@@ -45,8 +47,7 @@ function laneDotClass(lane, hit) {
 
 export default function PromptBox({
   value, onChange, onDispatch, routing, hintLane, projectName, inputRef, routeActive,
-  onOpenAuthor,
-  tools = [],
+  onOpenAuthor, tools = [],
 }) {
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
@@ -79,11 +80,13 @@ export default function PromptBox({
     return [...pre, ...sub]
   }, [completing, afterSlash, tools])
 
-  // While a route decision or the scope resolver is showing, that surface owns
-  // the keys — the menu stands down entirely (typing clears the route App-side,
-  // which brings the menu straight back). Gate on scopeMenu.shown, NOT scopeOpen:
-  // the scope resolver stays mounted for its 180 ms exit fade after scopeOpen
-  // flips false, and two listboxes must never be visible at once.
+  // While ANOTHER resolver is showing — a route decision, or the scope menu —
+  // that resolver owns the surface AND the keys, so this menu stands down
+  // entirely (typing clears the route App-side, which brings it straight back).
+  // Gate on scopeMenu.shown, NOT scopeOpen: useExit holds the scope resolver
+  // mounted for its 180 ms exit fade after scopeOpen flips false, so gating on
+  // scopeOpen reopens this menu mid-fade and puts two listboxes on screen at
+  // once. scopeMenu.shown covers both the open and the fading state.
   const menuOpen = completing && !menuDismissed && !routeActive && !scopeMenu.shown
 
   // Any edit re-arms a dismissed menu and re-anchors the highlight.
