@@ -9,6 +9,11 @@
   pointer-events: none;
 }
 
+/* The root is programmatically focused on mount so the first Tab reaches the
+   tour controls; suppress the UA outline on the container only (the real
+   controls keep their focus ring). */
+.tour-root:focus { outline: none; }
+
 /* Dimmer: everything outside the spotlight rectangle reads back. The spotlight
    itself is a transparent hole punched with a huge outline shadow. */
 .tour-dim {
@@ -68,6 +73,9 @@
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 16px;
+  /* Backstop: a long body can never clip its own Back/Skip/Next row. */
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
   pointer-events: auto;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
   font-family: var(--font-sans);
@@ -112,7 +120,10 @@
   color: var(--primary);
 }
 
-/* indeterminate running line: pulse dot + verb (amber is reserved for advisory) */
+/* indeterminate running line: pulse dot + verb (amber is reserved for advisory).
+   The node stays mounted as a live region, so the empty state must take no space. */
+.tour-card-wait:empty { display: none; }
+
 .tour-card-wait {
   display: flex;
   align-items: center;
@@ -141,29 +152,11 @@
 
 .tour-card-actions .tour-spacer { margin-left: auto; }
 
-/* chip grammar: quiet FILLED chips, never outlined (.chip-neutral / .primary voice) */
-.tour-btn {
-  font: inherit;
-  font-size: 12.5px;
-  padding: 6px 12px;
-  border-radius: 6px;
-  border: 0;
-  background: rgba(255, 255, 255, .05);
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.tour-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .09); }
-
-.tour-btn:disabled { opacity: 0.45; cursor: default; }
-
-.tour-btn.primary {
-  background: var(--primary);
-  color: var(--on-accent);
-  font-weight: 600;
-}
-
-.tour-btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
+/* Buttons use the real contract classes from styles.css (.chip-neutral /
+   .primary) — no drifted .tour-btn duplicate vocabulary. Only the disabled
+   state of the primary Next needs a local rule (the shared .primary defines
+   none; .chip-neutral's lives in popovers.css). */
+.tour-card-actions .primary:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
 
 .tour-dots {
   display: flex;
@@ -182,6 +175,16 @@
 
 @keyframes tour-fade { from { opacity: 0 } to { opacity: 1 } }
 @keyframes tour-rise { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: none } }
+
+/* The centered (no-target) case positions itself with a translate(-50%,-50%);
+   tour-rise's `transform: none` end state would clobber that and slam the card
+   against the right edge, clipping the closing copy and the Exit button on a
+   phone. Give it keyframes that CARRY the centering transform. */
+.tour-card.is-centered { animation-name: tour-rise-centered; }
+@keyframes tour-rise-centered {
+  from { opacity: 0; transform: translate(-50%, calc(-50% + 12px)) }
+  to   { opacity: 1; transform: translate(-50%, -50%) }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .tour-dim, .tour-card, .tour-spot, .tour-card-wait::before {

@@ -33,7 +33,7 @@
     {
       "id": "build",
       "beat": 4,
-      "prompt": "build a tool that flags panels within 18 in of the roof edge",
+      "prompt": "build a tool that flags panels within 24 in of the roof edge",
       "lane": "build",
       "tool": null,
       "min_confidence": 0.7

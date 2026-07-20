@@ -82,5 +82,55 @@ for (const row of hist.versions) {
 }
 assert(view(1).intake.polylines.length === baseCount, 'view(1) is not the base intake')
 
-console.log(`base polylines: ${baseCount}; deleted handle ${target}; v2 -> ${baseCount - 1}; undo -> ${baseCount}`)
+// --- a SECOND delete APPENDS v3 computed from HEAD (regression: F15) -----
+// head is v2 here (post-redo). The engine is handed the CURRENT head intake,
+// exactly as App.jsx does, and the chain must agree with it — the first
+// deleted panel must NOT come back.
+const headBefore2 = headIntake()
+assert(headBefore2.polylines.length === baseCount - 1, 'pre-second-delete head count wrong')
+const panels2 = headBefore2.polylines.filter((p) => p.layer === 'Panels')
+assert(panels2.length > 0, 'no Panels polylines left at head for a second delete')
+const target2 = panels2[0].handle
+assert(target2 && target2 !== target, 'second target must differ from the first')
+
+const env2 = runMock(tool, { handle: target2 }, headBefore2)
+assert(env2.ok === true, `second engine envelope not ok: ${env2.error}`)
+assert(env2.result.removed === target2, 'second run removed the wrong handle')
+assert(env2.result.panels_after === baseCount - 2, `second engine count ${env2.result.panels_after} !== ${baseCount - 2}`)
+
+const v3 = applyDelete(env2.result.removed)
+assert(v3.version === 3, `second applyDelete version ${v3.version} !== 3 (chain not append-only)`)
+assert(v3.parent === 2, `second applyDelete parent ${v3.parent} !== 2`)
+assert(v3.removed === target2, 'second applyDelete removed the wrong handle')
+const h3 = headIntake().polylines
+assert(h3.length === baseCount - 2, `v3 head count ${h3.length} !== ${baseCount - 2} (chain disagrees with the engine)`)
+assert(!h3.some((p) => p.handle === target), 'v3 head resurrected the FIRST deleted handle')
+assert(!h3.some((p) => p.handle === target2), 'v3 head still contains the second deleted handle')
+assert(h3.length === env2.result.intake.polylines.length, 'chain head and engine intake disagree on count')
+
+const hist3 = list()
+assert(hist3.head === 3 && hist3.latest === 3, `history head/latest after second delete: ${hist3.head}/${hist3.latest}`)
+assert(hist3.versions.length === 3, `history should list v1,v2,v3 (got ${hist3.versions.length})`)
+assert(hist3.versions[1].note === `Deleted panel ${target}`, 'v2 history note wrong')
+assert(hist3.versions[2].note === `Deleted panel ${target2}`, 'v3 history note wrong')
+assert(hist3.versions[2].parent === 2, 'v3 history parent !== 2')
+
+// --- undo PAST the second delete walks back deterministically ------------
+const u1 = undo()
+assert(u1.head === 2, `undo from v3 head ${u1.head} !== 2`)
+assert(headIntake().polylines.length === baseCount - 1, 'undo to v2 count wrong')
+assert(headIntake().polylines.some((p) => p.handle === target2), 'undo to v2 did not restore the second handle')
+assert(!headIntake().polylines.some((p) => p.handle === target), 'undo to v2 wrongly restored the first handle')
+
+const u2 = undo()
+assert(u2.head === 1, `second undo head ${u2.head} !== 1`)
+assert(headIntake().polylines.length === baseCount, 'undo to v1 count wrong')
+assert(headIntake().polylines.some((p) => p.handle === target), 'undo to v1 did not restore the first handle')
+
+// undo at the bottom is a no-op, and redo walks all the way back up
+assert(undo().head === 1, 'undo below v1 should be a no-op')
+assert(redo().head === 2 && redo().head === 3, 'redo did not walk back to v3')
+assert(headIntake().polylines.length === baseCount - 2, 'post-double-redo head count wrong')
+
+console.log(`base polylines: ${baseCount}; deleted ${target} -> v2 (${baseCount - 1}); deleted ${target2} -> v3 (${baseCount - 2}); undo x2 -> ${baseCount}`)
 console.log('WRITELOOP_OK')

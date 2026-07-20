@@ -18,7 +18,7 @@ import { useEffect, useRef, useState } from 'react'
 // author flow opens ready to generate. seedSignal bumps on each route so the
 // same text can be re-seeded.
 const EXAMPLES = [
-  'count panels within 18in of the roof edge',
+  'count panels within 24in of the roof edge',
   'measure the total area of all panels',
   'select everything on the Panel Groups layer',
 ]
@@ -47,6 +47,14 @@ function readProvenance(res) {
 function authoredProvLine(res) {
   const p = res?.tool?.provenance || {}
   const parts = []
+  // Author + created lead the block — the two fields the runbook tells the
+  // presenter to point at. Absent-safe, so a live response that omits them is
+  // rendered exactly as before.
+  if (p.author) parts.push(`author ${p.author}`)
+  if (p.created) {
+    const t = new Date(p.created)
+    if (!Number.isNaN(t.getTime())) parts.push(`created ${t.toLocaleTimeString()}`)
+  }
   const run = res?.run_id || p.run_id || p.session_id
   if (run) parts.push(`run ${String(run).slice(0, 12)}`)
   const sha = p.sha256 || p.sha || res?.sha256
@@ -56,6 +64,13 @@ function authoredProvLine(res) {
     parts.push(`grants ${grants}`)
   }
   if (p.reviewer !== undefined) parts.push(`reviewer ${p.reviewer || '—'}`)
+  // The params parsed out of the sentence (e.g. `distance_in: 18`) — the proof
+  // the description was actually understood. Capped so a many-param live tool
+  // can't run the line long; absent-safe for tools with no defaults.
+  const props = res?.tool?.params?.properties || {}
+  for (const [k, v] of Object.entries(props).slice(0, 3)) {
+    if (v && v.default !== undefined && v.default !== '') parts.push(`${k}: ${v.default}`)
+  }
   return parts.length ? parts.join(' · ') : null
 }
 
@@ -183,7 +198,7 @@ function ServiceGate() {
   )
 }
 
-export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal, notLinked, onLinkClaude, buildEntitled = true }) {
+export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal, seedAutoSubmit = false, notLinked, onLinkClaude, buildEntitled = true }) {
   const [desc, setDesc] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
@@ -201,7 +216,12 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
   useEffect(() => {
     if (seedSignal != null && seedSignal !== lastSignal.current) {
       lastSignal.current = seedSignal
-      if (seed) setDesc(seed)
+      if (seed) {
+        setDesc(seed)
+        // Tour beat: the differentiator claim is "Leaf writes the tool", so on a
+        // guided run the seed authors immediately instead of leaving a prefilled box.
+        if (seedAutoSubmit) submit(seed)
+      }
     }
   }, [seed, seedSignal])
 
@@ -214,11 +234,15 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
     return () => clearInterval(id)
   }, [busy])
 
-  async function submit() {
-    if (!desc.trim() || !buildEntitled) return
+  // `override` lets a caller submit a description that hasn't round-tripped
+  // through state yet (the tour seed). Click handlers pass a MouseEvent, so only
+  // a string is honoured — mirroring the existing seed/override pattern.
+  async function submit(override) {
+    const d = (typeof override === 'string' ? override : desc).trim()
+    if (!d || !buildEntitled) return
     setBusy(true); setErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setAuthored(null)
     try {
-      const res = await onAuthor(desc.trim())
+      const res = await onAuthor(d)
       setAuthored(res)
     } catch (e) {
       // Expected "not-an-alarm" rejections surface as calm gates, never red:
@@ -269,7 +293,7 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
         id="author-desc"
         value={desc}
         onChange={(e) => setDesc(e.target.value)}
-        placeholder="e.g. count panels within 18in of the roof edge"
+        placeholder="e.g. count panels within 24in of the roof edge"
         rows={3}
         disabled={busy}
       />

@@ -77,16 +77,72 @@ Error strings are passed through the humanizer (M4), so the surface never shows
 the **Details** disclosure — quote that id if a prospect asks what they would
 send support. Then move to the next beat; do not retry the same prompt twice.
 
+## Beat 4: "Run it now" highlights 0 panels / canvas goes empty
+
+**Move:** say "too tight — let's give it some room", retype the sentence with
+**24 in**, and re-author. Never leave a zero on the differentiator beat.
+
+This is a real answer, not a bug: on this sample rooftop the closest panel
+centroid sits **~19.2 in** from the drawing bounds, so any parsed distance at or
+below 19 correctly matches nothing. Safe values recomputed from the sample:
+20 → 21, **24 → 23**, 48 → 46, 60 → 72. The runbook scripts 24 for exactly this
+reason. If a prospect insisted on "12 inches", you can own it instead of
+retyping: "nothing on this roof is that close — that's the tool telling you the
+truth, not a blank screen."
+
+## The authored tool's name looks strange
+
+**Move:** ignore it and keep going — read the *provenance* block aloud, not the
+name.
+
+The generated name is a slug of the sentence they typed
+(`flags-panels-within-24-in-of-the-roof`), capped at 40 characters, so an odd
+phrasing produces an odd slug. It is cosmetic. The load-bearing parts of the
+beat are the LISP preview, the parsed `distance_in`, and **Run it now** — all of
+which still work. Do not rename it on stage.
+
+## A second delete lands and the version numbers keep climbing
+
+**Move:** that is correct — say "every write stacks a version" — then press
+**Undo** once per delete, or click **v1** in History to jump straight back.
+
+The version chain is append-only from HEAD: the first `delete panel …` makes
+v2, a second makes v3, and each Undo walks head back one step. If you have lost
+count and just need the full rooftop **on screen**, open **History** and click
+**v1** — that *previews* v1 (all 2,345 panels render, and **Back to head**
+returns) but it does not move head. To actually reseat head at v1, press
+**Undo** once per delete. If History and the canvas appear to disagree, reload
+the tab — you are between beats, so it is safe.
+
+## The routing chip names a tool you didn't expect
+
+**Move:** clear the box, retype the prompt **verbatim** from the runbook table,
+and run once.
+
+The prompt bar routes with a real matcher, not a model, so paraphrase can land
+on a neighbouring tool (asking to "remove" anything routes to the *write* lane,
+not a read-only highlight). The runbook prompts are the ones the router is
+checked against by `web/test/check_routes.mjs`. Never run the same off-script
+prompt twice hoping for a different lane — it is deterministic.
+
+## Something routes to the Solve lane
+
+**Move:** say "that lane is not wired in this build" and go to the next beat.
+
+The solve lane is an honest dead-end here and will say so. No runbook beat
+routes to it, and the build fails if one ever does. Do not try to make it work
+on stage; offer it as a scheduled follow-up.
+
 ## Numbers on screen disagree with the runbook
 
 **Move:** you are not in mock mode, or you are not on the sample rooftop — check
 the Mock checkbox first.
 
-The golden numbers (2345 panels, 48,718 sqft, 72 near-edge at 60 in) are
-recomputed from `web/public/sample.intake.json` by both
-`web/test/check_integration.mjs` and `scripts/demo-preflight.py`. If the running
-app disagrees, the app is reading something else — it is not that the numbers
-drifted.
+The golden numbers (2345 panels, 48,718 sqft, 72 near-edge at 60 in, 23
+near-edge at the authored 24 in) are recomputed from
+`web/public/sample.intake.json` by `web/test/check_integration.mjs` and
+`scripts/demo-preflight.py`. If the running app disagrees, the app is reading
+something else — it is not that the numbers drifted.
 
 ## Total loss (no laptop, no network, no app)
 

@@ -757,12 +757,42 @@ footer .warn-txt { color: var(--status-warning); }
   .lower { grid-template-columns: 1fr; }
 }
 @media (max-width: 980px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto auto auto auto auto; }
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto auto;
+    /* Release the desktop 100vh trap (:116). Once the 3-column grid collapses to
+       a single stacked column, a viewport-locked height squeezes the workspace
+       row down to a few hundred px — the rooftop canvas then lays out BELOW the
+       inner scrollport's fold and a phone viewer never sees the drawing at all.
+       Auto height lets the DOCUMENT scroll instead; min-height keeps the shell
+       full-bleed when content is short. The command bar stays reachable because
+       structural.css pins .bar-dock to the viewport at this same breakpoint. */
+    height: auto;
+    min-height: 100vh;
+  }
   /* grid items default to min-width:auto (never shrinking below their
      content's min-content size) — a single wide child would otherwise force
      the collapsed 1fr column, and the whole .app grid, past the viewport. */
   .app > * { min-width: 0; }
   aside.nav, aside.rail { border: 0; border-bottom: 1px solid var(--border); }
+
+  /* The collapsed .center-col is a CONTENT-sized block, not a viewport-height
+     grid row, so the absolutely-positioned bar anchors to the bottom of that
+     block — floating mid-page, overlapping the content above it, and scrolling
+     away entirely. The command bar is the product's only input surface, so pin
+     it to the VIEWPORT (the same treatment .drawer-layer gets in
+     structural.css). This override must live in THIS file, not structural.css:
+     main.jsx evaluates `import App` (which imports structural.css) before
+     `import './styles.css'`, so styles.css is emitted last and its
+     unconditional `.bar-dock { position: absolute }` (:1203) wins any
+     equal-specificity tie — media queries add no specificity. */
+  .bar-dock {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 64px; /* clears footer.foot-bar (~55px) when scrolled to the end */
+    max-width: none;
+  }
 }
 /* ---------------- responsive: phone widths (390px target) ---------------- */
 @media (max-width: 430px) {
@@ -771,12 +801,9 @@ footer .warn-txt { color: var(--status-warning); }
      drop the max-width; let the well's controls row wrap so Dispatch + the
      run/solve/build scope chips all stay on-screen instead of overflowing
      past the right edge. */
-  .bar-dock {
-    left: 8px;
-    right: 8px;
-    bottom: 8px;
-    max-width: none;
-  }
+  /* .bar-dock offsets are set once in the 980px block above (position:fixed,
+     8px insets) and inherited here — two blocks disagreeing on the phone
+     geometry is how this regressed before. */
   .bar-controls {
     flex-wrap: wrap;
     row-gap: 6px;
@@ -803,6 +830,13 @@ footer .warn-txt { color: var(--status-warning); }
     max-width: 100%;
   }
   .code { max-width: 100%; }
+
+  /* iOS Safari auto-zooms the whole page whenever a focused text input computes
+     under 16px — on a phone every tap into the demo's PRIMARY input would punch
+     the viewport into a zoomed state mid-sentence. Clear the threshold at phone
+     widths only; desktop keeps the 13px command-bar type byte-identical. No
+     maximum-scale hack in index.html, so pinch-zoom stays available. */
+  .bar-input input, .bar-input .bar-field { font-size: 16px; }
 }
 /* reduced motion: freeze, never hide (M1) */
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -1263,6 +1297,18 @@ footer .warn-txt { color: var(--status-warning); }
   background: var(--bar-well);
   display: flex; flex-direction: column;
   box-shadow: 0 18px 44px rgba(0, 0, 0, .5); /* floating elevation */
+  position: relative; /* anchors the G2 drop hint overlay */
+}
+/* G2 ingest — the bar is the ONE drop catcher: mid-drag the well border goes
+   dashed accent and the hint overlays the well (display-only; drops land on
+   the bar itself). */
+.bar.drag { border-style: dashed; border-color: var(--primary); }
+.bar-drop-hint {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 11px; background: var(--bar-well);
+  font-size: 12.5px; color: var(--primary);
+  pointer-events: none;
 }
 .bar-input { display: flex; align-items: center; gap: 10px; padding: 13px 16px 9px; }
 .bar-caret { font: 600 13px var(--font-mono); color: var(--primary); } /* the accent prompt caret */
@@ -1280,10 +1326,14 @@ footer .warn-txt { color: var(--status-warning); }
 }
 .bar-add:hover { color: var(--muted); }
 .bar-scope {
-  font-size: 11px; color: var(--muted-2); background: var(--bar-chip);
+  font-family: var(--sans); font-size: 11px; color: var(--muted-2); background: var(--bar-chip);
   border: 0; border-radius: 6px; padding: 3px 10px; cursor: pointer;
 }
-.bar-proj { margin-left: auto; font-size: 11.5px; color: var(--muted-2); background: none; border: 0; cursor: pointer; }
+/* rendered as <button>s now — strip the UA chrome (font comes from the rules above) */
+button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
+/* passive context label — no cursor:pointer: the chip advertises nothing it
+   can't do (the project switcher lives in the header) */
+.bar-proj { margin-left: auto; font-size: 11.5px; color: var(--muted-2); background: none; border: 0; }
 .bar-lanes { font-size: 11px; color: #3f3f46; } /* "find - act - build" lane hint */
 /* focus - the bar's standing exception to the halo rule: no drop halo */
 .bar:focus-within {
@@ -1452,17 +1502,31 @@ footer .warn-txt { color: var(--status-warning); }
   animation: m1-in var(--m-enter) var(--m-curve) both;
   animation-delay: calc(var(--rank, 0) * var(--m-stagger));
 }
-.exit { animation: m1-out var(--m-exit) ease both; }
 /* the one enter curve, applied to every mounting pane/card/popover */
 .route, .banner, .vh-pop, .proj-menu, .claude-pop, .result-card,
 .ops-drawer, .workspace-summary, .resolver, .drawer,
 .strip-decision, .strip-failed {
   animation: m1-in var(--m-enter) var(--m-curve) both;
 }
+/* exits: 180 ms fades (M1). AFTER the auto-enter list so .exit wins on any
+   surface that list also names; a fading surface is display-only. */
+.exit { animation: m1-out var(--m-exit) ease both; pointer-events: none; }
 
 /* ---------------- SB3 fold: below 760px tall the bar is one 40px row ---------------- */
 @media (max-height: 760px) {
-  .bar-controls { display: none; }
+  /* Fold the controls row to ONE short line — do not delete it. `display:none`
+     here also removed the Run button and the Enter keycap (both live in this
+     row), and an iPhone 12 in PORTRAIT is ~664px CSS tall, so the most common
+     demo phone showed a bare input with no primary action. Hide only the
+     decorative children; keep Run + the Enter hint, right-aligned by :1287. */
+  .bar-controls { padding: 0 13px 8px; gap: 8px; }
+  .bar-controls .bar-add,
+  .bar-controls .bar-scope,
+  .bar-controls .bar-proj { display: none; }
+  /* .bar-proj (:1302) carries the margin-left:auto that pushes the keycap + Run
+     right; hiding it would left-bunch them, so hand the auto margin to the
+     keycap, which is the next surviving child. */
+  .bar-controls .key { margin-left: auto; }
   .bar-input { height: 40px; padding: 0 16px; }
 }
 
@@ -1492,10 +1556,10 @@ footer .warn-txt { color: var(--status-warning); }
   border-radius: 6px;
 }
 
-/* Persistent guided-demo banner (M2 item 3 / M-c). NT2 ongoing-condition
-   anatomy (matches .banner): amber square dot + sentence + one quiet action —
-   sits at the top of the center column whenever mock is active. The Exit chip
-   is the only accent element (the actionable one). */
+/* Persistent guided-demo banner (M2 item 3 / M-c). NR ongoing-condition
+   anatomy (matches .banner): amber square dot + sentence — sits at the top of
+   the center column whenever mock is active; clears itself when the mode
+   flips, never user-dismissed. */
 .demo-banner {
   display: flex; align-items: center; gap: 14px;
   margin: 0 0 14px;
@@ -1512,4 +1576,36 @@ footer .warn-txt { color: var(--status-warning); }
 .demo-banner-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .demo-banner-title { font-size: 13px; font-weight: 600; color: var(--foreground); }
 .demo-banner-sub { font-size: 12px; color: var(--muted-2); }
-.demo-banner-exit { flex: none; margin-left: auto; white-space: nowrap; }
+
+/* ---- phone command-bar pin (must be LAST) ----
+   The @media (max-width: 980px) `.bar-dock { position: fixed }` override above
+   loses to the unconditional `.bar-dock { position: absolute }` at :1221 —
+   same file, same specificity, and the unconditional rule is emitted LATER, so
+   source order decides. Re-declare the pin here, after every competing rule,
+   so the collapsed single-column layout actually keeps the command bar (the
+   product's only input surface) on the viewport instead of anchoring it to the
+   bottom of a tall, content-sized .center-col. */
+@media (max-width: 980px) {
+  .bar-dock {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 64px; /* clears footer.foot-bar (~55px) at the end of the scroll */
+    max-width: none;
+  }
+}
+
+/* ---- phone source-order: drawing first ----
+   Stacked, the catalog rail (~263px) + banner + hero push .viewer-canvas to
+   y≈707 on a 390x844 phone, so a prospect handed the ?demo=tour link arrives
+   at a screen of accordions with the rooftop below the fold. The drawing is
+   the thing to see first; reorder the collapsed grid so the workspace column
+   precedes the catalog and the job rail. Visual order only — DOM/tab order is
+   unchanged, and the sections keep their headings. */
+@media (max-width: 980px) {
+  .app > header.top { order: 0; }
+  .app > .center-col { order: 1; }
+  .app > aside.nav { order: 2; }
+  .app > aside.rail { order: 3; }
+  .app > footer.foot-bar { order: 4; }
+}

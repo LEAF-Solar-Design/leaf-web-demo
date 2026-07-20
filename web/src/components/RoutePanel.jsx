@@ -8,6 +8,8 @@
 // still confirms before anything runs — paid actions never auto-execute.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import useExit from '../useExit.js'
+import { humanKey } from '../labels.js'
 
 function defaultsOf(schema) {
   const out = {}
@@ -21,13 +23,16 @@ function defaultsOf(schema) {
 function paramsSummary(params) {
   const entries = Object.entries(params || {})
   if (entries.length === 0) return null
-  return entries.map(([k, v]) => `${k.replace(/_/g, ' ')} ${String(v)}`).join(' · ')
+  return entries.map(([k, v]) => `${humanKey(k)} ${String(v)}`).join(' · ')
 }
 
 export default function RoutePanel({
-  route, tools, running, writeLocked, writeEntitled = true,
+  route: liveRoute, tools, running, writeLocked, writeEntitled = true,
   onRun, onPickAlternative, onOpenAuthor, onDismiss,
 }) {
+  // M1 exit: on dismissal (Esc / typing / a run consuming the decision) the
+  // last route is held for the 180 ms .exit fade (display-only) before unmount.
+  const { shown: route, exiting } = useExit(liveRoute)
   const [activeIdx, setActiveIdx] = useState(0)
   // Enter arms 350ms AFTER the route mounts: the keypress that dispatched the
   // prompt (or its OS key-repeat) must never also confirm the run — one Enter,
@@ -70,8 +75,9 @@ export default function RoutePanel({
 
   // Enter / arrow keys while a decision surface is up (Esc lives in App's
   // global ladder). Enter on a focused button/link is left to that control.
+  // A fading (exiting) surface is display-only — no keys.
   useEffect(() => {
-    if (!route) return undefined
+    if (!route || exiting) return undefined
     const onKey = (e) => {
       if (e.key === 'ArrowDown' && rows.length > 0) {
         e.preventDefault(); setActiveIdx((i) => Math.min(i + 1, rows.length - 1)); return
@@ -99,15 +105,16 @@ export default function RoutePanel({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [route, rows, activeIdx, confident, toolObj, params, running, locked, entBlocked,
+  }, [route, exiting, rows, activeIdx, confident, toolObj, params, running, locked, entBlocked,
       onRun, onPickAlternative, onOpenAuthor, onDismiss])
 
   if (!route) return null
+  const motion = exiting ? 'exit' : 'enter'
 
   // ---- BUILD lane: decision strip pointing at the author flow ---------------
   if (route.lane === 'build') {
     return (
-      <div className="strip-decision enter">
+      <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           Build — <span className="route-title">author a new capability</span>. Your description is
@@ -123,7 +130,7 @@ export default function RoutePanel({
   // ---- SOLVE lane: honest not-wired advisory strip --------------------------
   if (route.lane === 'solve') {
     return (
-      <div className="strip-decision enter">
+      <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           <span className="route-title">Solve lane</span> — string / combiner / route jobs run on
@@ -139,7 +146,7 @@ export default function RoutePanel({
   if (confident && toolObj) {
     const summary = paramsSummary(params)
     return (
-      <div className="strip-decision enter">
+      <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           Run <span className="route-tool">{route.tool}</span>
@@ -159,6 +166,7 @@ export default function RoutePanel({
         <button
           type="button"
           className="chip-act"
+          aria-label={`Run ${route.tool}`}
           disabled={running || locked || entBlocked}
           onClick={() => onRun(toolObj, params)}
         >
@@ -173,7 +181,7 @@ export default function RoutePanel({
   // ---- RUN lane, low confidence / not in this catalog: resolver rows --------
   const conf = Math.round((route.confidence || 0) * 100)
   return (
-    <div className="resolver enter" role="listbox" aria-label="Route resolver">
+    <div className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
       <div className="resolver-header">
         {toolObj
           ? <>Run · best guess {conf}% match</>

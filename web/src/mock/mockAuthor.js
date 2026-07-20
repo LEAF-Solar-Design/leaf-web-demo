@@ -7,8 +7,15 @@
 // Greedy WHOLE-WORD slug: join words with '-', appending the next word only
 // while the result stays <=40 chars. If the very first word exceeds 40, keep
 // just that first word sliced to 40. Never cut mid-word or leave a trailing '-'.
+// A leading imperative phrase ("build a tool that …") names the ACT of authoring,
+// not the tool — strip it so the tool is named after what it does. Trailing
+// stopwords are dropped so the name never ends mid-phrase.
+const LEAD = /^(?:build|create|make|write|author|generate|give me)\s+(?:me\s+)?(?:a|an|the)?\s*(?:new\s+)?(?:tool|script|command|function)\s+(?:that|which|to|for)?\s*/i
+const STOP = new Set(['the', 'a', 'an', 'of', 'in', 'on', 'to', 'that', 'by', 'for', 'and', 'with', 'within', 'per'])
+
 function slugify(text) {
-  const words = String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean)
+  const stripped = String(text).replace(LEAD, '')
+  const words = stripped.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean)
   if (words.length === 0) return 'authored-tool'
   let slug = words[0].slice(0, 40)
   for (let i = 1; i < words.length; i++) {
@@ -16,7 +23,9 @@ function slugify(text) {
     if (candidate.length <= 40) slug = candidate
     else break
   }
-  return slug.replace(/-+$/g, '') || 'authored-tool'
+  const segs = slug.split('-')
+  while (segs.length > 1 && STOP.has(segs[segs.length - 1])) segs.pop()
+  return segs.join('-').replace(/-+$/g, '') || 'authored-tool'
 }
 
 // Parse a distance from the description: the first number followed by
@@ -63,9 +72,11 @@ const TEMPLATES = {
       properties: { distance_in: { type: 'number', title: 'Distance (inches)', default: 60 } },
       required: [],
     },
-    code: (n) => `; ${n} — generated LISP (script) tool
+    // `d` is the distance parsed from the description — the generated code must
+    // agree with the params chip the prospect just read (falls back to 60).
+    code: (n, d = 60) => `; ${n} — generated LISP (script) tool
 (defun c:${n.replace(/-/g, '')} ( / dist box near)
-  (setq dist (leaf:param "distance_in" 60.0))
+  (setq dist (leaf:param "distance_in" ${Number(d).toFixed(1)}))
   (setq box (leaf:drawing-bounds))
   (setq near (leaf:filter-entities
                (lambda (e) (<= (leaf:dist-to-box (leaf:centroid e) box) dist))))
@@ -134,6 +145,7 @@ export function authorMock(description) {
 
   const caps = [...tmpl.caps]
   const isWrite = caps.includes('drawing.write')
+  const created = new Date().toISOString()
 
   const tool = {
     name,
@@ -144,13 +156,17 @@ export function authorMock(description) {
     params,
     returns: { type: 'object' },
     capabilities: caps,
-    provenance: { author: 'agent', created: new Date().toISOString() },
+    provenance: { author: 'agent', created, grants: caps, reviewer: null },
   }
-  const code = tmpl.code(name)
+  const code = tmpl.code(name, params.properties?.distance_in?.default)
   const preview = isWrite
     ? `Generated a "${op}" script tool from your description.\n` +
       `It creates a new undoable version of the drawing when you run it on Leaf.`
     : `Generated a "${op}" script tool from your description.\n` +
       `It runs read-only on the drawing and is ready to run on Leaf.`
-  return { tool, code, preview }
+  // `source: 'harness'` + `run_id` are the honest agent-authored signals the
+  // AuthorPanel reads (readProvenance / authoredProvLine). The demo's authoring
+  // IS the agent story, so the card must read "Authored by agent", not
+  // "Templated". Shape stays a superset of { tool, code, preview }.
+  return { tool, code, preview, source: 'harness', run_id: `demo-${op}-${name}`.slice(0, 24) }
 }

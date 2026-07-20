@@ -31,6 +31,40 @@ assert(
   `distance_in.default should be 18, got ${b.tool.params.properties.distance_in.default}`
 )
 
+// (2b) The GENERATED CODE must carry the same parsed distance as the params —
+// a preview that says 60.0 while the tool runs at 18 is a visible contradiction.
+assert(
+  b.code.includes('"distance_in" 18.0'),
+  `generated code must use the parsed distance, got: ${JSON.stringify(b.code.split('\n')[2])}`
+)
+// An unparsed description keeps the 60.0 default in both places.
+const b60 = authorMock('highlight panels near the roof edge')
+assert(b60.tool.params.properties.distance_in.default === 60, 'unparsed distance should default to 60')
+assert(b60.code.includes('"distance_in" 60.0'), 'unparsed distance should render 60.0 in the code')
+
+// (2c) Slug names the TOOL, not the act of authoring: a leading imperative phrase
+// is stripped and the name never ends on a stopword.
+const e = authorMock('build a tool that flags panels within 18 in of the roof edge')
+assert(!e.tool.name.startsWith('build-'), `slug must strip the leading imperative phrase, got "${e.tool.name}"`)
+assert(e.tool.name.startsWith('flags-panels'), `slug should name what the tool does, got "${e.tool.name}"`)
+const STOPWORDS = new Set(['the', 'a', 'an', 'of', 'in', 'on', 'to', 'that', 'by', 'for', 'and', 'with', 'within', 'per'])
+for (const desc of [longDesc, 'count panels within 18 inches of the edge', 'build a tool that flags panels within 18 in of the roof edge']) {
+  const n = authorMock(desc).tool.name
+  const tail = n.split('-').pop()
+  assert(!STOPWORDS.has(tail), `slug for "${desc}" ends on stopword "${tail}": "${n}"`)
+}
+
+// (2d) Provenance the authored card renders: agent-authored, with created +
+// grants + a run id, so the UI reads "Authored by agent" and can show the block.
+assert(b.source === 'harness', `mock authoring must report source 'harness', got ${JSON.stringify(b.source)}`)
+assert(typeof b.run_id === 'string' && b.run_id.length > 0, 'mock authoring must carry a run_id')
+assert(b.tool.provenance.author === 'agent', 'provenance.author must be agent')
+assert(!Number.isNaN(Date.parse(b.tool.provenance.created)), `provenance.created must be an ISO timestamp, got ${b.tool.provenance.created}`)
+assert(
+  Array.isArray(b.tool.provenance.grants) && b.tool.provenance.grants.includes('drawing.read'),
+  `provenance.grants must list the capabilities, got ${JSON.stringify(b.tool.provenance.grants)}`
+)
+
 // (3) Write-verb honesty branch: delete requests are drawing.write and the
 // preview must NOT claim read-only.
 const c = authorMock('delete panels near the roof edge')

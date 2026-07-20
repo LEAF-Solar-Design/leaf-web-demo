@@ -25,7 +25,7 @@ drive it manually with the beats below.
 | 1 | `count panels per layer` | **Panels: 2345** |
 | 2 | `measure the total area` | **48,718 sqft** (48718.2) + largest-panel marker |
 | 3 | `highlight panels within 60 in of the edge` | **72** panels of 2345, 60 in ring |
-| 4 | Build lane authors a tool | LISP preview + provenance + **Run it now** |
+| 4 | Build lane authors a tool | LISP preview + provenance (`distance_in: 24`) + **Run it now** → **23** of 2345 |
 | 5 | `delete panel 7FA3` | v2 (parent 1) → **Undo** → head v1, History v1→v2 |
 | 6 | Honesty close | Real out-of-the-box vs operator-enabled, cite `RUN.md` |
 
@@ -80,18 +80,25 @@ drive it manually with the beats below.
 
 ## Beat 4 — Build lane: author a real reusable tool
 
-- **Type:** `build a tool that flags panels within 18 in of the roof edge`
+- **Type:** `build a tool that flags panels within 24 in of the roof edge`
 - **Click:** **Build** lane → **Author**, then **Run it now** on the authored tool.
-- **Expect:** the authored tool appears with its **LISP preview**, a
-  **provenance** block (author, created, params parsed from your sentence — the
-  18 in shows up as `distance_in: 18`), and a **Run it now** button that
-  executes it against the same rooftop.
+- **Expect:** the authored tool `flags-panels-within-24-in-of-the-roof` appears
+  with its **LISP preview** (which reads `(leaf:param "distance_in" 24.0)` — the
+  number you typed, not a hardcoded default), a **provenance** block (author
+  `agent`, created, params parsed from your sentence — the 24 in shows up as
+  `distance_in: 24`), and a **Run it now** button. **Run it now** highlights
+  **23 of 2345** panels — a tighter ring than beat 3's 72, because it is a
+  tighter setback.
 - **Say:** *"It authored a real reusable tool, not a one-off answer."* — this is
   the differentiator line. Pause on it. The tool is now in the catalog for
-  everyone, and every future run of it is zero-LLM.
+  everyone, and every future run of it is zero-LLM. Then run it: "and the 24
+  inches I typed is a live parameter — that ring is tighter than the last one."
 - **If it doesn't match →** if the preview is empty, re-submit the same sentence
-  once; if the parsed distance is missing, say the tool defaults to 60 in and
-  move on — do **not** hand-edit the generated code on stage.
+  once. **If Run it now returns 0 panels and the canvas goes empty, the parsed
+  distance landed below this array's ~19 in setback** — no panel centroid is
+  that close to the roof edge. Retype the sentence with the literal words
+  "within 24 in" and re-author; do not narrate a zero. Do **not** hand-edit the
+  generated code on stage.
 
 ## Beat 5 — Delete a panel → version → undo
 
@@ -106,7 +113,10 @@ drive it manually with the beats below.
   path without that."
 - **If it doesn't match →** if the handle isn't found, the tool deletes the last
   panel instead — that is fine, keep narrating. If Undo looks stuck, open
-  History and click **v1** directly.
+  **History** and click **v1** — note this *previews* v1 (the rooftop comes
+  back on the canvas and the row goes active) rather than moving head; **Back
+  to head** returns. Undo is the thing that actually moves head, so if you need
+  the seated version back at v1, close History and press Undo.
 
 ## Beat 6 — Honesty close
 
@@ -133,6 +143,13 @@ Things that break the golden path. Do not do them on stage.
   optimal route) is an honest dead-end in this build — it will say it is not
   wired. No beat in this runbook routes to solve, and
   `web/test/check_routes.mjs` fails the build if one ever does.
+- **Do not improvise a setback under 20 in.** On this sample rooftop the
+  closest panel centroid sits ~19.2 in from the drawing bounds, so any distance
+  at or below 19 returns **0 panels and an empty canvas** — the worst possible
+  frame on the differentiator beat. Safe values, all recomputed from the sample:
+  20 → 21, **24 → 23**, 48 → 46, **60 → 72**. If a prospect asks for "12
+  inches", say yes, type it, and narrate the zero as the answer ("nothing is
+  that close — that is the tool telling you the truth"), or steer to 24.
 - **Do not present in a window under 760px tall.** The result panel scrolls out
   of view and the golden numbers stop being readable from the back of a room.
 - **Do not hard-reload the pre-warmed tab.** Cold load is the slowest thing in
@@ -145,9 +162,19 @@ the real router and the real mock engine:
 
 ```
 cd web
-node test/check_routes.mjs        # ROUTES_OK  — every prompt above routes as claimed
-node test/check_integration.mjs   # INTEGRATION_OK — 2345 / 48718.2 / 72 / v2->undo->v1
+node test/check_routes.mjs         # ROUTES_OK      — every prompt above routes as claimed
+node test/check_integration.mjs    # INTEGRATION_OK — 2345 / 48718.2 / 72 / v2->undo->v1
+node scripts/check_author.mjs      # AUTHOR_QUALITY_OK — beat 4 authoring + parsed distance
+node scripts/check_writeloop.mjs   # WRITELOOP_OK   — repeated delete + undo chain (beat 5)
+node scripts/check_tourscript.mjs  # TOURSCRIPT_OK  — the ?demo=tour beats re-route correctly
 ```
 
-If either fails, the runbook is stale — fix the runbook or the code before you
+If any fails, the runbook is stale — fix the runbook or the code before you
 present it.
+
+**Coverage caveat, stated honestly:** `check_integration.mjs` asserts beat 4
+only routes to the *build* lane; it does not yet re-run the authored tool. The
+**23** above was recomputed from `web/public/sample.intake.json` through the
+real `authorMock` → `runMock` path (`distance_in: 24` → 23 of 2345). If you
+change the sample rooftop or the near-edge geometry, re-derive it rather than
+trusting this line.

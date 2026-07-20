@@ -33,7 +33,7 @@ export const TOUR_STEPS = [
   },
   {
     id: 'viewer',
-    title: 'Your drawing, live',
+    title: 'The sample rooftop, live',
     body:
       'Here is the drawing itself — panels, roof edges and layers, drawn from the ' +
       'real file. Every result you are about to see lands back on this canvas.',
@@ -46,7 +46,10 @@ export const TOUR_STEPS = [
     body:
       'Watch the command bar. We ask how many entities sit on each layer, and Leaf ' +
       'routes it to a safe read-only tool before running anything.',
-    target: '.bar-well, .workspace-card',
+    // `.bar` is the real command-bar well (PromptBox.jsx); `.bar-dock` is its
+    // always-mounted wrapper (App.jsx). `.workspace-card` stays as a last-resort
+    // fallback so the spotlight can never vanish.
+    target: '.bar, .bar-dock, .workspace-card',
     prompt: 'count panels per layer',
     action: 'run',
     tool: 'count-by-layer',
@@ -57,7 +60,10 @@ export const TOUR_STEPS = [
     body:
       'Same bar, harder question: which panels sit within sixty inches of the roof ' +
       'edge. Leaf reads the distance out of your sentence and highlights the ring.',
-    target: '.bar-well, .workspace-card',
+    // `.bar` is the real command-bar well (PromptBox.jsx); `.bar-dock` is its
+    // always-mounted wrapper (App.jsx). `.workspace-card` stays as a last-resort
+    // fallback so the spotlight can never vanish.
+    target: '.bar, .bar-dock, .workspace-card',
     prompt: 'highlight panels within 60in of the edge',
     action: 'run',
     tool: 'highlight-panels-near-edge',
@@ -68,7 +74,10 @@ export const TOUR_STEPS = [
     body:
       'Now the total panel area, with the largest module marked on the canvas. ' +
       'Same drawing, same loop, no cloud round trip.',
-    target: '.bar-well, .workspace-card',
+    // `.bar` is the real command-bar well (PromptBox.jsx); `.bar-dock` is its
+    // always-mounted wrapper (App.jsx). `.workspace-card` stays as a last-resort
+    // fallback so the spotlight can never vanish.
+    target: '.bar, .bar-dock, .workspace-card',
     prompt: 'measure the total area',
     action: 'run',
     tool: 'measure-panel-area',
@@ -78,21 +87,35 @@ export const TOUR_STEPS = [
     title: 'The part that is different',
     body:
       'Ask for something that does not exist yet and Leaf writes a new reusable ' +
-      'tool — code you can read, keep and run again — not a one-off answer.',
+      'tool — code you can read, keep and run again. Watch it write the code, ' +
+      'then Run it now.',
     target: '.author-section, .workspace-card',
-    prompt: 'build a tool that flags panels on the Panel Groups layer',
+    prompt: 'build a tool that flags panels within 24 in of the roof edge',
     action: 'author',
   },
   {
     id: 'version',
-    title: 'Edits are versioned',
+    title: 'Edits are versioned — your call',
     body:
-      'Deleting a panel is a real write. Leaf stages it as a new version you ' +
-      'confirm, and Undo walks the drawing straight back. Nothing is destroyed.',
-    target: '.workspace-card',
-    prompt: 'delete panel 2A7',
+      'Deleting a panel is a real write, so nothing auto-runs. Click Run in the ' +
+      'bar below to stage the next version, then press Undo to walk the drawing back.',
+    // The confirm strip is where the decision actually lives; fall back to the
+    // dock before it mounts so the light is never on the wrong half of the screen.
+    target: '.strip-decision, .bar-dock',
+    // 7FA3 is a real polyline handle in public/sample.intake.json (matches the
+    // runbook) — an invented handle makes the engine delete a different panel.
+    prompt: 'delete panel 7FA3',
     action: 'version',
     tool: 'delete-marked-panel',
+  },
+  {
+    id: 'undo',
+    title: 'Undo is one click',
+    body:
+      'History now lists both versions. Undo steps the drawing back and the panel ' +
+      'reappears — the write was staged, never destructive.',
+    target: '.bar-dock, .workspace-card',
+    action: null,
   },
   {
     id: 'exit',

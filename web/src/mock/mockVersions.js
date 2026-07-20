@@ -1,10 +1,14 @@
 // Mock version chain (CONTRACT-ADDENDUM §11, demo side) — a PURE in-memory
-// v1<->v2 chain for drawing_id 'demo'. No React, no import.meta, no JSON
+// APPEND-ONLY chain for drawing_id 'demo'. No React, no import.meta, no JSON
 // import: `node` must be able to import this module headless.
 //
-// v1 is the base intake seated at load; a `drawing.write` run (delete-marked-
-// panel) creates v2 = base minus one polyline. undo()/redo() walk the chain
-// deterministically; list() returns the LIVE shape VersionHistory.jsx consumes
+// v1 is the base intake seated at load; every `drawing.write` run (delete-
+// marked-panel) appends a NEW version computed from the CURRENT HEAD — never
+// recomputed from the base — so a second delete produces v3 rather than
+// silently replacing v2 (which resurrected the first deleted panel and made
+// the receipt and the header disagree). undo()/redo() walk the chain
+// deterministically; a write after an undo truncates the redo tail first.
+// list() returns the LIVE shape VersionHistory.jsx consumes
 // ({head, latest, versions:[{v, tool, note, created, sha256}]}).
 
 export const DRAWING_ID = 'demo'
@@ -30,16 +34,15 @@ function fingerprint(intake) {
   return digest(`${pls.length}|${pls.map((p) => p.handle).join(',')}`)
 }
 
-// Shallow clone of the intake with a replaced polyline list — the base object
-// (layers, meta, ...) is never mutated.
+// Shallow clone of the intake with a replaced polyline list — the previous
+// intake object (layers, meta, ...) is never mutated.
 function withPolylines(intake, polylines) {
   return { ...intake, polylines }
 }
 
 const chain = {
-  base: null,     // v1 intake
-  v2: null,       // v2 intake (null until applyDelete)
-  removed: null,  // handle removed by v1 -> v2
+  intakes: [],    // index 0 = v1, index n-1 = vn
+  removed: null,  // handle removed by the most recent write
   head: 1,
   latest: 1,
   versions: [],   // [{v, parent, tool, note, created, sha256}]
@@ -51,8 +54,7 @@ function nowIso() {
 
 /** Reset the chain and seat `intake` as v1 (the base). Idempotent per intake. */
 export function seedBase(intake) {
-  chain.base = intake || null
-  chain.v2 = null
+  chain.intakes = intake ? [intake] : []
   chain.removed = null
   chain.head = 1
   chain.latest = 1
@@ -66,7 +68,7 @@ export function seedBase(intake) {
         sha256: fingerprint(intake),
       }]
     : []
-  return chain.base
+  return chain.intakes[0] || null
 }
 
 /** Drop the whole chain (mode change / re-running the demo clean). */
@@ -75,60 +77,66 @@ export function reset() {
 }
 
 export function isSeeded() {
-  return chain.base != null
+  return chain.intakes.length > 0
 }
 
-/** The handle applyDelete() would remove by default (the last polyline). */
+/** The intake currently at head (the one a write is computed against). */
+function headOrNull() {
+  return chain.intakes[chain.head - 1] || null
+}
+
+/** The handle applyDelete() would remove by default (last polyline AT HEAD). */
 export function defaultHandle() {
-  const pls = chain.base?.polylines || []
+  const pls = headOrNull()?.polylines || []
   return pls.length ? pls[pls.length - 1].handle : null
 }
 
 /**
- * Create v2 = base minus the polyline whose handle matches (default: last).
- * Returns {version, parent, drawing_id, removed, intake}. Re-applying replaces
- * v2 (the demo only ever needs one write generation).
+ * Append a new version = CURRENT HEAD minus the polyline whose handle matches
+ * (default: last at head). Any redo tail above head is discarded first, so the
+ * chain stays a single append-only line of history.
+ * Returns {drawing_id, version, parent, removed, intake}.
  */
 export function applyDelete(handle) {
-  if (!chain.base) throw new Error('mockVersions: seedBase(intake) first')
-  const pls = chain.base.polylines || []
+  const cur = headOrNull()
+  if (!cur) throw new Error('mockVersions: seedBase(intake) first')
+  const pls = cur.polylines || []
   const target = handle != null && pls.some((p) => p.handle === handle)
     ? handle
     : defaultHandle()
   if (target == null) throw new Error('mockVersions: nothing to delete')
-  const next = pls.filter((p) => p.handle !== target)
-  chain.v2 = withPolylines(chain.base, next)
+  const next = withPolylines(cur, pls.filter((p) => p.handle !== target))
+
+  // Truncate the redo tail (a write after an undo forks from head), then append.
+  chain.intakes = chain.intakes.slice(0, chain.head)
+  chain.versions = chain.versions.slice(0, chain.head)
+  chain.intakes.push(next)
+  chain.head = chain.latest = chain.intakes.length
   chain.removed = target
-  chain.head = 2
-  chain.latest = 2
-  chain.versions = [
-    chain.versions[0],
-    {
-      v: 2,
-      parent: 1,
-      tool: 'delete-marked-panel',
-      note: `Deleted panel ${target}`,
-      created: nowIso(),
-      sha256: fingerprint(chain.v2),
-    },
-  ]
+  chain.versions.push({
+    v: chain.head,
+    parent: chain.head - 1,
+    tool: 'delete-marked-panel',
+    note: `Deleted panel ${target}`,
+    created: nowIso(),
+    sha256: fingerprint(next),
+  })
+
   return {
     drawing_id: DRAWING_ID,
-    version: 2,
-    parent: 1,
+    version: chain.head,
+    parent: chain.head - 1,
     removed: target,
-    intake: chain.v2,
+    intake: next,
   }
 }
 
-/** The intake at a version ('head' | 1 | 2). */
+/** The intake at a version ('head' | 1 | 2 | ...). */
 export function intakeAt(version) {
   const v = version === 'head' || version == null ? chain.head : Number(version)
-  if (v === 2) {
-    if (!chain.v2) throw new Error('mockVersions: version 2 does not exist')
-    return chain.v2
-  }
-  return chain.base
+  const it = chain.intakes[v - 1]
+  if (!it) throw new Error(`mockVersions: version ${v} does not exist`)
+  return it
 }
 
 /** The intake at head. */
@@ -148,13 +156,13 @@ export function view(version) {
   }
 }
 
-/** Step head back one version (v2 -> v1). Returns the LIVE undo shape. */
+/** Step head back one version. Returns the LIVE undo shape. */
 export function undo() {
   if (chain.head > 1) chain.head -= 1
   return view('head')
 }
 
-/** Step head forward one version (v1 -> v2). Returns the LIVE redo shape. */
+/** Step head forward one version. Returns the LIVE redo shape. */
 export function redo() {
   if (chain.head < chain.latest) chain.head += 1
   return view('head')
