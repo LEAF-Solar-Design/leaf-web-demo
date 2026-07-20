@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getOpsTenants, setTenantDisabled } from '../api.js'
+import './popovers.css'
 
-// INTERNAL ops drawer — visible only with ?ops=1 in the URL. Lists tenants from
-// GET /api/ops/tenants (X-Internal-Role: qa): tenant / runs / spend / state,
-// with calm disable/enable actions (inline confirm-before-act, plain words).
-// A 403 (role not granted) renders a calm "ops role required" note, not a red
-// failure. This is an internal surface — clearly labelled INTERNAL, distinct
-// from the tenant-facing app.
+// Internal ops drawer — visible only with ?ops=1 in the URL. A DT2 right drawer
+// (title + Esc cap header, endpoint provenance in the foot) listing tenants from
+// GET /api/ops/tenants (X-Internal-Role: qa): tenant / runs / spend / state.
+// Disable is destructive, so it follows D1: quiet danger chip -> the row's
+// actions swap inline to "Disable <tenant>? [filled danger chip] [Keep]" — red
+// only on the destroying act. A kill-switched tenant is a deliberate hold, not
+// a failure: amber square-dot "Disabled", never red. A 403 (role not granted)
+// renders a calm "ops role required" note; a load failure gets the centered
+// X3 takeover with a Retry chip. Clearly labelled Internal, distinct from the
+// tenant-facing app. Esc (key or cap) hides the drawer.
 export default function OpsDrawer({ onDismiss }) {
   const [tenants, setTenants] = useState(null)
   const [err, setErr] = useState(null)
@@ -29,6 +34,14 @@ export default function OpsDrawer({ onDismiss }) {
 
   useEffect(() => { load() }, [load])
 
+  // Esc closes — the header cap is the affordance, the key must actually work.
+  useEffect(() => {
+    if (!onDismiss) return
+    const onKey = (e) => { if (e.key === 'Escape') onDismiss() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onDismiss])
+
   const act = useCallback(async (tid, disabled) => {
     setActing(tid); setConfirming(null); setErr(null)
     try {
@@ -37,7 +50,7 @@ export default function OpsDrawer({ onDismiss }) {
       // state, so reflect it directly. We deliberately do NOT re-fetch the list
       // here: the list reads kill-switch state from the broker's /health, which
       // lags the proxied write by a beat, so an immediate reload would briefly
-      // clobber the just-applied truth with a stale value. The Refresh button
+      // clobber the just-applied truth with a stale value. The Refresh chip
       // (and the next open) reconcile the full list.
       setTenants((prev) => (prev || []).map((t) => (t.tenant_id === tid ? { ...t, disabled } : t)))
     } catch (e) {
@@ -49,74 +62,100 @@ export default function OpsDrawer({ onDismiss }) {
   }, [load])
 
   return (
-    <aside className="ops-drawer" role="region" aria-label="Internal ops">
-      <div className="ops-head">
-        <span className="ops-badge">INTERNAL</span>
-        <span className="ops-title">Ops · tenants</span>
-        <button className="ops-x" onClick={load} disabled={loading} title="Refresh">
-          {loading ? 'loading' : 'refresh'}
-        </button>
-        {onDismiss && <button className="ops-x" onClick={onDismiss} title="Hide drawer">close</button>}
+    <aside className="drawer" role="region" aria-label="Internal ops">
+      <div className="drawer-head">
+        <span className="ops-badge">Internal</span>
+        <span className="drawer-title">Ops · tenants</span>
+        {onDismiss && (
+          <button className="key hot" onClick={onDismiss} aria-label="Hide drawer">Esc</button>
+        )}
       </div>
 
-      {forbidden && (
-        <div className="ops-note">ops role required — this surface needs the QA/internal role.</div>
-      )}
-      {err && !forbidden && <div className="ops-note ops-err">Couldn’t load tenants: {err}</div>}
+      <div className="drawer-body">
+        {forbidden && (
+          <div className="ops-note">ops role required — this surface needs the QA/internal role.</div>
+        )}
+        {err && !forbidden && (
+          <div className="pane-fail" role="alert">
+            <span className="pane-fail-title"><span className="dot red" />Couldn’t load tenants</span>
+            <span className="pane-fail-reason">{err}</span>
+            <button className="chip-act" onClick={load} disabled={loading}>Retry</button>
+          </div>
+        )}
 
-      {!forbidden && !err && tenants && tenants.length === 0 && (
-        <div className="ops-note">No tenants recorded yet.</div>
-      )}
+        {!forbidden && !err && !tenants && loading && (
+          <div className="skeleton-stack" aria-label="Loading tenants">
+            <div className="skeleton-row" />
+            <div className="skeleton-row" />
+            <div className="skeleton-row" />
+          </div>
+        )}
 
-      {!forbidden && !err && tenants && tenants.length > 0 && (
-        <table className="ops-table">
-          <thead>
-            <tr><th>tenant</th><th className="num">runs</th><th className="num">spend</th><th>state</th><th /></tr>
-          </thead>
-          <tbody>
-            {tenants.map((t) => {
-              const disabled = !!t.disabled
-              const isConfirming = confirming === t.tenant_id
-              const isActing = acting === t.tenant_id
-              return (
-                <tr key={t.tenant_id} className={disabled ? 'ops-row-off' : ''}>
-                  <td className="ops-tid">{t.tenant_id}</td>
-                  <td className="num">{Number(t.runs || 0).toLocaleString()}</td>
-                  <td className="num">${Number(t.usd_est || 0).toFixed(3)}</td>
-                  <td>
-                    <span className={`state ${disabled ? 'fail' : 'done'}`}>
-                      {disabled ? 'disabled' : 'active'}
-                    </span>
-                  </td>
-                  <td className="ops-act-cell">
-                    {isConfirming ? (
-                      <span className="ops-confirm">
-                        <span className="ops-confirm-q">
-                          {disabled ? 'Enable this tenant?' : 'Disable this tenant?'}
-                        </span>
-                        <button className="btn ghost ops-yes" onClick={() => act(t.tenant_id, !disabled)} disabled={isActing}>
-                          {isActing ? 'working…' : 'yes'}
-                        </button>
-                        <button className="btn ghost" onClick={() => setConfirming(null)} disabled={isActing}>cancel</button>
+        {!forbidden && !err && tenants && tenants.length === 0 && (
+          <div className="ops-note">No tenants recorded yet.</div>
+        )}
+
+        {!forbidden && !err && tenants && tenants.length > 0 && (
+          <table className="ops-table">
+            <thead>
+              <tr><th>Tenant</th><th className="num">Runs</th><th className="num">Spend</th><th>State</th><th /></tr>
+            </thead>
+            <tbody>
+              {tenants.map((t) => {
+                const disabled = !!t.disabled
+                const isConfirming = confirming === t.tenant_id
+                const isActing = acting === t.tenant_id
+                return (
+                  <tr key={t.tenant_id} className={disabled ? 'ops-row-off' : ''}>
+                    <td className="ops-tid">{t.tenant_id}</td>
+                    <td className="num">{Number(t.runs || 0).toLocaleString()}</td>
+                    <td className="num">${Number(t.usd_est || 0).toFixed(3)}</td>
+                    <td>
+                      {/* Kill-switch = deliberate hold: amber square dot, not red/fail. */}
+                      <span className={`state ${disabled ? 'quota' : 'done'}`}>
+                        {disabled ? 'Disabled' : 'Active'}
                       </span>
-                    ) : (
-                      <button
-                        className="btn ghost ops-toggle"
-                        onClick={() => setConfirming(t.tenant_id)}
-                        disabled={isActing}
-                      >
-                        {disabled ? 'enable' : 'disable'}
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      )}
+                    </td>
+                    <td className="ops-act-cell">
+                      {isConfirming ? (
+                        <span className="ops-confirm">
+                          <span className="confirm-q">
+                            {disabled ? `Enable ${t.tenant_id}?` : `Disable ${t.tenant_id}?`}
+                          </span>
+                          <button
+                            className={disabled ? 'chip-act' : 'chip-danger-confirm'}
+                            onClick={() => act(t.tenant_id, !disabled)}
+                            disabled={isActing}
+                          >
+                            {isActing ? 'Working…' : (disabled ? 'Enable' : 'Disable')}
+                          </button>
+                          <button className="chip-neutral" onClick={() => setConfirming(null)} disabled={isActing}>
+                            Keep
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          className={disabled ? 'chip-act' : 'chip-danger'}
+                          onClick={() => setConfirming(t.tenant_id)}
+                          disabled={isActing}
+                        >
+                          {disabled ? 'Enable' : 'Disable'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
 
-      <div className="ops-foot">GET /api/ops/tenants · X-Internal-Role: qa</div>
+        <button className="chip-act drawer-act" onClick={load} disabled={loading}>
+          {loading ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>
+
+      <div className="drawer-foot">GET /api/ops/tenants · X-Internal-Role: qa</div>
     </aside>
   )
 }

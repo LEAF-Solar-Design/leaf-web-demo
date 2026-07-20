@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import './popovers.css'
 
 // Claude account (CONCERN 2 — the user's Claude login). This is the SIBLING of
 // the platform identity (the Auth0 JWT / tenant chip), and NEVER the same thing
@@ -21,9 +22,24 @@ import { useEffect, useRef, useState } from 'react'
 // {linked, linked_at, kind}), never echo it, never log it.
 //
 // Calm vocabulary: a square mono trigger in the header .who cluster, a plain
-// bordered popover, word actions — no emoji, no rounded status pills, no spinner.
+// bordered popover, quiet chips, the Esc cap to close — no emoji, no rounded
+// status pills, no spinner. Unlink is destructive, so it follows D1: quiet
+// danger chip -> inline swap to "[Unlink = filled danger chip] [Keep]".
+//
+// TM1 time: relative under a day ("2 m", "2 h"), "Jul 12" after; the absolute
+// clock rides the hover title.
 function fmtWhen(iso) {
   if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  const mins = Math.round((Date.now() - d.getTime()) / 60000)
+  if (mins >= 0 && mins < 60) return `${mins} m`
+  if (mins >= 0 && mins < 1440) return `${Math.round(mins / 60)} h`
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function fmtAbs(iso) {
+  if (!iso) return undefined
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return String(iso)
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -107,7 +123,7 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
         <div className="claude-pop" role="dialog" aria-label="Claude account">
           <div className="ca-head">
             <span>Claude account</span>
-            <button className="ca-x" onClick={() => onToggle(false)}>close</button>
+            <button className="key hot" onClick={() => onToggle(false)} aria-label="Close Claude account panel">Esc</button>
           </div>
 
           {linked ? (
@@ -118,20 +134,22 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
                 {grant.kind === 'api_key'
                   ? <b>your Anthropic API key</b>
                   : <b>your Claude subscription</b>}.
-                {grant.linked_at ? <> Linked <b>{fmtWhen(grant.linked_at)}</b>.</> : null}
+                {grant.linked_at ? <> Linked <b title={fmtAbs(grant.linked_at)}>{fmtWhen(grant.linked_at)}</b>.</> : null}
               </p>
-              {error && <div className="ca-err">{error}</div>}
+              {error && (
+                <div className="field-err" role="alert"><span className="dot red" />{error}</div>
+              )}
               {!confirmUnlink ? (
-                <button className="btn ghost ca-act" onClick={() => setConfirmUnlink(true)} disabled={busy}>
+                <button className="chip-danger ca-act" onClick={() => setConfirmUnlink(true)} disabled={busy}>
                   Unlink
                 </button>
               ) : (
                 <div className="ca-confirm">
                   <span className="ca-confirm-q">Unlink this Claude account?</span>
-                  <button className="btn ghost ca-yes" onClick={onUnlink} disabled={busy}>
-                    {busy ? 'unlinking…' : 'yes, unlink'}
+                  <button className="chip-danger-confirm" onClick={onUnlink} disabled={busy}>
+                    {busy ? 'Unlinking…' : 'Unlink'}
                   </button>
-                  <button className="btn ghost" onClick={() => setConfirmUnlink(false)} disabled={busy}>cancel</button>
+                  <button className="chip-neutral" onClick={() => setConfirmUnlink(false)} disabled={busy}>Keep</button>
                 </div>
               )}
               <p className="ca-note">
@@ -169,7 +187,7 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
                     Paste an <b>Anthropic API key</b> — for org API keys — usage billed to your Anthropic
                     account at API rates.
                   </p>
-                  <label className="ca-field">
+                  <label className={`ca-field${error ? ' field-invalid' : ''}`}>
                     <span className="ca-field-k">Anthropic API key</span>
                     <input
                       type="password"
@@ -193,7 +211,7 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
                     <li>Approve the request in the browser it opens.</li>
                     <li>Paste the token it prints below.</li>
                   </ol>
-                  <label className="ca-field">
+                  <label className={`ca-field${error ? ' field-invalid' : ''}`}>
                     <span className="ca-field-k">Claude token</span>
                     <input
                       type="password"
@@ -209,9 +227,11 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
                 </>
               )}
 
-              {error && <div className="ca-err">{error}</div>}
+              {error && (
+                <div className="field-err" role="alert"><span className="dot red" />{error}</div>
+              )}
               <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim()}>
-                {busy ? 'linking…' : (isApiKey ? 'Link API key' : 'Link Claude account')}
+                {busy ? 'Linking…' : (isApiKey ? 'Link API key' : 'Link Claude account')}
               </button>
               <p className="ca-note">
                 {isApiKey

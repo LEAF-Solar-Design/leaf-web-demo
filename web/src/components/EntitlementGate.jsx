@@ -34,8 +34,13 @@ export default function EntitlementGate({ tier, entitlements, loading, mock }) {
         <span className="ent-tier">tier {tierLabel}</span>
         {known ? (
           <span className="ent-src">enforced server-side{source ? ` · ${source}` : ''}</span>
+        ) : (!mock && loading) ? (
+          <span className="ent-src dim ent-checking">
+            <span className="dot live pulse" aria-hidden="true" />
+            Checking plan
+          </span>
         ) : (
-          <span className="ent-src dim">{mock ? 'demo · not signed in' : (loading ? 'checking' : 'demo · not signed in')}</span>
+          <span className="ent-src dim">demo · not signed in</span>
         )}
       </div>
 
@@ -75,7 +80,6 @@ export function EntitlementNotice({ required, tier, message }) {
     : (required || 'this capability')
   return (
     <div className="banner quota" role="status">
-      <span className="tag amber">Plan</span>
       <div>
         <b>This action needs a higher plan.</b>{' '}
         {message || `Your ${tier || 'current'} plan doesn’t include ${need}.`}

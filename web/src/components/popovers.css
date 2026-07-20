@@ -1,0 +1,62 @@
+/* Popover/drawer patches — OpsDrawer, VersionHistory, ClaudeAccountPanel.
+   Only NEW classes (plus deterministic higher-specificity overrides of this
+   trio's legacy rules) live here; the shared vocabulary (.drawer*, .chip-*,
+   .key, .dot, .skeleton-row, resolver anatomy) is defined in styles.css.
+   NOTE: this file is bundled BEFORE styles.css (App imports resolve first),
+   so every override below must win on specificity, never on order. */
+
+/* Contract chips/keycaps rendered as <button> need the UA chrome stripped.
+   Element-qualified (0,1,1) so it beats the bare class either way; visual
+   identity (fill, color, font, padding) still comes from the class itself. */
+button.chip-act,
+button.chip-neutral,
+button.chip-danger,
+button.chip-danger-confirm,
+button.key {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  cursor: pointer;
+}
+button.chip-act:disabled,
+button.chip-neutral:disabled,
+button.chip-danger:disabled,
+button.chip-danger-confirm:disabled,
+button.key:disabled { opacity: .6; cursor: default; }
+
+/* D1 confirm question — plain foreground voice; red lives ONLY on the
+   destroying chip (.chip-danger-confirm), never on the question text. */
+.confirm-q { font-size: 11.5px; color: var(--foreground); }
+
+/* X3 whole-pane failure — centered takeover: red dot · what failed · reason
+   in quiet text · Retry chip. */
+.pane-fail {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 7px; text-align: center; padding: 26px 12px;
+}
+.pane-fail-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--foreground); }
+.pane-fail-reason { font-size: 12px; color: var(--muted); line-height: 1.5; max-width: 240px; overflow-wrap: anywhere; }
+.pane-fail .chip-act { margin-top: 3px; }
+
+/* L1 loading — static skeleton stack (rows sit where the real rows will). */
+.skeleton-stack { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+
+/* V1 validation — the failed field's border turns danger; the message below is
+   a red dot + sentence (never amber, never a toast). */
+.ca-field.field-invalid input { border-color: var(--status-danger); }
+.field-err { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--status-danger); line-height: 1.4; }
+
+/* VersionHistory rows — O2 resolver anatomy (2px accent left bar + tint on the
+   active/previewed row, transparent at rest, hairline separators). Overrides
+   the legacy filled-button .vh-row in styles.css by specificity. */
+.drawer .vh-list { gap: 0; margin-top: 4px; }
+.vh-list .vh-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  font: inherit; background: none; border: 0; border-top: 1px solid var(--border);
+  border-radius: 0; padding: 8px 8px 8px 0; cursor: pointer;
+}
+.vh-list .vh-row:hover { background: rgba(255, 255, 255, .03); }
+.vh-list .vh-row.active { background: rgba(34, 197, 94, .09); }
+.vh-list .vh-row .lbar { width: 2px; align-self: stretch; flex: 0 0 auto; }
+.vh-list .vh-row.active .lbar { background: var(--primary); border-radius: 1px; }
+.vh-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }

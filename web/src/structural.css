@@ -1,0 +1,61 @@
+/* Structural glue — SHELL layout only (SHELL DOM CONTRACT, structural lane).
+   Defines ONLY layout/positioning for .center-col / .center-scroll / .bar-dock,
+   the DT2 drawer overlay layer, and tiny flex-alignment helpers. All visual
+   (crib-contract) classes — .bar, .resolver, .strip-*, .toast, .drawer, .dot,
+   .key, .chip-* — are defined in styles.css and never here. */
+
+/* Center column: row 2 col 2 of the .app grid — scrolling content above the
+   docked command bar. position:relative so the NT2 toast anchors to it. */
+.center-col {
+  grid-row: 2;
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+main.center-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Docked SB3 block: state strips + resolver + the .bar well (crib §1). */
+.bar-dock {
+  flex: none;
+  position: relative;
+  padding: 10px 26px 14px;
+}
+.bar-dock > * + * { margin-top: 8px; }
+/* The resolver is a floating card attached ABOVE the well — absolutely
+   positioned so it never grows the docked block past its ≤10%-height budget. */
+.bar-dock > .resolver {
+  position: absolute;
+  left: 26px;
+  right: 26px;
+  bottom: calc(100% - 2px);
+  margin: 0;
+  z-index: 20;
+}
+
+/* DT2 drawer overlay layer: occupies the SAME grid cell as aside.rail (row 2
+   col 3) so the drawer slides over the events rail — top below the header,
+   bottom above the footer — and the rail behind never re-flows. */
+.drawer-layer {
+  grid-row: 2;
+  grid-column: 3;
+  position: relative;
+  z-index: 40;
+  pointer-events: none;
+  min-height: 0;
+}
+.drawer-layer > .drawer { pointer-events: auto; width: 100%; }
+
+/* Flex-alignment helpers (layout only — color/type comes from styles.css). */
+.bar-controls .bar-scope { display: inline-flex; align-items: center; gap: 6px; }
+.strip-sentence { flex: 1 1 auto; min-width: 0; }
+.foot-stat { display: inline-flex; align-items: center; gap: 6px; }
+.loading-line { display: inline-flex; align-items: center; gap: 8px; }
+.result-details-row { display: flex; justify-content: flex-end; margin-top: 8px; }
+.skeleton-stack { display: flex; flex-direction: column; gap: 8px; margin: 4px; }

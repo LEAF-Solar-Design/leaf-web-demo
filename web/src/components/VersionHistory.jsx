@@ -1,75 +1,117 @@
-// Version-history browser: a calm popover off the viewer toolbar's version note.
-// Lists the drawing's version chain (GET /api/drawings/{id}/versions) newest
-// first — each row `v{n} · {tool} · {created}` with the note, head marked.
-// Clicking a version is a READ-ONLY PREVIEW (the parent fetches that version's
-// intake and seats it in the viewer); it never mutates head. While previewing, a
-// "viewing vN of M — back to head" line restores the head intake.
+import { useEffect } from 'react'
+import './popovers.css'
+
+// Version-history browser: a DT2 right drawer (title + Esc cap header) listing
+// the drawing's version chain (GET /api/drawings/{id}/versions) newest first.
+// Rows follow the O2 resolver anatomy — 2px accent left bar + tint on the
+// active (previewed) row, Enter cap — with mono reserved for the version seq,
+// the tool slug, and the sha256 prefix (provenance). Clicking a version is a
+// READ-ONLY PREVIEW (the parent fetches that version's intake and seats it in
+// the viewer); it never mutates head. While previewing, a "Viewing vN of M —
+// back to head" strip restores the head intake. Esc (key or cap) closes.
 //
-// Stays inside the Unified Surface's calm vocabulary: no emoji, no rounded
-// status pills, no spinners — square mono rows, a static word for state.
+// TM1 time: relative under a day ("2 m", "2 h"), "Jul 12" after; the absolute
+// clock rides the row's hover title.
 
 function fmtWhen(iso) {
   if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  const mins = Math.round((Date.now() - d.getTime()) / 60000)
+  if (mins >= 0 && mins < 60) return `${mins} m`
+  if (mins >= 0 && mins < 1440) return `${Math.round(mins / 60)} h`
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function fmtAbs(iso) {
+  if (!iso) return undefined
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return String(iso)
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
 export default function VersionHistory({
-  data, error, loading, previewingVersion, onPreview, onBackToHead, onClose,
+  data, error, loading, previewingVersion, onPreview, onBackToHead, onClose, onRetry,
 }) {
   const head = data?.head
   const latest = data?.latest
   const rows = [...(data?.versions || [])].sort((a, b) => (b.v || 0) - (a.v || 0))
 
+  // Esc closes — the header cap is the affordance, the key must actually work.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   return (
-    <div className="vh-pop" role="dialog" aria-label="Version history">
-      <div className="vh-head">
-        <span>Version history{data ? ` · ${rows.length}` : ''}</span>
-        <button className="vh-x" onClick={onClose} aria-label="Close version history">close</button>
+    <div className="drawer" role="dialog" aria-label="Version history">
+      <div className="drawer-head">
+        <span className="drawer-title">Version history{data ? ` · ${rows.length}` : ''}</span>
+        <button className="key hot" onClick={onClose} aria-label="Close version history">Esc</button>
       </div>
 
-      {previewingVersion != null && (
-        <div className="vh-previewing">
-          <span>viewing v{previewingVersion}{latest != null ? ` of ${latest}` : ''} — read-only preview</span>
-          <button className="btn ghost vh-back" onClick={onBackToHead}>Back to head</button>
-        </div>
-      )}
+      <div className="drawer-body">
+        {previewingVersion != null && (
+          <div className="vh-previewing">
+            <span>Viewing v{previewingVersion}{latest != null ? ` of ${latest}` : ''} — read-only preview</span>
+            <button className="chip-act" onClick={onBackToHead}>Back to head</button>
+          </div>
+        )}
 
-      {loading && <div className="vh-note">Loading history…</div>}
-      {error && <div className="vh-note vh-err">History unavailable: {error}</div>}
+        {loading && (
+          <div className="skeleton-stack" aria-label="Loading history">
+            <div className="skeleton-row" />
+            <div className="skeleton-row" />
+            <div className="skeleton-row" />
+          </div>
+        )}
 
-      {!loading && !error && rows.length === 0 && (
-        <div className="vh-note">No versions yet.</div>
-      )}
+        {error && !loading && (
+          <div className="pane-fail" role="alert">
+            <span className="pane-fail-title"><span className="dot red" />Couldn’t load versions</span>
+            <span className="pane-fail-reason">{error}</span>
+            {onRetry && <button className="chip-act" onClick={onRetry}>Retry</button>}
+          </div>
+        )}
 
-      {!loading && !error && rows.length > 0 && (
-        <ul className="vh-list">
-          {rows.map((r) => {
-            const isHead = r.v === head
-            const isPreview = r.v === previewingVersion
-            return (
-              <li key={r.v}>
-                <button
-                  className={`vh-row ${isPreview ? 'active' : ''}`}
-                  onClick={() => onPreview(r.v)}
-                  title={r.sha256 ? `sha256 ${String(r.sha256).slice(0, 12)}…` : undefined}
-                >
-                  <div className="vh-row-top">
-                    <span className="vh-v">v{r.v}</span>
-                    {r.tool && <span className="vh-tool">{r.tool}</span>}
-                    {isHead && <span className="vh-mark">head</span>}
-                  </div>
-                  <div className="vh-row-sub">
-                    {r.note && <span className="vh-note-txt">{r.note}</span>}
-                    <span className="vh-when">{fmtWhen(r.created)}</span>
-                  </div>
-                </button>
-              </li>
-            )
-          })}
-        </ul>
-      )}
+        {!loading && !error && rows.length === 0 && (
+          <div className="vh-note">No versions yet.</div>
+        )}
+
+        {!loading && !error && rows.length > 0 && (
+          <ul className="vh-list">
+            {rows.map((r) => {
+              const isHead = r.v === head
+              const isPreview = r.v === previewingVersion
+              return (
+                <li key={r.v}>
+                  <button
+                    className={`vh-row${isPreview ? ' active' : ''}`}
+                    onClick={() => onPreview(r.v)}
+                    title={fmtAbs(r.created)}
+                  >
+                    <span className="lbar" />
+                    <span className="vh-main">
+                      <span className="vh-row-top">
+                        <span className="vh-v">v{r.v}</span>
+                        {r.tool && <span className="vh-tool">{r.tool}</span>}
+                        {isHead && <span className="vh-mark">head</span>}
+                      </span>
+                      <span className="vh-row-sub">
+                        {r.note && <span className="vh-note-txt">{r.note}</span>}
+                        {r.sha256 && <span className="drawer-mono">{String(r.sha256).slice(0, 12)}</span>}
+                        <span className="vh-when">{fmtWhen(r.created)}</span>
+                      </span>
+                    </span>
+                    {isPreview && <span className="key hot">Enter</span>}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
     </div>
   )
 }
