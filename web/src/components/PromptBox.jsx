@@ -13,8 +13,15 @@
 // dashed accent with "Drop manifest to ingest — runs sandboxed". No ingest
 // path exists in src/api.js, so a drop surfaces the honest X1-style red strip
 // (never a silent ignore).
+//
+// Slash commands: a leading "/" lists the runnable tool catalog as an O2
+// resolver menu above the well (same anatomy as the route resolver), filtered
+// live by the text after the slash — ↑/↓ move, Tab completes the name into the
+// input, Enter completes AND dispatches (the route decision strip still asks
+// for confirmation — paid actions never auto-execute). Esc closes just the
+// menu; a space after the tool name closes it too (args mode).
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
@@ -39,6 +46,7 @@ function laneDotClass(lane, hit) {
 export default function PromptBox({
   value, onChange, onDispatch, routing, hintLane, projectName, inputRef, routeActive,
   onOpenAuthor,
+  tools = [],
 }) {
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
@@ -48,8 +56,65 @@ export default function PromptBox({
   const dragDepth = useRef(0) // dragenter/leave pair counter (children re-fire them)
   const rootRef = useRef(null)
   const scopeMenu = useExit(scopeOpen) // 180 ms M1 exit fade
+  const [menuIdx, setMenuIdx] = useState(0)
+  const [menuDismissed, setMenuDismissed] = useState(false)
+
+  // "/..." with no space yet = completing a tool name; a space after the name
+  // means the user moved on to args, so the menu stands down.
+  const afterSlash = value.startsWith('/') ? value.slice(1) : null
+  const completing = afterSlash != null && !/\s/.test(afterSlash)
+
+  // Name-prefix matches rank first (the Tab target reads left-to-right), then
+  // name/description substring matches — case-insensitive, like Claude's picker.
+  const matches = useMemo(() => {
+    if (!completing) return []
+    const q = afterSlash.toLowerCase()
+    const pre = []
+    const sub = []
+    for (const t of tools) {
+      const name = (t.name || '').toLowerCase()
+      if (name.startsWith(q)) pre.push(t)
+      else if (name.includes(q) || (t.description || '').toLowerCase().includes(q)) sub.push(t)
+    }
+    return [...pre, ...sub]
+  }, [completing, afterSlash, tools])
+
+  // While a route decision or the scope resolver is showing, that surface owns
+  // the keys — the menu stands down entirely (typing clears the route App-side,
+  // which brings the menu straight back).
+  const menuOpen = completing && !menuDismissed && !routeActive && !scopeOpen
+
+  // Any edit re-arms a dismissed menu and re-anchors the highlight.
+  useEffect(() => { setMenuDismissed(false); setMenuIdx(0) }, [value])
+  const idx = Math.min(menuIdx, Math.max(0, matches.length - 1))
+
+  // Tab: complete the name into the input (trailing space closes the menu and
+  // starts args mode). Enter: complete and hand off to dispatch in one act.
+  const complete = (t) => onChange(`/${t.name} `)
+  const pick = (t) => {
+    onChange(`/${t.name} `)
+    onDispatch(`/${t.name}`)
+  }
 
   const onKeyDown = (e) => {
+    if (menuOpen && !e.isComposing) { // IME candidate navigation keeps its keys
+      if (e.key === 'ArrowDown' && matches.length > 0) {
+        e.preventDefault(); setMenuIdx(Math.min(idx + 1, matches.length - 1)); return
+      }
+      if (e.key === 'ArrowUp' && matches.length > 0) {
+        e.preventDefault(); setMenuIdx(Math.max(idx - 1, 0)); return
+      }
+      if (e.key === 'Tab' && matches[idx]) {
+        e.preventDefault(); complete(matches[idx]); return
+      }
+      if (e.key === 'Escape') {
+        // closes ONLY the menu — the global Esc ladder must not also fire
+        e.preventDefault(); e.stopPropagation(); setMenuDismissed(true); return
+      }
+      if (e.key === 'Enter' && matches[idx]) {
+        e.preventDefault(); pick(matches[idx]); return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { // isComposing: IME confirm-Enter must not dispatch
       if (routeActive || scopeOpen) return // the resolver / decision strip owns Enter
       e.preventDefault()
@@ -128,6 +193,39 @@ export default function PromptBox({
         {dragging && (
           <div className="bar-drop-hint" aria-hidden="true">Drop manifest to ingest — runs sandboxed</div>
         )}
+        {menuOpen && (
+          <div className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
+            <div className="resolver-header">
+              {matches.length > 0
+                ? <>Tools · Tab completes · Enter picks — you still confirm before it runs</>
+                : <>No tool matches “/{afterSlash}” — keep typing, or Esc to close</>}
+            </div>
+            {matches.map((t, i) => {
+              const isWrite = (t.capabilities || []).includes('drawing.write')
+              return (
+                <div
+                  key={t.name}
+                  id={`slash-opt-${i}`}
+                  className={`resolver-row ${i === idx ? 'active' : ''}`}
+                  role="option"
+                  aria-selected={i === idx}
+                  onMouseEnter={() => setMenuIdx(i)}
+                  onMouseDown={(e) => e.preventDefault()} // keep the input focused
+                  onClick={() => pick(t)}
+                >
+                  <span className="lbar" aria-hidden="true" />
+                  <span className={isWrite ? 'dot square' : 'dot'} aria-hidden="true" />
+                  <span className="label">
+                    <span className="route-tool">/{t.name}</span>
+                    {t.description && <span className="dim"> · {t.description}</span>}
+                  </span>
+                  <span className="count">{isWrite ? 'write' : 'read'}</span>
+                  {i === idx && <span className="key hot">Tab</span>}
+                </div>
+              )
+            })}
+          </div>
+        )}
         <div className="bar-input">
           <span className="bar-caret" aria-hidden="true">›</span>
           <input
@@ -137,9 +235,14 @@ export default function PromptBox({
             onKeyDown={onKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            placeholder="Find, act, or build…"
+            placeholder="Find, act, or build… ( / for tools)"
             spellCheck={false}
             aria-label="Command bar"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={menuOpen}
+            aria-controls={menuOpen ? 'slash-menu-listbox' : undefined}
+            aria-activedescendant={menuOpen && matches[idx] ? `slash-opt-${idx}` : undefined}
           />
         </div>
         <div className="bar-controls">

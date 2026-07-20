@@ -185,7 +185,9 @@ export default function RoutePanel({
       <div className="resolver-header">
         {toolObj
           ? <>Run · best guess {conf}% match</>
-          : <>“{route.tool}” is live-only — not in this catalog. Pick an alternative:</>}
+          : route.slash
+            ? <>“/{route.tool}” isn’t a tool in this catalog. Pick an alternative:</>
+            : <>“{route.tool}” is live-only — not in this catalog. Pick an alternative:</>}
       </div>
       {rows.map((row, i) => (
         <div
