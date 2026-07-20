@@ -17,11 +17,6 @@ function defaultsOf(schema) {
   return out
 }
 
-function StubFlag({ route }) {
-  if (!route.stub) return null
-  return <span className="stub-flag">local router stub</span>
-}
-
 // Calm inline parameter summary for the decision strip ("layer roofline · n 4").
 function paramsSummary(params) {
   const entries = Object.entries(params || {})
@@ -116,7 +111,7 @@ export default function RoutePanel({
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           Build — <span className="route-title">author a new capability</span>. Your description is
-          prefilled in “Author a tool”. <StubFlag route={route} />
+          prefilled in “Author a tool”.
         </span>
         <button type="button" className="chip-act" onClick={onOpenAuthor}>Open author flow</button>
         <span className="key hot">Enter</span>
@@ -133,7 +128,7 @@ export default function RoutePanel({
         <span className="strip-sentence">
           <span className="route-title">Solve lane</span> — string / combiner / route jobs run on
           the cloud solver, which is not connected in this demo. Nothing was
-          executed. <StubFlag route={route} />
+          executed.
         </span>
         <span className="key">Esc</span>
       </div>
@@ -159,7 +154,7 @@ export default function RoutePanel({
                 : isWrite
                   ? 'creates a new version — you confirm before it runs.'
                   : 'you confirm before it runs.'}
-          </span> <StubFlag route={route} />
+          </span>
         </span>
         <button
           type="button"
@@ -183,7 +178,6 @@ export default function RoutePanel({
         {toolObj
           ? <>Run · best guess {conf}% match</>
           : <>“{route.tool}” is live-only — not in this catalog. Pick an alternative:</>}
-        {' '}<StubFlag route={route} />
       </div>
       {rows.map((row, i) => (
         <div

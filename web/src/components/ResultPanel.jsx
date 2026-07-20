@@ -173,7 +173,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry }) {
               {result.overlay.highlight_handles?.length > 0 && (
                 <div className="ov-row">
                   <span className="ov-dot hl" />
-                  {result.overlay.highlight_handles.length.toLocaleString()} panels highlighted in the viewer
+                  {result.overlay.highlight_handles.length.toLocaleString()} panel{result.overlay.highlight_handles.length === 1 ? '' : 's'} highlighted in the viewer
                 </div>
               )}
               {result.overlay.markers?.length > 0 && (
@@ -185,7 +185,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry }) {
                 </div>
               )}
               {result.overlay.polylines?.length > 0 && (
-                <div className="ov-row"><span className="ov-dot ov" />{result.overlay.polylines.length} overlay shapes</div>
+                <div className="ov-row"><span className="ov-dot ov" />{result.overlay.polylines.length} overlay shape{result.overlay.polylines.length === 1 ? '' : 's'}</div>
               )}
             </div>
           )}

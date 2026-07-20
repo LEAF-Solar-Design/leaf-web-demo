@@ -386,8 +386,6 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .route-alt:hover { background: rgba(255, 255, 255, .03); }
 .route-alt .an { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
 .route-alt .ad { font-size: 11.5px; color: var(--muted); }
-.stub-flag { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--status-warning); }
-.stub-flag::before { content: ''; width: 6px; height: 6px; border-radius: 1.5px; background: var(--status-warning); flex: 0 0 auto; }
 
 /* --- banner (NT2 ongoing condition): docked strip under the affected pane's
    header — amber square dot + sentence (lead word tinted) + one quiet action;
@@ -768,7 +766,51 @@ footer .warn-txt { color: var(--status-warning); }
 }
 @media (max-width: 980px) {
   .app { grid-template-columns: 1fr; grid-template-rows: auto auto auto auto auto; }
+  /* grid items default to min-width:auto (never shrinking below their
+     content's min-content size) — a single wide child would otherwise force
+     the collapsed 1fr column, and the whole .app grid, past the viewport. */
+  .app > * { min-width: 0; }
   aside.nav, aside.rail { border: 0; border-bottom: 1px solid var(--border); }
+}
+/* ---------------- responsive: phone widths (390px target) ---------------- */
+@media (max-width: 430px) {
+  /* SB3 floating bar: the desktop 26px insets + 700px max-width left no room
+     at 390px — Dispatch was landing at x≈523, off-canvas. Shrink insets and
+     drop the max-width; let the well's controls row wrap so Dispatch + the
+     run/solve/build scope chips all stay on-screen instead of overflowing
+     past the right edge. */
+  .bar-dock {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    max-width: none;
+  }
+  .bar-controls {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  /* main content: desktop's 26px side padding alone ate 52px of a 390px
+     viewport; taller bottom clearance covers the now-(possibly)-two-row bar. */
+  .center-scroll {
+    padding: 16px 12px 170px;
+  }
+
+  /* header / footer already wrap (flex-wrap set elsewhere) — tighten the gap
+     and edge padding so a wrapped row can't itself force horizontal scroll. */
+  header.top { gap: 8px; padding: 8px 10px; }
+  footer.foot-bar { gap: 10px; padding: 6px 10px; }
+
+  /* tables / code blocks: table auto-layout can force column widths past a
+     100% box (a well-known CSS quirk — width:100% doesn't cap min-content
+     column widths), which was pushing the whole page wider. Scroll INSIDE
+     their own box instead of widening it. */
+  table.counts, table.kv, .ops-table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+  .code { max-width: 100%; }
 }
 /* reduced motion: freeze, never hide (M1) */
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

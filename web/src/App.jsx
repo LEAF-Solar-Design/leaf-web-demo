@@ -1040,7 +1040,7 @@ export default function App() {
       `entitlement tier ${gateTier}`,
     ]
     if (!mock && usage) {
-      rows.push(`spend $${Number(usage.today?.usd_est || 0).toFixed(3)} today · ${usage.today?.runs || 0} runs`)
+      rows.push(`spend $${Number(usage.today?.usd_est || 0).toFixed(3)} today · ${usage.today?.runs || 0} run${(usage.today?.runs || 0) === 1 ? '' : 's'}`)
       if (usage.cap?.enabled && typeof usage.cap?.remaining === 'number') {
         rows.push(`cap $${Number(usage.cap.remaining).toFixed(2)} left`)
       }
@@ -1050,7 +1050,7 @@ export default function App() {
       title: 'Session · provenance',
       rows,
       action: { label: 'Refresh', onClick: () => { loadUsage(); loadHealth() } },
-      foot: 'Identity and spend, demoted from the header.',
+      foot: 'Your account and usage.',
     })
   }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth])
 
@@ -1302,7 +1302,6 @@ export default function App() {
         <div className="fam-title">
           Catalog · {catalog.families.length} famil{catalog.families.length === 1 ? 'y' : 'ies'} · {capCount} caps
           {catalog.source === 'flat-fallback' ? ' · flat' : ''}
-          {catalog.source === 'mock' ? ' · stub' : ''}
         </div>
         {catalogErr && (
           <>
