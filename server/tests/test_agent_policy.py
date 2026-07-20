@@ -151,6 +151,37 @@ def test_security_bool_refuses_unparseable_values(tmp_path):
             agent_policy.load_policy(_write(tmp_path, raw))
 
 
+def test_explicit_null_security_flag_never_resolves_permissive(tmp_path):
+    """`null` is a value the operator WROTE, carrying no meaning — distinct from
+    an omitted field. dict.get() collapses the two, so a null flag used to take
+    the permissive default: `enabled: null` read as True, `tenant_tightenable:
+    null` read as loosenable, and `agent_disabled: null` read as NOT killed."""
+    for flag, default_if_absent in (("enabled", True), ("tenant_tightenable", True)):
+        raw = _shipped_raw()
+        raw["actions"]["run_read_tool"][flag] = None
+        with pytest.raises(PolicyError, match="null"):
+            agent_policy.load_policy(_write(tmp_path, raw))
+        # ...while OMITTING it still takes the documented default
+        raw2 = _shipped_raw()
+        raw2["actions"]["run_read_tool"].pop(flag, None)
+        pol = agent_policy.load_policy(_write(tmp_path, raw2))
+        assert getattr(pol.actions["run_read_tool"], flag) is default_if_absent
+
+
+def test_null_kill_flag_fails_closed_but_absent_one_does_not(tmp_path, monkeypatch):
+    """The tenant kill flag is the sharpest case: an explicit null must NOT read
+    as "not killed". It fails closed to disabled; an omitted flag does not."""
+    p = tmp_path / "agent_tenants.json"
+    monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(p))
+
+    p.write_text('{"t-a": {"agent_disabled": null}}', encoding="utf-8")
+    assert agent_policy.load_tenant_state("t-a")["agent_disabled"] is True
+
+    # an entry that only carries an overlay is NOT a killed tenant
+    p.write_text('{"t-a": {"overlay": {}}}', encoding="utf-8")
+    assert agent_policy.load_tenant_state("t-a")["agent_disabled"] is False
+
+
 def test_security_bool_quoted_false_is_false_not_truthy(tmp_path):
     """bool("false") is True — the parser must NOT coerce by truthiness."""
     raw = _shipped_raw()

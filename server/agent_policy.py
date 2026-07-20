@@ -66,6 +66,19 @@ class PolicyError(ValueError):
     """Raised when the agent policy file is malformed or violates schema."""
 
 
+class _Missing:
+    """Sentinel: the field was ABSENT, as distinct from present-and-null.
+    `dict.get()` collapses those two, which for a security flag is the
+    difference between "operator declined to override" and "operator wrote
+    something meaningless" — only the first may take a permissive default."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "<MISSING>"
+
+
+MISSING = _Missing()
+
+
 _TRUE_TOKENS = frozenset({"true", "yes", "on", "1"})
 _FALSE_TOKENS = frozenset({"false", "no", "off", "0"})
 
@@ -79,9 +92,22 @@ def security_bool(value: Any, *, field: str, default: bool = False) -> bool:
     Anything else raises rather than defaulting, because for a security flag
     "I could not tell what the operator meant" must never resolve to the
     permissive answer.
+
+    An ABSENT field (pass `MISSING`) takes the default — that is the operator
+    declining to override. An explicitly null one raises: `null` is a value the
+    operator wrote, it carries no meaning, and silently reading it as the
+    default is exactly the ambiguity-resolves-permissive failure this function
+    exists to prevent (`{"agent_disabled": null}` would otherwise read as a
+    tenant that is NOT killed).
     """
-    if value is None:
+    if value is MISSING:
         return default
+    if value is None:
+        raise PolicyError(
+            f"{field}: must be a boolean (true/false); got null. An explicitly "
+            f"null security flag is ambiguous — omit the field to take the "
+            f"default ({default}), or write true/false unquoted."
+        )
     if isinstance(value, bool):
         return value
     if isinstance(value, int) and value in (0, 1):  # bool already handled above
@@ -402,9 +428,11 @@ def _parse_action(name: str, record: Any) -> AgentAction:
         rate_limit_category=rlc,
         timeout_s=timeout_s,
         audit_extra=tuple(audit_extra_raw),
-        enabled=security_bool(record.get("enabled"), field=f"actions.{name}.enabled", default=True),
+        enabled=security_bool(record.get("enabled", MISSING),
+                              field=f"actions.{name}.enabled", default=True),
         tenant_tightenable=security_bool(
-            record.get("tenant_tightenable"), field=f"actions.{name}.tenant_tightenable", default=True),
+            record.get("tenant_tightenable", MISSING),
+            field=f"actions.{name}.tenant_tightenable", default=True),
         cost_class=cost_class,
     )
 
@@ -551,7 +579,9 @@ def load_tenant_state(tenant_id: str) -> Dict[str, Any]:
             f"{type(entry).__name__} — a malformed entry must not silently drop "
             f"this tenant's kill flag and overlay")
     try:
-        disabled = security_bool(entry.get("agent_disabled"),
+        # MISSING (field omitted) legitimately means "not killed"; an explicit
+        # null is unparseable and lands in the fail-CLOSED branch below.
+        disabled = security_bool(entry.get("agent_disabled", MISSING),
                                  field=f"agent_tenants.{tenant_id}.agent_disabled")
     except PolicyError:
         disabled = True  # an unparseable KILL flag fails CLOSED, never open
