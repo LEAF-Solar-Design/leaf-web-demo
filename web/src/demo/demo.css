@@ -1,0 +1,187 @@
+/* M5 — guided-tour overlay.
+   Uses ONLY the existing dark-emerald tokens from styles.css (--card, --border,
+   --primary, --muted, …). No new color system, no new fonts. */
+
+.tour-root {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+}
+
+/* Dimmer: everything outside the spotlight rectangle reads back. The spotlight
+   itself is a transparent hole punched with a huge outline shadow. */
+.tour-dim {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 6, 0.62);
+  pointer-events: auto;
+  animation: tour-fade 220ms ease both;
+}
+
+.tour-spot {
+  position: fixed;
+  border-radius: 12px;
+  border: 1px solid var(--primary);
+  box-shadow: 0 0 0 9999px rgba(4, 8, 6, 0.62), 0 0 0 4px var(--accent-tint);
+  pointer-events: none;
+  transition: top 260ms ease, left 260ms ease, width 260ms ease, height 260ms ease;
+}
+
+/* Persistent banner strip — same words as the standing demo banner so leaving
+   the tour is never a mystery. */
+.tour-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  pointer-events: auto;
+  font-family: var(--font-sans);
+}
+
+.tour-banner-title {
+  font-weight: 600;
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.tour-banner-sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tour-banner-exit {
+  margin-left: auto;
+}
+
+/* Coach-mark card */
+.tour-card {
+  position: fixed;
+  width: min(380px, calc(100vw - 32px));
+  background: var(--card-grad, var(--card));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  pointer-events: auto;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  font-family: var(--font-sans);
+  animation: tour-rise 240ms ease both;
+}
+
+.tour-card-step {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted-2);
+  text-transform: uppercase;
+}
+
+.tour-card-title {
+  margin: 6px 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.tour-card-body {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.tour-card-prompt {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bar-well);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--foreground);
+  word-break: break-word;
+}
+
+.tour-card-prompt .tour-caret {
+  display: inline-block;
+  width: 7px;
+  color: var(--primary);
+  animation: tour-blink 1s steps(1) infinite;
+}
+
+.tour-card-wait {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--status-warning);
+}
+
+.tour-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.tour-card-actions .tour-spacer { margin-left: auto; }
+
+.tour-btn {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bar-chip);
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.tour-btn:hover:not(:disabled) { border-color: var(--primary); }
+
+.tour-btn:disabled { opacity: 0.45; cursor: default; }
+
+.tour-btn.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.tour-btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
+
+.tour-btn.quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.tour-dots {
+  display: flex;
+  gap: 5px;
+  margin-top: 12px;
+}
+
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.tour-dot.on { background: var(--primary); }
+
+@keyframes tour-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes tour-rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
+@keyframes tour-blink { 50% { opacity: 0 } }
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-dim, .tour-card, .tour-spot, .tour-card-prompt .tour-caret {
+    animation: none;
+    transition: none;
+  }
+}

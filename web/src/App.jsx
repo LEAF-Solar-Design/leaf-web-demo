@@ -35,6 +35,8 @@ import {
   getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant, getEntitlements,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
+import { shouldStartTour } from './demo/tourEntry.js'
+import DemoTour from './demo/DemoTour.jsx'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
@@ -248,6 +250,12 @@ export default function App() {
   const [grantErr, setGrantErr] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
   const [bannerDismissed, setBannerDismissed] = useState(false) // "Exit — explore freely" hides the demo banner (stays in mock)
+  // M5 guided tour: opened ONLY by the ?demo=tour (or ?demo=1) deep-link, and
+  // only while mock is active. Exiting clears the tour and leaves you in mock.
+  const [tourOn, setTourOn] = useState(() => {
+    try { return shouldStartTour(typeof window !== 'undefined' ? window.location.search : '') } catch { return false }
+  })
+  const [tourLanded, setTourLanded] = useState(true) // did the current beat's real effect land?
 
   const viewerRef = useRef(null)
   const authorSectionRef = useRef(null)
@@ -1017,8 +1025,11 @@ export default function App() {
     try { return matchPrompt(s, tools).lane } catch { return null }
   }, [prompt, tools])
 
-  const onDispatch = useCallback(async () => {
-    const text = prompt.trim()
+  // `override` is an optional explicit string (the guided tour's canned prompt).
+  // Click handlers pass an event object, which is NOT a string, so the normal
+  // "dispatch what's in the bar" path is untouched.
+  const onDispatch = useCallback(async (override) => {
+    const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
     setRouting(true); setRoute(null); setRouteErr(null)
     try {
@@ -1031,6 +1042,7 @@ export default function App() {
         // bring the (left-rail) author flow into view
         setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
       }
+      return r
     } catch (e) {
       // A failed routing call is a FAILED act — it rides the red strip above
       // the well (with Retry + its key), never a fake confidence-0 route card.
@@ -1061,6 +1073,42 @@ export default function App() {
   const onOpenAuthor = useCallback(() => {
     setAuthorOpen(true)
     setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+  }, [])
+
+  // --- M5 guided tour: canned prompts ride the REAL handlers ----------------
+  // The tour types its beat into the real command bar, dispatches it through the
+  // real nl-prompt router (onDispatch), and — for a read-only run beat — runs it
+  // through the real onRun path. NOTHING here fabricates a result: the numbers
+  // on screen come out of the same mock engine a human would have driven.
+  // Write beats (the versioned delete) deliberately stop at the confirm card;
+  // paid/destructive actions never auto-execute, tour or not.
+  const onCannedPrompt = useCallback(async (text, step) => {
+    if (!text) return
+    setTourLanded(false)
+    // self-type into the real bar so the audience sees the sentence being written
+    setRoute(null); setRouteErr(null)
+    for (let i = 1; i <= text.length; i += 1) {
+      setPrompt(text.slice(0, i))
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((res) => setTimeout(res, 22))
+    }
+    try {
+      const r = await onDispatch(text)
+      if (r && r.lane === 'run' && step?.action === 'run') {
+        const toolObj = tools.find((t) => t.name === r.tool)
+        const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
+        if (toolObj && !isWrite) await onRun(toolObj, r.params || {})
+      }
+    } finally {
+      setTourLanded(true)
+    }
+  }, [onDispatch, onRun, tools])
+
+  const onTourExit = useCallback(() => {
+    // Leaving the tour keeps you exactly where you are — in mock, on the same
+    // drawing, with your last real result on screen.
+    setTourOn(false)
+    setTourLanded(true)
   }, [])
 
   // Click a terminal job in the rail -> open its DT2 provenance drawer (over
@@ -1472,7 +1520,8 @@ export default function App() {
 
       <div className="center-col">
         <main className="center-scroll">
-        {mock && !bannerDismissed && <DemoBanner onExit={() => setBannerDismissed(true)} />}
+        {/* the tour carries its own persistent banner — don't stack two */}
+        {mock && !bannerDismissed && !tourOn && <DemoBanner onExit={() => setBannerDismissed(true)} />}
         {signedOut && authConfigured && <SignedOutGate onDemo={() => setMock(true)} onSignIn={login} />}
         <div className="kicker">Home · one prompt, three lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
@@ -1784,6 +1833,17 @@ export default function App() {
       {/* DT2 drawer: fixed over the events rail (row 2, col 3) — the rail
           behind never re-flows. Esc (global ladder) or the header cap closes. */}
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
+
+      {/* M5: the ?demo=tour walkthrough. Mock-only — the tour drives real mock
+          handlers, so it must never point at a live/paid backend. */}
+      {mock && tourOn && (
+        <DemoTour
+          onCannedPrompt={onCannedPrompt}
+          onExit={onTourExit}
+          landed={tourLanded && !running && !routing}
+          busy={running || routing}
+        />
+      )}
     </div>
   )
 }
