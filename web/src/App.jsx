@@ -1095,6 +1095,26 @@ export default function App() {
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, onDispatch, onRetry])
 
+  // Click-to-fall-through (operator rule): a click anywhere on the surface that
+  // doesn't otherwise take an action activates the prompt bar. Real
+  // interactions (buttons, links, fields, the viewer canvas — a click there
+  // selects an entity) and popover/drawer interiors keep their clicks, and an
+  // in-flight text selection is never stolen from.
+  useEffect(() => {
+    const onClick = (e) => {
+      const t = e.target
+      if (!(t instanceof Element)) return
+      if (t.closest('button, a, input, textarea, select, label, summary, canvas, '
+        + '[role="button"], [contenteditable="true"], '
+        + '.drawer, .vh-pop, .proj-menu, .claude-pop, .ops-drawer')) return
+      const sel = window.getSelection && window.getSelection()
+      if (sel && sel.toString()) return
+      barInputRef.current?.focus()
+    }
+    window.addEventListener('click', onClick)
+    return () => window.removeEventListener('click', onClick)
+  }, [])
+
   const toggleLayer = useCallback((layer) => {
     setVisibleLayers((v) => ({ ...v, [layer]: !v[layer] }))
   }, [])
