@@ -1054,7 +1054,8 @@ export default function App() {
 
   // Global key ladder: ⌘K summons the bar; Esc closes the topmost surface
   // (drawer > history > route/failed strip > running run > selection); R
-  // retries the visible failed strip (outside text inputs).
+  // retries the visible failed strip (outside text inputs); any OTHER bare
+  // printable keystroke falls into the prompt bar (type-to-fall-through).
   useEffect(() => {
     const onKey = (e) => {
       const tag = ((e.target && e.target.tagName) || '').toLowerCase()
@@ -1077,6 +1078,16 @@ export default function App() {
         e.preventDefault()
         if (routeErr) onDispatch()
         else onRetry()
+        return
+      }
+      // Type-to-fall-through (operator rule): a bare printable keystroke on the
+      // surface always falls into the prompt bar. Focus BEFORE the default
+      // action so the character itself lands in the input; visible mnemonic
+      // rungs above (⌘K, Esc, R-on-failed-strip) keep priority. Never steals
+      // from an editable element.
+      const editable = typing || tag === 'select' || (e.target && e.target.isContentEditable)
+      if (!editable && !e.metaKey && !e.ctrlKey && !e.altKey && e.key.length === 1) {
+        barInputRef.current?.focus()
       }
     }
     window.addEventListener('keydown', onKey)
