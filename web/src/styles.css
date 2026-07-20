@@ -204,6 +204,7 @@ aside.nav {
   border-radius: 10px;
   background: var(--card-grad);
   overflow: hidden;
+  flex: 0 0 auto; /* never compress in the nav's flex column — the NAV scrolls instead */
 }
 .section > .section-head {
   width: 100%;
@@ -1297,7 +1298,9 @@ footer .warn-txt { color: var(--status-warning); }
 
 /* ---------------- NT2 toast (completed event) ---------------- */
 .toast {
-  position: absolute; left: 50%; transform: translateX(-50%);
+  /* centered via inset+margin, NOT translateX: the m1 enter animation owns
+     `transform` and was stomping a translateX(-50%) into off-center */
+  position: absolute; left: 0; right: 0; margin: 0 auto; width: fit-content;
   bottom: 132px; z-index: 80; /* clears the floating bar island */
   display: flex; align-items: center; gap: 9px;
   font: 500 12px var(--sans); color: var(--muted);

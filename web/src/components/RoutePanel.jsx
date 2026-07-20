@@ -7,7 +7,7 @@
 // Enter confirms; Esc (App's global key ladder) dismisses the route. The user
 // still confirms before anything runs — paid actions never auto-execute.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 function defaultsOf(schema) {
   const out = {}
@@ -34,6 +34,10 @@ export default function RoutePanel({
   onRun, onPickAlternative, onOpenAuthor, onDismiss,
 }) {
   const [activeIdx, setActiveIdx] = useState(0)
+  // Enter arms 350ms AFTER the route mounts: the keypress that dispatched the
+  // prompt (or its OS key-repeat) must never also confirm the run — one Enter,
+  // one act. A deliberate second Enter lands after the cooldown.
+  const enterArmedAtRef = useRef(0)
 
   const toolObj = useMemo(
     () => (route && route.lane === 'run' ? tools.find((t) => t.name === route.tool) || null : null),
@@ -67,7 +71,7 @@ export default function RoutePanel({
     return out
   }, [route, confident, toolObj, tools])
 
-  useEffect(() => { setActiveIdx(0) }, [route])
+  useEffect(() => { setActiveIdx(0); enterArmedAtRef.current = performance.now() + 350 }, [route])
 
   // Enter / arrow keys while a decision surface is up (Esc lives in App's
   // global ladder). Enter on a focused button/link is left to that control.
@@ -81,6 +85,7 @@ export default function RoutePanel({
         e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)); return
       }
       if (e.key !== 'Enter') return
+      if (performance.now() < enterArmedAtRef.current) return // dispatch keypress cooling down
       if (e.target && /^(button|a)$/i.test(e.target.tagName || '')) return
       e.preventDefault()
       if (route.lane === 'build') { onOpenAuthor(); return }

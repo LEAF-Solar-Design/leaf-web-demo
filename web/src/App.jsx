@@ -924,7 +924,7 @@ export default function App() {
 
   const onDispatch = useCallback(async () => {
     const text = prompt.trim()
-    if (!text || routing) return
+    if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
     setRouting(true); setRoute(null); setRouteErr(null)
     try {
       const r = await nlPrompt(mock, text, tools)
