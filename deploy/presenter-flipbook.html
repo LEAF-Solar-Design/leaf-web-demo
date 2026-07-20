@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leaf demo flipbook - offline presenter backup</title>
+<style>
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ffffff;
+    --card: #18181b;
+    --card-grad: linear-gradient(180deg, #17171a, #111113);
+    --border: #27272a;
+    --primary: #22c55e;
+    --primary-hover: #4ade80;
+    --on-accent: #04140a;
+    --muted: #a1a1aa;
+    --muted-2: #71717a;
+    --rail: #0c0c0e;
+    --accent-tint: rgba(34, 197, 94, .08);
+    --hairline: #1c1c20;
+    --font-sans: 'Inter Tight', 'Inter', system-ui, sans-serif;
+    --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--background); color: var(--foreground);
+    font-family: var(--font-sans);
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--rail);
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--primary); }
+  .brand { font-weight: 600; letter-spacing: .01em; }
+  .tagline { color: var(--muted-2); font-size: 13px; margin-left: auto; }
+  main { flex: 1; display: flex; align-items: stretch; justify-content: center; padding: 28px 22px; }
+  .slide {
+    display: none; width: 100%; max-width: 1080px;
+    grid-template-columns: 1.05fr .95fr; gap: 26px; align-items: start;
+  }
+  .slide.on { display: grid; }
+  @media (max-width: 860px) { .slide.on { grid-template-columns: 1fr; } }
+  .beat { color: var(--primary); font-size: 13px; letter-spacing: .12em; text-transform: uppercase; font-weight: 600; }
+  h1 { font-size: clamp(30px, 4.2vw, 46px); line-height: 1.08; margin: 10px 0 14px; }
+  .say { color: var(--muted); font-size: 17px; line-height: 1.55; margin: 0 0 18px; }
+  .prompt {
+    font-family: var(--font-mono); font-size: 15px; color: var(--primary-hover);
+    background: var(--accent-tint); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 14px; display: inline-block; margin-bottom: 18px;
+  }
+  .numbers { display: flex; flex-wrap: wrap; gap: 12px; }
+  .num {
+    background: var(--card-grad); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 16px; min-width: 140px;
+  }
+  .num b { display: block; font-size: 30px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .num span { color: var(--muted-2); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+  .panelcard {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 16px; min-height: 300px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .panelcard .cap { color: var(--muted-2); font-size: 12px; font-family: var(--font-mono); }
+  .roof {
+    flex: 1; display: grid; grid-template-columns: repeat(16, 1fr); gap: 3px;
+    background: #0d0d0f; border: 1px solid var(--hairline); border-radius: 10px; padding: 10px;
+  }
+  .roof i { display: block; padding-top: 62%; background: #1f2a22; border-radius: 2px; }
+  .roof i.edge { background: #e7b643; }
+  .roof i.gone { background: #2a1416; border: 1px solid #e24947; }
+  .roof i.lit { background: var(--primary); }
+  .shot { width: 100%; border-radius: 10px; border: 1px solid var(--hairline); display: block; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; background: #141416;
+  }
+  .chip.on { color: var(--on-accent); background: var(--primary); border-color: var(--primary); }
+  footer {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 22px; border-top: 1px solid var(--border); background: var(--rail);
+  }
+  button {
+    font: inherit; font-size: 14px; color: var(--foreground); background: #141416;
+    border: 1px solid var(--border); border-radius: 10px; padding: 8px 16px; cursor: pointer;
+  }
+  button:hover { border-color: var(--primary); color: var(--primary-hover); }
+  .count { color: var(--muted-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .hint { margin-left: auto; color: var(--muted-2); font-size: 12px; }
+  .track { display: flex; gap: 5px; }
+  .track i { width: 26px; height: 4px; border-radius: 2px; background: var(--hairline); display: block; }
+  .track i.on { background: var(--primary); }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <span class="brand">Leaf platform - demo flipbook</span>
+  <span class="tagline">offline backup &middot; sample rooftop &middot; no network required</span>
+</header>
+
+<main id="deck"></main>
+
+<footer>
+  <button id="prev" type="button">&larr; Back</button>
+  <button id="next" type="button">Next &rarr;</button>
+  <span class="count" id="count"></span>
+  <span class="track" id="track"></span>
+  <span class="hint">arrow keys / space to step</span>
+</footer>
+
+<script>
+// Beats mirror docs/DEMO-GOLDEN-PATH.md. Numbers are the pinned golden values
+// that scripts/demo-preflight.py recomputes from web/public/sample.intake.json.
+var BEATS = [
+  {
+    beat: 'Beat 0 - open the pre-warmed tab',
+    title: 'A real rooftop, zero clicks in.',
+    say: 'This is a sample rooftop drawing - a real DWG we extracted. It is already loaded: no sign-in, no setup, nothing to click to get here.',
+    prompt: null,
+    nums: [['2345', 'panels on screen'], ['0', 'clicks to get here']],
+    cap: 'sample rooftop - 2345 panels on the Panels layer',
+    mode: 'plain'
+  },
+  {
+    beat: 'Beat 1 - count',
+    title: 'Plain English, no model in the loop.',
+    say: 'Type it the way you would say it. This ran zero-LLM against the drawing - the tool is deterministic code, not a guess.',
+    prompt: 'count panels per layer',
+    nums: [['2345', 'Panels'], ['2345', 'total entities']],
+    cap: 'count-by-layer -> { counts: { Panels: 2345 }, total: 2345 }',
+    mode: 'plain'
+  },
+  {
+    beat: 'Beat 2 - measure',
+    title: '48,718 sqft, and the largest panel marked.',
+    say: 'Same drawing, a different tool, still no model. It measures every panel and marks the biggest one on the canvas.',
+    prompt: 'measure the total area',
+    nums: [['48,718', 'total sqft'], ['21.3', 'largest panel sqft'], ['2345', 'panels measured']],
+    cap: 'measure-panel-area -> total_area_sqft: 48718.2',
+    mode: 'lit'
+  },
+  {
+    beat: 'Beat 3 - edge setback',
+    title: '72 panels sit inside the 60 inch setback.',
+    say: 'Now a parameter. Change the number in the sentence and the tool respects it - the ring on the drawing moves with it.',
+    prompt: 'highlight panels within 60 in of the edge',
+    nums: [['72', 'panels near edge'], ['60 in', 'setback'], ['2345', 'panels checked']],
+    cap: 'highlight-panels-near-edge @ distance_in: 60 -> 72 of 2345',
+    mode: 'edge'
+  },
+  {
+    beat: 'Beat 4 - author a tool',
+    title: 'It writes the tool. That is the differentiator.',
+    say: 'Describe a tool that does not exist yet and the platform authors it - real LISP, real parameters, provenance attached - then offers Run it now. Nobody else does this part.',
+    prompt: 'build a tool that flags panels within 18 in of the roof edge',
+    nums: [['1', 'new reusable tool'], ['18 in', 'parameter it parsed']],
+    cap: 'authored script tool + LISP preview + provenance -> Run it now',
+    mode: 'code'
+  },
+  {
+    beat: 'Beat 5 - delete, version, undo',
+    title: 'A write that is safe: delete makes v2, undo restores v1.',
+    say: 'Every write becomes a new version. Delete a panel and you get v2 with parent 1; undo puts the head back on v1. Nothing is destroyed.',
+    prompt: 'delete panel 7FA3',
+    nums: [['v2', 'new version (parent 1)'], ['2344', 'panels after delete'], ['v1', 'head after undo']],
+    cap: 'delete-marked-panel -> v2 | Undo -> head v1 | History v1 -> v2',
+    mode: 'gone'
+  },
+  {
+    beat: 'Beat 6 - honesty close',
+    title: 'What is real out of the box, and what we turn on for you.',
+    say: 'Everything you just saw runs on the sample rooftop we ship. Your drawings, your CAD host and your seats are the operator-enabled step - that is a conversation, not a surprise. RUN.md has the exact list.',
+    prompt: null,
+    nums: [['2345', 'panels, recomputed live'], ['0', 'numbers hardcoded']],
+    cap: 'see RUN.md - real out-of-the-box vs operator-enabled',
+    mode: 'plain'
+  }
+];
+
+// Optional captured shots (deploy/shots/beat-N.png). Referenced relatively so the
+// file stays self-contained; when they are absent the schematic panel renders.
+function shotSrc(i) { return 'shots/beat-' + i + '.png'; }
+
+function roofHTML(mode) {
+  var cells = [];
+  var cols = 16, rows = 9, total = cols * rows;
+  for (var i = 0; i < total; i++) {
+    var r = Math.floor(i / cols), c = i % cols, cls = '';
+    var isEdge = (r === 0 || c === 0 || r === rows - 1 || c === cols - 1);
+    if (mode === 'edge' && isEdge) cls = 'edge';
+    else if (mode === 'lit' && i === 74) cls = 'lit';
+    else if (mode === 'gone' && i === 74) cls = 'gone';
+    else if (mode === 'code' && (r === 1 || r === rows - 2) && !isEdge) cls = 'lit';
+    cells.push('<i class="' + cls + '"></i>');
+  }
+  return cells.join('');
+}
+
+var deck = document.getElementById('deck');
+BEATS.forEach(function (b, i) {
+  var s = document.createElement('section');
+  s.className = 'slide' + (i === 0 ? ' on' : '');
+  var nums = b.nums.map(function (n) {
+    return '<div class="num"><b>' + n[0] + '</b><span>' + n[1] + '</span></div>';
+  }).join('');
+  var chips = BEATS.map(function (x, j) {
+    return '<span class="chip' + (j === i ? ' on' : '') + '">' + j + '</span>';
+  }).join('');
+  s.innerHTML =
+    '<div>' +
+      '<div class="beat">' + b.beat + '</div>' +
+      '<h1>' + b.title + '</h1>' +
+      (b.prompt ? '<div class="prompt">' + b.prompt + '</div>' : '') +
+      '<p class="say">' + b.say + '</p>' +
+      '<div class="numbers">' + nums + '</div>' +
+    '</div>' +
+    '<div class="panelcard">' +
+      '<div class="chips">' + chips + '</div>' +
+      '<div class="roof" data-i="' + i + '">' + roofHTML(b.mode) + '</div>' +
+      '<div class="cap">' + b.cap + '</div>' +
+    '</div>';
+  // If a captured shot exists next to this file, swap the schematic for it.
+  var img = new Image();
+  img.onload = function () {
+    var holder = s.querySelector('.roof');
+    if (!holder) return;
+    holder.outerHTML = '<img class="shot" alt="' + b.beat + '" src="' + shotSrc(i) + '">';
+  };
+  img.src = shotSrc(i);
+  deck.appendChild(s);
+});
+
+var slides = deck.querySelectorAll('.slide');
+var idx = 0;
+var track = document.getElementById('track');
+track.innerHTML = BEATS.map(function () { return '<i></i>'; }).join('');
+function show(n) {
+  idx = Math.max(0, Math.min(slides.length - 1, n));
+  for (var i = 0; i < slides.length; i++) slides[i].className = 'slide' + (i === idx ? ' on' : '');
+  var ticks = track.children;
+  for (var j = 0; j < ticks.length; j++) ticks[j].className = j <= idx ? 'on' : '';
+  document.getElementById('count').textContent = (idx + 1) + ' / ' + slides.length;
+}
+document.getElementById('next').addEventListener('click', function () { show(idx + 1); });
+document.getElementById('prev').addEventListener('click', function () { show(idx - 1); });
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { show(idx + 1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') { show(idx - 1); e.preventDefault(); }
+  if (e.key === 'Home') show(0);
+  if (e.key === 'End') show(slides.length - 1);
+});
+show(0);
+</script>
+</body>
+</html>
