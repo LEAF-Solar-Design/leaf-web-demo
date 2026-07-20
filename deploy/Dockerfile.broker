@@ -76,6 +76,13 @@ EXPOSE 8140
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8140/broker/health', timeout=4)" || exit 1
 
+# F11: the broker must not run as root. Runtime EFS mounts replace these
+# directories in ECS, while the local directories keep compose/dev runs writable.
+RUN useradd --system --uid 10001 --user-group --home /home/leaf --create-home leaf \
+  && mkdir -p /data/state /data/drawings \
+  && chown -R 10001:10001 /data /home/leaf
+USER 10001:10001
+
 # uvicorn --host 0.0.0.0 is REQUIRED here: `python broker.py` binds 127.0.0.1
 # (loopback only) and would be unreachable from the app/harness containers.
 CMD ["uvicorn", "broker:app", "--host", "0.0.0.0", "--port", "8140"]
