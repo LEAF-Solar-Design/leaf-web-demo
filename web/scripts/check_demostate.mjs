@@ -6,14 +6,23 @@ function assert(cond, msg) {
   if (!cond) { console.error('FAIL:', msg); process.exit(1) }
 }
 
-// The ONE true case: a live build (mock:false) that hit a 401 with Auth0
-// unconfigured must auto-fall back to the demo.
+// The ONE true case: a signed-out live build (mock:false) that hit a 401 with
+// Auth0 unconfigured must auto-fall back to the demo.
+assert(
+  shouldAutoDemo({ authRequired: true, authConfigured: false, mock: false, signedIn: false }) === true,
+  'authRequired && !authConfigured && !mock && !signedIn must be true',
+)
+// Omitted signedIn (older call sites / headless checks) still counts as signed out.
 assert(
   shouldAutoDemo({ authRequired: true, authConfigured: false, mock: false }) === true,
-  'authRequired && !authConfigured && !mock must be true',
+  'signedIn omitted -> treated as signed out (true)',
 )
 
 // Every other combination is false.
+assert(shouldAutoDemo({ authRequired: true, authConfigured: false, mock: false, signedIn: true }) === false,
+  'a signed-in session (persisted token) must NEVER silently switch to mock (false)')
+assert(shouldAutoDemo({ authRequired: true, authConfigured: true, mock: false, signedIn: true }) === false,
+  'signed-in + configured -> real error surface, not mock (false)')
 assert(shouldAutoDemo({ authRequired: true, authConfigured: true, mock: false }) === false,
   'authConfigured true -> keep the real sign-in gate (false)')
 assert(shouldAutoDemo({ authRequired: true, authConfigured: false, mock: true }) === false,

@@ -382,7 +382,7 @@ export default function App() {
           // unconfigured can't sign in — flip to the demo instead of parking on
           // the gate, so the deployed link lands zero-click. SignedOutGate is
           // kept only for the authConfigured build (the user CAN sign in there).
-          if (shouldAutoDemo({ authRequired: true, authConfigured, mock })) setMock(true)
+          if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)
         }
       })
     return () => { alive = false }

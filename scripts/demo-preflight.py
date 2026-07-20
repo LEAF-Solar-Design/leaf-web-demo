@@ -235,6 +235,25 @@ def check_buildable():
     ok("no web/dist, but `npm run build` is runnable (node_modules present)")
 
 
+def check_flipbook():
+    """The stage-fallback flipbook must be fully self-contained: it is the thing
+    you open when the NETWORK is the problem, so a single external URL (script,
+    stylesheet, image, font) silently breaks it exactly when it is needed. It
+    must also still carry the golden panel count it exists to show."""
+    flip = ROOT / "deploy" / "presenter-flipbook.html"
+    if not flip.is_file():
+        raise NotReady("deploy/presenter-flipbook.html missing")
+    text = flip.read_text(encoding="utf-8")
+    hit = re.search(r"https?://\S+", text)
+    if hit:
+        raise NotReady("presenter-flipbook.html references an external URL (%s...) -- "
+                       "the offline fallback must be fully self-contained"
+                       % hit.group(0)[:60])
+    if "2345" not in text:
+        raise NotReady("presenter-flipbook.html lost the golden panel count (2345)")
+    ok("presenter-flipbook.html self-contained (no external URLs; golden 2345 present)")
+
+
 def check_base(base):
     """Optional: ping a deployed base URL. Never called on an --offline run."""
     import urllib.request
@@ -267,6 +286,7 @@ def main(argv=None):
         check_mock_author()
         check_pinned_beats(polylines)
         check_buildable()
+        check_flipbook()
         if args.base and not args.offline:
             check_base(args.base)
         elif args.base:

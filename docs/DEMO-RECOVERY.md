@@ -43,9 +43,11 @@ flipbook rather than watching a spinner.
 **Move:** say nothing and keep going — you are already in the demo.
 
 The demo runs in mock mode: no backend, no Auth0, no APS. If a live-mode request
-ever answers 401, the app auto-falls back to the mock path rather than showing a
-sign-in wall. If you somehow land on the "not signed in" gate, the Mock checkbox
-in the header puts you back in one click. Do not attempt to sign in on stage.
+ever answers 401 on a signed-out session, the app auto-falls back to the mock
+path rather than showing a sign-in wall. If you somehow land on the "not signed
+in" gate, click **Explore the demo** on the gate itself — one click, back in.
+(The header Mock checkbox exists only in dev builds / `?dev=1`; do not look for
+it on stage.) Do not attempt to sign in on stage.
 
 ## WebGL unavailable
 
@@ -58,14 +60,18 @@ locked-down VDI profiles do this). Use a real GPU browser window on the local
 machine. The numbers still come out on the results side, but the drawing is the
 picture people remember — if you cannot get GL, run beat 0 from the flipbook.
 
-## Mock toggle accidentally unchecked
+## Somehow in live mode (results stop matching the runbook)
 
-**Move:** re-check the **Mock** checkbox in the header.
+**Move:** click **Back to the demo** on the failed-load pane, or **Explore the
+demo** if you are looking at the sign-in gate.
 
-An accidental click on the toggle drops you into live mode, where results stop
-matching the runbook. Re-check it; the mock registry and sample rooftop come
-straight back. Re-run the current beat's prompt so the visible result matches
-what you just said out loud.
+The production demo build hides the Mock toggle, so you cannot fall out of mock
+by a stray header click — but if you do end up in live mode (a dev build's
+toggle, an old link), the app always offers a one-click way home: the
+failed-load pane's **Back to the demo** button or the gate's **Explore the
+demo**. In a dev build you can also simply re-check the **Mock** checkbox.
+Afterwards re-run the current beat's prompt so the visible result matches what
+you just said out loud.
 
 ## A run shows a raw error
 
@@ -135,8 +141,9 @@ on stage; offer it as a scheduled follow-up.
 
 ## Numbers on screen disagree with the runbook
 
-**Move:** you are not in mock mode, or you are not on the sample rooftop — check
-the Mock checkbox first.
+**Move:** you are not in mock mode, or you are not on the sample rooftop — get
+back to mock first (**Back to the demo** / **Explore the demo**; dev builds: the
+Mock checkbox).
 
 The golden numbers (2345 panels, 48,718 sqft, 72 near-edge at 60 in, 23
 near-edge at the authored 24 in) are recomputed from
