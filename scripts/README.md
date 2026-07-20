@@ -1,10 +1,11 @@
 # Test orchestration — `scripts/`
 
-Two CI-ready entry points for the Leaf web demo:
+CI-ready entry points for the Leaf web demo:
 
 | File | What it is |
 |------|------------|
 | `run-all-gates.py` | Runs every test suite in the repo, each in its **own** subprocess, and prints one PASS/FAIL scoreboard. Exit 0 iff every non-skipped gate passes. |
+| `deploy-web.py` | Builds `web/` and deploys `web/dist` **itself** to the `leaf-platform-web` Vercel project, then verifies the live domain. Exit 0 iff every route returns 200 and the domain serves the asset filenames this build produced. |
 | `../server/tests/test_e2e_golden.py` | One self-contained golden-path e2e that boots the broker + app and drives the whole product over HTTP. Run by the gate runner, also runnable alone. |
 
 ---
@@ -17,7 +18,34 @@ python scripts/run-all-gates.py
 
 # just the golden-path e2e
 cd server && python -m pytest tests/test_e2e_golden.py -q
+
+# build + deploy the web demo to production, then verify it
+python scripts/deploy-web.py
 ```
+
+---
+
+## Deploying the web demo
+
+`deploy-web.py` deploys the build output directly. There is **no staging
+directory** to keep in sync — that was the old arrangement and it drifted.
+
+Two things make `web/dist` self-sufficient as the deploy root:
+
+- `vercel.json` lives in `web/public/`, so vite copies it into `dist/` on every
+  build. Without it every route except `/` returns 404, because `/` is the only
+  path that exists as a real file.
+- Project linkage comes from `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID`, set by the
+  script. A committed `.vercel/` directory would not survive, because vite
+  empties `dist/` on each build.
+
+The script refuses to deploy a `dist` that would 404 — it fails if `vercel.json`
+is missing, has no `rewrites`, or sets `cleanUrls: true`. That last one is not
+hypothetical: `cleanUrls` 308-redirects `/index.html` to `/`, which makes the
+catch-all rewrite point at a redirect, and every deep route 404s.
+
+Prereq: `vercel login` once (the CLI's auth token is the credential — the org
+and project ids in the script are identifiers, not secrets).
 
 Prereqs: Python deps (`pytest requests jsonschema fastapi uvicorn psycopg`) and,
 for the harness gates, Node ≥18 with `npm install` already run in `harness/`.
