@@ -28,7 +28,7 @@ are owned/writable by that uid. Drop caps + RO rootfs where mounts allow.
 (Proven live — docs/auth0-live-server-receipt.json.) Keep :8130 behind ALB/TLS;
 broker :8140 + harness :8150 stay internal-only.
 
-## The 8 new env vars
+## The 10 new env vars
 | Env | Purpose (finding) | Set on | Secret? |
 |---|---|---|---|
 | LEAF_BROKER_SECRET | app<->broker caller-auth (F4); same value both; unset+live -> broker 503 | app + broker | YES -> Secrets Manager |
@@ -36,13 +36,16 @@ broker :8140 + harness :8150 stay internal-only.
 | LEAF_HARNESS_AUTH | enable harness gate; set =1 | harness | no |
 | LEAF_OPS_SECRET | ops gate (F7); /api/ops/* needs X-Ops-Secret; unset+live -> 503 | app (+ ops client) | YES -> Secrets Manager |
 | LEAF_CORS_ORIGINS | CORS allowlist (F17); prod web origin(s), e.g. https://leaf-platform-web.vercel.app | app | no |
-| LEAF_SANDBOX | tenant-code sandbox (F2); set =e2b (broker tool-exec + harness author) | broker + harness | no |
+| LEAF_SANDBOX | tenant-code sandbox (F2); set =e2b (broker tool-exec + harness author, subprocess tier, current default recommendation) or =e2b-microvm (real E2B micro-VM via the Node helper, requires E2B_API_KEY) | broker + harness | no |
 | LEAF_DAILY_RUN_QUOTA | free-tier daily run cap (F12/A4); default 20; swap {10,20,50} | broker | no |
 | LEAF_QA_HOOKS | test hook; leave UNSET/0 in prod (auto-off when LEAF_AUTH_LIVE=1) | (none in prod) | no |
+| E2B_API_KEY | E2B micro-VM auth; only needed when LEAF_SANDBOX=e2b-microvm | broker | YES -> Secrets Manager |
+| LEAF_E2B_HELPER | path to the Node tool-exec helper; baked into the broker image as /app/harness/scripts/e2b-tool-exec.mjs — override only for local dev | broker | no |
 
 Optional: LEAF_BROKER_TENANT_TIERS (JSON {tenant_id: tier}) on broker so F10 enforces
 per-tenant tiers in hosted mode (else defaults demo/open); or provision broker_tenants.json.
-E2B_API_KEY only if flipping from the shipped subprocess sandbox to the deferred full-E2B micro-VM.
+The micro-VM tier now ships behind LEAF_SANDBOX=e2b-microvm; enabling it requires the
+E2B_API_KEY secret plus the node-capable broker image from this change (deploy/Dockerfile.broker).
 
 ## Migration 0002
 platform/db.py apply_migration() (no arg) now applies EVERY NNNN_*.sql in order

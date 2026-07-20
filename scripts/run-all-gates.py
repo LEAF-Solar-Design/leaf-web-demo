@@ -141,6 +141,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave4.py"), 9),
         Suite("server-wave5", "server tests/test_wave5.py", "pytest", SERVER,
               _py_pytest("tests/test_wave5.py"), 14),
+        Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
+              _py_pytest("tests/test_hardening_2c_microvm.py"), 11),
         # --- the golden-path composed e2e (this runner's sibling deliverable) --- #
         Suite("server-e2e-golden", "server tests/test_e2e_golden.py", "pytest", SERVER,
               _py_pytest("tests/test_e2e_golden.py"), 1),
@@ -154,7 +156,7 @@ def build_suites() -> List[Suite]:
               _py_pytest(f"{repo_name}/platform/tests"), 11, db_gated=True),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 26),
+              [_npm(), "test"], 63),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
@@ -171,6 +173,7 @@ _ENV_DENYLIST = (
     "LEAF_STORE_DIR", "LEAF_ENTITLEMENTS_FILE", "LEAF_AUTHOR_HARNESS_URL",
     "LEAF_AUTHOR_LLM", "LEAF_TENANTS_DIR", "LEAF_TENANT_REPO", "BROKER_URL",
     "BROKER_LEDGER", "BROKER_TENANTS",
+    "LEAF_SANDBOX", "LEAF_SANDBOX_TIMEOUT_S", "LEAF_E2B_HELPER", "E2B_API_KEY",
 )
 
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -104,6 +105,20 @@ def _sandbox_enabled() -> bool:
     return os.environ.get("LEAF_SANDBOX", "").strip().lower() == "e2b"
 
 
+def _sandbox_tier() -> str:
+    """Tri-state sandbox tier from LEAF_SANDBOX (read at CALL time, case-insensitive):
+    ``e2b`` -> "subprocess" (the shipped v1 tier, meaning unchanged), ``e2b-microvm`` ->
+    "microvm" (real E2B micro-VM via the Node helper -- `_run_in_sandbox_e2b`), anything
+    else -> "off" (in-process, byte-identical to today). `_sandbox_enabled()` above keeps
+    its exact v1 contract for its direct callers/tests."""
+    val = os.environ.get("LEAF_SANDBOX", "").strip().lower()
+    if val == "e2b":
+        return "subprocess"
+    if val == "e2b-microvm":
+        return "microvm"
+    return "off"
+
+
 def _sandbox_timeout_s() -> float:
     try:
         return float(os.environ.get("LEAF_SANDBOX_TIMEOUT_S", "30"))
@@ -127,6 +142,65 @@ def _sandbox_env() -> Dict[str, str]:
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONPATH"] = ""
     return env
+
+
+# --------------------------------------------------------------------------- #
+# e2b-microvm tier (opt-in v2): real E2B micro-VM via the PROVEN Node substrate.
+# The broker shells out to harness/scripts/e2b-tool-exec.mjs (stdin job -> stdout
+# result; schemas leaf.e2b.tool-exec-{job,result}.v1). The helper reuses the exact
+# egress-locked Sandbox.create config proven in harness/scripts/e2b-vendor-eval.mjs
+# (allowOut broker-host-only, denyOut 0.0.0.0/0, allowPublicTraffic false) and
+# REFUSES to relay tool output when the egress receipt fails. `_SANDBOX_RUNNER`
+# rides along as runner_py, so the PEP-578 jail applies INSIDE the VM too
+# (defense-in-depth) and this file stays the single source of truth for the
+# in-sandbox program. Fail-closed: node missing / key missing / boot / receipt /
+# timeout => infra_error (INTERNAL). An explicitly selected security tier never
+# silently downgrades to a weaker one.
+# --------------------------------------------------------------------------- #
+
+# Denied-egress probe targets the helper verifies from INSIDE the VM on every run
+# (the same three the proven vendor eval uses).
+_MICROVM_DENIED_TARGETS = [
+    "https://example.com/", "https://api.github.com/", "https://1.1.1.1/",
+]
+
+
+def _microvm_boot_budget_s() -> float:
+    """Extra outer-timeout budget for VM boot + upload (env LEAF_SANDBOX_MICROVM_BOOT_BUDGET_S)."""
+    try:
+        return float(os.environ.get("LEAF_SANDBOX_MICROVM_BOOT_BUDGET_S", "60"))
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _microvm_env() -> Dict[str, str]:
+    """The Node helper's env: the SAME default-deny allowlist as the subprocess tier PLUS the
+    E2B key vars -- the helper is the trusted LAUNCHER (it needs the key to boot the VM); the
+    key stops there and is never written into the VM (the helper passes no `envs` to the VM).
+    No APS/broker secret is ever included."""
+    env = _sandbox_env()
+    for k in ("E2B_API_KEY", "E2B_API_KEY_FILE"):
+        if k in os.environ:
+            env[k] = os.environ[k]
+    return env
+
+
+def _microvm_helper_path() -> Path:
+    """Helper script path: LEAF_E2B_HELPER override (deploy bakes /app/harness/scripts/...)
+    else the in-repo default beside the proven vendor eval."""
+    override = os.environ.get("LEAF_E2B_HELPER", "").strip()
+    if override:
+        return Path(override)
+    return SERVER_DIR.parent / "harness" / "scripts" / "e2b-tool-exec.mjs"
+
+
+def _microvm_cmd() -> Optional[List[str]]:
+    """argv for the Node helper, or None when node is not resolvable. THE monkeypatch seam
+    for hermetic tests (substitute a Python fake helper speaking the result schema)."""
+    node = shutil.which("node")
+    if not node:
+        return None
+    return [node, str(_microvm_helper_path())]
 
 
 # The in-sandbox program. Standard-library only. Reads the job from stdin, installs the guard,
@@ -285,6 +359,79 @@ def _run_in_sandbox(local: Path, intake: Dict[str, Any],
     if not parsed.get("ok"):
         return ("infra_error", "sandbox returned a non-ok result without an error")
     return ("ok", _decode_ret(parsed.get("ret") or {}))
+
+
+def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
+                        params: Dict[str, Any]) -> Tuple[str, Any]:
+    """Execute the tenant tool file inside a REAL egress-locked E2B micro-VM (tier v2).
+
+    Same trust shape as `_run_in_sandbox`: the source is read HERE (trusted broker; ``local``
+    is already 1F path-safety-resolved); source+intake+params go to the Node helper over ONE
+    stdin JSON channel; the helper uploads them into the VM via files.write (the ~0.5MB+
+    intake never touches an argv), runs `_SANDBOX_RUNNER` (audit-hook jail included) via
+    stdin redirect, verifies the broker-only egress receipt (REFUSING to relay on failure),
+    and relays the runner's JSON verbatim. Same return contract as `_run_in_sandbox`."""
+    cmd = _microvm_cmd()
+    if cmd is None:
+        return ("infra_error", "node executable not found; e2b-microvm tier unavailable")
+    try:
+        source = local.read_text(encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        return ("infra_error", f"could not read tool source {local.name}: {type(exc).__name__}: {exc}")
+    timeout = _sandbox_timeout_s()
+    blob = json.dumps({
+        "schema": "leaf.e2b.tool-exec-job.v1",
+        "job": {"source": source, "intake": intake, "params": params,
+                "filename": local.name},
+        "runner_py": _SANDBOX_RUNNER,
+        "timeout_s": timeout,
+        "broker_host": (os.environ.get("LEAF_SANDBOX_BROKER_HOST", "").strip()
+                        or "httpbingo.org"),
+        "denied_targets": _MICROVM_DENIED_TARGETS,
+        "probe_broker": False,
+    }).encode("utf-8")
+    outer = timeout + _microvm_boot_budget_s()
+    try:
+        with tempfile.TemporaryDirectory(prefix="leaf-mvm-") as jail:
+            proc = subprocess.run(
+                cmd,
+                input=blob,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=_microvm_env(),
+                cwd=jail,
+                timeout=outer,
+            )
+    except subprocess.TimeoutExpired:
+        return ("infra_error", f"e2b-microvm helper timed out after {outer}s")
+    except Exception as exc:  # noqa: BLE001
+        return ("infra_error", f"e2b-microvm helper failed to start: {type(exc).__name__}: {exc}")
+    out = (proc.stdout or b"").decode("utf-8", "replace").strip()
+    if not out:
+        return ("infra_error", f"e2b-microvm helper produced no output (rc={proc.returncode})")
+    try:
+        parsed = json.loads(out)
+    except Exception as exc:  # noqa: BLE001
+        return ("infra_error", f"e2b-microvm helper output was not JSON: {type(exc).__name__}: {exc}")
+    herr = parsed.get("helper_error")
+    if herr:
+        return ("infra_error",
+                f"e2b-microvm {herr.get('stage', '?')} failure: "
+                f"{herr.get('type', 'Error')}: {herr.get('msg', '')}")
+    receipt = parsed.get("receipt") or {}
+    if not receipt.get("passed"):
+        # The security boundary: an unproven egress lock means the sandbox result is refused
+        # by the HELPER (result:null) -- and re-refused here even if a result slipped through.
+        return ("infra_error", "e2b-microvm egress receipt not passed; sandbox result refused")
+    result = parsed.get("result")
+    if not isinstance(result, dict):
+        return ("infra_error", "e2b-microvm helper returned no result")
+    if result.get("error"):
+        e = result["error"]
+        return ("tool_error", f"{e.get('type', 'Error')}: {e.get('msg', '')}")
+    if not result.get("ok"):
+        return ("infra_error", "e2b-microvm runner returned a non-ok result without an error")
+    return ("ok", _decode_ret(result.get("ret") or {}))
 
 
 def _tenant_repo_root(tenant_id: Optional[str] = None) -> Optional[Path]:
@@ -474,12 +621,15 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
             f"no local implementation resolvable for tool {name!r} "
             f"(engine_op={tool.get('engine_op')!r}) at APS_LIVE=0",
             retryable=False, tool=name, version=version, timing_ms=_ms())
-    # F2 / lane 2B: when the sandbox is ENABLED (LEAF_SANDBOX=e2b), the tenant tool BODY runs
-    # OUT of this credential-holding process — no `_load_module`/`exec_module` of tenant code
-    # in this PID on the sandbox path. DEFAULT (unset) => the in-process `else` below runs and
-    # is BYTE-IDENTICAL to today, so every in-process gate suite is unaffected.
-    if _sandbox_enabled():
-        kind, payload = _run_in_sandbox(local, intake, params)
+    # F2 / lane 2B: when a sandbox tier is ENABLED (LEAF_SANDBOX=e2b -> subprocess tier;
+    # LEAF_SANDBOX=e2b-microvm -> real E2B micro-VM tier), the tenant tool BODY runs OUT of
+    # this credential-holding process — no `_load_module`/`exec_module` of tenant code in
+    # this PID on either sandbox path. DEFAULT (unset) => the in-process `else` below runs
+    # and is BYTE-IDENTICAL to today, so every in-process gate suite is unaffected.
+    tier = _sandbox_tier()
+    if tier != "off":
+        sandbox_fn = _run_in_sandbox_e2b if tier == "microvm" else _run_in_sandbox
+        kind, payload = sandbox_fn(local, intake, params)
         if kind == "tool_error":
             return err_envelope(ErrorCode.INTERNAL,
                                 f"tool {name!r} raised {payload}",
