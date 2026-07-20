@@ -6,8 +6,13 @@
  * Routes:
  *   GET  /health          -> { ok: true }
  *   POST /author          -> author route (build | one-off). Body {description, mode?}.
- *                            build:   200 { tool, code, preview }         (CONTRACT section 4)
- *                            one-off: 200 { tool, code, preview, run }
+ *                            build:   200 { tool, code, preview, telemetry? } (CONTRACT section 4)
+ *                            one-off: 200 { tool, code, preview, run, telemetry? }
+ *                            `telemetry` (A1) is ADDITIVE + OPTIONAL — a provenance chip source:
+ *                            { turns?, input_tokens?, output_tokens?, total_cost_usd?, models?[] }.
+ *                            It is present ONLY when the runner metered the build (the real Agent
+ *                            SDK runner); absent-safe, so a non-metering runner keeps the frozen
+ *                            {tool, code, preview} shape. Forwarded verbatim from AuthorLoop.
  *   POST /run-registered  -> run route (design-time-ONLY invariant). Body
  *                            {tool, params?, dwg?, aps_live?}. 200 section-3 envelope.
  *                            NEVER constructs the Agent SDK / touches AgentRunner.
@@ -15,8 +20,19 @@
  * Tenant id comes from the X-Tenant-Id header stub (default "demo-tenant"),
  * matching the backbone. Concern 1 (Auth0 platform identity) is resolved upstream
  * and is NOT this harness's job; Concern 2 (Claude grant) is the OAuthGrantProvider.
+ *
+ * CALLER AUTH (F5): the HTTP surface is NOT public. When the gate is enabled
+ * (LEAF_HARNESS_AUTH truthy in the live serve path), EVERY route except GET /health
+ * requires a shared secret on the `X-Harness-Secret` header, constant-time compared
+ * against LEAF_HARNESS_SECRET; a wrong/absent secret is 401. The gate is DEFAULT-OFF
+ * so the hermetic/local path (and `npm test`) is unchanged. On a reachable harness the
+ * ONLY legitimate caller is the app (server/routers/author.py, server/routers/tenant.py),
+ * which forwards the secret from the same env; the per-request tenant identity therefore
+ * comes from the AUTHENTICATED app, never from an anonymous request body. The secret is
+ * env-only: never logged, never echoed, never mingled with any grant token.
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
@@ -34,11 +50,83 @@ function tenantOf(req: IncomingMessage): string {
 }
 
 /** Resolve the request tenant: body `tenant_id` wins, else the X-Tenant-Id header,
- *  else DEFAULT_TENANT. Lets the app forward the RESOLVED tenant per request. */
+ *  else DEFAULT_TENANT. Lets the app forward the RESOLVED tenant per request.
+ *
+ *  SECURITY NOTE (F5): the body `tenant_id` is TRUSTED only because a reachable harness
+ *  is gated by the shared secret (see harnessAuthDenial) — the sole caller that can reach
+ *  this code is the AUTHENTICATED app, which forwards the tenant it already resolved from
+ *  the platform JWT. This is NOT anonymous self-assertion of identity: without the secret
+ *  the request never reaches tenant resolution. Do not expose this harness unauthenticated. */
 function tenantForRequest(req: IncomingMessage, body: Record<string, unknown>): string {
   const t = body.tenant_id;
   if (typeof t === "string" && t.trim()) return t.trim();
   return tenantOf(req);
+}
+
+// --------------------------------------------------------------------------- //
+// F5 caller auth — shared-secret gate on the harness HTTP surface.
+// --------------------------------------------------------------------------- //
+
+/** Shared-secret gate config. DEFAULT-OFF (enabled=false) keeps the hermetic/local path
+ *  and `npm test` unchanged; the live serve path turns it on via env (LEAF_HARNESS_AUTH). */
+export interface HarnessAuthConfig {
+  /** When false, every route is served as before (no secret required). */
+  enabled: boolean;
+  /** Expected shared secret (from LEAF_HARNESS_SECRET). Never logged, never echoed. */
+  secret: string;
+}
+
+const AUTH_ENV_FLAG = "LEAF_HARNESS_AUTH";
+const AUTH_ENV_SECRET = "LEAF_HARNESS_SECRET";
+
+/** Env truthiness matching the app's flag pattern: "1"/"true"/"yes"/"on" (case-insensitive). */
+function envFlagOn(v: string | undefined): boolean {
+  const s = (v ?? "").trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "on";
+}
+
+/**
+ * Resolve the auth gate from the environment (the live serve path uses this per request,
+ * so setting LEAF_HARNESS_AUTH + LEAF_HARNESS_SECRET is all the wiring serve.ts needs).
+ * LIVE FAIL-CLOSED: when the gate is ON but LEAF_HARNESS_SECRET is unset/empty, `secret`
+ * is "" and harnessAuthDenial rejects EVERYTHING (an anonymous harness is never open).
+ */
+export function resolveHarnessAuth(env: NodeJS.ProcessEnv = process.env): HarnessAuthConfig {
+  return { enabled: envFlagOn(env[AUTH_ENV_FLAG]), secret: (env[AUTH_ENV_SECRET] ?? "").trim() };
+}
+
+/**
+ * Constant-time secret compare. Both sides are hashed to a fixed-length SHA-256 digest so
+ * the comparison is length-independent (timingSafeEqual requires equal-length buffers) and
+ * leaks neither the secret's length nor its bytes via timing.
+ */
+function secretsEqual(provided: string, expected: string): boolean {
+  const a = createHash("sha256").update(provided, "utf8").digest();
+  const b = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Auth decision for one request. Returns a 401 error body when the request MUST be
+ * rejected, or null when it is authorized (or the gate is off). GET /health is exempt at
+ * the call site. The secret is NEVER included in the returned body.
+ */
+function harnessAuthDenial(
+  req: IncomingMessage,
+  auth: HarnessAuthConfig,
+): { error: { message: string; code: string } } | null {
+  if (!auth.enabled) return null; // default-off: hermetic/local path unchanged
+  // Fail-closed: an enabled gate with no configured secret authenticates NOTHING. This is
+  // the guard that stops an empty provided secret from matching an empty expected secret.
+  if (!auth.secret) {
+    return { error: { message: "harness auth required", code: "harness_auth_required" } };
+  }
+  const h = req.headers["x-harness-secret"];
+  const provided = Array.isArray(h) ? h[0] : h;
+  if (typeof provided !== "string" || provided.length === 0 || !secretsEqual(provided, auth.secret)) {
+    return { error: { message: "harness auth required", code: "harness_auth_required" } };
+  }
+  return null;
 }
 
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -70,8 +158,14 @@ export interface Harness {
   loop: AuthorLoop;
 }
 
-export function createHarness(ports: HarnessPorts): Harness {
+/**
+ * Create the harness. `opts.auth` explicitly pins the F5 caller-auth gate (used by tests
+ * to stay hermetic); when omitted the gate resolves per-request from the environment via
+ * resolveHarnessAuth() — so the live serve path needs no code change, only the env vars.
+ */
+export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthConfig }): Harness {
   const loop = new AuthorLoop(ports);
+  const explicitAuth = opts?.auth ?? null;
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = (req.url ?? "").split("?")[0];
@@ -80,6 +174,13 @@ export function createHarness(ports: HarnessPorts): Harness {
       if (method === "GET" && path === "/health") {
         return send(res, 200, { ok: true, service: "leaf-tenant-author-harness" });
       }
+
+      // F5 caller-auth gate: every non-health route requires the shared secret when the
+      // gate is enabled. Rejected BEFORE any body read, tenant resolution, or store touch,
+      // so an unauthed caller can neither author, run, nor read/overwrite/delete a grant.
+      const auth = explicitAuth ?? resolveHarnessAuth();
+      const denial = harnessAuthDenial(req, auth);
+      if (denial) return send(res, 401, denial);
 
       // Per-tenant grant admin (wave 4 + §17): PUT/GET/DELETE /grants/{tenantId}. Backs
       // the app's /api/tenant/claude-grant proxy. Returns ONLY {linked, linked_at, kind}

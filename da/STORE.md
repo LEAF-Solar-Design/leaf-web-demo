@@ -138,6 +138,19 @@ retention; strict multi-writer CAS correctness beyond single-writer checkout.
   `policyKey=persistent`, owner `iBZFSm0zj8SGcjm4...`. (Extract activity/alias already
   existed → 409, tolerated.)
 
+**Clean-cutover app provisioned 2026-07-19** (`Leaf Design Automation Production`):
+
+- New persistent bucket: `leaf-web-store-czjiu4w9ok9fsowa`, region `US`,
+  `policyKey=persistent`, owner `czjIu4W9OK9fSoWA...`.
+- Copied all **40 legacy objects / 8,750,523 bytes** into the new bucket without
+  modifying the legacy bucket. The new bucket contained **44 objects / 8,815,241
+  bytes** after copy (the four additional objects are the new-app smoke inputs and
+  outputs).
+- Verified the new app with a live AutoCAD extract and `count-by-layer` WorkItem;
+  the tool returned one entity on `Panels` in 2.43 engine-seconds (~$0.0068).
+- Legacy credentials and bucket remain intact as rollback until the runtime cutover
+  has been deployed and observed.
+
 **Pure-OSS persistence round-trip (ZERO WorkItems, spend ≈ $0):**
 
 | check | value |

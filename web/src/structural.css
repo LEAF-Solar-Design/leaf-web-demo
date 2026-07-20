@@ -1,0 +1,115 @@
+/* Structural glue — SHELL layout only (SHELL DOM CONTRACT, structural lane).
+   Defines ONLY layout/positioning for .center-col / .center-scroll / .bar-dock,
+   the DT2 drawer overlay layer, and tiny flex-alignment helpers. All visual
+   (crib-contract) classes — .bar, .resolver, .strip-*, .toast, .drawer, .dot,
+   .key, .chip-* — are defined in styles.css and never here. */
+
+/* Center column: row 2 col 2 of the .app grid — scrolling content above the
+   docked command bar. position:relative so the NT2 toast anchors to it. */
+.center-col {
+  grid-row: 2;
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+main.center-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* SB3 block as a FLOATING island (operator amendment): absolutely positioned
+   over the scroll area — content scrolls BEHIND it — with a bottom gap, never
+   a flush footer strip. Still center-column-only (rails untouched). */
+.bar-dock {
+  position: absolute;
+  left: 26px;
+  right: 26px;
+  bottom: 18px;
+  z-index: 30;
+  padding: 0;
+  /* narrower than the content behind it, centered — the island must read as
+     its own object, never edge-align with the cards it floats over */
+  max-width: 700px;
+  margin: 0 auto;
+}
+.bar-dock > * + * { margin-top: 8px; }
+/* The resolver is a floating card attached ABOVE the well — absolutely
+   positioned so it never grows the docked block past its ≤10%-height budget. */
+.bar-dock > .resolver {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  margin: 0;
+  /* z-index intentionally unset here: styles.css owns it (35, above the bar) */
+}
+
+/* DT2 drawer overlay layer: occupies the SAME grid cell as aside.rail (row 2
+   col 3) so the drawer slides over the events rail — top below the header,
+   bottom above the footer — and the rail behind never re-flows. */
+.drawer-layer {
+  grid-row: 2;
+  grid-column: 3;
+  position: relative;
+  z-index: 40;
+  pointer-events: none;
+  min-height: 0;
+}
+.drawer-layer > .drawer { pointer-events: auto; width: 100%; }
+
+/* Flex-alignment helpers (layout only — color/type comes from styles.css). */
+.bar-controls .bar-scope { display: inline-flex; align-items: center; gap: 6px; }
+.strip-sentence { flex: 1 1 auto; min-width: 0; }
+.foot-stat { display: inline-flex; align-items: center; gap: 6px; }
+.loading-line { display: inline-flex; align-items: center; gap: 8px; }
+.result-details-row { display: flex; justify-content: flex-end; margin-top: 8px; }
+.skeleton-stack { display: flex; flex-direction: column; gap: 8px; margin: 4px; }
+
+/* ---------------- small-screen: undo desktop 3-col grid placement ----------------
+   .center-col explicitly targets column 2 of the desktop 300px/1fr/300px
+   template (this file is the sole owner of that property — styles.css's
+   duplicate .center-col rule never sets grid-row/grid-column, so this is the
+   only place that needs the reset). Below the app's single-column collapse
+   (styles.css @media max-width:980px sets .app { grid-template-columns: 1fr }),
+   column 2 no longer exists in the explicit template — the grid was silently
+   sprouting an IMPLICIT track to still host it at that line number, which is
+   the reported "interleaved jumble" + horizontal-overflow bug at narrow
+   widths. Reset to the single column so it stacks in DOM order like the rest.
+
+   .drawer-layer gets the OPPOSITE treatment: a prior fix reset it to
+   grid-column:1 alongside .center-col, which made the DT2 drawer stack
+   inline below the footer instead of floating as an overlay (it's grid
+   row 2 / col 3 — same cell as aside.rail — only on desktop). Lift it clean
+   out of grid flow into a fixed overlay instead, so it still slides over
+   content from the right and the page behind never re-flows. Offsets match
+   the existing .drawer-fixed backup helper's clearances (styles.css
+   .drawer-fixed: top 49px below header.top / bottom 30px above
+   footer.foot-bar). */
+@media (max-width: 980px) {
+  .center-col {
+    grid-row: auto;
+    grid-column: 1;
+  }
+  .drawer-layer {
+    position: fixed;
+    inset: 49px 0 30px auto;
+    z-index: 60;
+  }
+  .drawer-layer > .drawer {
+    width: min(340px, 92vw);
+    height: 100%;
+  }
+}
+
+/* ≤430px: the drawer goes full-bleed right-side panel (still an overlay —
+   .drawer-layer's fixed inset/pointer-events from the 980px block still
+   applies; only the panel's own width changes). */
+@media (max-width: 430px) {
+  .drawer-layer > .drawer {
+    width: 100%;
+  }
+}

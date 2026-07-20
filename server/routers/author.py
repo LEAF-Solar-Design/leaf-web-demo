@@ -14,7 +14,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import deps
 import entitlements
@@ -34,9 +34,14 @@ AUTHORED_DIR = SERVER_DIR / "authored"
 # CONTRACT-ADDENDUM §16.
 GRANT_REQUIRED = "GRANT_REQUIRED"
 
+# Bound the tool-description so an unbounded body can't exhaust the author /
+# templater / harness pipeline (security-audit F15). An over-cap body is rejected at
+# the validation layer before any harness/template work runs.
+MAX_AUTHOR_DESCRIPTION = 8_000
+
 
 class AuthorRequest(BaseModel):
-    description: str
+    description: str = Field(..., max_length=MAX_AUTHOR_DESCRIPTION)
 
 
 def _grant_required_response(tenant_id: str, harness_message: str | None) -> JSONResponse:
@@ -80,6 +85,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
     # failure falls back to the local templater (noted in the preview).
     tool = None
     source = "template"
+    _telemetry = None  # A1: real authoring telemetry from the harness (harness path only)
     harness_url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
     if harness_url:
         # Contract 6: forward the RESOLVED tenant so the harness resolves THAT tenant's
@@ -88,9 +94,11 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
         resp = None
         try:
             import requests
+            import broker_client
             resp = requests.post(f"{harness_url}/author",
                                  json={"description": req.description,
-                                       "tenant_id": str(tenant)}, timeout=120)
+                                       "tenant_id": str(tenant)},
+                                 headers=broker_client.harness_headers(), timeout=120)
         except Exception as exc:
             print(f"[author] harness unreachable, templated fallback: {exc}")
         if resp is not None:
@@ -108,6 +116,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
                 resp.raise_for_status()
                 body = jb if jb is not None else resp.json()
                 tool, code, preview = body["tool"], body["code"], body["preview"]
+                _telemetry = body.get("telemetry")  # A1: forward real telemetry (was dropped)
                 source = "harness"
             except Exception as exc:
                 tool = None
@@ -150,5 +159,6 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
 
     return deps.tenant_echo(
         with_envelope_fields({"tool": tool, "code": code, "preview": preview,
-                              "source": source, "static_scan": findings}), tenant
+                              "source": source, "static_scan": findings,
+                              **({"telemetry": _telemetry} if _telemetry else {})}), tenant
     )

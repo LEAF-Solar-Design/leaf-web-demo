@@ -33,6 +33,11 @@ from envelopes import ErrorCode, err_envelope, error_obj
 SERVER_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
 
+# Bound the run `params` blob so an unbounded body can't bloat the durable jobs row /
+# broker payload (security-audit F15). 64 KiB is far above any real tool's params; an
+# over-cap submission is rejected with an HTTP 400 before the job row is written.
+MAX_PARAMS_BYTES = int(os.environ.get("JOB_MAX_PARAMS_BYTES", str(64 * 1024)))
+
 
 def job_max_s() -> float:
     return float(os.environ.get("JOB_MAX_S", "540"))
@@ -116,6 +121,32 @@ def _row_to_record(row: sqlite3.Row) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# input bounding (security-audit F15)
+# --------------------------------------------------------------------------- #
+def _reject_oversized_params(params: Dict[str, Any]) -> None:
+    """Reject a run whose ``params`` serialise to more than ``MAX_PARAMS_BYTES``.
+
+    Raised as an HTTP 400 (mirrors the codebase's HTTPException idiom in auth.py /
+    deps.require_tenant → the shared handler renders a structured error envelope). The
+    check runs on the MERGED params (authored defaults + caller params) so neither
+    source can smuggle an unbounded blob past the durable job row / broker payload.
+    """
+    from fastapi import HTTPException, status
+
+    try:
+        size = len(json.dumps(params, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        # non-serialisable params are a client error, not a 500 — reject cleanly.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="run params are not JSON-serialisable")
+    if size > MAX_PARAMS_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"run params too large: {size} bytes exceeds the {MAX_PARAMS_BYTES}-byte cap",
+        )
+
+
+# --------------------------------------------------------------------------- #
 # public API (used by routers/jobs.py)
 # --------------------------------------------------------------------------- #
 def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg: str,
@@ -128,7 +159,11 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     present AND a platform DB resolves, a canonical platform Job row is recorded
     (best-effort, env-gated; see platform_link). With no project context this is
     a no-op and the spine is byte-identical to before.
+
+    Rejects an over-cap ``params`` blob (> ``MAX_PARAMS_BYTES``) with HTTP 400 before
+    any durable row / broker payload is written (security-audit F15).
     """
+    _reject_oversized_params(params)
     ensure_started()
     job_id = str(uuid.uuid4())
     now = time.time()

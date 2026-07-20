@@ -1,0 +1,65 @@
+/* Lane-local styles for the rails + ledger surfaces (JobRail, WorkspaceSummary,
+   QuotaCard, DegradedBanner). Contract classes (.dot, .key, .chip-act,
+   .skeleton-row, …) are DEFINED by styles.css — this file only adds genuinely
+   new names, all following the committed recipes (22g ledger rows, SL1
+   selection, E2 empty panes, NT2 banner anatomy, TM1 time). */
+
+/* --- 22g ledger rows (job rail + workspace job list) ---
+   32px rows on #1c1c20 hairlines (== the --keycap ground), 12.5px sentence-case
+   event text behind the status dot, mono 11px time/cost columns right,
+   hover tint white .03, 26px day-boundary rows. */
+.rail-ledger { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.rail-day {
+  display: flex; align-items: center; height: 26px;
+  border-top: 1px solid var(--keycap);
+  font-size: 11px; color: var(--muted-2);
+}
+.rail-row {
+  display: flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 2px; width: 100%;
+  border: 0; border-top: 1px solid var(--keycap);
+  background: none; text-align: left; color: inherit; font: inherit;
+}
+button.rail-row { cursor: pointer; }
+.rail-row:hover { background: rgba(255, 255, 255, .03); }
+/* SL1 selected/current row: 2px accent left bar + accent tint */
+.rail-row.current {
+  background: rgba(34, 197, 94, .07);
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+.rail-ev {
+  flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px;
+  font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden;
+}
+.rail-tool { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--foreground); }
+.rail-detail { color: var(--muted-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* status word tinted the state color (hollow states keep neutral words) */
+.rail-word { font-size: 12px; white-space: nowrap; }
+.rail-word.ok { color: var(--primary); }
+.rail-word.warn { color: var(--status-warning); }
+.rail-word.err { color: var(--status-danger); }
+.rail-word.mut { color: var(--muted); }
+.rail-when, .rail-cost {
+  font-family: var(--font-mono); font-size: 11px; color: var(--muted-2);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* --- E2 empty state (content-shaped, top-left) + L1 skeleton spacing --- */
+.rail-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.rail-ske { display: flex; flex-direction: column; gap: 8px; }
+
+/* --- workspace summary: ONE big number, demoted sibling stats --- */
+.ws-stats {
+  align-self: flex-end; padding-bottom: 5px;
+  font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+
+/* --- NT2 banner helpers (the amber square dot is .banner::before; the tinted
+   lead word is styles.css `.banner b`) --- */
+.banner-rest { color: var(--muted); min-width: 0; }
+.banner-tail { margin-left: auto; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.banner-since { font-size: 11px; color: #52525b; }
+.banner-reason {
+  font-family: var(--font-mono); font-size: 11px; color: var(--muted-2);
+  max-width: 340px; overflow: hidden; text-overflow: ellipsis;
+}

@@ -7,13 +7,22 @@
 > Onboarding call with Peter Schlipf on **Thursday, 2026-07-23 at 5:30 AM Central**.
 > Microsoft Bookings confirmed the appointment and will send the calendar receipt
 > to `ehaug@leafautomation.ai`. This path does not issue a support ticket number.
+> **App identity changed on 2026-07-19:** the clean-cutover app below replaced the
+> inaccessible legacy app as the target of this request. At the onboarding call,
+> ask Autodesk to apply any concurrency grant to the new client ID below, not the
+> legacy `iBZF...` app referenced in the original booking text.
+> **Updated request emailed 2026-07-19:** sent from
+> `ehaug@leafautomation.ai` to
+> `AutodeskPlatformServicesAPSSupport@autodesk.com`, requesting 25 concurrent
+> WorkItems (10 then 25 acceptable) for the new app and asking Autodesk to attach
+> it to the July 23 onboarding call. Awaiting reply/reference number.
 >
 > Send via: APS support ticket at https://aps.autodesk.com/en/support/get-help
 > (category: Design Automation API), or your Autodesk account/partner contact.
 
 ---
 
-**Subject:** Request to raise Design Automation WorkItem concurrency limit — app `iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp`
+**Subject:** Request to raise Design Automation WorkItem concurrency limit — app `czjIu4W9OK9fSoWAJ6lddfj00tv6tPooFdBqMfFbEKP2AbfV`
 
 Hello APS Design Automation team,
 
@@ -25,12 +34,13 @@ concurrency limit** on our production app.
 
 | Field | Value |
 |---|---|
-| APS app nickname (owner id) | `iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp` |
+| APS application | `Leaf Design Automation Production` (Developer Hub: `Leaf Automation APS`) |
+| APS client ID / app nickname | `czjIu4W9OK9fSoWAJ6lddfj00tv6tPooFdBqMfFbEKP2AbfV` |
 | Engine | `Autodesk.AutoCAD+26_0` (Design Automation for AutoCAD) |
 | Region | `us-east` (`/da/us-east/v3`) |
-| OSS bucket (persistent store) | `leaf-web-store-ibzfsm0zj8sgcjm4` (policy: **persistent**) |
+| OSS bucket (persistent store) | `leaf-web-store-czjiu4w9ok9fsowa` (policy: **persistent**) |
 | Billing | Design Automation Flex (pay-as-you-go) |
-| Typical WorkItem | headless AutoCAD extract + read-only tools, **~2.4–4.1 engine-seconds**, **~$0.006–0.008/run** at the AutoCAD DA rate |
+| Typical WorkItem | headless AutoCAD extract + read-only tools, **~2.4–4.1 engine-seconds**, **~$0.006–0.008/run** at the AutoCAD DA rate; new-app smoke on 2026-07-19: **2.43 engine-seconds / $0.0068** |
 
 ## 2. Current limit (observed)
 

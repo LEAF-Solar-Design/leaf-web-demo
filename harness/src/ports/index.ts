@@ -91,11 +91,40 @@ export interface ResultOverlay {
   polylines?: { pts: [number, number][]; color?: string }[];
 }
 
-/** Author response = CONTRACT.md section 4: POST /api/author -> {tool, code, preview}. */
+/**
+ * Authoring telemetry (A1) — the real provenance/cost numbers surfaced from ONE
+ * design-time author build so the UI can render a telemetry/provenance chip. Every
+ * field is OPTIONAL: a runner that cannot measure a dimension omits it, and a runner
+ * that meters nothing (the hermetic fake) omits the whole object — so the /author
+ * response stays additively `{tool, code, preview}` when telemetry is absent.
+ *
+ * Populated by AgentSdkRunner from its self-metered `lastRun` summary
+ * (research/agentsdk-usage-visibility.md: meter from each response's usage, there is
+ * no balance API). Not carried by the fake or the e2b runner (they leave it undefined).
+ */
+export interface AuthorTelemetry {
+  /** SDK turns consumed by the author session. */
+  turns?: number;
+  /** Prompt (input) tokens across the session. */
+  input_tokens?: number;
+  /** Completion (output) tokens across the session. */
+  output_tokens?: number;
+  /** SDK-reported total cost of the author session in USD (omitted when unknown). */
+  total_cost_usd?: number;
+  /** Distinct model id(s) the author session used. */
+  models?: string[];
+}
+
+/**
+ * Author response = CONTRACT.md section 4: POST /api/author -> {tool, code, preview}.
+ * `telemetry` is an ADDITIVE, OPTIONAL extension (A1): present only when the runner
+ * metered the build; absent-safe so the frozen 3-field shape is unchanged otherwise.
+ */
 export interface AuthorResponse {
   tool: ToolPackage;
   code: string;
   preview: string;
+  telemetry?: AuthorTelemetry;
 }
 
 // --------------------------------------------------------------------------- //
@@ -250,6 +279,12 @@ export interface AgentRunResult {
   preview: string;
   /** Files the session wrote, relative to repoDir (for observability/tests). */
   files: string[];
+  /**
+   * OPTIONAL authoring telemetry (A1): turns/tokens/cost/models for this build.
+   * A runner that meters populates it (AgentSdkRunner); one that does not (the fake,
+   * the e2b runner) leaves it undefined — so `e2bAgentRunner.ts` compiles unchanged.
+   */
+  telemetry?: AuthorTelemetry;
 }
 
 export interface AgentRunner {

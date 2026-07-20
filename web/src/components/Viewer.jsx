@@ -25,13 +25,21 @@ function readTokens() {
     return raw || fallback
   }
   return {
-    bg: v('--cv-bg', '#f4f6f8'),
-    insert: v('--cv-insert', '#3b6ea5'),
-    face: v('--cv-face', '#5f8a6a'),
-    select: v('--cv-select', '#a76a00'),
-    ghost: v('--cv-ghost', '#8b98a5'),
-    ghostRemove: v('--cv-ghost-remove', '#c07d7d'),
-    danger: v('--cv-danger', '#8a1c1c'),
+    // Fallbacks mirror the committed dark values in styles.css (:root --cv-*)
+    // so a failed variable resolve still renders the dark scheme, never the
+    // retired light "paper" palette.
+    bg: v('--cv-bg', '#0f0f11'),
+    insert: v('--cv-insert', '#4f83c2'),
+    face: v('--cv-face', '#4b8f68'),
+    select: v('--cv-select', '#e7b643'),
+    ghost: v('--cv-ghost', '#6b7280'),
+    ghostRemove: v('--cv-ghost-remove', '#a05555'),
+    danger: v('--cv-danger', '#e24947'),
+    // Default color for result-overlay polylines when the envelope carries
+    // none — info-blue family, off the accent/status reds and greens. The
+    // token itself lives in styles.css; the fallback is the faithful hex of
+    // oklch(0.72 0.12 230).
+    overlay: v('--cv-overlay', '#43b2e1'),
   }
 }
 
@@ -433,7 +441,7 @@ const Viewer = forwardRef(function Viewer(
 
     const lg = new THREE.BufferGeometry()
     lg.setAttribute('position', new THREE.Float32BufferAttribute(linePos, 3))
-    const lm = new THREE.LineBasicMaterial({ color: '#ffce4d', transparent: true, opacity: 1, depthTest: false })
+    const lm = new THREE.LineBasicMaterial({ color: s.tokens.select, transparent: true, opacity: 1, depthTest: false })
     const lMesh = new THREE.LineSegments(lg, lm); lMesh.renderOrder = 11; g.add(lMesh)
   }, [highlightHandles, buildTick])
 
@@ -527,7 +535,7 @@ const Viewer = forwardRef(function Viewer(
       }
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
-      const mat = new THREE.LineBasicMaterial({ color: ov.color || '#4de1c1', depthTest: false })
+      const mat = new THREE.LineBasicMaterial({ color: ov.color || s.tokens.overlay, depthTest: false })
       const mesh = new THREE.LineSegments(geo, mat); mesh.renderOrder = 9; g.add(mesh)
     }
   }, [overlayPolylines, buildTick])

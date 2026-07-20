@@ -45,7 +45,11 @@ const nap = (ms) => new Promise((r) => setTimeout(r, ms))
 async function http(path, opts) {
   const headers = { ...(opts?.headers || {}), ...authHeaders() }
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers })
-  if (!res.ok) throw new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
+  if (!res.ok) {
+    const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
+    e.status = res.status // callers gate on 401/403 without string-matching
+    throw e
+  }
   return res.json()
 }
 
@@ -234,14 +238,37 @@ export async function openProject(projectId, orgId) {
 }
 
 // --- Ops surface (INTERNAL; ?ops=1 only) ---------------------------------
-// GET /api/ops/tenants (X-Internal-Role: qa) -> {tenants:[{tenant_id,runs,usd_est,disabled}]}.
-// POST /api/ops/tenants/{tid}/disable|enable -> enveloped ack. A 403 (role not
-// granted) throws an Error tagged .status=403 so the drawer renders a calm
+// GET /api/ops/tenants -> {tenants:[{tenant_id,runs,usd_est,disabled}]}.
+// POST /api/ops/tenants/{tid}/disable|enable -> enveloped ack. A 403 (not
+// authorized) throws an Error tagged .status=403 so the drawer renders a calm
 // "ops role required" instead of a red failure. Sibling contract.
+//
+// AUTH (1C-followup): the backend now gates ops on a real internal credential,
+// `X-Ops-Secret`, NOT the legacy `X-Internal-Role: qa` dev seam. When the
+// operator has provisioned a secret — localStorage `leaf.ops_secret` or the
+// build-time `VITE_OPS_SECRET` — we attach it; absent, we still send the legacy
+// role header so an ungated LOCAL dev backend keeps working (the demo path is
+// byte-unchanged off-secret). The secret is read at call time and never logged.
+const OPS_SECRET_KEY = 'leaf.ops_secret'
 const OPS_HEADERS = { 'X-Internal-Role': 'qa' }
 
+function opsSecret() {
+  try {
+    const ls = localStorage.getItem(OPS_SECRET_KEY)
+    if (ls) return ls
+  } catch { /* localStorage unavailable */ }
+  return import.meta.env.VITE_OPS_SECRET || null
+}
+
+// Ops request headers: the legacy role seam + the real secret (when present) +
+// any bearer. Never logs the secret.
+function opsHeaders() {
+  const s = opsSecret()
+  return { ...OPS_HEADERS, ...(s ? { 'X-Ops-Secret': s } : {}), ...authHeaders() }
+}
+
 export async function getOpsTenants() {
-  const res = await fetch(`${API_BASE}/api/ops/tenants`, { headers: { ...OPS_HEADERS, ...authHeaders() } })
+  const res = await fetch(`${API_BASE}/api/ops/tenants`, { headers: opsHeaders() })
   if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
   if (!res.ok) throw new Error(`GET /api/ops/tenants -> ${res.status}`)
   const body = await res.json()
@@ -252,7 +279,7 @@ export async function setTenantDisabled(tenantId, disabled) {
   const action = disabled ? 'disable' : 'enable'
   const res = await fetch(
     `${API_BASE}/api/ops/tenants/${encodeURIComponent(tenantId)}/${action}`,
-    { method: 'POST', headers: { ...OPS_HEADERS, ...authHeaders() } },
+    { method: 'POST', headers: opsHeaders() },
   )
   if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
   if (!res.ok) throw new Error(`POST /api/ops/tenants/${tenantId}/${action} -> ${res.status}`)
@@ -516,6 +543,24 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
         tier: body.tier || null,
       }
     }
+    // Coarse per-tenant DAILY run-quota over-cap (HTTP 429 {error, tier, limit,
+    // used, retryable}). Distinct from the 402 spend-cap even though both carry
+    // error_code:"quota_exceeded" — tag it `quota_kind:"daily_runs"` so the UI
+    // renders the calm "daily run limit reached" card (amber), never the spend
+    // card and never a red failure. Nothing ran; the job was rejected pre-APS.
+    if (res.status === 429) {
+      const qErr = (body && body.error) ||
+        { error_code: 'quota_exceeded', message: 'Daily run limit reached.', retryable: true }
+      return {
+        ok: false, tool: toolName, version: null, result: null, overlay: null,
+        timing_ms: 0, cost: null, degraded_mode: false,
+        error: qErr,
+        quota_kind: 'daily_runs',
+        tier: (body && body.tier) || null,
+        limit: (body && Number.isFinite(Number(body.limit))) ? Number(body.limit) : null,
+        used: (body && Number.isFinite(Number(body.used))) ? Number(body.used) : null,
+      }
+    }
     // Submission itself failed. If the server already returned a §3 envelope
     // (e.g. UNKNOWN_TOOL 404), pass it straight through; else synthesize one.
     if (body && 'ok' in body) return body
@@ -565,6 +610,53 @@ export async function getDrawingVersions(drawingId) {
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions`, {
     headers: { 'X-Tenant-Id': TENANT },
   })
+}
+
+// --- Single-writer checkout take / release (3B) -------------------------
+// Wave-2 landed the checkout as a DISPLAY-ONLY chip (read from /versions). These
+// two calls make it MUTABLE: acquire the single-writer lock, or release it.
+//
+// POST /api/drawings/{id}/checkout {holder?, ttl_s?}
+//   200 {acquired:true, holder, checkout:{holder,acquired,expires}}
+//   409 {acquired:false, locked_by, ...}   (someone else holds it — EXPECTED)
+// The 409 is a normal coordination outcome, not an error: we fold it into the
+// resolved value (`acquired:false`) instead of throwing, so the caller just
+// refetches /versions to show the real lock. LIVE only.
+export async function takeCheckout(drawingId, holder, ttlS) {
+  const payload = {}
+  if (holder) payload.holder = holder
+  if (ttlS) payload.ttl_s = ttlS
+  const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  const data = await res.json().catch(() => null)
+  if (res.status === 409) {
+    return {
+      acquired: false,
+      locked_by: (data && (data.locked_by || (data.checkout && data.checkout.holder))) || null,
+      checkout: (data && data.checkout) || null,
+    }
+  }
+  if (!res.ok) throw new Error(`POST /api/drawings/${drawingId}/checkout -> ${res.status}`)
+  return { acquired: true, ...(data || {}) }
+}
+
+// DELETE /api/drawings/{id}/checkout?holder=
+//   200 {released, checkout:null}
+//   403 (not the holder) — tagged .status=403 so the caller can say "you don't
+//   hold this lock" calmly. LIVE only.
+export async function releaseCheckout(drawingId, holder) {
+  const q = holder ? `?holder=${encodeURIComponent(holder)}` : ''
+  const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout${q}`, {
+    method: 'DELETE',
+    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+  })
+  if (res.status === 403) { const e = new Error('not the lock holder'); e.status = 403; throw e }
+  const data = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(`DELETE /api/drawings/${drawingId}/checkout -> ${res.status}`)
+  return data || { released: true, checkout: null }
 }
 
 export async function undoDrawing(drawingId) {

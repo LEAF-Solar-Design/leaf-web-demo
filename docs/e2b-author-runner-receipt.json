@@ -1,0 +1,55 @@
+{
+  "schema": "leaf.e2b.author-runner.v1",
+  "startedAt": "2026-07-19T17:55:45.484Z",
+  "completedAt": "2026-07-19T17:55:47.620Z",
+  "sandboxId": "ijoxeedml3beuxa3w17t5",
+  "coldBootMs": 906,
+  "brokerHost": "httpbingo.org",
+  "network": {
+    "allowOut": [
+      "httpbingo.org"
+    ],
+    "denyOut": [
+      "0.0.0.0/0"
+    ],
+    "allowPublicTraffic": false
+  },
+  "broker": {
+    "host": "httpbingo.org",
+    "url": "https://httpbingo.org/post",
+    "reached": true,
+    "status": 200
+  },
+  "deniedProbes": {
+    "https://1.1.1.1/": {
+      "blocked": true,
+      "error_type": "URLError"
+    },
+    "https://api.github.com/": {
+      "blocked": true,
+      "error_type": "URLError"
+    },
+    "https://example.com/": {
+      "blocked": true,
+      "error_type": "URLError"
+    }
+  },
+  "configuredDenyAll": true,
+  "configuredBrokerOnly": true,
+  "everyDeniedProbeBlocked": true,
+  "passed": true,
+  "authored": {
+    "name": "count-entities-per-layer",
+    "engine_op": "count_by_layer"
+  },
+  "smoke": {
+    "tool_valid": true,
+    "tool_name": "count-entities-per-layer",
+    "engine_op": "count_by_layer",
+    "files_written": [
+      "tools/count-entities-per-layer/tool.json",
+      "tools/count-entities-per-layer/tool.py"
+    ],
+    "aps_test_runs": 1
+  }
+}

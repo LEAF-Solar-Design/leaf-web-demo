@@ -1,23 +1,51 @@
-// Quota card: a run rejected by the broker's hard pre-flight spend cap
-// (error_code === 'quota_exceeded', HTTP 402). Reuses the DegradedBanner shape
-// with a calm amber posture — this is an expected budget state, not a failure to
-// alarm about. Nothing ran on the cloud, so the run was never charged. The
-// backend's own message is authoritative; a soft second line says what unblocks
-// new runs. Rendered only for the quota case (never for generic failures).
-export default function QuotaCard({ message, remaining }) {
+// Quota banner: a run rejected by a per-tenant limit. Two distinct kinds, both
+// calm amber (an expected budget/allowance state, never a red failure):
+//
+//   default        — the broker's hard pre-flight SPEND cap (HTTP 402). Keyed on
+//                     dollars remaining; resolves when spend falls back under cap.
+//   kind:daily_runs — the coarse DAILY RUN-COUNT limit (HTTP 429). Keyed on
+//                     used/limit for the tier; resets at 00:00 UTC.
+//
+// NT2 ongoing-condition anatomy, one line: the container's own amber square
+// dot (.banner::before) + tinted lead word (styles.css `.banner b`) + muted
+// sentence + at most one quiet action (rendered only when the parent wires
+// `onAction`, e.g. scroll-to-usage) + a self-clearing note. Persists while the
+// condition is true and clears itself — never user-dismissed. Nothing ran on
+// the cloud in either case, so the run was never charged; the backend's own
+// message is authoritative.
+export default function QuotaCard({ kind, message, remaining, tier, limit, used, onAction }) {
+  if (kind === 'daily_runs') {
+    const haveCounts = Number.isFinite(Number(used)) && Number.isFinite(Number(limit))
+    return (
+      <div className="banner quota" role="status">
+        <b>Daily limit</b>
+        <span className="banner-rest">
+          {' — '}
+          {haveCounts ? `${used}/${limit} runs used` : 'daily run limit reached'}
+          {tier ? ` on the ${tier} tier` : ''}
+          {'; '}
+          {message || 'this run was rejected before any cloud work — nothing was charged.'}
+        </span>
+        <span className="banner-tail">
+          {onAction && <button className="chip-act" onClick={onAction}>View usage</button>}
+          <span className="banner-since">resets at 00:00 UTC · clears itself</span>
+        </span>
+      </div>
+    )
+  }
   const hasRemaining = typeof remaining === 'number' && Number.isFinite(remaining)
   return (
     <div className="banner quota" role="status">
-      <span className="tag amber">Spend cap</span>
-      <div>
-        <b>Spend cap reached — this run wasn’t charged.</b>{' '}
-        {message || 'Nothing ran on the cloud; the run was rejected before any billable work.'}
-        <div className="quota-sub">
-          New runs resume once your spend falls back under the cap
-          {hasRemaining ? ` (currently $${remaining.toFixed(2)} left)` : ''}, or when your
-          plan’s limit is raised. No cloud work was billed for this attempt.
-        </div>
-      </div>
+      <b>Spend cap</b>
+      <span className="banner-rest">
+        {' — this run wasn’t charged; '}
+        {message || 'nothing ran on the cloud — the run was rejected before any billable work.'}
+        {hasRemaining ? ` $${remaining.toFixed(2)} left under the cap.` : ''}
+      </span>
+      <span className="banner-tail">
+        {onAction && <button className="chip-act" onClick={onAction}>View usage</button>}
+        <span className="banner-since">clears when spend falls under the cap</span>
+      </span>
     </div>
   )
 }

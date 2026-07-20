@@ -22,7 +22,7 @@ import client  # noqa: E402
 import store  # noqa: E402
 
 DWG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "rooftop_demo.dwg")
-VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9-]+/drawings/[a-z0-9-]+/v/\d{8}\.dwg$")
+VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9_-]+/drawings/[a-z0-9_-]+/v/\d{8}\.dwg$")
 
 
 # --------------------------------------------------------------------------- #
@@ -88,7 +88,10 @@ def test_create_bucket_default_policy_is_persistent(monkeypatch):
 # Key scheme
 # --------------------------------------------------------------------------- #
 def test_version_keys_distinct_deterministic_and_regex():
-    t, d = "Tenant_1", "Draw-A"
+    # F13: ids are now REJECT-don't-collapse, so the store no longer normalises
+    # `Tenant_1`/`Draw-A` — a caller must pass already-canonical ids. (The collision
+    # this closes is proven in da/test_hardening_1f.py.)
+    t, d = "tenant-1", "draw-a"
     k1 = store.drawing_version_key(t, d, 1)
     k2 = store.drawing_version_key(t, d, 2)
     assert k1 != k2
@@ -120,22 +123,22 @@ def test_immutable_versions_and_manifest_chain(tmp_path):
     a = _tmpfile(tmp_path, "v1.dwg", b"DWG-BYTES-V1")
     b = _tmpfile(tmp_path, "v2.dwg", b"DWG-BYTES-V2-different")
 
-    ing = store.ingest_drawing(be, "Acme Corp", a)
+    ing = store.ingest_drawing(be, "acme-corp", a)
     did = ing["drawing_id"]
     assert ing["version"] == 1
 
-    v2 = store.put_drawing(be, "Acme Corp", did, b, parent_version=1,
+    v2 = store.put_drawing(be, "acme-corp", did, b, parent_version=1,
                            meta={"tool": "add-panel-row", "workitem_id": "wi-123"})
     assert v2 == 2
 
-    k1 = store.drawing_version_key("Acme Corp", did, 1)
-    k2 = store.drawing_version_key("Acme Corp", did, 2)
+    k1 = store.drawing_version_key("acme-corp", did, 1)
+    k2 = store.drawing_version_key("acme-corp", did, 2)
     # both version objects still resolve; v1 was NOT overwritten
     assert be.exists(k1) and be.exists(k2)
     assert be.get(k1) == b"DWG-BYTES-V1"
     assert be.get(k2) == b"DWG-BYTES-V2-different"
 
-    m = store.load_manifest(be, "Acme Corp", did)
+    m = store.load_manifest(be, "acme-corp", did)
     assert m["head"] == 2 and m["latest"] == 2
     by_v = {e["v"]: e for e in m["versions"]}
     assert by_v[1]["parent"] is None

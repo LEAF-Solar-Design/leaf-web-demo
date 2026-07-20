@@ -10,6 +10,16 @@
 # Listens on :8140.  The APS credential is provided at RUNTIME via a mounted
 # file referenced by APS_CRED (default ~/.aps/credentials.json) — it is NEVER
 # baked into this image and is only read on live (APS_LIVE=1) runs.
+#
+# --- Node helper stage (opt-in LEAF_SANDBOX=e2b-microvm tier, F2) -----------
+# Installs ONLY the e2b SDK into its own throwaway node_modules. This must
+# NEVER become `npm install` against harness/package.json — that manifest
+# pulls in the Anthropic agent SDK, which must not enter the broker image
+# (broker stays server+da only, per the header comment above).
+FROM node:20-slim AS e2bdeps
+WORKDIR /helper
+RUN npm init -y && npm install e2b@^2.35.0
+
 FROM python:3.12-slim AS broker
 
 WORKDIR /app
@@ -30,6 +40,26 @@ COPY da/      /app/da/
 COPY engine/  /app/engine/
 COPY contract/ /app/contract/
 COPY data/    /app/data/
+
+# --- Node runtime for the E2B micro-VM tool-exec helper (LEAF_SANDBOX=e2b-microvm,
+#     F2 opt-in tier; the shipped default remains the LEAF_SANDBOX=e2b subprocess
+#     tier and needs none of this). libstdc++6 satisfies the copied node binary's
+#     dynamic linking on this debian-slim base — node:20-slim is debian-slim and
+#     ships it, python:3.12-slim does not by default.
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 \
+      && rm -rf /var/lib/apt/lists/*
+COPY --from=node:20-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=e2bdeps /helper/node_modules /app/harness/node_modules
+COPY harness/scripts/e2b-tool-exec.mjs /app/harness/scripts/e2b-tool-exec.mjs
+# NOTE: import "e2b" from /app/harness/scripts/*.mjs resolves node_modules by
+# walking UP from the script dir, hence node_modules landing at
+# /app/harness/node_modules (sibling of scripts/, not scripts/node_modules).
+# E2B_API_KEY is NEVER baked here — like APS_CRED above, it is runtime-injected
+# (Secrets Manager) and only read when LEAF_SANDBOX=e2b-microvm is actually used.
+# F11 (not yet applied to this file): once a non-root `leaf` uid is added before
+# CMD, /usr/local/bin/node and /app/harness/node_modules must stay world/uid
+# readable so that uid can still exec the helper.
+ENV LEAF_E2B_HELPER=/app/harness/scripts/e2b-tool-exec.mjs
 
 # Run from the server workdir (broker.py caches stdlib `platform`/`queue` before
 # the PROJECT_ROOT sys.path insert, so the local da/queue.py never shadows them).

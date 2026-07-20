@@ -223,6 +223,162 @@ def aggregate_usage(tenant_id: str, ledger_path, now_ts: Optional[float] = None)
 
 
 # --------------------------------------------------------------------------- #
+# F12 + A4 (coarse-quota-v1): per-tenant DAILY RUN quota — a COUNT-based liability
+# cap standing ALONGSIDE the USD spend cap above. It caps the NUMBER of APS-money
+# runs a tenant may make per UTC day, keyed on the tenant's tier, so one runaway
+# stranger can't loop-and-burn the shared APS credential.
+#
+# COUNTING RULE (spec §a): a quota unit = one run that enters the APS_LIVE=1 branch.
+# APS_LIVE=0 (free/mock) runs are NEVER counted and never gated — they spend no
+# Autodesk money — and a run already rejected as over-quota / tenant-disabled is not
+# counted either. The broker records `aps_live` + `status` on every ledger line, so
+# the live-only count is a filter over the AUTHORITATIVE broker ledger.
+#
+# No cron, no scheduler (spec §d): the "daily reset" is IMPLICIT because the count
+# keys on the current UTC calendar day (YYYY-MM-DD). A new UTC day scans a fresh
+# window of the ledger and yields a fresh count of 0 — yesterday's rows simply stop
+# being read.
+# --------------------------------------------------------------------------- #
+
+# Free/unknown-tier default N (runs/tenant/UTC-day). OPERATOR-CONFIRMABLE {10,20,50}
+# (spec §c). Read from env LEAF_DAILY_RUN_QUOTA at call time so retuning N is a
+# config flip, not a redeploy; the built-in default is 20.
+DEFAULT_DAILY_RUN_QUOTA = 20
+
+# hosted_starter: a fixed placeholder multiple (10x free) that hardens into a real
+# value when the billing SKUs get priced (spec §c). hosted_pro: UNMETERED.
+_HOSTED_STARTER_DAILY_RUN_QUOTA = 200
+
+
+def default_daily_run_quota() -> int:
+    """Free/unknown-tier daily run cap N, from env LEAF_DAILY_RUN_QUOTA (default 20).
+    A non-integer or negative value falls back to the built-in default."""
+    raw = os.environ.get("LEAF_DAILY_RUN_QUOTA")
+    if raw not in (None, ""):
+        try:
+            v = int(raw)
+            if v >= 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_DAILY_RUN_QUOTA
+
+
+def daily_run_limit_for(tier: Optional[str]) -> Optional[int]:
+    """Runs-per-UTC-day limit for a tier. ``None`` == UNMETERED (never blocked).
+
+    Tier map (spec §c), tier-aware and read live:
+        demo / self_hosted        -> N   (env LEAF_DAILY_RUN_QUOTA, default 20 — free cap)
+        restricted                -> N   (fail closed to the free cap)
+        hosted_starter            -> 200 (placeholder 10x free)
+        hosted_pro                -> None (unmetered; still counted for future billing)
+        unknown / unauthenticated -> N   (FAIL CLOSED to the free cap — never fail open)
+    """
+    n = default_daily_run_quota()
+    table: Dict[str, Optional[int]] = {
+        "demo": n,
+        "self_hosted": n,
+        "restricted": n,
+        "hosted_starter": _HOSTED_STARTER_DAILY_RUN_QUOTA,
+        "hosted_pro": None,  # unmetered
+    }
+    if tier in table:
+        return table[tier]
+    return n  # unknown / unauthenticated -> free default (fail closed)
+
+
+def daily_run_count(tenant_id: str, ledger_path, now_ts: Optional[float] = None) -> int:
+    """Count a tenant's APS-money runs (``aps_live`` truthy) in the CURRENT UTC day,
+    from the broker ledger.
+
+    Per the spec §a counting rule this EXCLUDES APS_LIVE=0 (free/mock) runs and runs
+    already rejected as over-quota / tenant-disabled (the same denial filter
+    ``spent_from_broker_ledger`` / ``aggregate_usage`` apply). ``now_ts`` overrides
+    "now" for deterministic tests. A missing/empty/corrupt ledger yields 0 — this read
+    NEVER raises."""
+    today = (datetime.fromtimestamp(now_ts, tz=timezone.utc).date()
+             if now_ts is not None else datetime.now(timezone.utc).date())
+    p = Path(ledger_path)
+    if not p.exists():
+        return 0
+    count = 0
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if e.get("tenant_id") != tenant_id:
+            continue
+        if not e.get("aps_live"):  # spec §a: APS_LIVE=0 runs are un-metered/free
+            continue
+        if e.get("status") in (QUOTA_EXCEEDED, "TENANT_DISABLED"):
+            continue
+        ts = e.get("ts")
+        if isinstance(ts, (int, float)):
+            try:
+                if datetime.fromtimestamp(ts, tz=timezone.utc).date() == today:
+                    count += 1
+            except (OverflowError, OSError, ValueError):
+                continue
+    return count
+
+
+def daily_quota_envelope(tenant_id: str, tier: str, limit: int, used: int,
+                         tool: Optional[str] = None) -> Dict[str, Any]:
+    """The over-quota §10 envelope for the DAILY RUN cap (broker returns HTTP 429).
+
+    Mirrors the spend-cap ``quota_envelope`` shape (a §10 ``error`` object + top-level
+    convenience mirrors) but ``retryable=True`` (the cap lifts at 00:00 UTC) and carries
+    ``tier``/``limit``/``used`` so the frontend renders an accurate upgrade prompt
+    (spec §e). tier/limit/used are additive keys the frozen envelope_schema.json permits
+    (it requires only error_code/message/retryable in the error object). ``degraded_mode``
+    is coerced to a boolean by the broker on the wire (schema requires boolean)."""
+    msg = (f"Daily run limit reached for your plan ({used}/{limit}). "
+           f"Resets 00:00 UTC. Upgrade for more.")
+    return {
+        "ok": False,
+        "tool": tool,
+        "result": None,
+        "overlay": None,
+        "cost": None,
+        "error": {"error_code": QUOTA_EXCEEDED, "message": msg, "retryable": True,
+                  "tier": tier, "limit": limit, "used": used},
+        "error_code": QUOTA_EXCEEDED,   # top-level convenience mirror (plan §3 shape)
+        "retryable": True,
+        "message": msg,
+        "tier": tier,
+        "limit": limit,
+        "used": used,
+        "degraded_mode": None,
+    }
+
+
+def daily_run_quota_check(tenant_id: str, tier: str, ledger_path,
+                          now_ts: Optional[float] = None) -> Dict[str, Any]:
+    """Pre-flight DAILY RUN quota decision (count-based, tier-keyed). Returns
+    ``{"ok": True, ...}`` to PROCEED, or a ``quota_exceeded`` envelope to REJECT —
+    BEFORE any APS call.
+
+    An UNMETERED tier (limit ``None``, e.g. hosted_pro) always proceeds (still logged
+    upstream for future billing). A metered run is admitted iff prior-runs-today
+    ``used < limit`` (this run then becomes ``used+1 <= limit``); at ``used >= limit``
+    it is rejected. ``now_ts`` overrides "now" for deterministic tests.
+    """
+    limit = daily_run_limit_for(tier)
+    used = daily_run_count(tenant_id, ledger_path, now_ts=now_ts)
+    if limit is None:
+        return {"ok": True, "metered": False, "tier": tier, "limit": None, "used": used}
+    if used >= limit:
+        env = daily_quota_envelope(tenant_id, tier, limit, used)
+        env.update({"metered": True, "tier": tier, "limit": limit, "used": used})
+        return env
+    return {"ok": True, "metered": True, "tier": tier, "limit": limit, "used": used}
+
+
+# --------------------------------------------------------------------------- #
 # attribution — local fallback: in-process append-only ledger
 # --------------------------------------------------------------------------- #
 class UsageLedger:

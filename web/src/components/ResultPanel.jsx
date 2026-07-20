@@ -1,33 +1,24 @@
+import { useEffect } from 'react'
+
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
-// key/value), overlay summary, timing + cost receipt. Plus calm live progress
-// and a normalized error.
+// key/value), overlay summary, timing + cost receipt, and a normalized error
+// in the X1 anatomy. Live run progress rides the SB3 running strip above the
+// docked command bar (App-level) — the card here is result DATA only.
 //
 // The §10 error is an OBJECT ({error_code, message, retryable}); mock errors
-// are plain strings. `errText`/`isRetryable` handle both so the same panel
+// are plain strings. `errParts`/`isRetryable` handle both so the same panel
 // renders live and mock without ever passing a raw object to React.
 
-function errText(e) {
-  if (!e) return ''
-  if (typeof e === 'string') return e
-  const code = e.error_code ? `${e.error_code}: ` : ''
-  return `${code}${e.message || 'error'}`
+// Split an error into a plain sentence + a demoted mono code (X1: the sentence
+// names what failed; the raw error_code never leads).
+function errParts(e) {
+  if (!e) return { message: '', code: '' }
+  if (typeof e === 'string') return { message: e, code: '' }
+  return { message: e.message || 'error', code: e.error_code || '' }
 }
 
 function isRetryable(e) {
   return !!(e && typeof e === 'object' && e.retryable)
-}
-
-// Calm, loader-free progress line: "submitted", then "running · 3.2s", and
-// when the backend emits a richer step string, "running · storing version · 3.2s".
-function progressText(runStatus, runElapsedMs, runProgress) {
-  const status = runStatus || 'running'
-  if (status === 'submitted') return 'submitted'
-  const secs = runElapsedMs != null ? ` · ${(runElapsedMs / 1000).toFixed(1)}s` : ''
-  // Only show the step when it adds information beyond the plain status.
-  const step = (runProgress && runProgress !== status && runProgress !== 'running')
-    ? ` · ${runProgress}`
-    : ''
-  return `${status}${step}${secs}`
 }
 
 function CountsTable({ counts }) {
@@ -79,54 +70,94 @@ function ResultBody({ result }) {
   return <KeyValue data={scalars} />
 }
 
-function ErrorLine({ err, onRetry, retry, quota }) {
+// X1 failed-act row: plain sentence naming what failed (code demoted to a
+// quiet mono suffix), Retry chip carrying its mnemonic keycap (R — bound at
+// the panel level while the row is visible), and an honest fallback note.
+// The calm quota/entitlement variants keep the broker's own sentence — a
+// budget/plan boundary is not a failure to re-phrase.
+function ErrorLine({ err, onRetry, retry, quota, toolName }) {
+  const { message, code } = errParts(err)
   return (
     <div className={`inline-error ${quota ? 'quota' : ''}`}>
-      <span>{errText(err)}</span>
+      <span>
+        {quota ? message : `Couldn't run ${toolName || 'the tool'} — ${message}`}
+        {!quota && code && <> <code className="dim">{code}</code></>}
+      </span>
       {retry && onRetry && (
-        <button type="button" className="btn ghost retry" onClick={onRetry}>Retry</button>
+        <>
+          <button type="button" className="btn ghost retry" onClick={onRetry}>Retry</button>
+          <span className="key" aria-hidden="true">R</span>
+        </>
       )}
+      {!quota && <span className="dim">Your drawing is unchanged.</span>}
     </div>
   )
 }
 
-// Format a per-run cost in dollars, itemized (e.g. "$0.0083"). Small runs need
-// 4 decimals to read as non-zero; larger ones stay legible. usd_est is a Number
-// or a numeric string in the §3 envelope.
+// Format a per-run cost in dollars (e.g. "$0.0083"). Small live runs need 4
+// decimals to read as non-zero; larger ones stay legible at 2. A ZERO or
+// non-finite cost (a mock run, or a live run that did no billable cloud work)
+// returns null so the caller shows a clean "no cloud cost" — never "$0.0000"
+// (B1). usd_est is a Number or a numeric string in the §3 envelope.
 function fmtUsd(v) {
   const n = Number(v)
-  if (!Number.isFinite(n)) return null
-  return `$${n.toFixed(4)}`
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`
 }
 
-export default function ResultPanel({ running, runStatus, runProgress, runElapsedMs, error, result, tool, onRetry }) {
+// Note: run progress (runStatus / runProgress / runElapsedMs) moved to the
+// SB3 running strip at the bar dock; callers may still pass them — ignored here.
+export default function ResultPanel({ running, error, result, tool, onRetry }) {
   // A quota rejection (broker hard cap, HTTP 402) is an expected budget state,
   // not a failure to alarm about — render it in the amber calm posture (matching
-  // QuotaCard), never red FAILED. Only this error_code softens; all others stay red.
+  // QuotaCard), never red 'Failed'. Only this error_code softens; all others stay red.
   const isQuota = !!(result && !result.ok && result.error && result.error.error_code === 'quota_exceeded')
+  // The coarse DAILY run-count limit (HTTP 429) rides in with the same quota
+  // error_code but a distinct `quota_kind` — label it honestly ("Daily limit")
+  // rather than "Spend cap". Still calm amber.
+  const isDailyQuota = !!(result && result.quota_kind === 'daily_runs')
   // An entitlement rejection (HTTP 403 {entitlement_required}) is a plan boundary,
   // also calm amber (not a red failure). Same softening path as quota.
   const isEnt = !!(result && result.entitlement_required)
   const calm = isQuota || isEnt
+
+  // X1: the Retry chip carries its key — R retries while a retryable error row
+  // is visible. Skipped while typing in a field and while a run is in flight;
+  // the condition mirrors the `retry` props on the two ErrorLine sites below.
+  const canRetryKey = !running && !!onRetry &&
+    (!!error || !!(result && result.error && !isEnt && isRetryable(result.error)))
+  useEffect(() => {
+    if (!canRetryKey) return undefined
+    const onKey = (e) => {
+      if (e.key !== 'r' && e.key !== 'R') return
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      const t = e.target
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      e.preventDefault()
+      onRetry()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [canRetryKey, onRetry])
+
   return (
     <section className="card result-panel">
       <h3>Result</h3>
       {!running && !result && !error && (
-        <p className="panel-sub">Dispatch a prompt or run a tool to see its result and overlay here.</p>
+        <p className="panel-sub">
+          Dispatch a prompt or run a tool to see its result and overlay here.
+          {' '}<span className="key">Ctrl</span> <span className="key">Enter</span>
+        </p>
       )}
-      {running && (
-        <div className="running">
-          <span>{progressText(runStatus, runElapsedMs, runProgress)}{tool?.name ? ` · ${tool.name}` : ''}</span>
-          <span className="bar" aria-hidden="true"><i /></span>
-        </div>
-      )}
+      {/* Live progress rides the SB3 running strip above the docked bar
+          (App-level) — nothing renders here while a run is in flight. */}
       {/* transport-level error (network / submit failure) — always retryable */}
-      {error && !running && <ErrorLine err={error} onRetry={onRetry} retry />}
+      {error && !running && <ErrorLine err={error} onRetry={onRetry} retry toolName={tool?.name} />}
       {result && !running && (
         <div className="result-card">
           <div className="result-head">
             <span className={`ok ${result.ok ? 'yes' : (calm ? 'quota' : 'no')}`}>
-              {result.ok ? 'OK' : (isQuota ? 'SPEND CAP' : (isEnt ? 'PLAN' : 'FAILED'))}
+              {result.ok ? 'Passed' : (isDailyQuota ? 'Daily limit' : (isQuota ? 'Spend cap' : (isEnt ? 'Plan' : 'Failed')))}
             </span>
             <span className="result-tool">{result.tool} <span className="dim">v{result.version}</span></span>
             {result.degraded_mode && (
@@ -135,14 +166,14 @@ export default function ResultPanel({ running, runStatus, runProgress, runElapse
           </div>
 
           {result.ok && <ResultBody result={result} />}
-          {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} />}
+          {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
 
           {result.overlay && (
             <div className="overlay-summary">
               {result.overlay.highlight_handles?.length > 0 && (
                 <div className="ov-row">
                   <span className="ov-dot hl" />
-                  {result.overlay.highlight_handles.length.toLocaleString()} panels highlighted in the viewer
+                  {result.overlay.highlight_handles.length.toLocaleString()} panel{result.overlay.highlight_handles.length === 1 ? '' : 's'} highlighted in the viewer
                 </div>
               )}
               {result.overlay.markers?.length > 0 && (
@@ -154,23 +185,34 @@ export default function ResultPanel({ running, runStatus, runProgress, runElapse
                 </div>
               )}
               {result.overlay.polylines?.length > 0 && (
-                <div className="ov-row"><span className="ov-dot ov" />{result.overlay.polylines.length} overlay shapes</div>
+                <div className="ov-row"><span className="ov-dot ov" />{result.overlay.polylines.length} overlay shape{result.overlay.polylines.length === 1 ? '' : 's'}</div>
               )}
             </div>
           )}
 
-          <div className="receipt">
+          {/* Itemized per-run cost receipt (B3): wall-clock, engine seconds, and
+              dollars — each a distinct item. Tied to the header spend chip via the
+              tooltip (this run rolls up into "today"). A zero / non-billable run
+              reads as a clean "no cloud cost", never "$0.0000" (B1). */}
+          <div
+            className="receipt"
+            title="This run’s cost — it rolls up into today’s spend (see the spend chip in the header)."
+          >
             <span>{result.timing_ms} ms</span>
-            <span className="dim">·</span>
             {result.cost ? (
-              <span>
-                {result.cost.engine_seconds}s engine
+              <>
+                <span className="dim">·</span>
+                <span>engine {result.cost.engine_seconds}s</span>
+                <span className="dim">·</span>
                 {fmtUsd(result.cost.usd_est)
-                  ? <> · <b className="usd">{fmtUsd(result.cost.usd_est)}</b></>
-                  : <span className="dim"> · no billable cost</span>}
-              </span>
+                  ? <b className="usd">{fmtUsd(result.cost.usd_est)}</b>
+                  : <span className="dim">no cloud cost</span>}
+              </>
             ) : (
-              <span className="dim">no APS cost (mock)</span>
+              <>
+                <span className="dim">·</span>
+                <span className="dim">no cloud cost (mock)</span>
+              </>
             )}
           </div>
         </div>

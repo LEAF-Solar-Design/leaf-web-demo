@@ -113,11 +113,21 @@ const DEFAULT_GRANTS_DIR = "C:/tmp/leaf-grants";
 /**
  * Reject anything but a single, traversal-free path component so a crafted tenant id
  * can never escape `$LEAF_GRANTS_DIR`. Returns the safe base name.
+ *
+ * F13 (security-audit 2026-07-18): the accepted charset MIRRORS the ONE shared
+ * tenant-id rule in server/tenant_id_validator.py — `^[a-z0-9][a-z0-9_-]{0,62}$`,
+ * REJECT-don't-collapse — so the TS grant store, the Python store keys, and
+ * tenant_paths all AGREE on which ids are legal. (Was `^[A-Za-z0-9._-]+$`, which
+ * accepted uppercase/dots the Python side would fold or reject, causing the three
+ * validators to disagree.) `demo-tenant` and real Auth0 ids like `org_acme_solar`
+ * stay valid; the leading-alphanumeric requirement subsumes the old `.`/`..` guards.
  */
+const TENANT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+
 function safeBase(tenantId: string): string {
   const tid = (tenantId ?? "").trim();
   const base = tid.replace(/\\/g, "/").split("/").pop() ?? "";
-  if (!base || base === "." || base === ".." || base !== tid || !/^[A-Za-z0-9._-]+$/.test(base)) {
+  if (!base || base !== tid || !TENANT_ID_RE.test(base)) {
     throw new Error(`invalid tenant id for grant store: ${JSON.stringify(tenantId)}`);
   }
   return base;
@@ -236,6 +246,54 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
   async remove(tenantId: string): Promise<void> {
     rmSync(this.file(tenantId), { force: true });
     rmSync(this.kindFile(tenantId), { force: true });
+  }
+}
+
+/**
+ * GRANT-STORE SEAM (F18, security-audit 2026-07-18) — the backing store for grants at
+ * rest is selectable via env `LEAF_GRANT_STORE`, so a production deployment can swap the
+ * on-disk file store for a sealed secret store WITHOUT touching call sites:
+ *
+ *   - `file`  (DEFAULT): `FileTenantGrantStore` — one mode-0600 token file per tenant
+ *             under `$LEAF_GRANTS_DIR`. The demo / single-operator default.
+ *   - `vault`: a production secret store (HashiCorp Vault / AWS Secrets Manager /
+ *             Windows DPAPI). NOT IMPLEMENTED here — this is the documented seam.
+ *             Implement `TenantGrantStore & TenantGrantAdminStore` against your vault
+ *             and return it from the `case "vault"` branch below.
+ *
+ * WHY a seam and not just the file store: a token on local disk is not a production
+ * secret boundary even at mode 0600 (any process running as the service user can read
+ * it, and it survives on the volume). The seam lets ops opt into a sealed backend and
+ * fails LOUDLY if `vault` is requested but unwired, rather than silently persisting
+ * tokens to disk when the operator believed they were sealed.
+ */
+export type GrantStoreBackend = "file" | "vault";
+
+/** The configured grant-store backend (env `LEAF_GRANT_STORE`, default `file`). */
+export function resolveGrantStoreBackend(): GrantStoreBackend {
+  return (process.env.LEAF_GRANT_STORE ?? "file").trim().toLowerCase() === "vault" ? "vault" : "file";
+}
+
+/**
+ * Construct the tenant grant store for the configured backend. Default `file` yields the
+ * mode-0600 `FileTenantGrantStore`; `vault` is the documented-but-unwired production seam.
+ */
+export function createTenantGrantStore(
+  opts: FileTenantGrantStoreOptions = {},
+): TenantGrantStore & TenantGrantAdminStore {
+  const backend = resolveGrantStoreBackend();
+  switch (backend) {
+    case "vault":
+      // SEAM: wire a real vault / DPAPI-backed `TenantGrantStore & TenantGrantAdminStore`
+      // here for production. Intentionally unimplemented — fail loudly rather than fall
+      // back to on-disk tokens when an operator explicitly asked for the sealed store.
+      throw new Error(
+        "LEAF_GRANT_STORE=vault is a documented seam, not yet implemented — provide a " +
+          "vault/DPAPI-backed TenantGrantStore (see F18 in docs/security-audit-2026-07-18.md).",
+      );
+    case "file":
+    default:
+      return new FileTenantGrantStore(opts);
   }
 }
 

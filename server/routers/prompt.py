@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import deps
 from envelopes import ErrorCode, error_response, with_envelope_fields
@@ -26,9 +26,14 @@ from nl_router import classify
 
 router = APIRouter()
 
+# Bound the free-text prompt so an unbounded body can't exhaust the classifier /
+# request pipeline (security-audit F15). 8_000 chars is far above any real prompt;
+# an over-cap body is rejected at the validation layer before the endpoint runs.
+MAX_PROMPT_TEXT = 8_000
+
 
 class PromptRequest(BaseModel):
-    text: str
+    text: str = Field(..., max_length=MAX_PROMPT_TEXT)
 
 
 @router.post("/api/nl-prompt")

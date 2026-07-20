@@ -1,0 +1,49 @@
+{
+  "schema": "leaf.e2b.tool-exec-microvm.v1",
+  "tier": "e2b-microvm",
+  "startedAt": "2026-07-20T00:25:23.578749+00:00",
+  "completedAt": "2026-07-20T00:25:31.693146+00:00",
+  "note": "boots 1-2 run the REAL production path (tool_loader e2b-microvm tier, probe_broker=false by design); boot 3 invokes the helper directly with probe_broker=true to prove the brokerReached leg",
+  "panels_count": 2345,
+  "boots": {
+    "oracle": {
+      "ok": true,
+      "panels_count": 2345,
+      "intake_bytes": 478315,
+      "wall_ms": 3592,
+      "error": null
+    },
+    "redteam": {
+      "ok": true,
+      "read_credential": false,
+      "blocked_by": "PermissionError",
+      "egress": false,
+      "net_blocked_by": "URLError",
+      "wall_ms": 2460
+    },
+    "receipt": {
+      "ok": true,
+      "helper_receipt": {
+        "sandboxId": "i0ntcaie8d9bws386v0i6",
+        "coldBootMs": 620,
+        "network": {
+          "allowOut": [
+            "httpbingo.org"
+          ],
+          "denyOut": [
+            "0.0.0.0/0"
+          ],
+          "allowPublicTraffic": false
+        },
+        "configuredDenyAll": true,
+        "configuredBrokerOnly": true,
+        "everyDeniedProbeBlocked": true,
+        "brokerReached": true,
+        "passed": true
+      },
+      "helper_error": null,
+      "wall_ms": 2042
+    }
+  },
+  "passed": true
+}
