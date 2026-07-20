@@ -586,7 +586,12 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             # authorize a rate-limit budget of duplicate writes/solves).
             with _state_lock:
                 record = read_pending(str(confirmation_id)) or record
-                if record.get("consumed_at"):
+                # PRESENCE, not truthiness. This field has inverse polarity to
+                # granted/denied: falsy means "not yet consumed", so a record
+                # whose stamp is corrupted to null / "" / 0 would replay a spent
+                # approval. create_pending never writes the key, and the only
+                # writer below stores an ISO string, so present == consumed.
+                if "consumed_at" in record:
                     return _deny("approval_consumed", act=act, extra={"gate": "policy"})
                 record["consumed_at"] = _iso(_now())
                 _write_pending(record)

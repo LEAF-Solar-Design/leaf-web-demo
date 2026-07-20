@@ -260,6 +260,28 @@ def test_granted_approval_redeems_exactly_once_always_confirm():
     assert agent_gate.read_pending(cid)["consumed_at"]
 
 
+def test_falsy_consumed_stamp_still_denies_the_replay():
+    """`consumed_at` has INVERSE polarity to granted/denied: falsy reads as
+    "not yet consumed". A truthiness check therefore let a spent approval be
+    replayed by corrupting the stamp to null / "" / 0 — the gate must key on
+    the field being PRESENT."""
+    args = {"tool": "my-tool", "manifest_sha256": "c" * 64}
+    for i, falsy in enumerate((None, "", 0)):
+        session = f"s-falsy-{i}"
+        first = _gate("register_tool", args, session=session)
+        cid = first["confirmation_id"]
+        agent_gate.grant_approval(cid)
+        assert _gate("register_tool", dict(args, confirmation_id=cid),
+                     session=session)["reason"] == "allow_via_approval"
+        # corrupt the spent stamp the way a partial write or hand-edit would
+        record = agent_gate.read_pending(cid)
+        record["consumed_at"] = falsy
+        agent_gate._write_pending(record)
+        replay = _gate("register_tool", dict(args, confirmation_id=cid), session=session)
+        assert replay["decision"] == "deny", f"replayed with consumed_at={falsy!r}"
+        assert replay["reason"] == "approval_consumed"
+
+
 def test_confirm_once_replay_denies_but_grant_covers_repeats():
     """Confirm-once consumes the record too; repeats in the session ride the
     session grant, never a re-redeemed approval."""

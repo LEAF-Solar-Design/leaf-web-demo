@@ -339,8 +339,14 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                 [str(a) for a in suite.argv],
                 cwd=str(suite.cwd), env=clean_env(),
                 capture_output=True, text=True, timeout=900,
+                # text=True without an explicit encoding decodes with the system
+                # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and
+                # quote glyphs. A byte outside cp1252 killed the reader thread,
+                # left proc.stdout as None, and crashed the whole runner mid-gate
+                # — the acceptance instrument itself failing on output encoding.
+                encoding="utf-8", errors="replace",
             )
-            out = proc.stdout + "\n" + proc.stderr
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
             rc = proc.returncode
         except subprocess.TimeoutExpired as exc:
             out = (exc.stdout or "") + "\n" + (exc.stderr or "") + "\n[TIMEOUT >900s]"
