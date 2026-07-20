@@ -55,7 +55,10 @@ export default function PromptBox({
     return [...pre, ...sub]
   }, [completing, afterSlash, tools])
 
-  const menuOpen = completing && !menuDismissed
+  // While a route decision is showing, the resolver owns the surface AND the
+  // keys — the menu stands down entirely (typing clears the route App-side,
+  // which brings the menu straight back).
+  const menuOpen = completing && !menuDismissed && !routeActive
 
   // Any edit re-arms a dismissed menu and re-anchors the highlight.
   useEffect(() => { setMenuDismissed(false); setMenuIdx(0) }, [value])
@@ -70,7 +73,7 @@ export default function PromptBox({
   }
 
   const onKeyDown = (e) => {
-    if (menuOpen) {
+    if (menuOpen && !e.isComposing) { // IME candidate navigation keeps its keys
       if (e.key === 'ArrowDown' && matches.length > 0) {
         e.preventDefault(); setMenuIdx(Math.min(idx + 1, matches.length - 1)); return
       }
@@ -84,7 +87,7 @@ export default function PromptBox({
         // closes ONLY the menu — the global Esc ladder must not also fire
         e.preventDefault(); e.stopPropagation(); setMenuDismissed(true); return
       }
-      if (e.key === 'Enter' && !e.isComposing && matches[idx]) {
+      if (e.key === 'Enter' && matches[idx]) {
         e.preventDefault(); pick(matches[idx]); return
       }
     }
@@ -98,7 +101,7 @@ export default function PromptBox({
   return (
     <div className="bar">
       {menuOpen && (
-        <div className="resolver slash-menu" role="listbox" aria-label="Tool commands">
+        <div className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
           <div className="resolver-header">
             {matches.length > 0
               ? <>Tools · Tab completes · Enter picks — you still confirm before it runs</>
@@ -109,6 +112,7 @@ export default function PromptBox({
             return (
               <div
                 key={t.name}
+                id={`slash-opt-${i}`}
                 className={`resolver-row ${i === idx ? 'active' : ''}`}
                 role="option"
                 aria-selected={i === idx}
@@ -141,6 +145,11 @@ export default function PromptBox({
           placeholder="Find, act, or build… ( / for tools)"
           spellCheck={false}
           aria-label="Command bar"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={menuOpen}
+          aria-controls={menuOpen ? 'slash-menu-listbox' : undefined}
+          aria-activedescendant={menuOpen && matches[idx] ? `slash-opt-${idx}` : undefined}
         />
       </div>
       <div className="bar-controls">

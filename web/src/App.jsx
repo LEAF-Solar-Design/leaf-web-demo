@@ -987,11 +987,24 @@ export default function App() {
           alternatives: [], slash: true,
         })
       } else {
-        // Unknown name -> the resolver rows offer the nearest catalog matches.
+        // Unknown name -> the resolver rows offer the nearest catalog matches:
+        // substring hits first, else longest-common-prefix ≥ 3 (catches
+        // trailing typos like /count-by-layre -> count-by-layer).
+        const q = name.toLowerCase()
+        const lcp = (a, b) => {
+          let n = 0
+          while (n < a.length && n < b.length && a[n] === b[n]) n++
+          return n
+        }
         const near = tools
-          .filter((x) => (x.name || '').toLowerCase().includes(name.toLowerCase()))
+          .map((x) => {
+            const nm = (x.name || '').toLowerCase()
+            return { x, score: nm.includes(q) ? 1000 + q.length : lcp(nm, q) }
+          })
+          .filter((s) => s.score >= 3)
+          .sort((a, b) => b.score - a.score)
           .slice(0, 3)
-          .map((x) => ({ tool: x.name, description: x.description }))
+          .map((s) => ({ tool: s.x.name, description: s.x.description }))
         setRoute({ lane: 'run', tool: name, params: {}, confidence: 0, alternatives: near, slash: true })
       }
       return
