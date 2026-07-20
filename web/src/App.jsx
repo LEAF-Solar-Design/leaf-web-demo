@@ -1,6 +1,8 @@
 import './structural.css'
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import Viewer from './components/Viewer.jsx'
+import React, { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
+// The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
+// dynamic-import pattern) keeps first paint off the critical path.
+const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
 import Legend from './components/Legend.jsx'
 import ToolsPanel from './components/ToolsPanel.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
@@ -22,6 +24,7 @@ import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
+import { humanizeError } from './errorHumanize.js'
 import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
@@ -38,6 +41,28 @@ import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
 // the legend swatches stay distinguishable.
 const PALETTE = ['#6b9fd4', '#8fbf9c', '#b49bd1', '#d4af6e', '#cf8fa6', '#79bcc7']
+
+// Suspense fallback while the lazy viewer chunk arrives — calm dark-emerald,
+// content-shaped, never a spinner-on-white flash.
+function ViewerSkeleton() {
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+        justifyContent: 'center', background: '#0f0f11', color: '#9db3a8',
+      }}
+    >
+      <div style={{ textAlign: 'center' }}>
+        <div style={{
+          width: 16, height: 16, margin: '0 auto 12px', background: '#22c55e',
+          transform: 'rotate(45deg)', borderRadius: 4, opacity: 0.85,
+        }} />
+        <div style={{ fontSize: 13 }}>Preparing the viewer…</div>
+      </div>
+    </div>
+  )
+}
 
 // Durable pointer to the one in-flight live job, so a closed/reloaded tab can
 // re-attach instead of orphaning the UI (CONTRACT-ADDENDUM §7, MATRIX gap #1).
@@ -331,7 +356,7 @@ export default function App() {
       })
       .catch((e) => {
         if (!alive) return
-        setLoadErr(String(e.message || e))
+        setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
           setAuthRequired(true)
           // Auto-fallback (B1): a VITE_MOCK=0 build that hits a 401 with Auth0
@@ -349,7 +374,7 @@ export default function App() {
     setToolsErr(null)
     getTools(mock)
       .then((t) => alive && setTools(t))
-      .catch((e) => alive && setToolsErr(String(e.message || e)))
+      .catch((e) => alive && setToolsErr(humanizeError(e)))
     return () => { alive = false }
   }, [mock])
 
@@ -370,7 +395,7 @@ export default function App() {
       })
     } catch (e) {
       setCatalog({ families: [], source: null })
-      setCatalogErr(String(e.message || e))
+      setCatalogErr(humanizeError(e))
       if (!mock && is401(e)) setAuthRequired(true)
     }
   }, [mock])
@@ -435,7 +460,7 @@ export default function App() {
       const res = await linkClaudeGrant(token, kind)
       setGrant({ linked: true, linked_at: res?.linked_at || new Date().toISOString(), kind: res?.kind || kind || null })
     } catch (e) {
-      setGrantErr(String(e.message || e))
+      setGrantErr(humanizeError(e))
     } finally {
       setGrantBusy(false)
     }
@@ -447,7 +472,7 @@ export default function App() {
       await unlinkClaudeGrant()
       setGrant({ linked: false, linked_at: null })
     } catch (e) {
-      setGrantErr(String(e.message || e))
+      setGrantErr(humanizeError(e))
     } finally {
       setGrantBusy(false)
     }
@@ -463,7 +488,7 @@ export default function App() {
     try {
       setProjects(await listProjects(orgId))
     } catch (e) {
-      setProjects([]); setProjectsErr(String(e.message || e))
+      setProjects([]); setProjectsErr(humanizeError(e))
     } finally {
       setProjectsLoading(false)
     }
@@ -664,7 +689,7 @@ export default function App() {
           }
         }
       } catch (e) {
-        if (attached()) setRunErr(String(e.message || e))
+        if (attached()) setRunErr(humanizeError(e))
       } finally {
         if (attached()) {
           setRunning(false); setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
@@ -721,7 +746,7 @@ export default function App() {
       const view = await undoDrawing(mock, drawingState.drawing_id)
       seatVersion(view, drawingState.drawing_id, `Reverted to version ${view.head}`)
     } catch (e) {
-      setRunErr(String(e.message || e))
+      setRunErr(humanizeError(e))
     } finally {
       setVersionBusy(false)
     }
@@ -734,7 +759,7 @@ export default function App() {
       const view = await redoDrawing(mock, drawingState.drawing_id)
       seatVersion(view, drawingState.drawing_id, `Advanced to version ${view.head}`)
     } catch (e) {
-      setRunErr(String(e.message || e))
+      setRunErr(humanizeError(e))
     } finally {
       setVersionBusy(false)
     }
@@ -753,7 +778,7 @@ export default function App() {
     try {
       setHistory(await getDrawingVersions(mock, drawingState.drawing_id))
     } catch (e) {
-      setHistoryErr(String(e.message || e)); setHistory(null)
+      setHistoryErr(humanizeError(e)); setHistory(null)
     } finally {
       setHistoryLoading(false)
     }
@@ -778,7 +803,7 @@ export default function App() {
         setOverlayStale(true)           // last run's overlay describes a different version
       }
     } catch (e) {
-      setHistoryErr(String(e.message || e))
+      setHistoryErr(humanizeError(e))
     }
   }, [mock, drawingState])
 
@@ -793,7 +818,7 @@ export default function App() {
     try {
       setWorkspace(await openProject(pid, orgId))
     } catch (e) {
-      setWorkspace(null); setProjectsErr(String(e.message || e))
+      setWorkspace(null); setProjectsErr(humanizeError(e))
     } finally {
       setWsLoading(false)
     }
@@ -828,7 +853,7 @@ export default function App() {
       const id = org.org_id || org.id
       setStoredOrgId(id); setOrgId(id); setProjects([])
     } catch (e) {
-      setProjectsErr(String(e.message || e))
+      setProjectsErr(humanizeError(e))
     } finally {
       setOrgBusy(false)
     }
@@ -845,7 +870,7 @@ export default function App() {
       setProjects((prev) => [...prev, p])
       await onOpenProject(p.project_id || p.id)
     } catch (e) {
-      setProjectsErr(String(e.message || e))
+      setProjectsErr(humanizeError(e))
     } finally {
       setProjectBusy(false)
     }
@@ -925,7 +950,7 @@ export default function App() {
         }
       }
     } catch (e) {
-      if (runSeqRef.current === seq) setRunErr(String(e.message || e))
+      if (runSeqRef.current === seq) setRunErr(humanizeError(e))
     } finally {
       if (runSeqRef.current === seq) {
         setRunning(false)
@@ -1009,7 +1034,7 @@ export default function App() {
     } catch (e) {
       // A failed routing call is a FAILED act — it rides the red strip above
       // the well (with Retry + its key), never a fake confidence-0 route card.
-      setRouteErr(String(e.message || e))
+      setRouteErr(humanizeError(e))
     } finally {
       setRouting(false)
     }
@@ -1073,7 +1098,7 @@ export default function App() {
         foot: 'Esc closes — the rail behind never re-flows.',
       })
     } catch (e) {
-      setRunErr(String(e.message || e))
+      setRunErr(humanizeError(e))
     }
   }, [])
 
@@ -1115,7 +1140,7 @@ export default function App() {
         rows.push(`cap $${Number(usage.cap.remaining).toFixed(2)} left`)
       }
     }
-    rows.push('build v2026.07')
+    rows.push(`build ${__BUILD_HASH__}`)
     setDrawer({
       title: 'Session · provenance',
       rows,
@@ -1555,6 +1580,7 @@ export default function App() {
               </div>
             )}
             {intake && (
+              <Suspense fallback={<ViewerSkeleton />}>
               <Viewer
                 ref={viewerRef}
                 intake={intake}
@@ -1567,6 +1593,7 @@ export default function App() {
                 onSelectEntity={setSelectedHandle}
                 pendingEdit={pendingEdit || writeGhost}
               />
+              </Suspense>
             )}
             {shown && (
               <Legend
@@ -1749,7 +1776,7 @@ export default function App() {
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
-        <span style={{ marginLeft: 'auto' }}>build v2026.07 · {mock ? 'sample data' : 'live'}</span>
+        <span style={{ marginLeft: 'auto' }}>build {__BUILD_HASH__} · {mock ? 'sample data' : 'live'}</span>
       </footer>
 
       {opsFlag && !opsDismissed && <OpsDrawer onDismiss={() => setOpsDismissed(true)} />}

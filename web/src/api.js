@@ -14,6 +14,7 @@ import registry from './mock/registry.json'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
+import { humanizeError } from './errorHumanize.js'
 import { groupToolsByFamily } from './mock/mockCapabilities.js'
 import * as mockVersions from './mock/mockVersions.js'
 
@@ -95,7 +96,7 @@ export async function nlPrompt(mock, text, tools = []) {
     return { alternatives: [], ...body, stub: false }
   } catch (e) {
     // Endpoint not live yet (sibling lands it concurrently) — route locally.
-    return { ...matchPrompt(text, tools), stub: true, stubReason: String(e.message || e) }
+    return { ...matchPrompt(text, tools), stub: true, stubReason: humanizeError(e) }
   }
 }
 
@@ -700,10 +701,13 @@ export async function authorTool(mock, description) {
   })
   const body = await res.json().catch(() => null)
   if (!res.ok) {
-    const err = new Error(
+    // The message can reach the DOM (AuthorPanel renders it), so it is
+    // humanized here — no verb/path/status ever leaks onto the stage. The
+    // machine-readable signal lives on .status/.body, which callers use.
+    const err = new Error(humanizeError(
       (body && body.error && (body.error.message || body.error.error_code)) ||
       `POST /api/author -> ${res.status}`,
-    )
+    ))
     err.status = res.status
     err.body = body
     err.grantRequired = isGrantRequired(body)
