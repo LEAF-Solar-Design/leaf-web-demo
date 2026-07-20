@@ -29,6 +29,7 @@ action's audit_extra allowlist only. Denied reasons name the failing gate.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -228,72 +229,141 @@ def deny_approval(confirmation_id: str, *, by: str = "tenant",
 
 
 # --------------------------------------------------------------------------- #
-# confirm-once session grants — persisted per (session, action)
+# confirm-once session grants — keyed by (tenant, session, action, TARGET TOOL)
+#
+# All four components are load-bearing. The human approved ONE chip naming ONE
+# tool: keying on the action alone would let an approved benign write authorize
+# every later write in the session (a different, destructive tool included), and
+# omitting the tenant would let anyone presenting the same session id inherit
+# the grant. Legacy (unversioned) grant files grant NOTHING — an old entry
+# cannot be re-keyed without inventing the tenant/tool it never recorded.
 # --------------------------------------------------------------------------- #
+_GRANTS_VERSION = 2
+
+
 def _load_grants() -> Dict[str, Any]:
     path = grants_file()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(raw, dict) or raw.get("v") != _GRANTS_VERSION:
+        return {}
+    grants = raw.get("grants")
+    return grants if isinstance(grants, dict) else {}
 
 
-def has_session_grant(session_id: str, action_name: str) -> bool:
-    return action_name in (_load_grants().get(str(session_id)) or {})
+def grant_target(args: Optional[Dict[str, Any]]) -> List[str]:
+    """The target tool a grant authorizes, as a two-element form so an action
+    with NO target tool can never share a key with one whose tool is literally
+    named "none"."""
+    if args and "tool" in args:
+        return ["tool", str(args["tool"])]
+    return ["none"]
 
 
-def record_session_grant(session_id: str, action_name: str) -> None:
+def _grant_key(tenant_id: str, session_id: str, action_name: str,
+               target: List[str]) -> str:
+    return json.dumps([str(tenant_id), str(session_id), str(action_name), target],
+                      separators=(",", ":"))
+
+
+def has_session_grant(tenant_id: str, session_id: str, action_name: str,
+                      target: List[str]) -> bool:
+    return _grant_key(tenant_id, session_id, action_name, target) in _load_grants()
+
+
+def record_session_grant(tenant_id: str, session_id: str, action_name: str,
+                         target: List[str]) -> None:
     path = grants_file()
     with _state_lock:
         grants = _load_grants()
-        grants.setdefault(str(session_id), {})[action_name] = _iso(_now())
+        grants[_grant_key(tenant_id, session_id, action_name, target)] = _iso(_now())
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(grants, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps({"v": _GRANTS_VERSION, "grants": grants},
+                                  indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(path)
 
 
 # --------------------------------------------------------------------------- #
-# rate limiting — per-tenant per-hour by category. The AUTHORITY is in-memory
-# (keyed by snapshot path, because the env override moves per test/subprocess);
-# the JSON file is only a restart snapshot so a bounce does not zero every
-# tenant's hour bucket. Two fail-closed rules make the budget un-erasable:
+# rate limiting — per-tenant per-hour by category. The JSON snapshot is the
+# AUTHORITY, not a cache: every check re-reads it, spends the unit and rewrites
+# it while holding an OS-level exclusive lock, so two uvicorn workers on the
+# same host cannot keep divergent budgets or clobber each other's write. Three
+# fail-closed rules make the budget un-erasable:
 #   * a snapshot that EXISTS but is unreadable/malformed denies rather than
 #     hydrating an empty budget (an unreadable budget is not "no budget");
-#   * the consumed unit is recorded in memory BEFORE the write, so a failed
-#     persist cannot un-count it — it can only be forgotten across a restart.
+#   * a malformed timestamp makes the whole bucket unreadable — silently
+#     dropping it would ERASE spent units, which is the same hole from the
+#     other side;
+#   * a snapshot that cannot be written denies, because an unrecorded unit is
+#     an unspent unit (a restart would otherwise hand the budget back).
 # A MISSING snapshot is a genuinely empty budget (nothing written yet).
+#
+# RESIDUAL (Phase-1): the lock is a host-local file lock, so workers spread
+# across hosts/containers that do not share the snapshot's filesystem still
+# keep independent budgets. Closing that needs a shared transactional counter
+# (Redis INCR or a Postgres row) rather than a file.
 # --------------------------------------------------------------------------- #
 _WINDOW_S = 3600.0
 
-_rate_buckets_by_path: Dict[str, Dict[str, Dict[str, List[float]]]] = {}
-_rate_hydrated: set = set()
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:  # Windows
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
 
 
-def _rate_buckets(path: Path) -> Dict[str, Dict[str, List[float]]]:
-    """The live {tenant -> category -> [timestamps]} map for `path`, hydrated
-    from the snapshot exactly once. Raises on a present-but-unusable snapshot;
-    the caller turns that into a deny (and retries the hydration next call)."""
-    key = str(path)
-    if key not in _rate_hydrated:
-        buckets: Dict[str, Dict[str, List[float]]] = {}
-        if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ValueError("rate snapshot top level must be a mapping")
-            for tenant, per_category in raw.items():
-                if not isinstance(per_category, dict):
-                    raise ValueError(f"rate snapshot entry for {tenant!r} must be a mapping")
-                for cat, stamps in per_category.items():
-                    if not isinstance(stamps, list):
-                        raise ValueError(f"rate snapshot bucket {tenant!r}.{cat!r} must be a list")
-                    buckets.setdefault(str(tenant), {})[str(cat)] = [
-                        float(t) for t in stamps if isinstance(t, (int, float))
-                        and not isinstance(t, bool)]
-        _rate_buckets_by_path[key] = buckets
-        _rate_hydrated.add(key)
-    return _rate_buckets_by_path[key]
+@contextlib.contextmanager
+def _snapshot_lock(path: Path):
+    """Hold an exclusive OS lock covering the whole read-check-write of the
+    rate snapshot. A sibling `.lock` file carries the lock so the snapshot
+    itself stays atomically replaceable underneath it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path.with_name(path.name + ".lock"), "a+b")
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        handle.close()
+
+
+def _read_rate_snapshot(path: Path) -> Dict[str, Dict[str, List[float]]]:
+    """{tenant -> category -> [timestamps]} from the snapshot. Raises on a
+    present-but-unusable snapshot; the caller turns that into a deny."""
+    buckets: Dict[str, Dict[str, List[float]]] = {}
+    if not path.exists():
+        return buckets
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("rate snapshot top level must be a mapping")
+    for tenant, per_category in raw.items():
+        if not isinstance(per_category, dict):
+            raise ValueError(f"rate snapshot entry for {tenant!r} must be a mapping")
+        for cat, stamps in per_category.items():
+            if not isinstance(stamps, list):
+                raise ValueError(f"rate snapshot bucket {tenant!r}.{cat!r} must be a list")
+            for t in stamps:
+                if not isinstance(t, (int, float)) or isinstance(t, bool):
+                    raise ValueError(
+                        f"rate snapshot bucket {tenant!r}.{cat!r} carries a non-numeric stamp")
+            buckets.setdefault(str(tenant), {})[str(cat)] = [float(t) for t in stamps]
+    return buckets
 
 
 def _rate_check_and_record(tenant_id: str, category: str,
@@ -306,28 +376,34 @@ def _rate_check_and_record(tenant_id: str, category: str,
                        "reason": f"rate_limit_exceeded: {category} (0/0)"}
     now = time.time()
     path = rate_file()
+    unreadable = {"category": category, "count": 0, "limit": limit}
     with _state_lock:
         try:
-            buckets = _rate_buckets(path)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            return False, {"category": category, "count": 0, "limit": limit,
-                           "reason": f"rate_state_unreadable: {type(exc).__name__}"}
-        per_category = buckets.setdefault(str(tenant_id), {})
-        bucket = [t for t in per_category.get(category, []) if now - t < _WINDOW_S]
-        per_category[category] = bucket
-        if len(bucket) >= limit:
-            return False, {"category": category, "count": len(bucket), "limit": limit,
-                           "reason": f"rate_limit_exceeded: {category} ({len(bucket)}/{limit})"}
-        bucket.append(now)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(json.dumps(buckets), encoding="utf-8")
-            tmp.replace(path)
-        except OSError:
-            pass  # snapshot is best-effort; the unit is already spent in memory
-        return True, {"category": category, "count": len(bucket), "limit": limit,
-                      "reason": f"rate_limit_ok: {category} ({len(bucket)}/{limit})"}
+            with _snapshot_lock(path):
+                try:
+                    buckets = _read_rate_snapshot(path)
+                except (ValueError, json.JSONDecodeError) as exc:
+                    return False, dict(unreadable,
+                                       reason=f"rate_state_unreadable: {type(exc).__name__}")
+                per_category = buckets.setdefault(str(tenant_id), {})
+                bucket = [t for t in per_category.get(category, []) if now - t < _WINDOW_S]
+                per_category[category] = bucket
+                if len(bucket) >= limit:
+                    return False, {"category": category, "count": len(bucket), "limit": limit,
+                                   "reason": f"rate_limit_exceeded: {category} "
+                                             f"({len(bucket)}/{limit})"}
+                bucket.append(now)
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(json.dumps(buckets), encoding="utf-8")
+                tmp.replace(path)
+                return True, {"category": category, "count": len(bucket), "limit": limit,
+                              "reason": f"rate_limit_ok: {category} ({len(bucket)}/{limit})"}
+        except OSError as exc:
+            # locking, reading and persisting all fail the same way: an
+            # unrecorded unit is an unspent unit, so deny rather than run on
+            # budget nothing durably counted.
+            return False, dict(unreadable,
+                               reason=f"rate_state_unwritable: {type(exc).__name__}")
 
 
 # --------------------------------------------------------------------------- #
@@ -514,11 +590,13 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                     return _deny("approval_consumed", act=act, extra={"gate": "policy"})
                 record["consumed_at"] = _iso(_now())
                 _write_pending(record)
-            # confirm-once persists the grant per session (repeats ride the
-            # grant, not the record); always-confirm NEVER persists — the next
-            # call files a fresh approval.
+            # confirm-once persists the grant for the exact tool the human saw
+            # on the chip (repeats ride the grant, not the record);
+            # always-confirm NEVER persists — the next call files a fresh
+            # approval.
             if act.policy == "confirm-once":
-                record_session_grant(session_id, act.name)
+                record_session_grant(tenant_id, session_id, act.name,
+                                     grant_target(args))
             return _allow("allow_via_approval", confirmation_id=str(confirmation_id))
         return _awaiting(record)
 
@@ -527,7 +605,7 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
 
     ttl_s = pol.approval_ttl_s
     if act.policy == "confirm-once":
-        if has_session_grant(session_id, act.name):
+        if has_session_grant(tenant_id, session_id, act.name, grant_target(args)):
             return _allow("allow_via_session_grant")
         record = create_pending(tenant_id=tenant_id, session_id=session_id,
                                 turn_id=turn_id, action=act, args=args, ttl_s=ttl_s)

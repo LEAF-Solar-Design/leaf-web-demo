@@ -31,6 +31,9 @@ const PACKET = {
   grant: { kind: "oauth", degraded: false },
 };
 
+/** A confirmation id only the (fake) app gate can produce. */
+const APP_MINTED_CID = "app-minted-confirmation-1";
+
 function makeLoop() {
   const runner = new FakeConverseRunner();
   const appRun = new FakeAppRunClient();
@@ -62,6 +65,27 @@ async function sendText(
 
 function ofType(events: StoredEvent[], type: string): StoredEvent[] {
   return events.filter((e) => e.type === type);
+}
+
+/**
+ * Model the app gate's request_confirmation policy (always-confirm, rung 0,
+ * NOT tenant-tightenable): the verdict is awaiting_approval and the APP mints
+ * the confirmation id — the harness never mints one (wire contract section 6).
+ */
+function gateAlwaysConfirms(gate: FakeGateClient, confirmationId: string): void {
+  const origCheck = gate.check.bind(gate);
+  gate.check = async (action: string, args: Record<string, unknown>, ctx: GateCheckContext) => {
+    if (action !== "request_confirmation") return origCheck(action, args, ctx);
+    const verdict: GateCheckResult = {
+      decision: "awaiting_approval",
+      confirmation_id: confirmationId,
+      reason: "user confirmation required",
+      policy: "always_confirm",
+      rung: "R0",
+    };
+    gate.checks.push({ action, args, ctx, decision: verdict.decision });
+    return verdict;
+  };
 }
 
 describe("ConverseLoop — sessions", () => {
@@ -557,13 +581,38 @@ describe("ConverseLoop — remaining spine tools", () => {
     expect(text).toContain("Phase 2");
   });
 
-  it("request_confirmation on an ALLOW verdict is informational — it never mints a chip", async () => {
-    const { loop, store } = makeLoop();
+  it("request_confirmation emits the chip carrying the id the GATE minted", async () => {
+    const { loop, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    gateAlwaysConfirms(gate, APP_MINTED_CID);
     await sendText(loop, s, "CONFIRM_REQ:deploy");
 
-    // The app gate auto-allows request_confirmation (rung 0), so it minted NO
-    // pending record — emitting a chip here would 404 on approval.
+    const events = await store.eventsAfter(s.session_id, 0);
+    const required = ofType(events, "confirmation_required");
+    expect(required).toHaveLength(1);
+    expect(required[0]!.data).toMatchObject({
+      confirmation_id: APP_MINTED_CID,
+      kind: "request_confirmation",
+      payload: { kind: "deploy" },
+    });
+    // The mirror row carries the APP's id — nothing was minted locally.
+    expect([...store.confirmations.keys()]).toEqual([APP_MINTED_CID]);
+    expect(ofType(events, "tool_result")[0]!.data).toMatchObject({
+      tool: "request_confirmation",
+      ok: true,
+      summary: `pending (confirmation ${APP_MINTED_CID})`,
+    });
+    // The model was told to end the turn on a pending result (section 5).
+    expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "awaiting_approval" });
+  });
+
+  it("request_confirmation on an ALLOW verdict (policy misconfigured) mints nothing", async () => {
+    const { loop, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    // The stock fake still allows rung-0 actions: an allow means the app minted
+    // NO pending record, so a chip here would 404 on approval.
+    await sendText(loop, s, "CONFIRM_REQ:deploy");
+
     const events = await store.eventsAfter(s.session_id, 0);
     expect(ofType(events, "confirmation_required")).toHaveLength(0);
     expect(store.confirmations.size).toBe(0);
@@ -590,6 +639,9 @@ describe("ConverseLoop — approval ids are APP truth (wire contract section 6)"
   it("every confirmation_id on the wire is one the gate returned — none is minted locally", async () => {
     const { loop, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+
+    // request_confirmation is always-confirm too, so BOTH chip shapes are covered.
+    gateAlwaysConfirms(gate, APP_MINTED_CID);
 
     // Every id the gate handed back, across the whole scenario.
     const minted = new Set<string>();

@@ -205,14 +205,18 @@ def test_auto_allows_with_policy_and_rung():
     assert res == {"decision": "allow", "reason": "allow", "policy": "auto", "rung": 1}
 
 
-def test_request_confirmation_allows_at_rung_zero():
+def test_request_confirmation_mints_a_confirmation_id_at_rung_zero():
     """The UI-consent tool (wire contract section 5): converseLoop consults the
-    REAL gate for it, so the catalog must auto-allow it at rung 0 — otherwise
-    every confirmation card dies as unknown_action."""
+    REAL gate for it, so it must be in the catalog at rung 0 — otherwise every
+    confirmation card dies as unknown_action. always-confirm is what MINTS the
+    id: only the app's pending store may issue one (section 6)."""
     res = _gate("request_confirmation", {"kind": "write_confirm", "payload": {"tool": "add-panel"}})
-    assert res == {"decision": "allow", "reason": "allow", "policy": "auto", "rung": 0}
-    # bare-minimum harness shape (payload optional) also passes
-    assert _gate("request_confirmation", {"kind": "confirm"})["decision"] == "allow"
+    assert res["decision"] == "awaiting_approval"
+    assert res["policy"] == "always-confirm"
+    assert res["rung"] == 0
+    assert res["confirmation_id"]
+    # bare-minimum harness shape (payload optional) also reaches the same tier
+    assert _gate("request_confirmation", {"kind": "confirm"})["decision"] == "awaiting_approval"
 
 
 def test_confirm_once_flow_and_session_grant_persists():
@@ -273,6 +277,46 @@ def test_confirm_once_replay_denies_but_grant_covers_repeats():
     assert again["reason"] == "allow_via_session_grant"
 
 
+def test_session_grant_does_not_cross_to_another_tool():
+    """One chip names ONE tool. Approving a benign write must not silently
+    authorize a different, destructive write in the same session."""
+    benign = {"tool": "add-panel"}
+    first = _gate("run_write_tool", benign, session="s-tools")
+    agent_gate.grant_approval(first["confirmation_id"])
+    assert _gate("run_write_tool", dict(benign, confirmation_id=first["confirmation_id"]),
+                 session="s-tools")["reason"] == "allow_via_approval"
+    # the SAME tool rides the grant...
+    assert _gate("run_write_tool", benign, session="s-tools")["reason"] == "allow_via_session_grant"
+    # ...a DIFFERENT tool under the same action still needs its own chip
+    other = _gate("run_write_tool", {"tool": "delete-everything"}, session="s-tools")
+    assert other["decision"] == "awaiting_approval"
+
+
+def test_session_grant_does_not_cross_to_another_tenant():
+    """has_session_grant is tenant-scoped: a tenant presenting someone else's
+    session id inherits nothing."""
+    args = {"tool": "add-panel"}
+    first = _gate("run_write_tool", args, tenant="t-A", session="s-shared")
+    agent_gate.grant_approval(first["confirmation_id"])
+    assert _gate("run_write_tool", dict(args, confirmation_id=first["confirmation_id"]),
+                 tenant="t-A", session="s-shared")["reason"] == "allow_via_approval"
+    assert _gate("run_write_tool", args, tenant="t-A",
+                 session="s-shared")["reason"] == "allow_via_session_grant"
+    other = _gate("run_write_tool", args, tenant="t-other", session="s-shared")
+    assert other["decision"] == "awaiting_approval"
+
+
+def test_legacy_grant_file_grants_nothing():
+    """An old (session -> action) entry names neither tenant nor tool, so it
+    cannot be re-keyed — it must be ignored, not trusted."""
+    agent_gate.grants_file().parent.mkdir(parents=True, exist_ok=True)
+    agent_gate.grants_file().write_text(
+        json.dumps({"s-legacy": {"run_write_tool": "2026-01-01T00:00:00Z"}}),
+        encoding="utf-8")
+    res = _gate("run_write_tool", {"tool": "add-panel"}, session="s-legacy")
+    assert res["decision"] == "awaiting_approval"
+
+
 def test_cross_session_confirmation_id_denies_as_mismatch():
     """An approval filed in session A must not redeem in session B of the same
     tenant — redeeming there would plant a confirm-once grant in a session that
@@ -284,7 +328,8 @@ def test_cross_session_confirmation_id_denies_as_mismatch():
     res = _gate("run_write_tool", dict(args, confirmation_id=cid), session="s-other")
     assert res["decision"] == "deny"
     assert res["reason"] == "args_mismatch"
-    assert agent_gate.has_session_grant("s-other", "run_write_tool") is False
+    assert agent_gate.has_session_grant("t-gate", "s-other", "run_write_tool",
+                                        agent_gate.grant_target(args)) is False
     # the filing session still redeems normally
     assert _gate("run_write_tool", dict(args, confirmation_id=cid),
                  session="s-filed")["reason"] == "allow_via_approval"
@@ -373,7 +418,8 @@ def test_always_confirm_never_persists_session_grant():
     again = _gate("register_tool", args, session="s-R")
     assert again["decision"] == "awaiting_approval"
     assert again["confirmation_id"] != cid
-    assert agent_gate.has_session_grant("s-R", "register_tool") is False
+    assert agent_gate.has_session_grant("t-gate", "s-R", "register_tool",
+                                        agent_gate.grant_target(args)) is False
 
 
 def test_tenant_overlay_tightens_gate(tmp_path):
@@ -421,20 +467,46 @@ def test_corrupt_rate_state_denies_instead_of_going_unlimited():
     assert _gate("read_platform_state")["reason"].startswith("rate_state_unreadable")
 
 
-def test_unwritable_rate_snapshot_still_advances_the_counter(tmp_path, monkeypatch):
-    """The in-memory bucket is authoritative — a failed persist must not hand
-    back the unit it already spent (which would also make limits unlimited)."""
-    _custom_policy(tmp_path, monkeypatch,
-                   lambda raw: raw["rate_limits"].update({"low_per_hour": 2}))
+def test_unwritable_rate_snapshot_denies(tmp_path, monkeypatch):
+    """The snapshot is the AUTHORITY, so a unit that cannot be recorded is a
+    unit that was never spent — a restart would hand the budget back. Deny."""
     blocker = tmp_path / "blocker"  # a FILE where the snapshot's parent dir must be
     blocker.write_text("not a directory", encoding="utf-8")
     monkeypatch.setenv("LEAF_AGENT_RATE_FILE", str(blocker / "rate.json"))
+    res = _gate("read_platform_state")
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("rate_state_unwritable")
+
+
+def test_corrupt_timestamp_denies_instead_of_erasing_spent_units():
+    """A malformed stamp makes the whole bucket unreadable. Dropping it would
+    silently ERASE spent units — the corrupt-snapshot hole from the other side."""
+    agent_gate.rate_file().parent.mkdir(parents=True, exist_ok=True)
+    agent_gate.rate_file().write_text(
+        json.dumps({"t-gate": {"low": [1.0, "not-a-timestamp", 2.0]}}), encoding="utf-8")
+    res = _gate("read_platform_state")
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("rate_state_unreadable")
+    # booleans are ints in Python — they must not pass as stamps either
+    agent_gate.rate_file().write_text(
+        json.dumps({"t-gate": {"low": [True]}}), encoding="utf-8")
+    assert _gate("read_platform_state")["reason"].startswith("rate_state_unreadable")
+
+
+def test_normal_rate_path_allows_and_counts_exactly_once(tmp_path, monkeypatch):
+    """The happy path still spends exactly one unit per allowed call, and the
+    durable snapshot is what it spends from."""
+    _custom_policy(tmp_path, monkeypatch,
+                   lambda raw: raw["rate_limits"].update({"low_per_hour": 2}))
     assert _gate("read_platform_state")["decision"] == "allow"
+    snapshot = json.loads(agent_gate.rate_file().read_text(encoding="utf-8"))
+    assert len(snapshot["t-gate"]["low"]) == 1
     assert _gate("read_platform_state")["decision"] == "allow"
+    snapshot = json.loads(agent_gate.rate_file().read_text(encoding="utf-8"))
+    assert len(snapshot["t-gate"]["low"]) == 2
     third = _gate("read_platform_state")
     assert third["decision"] == "deny"
     assert third["reason"] == "rate_limit_exceeded: low (2/2)"
-    assert not (blocker / "rate.json").exists()
 
 
 def test_corrupt_tenant_state_file_denies_at_the_gate():

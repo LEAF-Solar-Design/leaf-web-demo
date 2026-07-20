@@ -142,8 +142,9 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
     "rate_limits": {"low_per_hour": 120, "medium_per_hour": 60, "high_per_hour": 10},
     "actions": {
         "request_confirmation": {
-            "description": "UI-only consent chip: ask the user to approve something before proceeding (R0; wire contract section 5). Dispatches nowhere — the harness renders the card and ends the turn.",
-            "rung": 0, "required_capability": "converse", "policy": "auto",
+            "description": "UI-only consent chip: ask the user to approve something before proceeding (R0; wire contract section 5). Dispatches nowhere — the gate mints the confirmation_id and the harness renders the card, then ends the turn. always-confirm is what MAKES the id: the app's pending store is the only authority allowed to mint one (section 6), so a self-issued harness id could never be redeemed.",
+            "rung": 0, "required_capability": "converse", "policy": "always-confirm",
+            "tenant_tightenable": False,
             "dispatch": {"kind": "app_api", "routes": []},
             "args_schema": {"type": "object",
                             "properties": {"kind": {"type": "string"},
@@ -540,32 +541,54 @@ def load_tenant_state(tenant_id: str) -> Dict[str, Any]:
         raise PolicyError(f"agent tenants file unreadable/invalid JSON at {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise PolicyError(f"agent tenants top level must be a mapping ({path})")
-    entry = raw.get(str(tenant_id))
-    if not isinstance(entry, dict):
+    key = str(tenant_id)
+    if key not in raw:
         return {"agent_disabled": False, "overlay": {}}
+    entry = raw[key]
+    if not isinstance(entry, dict):
+        raise PolicyError(
+            f"agent_tenants.{tenant_id}: must be a mapping ({path}); got "
+            f"{type(entry).__name__} — a malformed entry must not silently drop "
+            f"this tenant's kill flag and overlay")
     try:
         disabled = security_bool(entry.get("agent_disabled"),
                                  field=f"agent_tenants.{tenant_id}.agent_disabled")
     except PolicyError:
         disabled = True  # an unparseable KILL flag fails CLOSED, never open
-    return {
-        "agent_disabled": disabled,
-        "overlay": entry.get("overlay") if isinstance(entry.get("overlay"), dict) else {},
-    }
+    overlay: Dict[str, Any] = {}
+    if "overlay" in entry:
+        overlay = entry["overlay"]
+        if not isinstance(overlay, dict):
+            raise PolicyError(
+                f"agent_tenants.{tenant_id}.overlay: must be a mapping ({path}); got "
+                f"{type(overlay).__name__} — dropping it would LOOSEN the tenant")
+    return {"agent_disabled": disabled, "overlay": overlay}
 
 
 def set_tenant_agent_disabled(tenant_id: str, disabled: bool) -> Dict[str, Any]:
     """Persist the per-tenant agent kill flag (ops surface). Returns the entry."""
     path = tenants_file()
+    raw: Dict[str, Any]
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raw = {}  # genuinely absent is the ONLY case a fresh mapping is safe:
+        # rebuilding from {} over an existing-but-unreadable file would erase
+        # every OTHER tenant's kill flag as a side effect of this one write.
+    except OSError as exc:
+        raise PolicyError(f"agent tenants file unreadable at {path}: {exc}") from exc
+    else:
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise PolicyError(f"agent tenants file invalid JSON at {path}: {exc}") from exc
         if not isinstance(raw, dict):
-            raw = {}
-    except (OSError, json.JSONDecodeError):
-        raw = {}
+            raise PolicyError(f"agent tenants top level must be a mapping ({path})")
     entry = raw.get(str(tenant_id))
-    if not isinstance(entry, dict):
+    if entry is None:
         entry = {}
+    elif not isinstance(entry, dict):
+        raise PolicyError(f"agent_tenants.{tenant_id}: must be a mapping ({path})")
     entry["agent_disabled"] = bool(disabled)
     raw[str(tenant_id)] = entry
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -9,10 +9,11 @@
   },
   "actions": {
     "request_confirmation": {
-      "description": "UI-only consent chip: ask the user to approve something before proceeding (R0; wire contract section 5). Dispatches nowhere — the harness renders the card and ends the turn.",
+      "description": "UI-only consent chip: ask the user to approve something before proceeding (R0; wire contract section 5). Dispatches nowhere — the gate mints the confirmation_id and the harness renders the card, then ends the turn. always-confirm is what MAKES the id: the app's pending store is the only authority allowed to mint one (section 6), so a self-issued harness id could never be redeemed.",
       "rung": 0,
       "required_capability": "converse",
-      "policy": "auto",
+      "policy": "always-confirm",
+      "tenant_tightenable": false,
       "dispatch": {"kind": "app_api", "routes": []},
       "args_schema": {"type": "object", "properties": {"kind": {"type": "string"}, "payload": {"type": "object"}, "confirmation_id": {"type": "string"}}, "required": ["kind"], "additionalProperties": false},
       "rate_limit_category": "low",

@@ -526,8 +526,10 @@ export class ConverseLoop {
             },
           };
         case "request_confirmation":
-          // No catalog action exists for this UI-only tool; the app gate must
-          // auto-allow it at rung 0 (server-side remainder of the vocabulary fix).
+          // The catalog carries this UI-only action at rung 0 with policy
+          // always-confirm, so the gate answers awaiting_approval and MINTS the
+          // id — the approvable path the executor's awaiting_approval branch
+          // turns into confirmation_required (wire contract sections 5 + 6).
           return { action: "request_confirmation", args };
       }
     };
@@ -722,18 +724,32 @@ export class ConverseLoop {
       }
 
       case "request_confirmation": {
-        // Reaching here means the gate ALLOWED (rung 0, policy auto) rather than
-        // returning awaiting_approval — so the app minted no pending record and
+        const kind = String(args.kind ?? "confirm");
+        const confirmationId =
+          typeof args.confirmation_id === "string" ? args.confirmation_id : null;
+        if (confirmationId) {
+          // Section-7 step 4: the gate consumed a GRANTED, args-bound record, so
+          // the user has already answered this chip — raising it again would ask
+          // twice for one decision.
+          return ok(
+            JSON.stringify({
+              pending: false,
+              confirmation_id: confirmationId,
+              kind,
+              message: "The user already answered this confirmation — continue without re-asking.",
+            }),
+          );
+        }
+        // The action's policy is always-confirm, so an allow with no granted id
+        // is a policy misconfiguration: the app minted no pending record and
         // there is no approvable id to hand out. Minting one locally would emit a
         // chip that POST /api/agent/approvals/{id} answers 404. Stay honest: an
-        // informational, non-approvable result the model asks the user in prose.
-        // (An awaiting_approval verdict IS the approvable path; the executor's
-        // gate branch emits confirmation_required with the APP's id.)
+        // informational, non-approvable result the model relays in prose.
         return ok(
           JSON.stringify({
             pending: false,
             confirmation_required: false,
-            kind: String(args.kind ?? "confirm"),
+            kind,
             message:
               "Approval chips are minted by the platform gate, not by the assistant. " +
               "Ask the user for confirmation in plain text and wait for their reply.",

@@ -85,10 +85,17 @@ def test_shipped_catalog_loads_with_v1_shape():
     assert undo.enabled is False
     assert undo.dispatch == {"kind": "app_api", "routes": []}
 
-    # the UI-consent tool (wire contract section 5) is rung 0 and auto —
-    # converseLoop consults the gate for it, so it MUST exist in the catalog
+    # The UI-consent tool (wire contract section 5) is rung 0 but always-confirm,
+    # NOT auto: its contract return is {pending, confirmation_id}, and section 6
+    # makes the APP's pending store the only authority that may mint one. auto
+    # would return an allow with no id, forcing the harness to invent an id no
+    # approval route could ever redeem. always-confirm files the pending record,
+    # so the gate answers awaiting_approval + confirmation_id and the existing
+    # harness branch mirrors app-minted truth. tenant_tightenable:false pins it
+    # so no tier override can drop it back to auto.
     conf = pol.actions["request_confirmation"]
-    assert conf.policy == "auto"
+    assert conf.policy == "always-confirm"
+    assert conf.tenant_tightenable is False
     assert conf.rung == 0
     assert conf.required_capability == "converse"
     assert conf.dispatch == {"kind": "app_api", "routes": []}
@@ -283,6 +290,48 @@ def test_corrupt_tenant_state_file_fails_closed(tmp_path, monkeypatch):
     bad.write_text('["not", "a", "mapping"]', encoding="utf-8")
     with pytest.raises(PolicyError, match="must be a mapping"):
         agent_policy.load_tenant_state("t1")
+
+
+def test_malformed_tenant_entry_fails_closed(tmp_path, monkeypatch):
+    """A top-level read that parses is not enough: a tenant entry that is not a
+    mapping, or a PRESENT overlay that is not a mapping, used to collapse to the
+    permissive answer and drop that tenant's tightening."""
+    p = tmp_path / "agent_tenants.json"
+    monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(p))
+
+    p.write_text('{"t1": "corrupt"}', encoding="utf-8")
+    with pytest.raises(PolicyError, match="must be a mapping"):
+        agent_policy.load_tenant_state("t1")
+
+    p.write_text('{"t1": {"overlay": "corrupt"}}', encoding="utf-8")
+    with pytest.raises(PolicyError, match="overlay"):
+        agent_policy.load_tenant_state("t1")
+
+    # a genuinely ABSENT entry/overlay was never configured -> still permissive
+    p.write_text('{"t1": {"agent_disabled": true}}', encoding="utf-8")
+    assert agent_policy.load_tenant_state("t1") == {"agent_disabled": True, "overlay": {}}
+    assert agent_policy.load_tenant_state("t2") == {"agent_disabled": False, "overlay": {}}
+
+
+def test_ops_write_refuses_to_clobber_a_corrupt_tenant_file(tmp_path, monkeypatch):
+    """Disabling tenant A must never erase tenant B's kill flag: on an existing
+    but unreadable file the mutator raises instead of rebuilding from {}."""
+    p = tmp_path / "agent_tenants.json"
+    monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(p))
+    p.write_text('{"t-b": {"agent_disabled": true}, {nope', encoding="utf-8")
+    with pytest.raises(PolicyError, match="invalid JSON"):
+        agent_policy.set_tenant_agent_disabled("t-a", True)
+    assert '"t-b"' in p.read_text(encoding="utf-8")  # untouched
+
+    p.write_text('["not", "a", "mapping"]', encoding="utf-8")
+    with pytest.raises(PolicyError, match="must be a mapping"):
+        agent_policy.set_tenant_agent_disabled("t-a", True)
+
+    # tenant B's flag survives a well-formed write for tenant A
+    p.write_text('{"t-b": {"agent_disabled": true}}', encoding="utf-8")
+    agent_policy.set_tenant_agent_disabled("t-a", True)
+    assert agent_policy.load_tenant_state("t-b")["agent_disabled"] is True
+    assert agent_policy.load_tenant_state("t-a")["agent_disabled"] is True
 
 
 # --------------------------------------------------------------------------- #
