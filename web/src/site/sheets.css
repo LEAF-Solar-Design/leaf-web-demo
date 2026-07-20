@@ -1,0 +1,488 @@
+/* Website Sheets — marketing drawing set, scoped under .sheets-root.
+   Source of truth: "Website Sheets.dc.html" (values verbatim; app tokens from
+   src/styles.css consumed only where the hex matches the mock exactly).
+   Halo budget: one per sheet — .sheet-cta only. Mono is for refs/revs/codes.
+   No text-transform anywhere: the sheets mock is sentence case throughout. */
+
+.sheets-root {
+  min-height: 100%;
+  background: var(--background);            /* #0a0a0a */
+  color: var(--foreground);                 /* #fff */
+  font-family: var(--font-sans);            /* 'Inter Tight', Inter, system-ui */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+  padding: 28px clamp(16px, 3vw, 44px) 44px;
+}
+
+/* live-dot pulse (same curve as the mock; frozen under reduced motion) */
+@keyframes sheets-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.sheets-root .pulse { animation: sheets-pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .sheets-root * { animation: none !important; }
+}
+
+/* ---------------- sheet shell ---------------- */
+.sheets-root .sheet {
+  width: 100%;
+  max-width: 1600px;
+  background: var(--background);
+  border: 1px solid var(--border);          /* #27272a */
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  scroll-margin-top: 16px;
+}
+
+/* ---------------- 56px header band ---------------- */
+.sheets-root .sheet-head {
+  height: 56px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+}
+.sheets-root .sheet-mark { border-radius: 50%; flex: none; }
+.sheets-root .sheet-brand { font-weight: 600; font-size: 14px; white-space: nowrap; }
+.sheets-root .sheet-context { font-size: 12.5px; color: var(--muted-2); }
+.sheets-root .sheet-nav {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+.sheets-root .sheet-navlink {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.sheets-root .sheet-navlink:hover { color: var(--foreground); }
+.sheets-root .sheet-navlink.accent { font-size: 12px; color: var(--primary); }
+.sheets-root .sheet-navlink.accent:hover { color: var(--primary-hover); }
+
+/* ---------------- content grid: 1fr / 400px · gap 56 · padding 64 72 48 ---------------- */
+.sheets-root .sheet-body {
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  gap: 56px;
+  padding: 64px 72px 48px;
+}
+.sheets-root .sheet-left {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  min-width: 0;
+}
+.sheets-root .sheet-lede { display: flex; flex-direction: column; gap: 18px; }
+.sheets-root .sheet-headline {
+  margin: 0;
+  font-weight: 600;
+  font-size: 54px;
+  line-height: 1.08;
+  letter-spacing: -.015em;
+  text-wrap: balance;
+}
+.sheets-root .sheet-headline em {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--primary);
+}
+.sheets-root .sheet-sub {
+  margin: 0;
+  font-weight: 400;
+  font-size: 15.5px;
+  line-height: 1.7;
+  color: var(--muted);
+  max-width: 620px;
+  text-wrap: pretty;
+}
+.sheets-root .sheet-sub.narrow { max-width: 600px; }
+.sheets-root .sheet-accent-line {
+  margin: 0;
+  font-weight: 500;
+  font-size: 15.5px;
+  color: var(--primary);
+}
+
+/* one big number per sheet */
+.sheets-root .sheet-bignum-row { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.sheets-root .sheet-bignum {
+  font-weight: 600;
+  font-size: 34px;
+  font-variant-numeric: tabular-nums;
+}
+.sheets-root .sheet-price {
+  font-weight: 600;
+  font-size: 54px;
+  letter-spacing: -.015em;
+  font-variant-numeric: tabular-nums;
+}
+.sheets-root .sheet-bignum-cap { font-size: 12.5px; color: var(--muted-2); }
+
+/* CTA row — .sheet-cta carries the sheet's single halo */
+.sheets-root .sheet-cta-row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.sheets-root .sheet-cta {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: var(--primary);
+  color: var(--on-accent);
+  box-shadow: 0 6px 18px rgba(34, 197, 94, .3);  /* the one halo per sheet */
+  font-family: inherit;
+  font-weight: 500;
+  font-size: 13.5px;
+  padding: 10px 20px;
+  cursor: pointer;
+}
+.sheets-root .sheet-cta:hover { background: var(--primary-hover); }
+.sheets-root .sheet-chip {
+  border: 0;
+  font-family: inherit;
+  font-weight: 500;
+  font-size: 12.5px;
+  color: var(--primary);
+  background: var(--accent-tint);           /* rgba(34,197,94,.08) */
+  border-radius: 6px;
+  padding: 6px 13px;
+  cursor: pointer;
+}
+.sheets-root .sheet-chip:hover { background: var(--accent-tint-hover); }
+.sheets-root .sheet-cta-note { font-size: 12.5px; color: var(--muted-2); }
+
+/* deployed row */
+.sheets-root .sheet-deploy {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* dots: solid = active · hollow = not in play · pulse = live */
+.sheets-root .sheet-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  flex: none;
+  display: inline-block;
+}
+.sheets-root .sheet-dot.hollow {
+  background: transparent;
+  border: 1.5px solid var(--muted-2);
+  box-sizing: border-box;
+}
+
+/* ---------------- right card (standard gradient surface) ---------------- */
+.sheets-root .sheet-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--card-grad);             /* linear-gradient(180deg,#17171a,#111113) */
+  overflow: hidden;
+  align-self: start;
+}
+.sheets-root .sheet-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 18px 10px;
+}
+.sheets-root .sheet-card-head b { font-weight: 600; font-size: 13px; }
+.sheets-root .sheet-card-head span { font-size: 11.5px; color: var(--muted-2); }
+.sheets-root .sheet-card-rows { display: flex; flex-direction: column; }
+.sheets-root .sheet-card-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  padding: 0 18px;
+}
+.sheets-root .sheet-card-row + .sheet-card-row { border-top: 1px solid var(--hairline); }
+.sheets-root .sheet-card-row .row-text { flex: 1; font-size: 13px; color: var(--muted); }
+.sheets-root .sheet-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 18px;
+  border-top: 1px solid var(--border);
+}
+.sheets-root .sheet-card-foot.spread { justify-content: space-between; }
+.sheets-root .foot-note { font-size: 11.5px; color: var(--muted-2); }
+.sheets-root .foot-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--foreground);
+}
+.sheets-root .foot-tool.dim { color: var(--muted-2); }
+.sheets-root .sheet-print {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--muted-2);
+}
+.sheets-root .sheet-print:hover { color: var(--muted); }
+
+/* index rows: 2px accent left bar · 52px mono code column · muted hints */
+.sheets-root .sheet-index-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 18px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+  color: inherit;
+}
+.sheets-root .sheet-index-row + .sheet-index-row { border-top: 1px solid var(--hairline); }
+.sheets-root .sheet-index-row:hover { background: rgba(255, 255, 255, .03); }
+.sheets-root .sheet-index-row .bar {
+  width: 2px;
+  align-self: stretch;
+  margin: 8px 0;
+  border-radius: 1px;
+  flex: none;
+}
+.sheets-root .sheet-index-row .code {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted-2);
+  width: 52px;
+  flex: none;
+}
+.sheets-root .sheet-index-row .label { flex: 1; font-size: 13px; color: var(--muted); }
+.sheets-root .sheet-index-row .hint { font-size: 11px; color: #3f3f46; white-space: nowrap; }
+.sheets-root .sheet-index-row.current {
+  background: var(--accent-tint);
+  cursor: default;
+}
+.sheets-root .sheet-index-row.current .bar { background: var(--primary); }
+.sheets-root .sheet-index-row.current .label { font-weight: 500; color: var(--foreground); }
+.sheets-root .sheet-index-row.current .hint { color: var(--primary); }
+
+/* ---------------- left-column ledger rows (figs, steps, quiet rows) ---------------- */
+.sheets-root .sheet-rows { display: flex; flex-direction: column; }
+.sheets-root .sheet-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-height: 40px;
+  padding: 9px 0;
+}
+.sheets-root .sheet-row + .sheet-row { border-top: 1px solid var(--hairline); }
+.sheets-root .sheet-row .num {
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  width: 64px;
+  flex: none;
+}
+.sheets-root .sheet-row .code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-2);
+  width: 52px;
+  flex: none;
+}
+.sheets-root .sheet-row .txt { flex: 1; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.sheets-root .sheet-row .txt.strong { color: var(--foreground); }
+.sheets-root .sheet-row .cap { font-size: 11px; color: var(--muted-2); white-space: nowrap; }
+.sheets-root .sheet-row .step-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sheets-root .sheet-row .step-title { font-weight: 500; font-size: 13px; color: var(--foreground); }
+
+/* quote (E-401) */
+.sheets-root .sheet-quote {
+  margin: 0;
+  border-left: 2px solid var(--primary);
+  padding: 2px 0 2px 16px;
+  max-width: 620px;
+}
+.sheets-root .sheet-quote p {
+  margin: 0 0 8px;
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: var(--foreground);
+}
+.sheets-root .sheet-quote footer { font-size: 11.5px; color: var(--muted-2); }
+
+/* receipt strip (E-401 inline evidence bundle) */
+.sheets-root .sheet-receipt {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--rail);                  /* #0c0c0e */
+  max-width: 620px;
+}
+
+/* ---------------- hero band + 34px caption strip ---------------- */
+.sheets-root .sheet-hero-wrap { padding: 0 72px 56px; }
+.sheets-root .sheet-hero {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.sheets-root .sheet-hero-media { overflow: hidden; background: #0b0d10; }
+.sheets-root .sheet-hero-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.sheets-root .sheet-hero-strip {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 16px;
+  border-top: 1px solid var(--border);
+  background: var(--rail);
+}
+.sheets-root .strip-text { font-size: 12px; color: var(--muted); }
+.sheets-root .strip-ref {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+.sheets-root button.strip-ref {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.sheets-root button.strip-ref:hover { color: var(--muted); }
+
+/* ---------------- title-block strip ---------------- */
+.sheets-root .sheet-titleblock {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  border-top: 1px solid var(--border);
+  background: var(--rail);
+  flex-wrap: wrap;
+}
+.sheets-root .tb-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 24px;
+  border-right: 1px solid var(--border);
+}
+.sheets-root .tb-identity img { border-radius: 50%; flex: none; }
+.sheets-root .tb-identity span {
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.sheets-root .tb-dim span { font-size: 12px; color: var(--muted-2); }
+.sheets-root .tb-sheet {
+  margin-left: auto;
+  border-right: 0;
+  border-left: 1px solid var(--border);
+  background: none;
+  font-family: inherit;
+  cursor: pointer;
+  color: inherit;
+}
+.sheets-root .tb-rev { border-right: 0; border-left: 1px solid var(--border); }
+.sheets-root .tb-k { font-size: 12px; color: var(--muted); }
+.sheets-root .tb-code {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--foreground);
+}
+.sheets-root .tb-sub { font-size: 12px; color: var(--muted-2); white-space: nowrap; }
+
+/* ---------------- print: one sheet per page, nav chrome hidden, dark kept ---------------- */
+@media print {
+  .sheets-root {
+    padding: 0;
+    gap: 0;
+    background: var(--background) !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .sheets-root .sheet {
+    break-after: page;
+    page-break-after: always;
+    max-width: none;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    border-top: 0;
+  }
+  .sheets-root .sheet-nav,
+  .sheets-root .sheet-print,
+  .sheets-root .foot-note { display: none; }
+  .sheets-root .pulse { animation: none; }
+}
+
+/* ---------------- responsive fallback (<1280px) ----------------
+   Authored, not from the mock — the sheets mock is a fixed 1600px drawing;
+   this single-column stack is flagged for design review. */
+@media (max-width: 1280px) {
+  .sheets-root .sheet-body {
+    grid-template-columns: 1fr;
+    gap: 36px;
+    padding: 44px 32px 36px;
+  }
+  .sheets-root .sheet-headline { font-size: 40px; }
+  .sheets-root .sheet-price { font-size: 44px; }
+  .sheets-root .sheet-hero-wrap { padding: 0 32px 40px; }
+  .sheets-root .sheet-card { align-self: stretch; }
+  .sheets-root .sheet-context { display: none; }
+}
+@media (max-width: 720px) {
+  .sheets-root { padding: 12px 10px 24px; gap: 16px; }
+  .sheets-root .sheet-head { gap: 10px; padding: 0 14px; }
+  .sheets-root .sheet-nav { gap: 12px; overflow-x: auto; }
+  .sheets-root .sheet-body { padding: 28px 18px 24px; gap: 26px; }
+  .sheets-root .sheet-headline { font-size: 30px; }
+  .sheets-root .sheet-price { font-size: 36px; }
+  .sheets-root .sheet-hero-wrap { padding: 0 18px 24px; }
+  .sheets-root .sheet-hero-media { max-height: 220px; }
+  .sheets-root .sheet-row .cap { white-space: normal; }
+  .sheets-root .tb-cell { padding: 10px 14px; }
+  .sheets-root .tb-sheet { margin-left: 0; border-left: 0; }
+  .sheets-root .tb-rev { border-left: 0; }
+}
