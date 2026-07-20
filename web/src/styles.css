@@ -85,8 +85,8 @@
   --cv-dim: #a1a1aa;
   --cv-insert: #4f83c2;
   --cv-face: #4b8f68;
-  --cv-select: #e8a840;
-  --cv-danger: #e05050;
+  --cv-select: #e7b643;   /* = --status-warning (true oklch(0.8 0.14 85) hex) */
+  --cv-danger: #e24947;   /* = --status-danger  (true oklch(0.62 0.19 25) hex) */
   --cv-ghost: #6b7280;
   --cv-ghost-remove: #a05555;
   --cv-overlay: #43b2e1;      /* result-overlay geometry default (info family) */

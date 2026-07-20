@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 
 // "Author a tool" — a text description -> POST /api/author -> a generated
 // tool card + code preview, added to the tool list so it's immediately
@@ -193,8 +192,6 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
   const [buildGate, setBuildGate] = useState(false) // a build-entitlement rejection (calm plan gate, not red)
   const [svcGate, setSvcGate] = useState(false) // authoring service unreachable (B2; calm, not red)
   const [authored, setAuthored] = useState(null)
-  const [toast, setToast] = useState(null) // NT2: { name } after a completed authoring run
-  const [toastExit, setToastExit] = useState(false)
   const lastSignal = useRef(null)
   const startRef = useRef(null)
   const authoredRef = useRef(null)
@@ -217,23 +214,12 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
     return () => clearInterval(id)
   }, [busy])
 
-  // NT2 toast lifecycle: one at a time (newest replaces), ~5s then a short exit
-  // fade — the completed event is visible even if the section scrolled away.
-  useEffect(() => {
-    if (!toast) return
-    setToastExit(false)
-    const fade = setTimeout(() => setToastExit(true), 5000)
-    const gone = setTimeout(() => setToast(null), 5200)
-    return () => { clearTimeout(fade); clearTimeout(gone) }
-  }, [toast])
-
   async function submit() {
     if (!desc.trim() || !buildEntitled) return
     setBusy(true); setErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setAuthored(null)
     try {
       const res = await onAuthor(desc.trim())
       setAuthored(res)
-      setToast({ name: res?.tool?.name || 'tool', at: Date.now() })
     } catch (e) {
       // Expected "not-an-alarm" rejections surface as calm gates, never red:
       //   entitlementRequired — the plan doesn't include authoring (build).
@@ -332,23 +318,6 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
         </div>
       )}
 
-      {/* NT2: bottom-center toast for the completed authoring event — one at a
-          time, ~5s auto-fade, one quiet View action */}
-      {toast && createPortal(
-        <div className={`toast ${toastExit ? 'exit' : 'enter'}`} role="status">
-          Tool authored — <span className="toast-name">{toast.name}</span>
-          <button
-            className="action"
-            onClick={() => {
-              authoredRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-              setToast(null)
-            }}
-          >
-            View
-          </button>
-        </div>,
-        document.body
-      )}
     </div>
   )
 }

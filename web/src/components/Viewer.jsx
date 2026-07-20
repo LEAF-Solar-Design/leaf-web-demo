@@ -31,10 +31,10 @@ function readTokens() {
     bg: v('--cv-bg', '#0f0f11'),
     insert: v('--cv-insert', '#4f83c2'),
     face: v('--cv-face', '#4b8f68'),
-    select: v('--cv-select', '#e8a840'),
+    select: v('--cv-select', '#e7b643'),
     ghost: v('--cv-ghost', '#6b7280'),
     ghostRemove: v('--cv-ghost-remove', '#a05555'),
-    danger: v('--cv-danger', '#e05050'),
+    danger: v('--cv-danger', '#e24947'),
     // Default color for result-overlay polylines when the envelope carries
     // none — info-blue family, off the accent/status reds and greens. The
     // token itself lives in styles.css; the fallback is the faithful hex of

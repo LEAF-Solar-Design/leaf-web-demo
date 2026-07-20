@@ -134,6 +134,7 @@ export default function App() {
   const [catalogErr, setCatalogErr] = useState(null)     // families load failure (falls back to flat tools)
   const [openFamilies, setOpenFamilies] = useState({})   // per-family collapse state (family_id -> bool)
   const [usage, setUsage] = useState(null)               // GET /api/usage aggregate (live; null hides chip)
+  const [usageAt, setUsageAt] = useState(0)              // ts of the last successful usage poll (freshness gate for quota self-clear)
   const [health, setHealth] = useState(null)             // GET /api/health (live; null -> static footer)
   // Real entitlements (GET /api/entitlements): drives the write-tool + build gates.
   // null in mock, or when the endpoint isn't deployed -> treated as full access.
@@ -331,7 +332,7 @@ export default function App() {
   // the chip (mock, or the sibling endpoint not deployed yet) — no fake numbers.
   const loadUsage = useCallback(async () => {
     if (mock) { setUsage(null); return }
-    try { setUsage(await getUsage()) } catch { setUsage(null) }
+    try { setUsage(await getUsage()); setUsageAt(Date.now()) } catch { setUsage(null) }
   }, [mock])
 
   useEffect(() => { loadUsage() }, [loadUsage])
@@ -1154,6 +1155,31 @@ export default function App() {
   const runQuotaError = (result && !result.ok && result.quota_kind === 'daily_runs')
     ? result : null
 
+  // NT2 self-clearing: an ongoing quota condition derives from LIVE usage, not
+  // the envelope that first raised it. While one shows, re-poll GET /api/usage
+  // every 60s; the banner clears itself only when a poll STRICTLY FRESHER than
+  // the condition shows headroom again (cap raised / day rolled). It is never
+  // user-dismissed, and a stale pre-error poll can never suppress first paint
+  // (suppression requires quotaAt > 0 AND usageAt > quotaAt).
+  const [quotaAt, setQuotaAt] = useState(0)
+  useEffect(() => {
+    setQuotaAt(quotaError || runQuotaError ? Date.now() : 0)
+  }, [quotaError, runQuotaError])
+  useEffect(() => {
+    if (mock || (!quotaError && !runQuotaError)) return undefined
+    loadUsage()
+    const id = setInterval(loadUsage, 60_000)
+    return () => clearInterval(id)
+  }, [mock, quotaError, runQuotaError, loadUsage])
+  const freshUsage = quotaAt > 0 && usageAt > quotaAt ? usage : null
+  const spendCapCleared = !!(quotaError && freshUsage?.cap?.enabled &&
+    typeof freshUsage.cap.remaining === 'number' && freshUsage.cap.remaining > 0)
+  const dailyRunsCleared = !!(runQuotaError && freshUsage?.today &&
+    Number.isFinite(Number(runQuotaError.limit)) &&
+    Number(freshUsage.today.runs || 0) < Number(runQuotaError.limit))
+  const quotaShown = quotaError && !spendCapCleared ? quotaError : null
+  const runQuotaShown = runQuotaError && !dailyRunsCleared ? runQuotaError : null
+
   // A run rejected by a plan boundary (HTTP 403 entitlement_required) -> calm
   // amber plan notice, also not a red failure. Nothing ran / was billed.
   const entitlementError = (result && result.entitlement_required) ? result : null
@@ -1161,8 +1187,8 @@ export default function App() {
   // NR: the active ongoing conditions, docked at the result pane. Two or more
   // collapse to ONE line with a count instead of stacking banners.
   const advisories = [
-    quotaError && 'spend cap',
-    runQuotaError && 'daily limit',
+    quotaShown && 'spend cap',
+    runQuotaShown && 'daily limit',
     entitlementError && 'plan',
     degraded && 'local fallback',
   ].filter(Boolean)
@@ -1434,14 +1460,15 @@ export default function App() {
             </div>
           ) : (
             <>
-              {quotaError && <QuotaCard message={quotaError.message} remaining={usage?.cap?.remaining} />}
-              {runQuotaError && (
+              {quotaShown && <QuotaCard message={quotaShown.message} remaining={usage?.cap?.remaining} onAction={openSessionDetails} />}
+              {runQuotaShown && (
                 <QuotaCard
                   kind="daily_runs"
-                  message={runQuotaError.error?.message}
-                  tier={runQuotaError.tier}
-                  limit={runQuotaError.limit}
-                  used={runQuotaError.used}
+                  message={runQuotaShown.error?.message}
+                  tier={runQuotaShown.tier}
+                  limit={runQuotaShown.limit}
+                  used={runQuotaShown.used}
+                  onAction={openSessionDetails}
                 />
               )}
               {entitlementError && (
