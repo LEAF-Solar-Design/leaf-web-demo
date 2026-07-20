@@ -44,8 +44,11 @@ export default function VersionHistory({
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // M-e: a bare `.drawer` has no positioning owner, so it injected a 300px
+  // column into the toolbar. `.drawer-fixed` (styles.css) anchors it as a
+  // floating right panel below the header / above the footer instead.
   return (
-    <div className="drawer" role="dialog" aria-label="Version history">
+    <div className="drawer drawer-fixed" role="dialog" aria-label="Version history">
       <div className="drawer-head">
         <span className="drawer-title">Version history{data ? ` · ${rows.length}` : ''}</span>
         <button className="key hot" onClick={onClose} aria-label="Close version history">Esc</button>

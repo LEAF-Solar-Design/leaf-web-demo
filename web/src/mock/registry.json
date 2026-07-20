@@ -40,6 +40,23 @@
       "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
     },
     {
+      "name": "delete-marked-panel",
+      "version": "1.0.0",
+      "description": "Deletes the marked panel and stores the result as a new, undoable drawing version.",
+      "kind": "script",
+      "engine_op": "delete_marked_panel",
+      "params": {
+        "type": "object",
+        "properties": {
+          "handle": { "type": "string", "title": "Panel handle", "default": "" }
+        },
+        "required": []
+      },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.write"],
+      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    },
+    {
       "name": "select-by-layer",
       "version": "1.0.0",
       "description": "Selects and highlights every entity on a chosen layer.",

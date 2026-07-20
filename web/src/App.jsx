@@ -13,6 +13,7 @@ import DegradedBanner from './components/DegradedBanner.jsx'
 import EntitlementGate, { EntitlementNotice } from './components/EntitlementGate.jsx'
 import QuotaCard from './components/QuotaCard.jsx'
 import VersionHistory from './components/VersionHistory.jsx'
+import * as mockVersions from './mock/mockVersions.js'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
 import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
@@ -308,9 +309,13 @@ export default function App() {
     setHistoryOpen(false); setHistory(null); setHistoryErr(null)
     setPreviewing(null); setPreviewIntake(null)
     runningSinceRef.current = null
+    mockVersions.reset()
     const seat = (d) => {
       if (!alive) return
       setIntake(d)
+      // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
+      // so re-running the demo always starts from a clean v1.
+      if (mock && !isEditFixture) mockVersions.seedBase(d)
       const vis = {}
       for (const l of d.layers || []) vis[l] = true
       setVisibleLayers(vis)
@@ -474,7 +479,7 @@ export default function App() {
     if (mock) { setCheckout(null); return }
     const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
     try {
-      const v = await getDrawingVersions(did)
+      const v = await getDrawingVersions(mock, did)
       setCheckout(v?.checkout || null)
     } catch {
       setCheckout(null)
@@ -713,27 +718,27 @@ export default function App() {
     if (!drawingState || versionBusy) return
     setVersionBusy(true); setOverlayStale(true)
     try {
-      const view = await undoDrawing(drawingState.drawing_id)
+      const view = await undoDrawing(mock, drawingState.drawing_id)
       seatVersion(view, drawingState.drawing_id, `Reverted to version ${view.head}`)
     } catch (e) {
       setRunErr(String(e.message || e))
     } finally {
       setVersionBusy(false)
     }
-  }, [drawingState, versionBusy, seatVersion])
+  }, [mock, drawingState, versionBusy, seatVersion])
 
   const onRedo = useCallback(async () => {
     if (!drawingState || versionBusy) return
     setVersionBusy(true); setOverlayStale(true)
     try {
-      const view = await redoDrawing(drawingState.drawing_id)
+      const view = await redoDrawing(mock, drawingState.drawing_id)
       seatVersion(view, drawingState.drawing_id, `Advanced to version ${view.head}`)
     } catch (e) {
       setRunErr(String(e.message || e))
     } finally {
       setVersionBusy(false)
     }
-  }, [drawingState, versionBusy, seatVersion])
+  }, [mock, drawingState, versionBusy, seatVersion])
 
   // --- version-history browser + read-only preview -------------------------
   const toggleFamily = useCallback((id) => {
@@ -746,13 +751,13 @@ export default function App() {
     if (!drawingState) return
     setHistoryLoading(true); setHistoryErr(null)
     try {
-      setHistory(await getDrawingVersions(drawingState.drawing_id))
+      setHistory(await getDrawingVersions(mock, drawingState.drawing_id))
     } catch (e) {
       setHistoryErr(String(e.message || e)); setHistory(null)
     } finally {
       setHistoryLoading(false)
     }
-  }, [historyOpen, drawingState])
+  }, [mock, historyOpen, drawingState])
 
   // Read-only preview of a version. Head -> restore head + clear preview; any
   // other version -> seat that intake in the viewer WITHOUT touching head/latest
@@ -761,7 +766,7 @@ export default function App() {
     if (!drawingState) return
     const isHead = v === drawingState.head
     try {
-      const view = await getDrawingIntake(drawingState.drawing_id, isHead ? 'head' : v)
+      const view = await getDrawingIntake(mock, drawingState.drawing_id, isHead ? 'head' : v)
       viewerRef.current?.applyVersion(view.intake)
       setSelectedHandle(null)
       if (isHead) {
@@ -775,7 +780,7 @@ export default function App() {
     } catch (e) {
       setHistoryErr(String(e.message || e))
     }
-  }, [drawingState])
+  }, [mock, drawingState])
 
   const onBackToHead = useCallback(() => {
     if (drawingState) onPreviewVersion(drawingState.head)
@@ -899,7 +904,21 @@ export default function App() {
       if (!mock && env?.ok && env.result?.new_version) {
         const nv = env.result.new_version
         try {
-          const view = await getDrawingIntake(nv.drawing_id, 'head')
+          const view = await getDrawingIntake(mock, nv.drawing_id, 'head')
+          seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
+        } catch {
+          showToast({ text: `Version ${nv.version} created — viewer refresh failed` })
+        }
+      }
+      // MOCK write loop (M3): the same beat, served by the in-memory chain —
+      // commit v2 locally, then seat it through the identical seatVersion path
+      // so Undo / Redo / History light up in the demo.
+      if (mock && env?.ok && env.result?.new_version) {
+        const nv = env.result.new_version
+        try {
+          if (!mockVersions.isSeeded() && intake) mockVersions.seedBase(intake)
+          mockVersions.applyDelete(env.result.removed)
+          const view = await getDrawingIntake(mock, nv.drawing_id, 'head')
           seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
         } catch {
           showToast({ text: `Version ${nv.version} created — viewer refresh failed` })
@@ -918,7 +937,7 @@ export default function App() {
         if (openProjectId) rehydrate()
       }
     }
-  }, [mock, shown, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
+  }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
       loadCheckout, writeLocked, openProjectId, orgId, rehydrate, showToast, viewResult])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
@@ -1469,7 +1488,7 @@ export default function App() {
                   onRelease={onReleaseCheckout}
                 />
               )}
-              {!mock && drawingState && (
+              {drawingState && (
                 <>
                   <button
                     className="btn ghost"
