@@ -18,6 +18,7 @@ import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
+import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
 import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
@@ -104,18 +105,21 @@ function Section({ title, count, open, onToggle, children, innerRef }) {
 // Live-mode landing when there is no session: instead of a wall of red 401s with
 // no way forward, a calm gate — sign-in for the live surface is coming; the demo
 // is one click away. Shown only when a 401 was actually observed (not offline).
-function SignedOutGate({ onDemo }) {
+function plural(n, w) { return `${n} ${w}${n === 1 ? '' : 's'}` }
+
+function SignedOutGate({ onDemo, onSignIn }) {
   return (
     <div className="card enter" style={{ margin: '0 0 16px' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--foreground)' }}>You’re not signed in</div>
         <p className="panel-sub" style={{ margin: 0 }}>
-          This is a live preview of Leaf against the cloud workspace. Sign-in for the
-          live surface is coming soon — explore the interactive demo to try the prompt
-          lanes, tool catalog, and viewer on a sample rooftop drawing.
+          {onSignIn
+            ? 'Sign in to load your tools and drawings from the cloud workspace, or explore the interactive demo on sample data.'
+            : 'This is a live preview of Leaf against the cloud workspace. Sign-in for the live surface is coming soon — explore the interactive demo to try the prompt lanes, tool catalog, and viewer on a sample rooftop drawing.'}
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <button type="button" className="btn primary" onClick={onDemo}>Explore the demo</button>
+          {onSignIn && <button type="button" className="btn primary" onClick={onSignIn}>Sign in</button>}
+          <button type="button" className={onSignIn ? 'btn ghost' : 'btn primary'} onClick={onDemo}>Explore the demo</button>
           <span className="dim" style={{ fontSize: 12 }}>No sign-in needed · sample data</span>
         </div>
       </div>
@@ -353,6 +357,14 @@ export default function App() {
   }, [mock])
 
   useEffect(() => { loadCatalog() }, [loadCatalog])
+
+  // Auth0 return leg: if we came back from Universal Login (?code=&state=),
+  // finish the exchange + store leaf.jwt, then reload so the fresh loads send
+  // the token and land a 200 session (no gate). No-op in mock / when unconfigured.
+  useEffect(() => {
+    if (mock) return
+    handleRedirectCallback().then((stored) => { if (stored) window.location.reload() })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Per-tenant spend chip: poll GET /api/usage on load (live only). null hides
   // the chip (mock, or the sibling endpoint not deployed yet) — no fake numbers.
@@ -1074,7 +1086,9 @@ export default function App() {
     setDrawer({
       title: 'Session · provenance',
       rows,
-      action: { label: 'Refresh', onClick: () => { loadUsage(); loadHealth() } },
+      action: isSignedIn()
+        ? { label: 'Sign out', onClick: logout }
+        : { label: 'Refresh', onClick: () => { loadUsage(); loadHealth() } },
       foot: 'Your account and usage.',
     })
   }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth])
@@ -1396,7 +1410,7 @@ export default function App() {
 
       <div className="center-col">
         <main className="center-scroll">
-        {signedOut && <SignedOutGate onDemo={() => setMock(true)} />}
+        {signedOut && <SignedOutGate onDemo={() => setMock(true)} onSignIn={authConfigured ? login : null} />}
         <div className="kicker">Home · one prompt, three lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
@@ -1683,12 +1697,12 @@ export default function App() {
             <span className={health.da_client_present ? 'dot' : 'dot square'} aria-hidden="true" />
             data agent · <span className={health.da_client_present ? 'ok-txt' : 'warn-txt'}>
               {health.da_client_present ? 'ready' : 'absent'}
-            </span> · <span className="dim">{health.n_tools} tools</span>
+            </span> · <span className="dim">{plural(health.n_tools, 'tool')}</span>
           </span>
         ) : (
           <span className="foot-stat"><span className="dot" aria-hidden="true" />local solver · <span className="ok-txt">ready</span></span>
         )}
-        <span className="dim">{capCount} caps · {catalog.families.length} families · tier {gateTier}</span>
+        <span className="dim">{plural(capCount, 'cap')} · {catalog.families.length} famil{catalog.families.length === 1 ? 'y' : 'ies'} · tier {gateTier}</span>
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
