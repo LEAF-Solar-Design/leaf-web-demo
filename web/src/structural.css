@@ -21,20 +21,25 @@ main.center-scroll {
   overflow-y: auto;
 }
 
-/* Docked SB3 block: state strips + resolver + the .bar well (crib §1). */
+/* SB3 block as a FLOATING island (operator amendment): absolutely positioned
+   over the scroll area — content scrolls BEHIND it — with a bottom gap, never
+   a flush footer strip. Still center-column-only (rails untouched). */
 .bar-dock {
-  flex: none;
-  position: relative;
-  padding: 10px 26px 14px;
+  position: absolute;
+  left: 26px;
+  right: 26px;
+  bottom: 18px;
+  z-index: 30;
+  padding: 0;
 }
 .bar-dock > * + * { margin-top: 8px; }
 /* The resolver is a floating card attached ABOVE the well — absolutely
    positioned so it never grows the docked block past its ≤10%-height budget. */
 .bar-dock > .resolver {
   position: absolute;
-  left: 26px;
-  right: 26px;
-  bottom: calc(100% - 2px);
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
   margin: 0;
   z-index: 20;
 }

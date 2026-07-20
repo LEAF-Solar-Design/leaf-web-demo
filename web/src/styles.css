@@ -1147,19 +1147,21 @@ footer .warn-txt { color: var(--status-warning); }
   overflow-y: auto;
   min-width: 0;
   min-height: 0;
-  padding: 20px 26px 28px;
+  padding: 20px 26px 140px; /* bottom clearance: content scrolls clear of the floating bar */
 }
 .bar-dock {
-  position: relative;
-  flex: 0 0 auto;
-  max-height: 10%;
-  padding: 0 26px 12px;
+  /* floating island (operator amendment): hovers over the scroll area with a
+     bottom gap — content scrolls behind it; never a flush footer strip */
+  position: absolute;
+  left: 26px; right: 26px; bottom: 18px;
+  z-index: 30;
+  padding: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 .bar-dock .resolver {
-  position: absolute; left: 26px; right: 26px;
+  position: absolute; left: 0; right: 0;
   bottom: calc(100% + 8px); z-index: 35;
 }
 
@@ -1220,9 +1222,10 @@ footer .warn-txt { color: var(--status-warning); }
 
 /* ---------------- SB3 command bar ---------------- */
 .bar {
-  border: 1px solid transparent; border-radius: 11px;
+  border: 1px solid var(--border); border-radius: 11px; /* hairline lifts the island off the void */
   background: var(--bar-well);
   display: flex; flex-direction: column;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .5); /* floating elevation */
 }
 .bar-input { display: flex; align-items: center; gap: 10px; padding: 13px 16px 9px; }
 .bar-caret { font: 600 13px var(--font-mono); color: var(--primary); } /* the accent prompt caret */
@@ -1293,7 +1296,7 @@ footer .warn-txt { color: var(--status-warning); }
 /* ---------------- NT2 toast (completed event) ---------------- */
 .toast {
   position: absolute; left: 50%; transform: translateX(-50%);
-  bottom: 96px; z-index: 80; /* clears the docked bar */
+  bottom: 132px; z-index: 80; /* clears the floating bar island */
   display: flex; align-items: center; gap: 9px;
   font: 500 12px var(--sans); color: var(--muted);
   background: var(--keycap); border-radius: 7px; padding: 7px 13px;
