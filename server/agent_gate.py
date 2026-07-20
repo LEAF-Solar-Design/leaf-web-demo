@@ -10,7 +10,9 @@ Ordering is load-bearing (elevate exemplar semantics):
   * entitlement runs BEFORE rate limiting so a denied call never burns budget;
   * revalidate re-reads the policy file fresh so an operator edit landing
     mid-request takes effect for THIS call (TOCTOU close) — the re-loaded
-    action is the one every later step trusts;
+    action is the one every later step trusts, and the args-schema +
+    entitlement checks re-run against it (the earlier pass cleared the OLD
+    definition, which may have been looser than the one that will dispatch);
   * the policy tier runs last: auto allows, confirm-once consults per-session
     grants, always-confirm ALWAYS files a pending approval (never persisted).
 
@@ -253,10 +255,45 @@ def record_session_grant(session_id: str, action_name: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# rate limiting — per-tenant per-hour by category; in-memory semantics with a
-# JSON snapshot so a restart does not zero every tenant's hour bucket
+# rate limiting — per-tenant per-hour by category. The AUTHORITY is in-memory
+# (keyed by snapshot path, because the env override moves per test/subprocess);
+# the JSON file is only a restart snapshot so a bounce does not zero every
+# tenant's hour bucket. Two fail-closed rules make the budget un-erasable:
+#   * a snapshot that EXISTS but is unreadable/malformed denies rather than
+#     hydrating an empty budget (an unreadable budget is not "no budget");
+#   * the consumed unit is recorded in memory BEFORE the write, so a failed
+#     persist cannot un-count it — it can only be forgotten across a restart.
+# A MISSING snapshot is a genuinely empty budget (nothing written yet).
 # --------------------------------------------------------------------------- #
 _WINDOW_S = 3600.0
+
+_rate_buckets_by_path: Dict[str, Dict[str, Dict[str, List[float]]]] = {}
+_rate_hydrated: set = set()
+
+
+def _rate_buckets(path: Path) -> Dict[str, Dict[str, List[float]]]:
+    """The live {tenant -> category -> [timestamps]} map for `path`, hydrated
+    from the snapshot exactly once. Raises on a present-but-unusable snapshot;
+    the caller turns that into a deny (and retries the hydration next call)."""
+    key = str(path)
+    if key not in _rate_hydrated:
+        buckets: Dict[str, Dict[str, List[float]]] = {}
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("rate snapshot top level must be a mapping")
+            for tenant, per_category in raw.items():
+                if not isinstance(per_category, dict):
+                    raise ValueError(f"rate snapshot entry for {tenant!r} must be a mapping")
+                for cat, stamps in per_category.items():
+                    if not isinstance(stamps, list):
+                        raise ValueError(f"rate snapshot bucket {tenant!r}.{cat!r} must be a list")
+                    buckets.setdefault(str(tenant), {})[str(cat)] = [
+                        float(t) for t in stamps if isinstance(t, (int, float))
+                        and not isinstance(t, bool)]
+        _rate_buckets_by_path[key] = buckets
+        _rate_hydrated.add(key)
+    return _rate_buckets_by_path[key]
 
 
 def _rate_check_and_record(tenant_id: str, category: str,
@@ -265,30 +302,32 @@ def _rate_check_and_record(tenant_id: str, category: str,
     if limit <= 0:
         # a category with no configured budget fails CLOSED — the shipped
         # policy always carries all three, so this only fires on a bad edit.
-        return False, {"category": category, "count": 0, "limit": 0}
+        return False, {"category": category, "count": 0, "limit": 0,
+                       "reason": f"rate_limit_exceeded: {category} (0/0)"}
     now = time.time()
     path = rate_file()
     with _state_lock:
         try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(state, dict):
-                state = {}
-        except (OSError, json.JSONDecodeError):
-            state = {}
-        bucket = state.setdefault(str(tenant_id), {}).setdefault(category, [])
-        bucket = [t for t in bucket if isinstance(t, (int, float)) and now - t < _WINDOW_S]
-        state[str(tenant_id)][category] = bucket
+            buckets = _rate_buckets(path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return False, {"category": category, "count": 0, "limit": limit,
+                           "reason": f"rate_state_unreadable: {type(exc).__name__}"}
+        per_category = buckets.setdefault(str(tenant_id), {})
+        bucket = [t for t in per_category.get(category, []) if now - t < _WINDOW_S]
+        per_category[category] = bucket
         if len(bucket) >= limit:
-            return False, {"category": category, "count": len(bucket), "limit": limit}
+            return False, {"category": category, "count": len(bucket), "limit": limit,
+                           "reason": f"rate_limit_exceeded: {category} ({len(bucket)}/{limit})"}
         bucket.append(now)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(json.dumps(state), encoding="utf-8")
+            tmp.write_text(json.dumps(buckets), encoding="utf-8")
             tmp.replace(path)
         except OSError:
-            pass  # snapshot is best-effort; worst case the budget resets on restart
-        return True, {"category": category, "count": len(bucket), "limit": limit}
+            pass  # snapshot is best-effort; the unit is already spent in memory
+        return True, {"category": category, "count": len(bucket), "limit": limit,
+                      "reason": f"rate_limit_ok: {category} ({len(bucket)}/{limit})"}
 
 
 # --------------------------------------------------------------------------- #
@@ -364,7 +403,10 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
 
     # 1b. per-tenant agent kill flag (ops surface) — independent of the run
     # kill-switch chain; still ahead of any policy work.
-    tenant_state = agent_policy.load_tenant_state(tenant_id)
+    try:
+        tenant_state = agent_policy.load_tenant_state(tenant_id)
+    except PolicyError as exc:
+        return _deny(f"tenant_state_load_failed: {exc}", extra={"gate": "tenant_disabled"})
     if tenant_state.get("agent_disabled"):
         return _deny("tenant_agent_disabled", extra={"gate": "tenant_disabled"})
 
@@ -393,7 +435,10 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
 
     # 5. revalidate — FRESH policy load; an operator edit landing between the
     # catalog read above and dispatch takes effect for THIS call. The re-loaded
-    # action is the one all remaining gates (and the caller's dispatch) trust.
+    # action is the one all remaining gates (and the caller's dispatch) trust,
+    # so the schema + entitlement checks RE-RUN against it: steps 3-4 cleared
+    # the old definition, and the refreshed one may carry a tighter args schema
+    # or a different required_capability.
     try:
         pol = agent_policy.load_policy()
         act = agent_policy.effective_action(pol, action, tier=tier,
@@ -402,13 +447,17 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         return _deny(f"policy_load_failed: {exc}", extra={"gate": "revalidate"})
     if act is None or not act.enabled:
         return _deny("action_disabled", act=act, extra={"gate": "revalidate"})
+    schema_error = _validate_args(act, args)
+    if schema_error is not None:
+        return _deny(f"invalid_args: {schema_error}", act=act, extra={"gate": "revalidate"})
+    if not (tier_caps or {}).get(act.required_capability, False):
+        return _deny(f"entitlement_required: tier lacks '{act.required_capability}'",
+                     act=act, extra={"gate": "revalidate"})
 
     # 6. rate limit — per-tenant per-hour by category.
     allowed, info = _rate_check_and_record(tenant_id, act.rate_limit_category, pol.rate_limits)
     if not allowed:
-        return _deny(
-            f"rate_limit_exceeded: {info['category']} ({info['count']}/{info['limit']})",
-            act=act, extra={"gate": "rate_limit"})
+        return _deny(info["reason"], act=act, extra={"gate": "rate_limit"})
 
     # 7. policy tier.
     projected = agent_audit.project_args(args, act.audit_extra)

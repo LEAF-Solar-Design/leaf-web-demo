@@ -406,6 +406,90 @@ def test_tier_override_reaches_gate(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# fail-closed state files (rate snapshot, tenant state)
+# --------------------------------------------------------------------------- #
+def test_corrupt_rate_state_denies_instead_of_going_unlimited():
+    """An unreadable budget is NOT "no budget": a corrupt snapshot must deny
+    every call, not hydrate an empty bucket and hand out unlimited runs."""
+    agent_gate.rate_file().write_text("{nope", encoding="utf-8")
+    for _ in range(3):
+        res = _gate("read_platform_state")
+        assert res["decision"] == "deny"
+        assert res["reason"].startswith("rate_state_unreadable")
+    # a structurally wrong (but parseable) snapshot fails closed the same way
+    agent_gate.rate_file().write_text('["not", "a", "mapping"]', encoding="utf-8")
+    assert _gate("read_platform_state")["reason"].startswith("rate_state_unreadable")
+
+
+def test_unwritable_rate_snapshot_still_advances_the_counter(tmp_path, monkeypatch):
+    """The in-memory bucket is authoritative — a failed persist must not hand
+    back the unit it already spent (which would also make limits unlimited)."""
+    _custom_policy(tmp_path, monkeypatch,
+                   lambda raw: raw["rate_limits"].update({"low_per_hour": 2}))
+    blocker = tmp_path / "blocker"  # a FILE where the snapshot's parent dir must be
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("LEAF_AGENT_RATE_FILE", str(blocker / "rate.json"))
+    assert _gate("read_platform_state")["decision"] == "allow"
+    assert _gate("read_platform_state")["decision"] == "allow"
+    third = _gate("read_platform_state")
+    assert third["decision"] == "deny"
+    assert third["reason"] == "rate_limit_exceeded: low (2/2)"
+    assert not (blocker / "rate.json").exists()
+
+
+def test_corrupt_tenant_state_file_denies_at_the_gate():
+    """The tenant file carries only TIGHTENINGS (kill flag, tighten-only
+    overlay), so an unreadable one denies rather than resolving permissive."""
+    agent_policy.tenants_file().write_text("{nope", encoding="utf-8")
+    res = _gate("read_platform_state")
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("tenant_state_load_failed")
+
+
+# --------------------------------------------------------------------------- #
+# revalidate — the refreshed action is re-CHECKED, not just re-read
+# --------------------------------------------------------------------------- #
+def _staged_policy(tmp_path, monkeypatch, mutate):
+    """First load_policy() call yields the shipped catalog, every later one the
+    mutated catalog — i.e. an operator edit landing between the step-2 catalog
+    read and the step-5 revalidate, mid-chain."""
+    raw = json.loads((SERVER_DIR / "agent_policy.json").read_text(encoding="utf-8"))
+    mutate(raw)
+    edited = tmp_path / "edited_policy.json"
+    edited.write_text(json.dumps(raw), encoding="utf-8")
+    before = agent_policy.load_policy(SERVER_DIR / "agent_policy.json")
+    after = agent_policy.load_policy(edited)
+    calls = {"n": 0}
+
+    def _staged(path=None):
+        calls["n"] += 1
+        return before if calls["n"] == 1 else after
+
+    monkeypatch.setattr(agent_policy, "load_policy", _staged)
+
+
+def test_revalidate_rechecks_entitlement_against_refreshed_action(tmp_path, monkeypatch):
+    """The mid-chain reload can change required_capability; the step-4 pass was
+    against the OLD definition, so the call must not execute under the new one."""
+    _staged_policy(tmp_path, monkeypatch, lambda raw: raw["actions"]["run_read_tool"].update(
+        {"required_capability": "deploy"}))
+    caps = dict(FULL_CAPS, deploy=False)
+    res = _gate("run_read_tool", {"tool": "layer-report"}, caps=caps)
+    assert res["decision"] == "deny"
+    assert res["reason"] == "entitlement_required: tier lacks 'deploy'"
+
+
+def test_revalidate_rechecks_args_schema_against_refreshed_action(tmp_path, monkeypatch):
+    def _tighten(raw):
+        raw["actions"]["run_read_tool"]["args_schema"]["required"] = ["tool", "dwg"]
+
+    _staged_policy(tmp_path, monkeypatch, _tighten)
+    res = _gate("run_read_tool", {"tool": "layer-report"})  # legal under the OLD schema
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("invalid_args")
+
+
+# --------------------------------------------------------------------------- #
 # args binding
 # --------------------------------------------------------------------------- #
 def test_canonical_hash_excludes_confirmation_id():

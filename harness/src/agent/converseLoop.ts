@@ -575,18 +575,27 @@ export class ConverseLoop {
           turnId,
         });
 
-        if (verdict.decision === "deny") {
-          // A deny is a RELAYABLE result, not a crash: the model explains it calmly.
-          result = err(
+        // A deny is a RELAYABLE result, not a crash: the model explains it calmly.
+        const relayDeny = (reason: string): SpineToolResult =>
+          err(
             JSON.stringify({
               denied: true,
-              reason: verdict.reason ?? "denied by policy",
+              reason,
               ...(verdict.policy ? { policy: verdict.policy } : {}),
               ...(verdict.rung ? { rung: verdict.rung } : {}),
             }),
           );
+
+        if (verdict.decision === "deny") {
+          result = relayDeny(verdict.reason ?? "denied by policy");
+        } else if (verdict.decision === "awaiting_approval" && !verdict.confirmation_id) {
+          // ONLY the app's pending store mints approvable ids (wire contract
+          // section 6). A locally minted one renders a chip that POST
+          // /api/agent/approvals/{id} answers 404 — an undeliverable approval, so
+          // an awaiting_approval verdict without an id is malformed: deny.
+          result = relayDeny("gate_awaiting_approval_without_confirmation_id");
         } else if (verdict.decision === "awaiting_approval") {
-          const confirmationId = verdict.confirmation_id ?? randomUUID();
+          const confirmationId = verdict.confirmation_id!;
           const kind = tool === "run_capability" ? "run_capability" : tool;
           // Mirror row for stream rendering/replay; the APP's store stays
           // authoritative for gating (wire contract section 6).
@@ -621,7 +630,7 @@ export class ConverseLoop {
           result = await this.dispatchAllowed(
             tool,
             args,
-            { session, turnId, emit, catalogFor, capabilityOf, mkConfirmation, state },
+            { session, turnId, emit, catalogFor, capabilityOf },
           );
         }
       } catch (e) {
@@ -649,16 +658,9 @@ export class ConverseLoop {
       emit: (type: ConverseEventType, data: Record<string, unknown>) => Promise<void>;
       catalogFor: () => Promise<CapabilityEntry[]>;
       capabilityOf: (toolName: string) => Promise<"drawing.read" | "drawing.write">;
-      mkConfirmation: (
-        confirmationId: string,
-        action: string,
-        args: Record<string, unknown>,
-        kind: string,
-      ) => ConfirmationRecord;
-      state: TurnState;
     },
   ): Promise<SpineToolResult> {
-    const { appRun, store } = this.ports;
+    const { appRun } = this.ports;
     const tenantId = ctx.session.tenant_id;
 
     switch (tool) {
@@ -720,19 +722,23 @@ export class ConverseLoop {
       }
 
       case "request_confirmation": {
-        const kind = String(args.kind ?? "confirm");
-        const payload = asRecord(args.payload);
-        const confirmationId = randomUUID();
-        await store.putConfirmation(
-          ctx.mkConfirmation(confirmationId, "request_confirmation", args, kind),
+        // Reaching here means the gate ALLOWED (rung 0, policy auto) rather than
+        // returning awaiting_approval — so the app minted no pending record and
+        // there is no approvable id to hand out. Minting one locally would emit a
+        // chip that POST /api/agent/approvals/{id} answers 404. Stay honest: an
+        // informational, non-approvable result the model asks the user in prose.
+        // (An awaiting_approval verdict IS the approvable path; the executor's
+        // gate branch emits confirmation_required with the APP's id.)
+        return ok(
+          JSON.stringify({
+            pending: false,
+            confirmation_required: false,
+            kind: String(args.kind ?? "confirm"),
+            message:
+              "Approval chips are minted by the platform gate, not by the assistant. " +
+              "Ask the user for confirmation in plain text and wait for their reply.",
+          }),
         );
-        ctx.state.proposalMade = true;
-        await ctx.emit("confirmation_required", {
-          confirmation_id: confirmationId,
-          kind,
-          payload,
-        });
-        return ok(JSON.stringify({ pending: true, confirmation_id: confirmationId }));
       }
     }
   }

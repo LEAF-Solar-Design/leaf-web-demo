@@ -193,6 +193,66 @@ def test_backedge_secret_ignored_on_non_contract_route(backedge_client, monkeypa
 
 
 # --------------------------------------------------------------------------- #
+# gate tier resolution (trusted source, fail closed)
+# --------------------------------------------------------------------------- #
+def test_gate_tier_comes_from_the_broker_trusted_source(client, monkeypatch, tmp_path):
+    """A tenant provisioned as `restricted` must be gated as restricted — resolving
+    the bare tenant_id would default it to `demo` and allow the write."""
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", DISPATCH_SECRET)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    tenants = tmp_path / "broker_tenants.json"
+    tenants.write_text(json.dumps({"t-down": {"tier": "restricted"}}), encoding="utf-8")
+    monkeypatch.setenv("BROKER_TENANTS", str(tenants))
+    body = _gate_call(client, "run_write_tool", {"tool": "add-panel"},
+                      tenant="t-down").json()
+    assert body["decision"] == "deny"
+    assert body["reason"].startswith("entitlement_required")
+
+
+def test_gate_tier_env_source_and_unprovisioned_fails_closed(client, monkeypatch, tmp_path):
+    """LEAF_BROKER_TENANT_TIERS is the second trusted source; a tenant absent from
+    both, with auth LIVE, resolves to `restricted` (never `demo`)."""
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", DISPATCH_SECRET)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("BROKER_TENANTS", str(tmp_path / "absent.json"))
+    monkeypatch.setenv("LEAF_BROKER_TENANT_TIERS", json.dumps({"t-pro": "hosted_pro"}))
+    assert _gate_call(client, "run_write_tool", {"tool": "add-panel"},
+                      tenant="t-pro").json()["decision"] != "deny"
+    unprovisioned = _gate_call(client, "run_write_tool", {"tool": "add-panel"},
+                               tenant="t-unknown").json()
+    assert unprovisioned["decision"] == "deny"
+    assert unprovisioned["reason"].startswith("entitlement_required")
+
+
+def test_gate_offauth_tier_is_unchanged_demo(client, monkeypatch, tmp_path):
+    """Auth OFF (the open demo): the gate keeps resolving `demo` regardless of any
+    provisioning file — byte-identical to the pre-fix behaviour."""
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", DISPATCH_SECRET)
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    monkeypatch.setenv("BROKER_TENANTS", str(tmp_path / "absent.json"))
+    assert _gate_call(client, "run_write_tool", {"tool": "add-panel"},
+                      tenant="t-unknown").json()["decision"] != "deny"
+
+
+def test_backedge_tenant_carries_the_trusted_tier(monkeypatch, tmp_path):
+    import deps
+    import entitlements as ent
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    tenants = tmp_path / "broker_tenants.json"
+    tenants.write_text(json.dumps({"t-starter": {"tier": "hosted_starter"}}), encoding="utf-8")
+    monkeypatch.setenv("BROKER_TENANTS", str(tenants))
+    monkeypatch.delenv("LEAF_BROKER_TENANT_TIERS", raising=False)
+    ctx = deps.backedge_tenant("t-starter")
+    assert isinstance(ctx, deps.TenantContext) and str(ctx) == "t-starter"
+    assert ent.resolve_tier(ctx) == "hosted_starter"
+    # unprovisioned under live auth -> restricted, and a plain str when auth is off
+    assert ent.resolve_tier(deps.backedge_tenant("t-nobody")) == ent.RESTRICTED_TIER
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    assert deps.backedge_tenant("t-nobody") == "t-nobody"
+    assert ent.resolve_tier(deps.backedge_tenant("t-nobody")) == ent.DEFAULT_TIER
+
+
+# --------------------------------------------------------------------------- #
 # approvals — tenant binding + resume
 # --------------------------------------------------------------------------- #
 def _propose_write(client, tenant="tenant-a"):

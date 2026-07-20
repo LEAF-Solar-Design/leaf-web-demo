@@ -170,7 +170,10 @@ def create_session(req: SessionCreateRequest, tenant=Depends(deps.require_tenant
                                 json={"tenantId": str(tenant), "drawingId": req.drawing_id})
     except Exception as exc:  # noqa: BLE001 - connection/timeout/etc.
         return _unreachable(str(exc))
-    if resp.status_code >= 500:
+    # Create has exactly ONE success shape (wire §1: 200). Anything else — most
+    # importantly a 401 from a harness-secret mismatch — is an upstream failure,
+    # not a session: reporting it as 200 {session_id: null} is a silent dead end.
+    if resp.status_code != 200:
         return _unreachable(f"harness returned HTTP {resp.status_code}")
     try:
         hj = resp.json()
@@ -471,7 +474,10 @@ def get_transcript(session_id: str, limit: int = 200,
         return _unreachable(str(exc))
     if resp.status_code == 404:
         return _session_not_found(session_id)
-    if resp.status_code >= 500:
+    # 200/404 are the only expected outcomes (wire §1); an unexpected code (e.g.
+    # 401 on a secret mismatch) must not surface as an empty-but-successful
+    # transcript.
+    if resp.status_code != 200:
         return _unreachable(f"harness returned HTTP {resp.status_code}")
     try:
         hj = resp.json()
@@ -495,7 +501,9 @@ def archive_session(session_id: str, tenant=Depends(deps.require_tenant)):
         return _unreachable(str(exc))
     if resp.status_code == 404:
         return _session_not_found(session_id)
-    if resp.status_code >= 500:
+    # Same rule as transcript: only 200/404 are expected, and claiming
+    # {archived: true} on an unexpected 4xx would be a lie the client acts on.
+    if resp.status_code != 200:
         return _unreachable(f"harness returned HTTP {resp.status_code}")
     _SESSIONS.pop(session_id, None)
     return deps.tenant_echo(with_envelope_fields({"archived": True}), tenant)

@@ -535,6 +535,26 @@ def test_archive_passthrough_and_forgets_session(fake_harness):
     assert fake_harness.calls[-1]["method"] == "DELETE"
 
 
+def test_unexpected_harness_4xx_is_an_error_not_a_fake_success(fake_harness):
+    """A harness-secret mismatch (401) on create/transcript/archive must surface as
+    an upstream failure — never 200 {session_id: null} / an empty transcript / a
+    falsely archived session."""
+    c = _client()
+    sid = _create(c)
+    fake_harness.responder = lambda m, u, k: FakeResponse(401, {"error": "unauthorized"})
+
+    r_create = c.post("/api/sessions", json={"drawing_id": "demo"}, headers=_h("t-alpha"))
+    r_transcript = c.get(f"/api/sessions/{sid}/transcript", headers=_h("t-alpha"))
+    r_archive = c.request("DELETE", f"/api/sessions/{sid}", headers=_h("t-alpha"))
+    for r in (r_create, r_transcript, r_archive):
+        assert r.status_code == 502, r.text
+        b = r.json()
+        jsonschema.validate(b, ENVELOPE_SCHEMA)
+        assert b["error"]["error_code"] == "BROKER_UNREACHABLE"
+        assert b["degraded_mode"] is True
+    assert sid in sessions_router._SESSIONS  # a failed archive must not forget it
+
+
 # --------------------------------------------------------------------------- #
 # script runner
 # --------------------------------------------------------------------------- #

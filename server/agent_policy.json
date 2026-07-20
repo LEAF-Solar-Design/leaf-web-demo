@@ -66,11 +66,12 @@
       "cost_class": "aps_usd"
     },
     "undo_drawing_version": {
-      "description": "Undo: repoint the drawing head to a prior version (R3 safety valve — never harder than the write).",
+      "description": "Undo: repoint the drawing head to a prior version (R3 safety valve — never harder than the write). DISABLED in Phase-1: no spine tool dispatches it and the wire contract §0 back-edge allowlist carries only GET /api/drawings/*, so POST /api/drawings/{dwg}/undo is unreachable from the harness and would 401. The user-facing undo is unaffected (the UI calls that route directly with a tenant token). Enabling this needs a contract revision adding the route to §0 plus a spine mapping — Phase-2.",
       "rung": 3,
       "required_capability": "run_write",
       "policy": "auto",
-      "dispatch": {"kind": "app_api", "routes": ["POST /api/drawings/{dwg}/undo"]},
+      "enabled": false,
+      "dispatch": {"kind": "app_api", "routes": []},
       "args_schema": {"type": "object", "properties": {"dwg": {"type": "string"}, "to_version": {"type": "integer"}}, "additionalProperties": false},
       "rate_limit_category": "medium",
       "timeout_s": 30,

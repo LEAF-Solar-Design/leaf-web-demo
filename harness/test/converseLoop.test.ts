@@ -17,7 +17,13 @@ import { FakeAppRunClient } from "../src/ports/fakes/fakeAppRunClient.js";
 import { FakeConverseRunner } from "../src/ports/fakes/fakeConverseRunner.js";
 import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
-import type { ConverseEvent, SessionRecord, StoredEvent } from "../src/ports/index.js";
+import type {
+  ConverseEvent,
+  GateCheckContext,
+  GateCheckResult,
+  SessionRecord,
+  StoredEvent,
+} from "../src/ports/index.js";
 
 const PACKET = {
   catalog: [{ name: "count-by-layer", description: "Count entities per layer", capabilities: ["drawing.read"] }],
@@ -551,16 +557,21 @@ describe("ConverseLoop — remaining spine tools", () => {
     expect(text).toContain("Phase 2");
   });
 
-  it("request_confirmation emits confirmation_required and ends the turn awaiting_approval", async () => {
+  it("request_confirmation on an ALLOW verdict is informational — it never mints a chip", async () => {
     const { loop, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, "CONFIRM_REQ:deploy");
+
+    // The app gate auto-allows request_confirmation (rung 0), so it minted NO
+    // pending record — emitting a chip here would 404 on approval.
     const events = await store.eventsAfter(s.session_id, 0);
-    const required = ofType(events, "confirmation_required");
-    expect(required).toHaveLength(1);
-    expect(required[0]!.data).toMatchObject({ kind: "deploy" });
-    expect(typeof required[0]!.data.confirmation_id).toBe("string");
-    expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "awaiting_approval" });
+    expect(ofType(events, "confirmation_required")).toHaveLength(0);
+    expect(store.confirmations.size).toBe(0);
+    expect(ofType(events, "tool_result")[0]!.data).toMatchObject({
+      tool: "request_confirmation",
+      ok: true,
+    });
+    expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
   });
 
   it("a terminal LLM quota failure maps to the error event + stop_reason", async () => {
@@ -572,6 +583,126 @@ describe("ConverseLoop — remaining spine tools", () => {
     expect(error.data).toMatchObject({ degraded_mode: true });
     expect((error.data.error as Record<string, unknown>).error_code).toBe("llm_quota_exhausted");
     expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "llm_quota_exhausted" });
+  });
+});
+
+describe("ConverseLoop — approval ids are APP truth (wire contract section 6)", () => {
+  it("every confirmation_id on the wire is one the gate returned — none is minted locally", async () => {
+    const { loop, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+
+    // Every id the gate handed back, across the whole scenario.
+    const minted = new Set<string>();
+    const origCheck = gate.check.bind(gate);
+    gate.check = async (action: string, args: Record<string, unknown>, ctx: GateCheckContext) => {
+      const verdict = await origCheck(action, args, ctx);
+      if (verdict.confirmation_id) minted.add(verdict.confirmation_id);
+      return verdict;
+    };
+
+    await sendText(loop, s, "RUN:add-panel");
+    await sendText(loop, s, "CONFIRM_REQ:deploy");
+
+    const events = await store.eventsAfter(s.session_id, 0);
+    const onWire = events
+      .map((e) => e.data.confirmation_id)
+      .filter((id): id is string => typeof id === "string");
+    expect(onWire.length).toBeGreaterThan(0);
+    for (const id of onWire) expect(minted.has(id)).toBe(true);
+    // The mirror rows are the same ids — no local minting behind the stream either.
+    for (const id of store.confirmations.keys()) expect(minted.has(id)).toBe(true);
+  });
+
+  it("awaiting_approval WITHOUT a confirmation_id is malformed: denied, nothing proposed", async () => {
+    const { loop, gate, appRun, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+
+    // A gate that says "approval needed" but mints no record: the app would 404
+    // the approval, so the harness must never render a chip for it.
+    const origCheck = gate.check.bind(gate);
+    gate.check = async (action: string, args: Record<string, unknown>, ctx: GateCheckContext) => {
+      const verdict = await origCheck(action, args, ctx);
+      return verdict.decision === "awaiting_approval"
+        ? ({ decision: "awaiting_approval", reason: verdict.reason } as GateCheckResult)
+        : verdict;
+    };
+
+    await sendText(loop, s, "RUN:add-panel");
+
+    const events = await store.eventsAfter(s.session_id, 0);
+    expect(ofType(events, "proposed_run")).toHaveLength(0);
+    expect(ofType(events, "confirmation_required")).toHaveLength(0);
+    expect(store.confirmations.size).toBe(0);
+    expect(appRun.submitCalls).toHaveLength(0);
+    const toolResult = ofType(events, "tool_result")[0]!;
+    expect(toolResult.data).toMatchObject({ tool: "run_capability", ok: false });
+    expect(String(toolResult.data.summary)).toContain(
+      "gate_awaiting_approval_without_confirmation_id",
+    );
+    expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
+  });
+});
+
+describe("FakeGateClient — approval records are bound and single-use", () => {
+  const CTX: GateCheckContext = { tenantId: "demo-tenant", sessionId: "sess-1", turnId: "turn-1" };
+  const ARGS = { tool: "add-panel", params: { row: 2 } };
+
+  async function mint(gate: FakeGateClient): Promise<string> {
+    const verdict = await gate.check("run_write_tool", ARGS, CTX);
+    expect(verdict.decision).toBe("awaiting_approval");
+    return verdict.confirmation_id!;
+  }
+
+  it("a granted approval allows exactly once, then reads as consumed", async () => {
+    const gate = new FakeGateClient();
+    const cid = await mint(gate);
+    gate.grant(cid);
+    const args = { ...ARGS, confirmation_id: cid };
+    // A different turn of the same session still carries the approval.
+    expect((await gate.check("run_write_tool", args, { ...CTX, turnId: "turn-2" })).decision).toBe("allow");
+    expect(await gate.check("run_write_tool", args, { ...CTX, turnId: "turn-3" })).toMatchObject({
+      decision: "deny",
+      reason: "confirmation_already_consumed",
+    });
+  });
+
+  it("drifted args are denied args_mismatch even though the id is granted", async () => {
+    const gate = new FakeGateClient();
+    const cid = await mint(gate);
+    gate.grant(cid);
+    const drifted = { tool: "add-panel", params: { row: 3 }, confirmation_id: cid };
+    expect(await gate.check("run_write_tool", drifted, CTX)).toMatchObject({
+      decision: "deny",
+      reason: "args_mismatch",
+    });
+  });
+
+  it("another tenant's session cannot spend the approval", async () => {
+    const gate = new FakeGateClient();
+    const cid = await mint(gate);
+    gate.grant(cid);
+    const foreign: GateCheckContext = { tenantId: "tenant-b", sessionId: "sess-2", turnId: "t" };
+    expect(
+      await gate.check("run_write_tool", { ...ARGS, confirmation_id: cid }, foreign),
+    ).toMatchObject({ decision: "deny", reason: "confirmation_not_bound_to_session" });
+  });
+
+  it("an ungranted or unknown id never allows, and the rung cannot be swapped", async () => {
+    const gate = new FakeGateClient();
+    const cid = await mint(gate);
+    expect(await gate.check("run_write_tool", { ...ARGS, confirmation_id: cid }, CTX)).toMatchObject({
+      decision: "deny",
+      reason: "confirmation_not_approved",
+    });
+    gate.grant(cid);
+    // Approved for the R3 write — not for the R4 real-USD action.
+    expect(
+      await gate.check("submit_live_solve", { ...ARGS, confirmation_id: cid }, CTX),
+    ).toMatchObject({ decision: "deny", reason: "action_mismatch" });
+    expect(
+      await gate.check("run_write_tool", { ...ARGS, confirmation_id: "made-up" }, CTX),
+    ).toMatchObject({ decision: "deny", reason: "unknown_confirmation" });
+    expect(() => gate.grant("made-up")).toThrow();
   });
 });
 

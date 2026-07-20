@@ -89,7 +89,13 @@ export class HttpGateClient implements GateClient {
       ...(typeof body.confirmation_id === "string" ? { confirmation_id: body.confirmation_id } : {}),
       ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
       ...(typeof body.policy === "string" ? { policy: body.policy } : {}),
-      ...(typeof body.rung === "string" ? { rung: body.rung } : {}),
+      // The app serializes rung as a NUMBER (agent_policy.json rung: 3); accept
+      // either representation so the real verdict never silently loses it.
+      ...(typeof body.rung === "string"
+        ? { rung: body.rung }
+        : typeof body.rung === "number" && Number.isFinite(body.rung)
+          ? { rung: String(body.rung) }
+          : {}),
     };
   }
 }

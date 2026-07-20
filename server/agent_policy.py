@@ -186,9 +186,10 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "audit_extra": ["tool", "dwg"], "cost_class": "aps_usd",
         },
         "undo_drawing_version": {
-            "description": "Undo: repoint the drawing head to a prior version (R3 safety valve — never harder than the write).",
+            "description": "Undo: repoint the drawing head to a prior version (R3 safety valve — never harder than the write). DISABLED in Phase-1: no spine tool dispatches it and the wire contract §0 back-edge allowlist carries only GET /api/drawings/*, so POST /api/drawings/{dwg}/undo is unreachable from the harness and would 401. The user-facing undo is unaffected (the UI calls that route directly with a tenant token). Enabling this needs a contract revision adding the route to §0 plus a spine mapping — Phase-2.",
             "rung": 3, "required_capability": "run_write", "policy": "auto",
-            "dispatch": {"kind": "app_api", "routes": ["POST /api/drawings/{dwg}/undo"]},
+            "enabled": False,
+            "dispatch": {"kind": "app_api", "routes": []},
             "args_schema": {"type": "object",
                             "properties": {"dwg": {"type": "string"},
                                            "to_version": {"type": "integer"}},
@@ -523,14 +524,23 @@ def effective_action(pol: AgentPolicy, action_name: str, *, tier: Optional[str] 
 # --------------------------------------------------------------------------- #
 def load_tenant_state(tenant_id: str) -> Dict[str, Any]:
     """{agent_disabled: bool, overlay: {action -> fields}} for a tenant.
-    Missing/corrupt file -> permissive-empty state (the GLOBAL policy still
-    applies in full; this layer only ever tightens)."""
+
+    A MISSING file -> permissive-empty state (this layer was never configured;
+    the GLOBAL policy still applies in full). A file that EXISTS but is
+    unreadable/malformed -> PolicyError, so the gate fails CLOSED: the same rule
+    the unparseable kill flag below already follows, because every value this
+    file carries is a TIGHTENING (kill flag, tighten-only overlay) and an I/O
+    error must never silently lift one."""
     path = tenants_file()
+    if not path.exists():
+        return {"agent_disabled": False, "overlay": {}}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"agent_disabled": False, "overlay": {}}
-    entry = raw.get(str(tenant_id)) if isinstance(raw, dict) else None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError(f"agent tenants file unreadable/invalid JSON at {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise PolicyError(f"agent tenants top level must be a mapping ({path})")
+    entry = raw.get(str(tenant_id))
     if not isinstance(entry, dict):
         return {"agent_disabled": False, "overlay": {}}
     try:

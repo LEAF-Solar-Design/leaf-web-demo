@@ -73,8 +73,17 @@ def test_shipped_catalog_loads_with_v1_shape():
     assert cust.rung == 7
 
     assert pol.actions["run_write_tool"].policy == "confirm-once"
-    assert pol.actions["undo_drawing_version"].policy == "auto"  # safety valve
     assert pol.actions["read_platform_state"].required_capability == "converse"
+
+    # undo keeps policy `auto` (the safety valve is never harder than the write)
+    # but ships DISABLED in Phase-1: no spine tool dispatches it and wire §0
+    # allowlists only GET /api/drawings/*, so the route would 401 from the
+    # harness. Pinned here so re-enabling it cannot happen without also adding
+    # the §0 route + a spine mapping. The UI's own undo is a different path.
+    undo = pol.actions["undo_drawing_version"]
+    assert undo.policy == "auto"
+    assert undo.enabled is False
+    assert undo.dispatch == {"kind": "app_api", "routes": []}
 
     # the UI-consent tool (wire contract section 5) is rung 0 and auto —
     # converseLoop consults the gate for it, so it MUST exist in the catalog
@@ -253,6 +262,27 @@ def test_tenant_state_roundtrip(tmp_path, monkeypatch):
     assert agent_policy.load_tenant_state("t1")["agent_disabled"] is False
     # other tenants unaffected
     assert agent_policy.load_tenant_state("t2")["agent_disabled"] is False
+
+
+def test_missing_tenant_state_file_is_permissive(tmp_path, monkeypatch):
+    """Never configured is not the same as unreadable: with no file at all the
+    tighten-only layer is simply absent and the GLOBAL policy stands."""
+    monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(tmp_path / "nope.json"))
+    assert agent_policy.load_tenant_state("t1") == {"agent_disabled": False, "overlay": {}}
+
+
+def test_corrupt_tenant_state_file_fails_closed(tmp_path, monkeypatch):
+    """A PRESENT-but-unreadable file must raise, not resolve to the permissive
+    answer — returning {} there would wipe every tenant kill flag and every
+    tightening overlay the operator set."""
+    bad = tmp_path / "agent_tenants.json"
+    bad.write_text("{nope", encoding="utf-8")
+    monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(bad))
+    with pytest.raises(PolicyError, match="unreadable/invalid JSON"):
+        agent_policy.load_tenant_state("t1")
+    bad.write_text('["not", "a", "mapping"]', encoding="utf-8")
+    with pytest.raises(PolicyError, match="must be a mapping"):
+        agent_policy.load_tenant_state("t1")
 
 
 # --------------------------------------------------------------------------- #

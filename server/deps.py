@@ -279,6 +279,46 @@ def _dispatch_backedge_route(method: str, path: str) -> bool:
     return False
 
 
+def backedge_tier(tenant_id: str) -> Optional[str]:
+    """The back-edge caller's tier from the SAME broker-TRUSTED sources the broker's
+    own re-check uses (broker.py:363-376): the persisted broker tenants record
+    (`$BROKER_TENANTS`, default server/broker_tenants.json), then
+    `$LEAF_BROKER_TENANT_TIERS` ({tenant_id: tier}). Never the request body — a
+    back-edge caller could forge it. Read at call time. Returns None when the
+    tenant has no provisioned tier at all; returns the raw (possibly empty) string
+    when it does, so `entitlements.resolve_tier` applies its own fail-closed rule."""
+    path = Path(os.environ.get("BROKER_TENANTS") or (SERVER_DIR / "broker_tenants.json"))
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8")).get(tenant_id) or {}
+    except Exception:  # noqa: BLE001 - missing/corrupt file -> fall through to env
+        rec = {}
+    if isinstance(rec, dict) and "tier" in rec:
+        return str(rec.get("tier") or "")
+    raw = os.environ.get("LEAF_BROKER_TENANT_TIERS")
+    if raw:
+        try:
+            m = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            m = None
+        if isinstance(m, dict) and tenant_id in m:
+            return str(m.get(tenant_id) or "")
+    return None
+
+
+def backedge_tenant(tenant_id: str) -> Any:
+    """The tenant identity for a verified back-edge call.
+
+    OFF-auth: the plain str (byte-identical legacy — the whole platform is the
+    open demo, so the gate resolving "demo" is the same answer every other route
+    gives). LIVE: a `TenantContext` carrying the broker-trusted tier, so
+    `entitlements.resolve_tier` sees a real rung instead of defaulting a bare
+    string to "demo". No provisioned tier -> `tier=None` -> "restricted"
+    (fail CLOSED: an unresolvable tier must never authorize as demo)."""
+    if not auth_live():
+        return tenant_id
+    return TenantContext(tenant_id, tier=backedge_tier(tenant_id))
+
+
 def _dispatch_secret_ok(presented: Optional[str]) -> bool:
     secret = os.environ.get("LEAF_APP_DISPATCH_SECRET", "").strip()
     if not secret or not presented:
@@ -297,9 +337,10 @@ def require_tenant(
     OFF: returns the plain `x_tenant_id or DEFAULT_TENANT` string (unchanged).
     ON:  returns a verified `TenantContext` (raises 401 no-token / 403 no-claim),
          EXCEPT the harness back-edge: a valid `X-Dispatch-Secret` on a §0-listed
-         route trusts `X-Tenant-Id` as the resolved tenant (plain str — the tier
-         then resolves like the gate route's off-auth caller, and the broker
-         re-checks entitlement from its own trusted tier source on dispatch).
+         route trusts `X-Tenant-Id` as the resolved tenant, carried as a
+         `TenantContext` whose tier comes from the broker-trusted source
+         (`backedge_tenant`) — never a bare str, which would resolve to "demo"
+         and hand a downgraded tenant every capability.
     """
     if not auth_live():
         # BYTE-IDENTICAL legacy path — X-Tenant-Id header stub, plain str.
@@ -308,7 +349,7 @@ def require_tenant(
     if (x_dispatch_secret is not None and x_tenant_id
             and _dispatch_backedge_route(request.method, request.url.path)
             and _dispatch_secret_ok(x_dispatch_secret)):
-        return x_tenant_id
+        return backedge_tenant(x_tenant_id)
 
     # LEAF_AUTH_LIVE=1: verified JWT claims win over the header stub.
     # Imported lazily so PyJWT is only needed when auth is actually live.

@@ -72,12 +72,13 @@ def internal_gate(req: GateRequest,
     denied = _require_dispatch(x_dispatch_secret)
     if denied is not None:
         return denied
-    # Tier resolution: the back-edge carries a plain tenant_id string, so the
-    # tier resolves like any off-auth caller ("demo" / policy default). The
-    # broker re-checks entitlement from its OWN trusted tier source on every
-    # dispatch (broker.py:588-595), so this gate can narrow but never widen
-    # what the execution chain would allow anyway.
-    tier = entitlements.resolve_tier(req.tenant_id)
+    # Tier resolution: the back-edge carries only a tenant_id string, so the tier
+    # comes from the broker-TRUSTED source keyed on it (deps.backedge_tenant) —
+    # resolving a bare string would default every caller to "demo" (full access)
+    # and silently skip tier_overrides that TIGHTEN a rung. This gate is the ONLY
+    # tier check for converse/deploy/agent_write_autopilot: the broker's own
+    # re-check (broker.py:588-595) covers run_read/run_write/build alone.
+    tier = entitlements.resolve_tier(deps.backedge_tenant(req.tenant_id))
     tier_caps = entitlements.entitlements_for(tier)
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
                              req.action, req.args, tier_caps, tier=tier)
