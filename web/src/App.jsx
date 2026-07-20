@@ -18,7 +18,9 @@ import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
+import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
+import { shouldAutoDemo } from './demoState.js'
 import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
@@ -153,7 +155,7 @@ export default function App() {
   const [overlayStale, setOverlayStale] = useState(false) // last result overlay no longer matches shown version
   const [openTool, setOpenTool] = useState(null)         // the tool card expanded in ToolsPanel (for the write ghost)
 
-  // --- unified surface state ---
+  // --- platform session state ---
   const [tenant, setTenant] = useState(null)             // /api/session tenant echo (else "demo")
   const [tier, setTier] = useState(null)                 // real tier from the session echo (auth-live)
   const [org, setOrg] = useState(null)                   // org_id from the session echo (auth-live)
@@ -219,6 +221,7 @@ export default function App() {
   const [grantBusy, setGrantBusy] = useState(false) // link/unlink request in flight
   const [grantErr, setGrantErr] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
+  const [bannerDismissed, setBannerDismissed] = useState(false) // "Exit — explore freely" hides the demo banner (stays in mock)
 
   const viewerRef = useRef(null)
   const authorSectionRef = useRef(null)
@@ -321,7 +324,18 @@ export default function App() {
         if (!alive) return
         seat(d); setTenant(t); setTier(ti); setOrg(o)
       })
-      .catch((e) => { if (!alive) return; setLoadErr(String(e.message || e)); if (!mock && is401(e)) setAuthRequired(true) })
+      .catch((e) => {
+        if (!alive) return
+        setLoadErr(String(e.message || e))
+        if (!mock && is401(e)) {
+          setAuthRequired(true)
+          // Auto-fallback (B1): a VITE_MOCK=0 build that hits a 401 with Auth0
+          // unconfigured can't sign in — flip to the demo instead of parking on
+          // the gate, so the deployed link lands zero-click. SignedOutGate is
+          // kept only for the authConfigured build (the user CAN sign in there).
+          if (shouldAutoDemo({ authRequired: true, authConfigured, mock })) setMock(true)
+        }
+      })
     return () => { alive = false }
   }, [mock, isEditFixture])
 
@@ -1289,7 +1303,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="top">
-        <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf / unified surface</div>
+        <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
         <div className="proj">
           <ProjectSwitcher
             mock={mock}
@@ -1309,14 +1323,14 @@ export default function App() {
           <span className="meta">
             {shown ? `${shown.polylines.length} polylines · ${shown.layers.length} layers` : 'loading'}
           </span>
-          <span className={`tag ${mock ? 'amber' : 'live'}`}>{mock ? 'mock data' : 'in design'}</span>
+          {mock && <span className="tag amber">Demo</span>}
         </div>
         <div className="spacer" />
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
           <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
-          <label className="toggle">
+          <label className="switch">
             <input
               type="checkbox"
               checked={mock}
@@ -1325,17 +1339,21 @@ export default function App() {
             />
             <span>Mock</span>
           </label>
-          <ClaudeAccountPanel
-            mock={mock}
-            grant={grant}
-            loading={grantLoading}
-            busy={grantBusy}
-            error={grantErr}
-            open={claudeOpen}
-            onToggle={setClaudeOpen}
-            onLink={onLinkClaude}
-            onUnlink={onUnlinkClaude}
-          />
+          {/* Live-only chrome (Claude-account terminal panel) is hidden in the
+              demo — it can't work signed-out. Guarded on !mock. */}
+          {!mock && (
+            <ClaudeAccountPanel
+              mock={mock}
+              grant={grant}
+              loading={grantLoading}
+              busy={grantBusy}
+              error={grantErr}
+              open={claudeOpen}
+              onToggle={setClaudeOpen}
+              onLink={onLinkClaude}
+              onUnlink={onUnlinkClaude}
+            />
+          )}
         </div>
       </header>
 
@@ -1410,7 +1428,8 @@ export default function App() {
 
       <div className="center-col">
         <main className="center-scroll">
-        {signedOut && <SignedOutGate onDemo={() => setMock(true)} onSignIn={authConfigured ? login : null} />}
+        {mock && !bannerDismissed && <DemoBanner onExit={() => setBannerDismissed(true)} />}
+        {signedOut && authConfigured && <SignedOutGate onDemo={() => setMock(true)} onSignIn={login} />}
         <div className="kicker">Home · one prompt, three lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
@@ -1687,6 +1706,11 @@ export default function App() {
           health.aps_live
             ? <span className="foot-stat"><span className="dot" aria-hidden="true" />backend · <span className="ok-txt">cloud live</span></span>
             : <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">local only</span></span>
+        ) : !authConfigured ? (
+          /* Gating window (a VITE_MOCK=0 build with Auth0 unconfigured, before the
+             401 auto-fallback flips to mock): never claim a green "live" state we
+             haven't confirmed. Neutral until the fallback lands. */
+          <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">connecting…</span></span>
         ) : (
           <span className="foot-stat"><span className="dot" aria-hidden="true" />backend · <span className="ok-txt">live</span></span>
         )}

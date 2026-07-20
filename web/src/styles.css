@@ -327,8 +327,10 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .dispatch-btn:hover:not(:disabled) { background: var(--primary-hover); }
 .dispatch-btn:disabled { opacity: .5; cursor: not-allowed; }
 /* inline hint: recedes to 15% until hovered (max one per pane) */
-.hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); opacity: .15; transition: opacity 180ms ease; }
-.hint:hover { opacity: 1; }
+/* Resting opacity raised (.15 -> .62) so the lane explainer is legible on a
+   projector / touch without hover; hover + keyboard focus-within reveal fully. */
+.hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); opacity: .62; transition: opacity 180ms ease; }
+.hint:hover, .hint:focus-within { opacity: 1; }
 .hint b { color: var(--foreground); font-weight: 500; }
 
 /* --- route panel (the nl-prompt match) --- */
@@ -468,8 +470,8 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
   color: var(--foreground); box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
 }
 .selection-readout.empty { color: var(--muted); }
-.sel-hint { font-size: 12px; color: var(--muted); opacity: .15; transition: opacity 180ms ease; }
-.sel-hint:hover, .selection-readout:hover .sel-hint { opacity: 1; }
+.sel-hint { font-size: 12px; color: var(--muted); opacity: .62; transition: opacity 180ms ease; }
+.sel-hint:hover, .selection-readout:hover .sel-hint, .selection-readout:focus-within .sel-hint { opacity: 1; }
 .sel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .sel-kind { font-size: 12px; font-weight: 600; letter-spacing: .2px; color: var(--foreground); }
 /* plain action = quiet accent chip (amber is reserved for real advisories) */
@@ -1479,3 +1481,42 @@ footer .warn-txt { color: var(--status-warning); }
 
 /* SB3: the bar never carries a drop halo — the focused-composer ring is the only pop */
 .bar .primary, .bar-dock .primary { box-shadow: none; }
+
+/* ============================================================
+   M2 — demo-default chrome, focus ring, route-title, banner
+   ============================================================ */
+
+/* .route-title (M-h): the RoutePanel used this class for the Build/Solve lane
+   nouns but it was never defined — give it a legible emphasized treatment that
+   matches the mono .route-tool grammar without the mono font. */
+.route-title { color: var(--foreground); font-weight: 600; }
+
+/* Shared keyboard :focus-visible accent ring (M-g / a11y). Keyboard focus was
+   invisible across the interactive chips/buttons/rows; one consistent
+   dark-emerald ring makes it perceivable. Pointer focus stays quiet (only
+   :focus-visible, never :focus). */
+.chip-act:focus-visible,
+.btn:focus-visible,
+.resolver-row:focus-visible,
+.rail-row:focus-visible,
+.legend-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--background, #0f0f11), 0 0 0 4px var(--primary);
+  border-radius: 6px;
+}
+
+/* Persistent guided-demo banner (M2 item 3 / M-c). Dark-emerald standard;
+   sits at the top of the center column whenever mock is active. */
+.demo-banner {
+  display: flex; align-items: center; gap: 14px;
+  margin: 0 0 14px;
+  padding: 11px 14px;
+  border: 1px solid var(--primary);
+  border-left: 3px solid var(--primary);
+  border-radius: 10px;
+  background: var(--accent-tint);
+}
+.demo-banner-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.demo-banner-title { font-size: 13px; font-weight: 600; color: var(--primary); }
+.demo-banner-sub { font-size: 12px; color: var(--muted-2); }
+.demo-banner-exit { flex: none; margin-left: auto; white-space: nowrap; }

@@ -3,7 +3,7 @@
 // "Find, act, or build…") and a controls row inside the well: the run / solve /
 // build lane scope chips with their live hit dots left; project context, the
 // summon keycap (⌘K, swapping to an emphasized Enter cap while focused) and the
-// Dispatch primary right. Enter dispatches (Ctrl/Cmd+Enter still works); while
+// Run primary right. Enter dispatches (Ctrl/Cmd+Enter still works); while
 // a route decision is showing above the well, Enter belongs to the resolver
 // (routeActive) and typing clears the stale route (App-side).
 
@@ -62,7 +62,7 @@ export default function PromptBox({
           onClick={onDispatch}
           disabled={routing || !value.trim()}
         >
-          {routing ? 'Routing…' : 'Dispatch'}
+          {routing ? 'Routing…' : 'Run'}
         </button>
       </div>
     </div>
