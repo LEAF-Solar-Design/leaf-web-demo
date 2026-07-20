@@ -23,6 +23,15 @@ function fmtWhen(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+// E2 empty state: the action chip focuses the composer directly (the docked
+// bar's input, falling back to the legacy prompt textarea) — no parent wiring
+// needed, same move as JobRail's empty state.
+function focusComposer() {
+  const el = document.querySelector('.bar textarea') || document.querySelector('.bar input')
+    || document.querySelector('.prompt textarea')
+  if (el) el.focus()
+}
+
 function fmtAbs(iso) {
   if (!iso) return undefined
   const d = new Date(iso)
@@ -79,7 +88,10 @@ export default function VersionHistory({
         )}
 
         {!loading && !error && rows.length === 0 && (
-          <div className="vh-note">No versions yet.</div>
+          <div className="rail-empty">
+            <div className="vh-note">Versions land here after your first edit runs.</div>
+            <button className="chip-act" onClick={() => { onClose(); focusComposer() }}>Run an edit</button>
+          </div>
         )}
 
         {!loading && !error && rows.length > 0 && (

@@ -161,7 +161,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry }) {
             </span>
             <span className="result-tool">{result.tool} <span className="dim">v{result.version}</span></span>
             {result.degraded_mode && (
-              <span className="degraded" title="Ran on the local fallback, not the cloud solver">local fallback</span>
+              <span className="degraded">local fallback</span>
             )}
           </div>
 
@@ -191,13 +191,12 @@ export default function ResultPanel({ running, error, result, tool, onRetry }) {
           )}
 
           {/* Itemized per-run cost receipt (B3): wall-clock, engine seconds, and
-              dollars — each a distinct item. Tied to the header spend chip via the
-              tooltip (this run rolls up into "today"). A zero / non-billable run
-              reads as a clean "no cloud cost", never "$0.0000" (B1). */}
-          <div
-            className="receipt"
-            title="This run’s cost — it rolls up into today’s spend (see the spend chip in the header)."
-          >
+              dollars — each a distinct item. No tooltip (T4: tooltips only on
+              unlabeled things — this row is its own label); the roll-up-into-
+              today's-spend sentence lives in the run's Details drawer. A zero /
+              non-billable run reads as a clean "no cloud cost", never
+              "$0.0000" (B1). */}
+          <div className="receipt">
             <span>{result.timing_ms} ms</span>
             {result.cost ? (
               <>

@@ -13,7 +13,7 @@ const WRAP = {
   padding: '24px',
   background: '#0a0f0d',
   color: '#e6f2ec',
-  fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
+  fontFamily: "'Inter Tight', 'Inter', system-ui, -apple-system, sans-serif",
 }
 
 const CARD = {

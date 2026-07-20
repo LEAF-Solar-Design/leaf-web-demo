@@ -44,23 +44,13 @@ import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.
 // the legend swatches stay distinguishable.
 const PALETTE = ['#6b9fd4', '#8fbf9c', '#b49bd1', '#d4af6e', '#cf8fa6', '#79bcc7']
 
-// Suspense fallback while the lazy viewer chunk arrives — calm dark-emerald,
-// content-shaped, never a spinner-on-white flash.
+// Suspense fallback while the lazy viewer chunk arrives — L1 indeterminate:
+// pulse dot + verb, top-left (the centered position is reserved for X3 failures).
 function ViewerSkeleton() {
   return (
-    <div
-      aria-hidden="true"
-      style={{
-        position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
-        justifyContent: 'center', background: '#0f0f11', color: '#9db3a8',
-      }}
-    >
-      <div style={{ textAlign: 'center' }}>
-        <div style={{
-          width: 16, height: 16, margin: '0 auto 12px', background: '#22c55e',
-          transform: 'rotate(45deg)', borderRadius: 4, opacity: 0.85,
-        }} />
-        <div style={{ fontSize: 13 }}>Preparing the viewer…</div>
+    <div aria-hidden="true" style={{ position: 'absolute', inset: 0, background: '#0f0f11' }}>
+      <div className="loading-line dim" style={{ position: 'absolute', top: 14, left: 14 }}>
+        <span className="dot live pulse" aria-hidden="true" /> Preparing the viewer
       </div>
     </div>
   )
@@ -163,6 +153,8 @@ export default function App() {
   const [intake, setIntake] = useState(null)
   const [versionIntake, setVersionIntake] = useState(null) // applied next-version
   const [loadErr, setLoadErr] = useState(null)
+  const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
+  const [refreshFail, setRefreshFail] = useState(null) // {drawing_id, version} — post-write viewer refresh failed (X1)
   const [tools, setTools] = useState([])
   const [toolsErr, setToolsErr] = useState(null)
   const [visibleLayers, setVisibleLayers] = useState({})
@@ -331,7 +323,7 @@ export default function App() {
   // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
-    setIntake(null); setVersionIntake(null); setLoadErr(null)
+    setIntake(null); setVersionIntake(null); setLoadErr(null); setRefreshFail(null)
     setResult(null); setSelectedHandle(null); setPendingEdit(null)
     setRunning(false); setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); setRunErr(null)
     setDrawingState(null); setVersionBusy(false)
@@ -375,7 +367,7 @@ export default function App() {
         }
       })
     return () => { alive = false }
-  }, [mock, isEditFixture])
+  }, [mock, isEditFixture, intakeRetryKey])
 
   useEffect(() => {
     let alive = true
@@ -778,9 +770,8 @@ export default function App() {
     setOpenFamilies((o) => ({ ...o, [id]: !o[id] }))
   }, [])
 
-  const onToggleHistory = useCallback(async () => {
-    if (historyOpen) { setHistoryOpen(false); return }
-    setHistoryOpen(true)
+  // Shared by the History toggle and the X3 takeover's Retry chip.
+  const loadHistory = useCallback(async () => {
     if (!drawingState) return
     setHistoryLoading(true); setHistoryErr(null)
     try {
@@ -790,7 +781,13 @@ export default function App() {
     } finally {
       setHistoryLoading(false)
     }
-  }, [mock, historyOpen, drawingState])
+  }, [mock, drawingState])
+
+  const onToggleHistory = useCallback(async () => {
+    if (historyOpen) { setHistoryOpen(false); return }
+    setHistoryOpen(true)
+    loadHistory()
+  }, [historyOpen, loadHistory])
 
   // Read-only preview of a version. Head -> restore head + clear preview; any
   // other version -> seat that intake in the viewer WITHOUT touching head/latest
@@ -896,7 +893,7 @@ export default function App() {
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
-    setOverlayStale(false); setCurrentJobId(null)
+    setOverlayStale(false); setCurrentJobId(null); setRefreshFail(null)
     lastRunRef.current = { tool, params }
     // feed the picked entity to the tool so an edit tool can target it. A write
     // tool (delete-marked-panel) reads `handle`, so map the selection onto it
@@ -940,7 +937,10 @@ export default function App() {
           const view = await getDrawingIntake(mock, nv.drawing_id, 'head')
           seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
         } catch {
-          showToast({ text: `Version ${nv.version} created — viewer refresh failed` })
+          // Completed act -> plain NT2 toast; the failed refresh surfaces as an
+          // X1 red row at the viewer card (a failed act is never a toast).
+          showToast({ text: `Version ${nv.version} created` })
+          setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
         }
       }
       // MOCK write loop (M3): the same beat, served by the in-memory chain —
@@ -954,7 +954,10 @@ export default function App() {
           const view = await getDrawingIntake(mock, nv.drawing_id, 'head')
           seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
         } catch {
-          showToast({ text: `Version ${nv.version} created — viewer refresh failed` })
+          // Completed act -> plain NT2 toast; the failed refresh surfaces as an
+          // X1 red row at the viewer card (a failed act is never a toast).
+          showToast({ text: `Version ${nv.version} created` })
+          setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
         }
       }
     } catch (e) {
@@ -978,6 +981,16 @@ export default function App() {
     const last = lastRunRef.current
     if (last) onRun(last.tool, last.params)
   }, [onRun])
+
+  // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
+  const onRetryViewerRefresh = useCallback(async () => {
+    if (!refreshFail) return
+    try {
+      const view = await getDrawingIntake(mock, refreshFail.drawing_id, 'head')
+      seatVersion(view, refreshFail.drawing_id, null)
+      setRefreshFail(null)
+    } catch { /* still failing — the X1 row stays */ }
+  }, [mock, refreshFail, seatVersion])
 
   const onAuthor = useCallback(async (description) => {
     const res = await authorTool(mock, description)
@@ -1456,7 +1469,11 @@ export default function App() {
         </div>
         {catalogErr && !signedOut && (
           <>
-            <div className="inline-error" style={{ margin: '0 4px 8px' }}>Couldn’t load families: {catalogErr}</div>
+            <div className="inline-error" style={{ margin: '0 4px 4px' }}>
+              Couldn’t load families: {catalogErr}
+              <button type="button" className="chip-act" onClick={loadCatalog}>Retry</button>
+            </div>
+            <div className="dim" style={{ margin: '0 4px 8px', fontSize: 11.5 }}>Showing the flat tool list instead.</div>
             <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={() => setToolsOpen((o) => !o)}>
               <ToolsPanel
                 tools={tools}
@@ -1537,7 +1554,9 @@ export default function App() {
         <div className="workspace-card enter" style={{ '--rank': 1 }} ref={workspaceCardRef}>
           <div className="viewer-toolbar">
             <div className="viewer-title">
-              {shown ? `${projectName}.dwg` : 'loading…'}
+              {/* One loading voice per pane — the pulse-dot line in the viewer
+                  announces loading; the title placeholder stays a muted dash. */}
+              {shown ? `${projectName}.dwg` : <span className="dim">—</span>}
               {shown && (
                 <span className="dim">
                   {' · '}{shown.polylines.length} polylines
@@ -1596,6 +1615,7 @@ export default function App() {
                         onPreview={onPreviewVersion}
                         onBackToHead={onBackToHead}
                         onClose={() => setHistoryOpen(false)}
+                        onRetry={loadHistory}
                       />
                     )}
                   </div>
@@ -1618,8 +1638,23 @@ export default function App() {
               <button className="btn ghost" onClick={() => viewerRef.current?.fit()}>Fit to bounds</button>
             </div>
           </div>
+          {/* X1: a failed post-write viewer refresh — red row + Retry + honest
+              fallback note (the completion itself already toasted plainly). */}
+          {refreshFail && (
+            <div className="inline-error" style={{ margin: '0 0 8px' }}>
+              Couldn’t refresh the viewer — showing the previous version
+              <button type="button" className="chip-act" onClick={onRetryViewerRefresh}>Retry</button>
+            </div>
+          )}
           <div className="viewer-wrap">
-            {loadErr && !signedOut && <div className="overlay-msg error">Couldn’t load drawing — {loadErr}</div>}
+            {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
+            {loadErr && !signedOut && (
+              <div className="pane-fail" role="alert" style={{ position: 'absolute', inset: 0 }}>
+                <span className="pane-fail-title"><span className="dot red" aria-hidden="true" />Couldn’t load drawing</span>
+                <span className="pane-fail-reason">{loadErr}</span>
+                <button className="chip-act" onClick={() => setIntakeRetryKey((k) => k + 1)}>Retry</button>
+              </div>
+            )}
             {signedOut && <div className="overlay-msg">Sign in or explore the demo to load a drawing.</div>}
             {!intake && !loadErr && !signedOut && (
               // Indeterminate load: content-shaped pulse dot + verb, top-left —
@@ -1825,7 +1860,7 @@ export default function App() {
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
-        <span style={{ marginLeft: 'auto' }}>build {__BUILD_HASH__} · {mock ? 'sample data' : 'live'}</span>
+        <span style={{ marginLeft: 'auto' }}>build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span> · {mock ? 'sample data' : 'live'}</span>
       </footer>
 
       {opsFlag && !opsDismissed && <OpsDrawer onDismiss={() => setOpsDismissed(true)} />}

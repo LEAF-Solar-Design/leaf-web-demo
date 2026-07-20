@@ -37,7 +37,7 @@ export default function WorkspaceSummary({ workspace, loading, onClose }) {
           {loading && <span className="dim"> · refreshing</span>}
         </div>
         {onClose && (
-          <button className="key" onClick={onClose} aria-label="Close workspace">Esc</button>
+          <button className="key hot" onClick={onClose} aria-label="Close workspace">Esc</button>
         )}
       </div>
 

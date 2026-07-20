@@ -10,7 +10,7 @@ function ParamForm({ schema, values, onChange }) {
     <div className="params">
       {keys.map((k) => {
         const p = props[k]
-        const label = p.title || k
+        const label = sentence((p.title || k).replace(/_/g, ' '))
         const val = values[k] ?? p.default ?? (p.type === 'number' ? 0 : '')
         return (
           <label key={k} className="param">
@@ -73,6 +73,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
         <div className="inline-error">
           <span>Couldn’t load tools — {error}</span>
           <button className="chip-act" onClick={onRetry || (() => window.location.reload())}>Retry</button>
+          <span className="key" aria-hidden="true">R</span>
         </div>
       )}
       <div className="tool-list">

@@ -16,7 +16,7 @@
   inset: 0;
   background: rgba(4, 8, 6, 0.62);
   pointer-events: auto;
-  animation: tour-fade 220ms ease both;
+  animation: tour-fade var(--m-enter) var(--m-curve) both;
 }
 
 .tour-spot {
@@ -25,7 +25,7 @@
   border: 1px solid var(--primary);
   box-shadow: 0 0 0 9999px rgba(4, 8, 6, 0.62), 0 0 0 4px var(--accent-tint);
   pointer-events: none;
-  transition: top 260ms ease, left 260ms ease, width 260ms ease, height 260ms ease;
+  transition: top 260ms var(--m-curve), left 260ms var(--m-curve), width 260ms var(--m-curve), height 260ms var(--m-curve);
 }
 
 /* Persistent banner strip — same words as the standing demo banner so leaving
@@ -71,15 +71,13 @@
   pointer-events: auto;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
   font-family: var(--font-sans);
-  animation: tour-rise 240ms ease both;
+  animation: tour-rise var(--m-enter) var(--m-curve) both;
 }
 
 .tour-card-step {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 11px;
-  letter-spacing: 0.04em;
   color: var(--muted-2);
-  text-transform: uppercase;
 }
 
 .tour-card-title {
@@ -102,8 +100,8 @@
   border-radius: 8px;
   background: var(--bar-well);
   border: 1px solid var(--border);
-  font-family: var(--font-mono);
-  font-size: 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
   color: var(--foreground);
   word-break: break-word;
 }
@@ -112,13 +110,26 @@
   display: inline-block;
   width: 7px;
   color: var(--primary);
-  animation: tour-blink 1s steps(1) infinite;
 }
 
+/* indeterminate running line: pulse dot + verb (amber is reserved for advisory) */
 .tour-card-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-top: 10px;
   font-size: 12px;
-  color: var(--status-warning);
+  color: var(--muted);
+}
+
+.tour-card-wait::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: leaf-pulse 1.6s ease-in-out infinite;
+  flex: none;
 }
 
 .tour-card-actions {
@@ -130,35 +141,29 @@
 
 .tour-card-actions .tour-spacer { margin-left: auto; }
 
+/* chip grammar: quiet FILLED chips, never outlined (.chip-neutral / .primary voice) */
 .tour-btn {
   font: inherit;
   font-size: 12.5px;
   padding: 6px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bar-chip);
-  color: var(--foreground);
+  border-radius: 6px;
+  border: 0;
+  background: rgba(255, 255, 255, .05);
+  color: var(--muted);
   cursor: pointer;
 }
 
-.tour-btn:hover:not(:disabled) { border-color: var(--primary); }
+.tour-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .09); }
 
 .tour-btn:disabled { opacity: 0.45; cursor: default; }
 
 .tour-btn.primary {
   background: var(--primary);
-  border-color: var(--primary);
   color: var(--on-accent);
   font-weight: 600;
 }
 
 .tour-btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
-
-.tour-btn.quiet {
-  background: transparent;
-  border-color: transparent;
-  color: var(--muted);
-}
 
 .tour-dots {
   display: flex;
@@ -176,11 +181,10 @@
 .tour-dot.on { background: var(--primary); }
 
 @keyframes tour-fade { from { opacity: 0 } to { opacity: 1 } }
-@keyframes tour-rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
-@keyframes tour-blink { 50% { opacity: 0 } }
+@keyframes tour-rise { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: none } }
 
 @media (prefers-reduced-motion: reduce) {
-  .tour-dim, .tour-card, .tour-spot, .tour-card-prompt .tour-caret {
+  .tour-dim, .tour-card, .tour-spot, .tour-card-wait::before {
     animation: none;
     transition: none;
   }

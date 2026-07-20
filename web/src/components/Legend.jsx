@@ -12,7 +12,6 @@ export default function Legend({ layers, counts, colorForLayer, visibleLayers, o
             className={`legend-row ${on ? '' : 'off'} ${n === 0 ? 'empty' : ''}`}
             onClick={() => onToggle(l)}
             disabled={n === 0}
-            title={n === 0 ? 'no geometry on this layer' : 'toggle visibility'}
           >
             <span className="swatch" style={{ background: colorForLayer(l), opacity: on ? 1 : 0.25 }} />
             <span className="legend-name">{l}</span>
