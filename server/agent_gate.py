@@ -158,14 +158,45 @@ def create_pending(*, tenant_id: str, session_id: str, turn_id: str,
     return record
 
 
+_RECORD_STR_FIELDS = ("confirmation_id", "tenant_id", "session_id", "action",
+                      "args_hash", "expires_at")
+
+
+def _record_is_wellformed(record: Any) -> bool:
+    """Type-validate an approval record at the READ boundary.
+
+    Every downstream check in gate() is a comparison or a truth test, and a
+    truth test on a corrupted value is an authorization decision made by
+    accident: `"granted": "false"` is a truthy string, `"granted": 1` is not the
+    bool this code wrote. create_pending() and _decide() only ever store real
+    bools and real strings, so anything else is corruption or tampering, and
+    validating once here is what stops each individual use site from having to
+    remember the distinction. A malformed record reads as absent -> deny.
+    """
+    if not isinstance(record, dict):
+        return False
+    for field in _RECORD_STR_FIELDS:
+        if not isinstance(record.get(field), str):
+            return False
+    # bools must be REAL bools, not truthy stand-ins
+    for field in ("granted", "denied"):
+        if not isinstance(record.get(field), bool):
+            return False
+    # written only on consumption, and only ever as an ISO string
+    if "consumed_at" in record and not isinstance(record["consumed_at"], str):
+        return False
+    return True
+
+
 def read_pending(confirmation_id: str) -> Optional[Dict[str, Any]]:
     path = _approval_path(confirmation_id)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    return record if _record_is_wellformed(record) else None
 
 
 def _write_pending(record: Dict[str, Any]) -> None:
@@ -574,18 +605,28 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             # in another (a redeeming session would otherwise gain a standing
             # confirm-once grant it was never shown a chip for).
             return _deny("args_mismatch", act=act, extra={"gate": "policy"})
-        if record.get("denied"):
+        if record.get("denied") is not False:
+            # `is not False` (not truthiness): read_pending guarantees a real
+            # bool, and anything but an explicit False is a denial or corruption.
             return _deny("approval_denied", act=act, extra={"gate": "policy"})
         if _is_expired(record):
             _decide(record, granted=False, by="system", reason="expired")
             return _deny("approval_expired", act=act, extra={"gate": "policy"})
-        if record.get("granted"):
+        if record.get("granted") is True:
             # An approval redeems EXACTLY ONCE: the re-read + consumed-stamp
             # under _state_lock closes the replay window a granted record's
             # 300s TTL would otherwise leave open (one human click must never
             # authorize a rate-limit budget of duplicate writes/solves).
             with _state_lock:
-                record = read_pending(str(confirmation_id)) or record
+                # NO `or record` fallback: re-reading under the lock is the
+                # whole point of this block, and falling back to the pre-lock
+                # copy on a failed/corrupt re-read hands back the stale, still
+                # unconsumed record — reopening the exact replay window the lock
+                # exists to close.
+                fresh = read_pending(str(confirmation_id))
+                if fresh is None:
+                    return _deny("approval_unreadable", act=act, extra={"gate": "policy"})
+                record = fresh
                 # PRESENCE, not truthiness. This field has inverse polarity to
                 # granted/denied: falsy means "not yet consumed", so a record
                 # whose stamp is corrupted to null / "" / 0 would replay a spent
@@ -593,6 +634,11 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                 # writer below stores an ISO string, so present == consumed.
                 if "consumed_at" in record:
                     return _deny("approval_consumed", act=act, extra={"gate": "policy"})
+                # the decision could have flipped between the two reads
+                if record.get("granted") is not True or record.get("denied") is not False:
+                    return _deny("approval_denied", act=act, extra={"gate": "policy"})
+                if _is_expired(record):
+                    return _deny("approval_expired", act=act, extra={"gate": "policy"})
                 record["consumed_at"] = _iso(_now())
                 _write_pending(record)
             # confirm-once persists the grant for the exact tool the human saw

@@ -265,21 +265,71 @@ def test_falsy_consumed_stamp_still_denies_the_replay():
     "not yet consumed". A truthiness check therefore let a spent approval be
     replayed by corrupting the stamp to null / "" / 0 — the gate must key on
     the field being PRESENT."""
-    args = {"tool": "my-tool", "manifest_sha256": "c" * 64}
+    # request_confirmation is always-confirm (so no session grant covers the
+    # repeat, unlike confirm-once) and rate category low/120-per-hour (so the
+    # loop cannot exhaust the budget and deny for the wrong reason). The replay
+    # must reuse the SAME session: the record is session-bound, and a different
+    # session denies earlier as args_mismatch, never reaching the stamp check.
     for i, falsy in enumerate((None, "", 0)):
         session = f"s-falsy-{i}"
-        first = _gate("register_tool", args, session=session)
+        args = {"kind": f"probe-{i}"}
+        first = _gate("request_confirmation", args, session=session)
         cid = first["confirmation_id"]
         agent_gate.grant_approval(cid)
-        assert _gate("register_tool", dict(args, confirmation_id=cid),
+        assert _gate("request_confirmation", dict(args, confirmation_id=cid),
                      session=session)["reason"] == "allow_via_approval"
         # corrupt the spent stamp the way a partial write or hand-edit would
         record = agent_gate.read_pending(cid)
         record["consumed_at"] = falsy
         agent_gate._write_pending(record)
-        replay = _gate("register_tool", dict(args, confirmation_id=cid), session=session)
+        replay = _gate("request_confirmation", dict(args, confirmation_id=cid),
+                       session=session)
         assert replay["decision"] == "deny", f"replayed with consumed_at={falsy!r}"
-        assert replay["reason"] == "approval_consumed"
+        # "" is a str so it survives boundary validation and denies as consumed;
+        # None/0 are not, so read_pending rejects the record even earlier. Both
+        # deny — which is the property under test.
+        assert replay["reason"] in ("approval_consumed", "approval_not_found")
+
+
+def test_non_bool_granted_is_not_authorization():
+    """A truth test on a corrupted field is an authorization decision made by
+    accident: "false" is a truthy STRING and 1 is not the bool this code wrote.
+    read_pending type-validates at the boundary, so these read as absent."""
+    for i, bogus in enumerate(("false", "true", 1, "yes", [], {})):
+        session = f"s-bogus-{i}"
+        args = {"tool": f"add-panel-{i}"}
+        first = _gate("run_write_tool", args, session=session)
+        cid = first["confirmation_id"]
+        record = agent_gate.read_pending(cid)
+        record["granted"] = bogus
+        agent_gate._write_pending(record)
+        out = _gate("run_write_tool", dict(args, confirmation_id=cid), session=session)
+        assert out["decision"] == "deny", f"granted={bogus!r} authorized the call"
+
+
+def test_failed_reread_under_lock_denies_instead_of_reusing_the_stale_record():
+    """Re-reading under the lock IS the replay guard. Falling back to the
+    pre-lock copy on a failed re-read hands back a still-unconsumed record and
+    reopens the window the lock exists to close."""
+    args = {"tool": "my-tool", "manifest_sha256": "e" * 64}
+    first = _gate("register_tool", args, session="s-reread")
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+
+    real_read = agent_gate.read_pending
+    calls = {"n": 0}
+
+    def flaky(confirmation_id):
+        calls["n"] += 1
+        return real_read(confirmation_id) if calls["n"] == 1 else None
+
+    agent_gate.read_pending = flaky
+    try:
+        out = _gate("register_tool", dict(args, confirmation_id=cid), session="s-reread")
+    finally:
+        agent_gate.read_pending = real_read
+    assert out["decision"] == "deny"
+    assert out["reason"] == "approval_unreadable"
 
 
 def test_confirm_once_replay_denies_but_grant_covers_repeats():

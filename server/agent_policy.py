@@ -505,13 +505,23 @@ def apply_tenant_overlay(action: AgentAction, overlay: Optional[Dict[str, Any]])
     """Merge a per-tenant overlay entry — TIGHTEN-ONLY. Policy may only move up
     the auto -> confirm-once -> always-confirm ordering; `enabled` may only go
     false. Any loosening attempt raises PolicyError (the gate fails closed)."""
-    if not overlay:
+    if overlay is None:
         return action
-    entry = overlay.get(action.name)
-    if not entry:
+    if not isinstance(overlay, dict):
+        raise PolicyError("tenant overlay: must be a mapping")
+    # Membership BEFORE truthiness, and the type check before the empty check:
+    # `if not entry` short-circuited on every falsy value, so a present null / 0
+    # / "" / [] skipped the isinstance guard below and silently returned the
+    # UNTIGHTENED base action — an operator's tightening quietly discarded.
+    if action.name not in overlay:
         return action
+    entry = overlay[action.name]
     if not isinstance(entry, dict):
-        raise PolicyError(f"tenant overlay for {action.name}: must be a mapping")
+        raise PolicyError(
+            f"tenant overlay for {action.name}: must be a mapping; got "
+            f"{type(entry).__name__} — dropping it would LOOSEN the tenant")
+    if not entry:
+        return action  # an EMPTY mapping legitimately means "no changes"
     unknown = set(entry.keys()) - _OVERRIDE_KNOWN_FIELDS
     if unknown:
         raise PolicyError(f"tenant overlay for {action.name}: unknown fields {sorted(unknown)}")

@@ -182,6 +182,21 @@ def test_null_kill_flag_fails_closed_but_absent_one_does_not(tmp_path, monkeypat
     assert agent_policy.load_tenant_state("t-a")["agent_disabled"] is False
 
 
+def test_present_falsy_overlay_entry_is_corruption_not_absence():
+    """`if not entry` short-circuited on every falsy value BEFORE the type
+    check, so a present null / 0 / "" / [] silently returned the UNTIGHTENED
+    base action — an operator's tightening quietly discarded. An empty mapping
+    is the one falsy value that legitimately means "no changes"."""
+    pol = agent_policy.load_policy(SHIPPED)
+    base = pol.actions["run_read_tool"]
+    for bogus in (None, 0, "", [], "always-confirm"):
+        with pytest.raises(PolicyError, match="must be a mapping"):
+            agent_policy.apply_tenant_overlay(base, {"run_read_tool": bogus})
+    # an empty entry is a legitimate no-op, and an absent one leaves it alone
+    assert agent_policy.apply_tenant_overlay(base, {"run_read_tool": {}}) == base
+    assert agent_policy.apply_tenant_overlay(base, {"other_action": {}}) == base
+
+
 def test_security_bool_quoted_false_is_false_not_truthy(tmp_path):
     """bool("false") is True — the parser must NOT coerce by truthiness."""
     raw = _shipped_raw()
