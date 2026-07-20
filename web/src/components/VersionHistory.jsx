@@ -23,6 +23,15 @@ function fmtWhen(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+// E2 empty state: the action chip focuses the composer directly (the docked
+// bar's input, falling back to the legacy prompt textarea) — no parent wiring
+// needed, same move as JobRail's empty state.
+function focusComposer() {
+  const el = document.querySelector('.bar textarea') || document.querySelector('.bar input')
+    || document.querySelector('.prompt textarea')
+  if (el) el.focus()
+}
+
 function fmtAbs(iso) {
   if (!iso) return undefined
   const d = new Date(iso)
@@ -30,8 +39,12 @@ function fmtAbs(iso) {
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
+// `retryKey`: App's R ladder marks this panel's error Retry as its active rung
+// (the keycap only renders while R genuinely fires it). `exiting`: the parent
+// holds the mount through the 180 ms M1 exit fade (useExit).
 export default function VersionHistory({
   data, error, loading, previewingVersion, onPreview, onBackToHead, onClose, onRetry,
+  retryKey, exiting,
 }) {
   const head = data?.head
   const latest = data?.latest
@@ -44,8 +57,11 @@ export default function VersionHistory({
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // M-e: a bare `.drawer` has no positioning owner, so it injected a 300px
+  // column into the toolbar. `.drawer-fixed` (styles.css) anchors it as a
+  // floating right panel below the header / above the footer instead.
   return (
-    <div className="drawer" role="dialog" aria-label="Version history">
+    <div className={`drawer drawer-fixed${exiting ? ' exit' : ''}`} role="dialog" aria-label="Version history">
       <div className="drawer-head">
         <span className="drawer-title">Version history{data ? ` · ${rows.length}` : ''}</span>
         <button className="key hot" onClick={onClose} aria-label="Close version history">Esc</button>
@@ -71,12 +87,20 @@ export default function VersionHistory({
           <div className="pane-fail" role="alert">
             <span className="pane-fail-title"><span className="dot red" />Couldn’t load versions</span>
             <span className="pane-fail-reason">{error}</span>
-            {onRetry && <button className="chip-act" onClick={onRetry}>Retry</button>}
+            {onRetry && (
+              <span className="pane-fail-act">
+                <button className="chip-act" onClick={onRetry}>Retry</button>
+                {retryKey && <span className="key" aria-hidden="true">R</span>}
+              </span>
+            )}
           </div>
         )}
 
         {!loading && !error && rows.length === 0 && (
-          <div className="vh-note">No versions yet.</div>
+          <div className="rail-empty">
+            <div className="vh-note">Versions land here after your first edit runs.</div>
+            <button className="chip-act" onClick={() => { onClose(); focusComposer() }}>Run an edit</button>
+          </div>
         )}
 
         {!loading && !error && rows.length > 0 && (

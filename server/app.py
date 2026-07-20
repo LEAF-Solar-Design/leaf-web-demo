@@ -37,6 +37,7 @@ from routers import (
     tools,
     usage,
 )
+from routers import site  # public marketing-site demo endpoints (site-demo lane)
 
 def _cors_origins() -> list[str]:
     """CORS allow-list, ENV-driven and default-deny in live-auth mode (F17).
@@ -81,6 +82,7 @@ app.include_router(prompt.router)  # M3: NL prompt router (MATRIX gap #2 — one
 app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET /api/usage)
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
+app.include_router(site.router)  # public site demo: /api/site/* (no auth by design, like /api/health)
 
 
 # --- platform Project/Job router (org-scoped persistence; platform/README.md) --- #

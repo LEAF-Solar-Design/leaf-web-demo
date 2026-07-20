@@ -151,7 +151,7 @@ header.top {
 .top .spacer { flex: 1; }
 
 /* label chip: quiet filled chip for pure LABELS ('Project', 'Workspace') only.
-   Status variants (.live / .amber) are NEVER pills: dot + tinted sentence-case word. */
+   The status variant (.amber) is NEVER a pill: dot + tinted sentence-case word. */
 .tag {
   display: inline-flex;
   align-items: center;
@@ -164,11 +164,6 @@ header.top {
   background: var(--bar-chip);
   white-space: nowrap;
 }
-.tag.live { color: var(--primary); background: none; padding: 0; }
-.tag.live::before {
-  content: ''; width: 6px; height: 6px; border-radius: 50%;
-  background: var(--primary); flex: 0 0 auto;
-}
 .tag.amber { color: var(--status-warning); background: none; padding: 0; }
 .tag.amber::before {
   content: ''; width: 6px; height: 6px; border-radius: 1.5px; /* square = advisory */
@@ -179,7 +174,6 @@ header.top {
 .who b { color: var(--foreground); font-weight: 500; }
 
 .mode-label { font-size: 11.5px; color: var(--muted); }
-.mode-label.live { color: var(--primary); }
 .switch { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .switch input { accent-color: var(--primary); }
 
@@ -326,9 +320,9 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 }
 .dispatch-btn:hover:not(:disabled) { background: var(--primary-hover); }
 .dispatch-btn:disabled { opacity: .5; cursor: not-allowed; }
-/* inline hint: recedes to 15% until hovered (max one per pane) */
+/* inline hint (H3): recedes to 15% until hovered (max one per pane) */
 .hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); opacity: .15; transition: opacity 180ms ease; }
-.hint:hover { opacity: 1; }
+.hint:hover, .hint:focus-within { opacity: 1; }
 .hint b { color: var(--foreground); font-weight: 500; }
 
 /* --- route panel (the nl-prompt match) --- */
@@ -362,8 +356,6 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .route-lane.solve::before { background: var(--status-warning); border-radius: 1.5px; }
 .route-tool { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; color: var(--foreground); }
 .route-conf { font-size: 11.5px; color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
-.route-conf b { color: var(--primary); }
-.route-conf.low b { color: var(--status-warning); }
 .route-body { padding: 12px 14px; }
 .route-rationale { font-size: 12.5px; color: var(--foreground); margin: 0 0 12px; line-height: 1.5; }
 .route-params { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
@@ -469,7 +461,7 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 }
 .selection-readout.empty { color: var(--muted); }
 .sel-hint { font-size: 12px; color: var(--muted); opacity: .15; transition: opacity 180ms ease; }
-.sel-hint:hover, .selection-readout:hover .sel-hint { opacity: 1; }
+.sel-hint:hover, .selection-readout:hover .sel-hint, .selection-readout:focus-within .sel-hint { opacity: 1; }
 .sel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .sel-kind { font-size: 12px; font-weight: 600; letter-spacing: .2px; color: var(--foreground); }
 /* plain action = quiet accent chip (amber is reserved for real advisories) */
@@ -635,7 +627,6 @@ button.job:hover { background: rgba(255, 255, 255, .03); }
 .job .bar { height: 3px; background: var(--bar-chip); margin: 6px 0 4px; position: relative; overflow: hidden; border-radius: 2px; }
 .job .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--primary); display: block; }
 .job .foot { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted-2); flex-wrap: wrap; }
-.job .foot .safe { color: var(--primary); }
 
 /* ---------------- footer status bar ---------------- */
 footer.foot-bar {
@@ -659,7 +650,7 @@ footer .warn-txt { color: var(--status-warning); }
 
 .tool-list { display: flex; flex-direction: column; gap: 8px; }
 .tool-card { border: 1px solid var(--border); border-radius: 10px; background: var(--card-grad); overflow: hidden; }
-.tool-card.open { border-color: rgba(34, 197, 94, .45); }
+.tool-card.open { box-shadow: inset 2px 0 0 var(--primary); } /* open = SL1 2px accent left bar, never a full accent border */
 .tool-head { width: 100%; text-align: left; background: none; border: none; color: inherit; padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 5px; }
 .tool-head:hover { background: rgba(255, 255, 255, .03); }
 .tool-head-main { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
@@ -667,13 +658,10 @@ footer .warn-txt { color: var(--status-warning); }
 .tool-desc { font-size: 12px; color: var(--muted); line-height: 1.35; }
 .tool-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 2px; }
 .cap { font-size: 10.5px; padding: 1px 8px; border-radius: 6px; border: 0; background: var(--bar-chip); color: var(--muted); }
-.cap.read { color: var(--primary); background: var(--accent-tint); }
-.cap.write { color: var(--status-warning); background: var(--warn-tint); } /* caution advisory — red is failed/destroying only */
+.cap.read, .cap.write { color: var(--muted); background: var(--bar-chip); } /* static capability descriptors — neutral, not states */
 .cap.kind { color: var(--muted); }
 /* provenance badge: quiet chip, sentence case */
 .badge { font-size: 10.5px; padding: 1px 8px; border-radius: 6px; border: 0; color: var(--muted); background: var(--bar-chip); }
-.badge.agent { color: var(--primary); background: var(--accent-tint); }
-.badge.user { color: var(--status-warning); background: var(--warn-tint); }
 .tool-body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 10px; }
 .params { display: flex; flex-direction: column; gap: 8px; }
 .params-none { font-size: 12px; color: var(--muted); margin: 4px 0; }
@@ -712,6 +700,9 @@ footer .warn-txt { color: var(--status-warning); }
   box-shadow: 0 6px 18px rgba(34, 197, 94, .3);
 }
 .btn.primary:hover:not(:disabled) { background: var(--primary-hover); color: var(--on-accent); }
+/* F1: the focused field's halo is the only halo in the pane — the primary
+   yields its drop halo while a sibling field has focus (cf. .bar .primary) */
+.author-panel:focus-within .btn.primary, .claude-pop:focus-within .btn.primary { box-shadow: none; }
 /* ghost repointed at the filled accent construction (unfilled text buttons retired) */
 .btn.ghost { background: var(--accent-tint); color: var(--primary); }
 .btn.ghost:hover:not(:disabled) { background: var(--accent-tint-hover); color: var(--primary-hover); }
@@ -745,11 +736,12 @@ footer .warn-txt { color: var(--status-warning); }
 .scan-flag { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; padding: 0; color: var(--status-warning); border: 0; background: none; }
 .scan-flag::before { content: ''; width: 6px; height: 6px; border-radius: 1.5px; background: var(--status-warning); flex: 0 0 auto; }
 
-/* failed act (X1): red dot + plain sentence + Retry chip — inline, never a toast */
+/* failed act (X1): red dot + plain sentence + Retry chip — inline, never a toast;
+   only the dot is red — no tinted container behind the sentence */
 .inline-error {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px;
-  color: var(--status-danger); background: var(--danger-tint); border: 0; border-radius: 8px;
-  padding: 8px 10px;
+  color: var(--foreground); background: none; border: 0;
+  padding: 0;
 }
 .inline-error::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--status-danger); flex: 0 0 auto; }
 .btn.retry { padding: 3px 10px; font-size: 12px; background: var(--accent-tint); color: var(--primary); }
@@ -765,12 +757,42 @@ footer .warn-txt { color: var(--status-warning); }
   .lower { grid-template-columns: 1fr; }
 }
 @media (max-width: 980px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto auto auto auto auto; }
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto auto;
+    /* Release the desktop 100vh trap (:116). Once the 3-column grid collapses to
+       a single stacked column, a viewport-locked height squeezes the workspace
+       row down to a few hundred px — the rooftop canvas then lays out BELOW the
+       inner scrollport's fold and a phone viewer never sees the drawing at all.
+       Auto height lets the DOCUMENT scroll instead; min-height keeps the shell
+       full-bleed when content is short. The command bar stays reachable because
+       structural.css pins .bar-dock to the viewport at this same breakpoint. */
+    height: auto;
+    min-height: 100vh;
+  }
   /* grid items default to min-width:auto (never shrinking below their
      content's min-content size) — a single wide child would otherwise force
      the collapsed 1fr column, and the whole .app grid, past the viewport. */
   .app > * { min-width: 0; }
   aside.nav, aside.rail { border: 0; border-bottom: 1px solid var(--border); }
+
+  /* The collapsed .center-col is a CONTENT-sized block, not a viewport-height
+     grid row, so the absolutely-positioned bar anchors to the bottom of that
+     block — floating mid-page, overlapping the content above it, and scrolling
+     away entirely. The command bar is the product's only input surface, so pin
+     it to the VIEWPORT (the same treatment .drawer-layer gets in
+     structural.css). This override must live in THIS file, not structural.css:
+     main.jsx evaluates `import App` (which imports structural.css) before
+     `import './styles.css'`, so styles.css is emitted last and its
+     unconditional `.bar-dock { position: absolute }` (:1203) wins any
+     equal-specificity tie — media queries add no specificity. */
+  .bar-dock {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 64px; /* clears footer.foot-bar (~55px) when scrolled to the end */
+    max-width: none;
+  }
 }
 /* ---------------- responsive: phone widths (390px target) ---------------- */
 @media (max-width: 430px) {
@@ -779,12 +801,9 @@ footer .warn-txt { color: var(--status-warning); }
      drop the max-width; let the well's controls row wrap so Dispatch + the
      run/solve/build scope chips all stay on-screen instead of overflowing
      past the right edge. */
-  .bar-dock {
-    left: 8px;
-    right: 8px;
-    bottom: 8px;
-    max-width: none;
-  }
+  /* .bar-dock offsets are set once in the 980px block above (position:fixed,
+     8px insets) and inherited here — two blocks disagreeing on the phone
+     geometry is how this regressed before. */
   .bar-controls {
     flex-wrap: wrap;
     row-gap: 6px;
@@ -811,6 +830,13 @@ footer .warn-txt { color: var(--status-warning); }
     max-width: 100%;
   }
   .code { max-width: 100%; }
+
+  /* iOS Safari auto-zooms the whole page whenever a focused text input computes
+     under 16px — on a phone every tap into the demo's PRIMARY input would punch
+     the viewport into a zoomed state mid-sentence. Clear the threshold at phone
+     widths only; desktop keeps the 13px command-bar type byte-identical. No
+     maximum-scale hack in index.html, so pinch-zoom stays available. */
+  .bar-input input, .bar-input .bar-field { font-size: 16px; }
 }
 /* reduced motion: freeze, never hide (M1) */
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -901,9 +927,9 @@ footer .warn-txt { color: var(--status-warning); }
 .proj-chip .name { font-weight: 600; color: var(--foreground); }
 .proj-caret {
   font-size: 10.5px;
-  color: var(--primary); background: var(--accent-tint); border: 0; border-radius: 5px; padding: 0 6px;
+  color: var(--muted-2); background: var(--bar-chip); border: 0; border-radius: 5px; padding: 0 6px;
 }
-.proj-chip:hover .proj-caret { background: var(--accent-tint-hover); }
+.proj-chip:hover .proj-caret { color: var(--muted); }
 .proj-menu {
   position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
   width: 280px; background: var(--card-grad); border: 1px solid var(--border); border-radius: 10px;
@@ -1029,7 +1055,7 @@ footer .warn-txt { color: var(--status-warning); }
 .state.quota { color: var(--status-warning); }
 .state.quota::before { background: var(--status-warning); border-radius: 1.5px; }
 /* .job.quota carries state via its dot — no colored left border (bar = selection only) */
-.inline-error.quota { color: var(--foreground); background: var(--warn-tint); }
+.inline-error.quota { color: var(--foreground); background: var(--warn-tint); border-radius: 8px; padding: 8px 10px; }
 .inline-error.quota::before { background: var(--status-warning); border-radius: 1.5px; }
 .inline-error.quota span { color: var(--foreground); }
 
@@ -1136,7 +1162,7 @@ footer .warn-txt { color: var(--status-warning); }
   font-size: 11px;
   color: var(--muted); border: 0; border-radius: 6px; padding: 1px 8px; background: var(--bar-chip);
 }
-.ent-src { font-size: 11px; color: var(--primary); margin-left: auto; }
+.ent-src { font-size: 11px; color: var(--muted); margin-left: auto; }
 .ent-src.dim { color: var(--muted-2); }
 .ent-rows { display: flex; flex-direction: column; gap: 0; margin: 10px 0 2px; }
 .ent-row {
@@ -1271,6 +1297,18 @@ footer .warn-txt { color: var(--status-warning); }
   background: var(--bar-well);
   display: flex; flex-direction: column;
   box-shadow: 0 18px 44px rgba(0, 0, 0, .5); /* floating elevation */
+  position: relative; /* anchors the G2 drop hint overlay */
+}
+/* G2 ingest — the bar is the ONE drop catcher: mid-drag the well border goes
+   dashed accent and the hint overlays the well (display-only; drops land on
+   the bar itself). */
+.bar.drag { border-style: dashed; border-color: var(--primary); }
+.bar-drop-hint {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 11px; background: var(--bar-well);
+  font-size: 12.5px; color: var(--primary);
+  pointer-events: none;
 }
 .bar-input { display: flex; align-items: center; gap: 10px; padding: 13px 16px 9px; }
 .bar-caret { font: 600 13px var(--font-mono); color: var(--primary); } /* the accent prompt caret */
@@ -1288,10 +1326,14 @@ footer .warn-txt { color: var(--status-warning); }
 }
 .bar-add:hover { color: var(--muted); }
 .bar-scope {
-  font-size: 11px; color: var(--muted-2); background: var(--bar-chip);
+  font-family: var(--sans); font-size: 11px; color: var(--muted-2); background: var(--bar-chip);
   border: 0; border-radius: 6px; padding: 3px 10px; cursor: pointer;
 }
-.bar-proj { margin-left: auto; font-size: 11.5px; color: var(--muted-2); background: none; border: 0; cursor: pointer; }
+/* rendered as <button>s now — strip the UA chrome (font comes from the rules above) */
+button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
+/* passive context label — no cursor:pointer: the chip advertises nothing it
+   can't do (the project switcher lives in the header) */
+.bar-proj { margin-left: auto; font-size: 11.5px; color: var(--muted-2); background: none; border: 0; }
 .bar-lanes { font-size: 11px; color: #3f3f46; } /* "find - act - build" lane hint */
 /* focus - the bar's standing exception to the halo rule: no drop halo */
 .bar:focus-within {
@@ -1356,14 +1398,11 @@ footer .warn-txt { color: var(--status-warning); }
   font: 500 12px var(--sans); color: var(--muted);
   background: var(--keycap); border-radius: 7px; padding: 7px 13px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
-  animation: toast-in var(--m-enter) var(--m-curve) both,
-             toast-out var(--m-exit) ease 5s forwards;
+  /* lifecycle animation comes from .enter/.exit (Toast.jsx owns the timing) */
 }
 .toast::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); flex: none; }
 .toast .action { color: var(--muted-2); cursor: pointer; background: none; border: 0; font: inherit; padding: 0; }
 .toast .action:hover { color: var(--muted); }
-@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 12px); } to { opacity: 1; transform: translate(-50%, 0); } }
-@keyframes toast-out { to { opacity: 0; } }
 
 /* ---------------- DT2 right drawer ---------------- */
 /* Visual construction; POSITIONING is owned by the structural lane -
@@ -1471,19 +1510,110 @@ footer .warn-txt { color: var(--status-warning); }
   animation: m1-in var(--m-enter) var(--m-curve) both;
   animation-delay: calc(var(--rank, 0) * var(--m-stagger));
 }
-.exit { animation: m1-out var(--m-exit) ease both; }
 /* the one enter curve, applied to every mounting pane/card/popover */
 .route, .banner, .vh-pop, .proj-menu, .claude-pop, .result-card,
 .ops-drawer, .workspace-summary, .resolver, .drawer,
 .strip-decision, .strip-failed {
   animation: m1-in var(--m-enter) var(--m-curve) both;
 }
+/* exits: 180 ms fades (M1). AFTER the auto-enter list so .exit wins on any
+   surface that list also names; a fading surface is display-only. */
+.exit { animation: m1-out var(--m-exit) ease both; pointer-events: none; }
 
 /* ---------------- SB3 fold: below 760px tall the bar is one 40px row ---------------- */
 @media (max-height: 760px) {
-  .bar-controls { display: none; }
+  /* Fold the controls row to ONE short line — do not delete it. `display:none`
+     here also removed the Run button and the Enter keycap (both live in this
+     row), and an iPhone 12 in PORTRAIT is ~664px CSS tall, so the most common
+     demo phone showed a bare input with no primary action. Hide only the
+     decorative children; keep Run + the Enter hint, right-aligned by :1287. */
+  .bar-controls { padding: 0 13px 8px; gap: 8px; }
+  .bar-controls .bar-add,
+  .bar-controls .bar-scope,
+  .bar-controls .bar-proj { display: none; }
+  /* .bar-proj (:1302) carries the margin-left:auto that pushes the keycap + Run
+     right; hiding it would left-bunch them, so hand the auto margin to the
+     keycap, which is the next surviving child. */
+  .bar-controls .key { margin-left: auto; }
   .bar-input { height: 40px; padding: 0 16px; }
 }
 
 /* SB3: the bar never carries a drop halo — the focused-composer ring is the only pop */
 .bar .primary, .bar-dock .primary { box-shadow: none; }
+
+/* ============================================================
+   M2 — demo-default chrome, focus ring, route-title, banner
+   ============================================================ */
+
+/* .route-title (M-h): the RoutePanel used this class for the Build/Solve lane
+   nouns but it was never defined — give it a legible emphasized treatment that
+   matches the mono .route-tool grammar without the mono font. */
+.route-title { color: var(--foreground); font-weight: 600; }
+
+/* Shared keyboard :focus-visible accent ring (M-g / a11y). Keyboard focus was
+   invisible across the interactive chips/buttons/rows; one consistent
+   dark-emerald ring makes it perceivable. Pointer focus stays quiet (only
+   :focus-visible, never :focus). */
+.chip-act:focus-visible,
+.btn:focus-visible,
+.resolver-row:focus-visible,
+.rail-row:focus-visible,
+.legend-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--background, #0f0f11), 0 0 0 4px var(--primary);
+  border-radius: 6px;
+}
+
+/* Persistent guided-demo banner (M2 item 3 / M-c). NR ongoing-condition
+   anatomy (matches .banner): amber square dot + sentence — sits at the top of
+   the center column whenever mock is active; clears itself when the mode
+   flips, never user-dismissed. */
+.demo-banner {
+  display: flex; align-items: center; gap: 14px;
+  margin: 0 0 14px;
+  padding: 11px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: color-mix(in oklab, var(--status-warning) 5%, var(--background));
+}
+.demo-banner::before {
+  content: ''; width: 6px; height: 6px; border-radius: 1.5px;
+  background: var(--status-warning); flex: 0 0 auto;
+}
+.demo-banner-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.demo-banner-title { font-size: 13px; font-weight: 600; color: var(--foreground); }
+.demo-banner-sub { font-size: 12px; color: var(--muted-2); }
+
+/* ---- phone command-bar pin (must be LAST) ----
+   The @media (max-width: 980px) `.bar-dock { position: fixed }` override above
+   loses to the unconditional `.bar-dock { position: absolute }` at :1221 —
+   same file, same specificity, and the unconditional rule is emitted LATER, so
+   source order decides. Re-declare the pin here, after every competing rule,
+   so the collapsed single-column layout actually keeps the command bar (the
+   product's only input surface) on the viewport instead of anchoring it to the
+   bottom of a tall, content-sized .center-col. */
+@media (max-width: 980px) {
+  .bar-dock {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 64px; /* clears footer.foot-bar (~55px) at the end of the scroll */
+    max-width: none;
+  }
+}
+
+/* ---- phone source-order: drawing first ----
+   Stacked, the catalog rail (~263px) + banner + hero push .viewer-canvas to
+   y≈707 on a 390x844 phone, so a prospect handed the ?demo=tour link arrives
+   at a screen of accordions with the rooftop below the fold. The drawing is
+   the thing to see first; reorder the collapsed grid so the workspace column
+   precedes the catalog and the job rail. Visual order only — DOM/tab order is
+   unchanged, and the sections keep their headings. */
+@media (max-width: 980px) {
+  .app > header.top { order: 0; }
+  .app > .center-col { order: 1; }
+  .app > aside.nav { order: 2; }
+  .app > aside.rail { order: 3; }
+  .app > footer.foot-bar { order: 4; }
+}

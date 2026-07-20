@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import './popovers.css'
+import useExit from '../useExit.js'
 
 // Claude account (CONCERN 2 — the user's Claude login). This is the SIBLING of
 // the platform identity (the Auth0 JWT / tenant chip), and NEVER the same thing
@@ -67,6 +68,7 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
   const [kind, setKind] = useState('oauth') // the chosen credential kind (setup-token by default)
   const [confirmUnlink, setConfirmUnlink] = useState(false)
   const rootRef = useRef(null)
+  const pop = useExit(open) // 180 ms M1 exit fade on close
 
   // Close on outside-click / Escape (matches the ProjectSwitcher popover).
   useEffect(() => {
@@ -119,8 +121,8 @@ export default function ClaudeAccountPanel({ mock, grant, loading, busy, error, 
         <span className={`ca-state ${linked ? 'on' : ''}`}>{stateLabel}</span>
       </button>
 
-      {open && (
-        <div className="claude-pop" role="dialog" aria-label="Claude account">
+      {pop.shown && (
+        <div className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Claude account">
           <div className="ca-head">
             <span>Claude account</span>
             <button className="key hot" onClick={() => onToggle(false)} aria-label="Close Claude account panel">Esc</button>
