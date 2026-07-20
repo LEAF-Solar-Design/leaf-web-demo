@@ -110,9 +110,9 @@ const CHECKOUT_DRAWING_ID =
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path).
-function Section({ title, count, open, onToggle, children, innerRef }) {
+function Section({ title, count, open, onToggle, children, innerRef, className = '' }) {
   return (
-    <div className={`section ${open ? '' : 'collapsed'}`} ref={innerRef}>
+    <div className={`section ${className} ${open ? '' : 'collapsed'}`.replace(/\s+/g, ' ').trim()} ref={innerRef}>
       <button className="section-head" onClick={onToggle} aria-expanded={open}>
         <span>{title}{count != null ? <span className="n"> · {count}</span> : null}</span>
         <span className="chev">{open ? 'hide' : 'show'}</span>
@@ -1519,6 +1519,7 @@ export default function App() {
         ))}
         <Section
           title="Author a tool"
+          className="author-section"
           open={authorOpen}
           onToggle={() => setAuthorOpen((o) => !o)}
           innerRef={authorSectionRef}
