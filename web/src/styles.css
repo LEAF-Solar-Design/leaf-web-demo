@@ -1318,6 +1318,14 @@ footer .warn-txt { color: var(--status-warning); }
 }
 
 /* ---------------- O2 resolver (menus/completions anatomy) ---------------- */
+/* Slash-command menu: the SAME resolver anatomy, anchored above the bar well
+   (the bar is its positioning context so it rides with the floating island). */
+.bar { position: relative; }
+.bar .slash-menu {
+  position: absolute; left: 0; right: 0;
+  bottom: calc(100% + 8px); z-index: 35;
+  max-height: 320px; overflow-y: auto;
+}
 .resolver {
   border: 1px solid var(--border); border-radius: 9px;
   background: var(--card-grad); overflow: hidden;

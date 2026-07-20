@@ -956,12 +956,59 @@ export default function App() {
   const hintLane = useMemo(() => {
     const s = prompt.trim()
     if (!s) return null
+    if (s.startsWith('/')) return 'run' // slash = explicit tool invocation
     try { return matchPrompt(s, tools).lane } catch { return null }
   }, [prompt, tools])
 
-  const onDispatch = useCallback(async () => {
-    const text = prompt.trim()
+  // The slash-completable catalog: every runnable tool the CURRENT plan allows
+  // (write tools drop out when the plan lacks run_write — the menu only offers
+  // what the end user can actually complete and run).
+  const slashTools = useMemo(
+    () => tools.filter((t) => canRunWrite || !(t.capabilities || []).includes('drawing.write')),
+    [tools, canRunWrite],
+  )
+
+  const onDispatch = useCallback(async (override) => {
+    // `override` carries the menu-picked "/tool" (state hasn't flushed yet);
+    // the Dispatch button's onClick passes a click event — ignore non-strings.
+    const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
+    // Slash fast-path: "/name" is an EXPLICIT invocation — no NL router call.
+    // The route decision strip still asks for confirmation before anything runs.
+    if (text.startsWith('/')) {
+      const name = text.slice(1).split(/\s+/)[0]
+      if (!name) return
+      setRoute(null); setRouteErr(null)
+      const t = tools.find((x) => (x.name || '').toLowerCase() === name.toLowerCase())
+      if (t) {
+        setRoute({
+          lane: 'run', tool: t.name, params: {}, confidence: 1,
+          rationale: `Explicit /${t.name} — you picked this tool.`,
+          alternatives: [], slash: true,
+        })
+      } else {
+        // Unknown name -> the resolver rows offer the nearest catalog matches:
+        // substring hits first, else longest-common-prefix ≥ 3 (catches
+        // trailing typos like /count-by-layre -> count-by-layer).
+        const q = name.toLowerCase()
+        const lcp = (a, b) => {
+          let n = 0
+          while (n < a.length && n < b.length && a[n] === b[n]) n++
+          return n
+        }
+        const near = tools
+          .map((x) => {
+            const nm = (x.name || '').toLowerCase()
+            return { x, score: nm.includes(q) ? 1000 + q.length : lcp(nm, q) }
+          })
+          .filter((s) => s.score >= 3)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 3)
+          .map((s) => ({ tool: s.x.name, description: s.x.description }))
+        setRoute({ lane: 'run', tool: name, params: {}, confidence: 0, alternatives: near, slash: true })
+      }
+      return
+    }
     setRouting(true); setRoute(null); setRouteErr(null)
     try {
       const r = await nlPrompt(mock, text, tools)
@@ -980,7 +1027,7 @@ export default function App() {
     } finally {
       setRouting(false)
     }
-  }, [prompt, routing, mock, tools])
+  }, [prompt, routing, running, mock, tools])
 
   // Typing invalidates a shown route/failure — the decision must match the text.
   const onPromptChange = useCallback((v) => {
@@ -1655,6 +1702,7 @@ export default function App() {
             projectName={currentProjectName || projectName}
             inputRef={barInputRef}
             routeActive={!!route}
+            tools={slashTools}
           />
         </div>
 
