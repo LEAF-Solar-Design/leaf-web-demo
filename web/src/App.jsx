@@ -1490,7 +1490,12 @@ export default function App() {
 
   // NR: the active ongoing conditions, docked at the result pane. Two or more
   // collapse to ONE line with a count instead of stacking banners.
-  const signedOut = !mock && authRequired // live, no session -> calm gate, hush the 401 red
+  // live, no session -> calm gate, hush the 401 red. A 401 on a SIGNED-IN
+  // session of an auth-unconfigured build is different: the token was rejected
+  // and there is no way to re-auth, so it is a real failure — fall through to
+  // the pane-fail surface (Retry + Back to the demo), never the inert overlay
+  // (round-2 review F1: that state was an unrecoverable blank).
+  const signedOut = !mock && authRequired && (authConfigured || !isSignedIn())
 
   const advisories = [
     quotaShown && 'spend cap',
