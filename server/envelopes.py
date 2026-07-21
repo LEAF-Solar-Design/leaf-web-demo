@@ -33,6 +33,11 @@ class ErrorCode:
     ENTITLEMENT_REQUIRED = "ENTITLEMENT_REQUIRED"  # tier lacks the capability (HTTP 403)
     QUOTA_EXCEEDED = "quota_exceeded"  # promoted 2026-07-17 (broker hard cap, HTTP 402)
     INTERNAL = "INTERNAL"
+    # Agent-spine codes (CONTRACT-ADDENDUM §18) — wire values lowercase like quota_exceeded.
+    LLM_QUOTA_EXHAUSTED = "llm_quota_exhausted"  # 429 long-horizon; retryable, degraded_mode true
+    LLM_RATE_LIMITED = "llm_rate_limited"        # 429 short-horizon; retryable
+    TURN_IN_PROGRESS = "turn_in_progress"        # 409: one in-flight turn per session
+    SESSION_NOT_FOUND = "session_not_found"      # 404 (also cross-tenant — no existence oracle)
 
     ALL = (
         UNKNOWN_TOOL,
@@ -46,6 +51,10 @@ class ErrorCode:
         ENTITLEMENT_REQUIRED,
         QUOTA_EXCEEDED,
         INTERNAL,
+        LLM_QUOTA_EXHAUSTED,
+        LLM_RATE_LIMITED,
+        TURN_IN_PROGRESS,
+        SESSION_NOT_FOUND,
     )
 
 
@@ -62,6 +71,10 @@ DEFAULT_HTTP_STATUS: Dict[str, int] = {
     ErrorCode.GRANT_REQUIRED: 401,
     ErrorCode.ENTITLEMENT_REQUIRED: 403,
     ErrorCode.INTERNAL: 500,
+    ErrorCode.LLM_QUOTA_EXHAUSTED: 429,
+    ErrorCode.LLM_RATE_LIMITED: 429,
+    ErrorCode.TURN_IN_PROGRESS: 409,
+    ErrorCode.SESSION_NOT_FOUND: 404,
 }
 
 

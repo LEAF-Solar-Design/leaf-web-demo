@@ -34,6 +34,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends
 
+import agent_ledger
 import deps
 from envelopes import with_envelope_fields
 
@@ -73,6 +74,11 @@ def usage(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
         "total": agg["total"],
         "cap": {"usd_cap": (float(cap) if enabled else None),
                 "remaining": remaining, "enabled": enabled},
+        # ADDITIVE agent block (agent spine §18): conversation-turn metering
+        # from the agent's OWN ledger (data/agent_ledger.jsonl) — never the
+        # broker attribution ledger, whose one-line-per-run invariant is
+        # sacred. Self-metered estimates only (no balance API exists).
+        "agent": agent_ledger.aggregate(tenant_id),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     return with_envelope_fields(deps.tenant_echo(body, tenant))
