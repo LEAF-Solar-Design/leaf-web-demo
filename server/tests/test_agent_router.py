@@ -174,6 +174,12 @@ def test_corrupt_primary_tier_source_never_falls_back_to_a_stale_env_map(tmp_pat
         p.write_text(corrupt, encoding="utf-8")
         assert deps.backedge_tier("t-r") is None, corrupt
 
+    # invalid UTF-8 is just another unreadable primary. UnicodeDecodeError
+    # subclasses ValueError, NOT OSError, so it escaped as a 500 instead of
+    # resolving unknown -> restricted -> an honest 403.
+    p.write_bytes(b'{"t-r": {"tier": "\xff\xfe not utf8"}}')
+    assert deps.backedge_tier("t-r") is None
+
     # a VALID primary that simply lacks the tenant still falls through
     p.write_text('{"someone-else": {"tier": "hosted_starter"}}', encoding="utf-8")
     assert deps.backedge_tier("t-r") == "hosted_pro"

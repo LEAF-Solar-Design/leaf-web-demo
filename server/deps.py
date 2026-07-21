@@ -300,6 +300,10 @@ def backedge_tier(tenant_id: str) -> Optional[str]:
         text = None
     except OSError:
         return None  # present but unreadable -> unknown -> resolve_tier fails closed
+    except UnicodeDecodeError:
+        # NOT an OSError (it subclasses ValueError), so it escaped as a 500.
+        # Non-UTF-8 bytes are just another unreadable primary: unknown tier.
+        return None
     if text is not None:
         try:
             raw = json.loads(text)
