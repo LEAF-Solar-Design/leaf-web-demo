@@ -103,6 +103,14 @@ def preflight() -> str:
         fail(f"{config_path} has no rewrites — deep SPA routes would return 404")
     if config.get("cleanUrls"):
         fail(f'{config_path} sets "cleanUrls": true, which breaks the SPA rewrite')
+    health_path = DIST / "health.json"
+    if not health_path.exists():
+        fail(f"{health_path} missing")
+    health_errors = _validate_web_health(
+        health_path.read_text(encoding="utf-8"), expected_source_sha=_source_sha()
+    )
+    if health_errors:
+        fail("local health artifact " + "; ".join(health_errors))
     match = re.search(
         r'assets/index-[A-Za-z0-9_-]+\.js', index.read_text(encoding="utf-8")
     )
@@ -191,6 +199,34 @@ def _production_bundle_contract(
         errors.append(f"missing {PRODUCTION_AUTH0_DOMAIN}")
     if expected_source_sha and expected_source_sha not in javascript:
         errors.append(f"missing source SHA {expected_source_sha}")
+    return errors
+
+
+def _validate_web_health(
+    body: str, *, expected_source_sha: str | None = None
+) -> list[str]:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return ["is not valid JSON"]
+    errors = []
+    expected = {
+        "ok": True,
+        "service": "leaf-platform-web",
+        "component": "frontend",
+        "schema_version": 1,
+    }
+    required_keys = {*expected, "source_sha"}
+    if set(payload) != required_keys:
+        errors.append(f"keys must equal {sorted(required_keys)!r}")
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            errors.append(f"{key} must equal {value!r}")
+    source_sha = payload.get("source_sha")
+    if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        errors.append("source_sha must be a lowercase 40-character Git SHA")
+    elif expected_source_sha and source_sha != expected_source_sha:
+        errors.append(f"source_sha must equal {expected_source_sha}")
     return errors
 
 
@@ -284,6 +320,16 @@ def verify(
         )
         if errors:
             fail("production bundle " + "; ".join(errors))
+    health_status, health_body = fetcher("/health.json")
+    if health_status != 200:
+        fail(f"{base_url}/health.json returned HTTP {health_status}")
+    health_errors = _validate_web_health(
+        health_body,
+        expected_source_sha=expected_source_sha if production_contract else None,
+    )
+    if health_errors:
+        fail("web health artifact " + "; ".join(health_errors))
+    print("  /health.json   semantic contract ok")
     for route in ROUTES:
         route_status, _ = fetcher(route)
         print(f"  {route:<14} {'ok' if route_status == 200 else f'HTTP {route_status}'}")

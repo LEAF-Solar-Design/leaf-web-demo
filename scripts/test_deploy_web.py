@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import shutil
 import subprocess
 import urllib.error
@@ -78,6 +79,39 @@ def test_production_contract_requires_expected_source_sha() -> None:
     assert deploy_web._production_bundle_contract(
         javascript + " " + "a" * 40, expected_source_sha="a" * 40
     ) == []
+
+
+def test_build_emits_exact_health_artifact_and_headers() -> None:
+    payload = json.loads((deploy_web.DIST / "health.json").read_text(encoding="utf-8"))
+    source_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=deploy_web.REPO, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip().lower()
+    assert payload == {
+        "ok": True,
+        "service": "leaf-platform-web",
+        "component": "frontend",
+        "schema_version": 1,
+        "source_sha": source_sha,
+    }
+    config = json.loads((deploy_web.DIST / "vercel.json").read_text(encoding="utf-8"))
+    health_headers = next(item for item in config["headers"] if item["source"] == "/health.json")
+    headers = {item["key"].lower(): item["value"] for item in health_headers["headers"]}
+    assert headers["cache-control"] == "no-store"
+    assert headers["content-type"].startswith("application/json")
+
+
+def test_health_contract_rejects_wrong_identity_and_source() -> None:
+    body = json.dumps({
+        "ok": True,
+        "service": "wrong-service",
+        "component": "frontend",
+        "schema_version": 1,
+        "source_sha": "b" * 40,
+    })
+    errors = deploy_web._validate_web_health(body, expected_source_sha="a" * 40)
+    assert any("service" in item for item in errors)
+    assert any("source_sha" in item for item in errors)
 
 
 def test_backend_contract_requires_health_auth_and_public_demo(monkeypatch) -> None:

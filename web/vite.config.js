@@ -16,13 +16,34 @@ function buildHash() {
   throw new Error('immutable build SHA unavailable; set LEAF_SOURCE_SHA')
 }
 
+function healthArtifact(sourceSha) {
+  return {
+    name: 'leaf-platform-health-artifact',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'health.json',
+        source: JSON.stringify({
+          ok: true,
+          service: 'leaf-platform-web',
+          component: 'frontend',
+          schema_version: 1,
+          source_sha: sourceSha,
+        }),
+      })
+    },
+  }
+}
+
 // Lane C frontend. Dev server on 5175 so it never collides with the
 // Lane D backend (8130). API base + mock mode are controlled via env
 // (see src/api.js): VITE_MOCK=1 (default) demos with no backend.
+const sourceSha = buildHash()
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), healthArtifact(sourceSha)],
   define: {
-    __BUILD_HASH__: JSON.stringify(buildHash()),
+    __BUILD_HASH__: JSON.stringify(sourceSha),
   },
   server: { port: 5175, strictPort: false },
   build: {

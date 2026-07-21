@@ -1,6 +1,15 @@
 {
+  "headers": [
+    {
+      "source": "/health.json",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json; charset=utf-8" },
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    }
+  ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/boundary" },
-    { "source": "/:path((?!(?:assets|site)/(?!(?:\\.|%2[eE]){2}(?:/|%2[fF]))|demo-solve\\.json$|sample\\.intake\\.json$|favicon\\.ico$).*)", "destination": "/index.html" }
+    { "source": "/:path((?!(?:assets|site)/(?!(?:\\.|%2[eE]){2}(?:/|%2[fF]))|health\\.json$|demo-solve\\.json$|sample\\.intake\\.json$|favicon\\.ico$).*)", "destination": "/index.html" }
   ]
 }
