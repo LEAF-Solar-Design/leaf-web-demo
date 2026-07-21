@@ -155,6 +155,34 @@ def test_backedge_route_matcher_covers_exactly_the_contract_routes():
     assert deps._dispatch_backedge_route("DELETE", "/api/sessions/x") is False
 
 
+def test_corrupt_primary_tier_source_never_falls_back_to_a_stale_env_map(tmp_path, monkeypatch):
+    """ABSENT primary means the operator did not provision it, so the env map is
+    a legitimate fallback. PRESENT-but-corrupt is a different fact: falling
+    through there let a stale LEAF_BROKER_TENANT_TIERS promote a DOWNGRADED
+    tenant back to a paid tier. An unreadable primary means the tier is UNKNOWN,
+    and unknown must resolve restricted, never inherit the secondary."""
+    import deps
+    p = tmp_path / "broker_tenants.json"
+    monkeypatch.setenv("BROKER_TENANTS", str(p))
+    monkeypatch.setenv("LEAF_BROKER_TENANT_TIERS", '{"t-r": "hosted_pro"}')
+
+    # absent primary -> env fallback is legitimate
+    assert deps.backedge_tier("t-r") == "hosted_pro"
+
+    # present but corrupt -> unknown, NOT the stale env value
+    for corrupt in ('{truncated', '["not","a","mapping"]', '{"t-r": null}', '{"t-r": "oops"}'):
+        p.write_text(corrupt, encoding="utf-8")
+        assert deps.backedge_tier("t-r") is None, corrupt
+
+    # a VALID primary that simply lacks the tenant still falls through
+    p.write_text('{"someone-else": {"tier": "hosted_starter"}}', encoding="utf-8")
+    assert deps.backedge_tier("t-r") == "hosted_pro"
+
+    # ...and a valid record wins over the env map
+    p.write_text('{"t-r": {"tier": "restricted"}}', encoding="utf-8")
+    assert deps.backedge_tier("t-r") == "restricted"
+
+
 def test_backedge_secret_trusts_tenant_header_in_live_auth(backedge_client, monkeypatch):
     """LEAF_AUTH_LIVE=1 + valid X-Dispatch-Secret on a §0 route: X-Tenant-Id is
     trusted as the resolved tenant (no JWT) — the spine can fetch the catalog."""

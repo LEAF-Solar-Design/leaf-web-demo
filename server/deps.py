@@ -288,12 +288,31 @@ def backedge_tier(tenant_id: str) -> Optional[str]:
     tenant has no provisioned tier at all; returns the raw (possibly empty) string
     when it does, so `entitlements.resolve_tier` applies its own fail-closed rule."""
     path = Path(os.environ.get("BROKER_TENANTS") or (SERVER_DIR / "broker_tenants.json"))
+    # ABSENT primary -> the operator has not provisioned this source, so the env
+    # map is a legitimate fallback. PRESENT-but-corrupt is NOT the same fact:
+    # falling through there let a stale LEAF_BROKER_TENANT_TIERS promote a
+    # downgraded tenant (truncated file + stale env -> hosted_pro instead of
+    # restricted). A primary we cannot read means the tier is UNKNOWN, and an
+    # unknown tier must resolve restricted rather than inherit a secondary.
     try:
-        rec = json.loads(path.read_text(encoding="utf-8")).get(tenant_id) or {}
-    except Exception:  # noqa: BLE001 - missing/corrupt file -> fall through to env
-        rec = {}
-    if isinstance(rec, dict) and "tier" in rec:
-        return str(rec.get("tier") or "")
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = None
+    except OSError:
+        return None  # present but unreadable -> unknown -> resolve_tier fails closed
+    if text is not None:
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            return None  # present but invalid -> unknown, never a stale fallback
+        if not isinstance(raw, dict):
+            return None
+        if tenant_id in raw:
+            rec = raw[tenant_id]
+            if not isinstance(rec, dict):
+                return None  # present-but-corrupt record -> unknown, fail closed
+            if "tier" in rec:
+                return str(rec.get("tier") or "")
     raw = os.environ.get("LEAF_BROKER_TENANT_TIERS")
     if raw:
         try:
