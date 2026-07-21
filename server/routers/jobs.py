@@ -9,6 +9,7 @@ GET  /api/jobs?tenant_id=&limit= -> recent jobs (reconnect-after-tab-close)
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, Dict, Optional
@@ -107,18 +108,24 @@ def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
 
 
 @router.get("/api/jobs/{job_id}/stream")
-def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
-    """SSE: emit each (status, progress) transition; close after terminal."""
-    _rec0 = jobs.get_job(job_id)
+async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
+    """SSE: emit each (status, progress) transition; close after terminal.
+
+    Async generator (B1): a sync generator here is consumed via AnyIO's
+    threadpool, pinning one of its ~40 worker threads for the stream's whole
+    lifetime — N concurrent streams starve every sync endpoint. The 0.5s cadence
+    now awaits on the event loop; the per-tick DB read hops to a thread so the
+    loop never blocks on the jobs-module lock. Wire format/timing unchanged."""
+    _rec0 = await asyncio.to_thread(jobs.get_job, job_id)
     if _rec0 is None or _rec0.get("tenant_id") != str(tenant):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
 
-    def event_stream():
+    async def event_stream():
         last = None
         deadline = time.time() + jobs.job_max_s() + 60
         while time.time() < deadline:
-            rec = jobs.get_job(job_id)
+            rec = await asyncio.to_thread(jobs.get_job, job_id)
             if rec is None:
                 yield "data: " + json.dumps({"job_id": job_id, "status": "unknown"}) + "\n\n"
                 return
@@ -135,7 +142,7 @@ def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
                 yield "data: " + json.dumps(payload) + "\n\n"
             if rec["status"] in jobs.TERMINAL:
                 return
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

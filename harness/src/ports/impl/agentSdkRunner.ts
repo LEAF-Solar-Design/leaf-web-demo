@@ -183,11 +183,26 @@ Capabilities: this is a read-only analysis tool -> capabilities: ["drawing.read"
 // --------------------------------------------------------------------------- //
 // The runner
 // --------------------------------------------------------------------------- //
+/**
+ * Rate-limit state of the most recent run() (B3 hardening, ADDITIVE). Exposed so a
+ * driver can read the retry-after horizon out of band; `retry_after_s` is derived
+ * from the SDK's `rate_limit_event` resetsAt (subscription lane) or the last
+ * `api_retry` delay, and is null when the SDK reported no horizon.
+ */
+export interface RateLimitState {
+  /** The SDK assistant error that tripped the abort (always "rate_limit"). */
+  error: string;
+  /** Seconds until the limit resets, when the SDK reported one. */
+  retry_after_s: number | null;
+}
+
 export class AgentSdkRunner implements AgentRunner {
   /** Per-turn usage from the most recent run() (self-metered). */
   usageLog: TurnUsage[] = [];
   /** Summary of the most recent run() (read out of band by a driver). */
   lastRun: RunUsageSummary | null = null;
+  /** Rate-limit info from the most recent run(), or null (B3, additive). */
+  lastRateLimit: RateLimitState | null = null;
 
   constructor(private readonly opts: AgentSdkRunnerOptions = {}) {}
 
@@ -196,6 +211,7 @@ export class AgentSdkRunner implements AgentRunner {
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
     this.usageLog = [];
     this.lastRun = null;
+    this.lastRateLimit = null;
 
     // 1) Scrub env + inject THIS tenant's grant explicitly (never logged).
     const childEnv = buildScrubbedEnv(input.grant, process.env);
@@ -351,8 +367,22 @@ export class AgentSdkRunner implements AgentRunner {
     let result: Record<string, unknown> | null = null;
     let authFailure: string | null = null;
     let capHit: string | null = null;
+    // B3 (ADDITIVE): rate-limit horizon sources. resetsAt arrives on
+    // rate_limit_event (subscription lane, epoch seconds or ms); api_retry
+    // carries the SDK's own backoff delay. Neither alters the existing flow.
+    let rateLimitHit = false;
+    let rateResetsAtS: number | null = null;
+    let retryDelayMs: number | null = null;
     for await (const raw of q) {
       const msg = raw as Record<string, unknown>;
+      if (msg.type === "rate_limit_event") {
+        const info = (msg.rate_limit_info ?? {}) as Record<string, unknown>;
+        if (typeof info.resetsAt === "number") {
+          rateResetsAtS = info.resetsAt > 1e12 ? info.resetsAt / 1000 : info.resetsAt;
+        }
+      } else if (msg.type === "system" && msg.subtype === "api_retry") {
+        if (typeof msg.retry_delay_ms === "number") retryDelayMs = msg.retry_delay_ms;
+      }
       if (msg.type === "assistant") {
         turn += 1;
         const message = (msg.message ?? {}) as Record<string, unknown>;
@@ -370,6 +400,14 @@ export class AgentSdkRunner implements AgentRunner {
         const err = msg.error;
         if (typeof err === "string" && ["authentication_failed", "oauth_org_not_allowed", "billing_error"].includes(err)) {
           authFailure = err;
+          abort.abort();
+          break;
+        }
+        // B3 (ADDITIVE): "rate_limit" joined SDKAssistantMessageError in SDK
+        // 0.3.214 — treat it as terminal too (previously it fell through as a
+        // generic session failure). Existing kinds above are untouched.
+        if (err === "rate_limit") {
+          rateLimitHit = true;
           abort.abort();
           break;
         }
@@ -422,6 +460,21 @@ export class AgentSdkRunner implements AgentRunner {
     // 6b) Surface a terminal auth / spend-cap failure (usage is now captured above).
     if (authFailure) throw new Error(`Agent SDK auth failure: ${authFailure}`);
     if (capHit) throw new Error(capHit);
+    // B3 (ADDITIVE): rate-limit terminal, with the retry-after horizon exposed on
+    // the instance (lastRateLimit) and named in the thrown error.
+    if (rateLimitHit) {
+      const retryAfterS =
+        rateResetsAtS !== null
+          ? Math.max(0, Math.round(rateResetsAtS - Date.now() / 1000))
+          : retryDelayMs !== null
+            ? Math.round(retryDelayMs / 1000)
+            : null;
+      this.lastRateLimit = { error: "rate_limit", retry_after_s: retryAfterS };
+      throw new Error(
+        `Agent SDK rate limited` +
+          (retryAfterS !== null ? ` (retry after ~${retryAfterS}s)` : " (retry horizon unknown)"),
+      );
+    }
 
     // 7) The candidate must be a validated package (defense in depth: re-validate).
     if (!candidate) {

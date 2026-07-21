@@ -43,11 +43,15 @@ import { join } from "node:path";
 
 import { createHarness } from "../src/server.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
-import type { HarnessPorts } from "../src/ports/index.js";
+import type { ConverseRunner, HarnessPorts } from "../src/ports/index.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
+import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
+import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
 import { E2bAgentRunner } from "../src/ports/impl/e2bAgentRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
+import { HttpGateClient } from "../src/ports/impl/gateClient.js";
 import { FileTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
+import { FileSessionStore } from "../src/ports/impl/sessionStore.js";
 import { startGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 
@@ -58,6 +62,12 @@ const REPO_ROOT = process.env.LEAF_REPO_ROOT ?? "C:/tmp/leaf-web-demo";
 const TENANTS_DIR = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
 const SINGLE_REPO_OVERRIDE = (process.env.LEAF_TENANT_REPO ?? "").trim(); // demo back-compat
 const BROKER_URL = process.env.BROKER_URL ?? "http://127.0.0.1:8140";
+// Converse back-edge + spine model (wire contract section 0). With the dispatch
+// secret unset the app's back-edge is disabled (401) and the gate client fails
+// CLOSED, so an unconfigured deployment cannot dispatch anything via the spine.
+const APP_URL = process.env.LEAF_APP_URL ?? "http://127.0.0.1:8130";
+const APP_DISPATCH_SECRET = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
+const SPINE_MODEL = process.env.LEAF_SPINE_MODEL ?? "claude-sonnet-5";
 // Fixture used to auto-provision a brand-new tenant's repo. Absolute so it works both
 // compiled (dist/scripts/serve.js) and via strip-types (scripts/serve.ts).
 const TENANT_FIXTURE =
@@ -87,8 +97,11 @@ function tenantRepoDir(tenantId: string): string {
   return join(TENANTS_DIR, safeComponent(tenantId));
 }
 
-/** Compose the real multi-tenant ports. */
-function buildPorts(): HarnessPorts {
+/** Compose the real multi-tenant ports (+ the per-turn converse-runner factory). */
+function buildPorts(): {
+  ports: HarnessPorts;
+  converseRunnerFor: (tenantId: string) => Promise<ConverseRunner>;
+} {
   const grantStore = new FileTenantGrantStore(); // reads $LEAF_GRANTS_DIR (default C:/tmp/leaf-grants)
   // F2 (2A): when LEAF_SANDBOX=e2b, run the design-time author session INSIDE an
   // egress-locked E2B sandbox instead of in-process. Default (unset/anything else) keeps
@@ -96,8 +109,9 @@ function buildPorts(): HarnessPorts {
   // sets the ONE allowlisted egress host (defaults to the proven public stand-in).
   const useE2b = (process.env.LEAF_SANDBOX ?? "").trim().toLowerCase() === "e2b";
   log(`[harness] author runner: ${useE2b ? "E2bAgentRunner (LEAF_SANDBOX=e2b, egress-locked sandbox)" : "AgentSdkRunner (in-process; default)"}`);
-  return {
-    oauth: new OAuthGrantProviderImpl({ store: grantStore }),
+  const oauth = new OAuthGrantProviderImpl({ store: grantStore });
+  const ports: HarnessPorts = {
+    oauth,
     grantAdmin: grantStore,
     tenantRepo: new TenantRepoProviderImpl({
       locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
@@ -108,17 +122,35 @@ function buildPorts(): HarnessPorts {
     agentRunner: useE2b
       ? new E2bAgentRunner({ brokerHost: process.env.LEAF_SANDBOX_BROKER_HOST || undefined })
       : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
+    // Conversational spine (section 18): durable transcript store + the app
+    // back-edge read/dispatch + gate clients (all fail closed without the secret).
+    sessionStore: new FileSessionStore(),
+    appRun: new HttpAppRunClient({ baseUrl: APP_URL, dispatchSecret: APP_DISPATCH_SECRET }),
+    gate: new HttpGateClient({ appBaseUrl: APP_URL, dispatchSecret: APP_DISPATCH_SECRET }),
+  };
+  return {
+    ports,
+    // A FRESH live runner per turn for THIS tenant's grant: no shared runner
+    // instance, so no cross-session telemetry bleed (B3). Model/timeout come from
+    // LEAF_SPINE_MODEL / LEAF_SPINE_TURN_TIMEOUT_S inside ConverseSdkRunner.
+    converseRunnerFor: async (tenantId: string) =>
+      new ConverseSdkRunner({ grant: await oauth.getGrant(tenantId) }),
   };
 }
 
 function main(): void {
-  const server: Server = createHarness(buildPorts()).listen(HARNESS_PORT);
+  const { ports, converseRunnerFor } = buildPorts();
+  const server: Server = createHarness(ports, { converseRunnerFor }).listen(HARNESS_PORT);
   server.on("listening", () => {
     log(
       `[harness] listening on http://127.0.0.1:${HARNESS_PORT}` +
         `  tenants_dir=${TENANTS_DIR}  demo_override=${SINGLE_REPO_OVERRIDE || "(none)"}  broker=${BROKER_URL}`,
     );
     log(`[harness] per-tenant grant store active; grant admin at PUT/GET/DELETE /grants/{tenantId} (token never logged).`);
+    log(
+      `[harness] converse spine mounted at /converse/* (model=${SPINE_MODEL}, app=${APP_URL}, ` +
+        `back-edge=${APP_DISPATCH_SECRET ? "configured" : "DISABLED (LEAF_APP_DISPATCH_SECRET unset; gate fails closed)"})`,
+    );
   });
   server.on("error", (err: Error) => {
     log(`[harness] server error: ${err.message}`);

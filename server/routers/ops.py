@@ -40,6 +40,9 @@ import requests
 from fastapi import APIRouter, Header
 from fastapi.responses import JSONResponse
 
+import agent_audit
+import agent_ledger
+import agent_policy
 import broker_client
 import deps
 from envelopes import ErrorCode, error_response, with_envelope_fields
@@ -207,3 +210,58 @@ def ops_enable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> 
     if gate is not None:
         return gate
     return _proxy(tid, "enable")
+
+
+# --------------------------------------------------------------------------- #
+# agent spine ops surface (§18) — same LEAF_OPS_SECRET gate. Reads come from
+# the agent's OWN ledger/audit files (no credential in either); the per-tenant
+# agent kill flag is APP-SIDE state (agent_tenants.json beside the policy
+# file, via agent_policy) — independent of the broker run kill-switch above.
+# --------------------------------------------------------------------------- #
+@router.get("/api/ops/agent/tenants")
+def ops_agent_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    rows = []
+    for tid, agg in sorted(agent_ledger.tenants_seen().items()):
+        rows.append({"tenant_id": tid, "turns": agg["turns"],
+                     "cost_tokens": agg["cost_tokens"], "usd_est": agg["usd_est"],
+                     "agent_disabled": bool(agent_policy.load_tenant_state(tid).get("agent_disabled"))})
+    return with_envelope_fields({"tenants": rows})
+
+
+@router.get("/api/ops/agent/sessions/{session_id}")
+def ops_agent_session(session_id: str, limit: int = 100,
+                      x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    limit = max(1, min(int(limit), 1000))
+    records = agent_audit.for_session(session_id, limit=limit)
+    return with_envelope_fields({"session_id": session_id, "records": records,
+                                 "count": len(records)})
+
+
+def _ops_agent_flag(tid: str, disabled: bool) -> Any:
+    entry = agent_policy.set_tenant_agent_disabled(tid, disabled)
+    agent_audit.append({"kind": "kill_switch", "scope": "tenant", "tenant_id": tid,
+                        "agent_disabled": bool(entry.get("agent_disabled")), "via": "ops"})
+    return with_envelope_fields({"tenant_id": tid,
+                                 "agent_disabled": bool(entry.get("agent_disabled"))})
+
+
+@router.post("/api/ops/agent/tenants/{tid}/disable")
+def ops_agent_disable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    return _ops_agent_flag(tid, True)
+
+
+@router.post("/api/ops/agent/tenants/{tid}/enable")
+def ops_agent_enable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    return _ops_agent_flag(tid, False)

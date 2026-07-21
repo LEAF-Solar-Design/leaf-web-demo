@@ -1541,6 +1541,81 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 /* SB3: the bar never carries a drop halo — the focused-composer ring is the only pop */
 .bar .primary, .bar-dock .primary { box-shadow: none; }
 
+/* ---------------- Converse panel (agent tier — ADDITIVE ONLY) ----------------
+   The tier-2 conversational surface, styled inside the standard: card gradient
+   + hairline border like every pane; assistant text is plain foreground prose;
+   tool activity is quiet mono chips on the bar-chip ground; confirm cards
+   reuse .strip-decision / .cap / .chip-act verbatim (RoutePanel's language). */
+.converse-card {
+  background: var(--card-grad);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  margin-top: 14px;
+  overflow: hidden;
+}
+.converse-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.converse-title { font-weight: 600; color: var(--foreground); }
+.converse-head .dim { font-size: 11.5px; }
+.converse-spacer { flex: 1; }
+.converse-card .banner { margin-top: 0; } /* banners dock flush under the head */
+.converse-log {
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 12px;
+  max-height: 420px; overflow-y: auto;
+}
+.converse-turn { display: flex; flex-direction: column; gap: 8px; }
+.converse-msg { font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; }
+.converse-msg.user {
+  align-self: flex-end;
+  max-width: 85%;
+  color: var(--foreground);
+  background: var(--accent-tint);
+  border-radius: 9px;
+  padding: 7px 11px;
+}
+.converse-msg.assistant { color: var(--foreground); }
+.converse-tool-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  align-self: flex-start;
+  font: 500 11.5px var(--font-mono);
+  color: var(--muted);
+  background: var(--bar-chip);
+  border-radius: 6px;
+  padding: 3px 9px;
+  max-width: 100%;
+}
+.converse-tool-chip .dim { font-family: var(--sans); }
+.converse-jobrow {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 12px;
+}
+.converse-confirm { align-self: stretch; } /* the strip-decision confirm card spans the log */
+.converse-note { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.converse-turnfoot {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 11px; color: var(--muted-2);
+}
+.converse-usage {
+  margin-left: auto;
+  font-size: 11px; color: var(--muted-2);
+  font-variant-numeric: tabular-nums;
+}
+.converse-input {
+  display: flex; align-items: center; gap: 9px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+.converse-input input {
+  flex: 1; border: 0; outline: 0; background: transparent;
+  font-family: var(--sans); font-size: 13px; color: var(--foreground);
+}
+.converse-input input::placeholder { color: #52525b; }
+.converse-input input:disabled { color: var(--muted-2); }
 /* ============================================================
    M2 — demo-default chrome, focus ring, route-title, banner
    ============================================================ */
