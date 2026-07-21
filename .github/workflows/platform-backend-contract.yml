@@ -1,0 +1,56 @@
+name: Platform backend contract
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - "deploy/Dockerfile.app"
+      - "platform/**"
+      - "da/**"
+      - "engine/**"
+      - "contract/**"
+      - "data/**"
+      - ".github/workflows/platform-backend-contract.yml"
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "deploy/Dockerfile.app"
+      - "platform/**"
+      - "da/**"
+      - "engine/**"
+      - "contract/**"
+      - "data/**"
+      - ".github/workflows/platform-backend-contract.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  public-site-api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            server/requirements.txt
+            server/requirements-auth.txt
+            platform/requirements.txt
+            da/requirements.txt
+      - name: Install application dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -r server/requirements.txt \
+            -r server/requirements-auth.txt \
+            -r platform/requirements.txt \
+            -r da/requirements.txt
+      - name: Verify public site API contract
+        working-directory: server
+        run: python -m pytest tests/test_site.py -q --color=no -p no:cacheprovider
+      - name: Build the deployable application image
+        run: docker build --file deploy/Dockerfile.app --tag leaf-platform-app:contract .
