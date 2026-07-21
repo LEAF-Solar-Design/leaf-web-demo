@@ -5,6 +5,7 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,7 +119,11 @@ def test_backend_contract_requires_health_auth_and_public_demo(monkeypatch) -> N
     responses = [
         (200, "{}"),
         (401, ""),
-        (200, '{"ok":true,"solve":{"stats":{"panel_count":2345}}}'),
+        (
+            200,
+            '{"ok":true,"solve":{"stats":{"panel_count":2345},'
+            '"electrical":{"pass":true}}}',
+        ),
     ]
     monkeypatch.setattr(deploy_web, "fetch", lambda _url: responses.pop(0))
     deploy_web.verify_production_backend()
@@ -138,6 +143,17 @@ def test_backend_contract_rejects_wrong_api_host(monkeypatch) -> None:
         (200, "not-json"),
         (200, '{"ok":true,"solve":{"stats":{"panel_count":0}}}'),
         (200, '{"ok":true,"solve":{"stats":{"panel_count":true}}}'),
+        (200, '{"ok":true,"solve":{"stats":{"panel_count":12}}}'),
+        (
+            200,
+            '{"ok":true,"solve":{"stats":{"panel_count":12},'
+            '"electrical":{"pass":false}}}',
+        ),
+        (
+            200,
+            '{"ok":true,"solve":{"stats":{"panel_count":12},'
+            '"electrical":{"pass":1}}}',
+        ),
     ],
 )
 def test_backend_contract_rejects_missing_or_invalid_public_demo(
@@ -147,6 +163,26 @@ def test_backend_contract_rejects_missing_or_invalid_public_demo(
     monkeypatch.setattr(deploy_web, "fetch", lambda _url: responses.pop(0))
     with pytest.raises(SystemExit):
         deploy_web.verify_production_backend()
+
+
+def test_main_never_promotes_when_backend_contract_fails(monkeypatch) -> None:
+    promote = Mock()
+    monkeypatch.setattr(sys, "argv", ["deploy-web.py", "--no-build"])
+    monkeypatch.setattr(deploy_web, "preflight", Mock())
+    monkeypatch.setattr(deploy_web, "deploy", Mock(return_value="https://stage.example"))
+    monkeypatch.setattr(deploy_web, "verify", Mock(return_value="assets/index.js"))
+    monkeypatch.setattr(deploy_web, "_source_sha", Mock(return_value="a" * 40))
+    monkeypatch.setattr(
+        deploy_web,
+        "verify_production_backend",
+        Mock(side_effect=SystemExit(2)),
+    )
+    monkeypatch.setattr(deploy_web, "promote", promote)
+
+    with pytest.raises(SystemExit):
+        deploy_web.main()
+
+    promote.assert_not_called()
 
 
 def test_promote_uses_verified_deployment(monkeypatch) -> None:

@@ -252,6 +252,7 @@ def verify_production_backend() -> None:
         demo = json.loads(demo_body)
         solve = demo["solve"]
         panel_count = solve["stats"]["panel_count"]
+        electrical_pass = solve["electrical"]["pass"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         fail("platform backend public demo solve returned malformed JSON")
     if (
@@ -259,6 +260,7 @@ def verify_production_backend() -> None:
         or isinstance(panel_count, bool)
         or not isinstance(panel_count, int)
         or panel_count <= 0
+        or electrical_pass is not True
     ):
         fail("platform backend public demo solve failed its semantic contract")
     print(f"  backend contract ok: {PRODUCTION_API_BASE}")
