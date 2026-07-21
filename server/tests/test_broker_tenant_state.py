@@ -122,3 +122,22 @@ def test_corrupt_tenant_record_resolves_restricted_not_demo(tmp_path, monkeypatc
     # documented friction-free demo default
     assert broker._provisioned_tier("t-real") == "hosted_pro"
     assert broker._tenant_tier("never-seen") == entitlements.DEFAULT_TIER
+
+
+# --------------------------------------------------------------------------- #
+# the operational kill-state view (/broker/health) must AGREE with the guard
+# --------------------------------------------------------------------------- #
+def test_health_disabled_list_agrees_with_the_kill_switch(tmp_path, monkeypatch):
+    """/broker/health is the documented authoritative view of who is killed, so
+    it must route through tenant_disabled — not a second `v.get("disabled")`
+    scan that reported a null flag as ENABLED and crashed (AttributeError) on a
+    non-dict record, disagreeing with the guard that actually blocks runs."""
+    broker = _broker_with_tenants(
+        tmp_path, monkeypatch,
+        '{"t-on": {"disabled": true}, "t-off": {"disabled": false},'
+        ' "t-null": {"disabled": null}, "t-badrec": null, "t-corrupt": ["x"]}')
+    listed = set(broker.health()["tenants_disabled"])
+    # every tenant the guard kills appears; none it permits does; no crash
+    for tid in ("t-on", "t-null", "t-badrec", "t-corrupt"):
+        assert tid in listed and broker.tenant_disabled(tid) is True, tid
+    assert "t-off" not in listed and broker.tenant_disabled("t-off") is False

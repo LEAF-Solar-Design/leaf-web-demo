@@ -144,7 +144,7 @@ def build_suites() -> List[Suite]:
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 11),
         Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 8),
+              SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 10),
         # --- the golden-path composed e2e (this runner's sibling deliverable) --- #
         Suite("server-e2e-golden", "server tests/test_e2e_golden.py", "pytest", SERVER,
               _py_pytest("tests/test_e2e_golden.py"), 1),

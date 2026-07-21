@@ -481,7 +481,10 @@ def health() -> Dict[str, Any]:
         "role": "aps-broker",
         "aps_endpoint": APS_ENDPOINT,
         "ledger": str(LEDGER_PATH),
-        "tenants_disabled": sorted(t for t, v in _tenants.items() if v.get("disabled")),
+        # Through the authoritative reader, not a second truthiness/`.get` scan:
+        # v.get("disabled") reported a null flag as ENABLED and crashed on a
+        # non-dict record, disagreeing with the very kill switch it reports.
+        "tenants_disabled": sorted(t for t in _tenants if tenant_disabled(t)),
     })
 
 
