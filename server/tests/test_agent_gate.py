@@ -389,6 +389,78 @@ def test_legacy_grant_file_grants_nothing():
     assert res["decision"] == "awaiting_approval"
 
 
+def test_planted_grant_key_with_no_timestamp_authorizes_nothing():
+    """The grant's VALUE is the authorization, not the key's presence. A v2
+    snapshot carrying the exact key with a null / empty / non-timestamp value is
+    a key someone planted — honouring it would dispatch a write with no chip."""
+    args = {"tool": "add-panel"}
+    key = agent_gate._grant_key("t-gate", "s-planted", "run_write_tool",
+                                agent_gate.grant_target(args))
+    for bogus in (None, "", 0, True, [], {}, "not-a-timestamp"):
+        agent_gate.grants_file().parent.mkdir(parents=True, exist_ok=True)
+        agent_gate.grants_file().write_text(
+            json.dumps({"v": 2, "grants": {key: bogus}}), encoding="utf-8")
+        assert agent_gate.has_session_grant(
+            "t-gate", "s-planted", "run_write_tool",
+            agent_gate.grant_target(args)) is False, f"value {bogus!r} granted"
+        res = _gate("run_write_tool", args, session="s-planted")
+        assert res["decision"] == "awaiting_approval", f"value {bogus!r} skipped the chip"
+
+
+def test_one_malformed_entry_rejects_the_whole_grants_snapshot():
+    """A snapshot this module cannot read is not a set of grants to salvage —
+    the cost of rejecting is one extra confirmation chip."""
+    args = {"tool": "add-panel"}
+    first = _gate("run_write_tool", args, session="s-mixed")
+    agent_gate.grant_approval(first["confirmation_id"])
+    assert _gate("run_write_tool", dict(args, confirmation_id=first["confirmation_id"]),
+                 session="s-mixed")["reason"] == "allow_via_approval"
+    assert _gate("run_write_tool", args, session="s-mixed")["reason"] == "allow_via_session_grant"
+    # now corrupt a SIBLING entry: the real grant must stop being honoured too
+    raw = json.loads(agent_gate.grants_file().read_text(encoding="utf-8"))
+    raw["grants"]["[\"t-x\",\"s-x\",\"run_write_tool\",[\"none\"]]"] = None
+    agent_gate.grants_file().write_text(json.dumps(raw), encoding="utf-8")
+    assert _gate("run_write_tool", args, session="s-mixed")["decision"] == "awaiting_approval"
+
+
+def test_approval_record_copied_under_another_id_denies():
+    """A record names the file it lives in, and the consumed stamp is written
+    back through that name. Copying granted record A into id B's path would let
+    a redemption through B stamp A consumed while B stayed unconsumed — and B
+    would then replay for the rest of the TTL."""
+    args = {"tool": "add-panel"}
+    first = _gate("run_write_tool", args, session="s-copy")
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid)
+    body = agent_gate._approval_path(cid).read_text(encoding="utf-8")
+    other = "b" * 16
+    (agent_gate.approvals_dir() / f"{other}.json").write_text(body, encoding="utf-8")
+
+    res = _gate("run_write_tool", dict(args, confirmation_id=other), session="s-copy")
+    assert res["decision"] == "deny"
+    assert res["reason"] == "approval_not_found"
+    # the ORIGINAL must be untouched — not consumed by someone else's redemption
+    assert "consumed_at" not in agent_gate.read_pending(cid)
+    # an id ALIAS (same file after the alnum sanitize) is not the minted id either
+    alias = cid[:4] + "-" + cid[4:]
+    aliased = _gate("run_write_tool", dict(args, confirmation_id=alias), session="s-copy")
+    assert aliased["decision"] == "deny"
+    assert aliased["reason"] == "approval_not_found"
+    # ...and the real id still redeems exactly once
+    assert _gate("run_write_tool", dict(args, confirmation_id=cid),
+                 session="s-copy")["reason"] == "allow_via_approval"
+
+
+def test_non_bool_entitlement_value_is_not_a_capability():
+    """entitlements_for() resolves every capability to a real bool, so anything
+    else is a map the gate cannot read — and "false" is a TRUTHY string."""
+    for bogus in ("false", "true", 1, "yes", [1]):
+        caps = dict(FULL_CAPS, run_read=bogus)
+        res = _gate("run_read_tool", {"tool": "layer-report"}, caps=caps)
+        assert res["decision"] == "deny", f"run_read={bogus!r} authorized the call"
+        assert res["reason"] == "entitlement_required: tier lacks 'run_read'"
+
+
 def test_cross_session_confirmation_id_denies_as_mismatch():
     """An approval filed in session A must not redeem in session B of the same
     tenant — redeeming there would plant a confirm-once grant in a session that
@@ -565,6 +637,22 @@ def test_corrupt_timestamp_denies_instead_of_erasing_spent_units():
     assert _gate("read_platform_state")["reason"].startswith("rate_state_unreadable")
 
 
+def test_non_finite_stamps_deny_instead_of_restoring_budget(tmp_path, monkeypatch):
+    """python's json PARSES the non-standard literals NaN / Infinity. A NaN
+    stamp is budget erasure: every comparison against it is False, so the window
+    filter drops it and hands the spent unit back."""
+    _custom_policy(tmp_path, monkeypatch,
+                   lambda raw: raw["rate_limits"].update({"low_per_hour": 1}))
+    agent_gate.rate_file().parent.mkdir(parents=True, exist_ok=True)
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        # a spent bucket at the 1/hour cap, with the spent stamp corrupted
+        agent_gate.rate_file().write_text(
+            '{"t-gate": {"low": [%s]}}' % literal, encoding="utf-8")
+        res = _gate("read_platform_state")
+        assert res["decision"] == "deny", f"{literal} restored the budget"
+        assert res["reason"].startswith("rate_state_unreadable")
+
+
 def test_normal_rate_path_allows_and_counts_exactly_once(tmp_path, monkeypatch):
     """The happy path still spends exactly one unit per allowed call, and the
     durable snapshot is what it spends from."""
@@ -636,6 +724,28 @@ def test_revalidate_rechecks_args_schema_against_refreshed_action(tmp_path, monk
 # --------------------------------------------------------------------------- #
 # args binding
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# listing
+# --------------------------------------------------------------------------- #
+def test_list_pending_reads_through_the_validating_reader():
+    """The listing must use read_pending like every other consumer: a scalar
+    JSON body has no .get() (it crashed the listing) and a falsy-but-malformed
+    decision flag showed a corrupt record as an awaiting approval."""
+    real = _gate("run_write_tool", {"tool": "add-panel"}, session="s-list")
+    cid = real["confirmation_id"]
+    root = agent_gate.approvals_dir()
+    (root / "aaaaaaaaaaaaaaaa.json").write_text("123", encoding="utf-8")  # scalar body
+    corrupt = agent_gate.read_pending(cid)
+    corrupt["confirmation_id"] = "c" * 16
+    corrupt["granted"] = 0  # falsy, but not the bool this module writes
+    (root / "cccccccccccccccc.json").write_text(json.dumps(corrupt), encoding="utf-8")
+
+    pending = agent_gate.list_pending()
+    assert [r["confirmation_id"] for r in pending] == [cid]
+    assert agent_gate.list_pending(tenant_id="t-gate")[0]["confirmation_id"] == cid
+    assert agent_gate.list_pending(tenant_id="t-nobody") == []
+
+
 def test_canonical_hash_excludes_confirmation_id():
     args = {"tool": "add-panel", "params": {"n": 2}}
     with_id = dict(args, confirmation_id="abc123")

@@ -255,6 +255,66 @@ def test_tier_override_cannot_reenable_disabled_action(tmp_path):
         agent_policy.load_policy(_write(tmp_path, raw))
 
 
+def test_present_falsy_tier_overrides_block_is_corruption_not_absence(tmp_path):
+    """`raw.get("tier_overrides") or {}` collapsed a PRESENT null / 0 / "" / []
+    to "no overrides", so an ACTIVE tightening block that got corrupted loaded
+    silently and RESTORED the looser base action. Absent still means absent."""
+    for bogus in (None, 0, "", [], "hosted_pro"):
+        raw = _shipped_raw()
+        raw["tier_overrides"] = bogus
+        with pytest.raises(PolicyError, match="tier_overrides"):
+            agent_policy.load_policy(_write(tmp_path, raw))
+
+    raw = _shipped_raw()
+    raw["tier_overrides"] = {"hosted_pro": {"run_read_tool": {"policy": "always-confirm"}}}
+    pol = agent_policy.load_policy(_write(tmp_path, raw))
+    assert agent_policy.effective_action(pol, "run_read_tool", tier="hosted_pro").policy == "always-confirm"
+
+    raw2 = _shipped_raw()
+    raw2.pop("tier_overrides", None)  # genuinely ABSENT -> no retunes, base stands
+    pol2 = agent_policy.load_policy(_write(tmp_path, raw2))
+    assert pol2.tier_overrides == {}
+
+
+def test_present_falsy_security_blocks_are_rejected(tmp_path):
+    """Same class, remaining reads: a present non-mapping `rate_limits`, a null
+    `args_schema` (which would leave every arg unvalidated) and a null
+    `audit_extra` (which would silently empty the audit projection) must refuse
+    to load rather than be read as their permissive absent-form."""
+    for block, matcher in (("rate_limits", "rate_limits"), ("actions", "actions")):
+        raw = _shipped_raw()
+        raw[block] = None
+        with pytest.raises(PolicyError, match=matcher):
+            agent_policy.load_policy(_write(tmp_path, raw))
+
+    raw = _shipped_raw()
+    raw["actions"]["run_read_tool"]["args_schema"] = None
+    with pytest.raises(PolicyError, match="args_schema"):
+        agent_policy.load_policy(_write(tmp_path, raw))
+
+    raw = _shipped_raw()
+    raw["actions"]["run_read_tool"]["audit_extra"] = None
+    with pytest.raises(PolicyError, match="audit_extra"):
+        agent_policy.load_policy(_write(tmp_path, raw))
+
+    # ...while OMITTING either one is the documented "no schema" / "project
+    # nothing" default and still loads.
+    raw = _shipped_raw()
+    raw["actions"]["run_read_tool"].pop("args_schema", None)
+    raw["actions"]["run_read_tool"].pop("audit_extra", None)
+    act = agent_policy.load_policy(_write(tmp_path, raw)).actions["run_read_tool"]
+    assert act.args_schema is None and act.audit_extra == ()
+
+
+def test_ops_kill_flag_write_refuses_a_non_boolean(tmp_path, monkeypatch):
+    """The mutator persists the kill flag; `bool("")` would have written a
+    NOT-killed tenant from a caller that never said so."""
+    monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(tmp_path / "agent_tenants.json"))
+    with pytest.raises(PolicyError, match="must be a boolean"):
+        agent_policy.set_tenant_agent_disabled("t1", "")
+    assert agent_policy.set_tenant_agent_disabled("t1", True)["agent_disabled"] is True
+
+
 def test_tier_override_unknown_action_is_error(tmp_path):
     raw = _shipped_raw()
     raw["tier_overrides"] = {"demo": {"no_such_action": {"policy": "auto"}}}

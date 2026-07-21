@@ -35,7 +35,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from entitlements import CAPABILITIES
+from entitlements import CAPABILITIES, MISSING, SecurityFlagError, security_flag
 
 SERVER_DIR = Path(__file__).resolve().parent
 
@@ -66,62 +66,19 @@ class PolicyError(ValueError):
     """Raised when the agent policy file is malformed or violates schema."""
 
 
-class _Missing:
-    """Sentinel: the field was ABSENT, as distinct from present-and-null.
-    `dict.get()` collapses those two, which for a security flag is the
-    difference between "operator declined to override" and "operator wrote
-    something meaningless" — only the first may take a permissive default."""
-
-    def __repr__(self) -> str:  # pragma: no cover - debug aid only
-        return "<MISSING>"
-
-
-MISSING = _Missing()
-
-
-_TRUE_TOKENS = frozenset({"true", "yes", "on", "1"})
-_FALSE_TOKENS = frozenset({"false", "no", "off", "0"})
-
-
 def security_bool(value: Any, *, field: str, default: bool = False) -> bool:
-    """Parse a SECURITY flag without truthiness coercion.
+    """`entitlements.security_flag` in this module's error currency.
 
-    `bool("false")` is `True`, so a quoted JSON scalar — `"enabled": "false"` —
-    would silently grant the very authority the operator was withholding.
-    Accepts real booleans, the ints 0/1, and the usual string spellings.
-    Anything else raises rather than defaulting, because for a security flag
-    "I could not tell what the operator meant" must never resolve to the
-    permissive answer.
-
-    An ABSENT field (pass `MISSING`) takes the default — that is the operator
-    declining to override. An explicitly null one raises: `null` is a value the
-    operator wrote, it carries no meaning, and silently reading it as the
-    default is exactly the ambiguity-resolves-permissive failure this function
-    exists to prevent (`{"agent_disabled": null}` would otherwise read as a
-    tenant that is NOT killed).
+    ONE implementation of "parse a security flag" lives in entitlements (the
+    lower module); this wrapper only re-raises as PolicyError, which every
+    caller here — and the gate's fail-closed handler — already keys on.
+    `MISSING` (absent field) takes the default; an explicit null raises, so
+    `{"agent_disabled": null}` can never read as a tenant that is NOT killed.
     """
-    if value is MISSING:
-        return default
-    if value is None:
-        raise PolicyError(
-            f"{field}: must be a boolean (true/false); got null. An explicitly "
-            f"null security flag is ambiguous — omit the field to take the "
-            f"default ({default}), or write true/false unquoted."
-        )
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):  # bool already handled above
-        return bool(value)
-    if isinstance(value, str):
-        token = value.strip().lower()
-        if token in _TRUE_TOKENS:
-            return True
-        if token in _FALSE_TOKENS:
-            return False
-    raise PolicyError(
-        f"{field}: must be a boolean (true/false); got {value!r}. "
-        f"Quoted strings are NOT coerced by truthiness — write true/false unquoted."
-    )
+    try:
+        return security_flag(value, field=field, default=default)
+    except SecurityFlagError as exc:
+        raise PolicyError(str(exc)) from exc
 
 
 @dataclasses.dataclass(frozen=True)
@@ -304,7 +261,7 @@ def _parse(raw: Dict[str, Any]) -> AgentPolicy:
     if version != 1:
         raise PolicyError(f"unsupported agent policy version: {version!r} (expected 1)")
 
-    actions_raw = raw.get("actions") or {}
+    actions_raw = raw.get("actions", MISSING)
     if not isinstance(actions_raw, dict) or not actions_raw:
         raise PolicyError("`actions` must be a non-empty mapping of action_name -> record")
 
@@ -312,9 +269,12 @@ def _parse(raw: Dict[str, Any]) -> AgentPolicy:
     for name, record in actions_raw.items():
         actions[name] = _parse_action(name, record)
 
-    rate_limits_raw = raw.get("rate_limits") or {}
+    # Membership: an ABSENT block means "no budgets configured" (the gate denies
+    # every category on a 0 budget), but a PRESENT null/list is corruption and
+    # must not be read as either answer.
+    rate_limits_raw = raw["rate_limits"] if "rate_limits" in raw else {}
     if not isinstance(rate_limits_raw, dict):
-        raise PolicyError("`rate_limits` must be a mapping")
+        raise PolicyError(f"`rate_limits` must be a mapping; got {rate_limits_raw!r}")
     rate_limits: Dict[str, int] = {}
     for k, v in rate_limits_raw.items():
         if not k.endswith("_per_hour"):
@@ -338,7 +298,12 @@ def _parse(raw: Dict[str, Any]) -> AgentPolicy:
     if ttl <= 0:
         raise PolicyError(f"approval_ttl_s: must be a positive integer; got {ttl}")
 
-    tier_overrides = _parse_tier_overrides(raw.get("tier_overrides") or {}, actions)
+    # Membership, not `or {}`: an ACTIVE tier_overrides block corrupted to null /
+    # 0 / "" collapsed to {} and silently restored every base action — including
+    # the looser one an override was tightening. Absent means "no retunes"; any
+    # present non-mapping refuses to load.
+    tier_overrides = _parse_tier_overrides(
+        raw["tier_overrides"] if "tier_overrides" in raw else {}, actions)
 
     return AgentPolicy(version=1, actions=actions, rate_limits=rate_limits,
                        approval_ttl_s=ttl, tier_overrides=tier_overrides)
@@ -383,16 +348,22 @@ def _parse_action(name: str, record: Any) -> AgentAction:
         raise PolicyError(
             f"actions.{name}.rate_limit_category: must be one of {sorted(_VALID_CATEGORIES)}; got {rlc!r}")
 
-    audit_extra_raw = record.get("audit_extra")
-    if audit_extra_raw is None:
-        audit_extra_raw = []
+    # Absent = "project nothing"; a present null is corruption, and this list is
+    # what the audit trail records about the call — silently emptying it loses
+    # the evidence for that action.
+    audit_extra_raw = record["audit_extra"] if "audit_extra" in record else []
     if not isinstance(audit_extra_raw, list) or any(not isinstance(k, str) for k in audit_extra_raw):
-        raise PolicyError(f"actions.{name}.audit_extra: must be a list of strings")
+        raise PolicyError(
+            f"actions.{name}.audit_extra: must be a list of strings; got {audit_extra_raw!r}")
 
     # args_schema must itself be a valid JSON Schema — a malformed schema would
     # otherwise only fail inside the gate at request time (elevate discipline).
-    args_schema = record.get("args_schema")
-    if args_schema is not None:
+    # An ABSENT schema legitimately means "no arg validation for this action";
+    # a PRESENT null said the same thing while looking like a written rule, so
+    # a corrupted schema silently unvalidated every arg the model sent.
+    args_schema: Optional[Dict[str, Any]] = None
+    if "args_schema" in record:
+        args_schema = record["args_schema"]
         if not isinstance(args_schema, dict):
             raise PolicyError(
                 f"actions.{name}.args_schema: must be a mapping (JSON Schema object); "
@@ -636,7 +607,9 @@ def set_tenant_agent_disabled(tenant_id: str, disabled: bool) -> Dict[str, Any]:
             raise PolicyError(
                 f"agent_tenants.{tenant_id}: must be a mapping ({path}); got "
                 f"{type(entry).__name__} — refusing to overwrite corrupt state")
-    entry["agent_disabled"] = bool(disabled)
+    # Not bool(): this WRITES the kill flag, and bool("") would persist a
+    # not-killed tenant from a caller that meant nothing of the sort.
+    entry["agent_disabled"] = security_bool(disabled, field="agent_disabled")
     raw[str(tenant_id)] = entry
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")

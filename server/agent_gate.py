@@ -17,8 +17,8 @@ Ordering is load-bearing (elevate exemplar semantics):
     grants, always-confirm ALWAYS files a pending approval (never persisted).
 
 Approvals are durable JSON files under `data/agent_approvals/` (TTL from the
-policy's approval_ttl_s, 300s), bound to the exact {session, action,
-canonical-json(args)} hash — the approved call IS the executed call, an args
+policy's approval_ttl_s, 300s), bound to their own confirmation id and to the
+exact {session, action, canonical-json(args)} hash — the approved call IS the executed call, an args
 drift after approval denies, and a granted record redeems exactly once
 (consumed_at stamp; replays deny). Expired approvals auto-deny. The kill switch is FILE-PRESENCE
 (`LEAF_AGENT_KILL_FILE`) with deliberately NO API off-toggle — only someone
@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import secrets
 import threading
@@ -162,8 +163,9 @@ _RECORD_STR_FIELDS = ("confirmation_id", "tenant_id", "session_id", "action",
                       "args_hash", "expires_at")
 
 
-def _record_is_wellformed(record: Any) -> bool:
-    """Type-validate an approval record at the READ boundary.
+def _record_is_wellformed(record: Any, confirmation_id: str) -> bool:
+    """Type-validate an approval record at the READ boundary, and bind it to the
+    id it was fetched under.
 
     Every downstream check in gate() is a comparison or a truth test, and a
     truth test on a corrupted value is an authorization decision made by
@@ -172,12 +174,22 @@ def _record_is_wellformed(record: Any) -> bool:
     bools and real strings, so anything else is corruption or tampering, and
     validating once here is what stops each individual use site from having to
     remember the distinction. A malformed record reads as absent -> deny.
+
+    The id binding is load-bearing for single-use: the record names the file it
+    lives in, and the consumption stamp is written back through that name. A
+    record for id A sitting at id B's path would let redemption through B stamp
+    A as consumed while B stayed unconsumed — replayable for the rest of its
+    TTL. It also collapses id ALIASES: `_approval_path` strips non-alphanumerics,
+    so several spellings address one file, and only the exact minted id may
+    redeem it.
     """
     if not isinstance(record, dict):
         return False
     for field in _RECORD_STR_FIELDS:
         if not isinstance(record.get(field), str):
             return False
+    if record["confirmation_id"] != str(confirmation_id):
+        return False
     # bools must be REAL bools, not truthy stand-ins
     for field in ("granted", "denied"):
         if not isinstance(record.get(field), bool):
@@ -196,7 +208,7 @@ def read_pending(confirmation_id: str) -> Optional[Dict[str, Any]]:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return record if _record_is_wellformed(record) else None
+    return record if _record_is_wellformed(record, confirmation_id) else None
 
 
 def _write_pending(record: Dict[str, Any]) -> None:
@@ -272,7 +284,18 @@ def deny_approval(confirmation_id: str, *, by: str = "tenant",
 _GRANTS_VERSION = 2
 
 
-def _load_grants() -> Dict[str, Any]:
+def _load_grants() -> Dict[str, str]:
+    """{grant key -> ISO timestamp} from the snapshot, or {} — grants NOTHING.
+
+    Validated whole: every entry must be the ISO-timestamp string
+    record_session_grant writes, and one malformed entry rejects the entire
+    snapshot rather than leaving callers to interpret it. Grants are the
+    permissive half of the confirm-once tier, so an entry whose VALUE is null /
+    0 / a list is not "a grant with an odd timestamp" — it is a key someone
+    planted, and honouring its presence would authorize a write with no chip.
+    Rejecting costs at most an extra confirmation chip; honouring costs the
+    confirmation itself.
+    """
     path = grants_file()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -281,7 +304,12 @@ def _load_grants() -> Dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("v") != _GRANTS_VERSION:
         return {}
     grants = raw.get("grants")
-    return grants if isinstance(grants, dict) else {}
+    if not isinstance(grants, dict):
+        return {}
+    for key, stamp in grants.items():
+        if not isinstance(key, str) or not isinstance(stamp, str) or _parse_iso(stamp) is None:
+            return {}
+    return dict(grants)
 
 
 def grant_target(args: Optional[Dict[str, Any]]) -> List[str]:
@@ -301,13 +329,20 @@ def _grant_key(tenant_id: str, session_id: str, action_name: str,
 
 def has_session_grant(tenant_id: str, session_id: str, action_name: str,
                       target: List[str]) -> bool:
-    return _grant_key(tenant_id, session_id, action_name, target) in _load_grants()
+    # the VALUE authorizes, never the key's presence: a grant is the timestamp
+    # record_session_grant stamped, and _load_grants has already rejected any
+    # snapshot carrying something else.
+    stamp = _load_grants().get(_grant_key(tenant_id, session_id, action_name, target))
+    return isinstance(stamp, str) and _parse_iso(stamp) is not None
 
 
 def record_session_grant(tenant_id: str, session_id: str, action_name: str,
                          target: List[str]) -> None:
     path = grants_file()
     with _state_lock:
+        # rebuilding from {} when _load_grants rejected the snapshot drops the
+        # OTHER sessions' grants — the cost is one extra chip each, and keeping
+        # unreadable entries alive across a rewrite is the opposite trade.
         grants = _load_grants()
         grants[_grant_key(tenant_id, session_id, action_name, target)] = _iso(_now())
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -374,13 +409,22 @@ def _snapshot_lock(path: Path):
         handle.close()
 
 
+def _reject_json_constant(token: str) -> float:
+    """json.loads accepts the non-standard literals NaN / Infinity / -Infinity.
+    NaN in a bucket is budget ERASURE: every comparison against it is False, so
+    the window filter drops the stamp and hands the spent unit back. Refuse them
+    at PARSE time so no later numeric check has to remember they exist."""
+    raise ValueError(f"rate snapshot carries the non-JSON constant {token}")
+
+
 def _read_rate_snapshot(path: Path) -> Dict[str, Dict[str, List[float]]]:
     """{tenant -> category -> [timestamps]} from the snapshot. Raises on a
     present-but-unusable snapshot; the caller turns that into a deny."""
     buckets: Dict[str, Dict[str, List[float]]] = {}
     if not path.exists():
         return buckets
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = json.loads(path.read_text(encoding="utf-8"),
+                     parse_constant=_reject_json_constant)
     if not isinstance(raw, dict):
         raise ValueError("rate snapshot top level must be a mapping")
     for tenant, per_category in raw.items():
@@ -393,6 +437,13 @@ def _read_rate_snapshot(path: Path) -> Dict[str, Dict[str, List[float]]]:
                 if not isinstance(t, (int, float)) or isinstance(t, bool):
                     raise ValueError(
                         f"rate snapshot bucket {tenant!r}.{cat!r} carries a non-numeric stamp")
+                # a stamp no arithmetic can order (NaN/inf, however it arrived)
+                # is unreadable, not zero — same rule as a malformed timestamp.
+                # a stamp no arithmetic can order (NaN/inf, however it arrived)
+                # is unreadable, not zero — same rule as a malformed timestamp.
+                if not math.isfinite(t):
+                    raise ValueError(
+                        f"rate snapshot bucket {tenant!r}.{cat!r} carries a non-finite stamp")
             buckets.setdefault(str(tenant), {})[str(cat)] = [float(t) for t in stamps]
     return buckets
 
@@ -464,6 +515,15 @@ def _validate_args(action: AgentAction, args: Dict[str, Any]) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # the gate
 # --------------------------------------------------------------------------- #
+def _has_capability(tier_caps: Optional[Dict[str, bool]], capability: str) -> bool:
+    """One entitlement read for the whole chain. entitlements_for() resolves
+    every capability to a REAL bool, so `is True` is what that contract looks
+    like on this side: an absent key, a null, or a quoted "false" (truthy!) is a
+    capability map this gate cannot read, and an unreadable entitlement is not a
+    granted one."""
+    return (tier_caps or {}).get(capability) is True
+
+
 def _result(decision: str, *, reason: str, policy: Optional[str] = None,
             rung: Optional[int] = None, confirmation_id: Optional[str] = None) -> Dict[str, Any]:
     out: Dict[str, Any] = {"decision": decision, "reason": reason,
@@ -514,7 +574,11 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         tenant_state = agent_policy.load_tenant_state(tenant_id)
     except PolicyError as exc:
         return _deny(f"tenant_state_load_failed: {exc}", extra={"gate": "tenant_disabled"})
-    if tenant_state.get("agent_disabled"):
+    # `is not False`: load_tenant_state resolves the flag through security_bool
+    # (an unparseable kill flag already fails closed there), so the only value
+    # that may keep the agent running is an explicit False — a missing or
+    # oddly-typed flag is state this gate cannot read, not permission.
+    if tenant_state.get("agent_disabled") is not False:
         return _deny("tenant_agent_disabled", extra={"gate": "tenant_disabled"})
 
     # 2. catalog lookup (a policy file that fails STRICT validation denies —
@@ -536,7 +600,7 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         return _deny(f"invalid_args: {schema_error}", act=act, extra={"gate": "args_schema"})
 
     # 4. entitlement — BEFORE rate limiting, so a denied call never burns budget.
-    if not (tier_caps or {}).get(act.required_capability, False):
+    if not _has_capability(tier_caps, act.required_capability):
         return _deny(f"entitlement_required: tier lacks '{act.required_capability}'",
                      act=act, extra={"gate": "entitlement"})
 
@@ -557,7 +621,7 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
     schema_error = _validate_args(act, args)
     if schema_error is not None:
         return _deny(f"invalid_args: {schema_error}", act=act, extra={"gate": "revalidate"})
-    if not (tier_caps or {}).get(act.required_capability, False):
+    if not _has_capability(tier_caps, act.required_capability):
         return _deny(f"entitlement_required: tier lacks '{act.required_capability}'",
                      act=act, extra={"gate": "revalidate"})
 
@@ -678,9 +742,16 @@ def list_pending(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     now = _now()
     for path in sorted(root.glob("*.json")):
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        # one validating reader for this state file: a scalar JSON body has no
+        # .get() (the listing crashed on it) and a malformed flag could show a
+        # decided approval as still pending. The filename IS the id, so a file
+        # whose name does not round-trip through _approval_path is not a record
+        # this module wrote.
+        confirmation_id = path.stem
+        if _approval_path(confirmation_id) != path:
+            continue
+        record = read_pending(confirmation_id)
+        if record is None:
             continue
         if record.get("granted") or record.get("denied"):
             continue
