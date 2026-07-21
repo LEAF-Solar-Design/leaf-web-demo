@@ -268,6 +268,10 @@ def verify(
         print(f"  {route:<14} {'ok' if route_status == 200 else f'HTTP {route_status}'}")
         if route_status != 200:
             fail(f"{route} returned HTTP {route_status}")
+    api_status, _ = fetcher("/api/health")
+    if api_status == 200:
+        fail("web origin /api/health returned 200 and can masquerade as backend health")
+    print("  /api/health    correctly excluded from SPA fallback")
     print(f"  verified entry: {entry}")
     return entry
 
