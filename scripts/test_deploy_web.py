@@ -126,7 +126,7 @@ def test_web_api_boundary_returns_structured_404() -> None:
     if not node:
         pytest.skip("node is required to execute the Vercel function")
     script = r"""
-import handler from './api/[...path].js'
+import handler from './api/boundary.js'
 let status = null
 let body = null
 const headers = {}

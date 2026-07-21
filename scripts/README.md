@@ -43,7 +43,7 @@ The pre-promotion backend check requires the configured platform host to return
 `/api/session`. This prevents a healthy but unrelated API hostname from passing
 the bundle string check and leaving every real platform request at 404.
 
-The Vite project also ships a terminal Vercel Function at `web/api/[...path].js`.
+The Vite project also ships a terminal Vercel Function at `web/api/boundary.js`.
 Every `/api/*` request made to the web origin returns structured JSON 404, so a
 monitor cannot mistake the SPA shell for backend health. The real backend health
 probe remains `${VITE_API_BASE}/api/health`.
