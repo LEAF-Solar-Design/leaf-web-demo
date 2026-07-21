@@ -81,6 +81,24 @@ def security_bool(value: Any, *, field: str, default: bool = False) -> bool:
         raise PolicyError(str(exc)) from exc
 
 
+def security_int(value: Any, *, field: str) -> int:
+    """Parse an integer that gates authority, refusing bool and string coercion.
+
+    In Python `bool` SUBCLASSES `int`: isinstance(True, int) is True, True == 1,
+    and int(True) is 1. So `"low_per_hour": true` silently loaded as a budget of
+    ONE, and `"version": true` passed a `!= 1` check. int("5") would likewise
+    accept a quoted number. Both are the operator writing something that is not
+    an integer, and a budget or version is not a place to guess. (`rung` already
+    excluded bool explicitly — this generalises that idiom to every such field.)
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PolicyError(
+            f"{field}: must be an integer; got {value!r}"
+            + (" (booleans are not integers here)" if isinstance(value, bool) else "")
+        )
+    return value
+
+
 @dataclasses.dataclass(frozen=True)
 class AgentAction:
     name: str
@@ -257,7 +275,9 @@ def _parse(raw: Dict[str, Any]) -> AgentPolicy:
     if unknown_top:
         raise PolicyError(f"unknown top-level fields {sorted(unknown_top)} — possible typo of a security field")
 
-    version = raw.get("version")
+    # security_int first: `True == 1`, so a bare `!= 1` check accepted
+    # `"version": true` as version 1.
+    version = security_int(raw.get("version"), field="version")
     if version != 1:
         raise PolicyError(f"unsupported agent policy version: {version!r} (expected 1)")
 
@@ -282,19 +302,12 @@ def _parse(raw: Dict[str, Any]) -> AgentPolicy:
         category = k[: -len("_per_hour")]
         if category not in _VALID_CATEGORIES:
             raise PolicyError(f"rate_limits.{k}: unknown category {category!r}")
-        try:
-            limit = int(v)
-        except (TypeError, ValueError):
-            raise PolicyError(f"rate_limits.{k}: must be an integer; got {v!r}")
+        limit = security_int(v, field=f"rate_limits.{k}")
         if limit <= 0:
             raise PolicyError(f"rate_limits.{k}: must be a positive integer; got {limit}")
         rate_limits[category] = limit
 
-    ttl_raw = raw.get("approval_ttl_s", 300)
-    try:
-        ttl = int(ttl_raw)
-    except (TypeError, ValueError):
-        raise PolicyError(f"approval_ttl_s: must be an integer; got {ttl_raw!r}")
+    ttl = security_int(raw.get("approval_ttl_s", 300), field="approval_ttl_s")
     if ttl <= 0:
         raise PolicyError(f"approval_ttl_s: must be a positive integer; got {ttl}")
 
@@ -376,11 +389,7 @@ def _parse_action(name: str, record: Any) -> AgentAction:
         except Exception as exc:
             raise PolicyError(f"actions.{name}.args_schema: not a valid JSON Schema: {exc}") from exc
 
-    timeout_raw = record.get("timeout_s", 600)
-    try:
-        timeout_s = int(timeout_raw)
-    except (TypeError, ValueError):
-        raise PolicyError(f"actions.{name}.timeout_s: must be an integer; got {timeout_raw!r}")
+    timeout_s = security_int(record.get("timeout_s", 600), field=f"actions.{name}.timeout_s")
     if timeout_s <= 0:
         raise PolicyError(f"actions.{name}.timeout_s: must be a positive integer; got {timeout_s}")
 

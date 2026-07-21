@@ -197,6 +197,41 @@ def test_present_falsy_overlay_entry_is_corruption_not_absence():
     assert agent_policy.apply_tenant_overlay(base, {"other_action": {}}) == base
 
 
+def test_booleans_are_not_integers_for_authority_fields(tmp_path):
+    """In Python `bool` SUBCLASSES `int`: isinstance(True, int) is True, and
+    True == 1. So `int(True)` gave a rate budget of ONE, and `version: true`
+    sailed through a bare `!= 1` check. A budget or a version is not a place to
+    guess at what the operator meant."""
+    raw = _shipped_raw()
+    raw["version"] = True
+    with pytest.raises(PolicyError, match="version"):
+        agent_policy.load_policy(_write(tmp_path, raw))
+
+    raw = _shipped_raw()
+    raw["rate_limits"]["low_per_hour"] = True
+    with pytest.raises(PolicyError, match="rate_limits"):
+        agent_policy.load_policy(_write(tmp_path, raw))
+
+    raw = _shipped_raw()
+    raw["approval_ttl_s"] = True
+    with pytest.raises(PolicyError, match="approval_ttl_s"):
+        agent_policy.load_policy(_write(tmp_path, raw))
+
+    raw = _shipped_raw()
+    raw["actions"]["run_read_tool"]["timeout_s"] = True
+    with pytest.raises(PolicyError, match="timeout_s"):
+        agent_policy.load_policy(_write(tmp_path, raw))
+
+    # a quoted number is also the operator not writing an integer
+    raw = _shipped_raw()
+    raw["rate_limits"]["low_per_hour"] = "120"
+    with pytest.raises(PolicyError, match="rate_limits"):
+        agent_policy.load_policy(_write(tmp_path, raw))
+
+    # ...and the shipped real integers still load
+    assert agent_policy.load_policy(SHIPPED).rate_limits["low"] == 120
+
+
 def test_security_bool_quoted_false_is_false_not_truthy(tmp_path):
     """bool("false") is True — the parser must NOT coerce by truthiness."""
     raw = _shipped_raw()

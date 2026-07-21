@@ -211,6 +211,39 @@ def test_agent_policy_delegates_to_the_one_parser():
         agent_policy.security_bool(None, field="f")
 
 
+def test_present_unreadable_policy_never_restores_permissive_defaults(tmp_path, monkeypatch):
+    """ABSENT means the operator never wrote a policy, so the shipped defaults
+    are the intended answer. PRESENT-but-unreadable is a different fact: falling
+    back to defaults there silently re-grants every capability a TIGHTENED
+    policy was withholding, precisely when the file is damaged."""
+    p = tmp_path / "entitlements.json"
+    monkeypatch.setenv("LEAF_ENTITLEMENTS_FILE", str(p))
+    # absent -> defaults, unchanged
+    assert entitlements.load_policy() == dict(entitlements._HARDCODED_DEFAULTS)
+
+    p.write_text("{truncated", encoding="utf-8")
+    with pytest.raises(entitlements.EntitlementsError, match="invalid JSON"):
+        entitlements.load_policy()
+
+    p.write_text('["not", "a", "mapping"]', encoding="utf-8")
+    with pytest.raises(entitlements.EntitlementsError, match="must be a mapping"):
+        entitlements.load_policy()
+
+
+def test_malformed_tool_capabilities_is_not_read_only(monkeypatch):
+    """`or []` treated a PRESENT malformed capabilities value as an absent
+    declaration, classifying a write tool as read-only so it passed a tier
+    lacking run_write. We cannot tell what the tool does -> take the
+    MORE-restrictive capability. A genuinely absent declaration is read-only."""
+    for bogus in (None, "", 0, False, {}, 7):
+        assert entitlements.tool_required_capability({"capabilities": bogus}) == "run_write", bogus
+    # absent stays read-only, and the real shapes still classify correctly
+    assert entitlements.tool_required_capability({}) == "run_read"
+    assert entitlements.tool_required_capability({"capabilities": []}) == "run_read"
+    assert entitlements.tool_required_capability({"capabilities": ["drawing.read"]}) == "run_read"
+    assert entitlements.tool_required_capability({"capabilities": ["drawing.write"]}) == "run_write"
+
+
 def test_entitlements_view_shape(monkeypatch):
     monkeypatch.setenv("LEAF_ENTITLEMENTS_FILE", str(SHIPPED))
     view = entitlements.entitlements_view("hosted_starter")

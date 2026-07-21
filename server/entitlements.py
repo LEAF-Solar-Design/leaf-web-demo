@@ -73,6 +73,16 @@ _DEFAULT_FILE = Path(__file__).resolve().parent / "entitlements.json"
 # from here), so the primitive lives here and agent_policy.security_bool
 # delegates to it rather than keeping a second copy that could drift.
 # --------------------------------------------------------------------------- #
+class EntitlementsError(ValueError):
+    """Raised when a PRESENT entitlements file cannot be trusted.
+
+    Deliberately NOT raised for an absent file: absent means "operator never
+    wrote a policy" and the shipped defaults are the intended answer, whereas
+    present-but-unreadable would silently restore permissive defaults over a
+    tightened policy that merely failed to parse.
+    """
+
+
 class SecurityFlagError(ValueError):
     """Raised when a stored security flag carries a value that is not a boolean."""
 
@@ -144,11 +154,22 @@ def load_policy() -> Dict[str, Dict[str, Any]]:
     Keys beginning with `_` (e.g. `_note`) are ignored so the file can carry docs."""
     path = _policy_file()
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - missing/corrupt -> fail safe to defaults
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # ABSENT is the only fail-SAFE case: the operator never wrote a policy,
+        # so the shipped defaults are the intended answer.
         return dict(_HARDCODED_DEFAULTS)
+    except OSError as exc:
+        # PRESENT but unreadable is NOT the same thing. Restoring the permissive
+        # defaults here would silently re-grant every capability a truncated or
+        # unreadable TIGHTENED policy was withholding.
+        raise EntitlementsError(f"entitlements file unreadable at {path}: {exc}") from exc
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise EntitlementsError(f"entitlements file invalid JSON at {path}: {exc}") from exc
     if not isinstance(raw, dict):
-        return dict(_HARDCODED_DEFAULTS)
+        raise EntitlementsError(f"entitlements top level must be a mapping ({path})")
     # A tier whose value is not a mapping is DROPPED, not coerced: the tier then
     # reads as absent and `entitlements_for` falls to `restricted` — the safe
     # direction. (Only a wholly unreadable FILE takes the defaults above.)
@@ -218,7 +239,17 @@ def entitlements_for(tier: str) -> Dict[str, bool]:
 def tool_required_capability(tool: Dict[str, Any]) -> str:
     """The run capability a tool requires: "run_write" iff it declares `drawing.write`
     (CONTRACT §2), else "run_read"."""
-    caps = (tool or {}).get("capabilities") or []
+    # `or []` treated a PRESENT malformed value (None / "" / 0 / False / {}) as
+    # an absent declaration, silently classifying a write tool as read-only so
+    # it passed a tier lacking run_write. A malformed declaration is not a
+    # read-only one: we cannot tell what the tool does, so it takes the
+    # MORE-restrictive capability. Absent is still legitimately read-only.
+    record = tool or {}
+    if "capabilities" not in record:
+        return "run_read"
+    caps = record["capabilities"]
+    if not isinstance(caps, (list, tuple)):
+        return "run_write"
     return "run_write" if "drawing.write" in caps else "run_read"
 
 
