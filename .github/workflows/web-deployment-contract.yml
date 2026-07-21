@@ -1,0 +1,46 @@
+name: Web deployment contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/web-deployment-contract.yml"
+      - "scripts/deploy-web.py"
+      - "scripts/test_deploy_web.py"
+      - "scripts/run-all-gates.py"
+      - "web/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/web-deployment-contract.yml"
+      - "scripts/deploy-web.py"
+      - "scripts/test_deploy_web.py"
+      - "scripts/run-all-gates.py"
+      - "web/**"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+      - name: Build web bundle
+        run: npm run build
+        working-directory: web
+      - name: Install test dependency
+        run: python -m pip install pytest
+      - name: Run deployment contract
+        run: python -m pytest scripts/test_deploy_web.py -q
