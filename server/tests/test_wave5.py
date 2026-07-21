@@ -285,9 +285,9 @@ def test_grant_status_roundtrip_carries_kind(monkeypatch, harness_stub):
 def test_entitlements_get_matrix(live_auth):
     c = _client()
     for tier, expected in [
-        ("hosted_pro", {"run_read": True, "run_write": True, "build": True}),
-        ("hosted_starter", {"run_read": True, "run_write": True, "build": False}),
-        ("self_hosted", {"run_read": True, "run_write": True, "build": True}),
+        ("hosted_pro", {"run_read": True, "run_write": True, "build": True, "converse": True}),
+        ("hosted_starter", {"run_read": True, "run_write": True, "build": False, "converse": True}),
+        ("self_hosted", {"run_read": True, "run_write": True, "build": True, "converse": True}),
     ]:
         r = c.get("/api/entitlements", headers=bearer(tier))
         assert r.status_code == 200, r.text
@@ -391,7 +391,7 @@ def test_entitlements_demo_offauth(demo_offauth):
     b = r.json()
     jsonschema.validate(b, ENVELOPE_SCHEMA)
     assert b["tier"] == "demo"
-    assert b["entitlements"] == {"run_read": True, "run_write": True, "build": True}
+    assert b["entitlements"] == {"run_read": True, "run_write": True, "build": True, "converse": True}
     assert b["source"] == "policy"
 
 

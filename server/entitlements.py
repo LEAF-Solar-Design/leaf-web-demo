@@ -32,17 +32,17 @@ from fastapi.responses import JSONResponse
 
 from envelopes import ErrorCode, error_obj
 
-# The three capability flags every tier entry carries.
-CAPABILITIES = ("run_read", "run_write", "build")
+# The capability flags every tier entry carries.
+CAPABILITIES = ("run_read", "run_write", "build", "converse")
 
 # Fail-safe defaults — used verbatim if the JSON file is absent or unreadable. These
 # MUST mirror server/entitlements.json so enforcement is identical with or without it.
 _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
-    "demo": {"run_read": True, "run_write": True, "build": True},
-    "restricted": {"run_read": True, "run_write": False, "build": False},
-    "self_hosted": {"run_read": True, "run_write": True, "build": True},
-    "hosted_starter": {"run_read": True, "run_write": True, "build": False},
-    "hosted_pro": {"run_read": True, "run_write": True, "build": True},
+    "demo": {"run_read": True, "run_write": True, "build": True, "converse": True},
+    "restricted": {"run_read": True, "run_write": False, "build": False, "converse": False},
+    "self_hosted": {"run_read": True, "run_write": True, "build": True, "converse": True},
+    "hosted_starter": {"run_read": True, "run_write": True, "build": False, "converse": True},
+    "hosted_pro": {"run_read": True, "run_write": True, "build": True, "converse": True},
 }
 
 DEFAULT_TIER = "demo"

@@ -3,26 +3,31 @@
   "demo": {
     "run_read": true,
     "run_write": true,
-    "build": true
+    "build": true,
+    "converse": true
   },
   "self_hosted": {
     "run_read": true,
     "run_write": true,
-    "build": true
+    "build": true,
+    "converse": true
   },
   "hosted_starter": {
     "run_read": true,
     "run_write": true,
-    "build": false
+    "build": false,
+    "converse": true
   },
   "hosted_pro": {
     "run_read": true,
     "run_write": true,
-    "build": true
+    "build": true,
+    "converse": true
   },
   "restricted": {
     "run_read": true,
     "run_write": false,
-    "build": false
+    "build": false,
+    "converse": false
   }
 }

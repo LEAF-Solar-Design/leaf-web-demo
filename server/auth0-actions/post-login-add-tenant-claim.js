@@ -24,9 +24,26 @@
  *   tier      = PLAN_TIER[plan]  (DeploymentTier enum; default hosted_starter).
  *               Surface-only — the server does NOT enforce entitlement here.
  *
+ * SUBSCRIPTION-LAPSE OVERRIDE (2026-07-20):
+ *   app_metadata.leaf.subscription_active and .subscription_status are
+ *   SIBLINGS of .plan (confirmed: leaf_website/lib/auth0.ts SubscriptionMetadata,
+ *   lines 52-61 — subscription_active: boolean, subscription_status: string).
+ *   If subscription_active === false, OR subscription_status is one of
+ *   'canceled' | 'unpaid' | 'incomplete_expired', the tier is forced to
+ *   'restricted' REGARDLESS of what .plan says — a stale/cached 'pro' plan
+ *   value must not outrank a lapsed subscription. This is still surface-only:
+ *   the server is expected to treat 'restricted' as no-entitlement.
+ *   BACKWARD COMPAT: when both fields are absent (legacy users minted before
+ *   this override existed, or any event missing app_metadata.leaf entirely),
+ *   the override does not fire and PLAN_TIER[plan] applies exactly as before.
+ *
  * SETUP (operator, Auth0 Dashboard):
  *   Actions -> Library -> Build Custom -> Login / Post Login -> paste this code
  *   -> Deploy -> add to the Login flow. No secrets required.
+ *   REDEPLOY IS MANUAL: editing this file on disk does NOT change the live
+ *   Action — an operator must re-paste/re-deploy in the Auth0 Dashboard (or via
+ *   the Auth0 Deploy CLI) for any code change here, including this override,
+ *   to take effect on real logins.
  *
  * SAMPLE INPUT  (event.user.app_metadata):
  *   { "leaf": { "organization_id": "org_acme_solar", "plan": "pro" } }
@@ -61,6 +78,9 @@ const PLAN_TIER = {
 };
 const DEFAULT_TIER = 'hosted_starter';
 
+// subscription_status values that force tier='restricted' regardless of plan.
+const LAPSED_STATUSES = new Set(['canceled', 'unpaid', 'incomplete_expired']);
+
 /**
  * Pure claim derivation — unit-testable, shared by the Action and the dry-run.
  * @param {object} event Auth0 post-login event.
@@ -73,7 +93,16 @@ function deriveClaims(event) {
   const sub = user.user_id || user.sub || null;
   const tenantId = orgId || sub;
   const plan = (leaf.plan || '').toString().toLowerCase();
-  const tier = PLAN_TIER[plan] || DEFAULT_TIER;
+  let tier = PLAN_TIER[plan] || DEFAULT_TIER;
+
+  // Subscription-lapse override — only fires when the field is explicitly
+  // present; absent fields (legacy users) leave the plan-derived tier intact.
+  const subscriptionActive = leaf.subscription_active;
+  const subscriptionStatus = (leaf.subscription_status || '').toString().toLowerCase();
+  if (subscriptionActive === false || LAPSED_STATUSES.has(subscriptionStatus)) {
+    tier = 'restricted';
+  }
+
   return { tenant_id: tenantId, org_id: orgId, tier: tier };
 }
 
@@ -111,6 +140,12 @@ if (require.main === module) {
       event: { user: { app_metadata: { leaf: { organization_id: 'org_big', plan: 'enterprise' } } } } },
     { name: 'no leaf metadata (sub only)',
       event: { user: { user_id: 'auth0|nometadata' } } },
+    { name: 'pro plan but subscription_active=false -> restricted',
+      event: { user: { app_metadata: { leaf: { organization_id: 'org_lapsed', plan: 'pro', subscription_active: false } } } } },
+    { name: 'pro plan but subscription_status=canceled -> restricted',
+      event: { user: { app_metadata: { leaf: { organization_id: 'org_canceled', plan: 'pro', subscription_active: true, subscription_status: 'canceled' } } } } },
+    { name: 'pro plan, subscription_active=true, subscription_status=active -> unaffected',
+      event: { user: { app_metadata: { leaf: { organization_id: 'org_good', plan: 'pro', subscription_active: true, subscription_status: 'active' } } } } },
   ];
   for (const s of samples) {
     const c = deriveClaims(s.event);

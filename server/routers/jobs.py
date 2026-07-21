@@ -33,10 +33,21 @@ class RunRequest(BaseModel):
 
 def _record_body(rec: Dict[str, Any]) -> Dict[str, Any]:
     """Job record -> response body. Top-level `error` is the JOB's error (null
-    unless failed); degraded_mode comes from the result envelope when present."""
+    unless failed); degraded_mode comes from the result envelope when present.
+
+    On a quota_exceeded error, also HOIST quota_kind/tier/limit/used from the
+    error object to the top level of the body (frontend api.js/ResultPanel read
+    them there, not nested under `error`) so the UI can disambiguate the daily
+    run-count quota from the USD spend-cap quota without reaching into `error`.
+    """
     body = dict(rec)
     result = rec.get("result") or {}
     body["degraded_mode"] = bool(result.get("degraded_mode", False))
+    error = rec.get("error")
+    if isinstance(error, dict) and error.get("error_code") == "quota_exceeded":
+        for key in ("quota_kind", "tier", "limit", "used"):
+            if key in error:
+                body[key] = error[key]
     return body
 
 
