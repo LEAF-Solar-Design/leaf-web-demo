@@ -16,6 +16,13 @@
  *   POST /run-registered  -> run route (design-time-ONLY invariant). Body
  *                            {tool, params?, dwg?, aps_live?}. 200 section-3 envelope.
  *                            NEVER constructs the Agent SDK / touches AgentRunner.
+ *   POST /turn             -> converse-turn route (sessions wire, leaf-backend-gaps.md
+ *                            §2.1; ports/converse.ts, FROZEN). Body = ConverseTurnInput.
+ *                            200 application/x-ndjson, one HarnessTurnEvent per line,
+ *                            always terminated by turn_complete or error. A grant error
+ *                            resolved on/before the first event -> non-stream 401
+ *                            {grant_required:true,...} (never a half-open stream). No
+ *                            converseRunner wired -> 501. Bad body -> 400.
  *
  * Tenant id comes from the X-Tenant-Id header stub (default "demo-tenant"),
  * matching the backbone. Concern 1 (Auth0 platform identity) is resolved upstream
@@ -39,7 +46,7 @@ import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
 import { GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import { DEFAULT_TENANT } from "./ports/index.js";
-import type { HarnessPorts } from "./ports/index.js";
+import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent } from "./ports/index.js";
 
 export { DEFAULT_TENANT };
 
@@ -152,6 +159,107 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+// --------------------------------------------------------------------------- //
+// POST /turn - converse-turn route (sessions wire, leaf-backend-gaps.md §2.1).
+// --------------------------------------------------------------------------- //
+
+type ConverseTurnValidation = { ok: true; input: ConverseTurnInput } | { ok: false; message: string };
+
+/**
+ * Minimal validation of ConverseTurnInput: the four required id fields, and at
+ * least one of `text` / `confirm` to drive the turn. Deliberately does not
+ * validate deeper into `confirm.proposal` — that is the runner's job. `messages`
+ * defaults to [] when absent/malformed (the turn engine always sends it, but a
+ * missing array here should not be a reason to reject the whole request).
+ */
+function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnValidation {
+  const tenant_id = typeof body.tenant_id === "string" ? body.tenant_id.trim() : "";
+  const session_id = typeof body.session_id === "string" ? body.session_id.trim() : "";
+  const turn_id = typeof body.turn_id === "string" ? body.turn_id.trim() : "";
+  const drawing_id = typeof body.drawing_id === "string" ? body.drawing_id.trim() : "";
+  if (!tenant_id) return { ok: false, message: "tenant_id is required" };
+  if (!session_id) return { ok: false, message: "session_id is required" };
+  if (!turn_id) return { ok: false, message: "turn_id is required" };
+  if (!drawing_id) return { ok: false, message: "drawing_id is required" };
+
+  const hasText = typeof body.text === "string" && body.text.length > 0;
+  const rawConfirm = body.confirm;
+  const hasConfirm = typeof rawConfirm === "object" && rawConfirm !== null;
+  if (!hasText && !hasConfirm) {
+    return { ok: false, message: "one of text or confirm is required" };
+  }
+
+  const messages = Array.isArray(body.messages)
+    ? (body.messages as ConverseTurnInput["messages"])
+    : [];
+
+  const input: ConverseTurnInput = { tenant_id, session_id, turn_id, drawing_id, messages };
+  if (hasText) input.text = body.text as string;
+  if (hasConfirm) input.confirm = rawConfirm as ConverseTurnInput["confirm"];
+  return { ok: true, input };
+}
+
+/**
+ * Drive one converse turn to completion, streaming `application/x-ndjson`.
+ *
+ * Ordering is the load-bearing part: the FIRST event is pulled BEFORE
+ * `res.writeHead` is called. If the runner rejects synchronously or on that
+ * first yield — e.g. `GrantRequiredError` (missing per-tenant Claude grant) —
+ * the rejection propagates out of this function (it is NOT caught here) so the
+ * caller's outer try/catch renders the same non-stream 401 `{grant_required:true}`
+ * shape /author uses (server.ts:258-263). The caller therefore never observes a
+ * half-open 200 stream for a turn that never started.
+ *
+ * Once streaming has begun, a mid-stream throw from the runner is caught here
+ * (headers are already committed) and rendered as an in-band `error` event
+ * followed by a `turn_complete{stop_reason:'error'}` event, matching the FROZEN
+ * invariant that every stream ends with one of those two event types.
+ *
+ * A client disconnect (`req` 'close') aborts the async iterator via
+ * `iterator.return()` and stops writing further chunks.
+ */
+async function streamTurn(
+  req: IncomingMessage,
+  res: ServerResponse,
+  runner: ConverseRunner,
+  input: ConverseTurnInput,
+): Promise<void> {
+  const iterator = runner.runTurn(input)[Symbol.asyncIterator]();
+
+  // Pull the first event BEFORE writing the response head (see doc comment above).
+  let step = await iterator.next();
+
+  res.writeHead(200, { "content-type": "application/x-ndjson" });
+
+  let closed = false;
+  const onClose = (): void => {
+    closed = true;
+    const ret = iterator.return?.(undefined);
+    if (ret && typeof (ret as Promise<unknown>).catch === "function") {
+      void (ret as Promise<unknown>).catch(() => {});
+    }
+  };
+  req.on("close", onClose);
+
+  try {
+    while (!step.done) {
+      if (closed) break;
+      const ev = step.value as HarnessTurnEvent;
+      res.write(`${JSON.stringify(ev)}\n`);
+      step = await iterator.next();
+    }
+  } catch (err) {
+    if (!closed) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.write(`${JSON.stringify({ type: "error", data: { message } })}\n`);
+      res.write(`${JSON.stringify({ type: "turn_complete", data: { stop_reason: "error" } })}\n`);
+    }
+  } finally {
+    req.off("close", onClose);
+    res.end();
+  }
+}
+
 export interface Harness {
   handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   listen(port?: number): Server;
@@ -233,6 +341,25 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         // default author route = build (author + register + one commit)
         const out = await loop.build(tenant, description);
         return send(res, 200, out);
+      }
+
+      if (method === "POST" && path === "/turn") {
+        const body = await readJsonBody(req);
+        const validated = validateConverseTurnInput(body);
+        if (!validated.ok) {
+          return send(res, 400, { error: { message: validated.message } });
+        }
+        if (!ports.converseRunner) {
+          return send(res, 501, {
+            error: { message: "converse runner not configured", code: "not_implemented" },
+          });
+        }
+        // Awaited (not `return`ed bare) so a rejection — e.g. GrantRequiredError on the
+        // first event — is caught by THIS function's own try/catch below, not silently
+        // dropped: async-function `return somePromise` does not route through a local
+        // catch, only `await` does.
+        await streamTurn(req, res, ports.converseRunner, validated.input);
+        return;
       }
 
       if (method === "POST" && path === "/run-registered") {

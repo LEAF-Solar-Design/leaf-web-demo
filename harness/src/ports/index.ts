@@ -293,6 +293,21 @@ export interface AgentRunner {
 }
 
 // --------------------------------------------------------------------------- //
+// Port 5 - ConverseRunner (the sessions/turn-engine loop boundary)
+// --------------------------------------------------------------------------- //
+
+import type { ConverseRunner } from "./converse.js";
+
+/**
+ * Re-exported from ./converse.js (FROZEN — leaf-backend-gaps.md §2.1): the
+ * `POST /turn` NDJSON boundary the turn engine (server/turn_runner.py, S3)
+ * drives. Defined in its own module so converse.ts stays a single-purpose,
+ * dependency-free port; re-exported here so callers can import everything
+ * from `ports/index.js` like the other four ports.
+ */
+export type { StopReason, HarnessTurnEvent, ConverseTurnInput, ConverseRunner } from "./converse.js";
+
+// --------------------------------------------------------------------------- //
 // Aggregate: everything the harness server needs injected.
 // --------------------------------------------------------------------------- //
 
@@ -307,4 +322,12 @@ export interface HarnessPorts {
    * hermetic author tests wire the four required ports and omit this.
    */
   grantAdmin?: TenantGrantAdminStore;
+  /**
+   * OPTIONAL converse-turn runner (sessions wire, leaf-backend-gaps.md §2.1).
+   * When present, the harness serves `POST /turn` (NDJSON) for the FastAPI
+   * turn engine to drive; when absent that route returns 501, matching the
+   * `grantAdmin` precedent. Hermetic tests that don't exercise the sessions
+   * lane omit this.
+   */
+  converseRunner?: ConverseRunner;
 }
