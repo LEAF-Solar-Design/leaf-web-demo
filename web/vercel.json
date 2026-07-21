@@ -5,11 +5,7 @@
   "framework": "vite",
   "rewrites": [
     {
-      "source": "/api/:path*",
-      "destination": "/__web_api_not_served__"
-    },
-    {
-      "source": "/:path((?!(?:assets|site)/(?!(?:\\.|%2[eE]){2}(?:/|%2[fF]))|demo-solve\\.json$|sample\\.intake\\.json$|favicon\\.ico$).*)",
+      "source": "/:path((?!(?:api.|(?:assets|site)/(?!(?:\\.|%2[eE]){2}(?:/|%2[fF]))|demo-solve\\.json$|sample\\.intake\\.json$|favicon\\.ico$).*)",
       "destination": "/index.html"
     }
   ]
