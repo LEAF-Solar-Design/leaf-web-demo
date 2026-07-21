@@ -120,13 +120,40 @@ _install_egress_guard()
 # --------------------------------------------------------------------------- #
 # tenant kill-switch (persisted)
 # --------------------------------------------------------------------------- #
+_MISSING_TENANT = object()  # absent record, as distinct from a corrupt one
+
+
+class BrokerStateError(RuntimeError):
+    """Raised when PRESENT broker state cannot be trusted.
+
+    The broker is the sole credential holder and the home of the tenant kill
+    switch, so refusing to start beats starting with every kill flag disarmed.
+    """
+
+
 def _load_tenants() -> Dict[str, Any]:
-    if TENANTS_PATH.exists():
-        try:
-            return json.loads(TENANTS_PATH.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return {}
-    return {}
+    """The persisted tenant records.
+
+    ABSENT is the only safe-empty case (first boot, nothing provisioned yet).
+    A PRESENT file that cannot be parsed used to collapse to {} — and since this
+    runs ONCE at import, that silently disarmed every tenant kill flag for the
+    whole process lifetime AND, with no record to carry a tier, promoted every
+    tenant to the friction-free `demo` default in _tenant_tier(). Corrupt state
+    now refuses to load.
+    """
+    try:
+        text = TENANTS_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise BrokerStateError(f"broker tenants file unreadable at {TENANTS_PATH}: {exc}") from exc
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise BrokerStateError(f"broker tenants file invalid JSON at {TENANTS_PATH}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise BrokerStateError(f"broker tenants top level must be a mapping ({TENANTS_PATH})")
+    return raw
 
 
 def _save_tenants(t: Dict[str, Any]) -> None:
@@ -137,8 +164,26 @@ _tenants: Dict[str, Any] = _load_tenants()
 
 
 def tenant_disabled(tid: str) -> bool:
+    """Whether this tenant is killed.
+
+    `bool(...)` coerced by truthiness, so a PRESENT-but-falsy flag — `null`, `0`,
+    `""` — read as ENABLED: exactly the direction a kill switch must never fail.
+    Only an explicit False (or an absent flag) enables; anything unparseable
+    disables, because "I cannot tell whether this tenant is killed" has one safe
+    answer.
+    """
     with _tenants_lock:
-        return bool(_tenants.get(tid, {}).get("disabled"))
+        rec = _tenants.get(tid)
+    if rec is None:
+        return False  # never provisioned -> not killed
+    if not isinstance(rec, dict):
+        return True  # corrupt record -> fail CLOSED
+    if "disabled" not in rec:
+        return False  # provisioned, flag never set -> not killed
+    flag = rec["disabled"]
+    if isinstance(flag, bool):
+        return flag
+    return True  # present but not a real boolean -> fail CLOSED
 
 
 def set_tenant_disabled(tid: str, disabled: bool) -> None:
@@ -362,7 +407,12 @@ class _TenantTier:
 
 def _provisioned_tier(tenant_id: str) -> Optional[str]:
     with _tenants_lock:
-        rec = _tenants.get(tenant_id) or {}
+        rec = _tenants.get(tenant_id, _MISSING_TENANT)
+    if rec is not _MISSING_TENANT and not isinstance(rec, dict):
+        # A corrupt record is not an unprovisioned one: falling through would end
+        # at `provisioned is None` -> DEFAULT_TIER (demo, full access). Unknown
+        # must resolve restricted instead.
+        return entitlements.RESTRICTED_TIER
     if isinstance(rec, dict) and "tier" in rec:
         return str(rec.get("tier") or "")
     raw = os.environ.get("LEAF_BROKER_TENANT_TIERS")
