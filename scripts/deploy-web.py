@@ -207,6 +207,24 @@ def verify_production_backend() -> None:
             "platform backend unauthenticated session contract expected HTTP 401, "
             f"got {session_status}"
         )
+    demo_status, demo_body = fetch(
+        PRODUCTION_API_BASE + "/api/site/demo-solve"
+    )
+    if demo_status != 200:
+        fail(f"platform backend public demo solve returned HTTP {demo_status}")
+    try:
+        demo = json.loads(demo_body)
+        solve = demo["solve"]
+        panel_count = solve["stats"]["panel_count"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        fail("platform backend public demo solve returned malformed JSON")
+    if (
+        demo.get("ok") is not True
+        or isinstance(panel_count, bool)
+        or not isinstance(panel_count, int)
+        or panel_count <= 0
+    ):
+        fail("platform backend public demo solve failed its semantic contract")
     print(f"  backend contract ok: {PRODUCTION_API_BASE}")
 
 

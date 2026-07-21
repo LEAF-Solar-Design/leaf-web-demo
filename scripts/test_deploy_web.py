@@ -80,14 +80,36 @@ def test_production_contract_requires_expected_source_sha() -> None:
     ) == []
 
 
-def test_backend_contract_requires_health_and_auth_boundary(monkeypatch) -> None:
-    responses = [(200, "{}"), (401, "")]
+def test_backend_contract_requires_health_auth_and_public_demo(monkeypatch) -> None:
+    responses = [
+        (200, "{}"),
+        (401, ""),
+        (200, '{"ok":true,"solve":{"stats":{"panel_count":2345}}}'),
+    ]
     monkeypatch.setattr(deploy_web, "fetch", lambda _url: responses.pop(0))
     deploy_web.verify_production_backend()
 
 
 def test_backend_contract_rejects_wrong_api_host(monkeypatch) -> None:
     responses = [(200, "{}"), (404, "")]
+    monkeypatch.setattr(deploy_web, "fetch", lambda _url: responses.pop(0))
+    with pytest.raises(SystemExit):
+        deploy_web.verify_production_backend()
+
+
+@pytest.mark.parametrize(
+    "demo_response",
+    [
+        (404, ""),
+        (200, "not-json"),
+        (200, '{"ok":true,"solve":{"stats":{"panel_count":0}}}'),
+        (200, '{"ok":true,"solve":{"stats":{"panel_count":true}}}'),
+    ],
+)
+def test_backend_contract_rejects_missing_or_invalid_public_demo(
+    monkeypatch, demo_response
+) -> None:
+    responses = [(200, "{}"), (401, ""), demo_response]
     monkeypatch.setattr(deploy_web, "fetch", lambda _url: responses.pop(0))
     with pytest.raises(SystemExit):
         deploy_web.verify_production_backend()
