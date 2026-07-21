@@ -37,6 +37,11 @@ and verifies every SPA route before calling `vercel promote`. It then verifies
 the production alias serves the exact staged entry asset. A failed post-promote
 check requests `vercel rollback` automatically.
 
+The pre-promotion backend check requires the configured platform host to return
+200 from `/api/health` and 401 (the expected no-token boundary) from
+`/api/session`. This prevents a healthy but unrelated API hostname from passing
+the bundle string check and leaving every real platform request at 404.
+
 The local build is only a structural preflight. It checks that Vite still emits
 an entry asset and that the SPA rewrite is present; it does not claim to test
 sensitive production environment values. Two files preserve the route contract:

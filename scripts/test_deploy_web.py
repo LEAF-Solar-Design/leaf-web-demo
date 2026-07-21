@@ -45,11 +45,11 @@ def test_deploy_cloud_builds_from_web(monkeypatch, preview, suffix) -> None:
     ("javascript", "error"),
     [
         (
-            "http://localhost:8130 https://api.leafdesign.ai leafautomation.us.auth0.com",
+            f"http://localhost:8130 {deploy_web.PRODUCTION_API_BASE} leafautomation.us.auth0.com",
             "localhost",
         ),
-        ("leafautomation.us.auth0.com", "api.leafdesign.ai"),
-        ("https://api.leafdesign.ai", "leafautomation.us.auth0.com"),
+        ("leafautomation.us.auth0.com", "platform-staging.leafdesign.ai"),
+        (deploy_web.PRODUCTION_API_BASE, "leafautomation.us.auth0.com"),
     ],
 )
 def test_production_contract_rejects_bad_bundle(javascript, error) -> None:
@@ -58,8 +58,21 @@ def test_production_contract_rejects_bad_bundle(javascript, error) -> None:
 
 def test_production_contract_accepts_real_endpoints() -> None:
     assert deploy_web._production_bundle_contract(
-        "https://api.leafdesign.ai leafautomation.us.auth0.com"
+        f"{deploy_web.PRODUCTION_API_BASE} leafautomation.us.auth0.com"
     ) == []
+
+
+def test_backend_contract_requires_health_and_auth_boundary(monkeypatch) -> None:
+    responses = [(200, "{}"), (401, "")]
+    monkeypatch.setattr(deploy_web, "fetch", lambda _url: responses.pop(0))
+    deploy_web.verify_production_backend()
+
+
+def test_backend_contract_rejects_wrong_api_host(monkeypatch) -> None:
+    responses = [(200, "{}"), (404, "")]
+    monkeypatch.setattr(deploy_web, "fetch", lambda _url: responses.pop(0))
+    with pytest.raises(SystemExit):
+        deploy_web.verify_production_backend()
 
 
 def test_promote_uses_verified_deployment(monkeypatch) -> None:

@@ -33,7 +33,7 @@ ORG_ID = "team_LWjg4ghzDbsZrkNPaOnRwAx5"
 PROJECT_ID = "prj_tBxvYtXa47THZ8aF59gvRx8W0bBc"
 TEAM_SLUG = "evan-haugs-projects"
 DOMAIN = "https://leaf-platform-web.vercel.app"
-PRODUCTION_API_BASE = "https://api.leafdesign.ai"
+PRODUCTION_API_BASE = "https://platform-staging.leafdesign.ai"
 PRODUCTION_AUTH0_DOMAIN = "leafautomation.us.auth0.com"
 ROUTES = ["/", "/app", "/try", "/sheets", "/sheets/01"]
 PROJECT_ENV = {"VERCEL_ORG_ID": ORG_ID, "VERCEL_PROJECT_ID": PROJECT_ID}
@@ -132,7 +132,13 @@ def deploy(*, preview: bool) -> str:
 
 
 def fetch(url: str, timeout: int = 30):
-    request = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Cache-Control": "no-cache",
+            "User-Agent": "Leaf-Platform-Deploy-Verifier/1.0",
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read().decode("utf-8", "replace")
@@ -167,6 +173,22 @@ def _production_bundle_contract(javascript: str) -> list[str]:
     if PRODUCTION_AUTH0_DOMAIN not in javascript:
         errors.append(f"missing {PRODUCTION_AUTH0_DOMAIN}")
     return errors
+
+
+def verify_production_backend() -> None:
+    """Prove the configured host is the platform API, not another healthy API."""
+    health_status, _ = fetch(PRODUCTION_API_BASE + "/api/health")
+    if health_status != 200:
+        fail(f"platform backend health returned HTTP {health_status}")
+    session_status, _ = fetch(
+        PRODUCTION_API_BASE + "/api/session?dwg=rooftop_demo"
+    )
+    if session_status != 401:
+        fail(
+            "platform backend unauthenticated session contract expected HTTP 401, "
+            f"got {session_status}"
+        )
+    print(f"  backend contract ok: {PRODUCTION_API_BASE}")
 
 
 def _javascript_graph(base_url: str, html: str, fetcher) -> tuple[str, str]:
@@ -279,6 +301,7 @@ def main() -> None:
         print(f"READY: verified preview {deployment_url}; production alias untouched")
         return
 
+    verify_production_backend()
     promote(deployment_url)
     try:
         for attempt in range(6):
