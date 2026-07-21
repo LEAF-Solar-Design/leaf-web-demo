@@ -33,7 +33,8 @@ only Vercel's cloud build can inject the production `VITE_*` values safely.
 
 Production deploys are staged with `--prod --skip-domain`. The script crawls
 the generated JavaScript chunks, rejects localhost/API-less/Auth0-less output,
-and verifies every SPA route before calling `vercel promote`. It then verifies
+requires the exact source commit injected as `LEAF_SOURCE_SHA`, and verifies
+every SPA route before calling `vercel promote`. It then verifies
 the production alias serves the exact staged entry asset. A failed post-promote
 check requests `vercel rollback` automatically.
 
@@ -41,6 +42,10 @@ The pre-promotion backend check requires the configured platform host to return
 200 from `/api/health` and 401 (the expected no-token boundary) from
 `/api/session`. This prevents a healthy but unrelated API hostname from passing
 the bundle string check and leaving every real platform request at 404.
+
+The SPA fallback explicitly excludes `/api/*`. The web origin therefore cannot
+answer an intuitive health probe with the HTML shell and falsely masquerade as
+the external backend.
 
 The local build is only a structural preflight. It checks that Vite still emits
 an entry asset and that the SPA rewrite is present; it does not claim to test

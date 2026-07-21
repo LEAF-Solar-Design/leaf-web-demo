@@ -35,8 +35,12 @@ def test_deploy_cloud_builds_from_web(monkeypatch, preview, suffix) -> None:
     runner = Mock(return_value=_result())
     monkeypatch.setattr(deploy_web, "run", runner)
     monkeypatch.setattr(deploy_web, "_vercel_cli", lambda: "vercel.cmd")
+    monkeypatch.setattr(deploy_web, "_source_sha", lambda: "a" * 40)
     assert deploy_web.deploy(preview=preview) == "https://leaf-web-abc.vercel.app"
-    assert runner.call_args.args[0] == ["vercel.cmd", "deploy", "--yes"] + suffix
+    assert runner.call_args.args[0] == [
+        "vercel.cmd", "deploy", "--yes", "--build-env",
+        f"LEAF_SOURCE_SHA={'a' * 40}",
+    ] + suffix
     assert runner.call_args.kwargs["cwd"] == deploy_web.WEB
     assert runner.call_args.kwargs["env_extra"] == deploy_web.PROJECT_ENV
 
@@ -60,6 +64,25 @@ def test_production_contract_accepts_real_endpoints() -> None:
     assert deploy_web._production_bundle_contract(
         f"{deploy_web.PRODUCTION_API_BASE} leafautomation.us.auth0.com"
     ) == []
+
+
+def test_production_contract_requires_expected_source_sha() -> None:
+    javascript = f"{deploy_web.PRODUCTION_API_BASE} leafautomation.us.auth0.com"
+    assert "source SHA" in deploy_web._production_bundle_contract(
+        javascript, expected_source_sha="a" * 40
+    )[0]
+    assert deploy_web._production_bundle_contract(
+        javascript + " " + "a" * 40, expected_source_sha="a" * 40
+    ) == []
+
+
+def test_spa_rewrite_excludes_api_paths() -> None:
+    root_config = deploy_web.WEB / "vercel.json"
+    public_config = deploy_web.WEB / "public" / "vercel.json"
+    root_source = __import__("json").loads(root_config.read_text())["rewrites"][0]["source"]
+    public_source = __import__("json").loads(public_config.read_text())["rewrites"][0]["source"]
+    assert "api(?:/|$)" in root_source
+    assert root_source == public_source
 
 
 def test_backend_contract_requires_health_and_auth_boundary(monkeypatch) -> None:

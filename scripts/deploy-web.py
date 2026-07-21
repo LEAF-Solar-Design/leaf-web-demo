@@ -71,6 +71,14 @@ def _npm_cli() -> str:
     return npm
 
 
+def _source_sha() -> str:
+    result = run(["git", "rev-parse", "HEAD"], cwd=REPO, capture=True)
+    sha = (result.stdout or "").strip().lower()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        fail("could not resolve an immutable 40-character source SHA")
+    return sha
+
+
 def build() -> None:
     """Make a local structural build; production contract checks happen remotely."""
     print("-> building web/ locally (structural preflight only)")
@@ -115,7 +123,11 @@ def deploy(*, preview: bool) -> str:
     """Cloud-build web/ and return its unaliased deployment URL."""
     target = "preview" if preview else "production (unaliased)"
     print(f"-> cloud-building and deploying web/ to {target}")
-    command = [_vercel_cli(), "deploy", "--yes"]
+    source_sha = _source_sha()
+    command = [
+        _vercel_cli(), "deploy", "--yes",
+        "--build-env", f"LEAF_SOURCE_SHA={source_sha}",
+    ]
     if not preview:
         command += ["--prod", "--skip-domain"]
     result = run(command, cwd=WEB, env_extra=PROJECT_ENV, capture=True)
@@ -164,7 +176,9 @@ def fetch_protected(deployment_url: str, path: str):
     return 200, result.stdout
 
 
-def _production_bundle_contract(javascript: str) -> list[str]:
+def _production_bundle_contract(
+    javascript: str, *, expected_source_sha: str | None = None
+) -> list[str]:
     errors = []
     if "http://localhost:8130" in javascript:
         errors.append("contains localhost API fallback")
@@ -172,6 +186,8 @@ def _production_bundle_contract(javascript: str) -> list[str]:
         errors.append(f"missing {PRODUCTION_API_BASE}")
     if PRODUCTION_AUTH0_DOMAIN not in javascript:
         errors.append(f"missing {PRODUCTION_AUTH0_DOMAIN}")
+    if expected_source_sha and expected_source_sha not in javascript:
+        errors.append(f"missing source SHA {expected_source_sha}")
     return errors
 
 
@@ -224,6 +240,7 @@ def verify(
     *,
     production_contract: bool,
     expected_entry: str | None = None,
+    expected_source_sha: str | None = None,
     protected: bool = False,
 ) -> str:
     """Verify routes and the recursively fetched JavaScript artifact."""
@@ -241,7 +258,9 @@ def verify(
     if expected_entry and entry != expected_entry:
         fail(f"entry mismatch: expected {expected_entry}, served {entry}")
     if production_contract:
-        errors = _production_bundle_contract(javascript)
+        errors = _production_bundle_contract(
+            javascript, expected_source_sha=expected_source_sha
+        )
         if errors:
             fail("production bundle " + "; ".join(errors))
     for route in ROUTES:
@@ -295,6 +314,7 @@ def main() -> None:
     entry = verify(
         deployment_url,
         production_contract=not args.preview,
+        expected_source_sha=None if args.preview else _source_sha(),
         protected=True,
     )
     if args.preview:
@@ -306,7 +326,12 @@ def main() -> None:
     try:
         for attempt in range(6):
             try:
-                verify(DOMAIN, production_contract=True, expected_entry=entry)
+                verify(
+                    DOMAIN,
+                    production_contract=True,
+                    expected_entry=entry,
+                    expected_source_sha=_source_sha(),
+                )
                 break
             except SystemExit:
                 if attempt == 5:

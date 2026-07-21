@@ -2,16 +2,18 @@ import { execSync } from 'node:child_process'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Build marker: the short git sha of the checkout being built, so a stage
-// tab can be proven fresh at a glance. Falls back to a timestamp when git
-// isn't available (tarball copy, CI without .git).
+// Build marker: an immutable source SHA. CLI cloud deploys do not upload .git,
+// so deploy-web.py supplies LEAF_SOURCE_SHA explicitly. Never substitute a
+// timestamp: that makes source-to-deployment attribution impossible.
 function buildHash() {
+  const injected = process.env.LEAF_SOURCE_SHA || process.env.VERCEL_GIT_COMMIT_SHA || ''
+  if (/^[0-9a-f]{40}$/i.test(injected)) return injected.toLowerCase()
   try {
-    const sha = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
+    const sha = execSync('git rev-parse HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
       .toString().trim()
-    if (sha) return sha
-  } catch { /* no git — fall through */ }
-  return new Date().toISOString().slice(0, 16).replace('T', ' ')
+    if (/^[0-9a-f]{40}$/i.test(sha)) return sha.toLowerCase()
+  } catch { /* handled below */ }
+  throw new Error('immutable build SHA unavailable; set LEAF_SOURCE_SHA')
 }
 
 // Lane C frontend. Dev server on 5175 so it never collides with the
