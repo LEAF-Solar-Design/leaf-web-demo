@@ -14,7 +14,9 @@ import registry from './mock/registry.json'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
+import { humanizeError } from './errorHumanize.js'
 import { groupToolsByFamily } from './mock/mockCapabilities.js'
+import * as mockVersions from './mock/mockVersions.js'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8130'
 // Default to mock unless explicitly disabled (VITE_MOCK=0).
@@ -94,7 +96,7 @@ export async function nlPrompt(mock, text, tools = []) {
     return { alternatives: [], ...body, stub: false }
   } catch (e) {
     // Endpoint not live yet (sibling lands it concurrently) — route locally.
-    return { ...matchPrompt(text, tools), stub: true, stubReason: String(e.message || e) }
+    return { ...matchPrompt(text, tools), stub: true, stubReason: humanizeError(e) }
   }
 }
 
@@ -594,8 +596,11 @@ export async function runTool(mock, tool, params, intake, dwg = 'rooftop_demo') 
 // verbatim: intake reads carry {intake, version, head, latest}; undo/redo carry
 // {version, head, latest, intake}. The X-Tenant-Id header MUST match the one
 // /api/run uses (same TENANT) so the per-tenant store resolves the same drawing.
-// LIVE only — mock mode edits stay the client-side fixture flow.
-export async function getDrawingIntake(drawingId, version = 'head') {
+// In MOCK the same four calls are served by the pure in-memory chain in
+// mock/mockVersions.js (same shapes, zero network); the LIVE branch below is
+// untouched.
+export async function getDrawingIntake(mock, drawingId, version = 'head') {
+  if (mock) { await nap(120); return mockVersions.view(version) }
   return http(
     `/api/drawings/${encodeURIComponent(drawingId)}/intake?version=${encodeURIComponent(version)}`,
     { headers: { 'X-Tenant-Id': TENANT } },
@@ -606,7 +611,8 @@ export async function getDrawingIntake(drawingId, version = 'head') {
 // {drawing_id, head, latest, versions:[{v, parent, created, bytes, sha256, tool,
 // workitem_id, note}]}. LIVE only. Throws if the sibling endpoint isn't live yet
 // so the caller can render a calm "history unavailable" note.
-export async function getDrawingVersions(drawingId) {
+export async function getDrawingVersions(mock, drawingId) {
+  if (mock) { await nap(120); return mockVersions.list() }
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions`, {
     headers: { 'X-Tenant-Id': TENANT },
   })
@@ -659,14 +665,16 @@ export async function releaseCheckout(drawingId, holder) {
   return data || { released: true, checkout: null }
 }
 
-export async function undoDrawing(drawingId) {
+export async function undoDrawing(mock, drawingId) {
+  if (mock) { await nap(180); return mockVersions.undo() }
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/undo`, {
     method: 'POST',
     headers: { 'X-Tenant-Id': TENANT },
   })
 }
 
-export async function redoDrawing(drawingId) {
+export async function redoDrawing(mock, drawingId) {
+  if (mock) { await nap(180); return mockVersions.redo() }
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/redo`, {
     method: 'POST',
     headers: { 'X-Tenant-Id': TENANT },
@@ -693,10 +701,13 @@ export async function authorTool(mock, description) {
   })
   const body = await res.json().catch(() => null)
   if (!res.ok) {
-    const err = new Error(
+    // The message can reach the DOM (AuthorPanel renders it), so it is
+    // humanized here — no verb/path/status ever leaks onto the stage. The
+    // machine-readable signal lives on .status/.body, which callers use.
+    const err = new Error(humanizeError(
       (body && body.error && (body.error.message || body.error.error_code)) ||
       `POST /api/author -> ${res.status}`,
-    )
+    ))
     err.status = res.status
     err.body = body
     err.grantRequired = isGrantRequired(body)

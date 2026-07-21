@@ -5,13 +5,40 @@
     <!-- Neutral calm mark: an accent diamond (leaf surface standard #22c55e), no emoji. -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Crect%20x='26'%20y='26'%20width='48'%20height='48'%20rx='8'%20transform='rotate(45%2050%2050)'%20fill='%2322c55e'/%3E%3C/svg%3E" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <!-- Typography (Leaf surface standard) loaded NON-render-blocking: media="print"
+         makes the browser fetch it at low priority and never block first paint on it;
+         onload swaps it to all whenever (or if ever) it arrives. On a hanging captive
+         portal the inline skeleton below still paints instantly and the UI renders in
+         the system-ui fallback declared in styles.css. Do not restore `rel=stylesheet`
+         without media="print" — that reintroduces a network dependency in the critical
+         path of a demo whose premise is "no network". -->
+    <link
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=Inter:wght@400;500;600&display=swap"
+    />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=Inter:wght@400;500;600&display=swap"
+      />
+    </noscript>
     <title>Leaf — build CAD tools with AI, run on Leaf</title>
+    <meta name="description" content="We do the drafting. You do the engineering. Branch strings a 3.2 MW rooftop live behind this page — 25 hours of drafting in 3 minutes, zero NEC violations." />
   </head>
   <body>
-    <div id="root"></div>
+    <!-- First-paint skeleton: replaced by React on mount. Keeps the cold-load
+         from showing a white screen on stage. Inline styles only (no CSS
+         request in the critical path). -->
+    <div id="root">
+      <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0f0d;color:#9db3a8;font-family:'Inter Tight','Inter',system-ui,-apple-system,sans-serif;">
+        <div style="text-align:center;">
+          <div style="width:18px;height:18px;margin:0 auto 16px;background:#22c55e;transform:rotate(45deg);border-radius:4px;"></div>
+          <div style="font-size:14px;letter-spacing:0.01em;">Loading workspace…</div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

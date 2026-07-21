@@ -1,6 +1,8 @@
 import './structural.css'
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import Viewer from './components/Viewer.jsx'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
+// The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
+// dynamic-import pattern) keeps first paint off the critical path.
+const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
 import Legend from './components/Legend.jsx'
 import ToolsPanel from './components/ToolsPanel.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
@@ -13,12 +15,17 @@ import DegradedBanner from './components/DegradedBanner.jsx'
 import EntitlementGate, { EntitlementNotice } from './components/EntitlementGate.jsx'
 import QuotaCard from './components/QuotaCard.jsx'
 import VersionHistory from './components/VersionHistory.jsx'
+import * as mockVersions from './mock/mockVersions.js'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
 import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
+import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
+import { shouldAutoDemo } from './demoState.js'
+import { humanizeError } from './errorHumanize.js'
+import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
@@ -29,6 +36,8 @@ import {
   getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant, getEntitlements,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
+import { shouldStartTour } from './demo/tourEntry.js'
+import DemoTour from './demo/DemoTour.jsx'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
 import {
@@ -40,6 +49,18 @@ import {
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
 // the legend swatches stay distinguishable.
 const PALETTE = ['#6b9fd4', '#8fbf9c', '#b49bd1', '#d4af6e', '#cf8fa6', '#79bcc7']
+
+// Suspense fallback while the lazy viewer chunk arrives — L1 indeterminate:
+// pulse dot + verb, top-left (the centered position is reserved for X3 failures).
+function ViewerSkeleton() {
+  return (
+    <div aria-hidden="true" style={{ position: 'absolute', inset: 0, background: '#0f0f11' }}>
+      <div className="loading-line dim" style={{ position: 'absolute', top: 14, left: 14 }}>
+        <span className="dot live pulse" aria-hidden="true" /> Preparing the viewer
+      </div>
+    </div>
+  )
+}
 
 // Durable pointer to the one in-flight live job, so a closed/reloaded tab can
 // re-attach instead of orphaning the UI (CONTRACT-ADDENDUM §7, MATRIX gap #1).
@@ -83,6 +104,19 @@ const opsFlag = new URLSearchParams(window.location.search).get('ops') === '1'
 // manifest. It fabricates no result numbers — only a lock display.
 const demoLocked = new URLSearchParams(window.location.search).get('demo') === 'locked'
 
+// Engineering-only header controls (the Mock switch). The demo build is served
+// from dist-demo with no backend, so a stray click on "Mock" in front of a cold
+// audience points every call at the PROSPECT's own localhost:8130 — a dead port
+// whose TypeError carries no .status, so the 401 auto-demo fallback never
+// fires — and simultaneously reveals the Anthropic-credential panel. Keep the
+// toggle for `npm run dev` and `?dev=1`; hide it on the demo build.
+const devControls = (() => {
+  try {
+    if (import.meta.env?.DEV) return true
+  } catch { /* no import.meta in a non-vite host */ }
+  return new URLSearchParams(window.location.search).get('dev') === '1'
+})()
+
 // The run's dwg (intake source name) — unchanged from the original demo.
 const DEFAULT_DRAWING_ID = 'rooftop_demo'
 
@@ -108,9 +142,9 @@ const CHECKOUT_DRAWING_ID =
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path).
-function Section({ title, count, open, onToggle, children, innerRef }) {
+function Section({ title, count, open, onToggle, children, innerRef, className = '' }) {
   return (
-    <div className={`section ${open ? '' : 'collapsed'}`} ref={innerRef}>
+    <div className={`section ${className} ${open ? '' : 'collapsed'}`.replace(/\s+/g, ' ').trim()} ref={innerRef}>
       <button className="section-head" onClick={onToggle} aria-expanded={open}>
         <span>{title}{count != null ? <span className="n"> · {count}</span> : null}</span>
         <span className="chev">{open ? 'hide' : 'show'}</span>
@@ -151,8 +185,11 @@ export default function App() {
   const [intake, setIntake] = useState(null)
   const [versionIntake, setVersionIntake] = useState(null) // applied next-version
   const [loadErr, setLoadErr] = useState(null)
+  const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
+  const [refreshFail, setRefreshFail] = useState(null) // {drawing_id, version} — post-write viewer refresh failed (X1)
   const [tools, setTools] = useState([])
   const [toolsErr, setToolsErr] = useState(null)
+  const [toolsRetryKey, setToolsRetryKey] = useState(0) // R ladder / Retry chip — bumping re-runs the tools load effect
   const [visibleLayers, setVisibleLayers] = useState({})
   const [selectedTool, setSelectedTool] = useState(null)
   const [running, setRunning] = useState(false)
@@ -171,7 +208,7 @@ export default function App() {
   const [overlayStale, setOverlayStale] = useState(false) // last result overlay no longer matches shown version
   const [openTool, setOpenTool] = useState(null)         // the tool card expanded in ToolsPanel (for the write ghost)
 
-  // --- unified surface state ---
+  // --- platform session state ---
   const [tenant, setTenant] = useState(null)             // /api/session tenant echo (else "demo")
   const [tier, setTier] = useState(null)                 // real tier from the session echo (auth-live)
   const [org, setOrg] = useState(null)                   // org_id from the session echo (auth-live)
@@ -237,6 +274,16 @@ export default function App() {
   const [grantBusy, setGrantBusy] = useState(false) // link/unlink request in flight
   const [grantErr, setGrantErr] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
+  // M5 guided tour: opened ONLY by the ?demo=tour (or ?demo=1) deep-link, and
+  // only while mock is active. Exiting clears the tour and leaves you in mock.
+  const [tourOn, setTourOn] = useState(() => {
+    try { return shouldStartTour(typeof window !== 'undefined' ? window.location.search : '') } catch { return false }
+  })
+  const [tourLanded, setTourLanded] = useState(true) // did the current beat's real effect land?
+  // Was this session deep-linked into the tour? Latched once so exiting the tour
+  // still leaves a way back in (the tour re-enters at beat 1).
+  const tourAvailable = useRef(false)
+  if (tourOn) tourAvailable.current = true
 
   // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
   const [agentSessionId, setAgentSessionId] = useState(null) // this drawing's converse session
@@ -253,6 +300,7 @@ export default function App() {
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
   const toastSeqRef = useRef(0)         // monotonic toast ids
+  const cannedSeq = useRef(0)           // supersedes an in-flight tour beat (typing + dispatch)
   const runSeqRef = useRef(0)           // Esc-interrupt bumps this to detach a run
 
   const isEditFixture = mock && fixtureParam === 'edit'
@@ -324,7 +372,7 @@ export default function App() {
   // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
-    setIntake(null); setVersionIntake(null); setLoadErr(null)
+    setIntake(null); setVersionIntake(null); setLoadErr(null); setRefreshFail(null)
     setResult(null); setSelectedHandle(null); setPendingEdit(null)
     setRunning(false); setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); setRunErr(null)
     setDrawingState(null); setVersionBusy(false)
@@ -337,9 +385,13 @@ export default function App() {
     setAgentMode(null); setAgentBanner(null); setAgentTurns([]); setAgentSessionId(null)
     agentSessionRef.current = null
     runningSinceRef.current = null
+    mockVersions.reset()
     const seat = (d) => {
       if (!alive) return
       setIntake(d)
+      // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
+      // so re-running the demo always starts from a clean v1.
+      if (mock && !isEditFixture) mockVersions.seedBase(d)
       const vis = {}
       for (const l of d.layers || []) vis[l] = true
       setVisibleLayers(vis)
@@ -353,18 +405,32 @@ export default function App() {
         if (!alive) return
         seat(d); setTenant(t); setTier(ti); setOrg(o)
       })
-      .catch((e) => { if (!alive) return; setLoadErr(String(e.message || e)); if (!mock && is401(e)) setAuthRequired(true) })
+      .catch((e) => {
+        if (!alive) return
+        setLoadErr(humanizeError(e))
+        if (!mock && is401(e)) {
+          setAuthRequired(true)
+          // Auto-fallback (B1): a VITE_MOCK=0 build that hits a 401 with Auth0
+          // unconfigured can't sign in — flip to the demo instead of parking on
+          // the gate, so the deployed link lands zero-click. SignedOutGate is
+          // kept only for the authConfigured build (the user CAN sign in there).
+          if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)
+        }
+      })
     return () => { alive = false }
-  }, [mock, isEditFixture])
+  }, [mock, isEditFixture, intakeRetryKey])
 
   useEffect(() => {
     let alive = true
     setToolsErr(null)
     getTools(mock)
       .then((t) => alive && setTools(t))
-      .catch((e) => alive && setToolsErr(String(e.message || e)))
+      .catch((e) => alive && setToolsErr(humanizeError(e)))
     return () => { alive = false }
-  }, [mock])
+  }, [mock, toolsRetryKey])
+
+  // Retry the tools load (ToolsPanel's Retry chip + the R ladder below).
+  const retryTools = useCallback(() => setToolsRetryKey((k) => k + 1), [])
 
   // Families catalog (left rail): GET /api/capabilities grouped, or the mock
   // registry grouped client-side. Refetched on mode change and after authoring a
@@ -383,7 +449,7 @@ export default function App() {
       })
     } catch (e) {
       setCatalog({ families: [], source: null })
-      setCatalogErr(String(e.message || e))
+      setCatalogErr(humanizeError(e))
       if (!mock && is401(e)) setAuthRequired(true)
     }
   }, [mock])
@@ -448,7 +514,7 @@ export default function App() {
       const res = await linkClaudeGrant(token, kind)
       setGrant({ linked: true, linked_at: res?.linked_at || new Date().toISOString(), kind: res?.kind || kind || null })
     } catch (e) {
-      setGrantErr(String(e.message || e))
+      setGrantErr(humanizeError(e))
     } finally {
       setGrantBusy(false)
     }
@@ -460,7 +526,7 @@ export default function App() {
       await unlinkClaudeGrant()
       setGrant({ linked: false, linked_at: null })
     } catch (e) {
-      setGrantErr(String(e.message || e))
+      setGrantErr(humanizeError(e))
     } finally {
       setGrantBusy(false)
     }
@@ -476,7 +542,7 @@ export default function App() {
     try {
       setProjects(await listProjects(orgId))
     } catch (e) {
-      setProjects([]); setProjectsErr(String(e.message || e))
+      setProjects([]); setProjectsErr(humanizeError(e))
     } finally {
       setProjectsLoading(false)
     }
@@ -492,7 +558,7 @@ export default function App() {
     if (mock) { setCheckout(null); return }
     const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
     try {
-      const v = await getDrawingVersions(did)
+      const v = await getDrawingVersions(mock, did)
       setCheckout(v?.checkout || null)
     } catch {
       setCheckout(null)
@@ -677,7 +743,7 @@ export default function App() {
           }
         }
       } catch (e) {
-        if (attached()) setRunErr(String(e.message || e))
+        if (attached()) setRunErr(humanizeError(e))
       } finally {
         if (attached()) {
           setRunning(false); setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
@@ -731,46 +797,51 @@ export default function App() {
     if (!drawingState || versionBusy) return
     setVersionBusy(true); setOverlayStale(true)
     try {
-      const view = await undoDrawing(drawingState.drawing_id)
+      const view = await undoDrawing(mock, drawingState.drawing_id)
       seatVersion(view, drawingState.drawing_id, `Reverted to version ${view.head}`)
     } catch (e) {
-      setRunErr(String(e.message || e))
+      setRunErr(humanizeError(e))
     } finally {
       setVersionBusy(false)
     }
-  }, [drawingState, versionBusy, seatVersion])
+  }, [mock, drawingState, versionBusy, seatVersion])
 
   const onRedo = useCallback(async () => {
     if (!drawingState || versionBusy) return
     setVersionBusy(true); setOverlayStale(true)
     try {
-      const view = await redoDrawing(drawingState.drawing_id)
+      const view = await redoDrawing(mock, drawingState.drawing_id)
       seatVersion(view, drawingState.drawing_id, `Advanced to version ${view.head}`)
     } catch (e) {
-      setRunErr(String(e.message || e))
+      setRunErr(humanizeError(e))
     } finally {
       setVersionBusy(false)
     }
-  }, [drawingState, versionBusy, seatVersion])
+  }, [mock, drawingState, versionBusy, seatVersion])
 
   // --- version-history browser + read-only preview -------------------------
   const toggleFamily = useCallback((id) => {
     setOpenFamilies((o) => ({ ...o, [id]: !o[id] }))
   }, [])
 
-  const onToggleHistory = useCallback(async () => {
-    if (historyOpen) { setHistoryOpen(false); return }
-    setHistoryOpen(true)
+  // Shared by the History toggle and the X3 takeover's Retry chip.
+  const loadHistory = useCallback(async () => {
     if (!drawingState) return
     setHistoryLoading(true); setHistoryErr(null)
     try {
-      setHistory(await getDrawingVersions(drawingState.drawing_id))
+      setHistory(await getDrawingVersions(mock, drawingState.drawing_id))
     } catch (e) {
-      setHistoryErr(String(e.message || e)); setHistory(null)
+      setHistoryErr(humanizeError(e)); setHistory(null)
     } finally {
       setHistoryLoading(false)
     }
-  }, [historyOpen, drawingState])
+  }, [mock, drawingState])
+
+  const onToggleHistory = useCallback(async () => {
+    if (historyOpen) { setHistoryOpen(false); return }
+    setHistoryOpen(true)
+    loadHistory()
+  }, [historyOpen, loadHistory])
 
   // Read-only preview of a version. Head -> restore head + clear preview; any
   // other version -> seat that intake in the viewer WITHOUT touching head/latest
@@ -779,7 +850,7 @@ export default function App() {
     if (!drawingState) return
     const isHead = v === drawingState.head
     try {
-      const view = await getDrawingIntake(drawingState.drawing_id, isHead ? 'head' : v)
+      const view = await getDrawingIntake(mock, drawingState.drawing_id, isHead ? 'head' : v)
       viewerRef.current?.applyVersion(view.intake)
       setSelectedHandle(null)
       if (isHead) {
@@ -791,9 +862,9 @@ export default function App() {
         setOverlayStale(true)           // last run's overlay describes a different version
       }
     } catch (e) {
-      setHistoryErr(String(e.message || e))
+      setHistoryErr(humanizeError(e))
     }
-  }, [drawingState])
+  }, [mock, drawingState])
 
   const onBackToHead = useCallback(() => {
     if (drawingState) onPreviewVersion(drawingState.head)
@@ -806,7 +877,7 @@ export default function App() {
     try {
       setWorkspace(await openProject(pid, orgId))
     } catch (e) {
-      setWorkspace(null); setProjectsErr(String(e.message || e))
+      setWorkspace(null); setProjectsErr(humanizeError(e))
     } finally {
       setWsLoading(false)
     }
@@ -841,7 +912,7 @@ export default function App() {
       const id = org.org_id || org.id
       setStoredOrgId(id); setOrgId(id); setProjects([])
     } catch (e) {
-      setProjectsErr(String(e.message || e))
+      setProjectsErr(humanizeError(e))
     } finally {
       setOrgBusy(false)
     }
@@ -858,7 +929,7 @@ export default function App() {
       setProjects((prev) => [...prev, p])
       await onOpenProject(p.project_id || p.id)
     } catch (e) {
-      setProjectsErr(String(e.message || e))
+      setProjectsErr(humanizeError(e))
     } finally {
       setProjectBusy(false)
     }
@@ -880,7 +951,7 @@ export default function App() {
     setSelectedTool(tool)
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
-    setOverlayStale(false); setCurrentJobId(null)
+    setOverlayStale(false); setCurrentJobId(null); setRefreshFail(null)
     lastRunRef.current = { tool, params }
     // feed the picked entity to the tool so an edit tool can target it. A write
     // tool (delete-marked-panel) reads `handle`, so map the selection onto it
@@ -921,14 +992,37 @@ export default function App() {
       if (!mock && env?.ok && env.result?.new_version) {
         const nv = env.result.new_version
         try {
-          const view = await getDrawingIntake(nv.drawing_id, 'head')
+          const view = await getDrawingIntake(mock, nv.drawing_id, 'head')
           seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
         } catch {
-          showToast({ text: `Version ${nv.version} created — viewer refresh failed` })
+          // Completed act -> plain NT2 toast; the failed refresh surfaces as an
+          // X1 red row at the viewer card (a failed act is never a toast).
+          showToast({ text: `Version ${nv.version} created` })
+          setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
+        }
+      }
+      // MOCK write loop (M3): the same beat, served by the in-memory chain —
+      // commit v2 locally, then seat it through the identical seatVersion path
+      // so Undo / Redo / History light up in the demo.
+      if (mock && env?.ok && env.result?.new_version) {
+        const nv = env.result.new_version
+        // The engine's `new_version.version` is hardcoded to 2; only the chain
+        // knows the real appended version, so a SECOND delete must read v3 here.
+        let commit = null
+        try {
+          if (!mockVersions.isSeeded() && intake) mockVersions.seedBase(intake)
+          commit = mockVersions.applyDelete(env.result.removed)
+          const view = await getDrawingIntake(mock, nv.drawing_id, 'head')
+          seatVersion(view, nv.drawing_id, `Version ${commit.version} created`)
+        } catch {
+          // Completed act -> plain NT2 toast; the failed refresh surfaces as an
+          // X1 red row at the viewer card (a failed act is never a toast).
+          showToast({ text: `Version ${commit?.version ?? nv.version} created` })
+          setRefreshFail({ drawing_id: nv.drawing_id, version: commit?.version ?? nv.version })
         }
       }
     } catch (e) {
-      if (runSeqRef.current === seq) setRunErr(String(e.message || e))
+      if (runSeqRef.current === seq) setRunErr(humanizeError(e))
     } finally {
       if (runSeqRef.current === seq) {
         setRunning(false)
@@ -940,7 +1034,7 @@ export default function App() {
         if (openProjectId) rehydrate()
       }
     }
-  }, [mock, shown, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
+  }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
       loadCheckout, writeLocked, openProjectId, orgId, rehydrate, showToast, viewResult])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
@@ -985,28 +1079,45 @@ export default function App() {
     }
   }, [mock, markRunning, refreshJobs, showToast, viewResult])
 
+  // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
+  const onRetryViewerRefresh = useCallback(async () => {
+    if (!refreshFail) return
+    try {
+      const view = await getDrawingIntake(mock, refreshFail.drawing_id, 'head')
+      seatVersion(view, refreshFail.drawing_id, null)
+      setRefreshFail(null)
+    } catch { /* still failing — the X1 row stays */ }
+  }, [mock, refreshFail, seatVersion])
+
   const onAuthor = useCallback(async (description) => {
-    const res = await authorTool(mock, description)
-    setTools((prev) => {
-      const rest = prev.filter((t) => t.name !== res.tool.name)
-      return [...rest, res.tool]
-    })
-    // Re-group the catalog so the new tool lands in "Custom authored tools"
-    // (visible re-fetch of the grouped capabilities).
-    loadCatalog()
-    // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
-    // it is visible even when the author section is collapsed / scrolled away.
-    showToast({
-      text: `Tool authored — ${res.tool.name}`,
-      action: {
-        label: 'View',
-        onClick: () => {
-          setAuthorOpen(true)
-          setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+    // Every authoring call funnels through here, so this is where the tour's
+    // build beat learns it has actually landed (onCannedPrompt deliberately
+    // does NOT flip `landed` for the build lane — see its finally).
+    try {
+      const res = await authorTool(mock, description)
+      setTools((prev) => {
+        const rest = prev.filter((t) => t.name !== res.tool.name)
+        return [...rest, res.tool]
+      })
+      // Re-group the catalog so the new tool lands in "Custom authored tools"
+      // (visible re-fetch of the grouped capabilities).
+      loadCatalog()
+      // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
+      // it is visible even when the author section is collapsed / scrolled away.
+      showToast({
+        text: `Tool authored — ${res.tool.name}`,
+        action: {
+          label: 'View',
+          onClick: () => {
+            setAuthorOpen(true)
+            setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+          },
         },
-      },
-    })
-    return res
+      })
+      return res
+    } finally {
+      setTourLanded(true)
+    }
   }, [mock, loadCatalog, showToast])
 
   // "Run it now" from the author card — prefill the RUN lane (RoutePanel) with
@@ -1065,9 +1176,11 @@ export default function App() {
     }
   }, [])
 
+  // `override` is an optional explicit string — the guided tour's canned prompt,
+  // or the menu-picked "/tool" (state hasn't flushed yet). Click handlers pass
+  // an event object, which is NOT a string, so the normal "dispatch what's in
+  // the bar" path is untouched.
   const onDispatch = useCallback(async (override) => {
-    // `override` carries the menu-picked "/tool" (state hasn't flushed yet);
-    // the Dispatch button's onClick passes a click event — ignore non-strings.
     const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
     // Slash fast-path: "/name" is an EXPLICIT invocation — no NL router call.
@@ -1153,10 +1266,13 @@ export default function App() {
           }
         }
       }
+      // main made onDispatch return the routed decision to its callers; the
+      // agent tier above is additive, so the return contract is preserved.
+      return r
     } catch (e) {
       // A failed routing call is a FAILED act — it rides the red strip above
       // the well (with Retry + its key), never a fake confidence-0 route card.
-      setRouteErr(String(e.message || e))
+      setRouteErr(humanizeError(e))
     } finally {
       setRouting(false)
     }
@@ -1185,6 +1301,54 @@ export default function App() {
     setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
   }, [])
 
+  // --- M5 guided tour: canned prompts ride the REAL handlers ----------------
+  // The tour types its beat into the real command bar, dispatches it through the
+  // real nl-prompt router (onDispatch), and — for a read-only run beat — runs it
+  // through the real onRun path. NOTHING here fabricates a result: the numbers
+  // on screen come out of the same mock engine a human would have driven.
+  // Write beats (the versioned delete) deliberately stop at the confirm card;
+  // paid/destructive actions never auto-execute, tour or not.
+  const onCannedPrompt = useCallback(async (text, step) => {
+    if (!text) return
+    // Cancellation token: Exit/Skip must stop the bar mid-character instead of
+    // typing on after the tour is gone, and a rapid Back must supersede the
+    // in-flight beat rather than interleave two typing loops.
+    const seq = (cannedSeq.current += 1)
+    setTourLanded(false)
+    // self-type into the real bar so the audience sees the sentence being written
+    setRoute(null); setRouteErr(null)
+    for (let i = 1; i <= text.length; i += 1) {
+      if (cannedSeq.current !== seq) return
+      setPrompt(text.slice(0, i))
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((res) => setTimeout(res, 22))
+    }
+    if (cannedSeq.current !== seq) return
+    let r = null
+    try {
+      r = await onDispatch(text)
+      if (cannedSeq.current !== seq) return
+      if (r && r.lane === 'run' && step?.action === 'run') {
+        const toolObj = tools.find((t) => t.name === r.tool)
+        const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
+        if (toolObj && !isWrite) await onRun(toolObj, r.params || {})
+      }
+    } finally {
+      // The BUILD lane hands off to AuthorPanel's auto-submit, whose onAuthor
+      // finally owns `landed` — flipping it here would unlock Next before the
+      // tool is actually authored, which is the whole differentiator beat.
+      if (cannedSeq.current === seq && !(r && r.lane === 'build')) setTourLanded(true)
+    }
+  }, [onDispatch, onRun, tools])
+
+  const onTourExit = useCallback(() => {
+    // Leaving the tour keeps you exactly where you are — in mock, on the same
+    // drawing, with your last real result on screen.
+    cannedSeq.current += 1   // kills any in-flight typing / dispatch
+    setTourOn(false)
+    setTourLanded(true)
+  }, [])
+
   // Click a terminal job in the rail -> open its DT2 provenance drawer (over
   // the rail — the center pane's current result stays untouched; "Show in
   // result pane" is the drawer's one quiet action).
@@ -1197,12 +1361,19 @@ export default function App() {
         `job ${job.job_id}`,
         `tool ${rec.tool || job.tool || '—'}`,
         `status ${rec.status}`,
-        `version ${env?.result?.new_version ? env.result.new_version.version : (env?.version ?? '—')}`,
+        // On the mock path the engine's new_version.version is a hardcoded 2 —
+        // the chain owns the real head, so read it there.
+        `version ${env?.result?.new_version
+          ? (mockVersions.isSeeded() ? mockVersions.list().head : env.result.new_version.version)
+          : (env?.version ?? '—')}`,
         `timing ${rec.elapsed_ms != null ? `${rec.elapsed_ms} ms` : (env?.timing_ms != null ? `${env.timing_ms} ms` : '—')}`,
         `cost ${env?.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '—'}`,
         `degraded ${(env?.degraded_mode || rec.degraded_mode) ? 'yes — local fallback' : 'no'}`,
       ]
-      if (env?.error) rows.push(`error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+      // A mock envelope can carry a bare string error — don't render a blank row.
+      if (env?.error) rows.push(typeof env.error === 'string'
+        ? `error ${env.error}`
+        : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
       setDrawer({
         title: `${rec.tool || job.tool || 'job'} · provenance`,
         rows,
@@ -1220,7 +1391,7 @@ export default function App() {
         foot: 'Esc closes — the rail behind never re-flows.',
       })
     } catch (e) {
-      setRunErr(String(e.message || e))
+      setRunErr(humanizeError(e))
     }
   }, [])
 
@@ -1231,12 +1402,18 @@ export default function App() {
     const rows = [
       `job ${currentJobId || '—'}`,
       `tool ${env.tool || selectedTool?.name || '—'}`,
-      `version ${env.result?.new_version ? env.result.new_version.version : (env.version ?? '—')}`,
+      // Mock path: the engine hardcodes new_version.version to 2; the chain
+      // (seeded only in mock) owns the real head.
+      `version ${env.result?.new_version
+        ? (mockVersions.isSeeded() ? mockVersions.list().head : env.result.new_version.version)
+        : (env.version ?? '—')}`,
       `timing ${env.timing_ms != null ? `${env.timing_ms} ms` : '—'}`,
       `cost ${env.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '—'}`,
       `degraded ${env.degraded_mode ? 'yes — local fallback' : 'no'}`,
     ]
-    if (env.error) rows.push(`error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+    if (env.error) rows.push(typeof env.error === 'string'
+      ? `error ${env.error}`
+      : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
     setDrawer({
       title: 'Run · provenance',
       rows,
@@ -1262,7 +1439,7 @@ export default function App() {
         rows.push(`cap $${Number(usage.cap.remaining).toFixed(2)} left`)
       }
     }
-    rows.push('build v2026.07')
+    rows.push(`build ${__BUILD_HASH__}`)
     setDrawer({
       title: 'Session · provenance',
       rows,
@@ -1284,10 +1461,37 @@ export default function App() {
     refreshJobs()
   }, [mock, currentJobId, refreshJobs])
 
+  // R ladder (item D): every displayed R keycap must be live, and only the
+  // HIGHEST-PRIORITY visible error responds — one keypress, one retry, never
+  // two. ResultPanel owns R for run/result errors via its own window listener
+  // (rung 1 — the global ladder stands down for it); the rungs below cover the
+  // routing strip, the history takeover, the tools-catalog row, the families
+  // row, and the post-write refresh row. Rows render their R keycap only when
+  // they are the active rung (rTarget), so a shown cap is never inert.
+  const anyFamilyOpen = useMemo(
+    () => catalog.families.some((f) => openFamilies[f.family_id]),
+    [catalog, openFamilies],
+  )
+  // Mirrors ResultPanel's own canRetryKey condition (its listener is authoritative).
+  const resultOwnsR = !running && (!!runErr ||
+    !!(result && result.error && !result.entitlement_required && result.error.retryable))
+  const rTarget = useMemo(() => {
+    if (running) return null
+    if (resultOwnsR) return 'result' // ResultPanel's listener handles it
+    if (routeErr) return 'route'
+    if (historyOpen && historyErr && !historyLoading) return 'history'
+    if (toolsErr && (catalogErr ? toolsOpen : anyFamilyOpen)) return 'tools'
+    if (catalogErr && !(!mock && authRequired)) return 'catalog'
+    if (refreshFail) return 'refresh'
+    return null
+  }, [running, resultOwnsR, routeErr, historyOpen, historyErr, historyLoading,
+      toolsErr, catalogErr, toolsOpen, anyFamilyOpen, mock, authRequired, refreshFail])
+
   // Global key ladder: ⌘K summons the bar; Esc closes the topmost surface
-  // (drawer > history > route/failed strip > running run > selection); R
-  // retries the visible failed strip (outside text inputs); any OTHER bare
-  // printable keystroke falls into the prompt bar (type-to-fall-through).
+  // (drawer > history > route/failed strip > running run > selection > open
+  // project); R retries the highest-priority visible error (outside text
+  // inputs); any OTHER bare printable keystroke falls into the prompt bar
+  // (type-to-fall-through).
   useEffect(() => {
     const onKey = (e) => {
       const tag = ((e.target && e.target.tagName) || '').toLowerCase()
@@ -1303,15 +1507,24 @@ export default function App() {
         if (route) { setRoute(null); return }
         if (routeErr || runErr) { setRouteErr(null); setRunErr(null); return }
         if (running) { interruptRun(); return }
-        if (selectedHandle) { setSelectedHandle(null) }
+        if (selectedHandle) { setSelectedHandle(null); return }
+        // Bottom rung: the WorkspaceSummary Esc cap — close the open project
+        // only once every higher surface has already yielded.
+        if (openProjectId) { onCloseProject() }
         return
       }
-      // R retries the ROUTING failed strip only — ResultPanel owns the R mnemonic
-      // for run errors (its own window listener; duplicating it here double-fired
-      // the retry: two POST /api/run from one keypress).
-      if (!typing && (e.key === 'r' || e.key === 'R') && !running && routeErr && !runErr) {
+      // R: fire the ladder's active rung. rTarget === 'result' means
+      // ResultPanel's own listener owns the keypress (duplicating it here
+      // double-fired the retry: two POST /api/run from one keypress).
+      if (!typing && (e.key === 'r' || e.key === 'R') &&
+          !e.metaKey && !e.ctrlKey && !e.altKey &&
+          rTarget && rTarget !== 'result') {
         e.preventDefault()
-        onDispatch()
+        if (rTarget === 'route') onDispatch()
+        else if (rTarget === 'history') loadHistory()
+        else if (rTarget === 'tools') retryTools()
+        else if (rTarget === 'catalog') loadCatalog()
+        else if (rTarget === 'refresh') onRetryViewerRefresh()
         return
       }
       // Type-to-fall-through (operator rule): a bare printable keystroke on the
@@ -1333,7 +1546,8 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
-      interruptRun, onDispatch])
+      interruptRun, onDispatch, openProjectId, onCloseProject, rTarget,
+      loadHistory, retryTools, loadCatalog, onRetryViewerRefresh])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
@@ -1457,7 +1671,12 @@ export default function App() {
 
   // NR: the active ongoing conditions, docked at the result pane. Two or more
   // collapse to ONE line with a count instead of stacking banners.
-  const signedOut = !mock && authRequired // live, no session -> calm gate, hush the 401 red
+  // live, no session -> calm gate, hush the 401 red. A 401 on a SIGNED-IN
+  // session of an auth-unconfigured build is different: the token was rejected
+  // and there is no way to re-auth, so it is a real failure — fall through to
+  // the pane-fail surface (Retry + Back to the demo), never the inert overlay
+  // (round-2 review F1: that state was an unrecoverable blank).
+  const signedOut = !mock && authRequired && (authConfigured || !isSignedIn())
 
   const advisories = [
     quotaShown && 'spend cap',
@@ -1466,10 +1685,37 @@ export default function App() {
     degraded && 'local fallback',
   ].filter(Boolean)
 
+  // Publish the MEASURED chrome heights that structural.css's drawer offsets
+  // read. The header wraps on a phone (~95px, not the hardcoded 49px fallback),
+  // so without this the DT2 drawer paints over the header; on desktop it fixes a
+  // latent 7px gap under a 42px header. ResizeObserver keeps it live on rotate.
+  useLayoutEffect(() => {
+    const h = document.querySelector('header.top')
+    const f = document.querySelector('footer.foot-bar')
+    if (!h || !f) return undefined
+    const sync = () => {
+      const r = document.documentElement.style
+      r.setProperty('--drawer-top', `${Math.round(h.getBoundingClientRect().height)}px`)
+      r.setProperty('--drawer-bottom', `${Math.round(f.getBoundingClientRect().height)}px`)
+    }
+    sync()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver(sync)
+    ro.observe(h); ro.observe(f)
+    return () => ro.disconnect()
+  }, [])
+
+  // M1 exit fades for the parent-mounted panels: hold the mount through the
+  // 180 ms .exit fade (useExit follows Toast.jsx's pattern).
+  const historyExit = useExit(historyOpen)
+  // The internal ops / tenant kill-switch drawer must never be reachable from a
+  // public demo build — `?ops=1` is a no-op in mock.
+  const opsExit = useExit(opsFlag && !mock && !opsDismissed)
+
   return (
     <div className="app">
       <header className="top">
-        <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf / unified surface</div>
+        <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
         <div className="proj">
           <ProjectSwitcher
             mock={mock}
@@ -1489,33 +1735,40 @@ export default function App() {
           <span className="meta">
             {shown ? `${shown.polylines.length} polylines · ${shown.layers.length} layers` : 'loading'}
           </span>
-          <span className={`tag ${mock ? 'amber' : 'live'}`}>{mock ? 'mock data' : 'in design'}</span>
+          {mock && <span className="tag amber">Demo</span>}
         </div>
         <div className="spacer" />
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
           <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={mock}
-              onChange={(e) => setMock(e.target.checked)}
-              aria-label="Use mock data (off = live backend)"
+          {devControls && (
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={mock}
+                disabled={tourOn}
+                onChange={(e) => setMock(e.target.checked)}
+                aria-label="Use mock data (off = live backend)"
+              />
+              <span>Mock</span>
+            </label>
+          )}
+          {/* Live-only chrome (Claude-account terminal panel) is hidden in the
+              demo — it can't work signed-out. Guarded on !mock. */}
+          {!mock && (
+            <ClaudeAccountPanel
+              mock={mock}
+              grant={grant}
+              loading={grantLoading}
+              busy={grantBusy}
+              error={grantErr}
+              open={claudeOpen}
+              onToggle={setClaudeOpen}
+              onLink={onLinkClaude}
+              onUnlink={onUnlinkClaude}
             />
-            <span>Mock</span>
-          </label>
-          <ClaudeAccountPanel
-            mock={mock}
-            grant={grant}
-            loading={grantLoading}
-            busy={grantBusy}
-            error={grantErr}
-            open={claudeOpen}
-            onToggle={setClaudeOpen}
-            onLink={onLinkClaude}
-            onUnlink={onUnlinkClaude}
-          />
+          )}
         </div>
       </header>
 
@@ -1526,13 +1779,20 @@ export default function App() {
         </div>
         {catalogErr && !signedOut && (
           <>
-            <div className="inline-error" style={{ margin: '0 4px 8px' }}>Couldn’t load families: {catalogErr}</div>
+            <div className="inline-error" style={{ margin: '0 4px 4px' }}>
+              Couldn’t load families: {catalogErr}
+              <button type="button" className="chip-act" onClick={loadCatalog}>Retry</button>
+              {rTarget === 'catalog' && <span className="key" aria-hidden="true">R</span>}
+            </div>
+            <div className="dim" style={{ margin: '0 4px 8px', fontSize: 11.5 }}>Showing the flat tool list instead.</div>
             <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={() => setToolsOpen((o) => !o)}>
               <ToolsPanel
                 tools={tools}
                 writeLocked={writeLocked}
                 writeEntitled={canRunWrite}
                 error={toolsErr}
+                onRetry={retryTools}
+                retryKey={rTarget === 'tools'}
                 running={running || !!previewing}
                 selectedTool={selectedTool}
                 onRun={onRun}
@@ -1563,6 +1823,8 @@ export default function App() {
               writeEntitled={canRunWrite}
               subtitle={fam.description}
               error={toolsErr}
+              onRetry={retryTools}
+              retryKey={rTarget === 'tools'}
               running={running || !!previewing}
               selectedTool={selectedTool}
               onRun={onRun}
@@ -1572,6 +1834,7 @@ export default function App() {
         ))}
         <Section
           title="Author a tool"
+          className="author-section"
           open={authorOpen}
           onToggle={() => setAuthorOpen((o) => !o)}
           innerRef={authorSectionRef}
@@ -1581,6 +1844,7 @@ export default function App() {
             onUseAuthored={onUseAuthored}
             seed={authorSeed}
             seedSignal={authorSignal}
+            seedAutoSubmit={tourOn}
             notLinked={claudeNotLinked}
             onLinkClaude={() => setClaudeOpen(true)}
             buildEntitled={canBuild}
@@ -1590,11 +1854,20 @@ export default function App() {
 
       <div className="center-col">
         <main className="center-scroll">
-        {signedOut && <SignedOutGate onDemo={() => setMock(true)} onSignIn={authConfigured ? login : null} />}
-        <div className="kicker">Home · one prompt, three lanes</div>
+        {/* the tour carries its own persistent banner — don't stack two */}
+        {mock && !tourOn && <DemoBanner />}
+        {/* There is a way back IN: leaving the tour (Skip / Exit) used to be
+            one-way, with a hard reload the only re-entry — forbidden on stage. */}
+        {mock && !tourOn && tourAvailable.current && (
+          <button type="button" className="chip-neutral" onClick={() => { setTourLanded(true); setTourOn(true) }}>
+            Restart guided tour
+          </button>
+        )}
+        {signedOut && authConfigured && <SignedOutGate onDemo={() => setMock(true)} onSignIn={login} />}
+        <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
-          Try <b>count panels per layer</b> — one prompt, routed across <b>Run</b> · <b>Solve</b> ·{' '}
+          Try <b>count panels per layer</b> — one prompt, routed across <b>Run</b> ·{' '}
           <b>Build</b>. You confirm before anything runs — paid actions never auto-execute.
         </div>
 
@@ -1605,7 +1878,9 @@ export default function App() {
         <div className="workspace-card enter" style={{ '--rank': 1 }} ref={workspaceCardRef}>
           <div className="viewer-toolbar">
             <div className="viewer-title">
-              {shown ? `${projectName}.dwg` : 'loading…'}
+              {/* One loading voice per pane — the pulse-dot line in the viewer
+                  announces loading; the title placeholder stays a muted dash. */}
+              {shown ? `${projectName}.dwg` : <span className="dim">—</span>}
               {shown && (
                 <span className="dim">
                   {' · '}{shown.polylines.length} polylines
@@ -1630,7 +1905,7 @@ export default function App() {
                   onRelease={onReleaseCheckout}
                 />
               )}
-              {!mock && drawingState && (
+              {drawingState && (
                 <>
                   <button
                     className="btn ghost"
@@ -1655,7 +1930,7 @@ export default function App() {
                     >
                       History{previewing ? ` · v${previewing.version}` : ''}
                     </button>
-                    {historyOpen && (
+                    {historyExit.shown && (
                       <VersionHistory
                         data={history}
                         error={historyErr}
@@ -1664,6 +1939,9 @@ export default function App() {
                         onPreview={onPreviewVersion}
                         onBackToHead={onBackToHead}
                         onClose={() => setHistoryOpen(false)}
+                        onRetry={loadHistory}
+                        retryKey={rTarget === 'history'}
+                        exiting={historyExit.exiting}
                       />
                     )}
                   </div>
@@ -1686,8 +1964,30 @@ export default function App() {
               <button className="btn ghost" onClick={() => viewerRef.current?.fit()}>Fit to bounds</button>
             </div>
           </div>
+          {/* X1: a failed post-write viewer refresh — red row + Retry + honest
+              fallback note (the completion itself already toasted plainly). */}
+          {refreshFail && (
+            <div className="inline-error" style={{ margin: '0 0 8px' }}>
+              Couldn’t refresh the viewer — showing the previous version
+              <button type="button" className="chip-act" onClick={onRetryViewerRefresh}>Retry</button>
+              {rTarget === 'refresh' && <span className="key" aria-hidden="true">R</span>}
+            </div>
+          )}
           <div className="viewer-wrap">
-            {loadErr && !signedOut && <div className="overlay-msg error">Couldn’t load drawing — {loadErr}</div>}
+            {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
+            {loadErr && !signedOut && (
+              <div className="pane-fail" role="alert" style={{ position: 'absolute', inset: 0 }}>
+                <span className="pane-fail-title"><span className="dot red" aria-hidden="true" />Couldn’t load drawing</span>
+                <span className="pane-fail-reason">{loadErr}</span>
+                <button className="chip-act" onClick={() => setIntakeRetryKey((k) => k + 1)}>Retry</button>
+                {/* There is always a way home: in live mode a dead backend makes
+                    Retry unwinnable, so offer the same demo escape the
+                    SignedOutGate already gives. */}
+                {!mock && (
+                  <button className="chip-act" onClick={() => setMock(true)}>Back to the demo</button>
+                )}
+              </div>
+            )}
             {signedOut && <div className="overlay-msg">Sign in or explore the demo to load a drawing.</div>}
             {!intake && !loadErr && !signedOut && (
               // Indeterminate load: content-shaped pulse dot + verb, top-left —
@@ -1697,6 +1997,7 @@ export default function App() {
               </div>
             )}
             {intake && (
+              <Suspense fallback={<ViewerSkeleton />}>
               <Viewer
                 ref={viewerRef}
                 intake={intake}
@@ -1709,6 +2010,7 @@ export default function App() {
                 onSelectEntity={setSelectedHandle}
                 pendingEdit={pendingEdit || writeGhost}
               />
+              </Suspense>
             )}
             {shown && (
               <Legend
@@ -1726,35 +2028,6 @@ export default function App() {
         </div>
 
         <div className="result-block enter" style={{ '--rank': 2 }} ref={resultBlockRef}>
-          {/* NR banners dock at the affected pane (the result); 2+ conditions
-              collapse to one line with a count instead of stacking. */}
-          {advisories.length >= 2 ? (
-            <div className="banner">
-              <span>{advisories.length} advisories — {advisories.join(' · ')}</span>
-            </div>
-          ) : (
-            <>
-              {quotaShown && <QuotaCard message={quotaShown.message} remaining={usage?.cap?.remaining} onAction={openSessionDetails} />}
-              {runQuotaShown && (
-                <QuotaCard
-                  kind="daily_runs"
-                  message={runQuotaShown.error?.message}
-                  tier={runQuotaShown.tier}
-                  limit={runQuotaShown.limit}
-                  used={runQuotaShown.used}
-                  onAction={openSessionDetails}
-                />
-              )}
-              {entitlementError && (
-                <EntitlementNotice
-                  required={entitlementError.required}
-                  tier={entitlementError.tier || entTier}
-                  message={entitlementError.error?.message}
-                />
-              )}
-              {degraded && <DegradedBanner />}
-            </>
-          )}
           <ResultPanel
             running={running}
             runStatus={runStatus}
@@ -1764,6 +2037,38 @@ export default function App() {
             result={result}
             tool={selectedTool}
             onRetry={onRetry}
+            notices={
+              /* NR banners dock UNDER the header of the affected pane (the
+                 result) — rendered right after its <h3>; 2+ conditions collapse
+                 to one line with a count instead of stacking. */
+              advisories.length >= 2 ? (
+                <div className="banner">
+                  <span>{advisories.length} advisories — {advisories.join(' · ')}</span>
+                </div>
+              ) : (
+                <>
+                  {quotaShown && <QuotaCard message={quotaShown.message} remaining={usage?.cap?.remaining} onAction={openSessionDetails} />}
+                  {runQuotaShown && (
+                    <QuotaCard
+                      kind="daily_runs"
+                      message={runQuotaShown.error?.message}
+                      tier={runQuotaShown.tier}
+                      limit={runQuotaShown.limit}
+                      used={runQuotaShown.used}
+                      onAction={openSessionDetails}
+                    />
+                  )}
+                  {entitlementError && (
+                    <EntitlementNotice
+                      required={entitlementError.required}
+                      tier={entitlementError.tier || entTier}
+                      message={entitlementError.error?.message}
+                    />
+                  )}
+                  {degraded && <DegradedBanner />}
+                </>
+              )
+            }
           />
           {/* Quiet Details -> the run's DT2 provenance drawer (receipt area). */}
           {result && !running && (
@@ -1867,8 +2172,28 @@ export default function App() {
             projectName={currentProjectName || projectName}
             inputRef={barInputRef}
             routeActive={!!route}
+            onOpenAuthor={onOpenAuthor}
             tools={slashTools}
           />
+        </div>
+
+        {/* The golden path's payoff (result numbers) and the running strip are
+            both silent to a screen reader. One PERMANENTLY-mounted polite region
+            announces the mutation; styles inline because no .sr-only utility
+            exists in the sheet. */}
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'absolute', width: 1, height: 1, padding: 0, margin: -1,
+            overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
+          }}
+        >
+          {running
+            ? `Running ${selectedTool?.name || 'tool'}`
+            : result?.ok
+              ? `${result.tool} complete${result.result?.total != null ? ` — total ${Number(result.result.total).toLocaleString()}` : ''}`
+              : ''}
         </div>
 
         <Toast toast={toast} onDone={onToastDone} />
@@ -1900,6 +2225,11 @@ export default function App() {
           health.aps_live
             ? <span className="foot-stat"><span className="dot" aria-hidden="true" />backend · <span className="ok-txt">cloud live</span></span>
             : <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">local only</span></span>
+        ) : !authConfigured ? (
+          /* Gating window (a VITE_MOCK=0 build with Auth0 unconfigured, before the
+             401 auto-fallback flips to mock): never claim a green "live" state we
+             haven't confirmed. Neutral until the fallback lands. */
+          <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">connecting…</span></span>
         ) : (
           <span className="foot-stat"><span className="dot" aria-hidden="true" />backend · <span className="ok-txt">live</span></span>
         )}
@@ -1919,14 +2249,25 @@ export default function App() {
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
-        <span style={{ marginLeft: 'auto' }}>build v2026.07 · {mock ? 'sample data' : 'live'}</span>
+        <span style={{ marginLeft: 'auto' }}>build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span> · {mock ? 'sample data' : 'live'}</span>
       </footer>
 
-      {opsFlag && !opsDismissed && <OpsDrawer onDismiss={() => setOpsDismissed(true)} />}
+      {opsExit.shown && <OpsDrawer onDismiss={() => setOpsDismissed(true)} exiting={opsExit.exiting} />}
 
       {/* DT2 drawer: fixed over the events rail (row 2, col 3) — the rail
           behind never re-flows. Esc (global ladder) or the header cap closes. */}
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
+
+      {/* M5: the ?demo=tour walkthrough. Mock-only — the tour drives real mock
+          handlers, so it must never point at a live/paid backend. */}
+      {mock && tourOn && (
+        <DemoTour
+          onCannedPrompt={onCannedPrompt}
+          onExit={onTourExit}
+          landed={tourLanded && !running && !routing}
+          busy={running || routing}
+        />
+      )}
     </div>
   )
 }

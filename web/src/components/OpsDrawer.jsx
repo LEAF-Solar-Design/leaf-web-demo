@@ -12,7 +12,8 @@ import './popovers.css'
 // renders a calm "ops role required" note; a load failure gets the centered
 // X3 takeover with a Retry chip. Clearly labelled Internal, distinct from the
 // tenant-facing app. Esc (key or cap) hides the drawer.
-export default function OpsDrawer({ onDismiss }) {
+// `exiting`: App holds the mount through the 180 ms M1 exit fade (useExit).
+export default function OpsDrawer({ onDismiss, exiting }) {
   const [tenants, setTenants] = useState(null)
   const [err, setErr] = useState(null)
   const [forbidden, setForbidden] = useState(false)
@@ -62,7 +63,7 @@ export default function OpsDrawer({ onDismiss }) {
   }, [load])
 
   return (
-    <aside className="drawer" role="region" aria-label="Internal ops">
+    <aside className={`drawer${exiting ? ' exit' : ''}`} role="region" aria-label="Internal ops">
       <div className="drawer-head">
         <span className="ops-badge">Internal</span>
         <span className="drawer-title">Ops · tenants</span>

@@ -39,6 +39,7 @@ from routers import (
     tools,
     usage,
 )
+from routers import site  # public marketing-site demo endpoints (site-demo lane)
 
 def _cors_origins() -> list[str]:
     """CORS allow-list, ENV-driven and default-deny in live-auth mode (F17).
@@ -85,6 +86,7 @@ app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spen
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 app.include_router(sessions.router)  # §18 agent spine: conversational sessions (proxy to harness /converse)
 app.include_router(agent.router)  # §18 agent spine: gate back-edge + approvals/audit/killswitch
+app.include_router(site.router)  # public site demo: /api/site/* (no auth by design, like /api/health)
 
 
 # --- platform Project/Job router (org-scoped persistence; platform/README.md) --- #

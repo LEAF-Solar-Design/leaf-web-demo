@@ -38,20 +38,23 @@ class _Response:
 def test_live_session_extracts_through_broker_only(monkeypatch):
     calls = []
 
-    def fake_post(url, *, json, timeout):
-        calls.append((url, json, timeout))
+    def fake_post(url, *, json, headers, timeout):
+        calls.append((url, json, headers, timeout))
         return _Response(200, {"intake": {"polylines": []}, "error": None,
                                "degraded_mode": False})
 
     monkeypatch.setattr(session_router.deps, "APS_LIVE", True)
     monkeypatch.setattr(session_router.broker_client, "broker_url", lambda: "http://broker:8140")
+    monkeypatch.setattr(session_router.broker_client, "broker_headers",
+                        lambda: {"X-Broker-Secret": "test-secret"})
     monkeypatch.setattr(session_router.requests, "post", fake_post)
 
     body = session_router.session(dwg="rooftop_demo", tenant="tenant-a")
 
     assert body["intake"] == {"polylines": []}
     assert calls == [("http://broker:8140/broker/extract",
-                      {"tenant_id": "tenant-a", "dwg": "rooftop_demo"}, 600)]
+                      {"tenant_id": "tenant-a", "dwg": "rooftop_demo"},
+                      {"X-Broker-Secret": "test-secret"}, 600)]
     source = Path(session_router.__file__).read_text(encoding="utf-8")
     assert "get_da_client" not in source
     assert "da.client" not in source

@@ -80,13 +80,15 @@ export function EntitlementNotice({ required, tier, message }) {
     : (required || 'this capability')
   return (
     <div className="banner quota" role="status">
-      <div>
-        <b>This action needs a higher plan.</b>{' '}
-        {message || `Your ${tier || 'current'} plan doesn’t include ${need}.`}
-        <div className="quota-sub">
-          Nothing ran — it was blocked before any billable work. Upgrade your plan to run {need}.
-        </div>
-      </div>
+      <b>Plan</b>
+      <span className="banner-rest">
+        {' — '}
+        {message || `your ${tier || 'current'} plan doesn’t include ${need}`}
+        {'; nothing ran — it was blocked before any billable work.'}
+      </span>
+      <span className="banner-tail">
+        <span className="banner-since">clears when the plan includes it</span>
+      </span>
     </div>
   )
 }

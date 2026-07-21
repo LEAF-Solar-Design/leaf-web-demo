@@ -94,9 +94,23 @@ main.center-scroll {
     grid-row: auto;
     grid-column: 1;
   }
+  /* NOTE: the small-screen .bar-dock override (position:fixed) canNOT live in
+     this file. main.jsx's `import App` is evaluated before its `import
+     './styles.css'`, so this sheet is emitted FIRST and styles.css's
+     unconditional `.bar-dock { position: absolute }` (styles.css:1203) would
+     win the tie at equal specificity — media queries add no specificity. The
+     rule therefore lives in styles.css's @media (max-width: 980px) block. */
+
+  /* .app releases its 100vh trap at this breakpoint (styles.css), so the
+     DOCUMENT scrolls and this inner scrollport is retired. */
+  main.center-scroll { overflow-y: visible; }
   .drawer-layer {
     position: fixed;
-    inset: 49px 0 30px auto;
+    /* Honor the same vars .drawer-fixed reads instead of duplicating magic
+       numbers: header.top wraps to ~95px on a 390px phone, so a hardcoded 49px
+       top paints the drawer OVER the header (it wins on z-index). Fallbacks
+       preserve today's behavior until App publishes measured values. */
+    inset: var(--drawer-top, 49px) 0 var(--drawer-bottom, 30px) auto;
     z-index: 60;
   }
   .drawer-layer > .drawer {
@@ -109,6 +123,19 @@ main.center-scroll {
    .drawer-layer's fixed inset/pointer-events from the 980px block still
    applies; only the panel's own width changes). */
 @media (max-width: 430px) {
+  /* Size the LAYER, not the child. The 980px block makes .drawer-layer fixed
+     with `inset: … auto` (left:auto), which shrink-to-fits it to its content;
+     `width:100%` on the child is then 100% of a shrink-to-fit parent — a
+     circular constraint that resolved to ~185px, NARROWER than the tablet case
+     it was meant to widen. Undoing left:auto gives the fixed layer the viewport
+     width; the child's width:100% then resolves against a real 390px box.
+     The child override must STAY: the 980px block's `width: min(340px, 92vw)`
+     comes after the unconditional base rule (:62) and would otherwise cap the
+     panel at 340px. .drawer-layer keeps pointer-events:none so the
+     now-full-width layer never swallows taps outside the panel. */
+  .drawer-layer {
+    left: 0;
+  }
   .drawer-layer > .drawer {
     width: 100%;
   }

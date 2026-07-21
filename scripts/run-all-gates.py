@@ -143,6 +143,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave5.py"), 14),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 11),
+        # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
+        # by hand — same gap this branch closed for its own suites.
+        Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
+              _py_pytest("tests/test_site.py"), 8),
         # --- conversational agent spine (CONTRACT-ADDENDUM section 18) --- #
         # Separate suites for the same reason as the waves above: the gate/ledger
         # suites share on-disk approval + audit state and the router suites toggle

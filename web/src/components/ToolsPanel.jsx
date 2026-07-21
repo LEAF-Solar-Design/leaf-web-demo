@@ -10,7 +10,7 @@ function ParamForm({ schema, values, onChange }) {
     <div className="params">
       {keys.map((k) => {
         const p = props[k]
-        const label = p.title || k
+        const label = sentence((p.title || k).replace(/_/g, ' '))
         const val = values[k] ?? p.default ?? (p.type === 'number' ? 0 : '')
         return (
           <label key={k} className="param">
@@ -62,7 +62,9 @@ function provenanceLine(t) {
   return parts.length ? parts.join(' · ') : null
 }
 
-export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool, onRetry, subtitle, writeLocked, writeEntitled = true }) {
+// `retryKey` (App's R ladder): the R keycap renders only while this row is the
+// ladder's active rung — a shown cap is never inert, never double-firing.
+export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool, onRetry, retryKey, subtitle, writeLocked, writeEntitled = true }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
@@ -73,6 +75,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
         <div className="inline-error">
           <span>Couldn’t load tools — {error}</span>
           <button className="chip-act" onClick={onRetry || (() => window.location.reload())}>Retry</button>
+          {retryKey && <span className="key" aria-hidden="true">R</span>}
         </div>
       )}
       <div className="tool-list">
