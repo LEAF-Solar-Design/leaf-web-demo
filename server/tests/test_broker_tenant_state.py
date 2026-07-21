@@ -141,3 +141,19 @@ def test_health_disabled_list_agrees_with_the_kill_switch(tmp_path, monkeypatch)
     for tid in ("t-on", "t-null", "t-badrec", "t-corrupt"):
         assert tid in listed and broker.tenant_disabled(tid) is True, tid
     assert "t-off" not in listed and broker.tenant_disabled("t-off") is False
+
+
+def test_ops_write_refuses_a_corrupt_record_instead_of_typeerror(tmp_path, monkeypatch):
+    """set_tenant_disabled used setdefault(tid, {}), which returns a present
+    corrupt record unchanged and then raises a bare TypeError on item-assign.
+    Refuse cleanly (BrokerStateError) rather than 500, and never log a kill as
+    applied while the on-disk record stays corrupt. Absent + valid still work."""
+    broker = _broker_with_tenants(
+        tmp_path, monkeypatch, '{"t-bad": ["garbage"], "t-ok": {"disabled": false}}')
+    with pytest.raises(broker.BrokerStateError):
+        broker.set_tenant_disabled("t-bad", True)
+    # a real record and a brand-new tenant both write fine
+    broker.set_tenant_disabled("t-ok", True)
+    assert broker.tenant_disabled("t-ok") is True
+    broker.set_tenant_disabled("t-fresh", True)
+    assert broker.tenant_disabled("t-fresh") is True

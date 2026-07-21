@@ -188,8 +188,22 @@ def tenant_disabled(tid: str) -> bool:
 
 def set_tenant_disabled(tid: str, disabled: bool) -> None:
     with _tenants_lock:
-        _tenants.setdefault(tid, {})["disabled"] = disabled
-        _tenants[tid]["updated_at"] = time.time()
+        existing = _tenants.get(tid, _MISSING_TENANT)
+        if existing is _MISSING_TENANT:
+            rec: Dict[str, Any] = {}
+            _tenants[tid] = rec
+        elif isinstance(existing, dict):
+            rec = existing
+        else:
+            # A present-but-corrupt record: setdefault would return it unchanged
+            # and the item-assignment below would raise a bare TypeError. Refuse
+            # cleanly instead — and do NOT overwrite it blind, which could log a
+            # kill as applied while the on-disk state stays corrupt.
+            raise BrokerStateError(
+                f"tenant {tid!r} has a corrupt record ({type(existing).__name__}); "
+                f"refusing to write over it — repair broker_tenants.json first")
+        rec["disabled"] = disabled
+        rec["updated_at"] = time.time()
         _save_tenants(_tenants)
 
 
