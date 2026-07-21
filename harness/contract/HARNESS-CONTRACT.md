@@ -36,7 +36,13 @@ resolved upstream; this harness does not verify the platform JWT.
 - Errors are JSON `{ error: { message, diagnostics? } }` with a sane HTTP status
   (400 bad request, 404 unknown tool, 422 tool failed validation, 500 internal).
 
-### `/converse/*` — conversational spine surface (summary; ADDENDUM §18.2 is normative)
+### `/converse/*` — conversational spine surface (PARKED — not served)
+
+> **PARKED at the 2026-07-21 merge resolution (spine × sessions-wire).** The harness
+> does NOT register these routes — they return 404. The live conversational surface
+> is the §2.1 sessions wire: the app's `/api/sessions*` routes drive the harness via
+> `POST /turn` (NDJSON; see the ConverseRunner port section below). This spec is
+> retained verbatim for the spine-unification follow-up; do not build against it.
 
 ConverseLoop's mirror routes, all behind the same shared-secret gate as the rest of
 the harness HTTP surface (`X-Harness-Secret`; timing-safe compare, fail-closed when
