@@ -5,7 +5,7 @@
   "framework": "vite",
   "rewrites": [
     {
-      "source": "/:path((?!(?:api.|(?:assets|site)/(?!(?:\\.|%2[eE]){2}(?:/|%2[fF]))|demo-solve\\.json$|sample\\.intake\\.json$|favicon\\.ico$).*)",
+      "source": "/:path((?!(?:api.|assets/(?!(?:\\.|%2[eE]){2}(?:/|%2[fF]))|site/(?!(?:\\.|%2[eE]){2}(?:/|%2[fF]))|demo-solve\\.json$|sample\\.intake\\.json$|favicon\\.ico$).*)",
       "destination": "/index.html"
     }
   ]
