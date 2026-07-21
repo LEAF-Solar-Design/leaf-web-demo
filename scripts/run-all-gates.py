@@ -143,6 +143,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave5.py"), 14),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 11),
+        Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
+              SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 11),
         # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
         # by hand — same gap this branch closed for its own suites.
         Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
