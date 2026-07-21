@@ -80,9 +80,20 @@ def test_present_falsy_kill_flag_does_not_enable_the_tenant(tmp_path, monkeypatc
         tmp_path, monkeypatch,
         '{"t-null": {"disabled": null}, "t-zero": {"disabled": 0},'
         ' "t-empty": {"disabled": ""}, "t-str": {"disabled": "false"},'
-        ' "t-corrupt": "not-a-record"}')
-    for tid in ("t-null", "t-zero", "t-empty", "t-str", "t-corrupt"):
+        ' "t-corrupt": "not-a-record", "t-nullrec": null}')
+    for tid in ("t-null", "t-zero", "t-empty", "t-str", "t-corrupt", "t-nullrec"):
         assert broker.tenant_disabled(tid) is True, tid
+
+
+def test_present_null_record_is_corrupt_not_absent(tmp_path, monkeypatch):
+    """`_tenants.get(tid)` returns None for BOTH an absent tenant and a present
+    `{"victim": null}` — so a null RECORD (not just a null flag) slipped through
+    as not-killed. A MISSING sentinel separates the two: absent enables, a
+    present null is corrupt and fails CLOSED. Tier already resolved restricted,
+    but /broker/extract has no tier gate, so the kill flag is the real guard."""
+    broker = _broker_with_tenants(tmp_path, monkeypatch, '{"victim": null}')
+    assert broker.tenant_disabled("victim") is True
+    assert broker.tenant_disabled("never-provisioned") is False
 
 
 def test_real_booleans_and_absence_still_behave(tmp_path, monkeypatch):

@@ -173,8 +173,8 @@ def tenant_disabled(tid: str) -> bool:
     answer.
     """
     with _tenants_lock:
-        rec = _tenants.get(tid)
-    if rec is None:
+        rec = _tenants.get(tid, _MISSING_TENANT)
+    if rec is _MISSING_TENANT:
         return False  # never provisioned -> not killed
     if not isinstance(rec, dict):
         return True  # corrupt record -> fail CLOSED
