@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -306,6 +307,16 @@ def main() -> int:
     base_env = os.environ.copy()
     base_env["APS_LIVE"] = "0"  # local dev is always mock — no cloud, no secrets
 
+    # Converse back-edge secret (wire contract §0): the harness authenticates to
+    # the app with X-Dispatch-Secret. Unset in EITHER child => /internal/agent/gate
+    # 401s and every spine tool is denied while all four services report healthy —
+    # a silent dead end. Mint one ephemeral value per boot and give it to BOTH
+    # children so a clean environment works; an operator-set secret always wins.
+    dispatch_secret = os.environ.get("LEAF_APP_DISPATCH_SECRET", "").strip()
+    ephemeral_dispatch = want_harness and not dispatch_secret
+    if ephemeral_dispatch:
+        dispatch_secret = secrets.token_urlsafe(32)
+
     _make_win_job()  # arm the kill-on-close guard before any child is spawned
 
     say("=" * 70)
@@ -324,6 +335,10 @@ def main() -> int:
             HARNESS_PORT=str(harness_port),
             BROKER_URL=broker_url,
             LEAF_REPO_ROOT=str(REPO),
+            # Converse back-edge: the harness must call the SAME app this launcher
+            # boots even when the app moved off its default port (stale squatter).
+            LEAF_APP_URL=app_url,
+            LEAF_APP_DISPATCH_SECRET=dispatch_secret,
         )
         spawn("harness", [node, str(HARNESS_ENTRY)], HARNESS_DIR, harness_env)
 
@@ -331,6 +346,8 @@ def main() -> int:
     app_env = dict(base_env, APP_PORT=str(app_port), BROKER_URL=broker_url)
     if harness_url:
         app_env["LEAF_AUTHOR_HARNESS_URL"] = harness_url
+        app_env["LEAF_CONVERSE_HARNESS_URL"] = harness_url
+        app_env["LEAF_APP_DISPATCH_SECRET"] = dispatch_secret
     spawn("app", [sys.executable, "app.py"], SERVER_DIR, app_env)
 
     # ---- 4) web (Vite dev; VITE_MOCK=0 so the browser hits the live app) -----
@@ -364,6 +381,11 @@ def main() -> int:
     say(f"    Broker     {broker_url}/broker/health   (internal; app talks to it)")
     if want_harness:
         say(f"    Harness    {harness_url}/health          (Build lane sidecar)")
+        if ephemeral_dispatch:
+            say("    Converse back edge ENABLED with an ephemeral dev secret")
+            say("          (regenerated every boot; set LEAF_APP_DISPATCH_SECRET to pin it).")
+        else:
+            say("    Converse back edge ENABLED with the LEAF_APP_DISPATCH_SECRET from your env.")
         say("    NOTE: authoring a tool needs a linked Claude grant per tenant")
         say("          (POST /api/tenant/claude-grant); without it /api/author")
         say("          returns a calm GRANT_REQUIRED (401) — no LLM credit spent.")

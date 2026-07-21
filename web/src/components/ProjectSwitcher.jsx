@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import './panels.css'
+import useExit from '../useExit.js'
 
 // The header PROJECT chip, made real: a calm switcher over the canonical
 // org-scoped Project entity (platform/api.py). LIVE only — in mock mode it is a
@@ -21,6 +22,7 @@ export default function ProjectSwitcher({
   const [open, setOpen] = useState(false)
   const [hi, setHi] = useState(0) // keyboard-highlighted row (resolver "active")
   const rootRef = useRef(null)
+  const menu = useExit(open) // 180 ms M1 exit fade on close
 
   // On open, start the highlight on the currently open project.
   useEffect(() => {
@@ -76,8 +78,8 @@ export default function ProjectSwitcher({
         <span className="proj-caret" aria-hidden="true">▾</span>
       </button>
 
-      {open && (
-        <div className="proj-menu resolver" role="menu">
+      {menu.shown && (
+        <div className={`proj-menu resolver${menu.exiting ? ' exit' : ''}`} role="menu">
           {unavailable ? (
             <div className="proj-empty">
               <div className="proj-note">Projects unavailable (no database configured)</div>

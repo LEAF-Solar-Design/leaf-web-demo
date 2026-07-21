@@ -1,0 +1,60 @@
+{
+  "_comment": "Pinned golden-path values for docs/DEMO-GOLDEN-PATH.md. These are ASSERTIONS, not inputs: check_integration.mjs recomputes every one of them from web/public/sample.intake.json through the real matchPrompt + mockEngine + mockVersions and fails on any drift.",
+  "drawing": "sample rooftop (web/public/sample.intake.json)",
+  "beats": [
+    {
+      "id": "count",
+      "beat": 1,
+      "prompt": "count panels per layer",
+      "lane": "run",
+      "tool": "count-by-layer",
+      "min_confidence": 0.7,
+      "expect": { "counts": { "Panels": 2345 }, "total": 2345 }
+    },
+    {
+      "id": "measure",
+      "beat": 2,
+      "prompt": "measure the total area",
+      "lane": "run",
+      "tool": "measure-panel-area",
+      "min_confidence": 0.7,
+      "expect": { "panels": 2345, "total_area_sqft": 48718.2 }
+    },
+    {
+      "id": "edge",
+      "beat": 3,
+      "prompt": "highlight panels within 60 in of the edge",
+      "lane": "run",
+      "tool": "highlight-panels-near-edge",
+      "min_confidence": 0.7,
+      "params": { "distance_in": 60 },
+      "expect": { "distance_in": 60, "panels_near_edge": 72, "panels_total": 2345 }
+    },
+    {
+      "id": "build",
+      "beat": 4,
+      "prompt": "build a tool that flags panels within 24 in of the roof edge",
+      "lane": "build",
+      "tool": null,
+      "min_confidence": 0.7
+    },
+    {
+      "id": "write",
+      "beat": 5,
+      "prompt": "delete panel 7FA3",
+      "lane": "run",
+      "tool": "delete-marked-panel",
+      "min_confidence": 0.7,
+      "params": { "handle": "7FA3" },
+      "expect": {
+        "removed": "7FA3",
+        "panels_before": 2345,
+        "panels_after": 2344,
+        "new_version": { "version": 2, "parent": 1 }
+      }
+    }
+  ],
+  "undo": { "head": 1, "latest": 2, "panels_at_head": 2345 },
+  "history": { "versions": [1, 2], "v2_tool": "delete-marked-panel" },
+  "forbidden_lane": "solve"
+}

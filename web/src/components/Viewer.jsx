@@ -43,11 +43,43 @@ function readTokens() {
   }
 }
 
+// Additive site-stage props (Website One Surface; defaults preserve the
+// console's behavior EXACTLY when absent):
+//   background      : 'transparent' -> renderer alpha:true + scene.background
+//                     null (the stage grid shows through). Default: today's
+//                     opaque --cv-bg scene, byte-identical.
+//   controlsEnabled : false disables OrbitControls (the landing stage is a
+//                     static hero, not an editor). Default true.
+//   stringRoutes    : [{id, color?, pts:[[x,y],...]}] world-coord routes drawn
+//                     as THREE.Line overlays and animated in the existing rAF
+//                     loop — sequential draw-on at ~650 world-units/s with a
+//                     glowing head sprite, 2.6s hold at full, loop. Under
+//                     prefers-reduced-motion they render fully drawn, static.
+//   onGlError       : optional callback fired when WebGL is unavailable so a
+//                     host can mount its own 2D fallback.
+const STRING_SPEED = 650 // world units / second
+const STRING_GAP_S = 0.35
+const STRING_HOLD_S = 2.6
+
+function makeGlowTexture() {
+  const c = document.createElement('canvas')
+  c.width = c.height = 64
+  const ctx = c.getContext('2d')
+  const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+  grad.addColorStop(0, 'rgba(255,255,255,1)')
+  grad.addColorStop(0.25, 'rgba(255,255,255,.85)')
+  grad.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, 64, 64)
+  return new THREE.CanvasTexture(c)
+}
+
 const Viewer = forwardRef(function Viewer(
   {
     intake, colorForLayer, visibleLayers,
     highlightHandles, markers, overlayPolylines,
     selectedHandle, onSelectEntity, pendingEdit,
+    background, controlsEnabled = true, stringRoutes, onGlError,
   },
   ref,
 ) {
@@ -57,6 +89,12 @@ const Viewer = forwardRef(function Viewer(
   // fires a stale closure.
   const onSelectRef = useRef(onSelectEntity)
   onSelectRef.current = onSelectEntity
+  const onGlErrorRef = useRef(onGlError)
+  onGlErrorRef.current = onGlError
+  // controlsEnabled read via ref inside the scene build (and synced by its own
+  // effect) so toggling it never forces a scene rebuild.
+  const controlsEnabledRef = useRef(controlsEnabled)
+  controlsEnabledRef.current = controlsEnabled
 
   // Internal override intake set by the imperative applyVersion(). Drives a
   // rebuild without the parent having to swap the `intake` prop. Reset whenever
@@ -81,17 +119,21 @@ const Viewer = forwardRef(function Viewer(
     const height = mount.clientHeight
     const tokens = readTokens()
 
+    const transparent = background === 'transparent'
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(tokens.bg)
+    scene.background = transparent ? null : new THREE.Color(tokens.bg)
 
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000, 1000)
     let renderer
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true })
+      renderer = transparent
+        ? new THREE.WebGLRenderer({ antialias: true, alpha: true })
+        : new THREE.WebGLRenderer({ antialias: true })
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn('[CADViewport] WebGL unavailable:', e?.message || e)
       setGlError(true)
+      if (onGlErrorRef.current) onGlErrorRef.current(e)
       return
     }
     setGlError(false)
@@ -100,6 +142,7 @@ const Viewer = forwardRef(function Viewer(
     mount.appendChild(renderer.domElement)
 
     const controls = new OrbitControls(camera, renderer.domElement)
+    controls.enabled = controlsEnabledRef.current !== false
     controls.enableRotate = false
     controls.screenSpacePanning = true
     controls.mouseButtons = {
@@ -268,6 +311,7 @@ const Viewer = forwardRef(function Viewer(
     const overlayGroup = new THREE.Group(); scene.add(overlayGroup)
     const selectionGroup = new THREE.Group(); scene.add(selectionGroup)
     const pendingGroup = new THREE.Group(); scene.add(pendingGroup)
+    const stringGroup = new THREE.Group(); scene.add(stringGroup)
 
     // rendered-count assertion (acceptance: rendered == intake lengths)
     // eslint-disable-next-line no-console
@@ -346,7 +390,14 @@ const Viewer = forwardRef(function Viewer(
     dom.addEventListener('pointerup', onPointerUp)
 
     let raf
-    function animate() { raf = requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera) }
+    function animate() {
+      raf = requestAnimationFrame(animate)
+      controls.update()
+      // string-route draw-on animation (site stage); no-op when absent
+      const sa = stateRef.current && stateRef.current.stringAnim
+      if (sa) sa.tick()
+      renderer.render(scene, camera)
+    }
     animate()
 
     function onResize() {
@@ -360,6 +411,7 @@ const Viewer = forwardRef(function Viewer(
     stateRef.current = {
       scene, camera, renderer, controls, layerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
+      stringGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens,
     }
 
@@ -393,7 +445,7 @@ const Viewer = forwardRef(function Viewer(
       scene.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.() })
       stateRef.current = null
     }
-  }, [activeIntake, colorForLayer])
+  }, [activeIntake, colorForLayer, background])
 
   useImperativeHandle(ref, () => ({
     fit: () => stateRef.current?.fitToBounds(),
@@ -401,7 +453,141 @@ const Viewer = forwardRef(function Viewer(
     // the next drawing version). Disposes old geometry and clears the pending
     // ghost as part of the rebuild.
     applyVersion: (newIntake) => setInternalIntake(newIntake),
+    // Project a world point to a client pixel (production twin of the DEV
+    // mount.__cadviewer hook — used by the site layer and automated checks).
+    project: (wx, wy) => {
+      const s = stateRef.current
+      if (!s) return null
+      const v = new THREE.Vector3(wx, wy, 0).project(s.camera)
+      const rect = s.renderer.domElement.getBoundingClientRect()
+      return {
+        x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
+        y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
+      }
+    },
   }), [])
+
+  // --- controls enable/disable (site stage: static hero) --------------------
+  useEffect(() => {
+    const s = stateRef.current
+    if (s) s.controls.enabled = controlsEnabled !== false
+  }, [controlsEnabled, buildTick])
+
+  // --- string routes (site stage draw-on animation) --------------------------
+  // [{id, color?, pts:[[x,y],...]}] -> THREE.Line per route in stringGroup.
+  // Animated inside the EXISTING rAF loop (stateRef.stringAnim.tick): strings
+  // draw on sequentially at ~650 world-units/s via setDrawRange, with the
+  // in-flight vertex interpolated for a smooth head + a glowing head sprite;
+  // 2.6s hold at full, then loop. prefers-reduced-motion -> fully drawn, no
+  // animation. No routes -> everything here is a no-op (byte-compatible).
+  useEffect(() => {
+    const s = stateRef.current
+    if (!s) return undefined
+    const g = s.stringGroup
+    s.stringAnim = null
+    g.clear()
+    if (!stringRoutes || stringRoutes.length === 0) return undefined
+
+    const disposables = []
+    const entries = []
+    for (const rt of stringRoutes) {
+      const pts = rt.pts || []
+      if (pts.length < 2) continue
+      const pos = new Float32Array(pts.length * 3)
+      for (let i = 0; i < pts.length; i++) {
+        pos[i * 3] = pts[i][0]; pos[i * 3 + 1] = pts[i][1]; pos[i * 3 + 2] = 4
+      }
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+      const mat = new THREE.LineBasicMaterial({
+        color: rt.color || s.tokens.overlay, transparent: true, opacity: 0.95, depthTest: false,
+      })
+      const line = new THREE.Line(geo, mat)
+      line.renderOrder = 14
+      g.add(line)
+      disposables.push(geo, mat)
+      const cum = [0]; let len = 0
+      for (let i = 1; i < pts.length; i++) {
+        len += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
+        cum.push(len)
+      }
+      entries.push({ geo, pos, orig: pos.slice(), n: pts.length, cum, len, dirty: null })
+    }
+    if (entries.length === 0) return undefined
+
+    const reduced = typeof window !== 'undefined' && window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (reduced) {
+      for (const e of entries) e.geo.setDrawRange(0, e.n)
+      return () => { if (stateRef.current) stateRef.current.stringGroup.clear(); disposables.forEach((d) => d.dispose()) }
+    }
+
+    // glowing head sprite (one, repositioned onto the active string)
+    const headTex = makeGlowTexture()
+    const headMat = new THREE.SpriteMaterial({
+      map: headTex, transparent: true, depthTest: false, blending: THREE.AdditiveBlending,
+    })
+    const head = new THREE.Sprite(headMat)
+    const hsz = s.dataSpan * 0.02
+    head.scale.set(hsz, hsz, 1)
+    head.renderOrder = 15
+    head.visible = false
+    g.add(head)
+    disposables.push(headTex, headMat)
+
+    for (const e of entries) e.geo.setDrawRange(0, 0)
+    const restore = (e) => {
+      if (e.dirty == null) return
+      const i = e.dirty
+      e.pos[i * 3] = e.orig[i * 3]; e.pos[i * 3 + 1] = e.orig[i * 3 + 1]
+      e.geo.attributes.position.needsUpdate = true
+      e.dirty = null
+    }
+    const total = entries.reduce((a, e) => a + e.len / STRING_SPEED + STRING_GAP_S, 0) + STRING_HOLD_S
+    const t0 = performance.now()
+    s.stringAnim = {
+      tick() {
+        const t = ((performance.now() - t0) / 1000) % total
+        let acc = 0
+        let headOn = false
+        for (const e of entries) {
+          const dur = e.len / STRING_SPEED
+          if (t >= acc + dur + STRING_GAP_S) {
+            restore(e)
+            e.geo.setDrawRange(0, e.n)
+          } else if (t > acc) {
+            const dist = Math.min((t - acc) * STRING_SPEED, e.len)
+            let i = 0
+            while (i < e.n - 2 && e.cum[i + 1] <= dist) i++
+            const span = e.cum[i + 1] - e.cum[i] || 1
+            const k = Math.min(Math.max((dist - e.cum[i]) / span, 0), 1)
+            const ax = e.orig[i * 3], ay = e.orig[i * 3 + 1]
+            const bx = e.orig[(i + 1) * 3], by = e.orig[(i + 1) * 3 + 1]
+            const hx = ax + (bx - ax) * k, hy = ay + (by - ay) * k
+            restore(e)
+            e.pos[(i + 1) * 3] = hx; e.pos[(i + 1) * 3 + 1] = hy
+            e.dirty = i + 1
+            e.geo.attributes.position.needsUpdate = true
+            e.geo.setDrawRange(0, i + 2)
+            if (dist < e.len) { head.position.set(hx, hy, 4.5); head.visible = true; headOn = true }
+          } else {
+            restore(e)
+            e.geo.setDrawRange(0, 0)
+          }
+          acc += dur + STRING_GAP_S
+        }
+        if (!headOn) head.visible = false
+      },
+    }
+
+    return () => {
+      if (stateRef.current) {
+        stateRef.current.stringAnim = null
+        stateRef.current.stringGroup.clear()
+      }
+      disposables.forEach((d) => d.dispose())
+    }
+  }, [stringRoutes, buildTick])
 
   // --- layer visibility ----------------------------------------------------
   useEffect(() => {

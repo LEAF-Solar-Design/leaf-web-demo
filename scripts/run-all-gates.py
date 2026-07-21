@@ -143,6 +143,32 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave5.py"), 14),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 11),
+        Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
+              SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 11),
+        # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
+        # by hand — same gap this branch closed for its own suites.
+        Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
+              _py_pytest("tests/test_site.py"), 8),
+        # --- conversational agent spine (CONTRACT-ADDENDUM section 18) --- #
+        # Separate suites for the same reason as the waves above: the gate/ledger
+        # suites share on-disk approval + audit state and the router suites toggle
+        # dispatch-secret env, so one pytest process cross-contaminates them.
+        Suite("server-agent-policy", "server tests/test_agent_policy.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_policy.py"), 22),
+        Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_gate.py"), 30),
+        Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_router.py"), 23),
+        Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
+              _py_pytest("tests/test_sessions_router.py"), 25),
+        Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
+              _py_pytest("tests/test_context_packet.py"), 16),
+        Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
+              _py_pytest("tests/test_contract_freeze.py"), 4),
+        Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
+              _py_pytest("tests/test_job_lanes.py"), 11),
+        Suite("server-agent-e2e", "server tests/test_agent_e2e.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_e2e.py"), 4),
         # --- the golden-path composed e2e (this runner's sibling deliverable) --- #
         Suite("server-e2e-golden", "server tests/test_e2e_golden.py", "pytest", SERVER,
               _py_pytest("tests/test_e2e_golden.py"), 1),
@@ -319,8 +345,14 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                 [str(a) for a in suite.argv],
                 cwd=str(suite.cwd), env=clean_env(),
                 capture_output=True, text=True, timeout=900,
+                # text=True without an explicit encoding decodes with the system
+                # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and
+                # quote glyphs. A byte outside cp1252 killed the reader thread,
+                # left proc.stdout as None, and crashed the whole runner mid-gate
+                # — the acceptance instrument itself failing on output encoding.
+                encoding="utf-8", errors="replace",
             )
-            out = proc.stdout + "\n" + proc.stderr
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
             rc = proc.returncode
         except subprocess.TimeoutExpired as exc:
             out = (exc.stdout or "") + "\n" + (exc.stderr or "") + "\n[TIMEOUT >900s]"

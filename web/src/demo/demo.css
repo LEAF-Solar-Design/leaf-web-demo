@@ -1,0 +1,194 @@
+/* M5 — guided-tour overlay.
+   Uses ONLY the existing dark-emerald tokens from styles.css (--card, --border,
+   --primary, --muted, …). No new color system, no new fonts. */
+
+.tour-root {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+}
+
+/* The root is programmatically focused on mount so the first Tab reaches the
+   tour controls; suppress the UA outline on the container only (the real
+   controls keep their focus ring). */
+.tour-root:focus { outline: none; }
+
+/* Dimmer: everything outside the spotlight rectangle reads back. The spotlight
+   itself is a transparent hole punched with a huge outline shadow. */
+.tour-dim {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 6, 0.62);
+  pointer-events: auto;
+  animation: tour-fade var(--m-enter) var(--m-curve) both;
+}
+
+.tour-spot {
+  position: fixed;
+  border-radius: 12px;
+  border: 1px solid var(--primary);
+  box-shadow: 0 0 0 9999px rgba(4, 8, 6, 0.62), 0 0 0 4px var(--accent-tint);
+  pointer-events: none;
+  transition: top 260ms var(--m-curve), left 260ms var(--m-curve), width 260ms var(--m-curve), height 260ms var(--m-curve);
+}
+
+/* Persistent banner strip — same words as the standing demo banner so leaving
+   the tour is never a mystery. */
+.tour-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  pointer-events: auto;
+  font-family: var(--font-sans);
+}
+
+.tour-banner-title {
+  font-weight: 600;
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.tour-banner-sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tour-banner-exit {
+  margin-left: auto;
+}
+
+/* Coach-mark card */
+.tour-card {
+  position: fixed;
+  width: min(380px, calc(100vw - 32px));
+  background: var(--card-grad, var(--card));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  /* Backstop: a long body can never clip its own Back/Skip/Next row. */
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  pointer-events: auto;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  font-family: var(--font-sans);
+  animation: tour-rise var(--m-enter) var(--m-curve) both;
+}
+
+.tour-card-step {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--muted-2);
+}
+
+.tour-card-title {
+  margin: 6px 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.tour-card-body {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.tour-card-prompt {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bar-well);
+  border: 1px solid var(--border);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--foreground);
+  word-break: break-word;
+}
+
+.tour-card-prompt .tour-caret {
+  display: inline-block;
+  width: 7px;
+  color: var(--primary);
+}
+
+/* indeterminate running line: pulse dot + verb (amber is reserved for advisory).
+   The node stays mounted as a live region, so the empty state must take no space. */
+.tour-card-wait:empty { display: none; }
+
+.tour-card-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tour-card-wait::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: leaf-pulse 1.6s ease-in-out infinite;
+  flex: none;
+}
+
+.tour-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.tour-card-actions .tour-spacer { margin-left: auto; }
+
+/* Buttons use the real contract classes from styles.css (.chip-neutral /
+   .primary) — no drifted .tour-btn duplicate vocabulary. Only the disabled
+   state of the primary Next needs a local rule (the shared .primary defines
+   none; .chip-neutral's lives in popovers.css). */
+.tour-card-actions .primary:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
+
+.tour-dots {
+  display: flex;
+  gap: 5px;
+  margin-top: 12px;
+}
+
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.tour-dot.on { background: var(--primary); }
+
+@keyframes tour-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes tour-rise { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: none } }
+
+/* The centered (no-target) case positions itself with a translate(-50%,-50%);
+   tour-rise's `transform: none` end state would clobber that and slam the card
+   against the right edge, clipping the closing copy and the Exit button on a
+   phone. Give it keyframes that CARRY the centering transform. */
+.tour-card.is-centered { animation-name: tour-rise-centered; }
+@keyframes tour-rise-centered {
+  from { opacity: 0; transform: translate(-50%, calc(-50% + 12px)) }
+  to   { opacity: 1; transform: translate(-50%, -50%) }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-dim, .tour-card, .tour-spot, .tour-card-wait::before {
+    animation: none;
+    transition: none;
+  }
+}

@@ -79,6 +79,29 @@ const OPS = {
     }
   },
 
+  // The one `drawing.write` op in mock: removes the marked panel and reports a
+  // §11 new_version stamp so the app can seat v2 and light Undo/Redo/History.
+  // Pure w.r.t. the passed intake — the version chain itself lives in
+  // mockVersions.js (which recomputes the same removal deterministically).
+  delete_marked_panel(intake, params) {
+    const pls = intake.polylines || []
+    const asked = params?.handle || params?.target_handle || null
+    const handle = asked && pls.some((p) => p.handle === asked)
+      ? asked
+      : (pls.length ? pls[pls.length - 1].handle : null)
+    const remaining = pls.filter((p) => p.handle !== handle)
+    return {
+      result: {
+        removed: handle,
+        panels_before: pls.length,
+        panels_after: remaining.length,
+        new_version: { drawing_id: 'demo', version: 2, parent: 1 },
+        intake: { ...intake, polylines: remaining },
+      },
+      overlay: { highlight_handles: handle ? [handle] : [], removed_handles: handle ? [handle] : [] },
+    }
+  },
+
   select_by_layer(intake, params) {
     const layer = params?.layer ?? 'Panels'
     const handles = intake.polylines.filter((p) => p.layer === layer).map((p) => p.handle)
