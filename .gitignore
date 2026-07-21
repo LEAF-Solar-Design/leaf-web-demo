@@ -17,3 +17,6 @@ server/drawings/
 engine/appbundle-write/bin/
 engine/appbundle-write/obj/
 engine/appbundle-write/build/
+server/sessions.db
+server/sessions.db-shm
+server/sessions.db-wal
