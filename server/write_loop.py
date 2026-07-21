@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, err_envelope, ok_envelope
+from tenant_id_validator import validate_tenant_id
 
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
@@ -153,13 +154,30 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
 # demo bootstrap
 # --------------------------------------------------------------------------- #
 def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
-    """Bootstrap the well-known `demo` drawing (v1 = cached intake JSON) on first
-    use at APS_LIVE=0. Non-demo drawings must already exist (raises KeyError)."""
+    """Bootstrap ANY first-seen `drawing_id` (v1 = cached intake JSON) on first use
+    at APS_LIVE=0, via the identical `store.ingest_drawing` path the well-known
+    `demo` drawing has always used — `demo` is now just one instance of this
+    general rule (its resulting v1 is byte-identical to before: same source file,
+    same ingest call). Generalizes the earlier demo-only special case per
+    leaf-backend-gaps.md §"Any plausible drawing_id ... should resolve to a
+    provisioned drawing" (fix (a): extend auto-bootstrap to any first-seen id).
+
+    `drawing_id` must satisfy the ONE shared slug-safe id rule
+    (tenant_id_validator.validate_tenant_id — lowercase alnum/`_`/`-`, must start
+    alphanumeric, 1..63 chars) so a path-y id (contains `/`, `.`, `..`, uppercase,
+    unicode, or is empty) is REJECTED with ValueError up front, before any
+    store/filesystem access — defense in depth: this is the auto-provisioning
+    gate, not just store.sanitize_id's (later, key-construction-time) rejection
+    of the same characters. This never rejects a REAL, already-provisioned
+    drawing: every id that can exist in the store was itself sanitize_id-checked
+    against this identical pattern at ingest time (store.ingest_drawing /
+    put_drawing), so any id reachable via `backend.exists(...)` below already
+    passes here too.
+    """
     import store
+    validate_tenant_id(drawing_id, kind="drawing id")  # reject path-y / malformed ids, up front
     if backend.exists(store.manifest_key(tenant_id, drawing_id)):
         return
-    if drawing_id != DEMO_DRAWING_ID:
-        raise KeyError(f"drawing not found: {tenant_id}/{drawing_id}")
     data = CACHED_INTAKE_PATH.read_bytes()
     fd, tmp = tempfile.mkstemp(suffix=".intake.json")
     try:

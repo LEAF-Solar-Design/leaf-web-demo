@@ -83,6 +83,7 @@ services:
       LEAF_STORE_DIR: /data/drawings                   # shared with the broker (write loop)
       BROKER_LEDGER: /data/state/broker_ledger.jsonl   # app reads the broker's ledger for /api/usage
       JOBS_DB: /data/state/jobs.db                     # durable async job records (restart-survivable)
+      SESSIONS_DB: /data/state/sessions.db             # conversational sessions/events/approvals (same durability tier as jobs.db). SINGLE-WRITER: SQLite+WAL+threading.Lock assumes ONE app process — keep one replica/one uvicorn worker, and on network filesystems (EFS/NFS, where WAL is unsafe) point JOBS_DB/SESSIONS_DB at task-local storage instead (see the production task definition)
       # --- operator opt-in: platform Project/Job persistence (Neon/Postgres) ---
       DATABASE_URL: ${DATABASE_URL:-}                  # empty => platform DB endpoints stay dark (demo-safe)
     volumes:

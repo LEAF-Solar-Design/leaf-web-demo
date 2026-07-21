@@ -56,6 +56,8 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         "params_schema": tool.get("params", {"type": "object", "properties": {}}),
         "capabilities": tool.get("capabilities", []),
         "provenance": tool.get("provenance", {}),
+        "kind": tool.get("kind"),
+        "engine_op": tool.get("engine_op"),
     }
 
 

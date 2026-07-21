@@ -1,5 +1,5 @@
 /**
- * Fake ConverseRunner - a SCRIPTED stand-in for the live conversational SDK
+ * Fake SpineConverseRunner - a SCRIPTED stand-in for the live conversational SDK
  * session. NO network, NO Anthropic auth. It behaves like an obedient spine
  * model: it honors canUseTool, drives tools ONLY through the injected
  * ToolExecutor, ends its turn after a proposed/pending result, and re-invokes
@@ -21,7 +21,7 @@
 
 import type {
   ConverseRunInput,
-  ConverseRunner,
+  SpineConverseRunner,
   ConverseRunnerEvent,
   ConverseStopReason,
   ConverseTurnUsage,
@@ -44,7 +44,7 @@ function tailOf(message: string): string {
   return userIdx >= 0 ? message.slice(userIdx) : message;
 }
 
-export class FakeConverseRunner implements ConverseRunner {
+export class FakeConverseRunner implements SpineConverseRunner {
   /** Every run() input, for assertions (resume ids, prompts, models). */
   readonly runs: ConverseRunInput[] = [];
   /** Test hook: a turn whose text contains SLOW awaits this before finishing. */

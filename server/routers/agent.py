@@ -1,10 +1,24 @@
 """
-Agent spine policy surface (§18 slice owned by this lane):
+Agent surface — UNION of two lanes (merge resolution, 2026-07-21):
 
-    POST /internal/agent/gate                       -> run the gate chain (harness back-edge)
-    POST /api/agent/approvals/{confirmation_id}     -> tenant grants/denies a pending approval
-    GET  /api/agent/audit?limit=                    -> tenant's own audit records (projected)
-    GET  /api/agent/killswitch                      -> {active} read-only (NO off-toggle)
+  §18 spine policy plane (PR #5):
+    POST /internal/agent/gate                   -> run the gate chain (harness back-edge)
+    GET  /api/agent/audit?limit=                -> tenant's own audit records (projected)
+    GET  /api/agent/killswitch                  -> {active} read-only (NO off-toggle)
+
+  §2.1 sessions wire (PR #12):
+    POST /api/agent/approvals/{confirmation_id} -> record-only approval decision
+                                                   against session_store (S4)
+
+Both lanes shipped an approvals route at the same path. The SESSIONS-WIRE one
+wins: the live console (leaf_website) drives turns through the §2.1 turn
+engine, whose `confirmation_required` events create rows in
+server/session_store.py — so tenant decisions must land in THAT store. The
+§18 gate chain's own pending-approval grant path (agent_gate.grant_approval /
+deny_approval) is PARKED pending spine unification: the gate back-edge below
+still records/queries its ledger, but nothing tenant-facing resolves its
+pending records until the two state models are unified (follow-up, named in
+the merge commit).
 
 BACK-EDGE TRUST (wire contract §0): `/internal/agent/gate` is the endpoint the
 harness's canUseTool calls before EVERY conversational tool call. It is gated
@@ -14,9 +28,16 @@ broker's X-Broker-Secret. Secret unset in env => the back-edge is disabled =>
 401 always (fail closed; there is no unguarded mode for this surface). The
 gate body carries the harness-resolved `tenant_id` verbatim.
 
-Tenant-facing routes use the ordinary `require_tenant` dependency; an approval
-that exists but belongs to another tenant is a 404, never a 403 — no
-cross-tenant existence oracle (same rule as jobs, security-audit F8).
+APPROVALS (record-only, sessions wire spec §2.1.5): the endpoint ONLY records
+an approve/reject decision against the durable `approvals` row created by the
+turn engine (S3) when it emitted `confirmation_required`. It NEVER starts (or
+resumes) a turn itself — the client always follows up with a separate
+`POST /sessions/{id}/messages {confirm:{confirmationId, approved}}`.
+Tenant + existence guard (no existence leak): unknown confirmation_id OR one
+owned by another tenant both collapse to the SAME 404 bad_params response.
+Deliberately does NOT check the approval's `expired` flag — an
+expired-but-undecided approval is still recorded; the 410
+confirmation_expired belongs to the SUBSEQUENT /messages{confirm} call.
 """
 from __future__ import annotations
 
@@ -32,6 +53,7 @@ import agent_audit
 import agent_gate
 import deps
 import entitlements
+import session_store
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
@@ -88,30 +110,49 @@ def internal_gate(req: GateRequest,
 # --------------------------------------------------------------------------- #
 # tenant-facing routes
 # --------------------------------------------------------------------------- #
-class ApprovalDecision(BaseModel):
+class ApprovalDecisionRequest(BaseModel):
     approved: bool
 
 
+def _not_found(confirmation_id: str):
+    return error_response(
+        ErrorCode.BAD_PARAMS,
+        f"unknown confirmation_id {confirmation_id!r}",
+        retryable=False,
+        status_code=404,
+    )
+
+
 @router.post("/api/agent/approvals/{confirmation_id}")
-def resolve_approval(confirmation_id: str, decision: ApprovalDecision,
-                     tenant=Depends(deps.require_tenant)) -> Any:
-    record = agent_gate.read_pending(confirmation_id)
-    # 404 (never 403) both when unknown AND when it belongs to another tenant.
-    if record is None or record.get("tenant_id") != str(tenant):
-        return error_response(ErrorCode.BAD_PARAMS,
-                              f"unknown confirmation_id: {confirmation_id}",
-                              retryable=False, status_code=404)
-    if decision.approved:
-        ok, _, reason = agent_gate.grant_approval(confirmation_id, by=str(tenant))
-    else:
-        ok, _, reason = agent_gate.deny_approval(confirmation_id, by=str(tenant))
-    if not ok:
-        # expired / already decided — the chip is stale; the client re-proposes.
-        return error_response(ErrorCode.BAD_PARAMS,
-                              f"approval not resolvable: {reason}",
-                              retryable=False, status_code=409)
-    return with_envelope_fields(
-        deps.tenant_echo({"resolved": True, "approved": decision.approved}, tenant))
+def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
+                     tenant=Depends(deps.require_tenant)):
+    """Record-only: approve/reject a pending confirmation. Never starts a turn."""
+    approval = session_store.get_approval(confirmation_id)
+    if approval is None or approval["tenant_id"] != str(tenant):
+        # Unknown and cross-tenant collapse to the IDENTICAL response -- no
+        # existence leak to a caller who isn't the owning tenant.
+        return _not_found(confirmation_id)
+
+    outcome = session_store.decide_approval(confirmation_id, req.approved, by=str(tenant))
+    if outcome == "not_found":
+        return _not_found(confirmation_id)
+    if outcome == "already_decided":
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            f"confirmation_id {confirmation_id!r} already decided",
+            retryable=False,
+            status_code=409,
+        )
+
+    # outcome == "recorded"
+    session_store.append_event(
+        approval["session_id"], approval["turn_id"], "confirmation_resolved",
+        {"confirmation_id": confirmation_id, "approved": bool(req.approved), "by": str(tenant)},
+    )
+    return deps.tenant_echo(
+        with_envelope_fields({"resolved": True, "approved": bool(req.approved)}),
+        tenant,
+    )
 
 
 @router.get("/api/agent/audit")

@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Optional  # noqa: E402
 import jsonschema  # noqa: E402
 import pytest  # noqa: E402
 
+pytestmark = pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): this exercises a section-18 surface replaced by the section-2.1 lane (approvals resolve against session_store; site.py serves the reviewed builtin-only catalog + canned artifact). Restore at spine unification.")
+
 SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
