@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -117,3 +119,32 @@ def test_protected_fetch_pins_existing_project(monkeypatch) -> None:
         "--", "--fail-with-body",
     ]
     assert runner.call_args.kwargs["env_extra"] == deploy_web.PROJECT_ENV
+
+
+def test_web_api_boundary_returns_structured_404() -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required to execute the Vercel function")
+    script = r"""
+import handler from './api/[...path].js'
+let status = null
+let body = null
+const headers = {}
+const response = {
+  setHeader(name, value) { headers[name] = value },
+  status(value) { status = value; return this },
+  json(value) { body = value; return this },
+}
+handler({}, response)
+if (status !== 404) process.exit(2)
+if (body?.error !== 'web origin does not serve API routes') process.exit(3)
+if (!headers['Content-Type']?.startsWith('application/json')) process.exit(4)
+"""
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=deploy_web.WEB,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

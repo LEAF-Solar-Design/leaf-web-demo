@@ -172,7 +172,10 @@ def fetch_protected(deployment_url: str, path: str):
         capture=True,
     )
     if result.returncode != 0:
-        return None, result.stderr or result.stdout or "vercel curl failed"
+        diagnostic = (result.stderr or "") + "\n" + (result.stdout or "")
+        match = re.search(r"(?:error:|HTTP/\S+)\s*(\d{3})", diagnostic, re.I)
+        status = int(match.group(1)) if match else None
+        return status, result.stdout or diagnostic or "vercel curl failed"
     return 200, result.stdout
 
 
@@ -268,6 +271,13 @@ def verify(
         print(f"  {route:<14} {'ok' if route_status == 200 else f'HTTP {route_status}'}")
         if route_status != 200:
             fail(f"{route} returned HTTP {route_status}")
+    api_status, api_body = fetcher("/api/health")
+    if api_status != 404 or "web origin does not serve API routes" not in api_body:
+        fail(
+            "web-origin API boundary expected structured HTTP 404, got "
+            f"HTTP {api_status}"
+        )
+    print("  /api/health    structured 404 (not SPA HTML)")
     print(f"  verified entry: {entry}")
     return entry
 
