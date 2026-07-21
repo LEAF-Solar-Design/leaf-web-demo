@@ -394,6 +394,66 @@ def test_decide_approval_concurrent_only_one_recorded():
 # --------------------------------------------------------------------------- #
 # final isolation re-check (belt-and-suspenders, runs after everything above)
 # --------------------------------------------------------------------------- #
+def test_legacy_db_without_consumed_column_is_migrated(tmp_path):
+    """A database created by the pre-`consumed` cut of the approvals table must be
+    migrated additively on open: CREATE TABLE IF NOT EXISTS never retrofits a column
+    onto an existing table, while consume_approval() SELECTs/UPDATEs `consumed` — an
+    un-migrated DB would 500 every confirm. The migration must also leave a
+    pre-existing decided-but-unconsumed row consumable exactly once."""
+    legacy = tmp_path / "legacy-sessions.db"
+    conn = sqlite3.connect(str(legacy))
+    conn.execute(
+        """CREATE TABLE approvals (
+             confirmation_id TEXT PRIMARY KEY, session_id TEXT, tenant_id TEXT,
+             turn_id TEXT, tool TEXT, params_json TEXT, capability TEXT,
+             rationale TEXT, kind TEXT, payload_json TEXT,
+             decided INTEGER DEFAULT 0, approved INTEGER, decided_by TEXT,
+             created_at REAL, expires_at REAL)"""
+    )
+    conn.execute(
+        "INSERT INTO approvals (confirmation_id, session_id, tenant_id, kind,"
+        " decided, approved, created_at, expires_at)"
+        " VALUES ('c-legacy', 's-legacy', 't-legacy', 'tool_run', 1, 1, ?, ?)",
+        (time.time(), time.time() + 3600),
+    )
+    conn.commit()
+    conn.close()
+
+    saved_conn, saved_path = session_store._conn, session_store.DB_PATH
+    session_store._conn = None
+    session_store.DB_PATH = legacy
+    try:
+        session_store.ensure_started()
+        cols = {
+            r[1]
+            for r in session_store._conn.execute("PRAGMA table_info(approvals)").fetchall()
+        }
+        assert "consumed" in cols, "migration did not add the consumed column"
+
+        row = session_store.consume_approval("c-legacy", "s-legacy", "t-legacy")
+        assert row["confirmation_id"] == "c-legacy"
+        try:
+            session_store.consume_approval("c-legacy", "s-legacy", "t-legacy")
+            raise AssertionError("second consume of a migrated row must fail")
+        except session_store.ApprovalConsumeError as e:
+            assert e.reason == "already_consumed"
+
+        # Idempotence: re-opening an ALREADY-migrated DB must not fail or double-add.
+        session_store._conn.close()
+        session_store._conn = None
+        session_store.ensure_started()
+        cols2 = [
+            r[1]
+            for r in session_store._conn.execute("PRAGMA table_info(approvals)").fetchall()
+        ]
+        assert cols2.count("consumed") == 1
+    finally:
+        if session_store._conn is not None:
+            session_store._conn.close()
+        session_store._conn = saved_conn
+        session_store.DB_PATH = saved_path
+
+
 def test_zzz_real_sessions_db_still_absent():
     assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
         f"this suite MODIFIED the real DB at {REAL_DB_PATH} "

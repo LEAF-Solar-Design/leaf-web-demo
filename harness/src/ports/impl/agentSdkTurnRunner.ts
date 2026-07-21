@@ -69,6 +69,7 @@ import type {
   AgentGrant,
   BrokerApsClient,
   ConverseRunner,
+  ConverseRunOptions,
   ConverseTurnInput,
   HarnessTurnEvent,
   OAuthGrantProvider,
@@ -385,7 +386,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     private readonly opts: AgentSdkTurnRunnerOptions = {},
   ) {}
 
-  async *runTurn(input: ConverseTurnInput): AsyncIterable<HarnessTurnEvent> {
+  async *runTurn(input: ConverseTurnInput, opts?: ConverseRunOptions): AsyncIterable<HarnessTurnEvent> {
     // Resolve the tenant's Agent SDK grant FIRST, before any yield: a thrown
     // GrantRequiredError propagates un-caught out of this generator's first next()
     // call, so the HTTP shell (server.ts /turn route) sees it before any NDJSON output
@@ -394,15 +395,16 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     const grant = await this.ports.oauth.getGrant(input.tenant_id);
 
     if (input.confirm) {
-      yield* this.runConfirm(input, grant);
+      yield* this.runConfirm(input, grant, opts?.signal);
       return;
     }
-    yield* this.driveSession(input, grant);
+    yield* this.driveSession(input, grant, opts?.signal);
   }
 
   private async *runConfirm(
     input: ConverseTurnInput,
     grant: AgentGrant,
+    external?: AbortSignal,
   ): AsyncGenerator<HarnessTurnEvent> {
     const { approved, proposal } = input.confirm!;
     if (!approved) {
@@ -424,12 +426,13 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       ...input.messages,
       { role: "assistant" as const, text: `Ran "${proposal.tool}". Result: ${outcome.summary}` },
     ];
-    yield* this.driveSession({ ...input, messages: continuationMessages }, grant);
+    yield* this.driveSession({ ...input, messages: continuationMessages }, grant, external);
   }
 
   private async *driveSession(
     input: ConverseTurnInput,
     grant: AgentGrant,
+    external?: AbortSignal,
   ): AsyncGenerator<HarnessTurnEvent> {
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
@@ -442,6 +445,12 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     const toolUseNames = new Map<string, string>();
     const pending: HarnessTurnEvent[] = [];
     const abort = new AbortController();
+    // Link the caller's in-process cancellation (client disconnected mid-first-pull —
+    // see ConverseRunOptions.signal) into THIS session's controller so the pending
+    // sdk.query() pull is abandoned promptly instead of running to settlement.
+    const onExternalAbort = (): void => abort.abort();
+    if (external?.aborted) abort.abort();
+    else external?.addEventListener("abort", onExternalAbort, { once: true });
     let awaitingApproval = false;
 
     const apsTestRunTool = sdk.tool(

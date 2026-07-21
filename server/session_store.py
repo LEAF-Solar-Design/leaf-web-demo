@@ -167,6 +167,13 @@ def _db() -> sqlite3.Connection:
         _conn.execute("PRAGMA busy_timeout = 5000")
         _conn.execute("PRAGMA journal_mode = WAL")
         _conn.executescript(_SCHEMA)
+        # CREATE TABLE IF NOT EXISTS never retrofits columns onto a database
+        # created by an older schema. `consumed` landed after the first cut of
+        # this table, and consume_approval() SELECTs it — migrate additively
+        # and idempotently before any reader touches the connection.
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(approvals)").fetchall()}
+        if "consumed" not in cols:
+            _conn.execute("ALTER TABLE approvals ADD COLUMN consumed INTEGER NOT NULL DEFAULT 0")
         _conn.commit()
     return _conn
 

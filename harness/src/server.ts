@@ -215,8 +215,14 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
  * followed by a `turn_complete{stop_reason:'error'}` event, matching the FROZEN
  * invariant that every stream ends with one of those two event types.
  *
- * A client disconnect (`res` 'close' - the response socket, see below) aborts the
- * async iterator via `iterator.return()` and stops writing further chunks.
+ * A client disconnect (`res` 'close' - the response socket, see below) does TWO
+ * things, in order: (1) fires the AbortSignal handed to `runTurn` — because
+ * `iterator.return()` alone merely QUEUES behind a pending `next()` per the
+ * async-generator spec, so a hung/expensive first SDK call would keep running
+ * until it settled on its own; the signal preempts that pull by aborting the
+ * runner's underlying work (the SDK's AbortController) immediately — and then
+ * (2) calls `iterator.return()` so the generator unwinds through `finally` and
+ * no further chunks are written.
  */
 async function streamTurn(
   _req: IncomingMessage,
@@ -224,11 +230,13 @@ async function streamTurn(
   runner: ConverseRunner,
   input: ConverseTurnInput,
 ): Promise<void> {
-  const iterator = runner.runTurn(input)[Symbol.asyncIterator]();
+  const turnAbort = new AbortController();
+  const iterator = runner.runTurn(input, { signal: turnAbort.signal })[Symbol.asyncIterator]();
 
   let closed = false;
   const onClose = (): void => {
     closed = true;
+    turnAbort.abort();
     const ret = iterator.return?.(undefined);
     if (ret && typeof (ret as Promise<unknown>).catch === "function") {
       void (ret as Promise<unknown>).catch(() => {});
@@ -248,7 +256,21 @@ async function streamTurn(
   res.on("error", () => {});
 
   // Pull the first event BEFORE writing the response head (see doc comment above).
-  let step = await iterator.next();
+  let step: IteratorResult<HarnessTurnEvent>;
+  try {
+    step = await iterator.next();
+  } catch (err) {
+    res.off("close", onClose);
+    if (closed) {
+      // Our own disconnect-triggered abort surfaced as a rejection (e.g. the SDK's
+      // AbortError). The peer is gone — there is no response left to shape.
+      res.end();
+      return;
+    }
+    // Genuine pre-stream failure (GrantRequiredError etc.): propagate so the caller
+    // renders the non-stream 401/error shape, exactly as before.
+    throw err;
+  }
 
   res.writeHead(200, { "content-type": "application/x-ndjson" });
 

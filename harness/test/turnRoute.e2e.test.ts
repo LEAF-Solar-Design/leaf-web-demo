@@ -30,7 +30,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHarness } from "../src/server.js";
 import type { HarnessAuthConfig } from "../src/server.js";
-import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent } from "../src/ports/index.js";
+import type {
+  ConverseRunner,
+  ConverseRunOptions,
+  ConverseTurnInput,
+  HarnessPorts,
+  HarnessTurnEvent,
+} from "../src/ports/index.js";
 import { GrantRequiredError } from "../src/ports/impl/oauthGrantProvider.js";
 import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
@@ -427,5 +433,68 @@ describe("POST /turn - client disconnect WHILE the first event is still pending"
     // ~2150ms it would take the pre-fix code's generator to finish on its own.
     await waitUntil(() => terminated, 1200);
     expect(terminated).toBe(true);
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// Round-2 review blocker: `iterator.return()` alone QUEUES behind a pending
+// `next()` (async-generator spec) — a first pull that never settles on its own
+// (a hung/expensive SDK call) would keep running after the client is gone. The
+// fix threads an AbortSignal into runTurn (ConverseRunOptions.signal) and fires
+// it in the close handler, preempting the pending pull instead of waiting it out.
+// --------------------------------------------------------------------------- //
+
+describe("POST /turn - client disconnect ABORTS a hung first pull via the runner's AbortSignal", () => {
+  it("the signal handed to runTurn fires on disconnect while the first pull is still pending", async () => {
+    let sawSignal = false;
+    let abortedPromptly = false;
+    const hungRunner: ConverseRunner = {
+      async *runTurn(_input: ConverseTurnInput, opts?: ConverseRunOptions): AsyncGenerator<HarnessTurnEvent> {
+        // Simulates an SDK first call that NEVER settles on its own. Without the
+        // signal threaded through (the pre-fix code), nothing can resolve this
+        // promise: the generator hangs, `abortedPromptly` never flips, and the
+        // waitUntil below times the test out — i.e. this test genuinely gates
+        // the fix, it cannot pass by iterator.return() semantics alone.
+        const sig = opts?.signal;
+        sawSignal = sig instanceof AbortSignal;
+        await new Promise<void>((resolve) => {
+          if (!sig) return; // no signal -> hang forever (regression -> timeout)
+          if (sig.aborted) return resolve();
+          sig.addEventListener("abort", () => resolve(), { once: true });
+        });
+        abortedPromptly = true;
+        // A real SDK runner's query would throw an AbortError here; ending the
+        // generator without further yields exercises the same server-side path
+        // (nothing further is written to the closed response).
+      },
+    };
+    const { server: s } = listen(basePorts(hungRunner));
+    server = s;
+    const addr = s.address() as AddressInfo;
+
+    const body = JSON.stringify(validBody());
+    const rawRequest =
+      `POST /turn HTTP/1.1\r\n` +
+      `Host: 127.0.0.1:${addr.port}\r\n` +
+      `Content-Type: application/json\r\n` +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+      `Connection: close\r\n` +
+      `\r\n${body}`;
+
+    const socket = connect(addr.port, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+    socket.on("error", () => {});
+    socket.write(rawRequest);
+
+    // Give the request time to reach streamTurn (first pull now pending), then vanish.
+    await delay(60);
+    socket.destroy();
+
+    await waitUntil(() => abortedPromptly, 1500);
+    expect(sawSignal).toBe(true);
+    expect(abortedPromptly).toBe(true);
   });
 });

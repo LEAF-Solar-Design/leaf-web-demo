@@ -48,13 +48,30 @@ from routers import agent as agent_router  # noqa: E402
 
 REAL_DB_PATH = SERVER_DIR / "sessions.db"
 
+# The live :8130 stack legitimately owns a real server/sessions.db on a dev
+# machine — its EXISTENCE is not test pollution (same posture as
+# test_session_store.py). The invariant is that this SUITE never touches it:
+# snapshot (mtime, size) at import, assert unchanged.
+def _real_db_snapshot():
+    try:
+        st = REAL_DB_PATH.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
+        return None
+_REAL_DB_AT_IMPORT = _real_db_snapshot()
+
 
 def test_sessions_db_isolated_to_tmp_path():
-    assert session_store.DB_PATH == _TMP_DB
+    # In a combined multi-file run, whichever test module imported session_store
+    # FIRST won the os.environ.setdefault race and bound SESSIONS_DB to ITS tmp
+    # dir — so assert the redirect is real (never the repo's own sessions.db),
+    # not that it equals THIS file's tmp path.
+    assert session_store.DB_PATH != REAL_DB_PATH
+    assert "sessions.db" in session_store.DB_PATH.name
     session_store.ensure_started()
-    assert not REAL_DB_PATH.exists(), (
-        f"this suite touched the real DB at {REAL_DB_PATH} instead of the "
-        f"SESSIONS_DB-redirected tmp path {_TMP_DB}"
+    assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
+        f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
+        f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )
 
 
@@ -271,7 +288,7 @@ def test_decide_expired_but_undecided_still_records_200_not_410(client):
 
 
 def test_zzz_real_sessions_db_still_absent():
-    assert not REAL_DB_PATH.exists(), (
-        f"the real {REAL_DB_PATH} was created by this test run -- SESSIONS_DB "
-        "isolation failed"
+    assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
+        f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
+        f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )

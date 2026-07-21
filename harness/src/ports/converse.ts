@@ -77,11 +77,24 @@ export interface ConverseTurnInput {
 }
 
 /**
+ * In-process (never on-the-wire) options for one `runTurn` drive. `signal`
+ * fires when the HTTP client of `POST /turn` disconnects: `iterator.return()`
+ * alone queues behind a pending `next()` per the async-generator spec, so a
+ * hung/expensive FIRST model call would otherwise keep running after the
+ * peer is gone — the runner must wire this signal into whatever underlying
+ * cancellation it has (the Agent SDK's AbortController) so that pull is
+ * abandoned promptly. Optional and additive: fakes may ignore it.
+ */
+export interface ConverseRunOptions {
+  signal?: AbortSignal;
+}
+
+/**
  * The harness-side implementation of the converse turn loop. `runTurn`
  * drives one turn to completion (or halt-on-approval) and yields the
  * `HarnessTurnEvent`s the turn engine relays/persists as it goes; the
  * async iterable ending is equivalent to the NDJSON stream ending.
  */
 export interface ConverseRunner {
-  runTurn(input: ConverseTurnInput): AsyncIterable<HarnessTurnEvent>;
+  runTurn(input: ConverseTurnInput, opts?: ConverseRunOptions): AsyncIterable<HarnessTurnEvent>;
 }
