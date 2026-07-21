@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import deps
 from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
+    agent,
     author,
     capabilities,
     drawings,
@@ -33,6 +34,8 @@ from routers import (
     ops,
     prompt,
     session,
+    sessions,
+    site,
     tenant,
     tools,
     usage,
@@ -72,6 +75,8 @@ app.add_middleware(
 install_error_handlers(app)
 
 app.include_router(session.router)
+app.include_router(sessions.router)  # sessions wire spec (S2): POST /api/sessions, .../messages, .../stream, .../transcript
+app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_id} (record-only)
 app.include_router(tools.router)
 app.include_router(jobs.router)
 app.include_router(capabilities.router)
@@ -81,6 +86,7 @@ app.include_router(prompt.router)  # M3: NL prompt router (MATRIX gap #2 — one
 app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET /api/usage)
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
+app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 
 
 # --- platform Project/Job router (org-scoped persistence; platform/README.md) --- #
