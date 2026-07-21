@@ -155,7 +155,7 @@ def fetch(url: str, timeout: int = 30):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        return exc.code, ""
+        return exc.code, exc.read().decode("utf-8", "replace")
     except Exception as exc:
         return None, str(exc)
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import shutil
 import subprocess
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -148,3 +150,22 @@ if (!headers['Content-Type']?.startsWith('application/json')) process.exit(4)
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_fetch_preserves_http_error_body(monkeypatch) -> None:
+    body = b'{"error":"web origin does not serve API routes"}'
+
+    def raise_not_found(_request, timeout):
+        raise urllib.error.HTTPError(
+            "https://example.test/api/health",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(body),
+        )
+
+    monkeypatch.setattr(deploy_web.urllib.request, "urlopen", raise_not_found)
+    assert deploy_web.fetch("https://example.test/api/health") == (
+        404,
+        body.decode(),
+    )
