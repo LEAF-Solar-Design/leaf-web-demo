@@ -29,6 +29,31 @@
 }
 .stage-root button { font-family: inherit; }
 
+.lp-auth-error {
+  position: absolute;
+  z-index: 40;
+  top: 58px;
+  right: 24px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 440px;
+  padding: 9px 12px;
+  border: 1px solid rgba(248, 113, 113, .38);
+  border-radius: 8px;
+  background: rgba(35, 12, 14, .94);
+  color: #fecaca;
+  font-size: 12px;
+}
+.lp-auth-error button {
+  border: 1px solid rgba(254, 202, 202, .4);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 /* ---------------- layer 0: the permanent stage ---------------- */
 
 .stage-layer { position: absolute; inset: 0; z-index: 0; }

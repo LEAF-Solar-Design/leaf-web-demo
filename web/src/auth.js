@@ -13,6 +13,8 @@
 // (the calm demo gate). Proven end-to-end against the already-allowed
 // http://localhost:8080 callback.
 
+import { beginLogin, finishLoginRedirect } from './authFlow.js'
+
 const DOMAIN = import.meta.env.VITE_AUTH0_DOMAIN || ''
 const CLIENT_ID = import.meta.env.VITE_AUTH0_CLIENT_ID || ''
 const AUDIENCE = import.meta.env.VITE_AUTH0_AUDIENCE || ''
@@ -39,30 +41,21 @@ async function client() {
 
 // Kick the Authorization-Code + PKCE redirect to Auth0 Universal Login.
 export async function login() {
-  const c = await client()
-  if (c) await c.loginWithRedirect()
+  return beginLogin(client)
 }
 
 // Call once on mount. If we returned from Auth0 (?code=&state=), finish the code
 // exchange, stash the api-audience access token as leaf.jwt, strip the query,
-// and return true so the caller can reload into an authenticated session.
+// and return a structured result so the caller can reload or show a retry.
 export async function handleRedirectCallback() {
-  if (!authConfigured) return false
-  const q = window.location.search
-  if (!/[?&]code=/.test(q) || !/[?&]state=/.test(q)) return false
-  const c = await client()
-  if (!c) return false
-  const clean = () => window.history.replaceState({}, document.title, window.location.pathname)
-  try {
-    await c.handleRedirectCallback()
-    const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
-    if (token) localStorage.setItem(JWT_KEY, token)
-    clean()
-    return !!token
-  } catch {
-    clean()
-    return false
-  }
+  return finishLoginRedirect({
+    configured: authConfigured,
+    search: window.location.search,
+    getClient: client,
+    audience: AUDIENCE,
+    storeToken: (token) => localStorage.setItem(JWT_KEY, token),
+    cleanUrl: () => window.history.replaceState({}, document.title, window.location.pathname),
+  })
 }
 
 export function isSignedIn() {

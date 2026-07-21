@@ -11,11 +11,6 @@ import { navigate } from './router.js'
 import { login, authConfigured } from '../auth.js'
 import { loadDemoSolve } from './intakeCache.js'
 
-function startTrial() {
-  if (authConfigured) login()
-  else navigate('/app')
-}
-
 const SHEETS = [
   { code: '02', label: '02 The problem' },
   { code: '03', label: '03 How Branch works' },
@@ -26,6 +21,13 @@ const SHEETS = [
 
 export default function LandingCast({ onTryTool }) {
   const [solve, setSolve] = useState(null)
+  const [authError, setAuthError] = useState(null)
+  const startTrial = async () => {
+    if (!authConfigured) { navigate('/app'); return }
+    setAuthError(null)
+    const result = await login()
+    if (result.error) setAuthError(result.error)
+  }
   useEffect(() => {
     let live = true
     loadDemoSolve()
@@ -50,6 +52,13 @@ export default function LandingCast({ onTryTool }) {
           </div>
         </div>
       </div>
+
+      {authError && (
+        <div className="lp-auth-error" data-cast="site" style={{ '--rank': 0 }} role="alert">
+          <span>{authError}</span>
+          <button type="button" onClick={startTrial}>Retry</button>
+        </div>
+      )}
 
       {/* Statement block */}
       <div className="lp-stmt" data-cast="site" style={{ '--rank': 0 }}>

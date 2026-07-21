@@ -159,7 +159,7 @@ function Section({ title, count, open, onToggle, children, innerRef, className =
 // is one click away. Shown only when a 401 was actually observed (not offline).
 function plural(n, w) { return `${n} ${w}${n === 1 ? '' : 's'}` }
 
-function SignedOutGate({ onDemo, onSignIn }) {
+function SignedOutGate({ onDemo, onSignIn, authError }) {
   return (
     <div className="card enter" style={{ margin: '0 0 16px' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -174,6 +174,7 @@ function SignedOutGate({ onDemo, onSignIn }) {
           <button type="button" className={onSignIn ? 'btn ghost' : 'btn primary'} onClick={onDemo}>Explore the demo</button>
           <span className="dim" style={{ fontSize: 12 }}>No sign-in needed · sample data</span>
         </div>
+        {authError && <div className="inline-error" role="alert">{authError}</div>}
       </div>
     </div>
   )
@@ -235,6 +236,7 @@ export default function App() {
   const [routeErr, setRouteErr] = useState(null)         // routing call failed -> failed strip
   const [jobs, setJobs] = useState([])                   // live rail: recent GET /api/jobs
   const [authRequired, setAuthRequired] = useState(false) // live mode with no session: 401s observed -> polls stop, footer says so
+  const [authError, setAuthError] = useState(null)       // actionable Auth0 start/callback failure
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [currentJobId, setCurrentJobId] = useState(null) // this session's live job id (dedupe)
   const [inflightPtr, setInflightPtr] = useState(null)   // localStorage re-attach pointer
@@ -461,8 +463,17 @@ export default function App() {
   // the token and land a 200 session (no gate). No-op in mock / when unconfigured.
   useEffect(() => {
     if (mock) return
-    handleRedirectCallback().then((stored) => { if (stored) window.location.reload() })
+    handleRedirectCallback().then((result) => {
+      if (result.signedIn) window.location.reload()
+      else if (result.handled && result.error) setAuthError(result.error)
+    })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startSignIn = useCallback(async () => {
+    setAuthError(null)
+    const result = await login()
+    if (result.error) setAuthError(result.error)
+  }, [])
 
   // Per-tenant spend chip: poll GET /api/usage on load (live only). null hides
   // the chip (mock, or the sibling endpoint not deployed yet) — no fake numbers.
@@ -1863,7 +1874,13 @@ export default function App() {
             Restart guided tour
           </button>
         )}
-        {signedOut && authConfigured && <SignedOutGate onDemo={() => setMock(true)} onSignIn={login} />}
+        {signedOut && authConfigured && (
+          <SignedOutGate
+            onDemo={() => setMock(true)}
+            onSignIn={startSignIn}
+            authError={authError}
+          />
+        )}
         <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">

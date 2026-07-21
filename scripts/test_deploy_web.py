@@ -169,3 +169,18 @@ def test_fetch_preserves_http_error_body(monkeypatch) -> None:
         404,
         body.decode(),
     )
+
+
+def test_auth_flow_oracle() -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required to execute the auth-flow oracle")
+    result = subprocess.run(
+        [node, "scripts/check_authflow.mjs"],
+        cwd=deploy_web.WEB,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "AUTH_FLOW_OK" in result.stdout
