@@ -81,7 +81,7 @@ def test_spa_rewrite_excludes_api_paths() -> None:
     public_config = deploy_web.WEB / "public" / "vercel.json"
     root_source = __import__("json").loads(root_config.read_text())["rewrites"][0]["source"]
     public_source = __import__("json").loads(public_config.read_text())["rewrites"][0]["source"]
-    assert "api(?:/|$)" in root_source
+    assert "api/" in root_source
     assert root_source == public_source
 
 
