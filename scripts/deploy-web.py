@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
-"""Build web/ and deploy web/dist straight to the leaf-platform-web Vercel project.
+"""Stage, verify, and promote the leaf-platform-web Vercel deployment.
 
-The deploy root IS the build output. There is no staging directory to keep in
-sync: everything the deploy needs (index.html, assets/, vercel.json, the public
-fixtures) is produced by `npm run build`, because vercel.json lives in
-web/public/ and vite copies public/ into dist/ on every build.
-
-Project linkage comes from VERCEL_ORG_ID / VERCEL_PROJECT_ID rather than a
-committed .vercel/ directory, because vite empties dist/ on every build — a
-.vercel/ folder placed inside dist would be deleted by the next build. That is
-exactly the trap the old hand-maintained staging dirs existed to work around.
-
-Usage:
-    python scripts/deploy-web.py              # build, deploy to production, verify
-    python scripts/deploy-web.py --preview    # same, but a preview deploy
-    python scripts/deploy-web.py --no-build   # deploy the dist that is already there
-    python scripts/deploy-web.py --dry-run    # build + preflight only, no deploy
-
-Exit code is 0 only when the deploy is live AND verified: every route returns
-200 and the domain actually serves the asset filenames this build produced.
+Production is built by Vercel from ``web/`` so the cloud build can read the
+project's sensitive ``VITE_*`` variables. The production alias is changed only
+after the unaliased deployment passes route and compiled-bundle checks.
 """
 
 from __future__ import annotations
@@ -31,31 +16,27 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
-# Windows consoles default to cp1252, which cannot encode every character this
-# script prints. Force UTF-8 so a deploy never dies on an encoding error.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError):  # already wrapped / not a real tty
+    except (AttributeError, ValueError):
         pass
 
 REPO = Path(__file__).resolve().parent.parent
 WEB = REPO / "web"
 DIST = WEB / "dist"
-
-# Not secrets: these identify the project, they do not authenticate to it.
-# The credential is the Vercel CLI's own auth token (`vercel login`).
 ORG_ID = "team_LWjg4ghzDbsZrkNPaOnRwAx5"
 PROJECT_ID = "prj_tBxvYtXa47THZ8aF59gvRx8W0bBc"
-
+TEAM_SLUG = "evan-haugs-projects"
 DOMAIN = "https://leaf-platform-web.vercel.app"
-
-# Every route the SPA owns. These are the ones that 404 without the catch-all
-# rewrite, because only "/" exists as a real file on disk.
+PRODUCTION_API_BASE = "https://api.leafdesign.ai"
+PRODUCTION_AUTH0_DOMAIN = "leafautomation.us.auth0.com"
 ROUTES = ["/", "/app", "/try", "/sheets", "/sheets/01"]
+PROJECT_ENV = {"VERCEL_ORG_ID": ORG_ID, "VERCEL_PROJECT_ID": PROJECT_ID}
 
 
 def run(cmd, cwd=None, env_extra=None, capture=False):
@@ -66,160 +47,252 @@ def run(cmd, cwd=None, env_extra=None, capture=False):
         env = os.environ.copy()
         env.update(env_extra)
     return subprocess.run(
-        cmd,
-        cwd=cwd,
-        env=env,
-        shell=isinstance(cmd, str),
-        check=False,
-        text=True,
-        capture_output=capture,
+        cmd, cwd=cwd, env=env, shell=isinstance(cmd, str), check=False,
+        text=True, encoding="utf-8", errors="replace", capture_output=capture,
     )
 
 
 def fail(msg: str) -> None:
     print(f"NOT-READY: {msg}")
-    sys.exit(1)
+    raise SystemExit(1)
 
 
-def build() -> None:
-    print("-> building web/")
-    r = run("npm run build", cwd=WEB)
-    if r.returncode != 0:
-        fail("`npm run build` failed")
-
-
-def preflight() -> str:
-    """Check dist is deployable. Returns the entry JS asset filename."""
-    index = DIST / "index.html"
-    if not index.exists():
-        fail(f"{index} missing — run without --no-build")
-
-    cfg = DIST / "vercel.json"
-    if not cfg.exists():
-        fail(
-            f"{cfg} missing — web/public/vercel.json should have been copied by "
-            "the build; without it every route except / returns 404"
-        )
-
-    try:
-        conf = json.loads(cfg.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        fail(f"{cfg} is not valid JSON: {e}")
-
-    if not conf.get("rewrites"):
-        fail(f"{cfg} has no rewrites — /app, /try and /sheets would 404")
-
-    # cleanUrls 308-redirects /index.html to /, so a catch-all rewrite pointing
-    # at /index.html resolves to a redirect and Vercel answers 404. The two are
-    # mutually exclusive; this guard stops that regression coming back.
-    if conf.get("cleanUrls"):
-        fail(
-            f'{cfg} sets "cleanUrls": true, which breaks the SPA rewrite '
-            "(/index.html becomes a 308 to /, so the rewrite target is itself a "
-            "redirect and every deep route 404s). Remove it."
-        )
-
-    html = index.read_text(encoding="utf-8")
-    m = re.search(r'assets/index-[A-Za-z0-9_-]+\.js', html)
-    if not m:
-        fail("could not find the entry asset reference in dist/index.html")
-    entry = m.group(0)
-    print(f"  preflight ok — entry asset {entry}")
-    return entry
-
-
-def deploy(preview: bool) -> None:
-    target = "preview" if preview else "production"
-    print(f"-> deploying {DIST} to {target}")
-    # On Windows the CLI is vercel.cmd, which a list-form exec cannot resolve
-    # by bare name — look up the real path instead of shelling out.
+def _vercel_cli() -> str:
     vercel = shutil.which("vercel")
     if not vercel:
         fail("`vercel` CLI not found on PATH — install it or run `vercel login`")
-    cmd = [vercel, "deploy", "--yes"] + ([] if preview else ["--prod"])
-    r = run(
-        cmd,
-        cwd=DIST,
-        env_extra={"VERCEL_ORG_ID": ORG_ID, "VERCEL_PROJECT_ID": PROJECT_ID},
-        capture=True,
+    return vercel
+
+
+def _npm_cli() -> str:
+    npm = shutil.which("npm")
+    if not npm:
+        fail("`npm` not found on PATH")
+    return npm
+
+
+def build() -> None:
+    """Make a local structural build; production contract checks happen remotely."""
+    print("-> building web/ locally (structural preflight only)")
+    result = run([_npm_cli(), "run", "build"], cwd=WEB)
+    if result.returncode != 0:
+        fail("local `npm run build` failed")
+
+
+def preflight() -> str:
+    """Check the local output's static shape, without claiming env validation."""
+    index = DIST / "index.html"
+    if not index.exists():
+        fail(f"{index} missing — run without --no-build")
+    config_path = DIST / "vercel.json"
+    if not config_path.exists():
+        fail(f"{config_path} missing — deep SPA routes would return 404")
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fail(f"{config_path} is not valid JSON: {exc}")
+    if not config.get("rewrites"):
+        fail(f"{config_path} has no rewrites — deep SPA routes would return 404")
+    if config.get("cleanUrls"):
+        fail(f'{config_path} sets "cleanUrls": true, which breaks the SPA rewrite')
+    match = re.search(
+        r'assets/index-[A-Za-z0-9_-]+\.js', index.read_text(encoding="utf-8")
     )
-    if r.returncode != 0:
-        print(r.stdout)
-        print(r.stderr, file=sys.stderr)
+    if not match:
+        fail("could not find the entry asset reference in dist/index.html")
+    print(f"  structural preflight ok — entry asset {match.group(0)}")
+    return match.group(0)
+
+
+def _deployment_url(output: str) -> str:
+    urls = re.findall(r"https://[A-Za-z0-9.-]+\.vercel\.app", output)
+    if not urls:
+        fail("Vercel did not return a deployment URL")
+    return urls[-1].rstrip("/")
+
+
+def deploy(*, preview: bool) -> str:
+    """Cloud-build web/ and return its unaliased deployment URL."""
+    target = "preview" if preview else "production (unaliased)"
+    print(f"-> cloud-building and deploying web/ to {target}")
+    command = [_vercel_cli(), "deploy", "--yes"]
+    if not preview:
+        command += ["--prod", "--skip-domain"]
+    result = run(command, cwd=WEB, env_extra=PROJECT_ENV, capture=True)
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    if result.returncode != 0:
+        print(output)
         fail("`vercel deploy` failed")
-    print(f"  deployed ({target})")
+    # Vercel writes the canonical deployment URL to stdout and ancillary
+    # inspect/alias links to stderr. Prefer stdout so an alias is never mistaken
+    # for the immutable staged artifact.
+    url = _deployment_url(result.stdout or output)
+    print(f"  staged: {url}")
+    return url
 
 
 def fetch(url: str, timeout: int = 30):
-    req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+    request = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return e.code, ""
-    except Exception as e:  # network hiccup — caller decides whether to retry
-        return None, str(e)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, ""
+    except Exception as exc:
+        return None, str(exc)
 
 
-def verify(entry: str) -> None:
-    """The deploy is only done when the live domain serves THIS build."""
-    print(f"-> verifying {DOMAIN}")
+def fetch_protected(deployment_url: str, path: str):
+    """Fetch a protected staged deployment through authenticated Vercel CLI."""
+    result = run(
+        [
+            _vercel_cli(), "curl", path, "--deployment", deployment_url,
+            "--yes", "--scope", TEAM_SLUG, "--", "--fail-with-body",
+        ],
+        cwd=WEB,
+        env_extra=PROJECT_ENV,
+        capture=True,
+    )
+    if result.returncode != 0:
+        return None, result.stderr or result.stdout or "vercel curl failed"
+    return 200, result.stdout
 
-    # The alias can take a moment to swing to the new deployment.
-    served = None
-    for attempt in range(6):
-        status, body = fetch(DOMAIN + "/")
-        if status == 200 and entry in body:
-            served = entry
-            break
-        time.sleep(5)
-    if not served:
-        fail(
-            f"{DOMAIN}/ is not serving this build's entry asset ({entry}) after "
-            "~30s — the alias may still be pointing at the previous deployment"
-        )
-    print(f"  live entry matches build: {entry}")
 
-    bad = []
-    for route in ROUTES:
-        status, _ = fetch(DOMAIN + route)
-        mark = "ok" if status == 200 else f"HTTP {status}"
-        print(f"  {route:<14} {mark}")
+def _production_bundle_contract(javascript: str) -> list[str]:
+    errors = []
+    if "http://localhost:8130" in javascript:
+        errors.append("contains localhost API fallback")
+    if PRODUCTION_API_BASE not in javascript:
+        errors.append(f"missing {PRODUCTION_API_BASE}")
+    if PRODUCTION_AUTH0_DOMAIN not in javascript:
+        errors.append(f"missing {PRODUCTION_AUTH0_DOMAIN}")
+    return errors
+
+
+def _javascript_graph(base_url: str, html: str, fetcher) -> tuple[str, str]:
+    """Fetch entry and referenced Vite chunks, returning entry path and text."""
+    match = re.search(r'(?:src=["\']/?)(assets/index-[^"\']+\.js)', html)
+    if not match:
+        fail(f"could not find the entry JavaScript at {base_url}")
+    entry = match.group(1)
+    pending = [entry]
+    seen: set[str] = set()
+    bodies: list[str] = []
+    while pending:
+        asset = pending.pop()
+        if asset in seen:
+            continue
+        seen.add(asset)
+        status, body = fetcher(asset)
         if status != 200:
-            bad.append((route, status))
-    if bad:
-        fail(
-            "these routes did not return 200: "
-            + ", ".join(f"{r} -> {s}" for r, s in bad)
-        )
+            fail(f"{base_url}/{asset} returned HTTP {status}")
+        bodies.append(body)
+        for child in re.findall(r'["\'](?:\./)?(assets/[^"\']+\.js)["\']', body):
+            if child not in seen:
+                pending.append(child)
+        for child in re.findall(r'["\']\./([^"\']+\.js)["\']', body):
+            sibling = str(Path(asset).parent / child).replace("\\", "/")
+            if sibling not in seen:
+                pending.append(sibling)
+    return entry, "\n".join(bodies)
 
-    print("READY: deploy is live and every route verified")
+
+def verify(
+    base_url: str,
+    *,
+    production_contract: bool,
+    expected_entry: str | None = None,
+    protected: bool = False,
+) -> str:
+    """Verify routes and the recursively fetched JavaScript artifact."""
+    base_url = base_url.rstrip("/")
+    print(f"-> verifying {base_url}")
+    fetcher = (
+        (lambda path: fetch_protected(base_url, "/" + path.lstrip("/")))
+        if protected
+        else (lambda path: fetch(urllib.parse.urljoin(base_url + "/", path)))
+    )
+    status, html = fetcher("/")
+    if status != 200:
+        fail(f"{base_url}/ returned HTTP {status}")
+    entry, javascript = _javascript_graph(base_url, html, fetcher)
+    if expected_entry and entry != expected_entry:
+        fail(f"entry mismatch: expected {expected_entry}, served {entry}")
+    if production_contract:
+        errors = _production_bundle_contract(javascript)
+        if errors:
+            fail("production bundle " + "; ".join(errors))
+    for route in ROUTES:
+        route_status, _ = fetcher(route)
+        print(f"  {route:<14} {'ok' if route_status == 200 else f'HTTP {route_status}'}")
+        if route_status != 200:
+            fail(f"{route} returned HTTP {route_status}")
+    print(f"  verified entry: {entry}")
+    return entry
+
+
+def promote(deployment_url: str) -> None:
+    print(f"-> promoting {deployment_url}")
+    result = run(
+        [
+            _vercel_cli(), "promote", deployment_url, "--yes",
+            "--scope", TEAM_SLUG,
+        ],
+        cwd=WEB, env_extra=PROJECT_ENV,
+    )
+    if result.returncode != 0:
+        fail("`vercel promote` failed; production alias was not intentionally changed")
+
+
+def rollback() -> None:
+    print("-> post-promotion verification failed; requesting Vercel rollback")
+    result = run(
+        [_vercel_cli(), "rollback", "--yes", "--scope", TEAM_SLUG],
+        cwd=WEB,
+        env_extra=PROJECT_ENV,
+    )
+    if result.returncode != 0:
+        print("WARNING: automatic rollback failed; run `vercel rollback` immediately")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--preview", action="store_true", help="preview deploy, not production")
-    ap.add_argument("--no-build", action="store_true", help="deploy the existing dist")
-    ap.add_argument("--dry-run", action="store_true", help="build + preflight, no deploy")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preview", action="store_true", help="stage a preview deploy")
+    parser.add_argument("--no-build", action="store_true", help="skip local structural build")
+    parser.add_argument("--dry-run", action="store_true", help="local structural checks only")
+    args = parser.parse_args()
 
     if not args.no_build:
         build()
-    entry = preflight()
-
+    preflight()
     if args.dry_run:
-        print("READY: dry run — dist is deployable (nothing was deployed)")
+        print("READY: local structure is deployable; sensitive production env was not tested")
         return
 
-    deploy(args.preview)
-
+    deployment_url = deploy(preview=args.preview)
+    entry = verify(
+        deployment_url,
+        production_contract=not args.preview,
+        protected=True,
+    )
     if args.preview:
-        # A preview deploy never touches the production alias, so verifying the
-        # domain would just re-check whatever is already live.
-        print("READY: preview deployed (production alias untouched, not verified)")
+        print(f"READY: verified preview {deployment_url}; production alias untouched")
         return
 
-    verify(entry)
+    promote(deployment_url)
+    try:
+        for attempt in range(6):
+            try:
+                verify(DOMAIN, production_contract=True, expected_entry=entry)
+                break
+            except SystemExit:
+                if attempt == 5:
+                    raise
+                time.sleep(5)
+    except SystemExit:
+        rollback()
+        raise
+    print(f"READY: verified and promoted {deployment_url} to {DOMAIN}")
 
 
 if __name__ == "__main__":

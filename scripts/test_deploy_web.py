@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+SCRIPT = Path(__file__).with_name("deploy-web.py")
+SPEC = importlib.util.spec_from_file_location("deploy_web", SCRIPT)
+assert SPEC and SPEC.loader
+deploy_web = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(deploy_web)
+
+
+def _result(stdout: str = "https://leaf-web-abc.vercel.app") -> SimpleNamespace:
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+def test_build_resolves_npm_launcher(monkeypatch) -> None:
+    runner = Mock(return_value=SimpleNamespace(returncode=0))
+    monkeypatch.setattr(deploy_web, "run", runner)
+    monkeypatch.setattr(deploy_web, "_npm_cli", lambda: "npm.cmd")
+    deploy_web.build()
+    assert runner.call_args.args[0] == ["npm.cmd", "run", "build"]
+    assert runner.call_args.kwargs["cwd"] == deploy_web.WEB
+
+
+@pytest.mark.parametrize(
+    ("preview", "suffix"),
+    [(True, []), (False, ["--prod", "--skip-domain"])],
+)
+def test_deploy_cloud_builds_from_web(monkeypatch, preview, suffix) -> None:
+    runner = Mock(return_value=_result())
+    monkeypatch.setattr(deploy_web, "run", runner)
+    monkeypatch.setattr(deploy_web, "_vercel_cli", lambda: "vercel.cmd")
+    assert deploy_web.deploy(preview=preview) == "https://leaf-web-abc.vercel.app"
+    assert runner.call_args.args[0] == ["vercel.cmd", "deploy", "--yes"] + suffix
+    assert runner.call_args.kwargs["cwd"] == deploy_web.WEB
+    assert runner.call_args.kwargs["env_extra"] == deploy_web.PROJECT_ENV
+
+
+@pytest.mark.parametrize(
+    ("javascript", "error"),
+    [
+        (
+            "http://localhost:8130 https://api.leafdesign.ai leafautomation.us.auth0.com",
+            "localhost",
+        ),
+        ("leafautomation.us.auth0.com", "api.leafdesign.ai"),
+        ("https://api.leafdesign.ai", "leafautomation.us.auth0.com"),
+    ],
+)
+def test_production_contract_rejects_bad_bundle(javascript, error) -> None:
+    assert any(error in item for item in deploy_web._production_bundle_contract(javascript))
+
+
+def test_production_contract_accepts_real_endpoints() -> None:
+    assert deploy_web._production_bundle_contract(
+        "https://api.leafdesign.ai leafautomation.us.auth0.com"
+    ) == []
+
+
+def test_promote_uses_verified_deployment(monkeypatch) -> None:
+    runner = Mock(return_value=SimpleNamespace(returncode=0))
+    monkeypatch.setattr(deploy_web, "run", runner)
+    monkeypatch.setattr(deploy_web, "_vercel_cli", lambda: "vercel.cmd")
+    deploy_web.promote("https://leaf-web-abc.vercel.app")
+    assert runner.call_args.args[0] == [
+        "vercel.cmd", "promote", "https://leaf-web-abc.vercel.app", "--yes",
+        "--scope", deploy_web.TEAM_SLUG,
+    ]
+
+
+def test_deployment_url_uses_last_cli_url() -> None:
+    output = "Inspect: https://one.vercel.app\nProduction: https://two.vercel.app"
+    assert deploy_web._deployment_url(output) == "https://two.vercel.app"
+
+
+def test_protected_fetch_pins_existing_project(monkeypatch) -> None:
+    runner = Mock(return_value=SimpleNamespace(returncode=0, stdout="body", stderr=""))
+    monkeypatch.setattr(deploy_web, "run", runner)
+    monkeypatch.setattr(deploy_web, "_vercel_cli", lambda: "vercel.cmd")
+    assert deploy_web.fetch_protected("https://stage.vercel.app", "/app") == (200, "body")
+    command = runner.call_args.args[0]
+    assert command == [
+        "vercel.cmd", "curl", "/app", "--deployment",
+        "https://stage.vercel.app", "--yes", "--scope", deploy_web.TEAM_SLUG,
+        "--", "--fail-with-body",
+    ]
+    assert runner.call_args.kwargs["env_extra"] == deploy_web.PROJECT_ENV

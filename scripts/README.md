@@ -5,7 +5,7 @@ CI-ready entry points for the Leaf web demo:
 | File | What it is |
 |------|------------|
 | `run-all-gates.py` | Runs every test suite in the repo, each in its **own** subprocess, and prints one PASS/FAIL scoreboard. Exit 0 iff every non-skipped gate passes. |
-| `deploy-web.py` | Builds `web/` and deploys `web/dist` **itself** to the `leaf-platform-web` Vercel project, then verifies the live domain. Exit 0 iff every route returns 200 and the domain serves the asset filenames this build produced. |
+| `deploy-web.py` | Cloud-builds `web/`, verifies the unaliased artifact, then promotes and verifies production. The production contract rejects localhost/API-less/Auth0-less bundles. |
 | `../server/tests/test_e2e_golden.py` | One self-contained golden-path e2e that boots the broker + app and drives the whole product over HTTP. Run by the gate runner, also runnable alone. |
 
 ---
@@ -27,17 +27,26 @@ python scripts/deploy-web.py
 
 ## Deploying the web demo
 
-`deploy-web.py` deploys the build output directly. There is **no staging
-directory** to keep in sync — that was the old arrangement and it drifted.
+`deploy-web.py` asks Vercel to cloud-build `web/`. This is required because
+sensitive project variables are intentionally withheld from `vercel env run`;
+only Vercel's cloud build can inject the production `VITE_*` values safely.
 
-Two things make `web/dist` self-sufficient as the deploy root:
+Production deploys are staged with `--prod --skip-domain`. The script crawls
+the generated JavaScript chunks, rejects localhost/API-less/Auth0-less output,
+and verifies every SPA route before calling `vercel promote`. It then verifies
+the production alias serves the exact staged entry asset. A failed post-promote
+check requests `vercel rollback` automatically.
+
+The local build is only a structural preflight. It checks that Vite still emits
+an entry asset and that the SPA rewrite is present; it does not claim to test
+sensitive production environment values. Two files preserve the route contract:
 
 - `vercel.json` lives in `web/public/`, so vite copies it into `dist/` on every
   build. Without it every route except `/` returns 404, because `/` is the only
   path that exists as a real file.
-- Project linkage comes from `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID`, set by the
-  script. A committed `.vercel/` directory would not survive, because vite
-  empties `dist/` on each build.
+- `web/vercel.json` configures Vercel's cloud build and its output directory.
+  Project linkage comes from `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID`, set by the
+  script, rather than a committed `.vercel/` directory.
 
 The script refuses to deploy a `dist` that would 404 — it fails if `vercel.json`
 is missing, has no `rewrites`, or sets `cleanUrls: true`. That last one is not
