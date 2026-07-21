@@ -43,10 +43,6 @@ The pre-promotion backend check requires the configured platform host to return
 `/api/session`. This prevents a healthy but unrelated API hostname from passing
 the bundle string check and leaving every real platform request at 404.
 
-The SPA fallback explicitly excludes `/api/*`. The web origin therefore cannot
-answer an intuitive health probe with the HTML shell and falsely masquerade as
-the external backend.
-
 The local build is only a structural preflight. It checks that Vite still emits
 an entry asset and that the SPA rewrite is present; it does not claim to test
 sensitive production environment values. Two files preserve the route contract:

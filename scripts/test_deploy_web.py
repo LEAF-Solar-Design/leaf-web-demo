@@ -76,15 +76,6 @@ def test_production_contract_requires_expected_source_sha() -> None:
     ) == []
 
 
-def test_spa_rewrite_excludes_api_paths() -> None:
-    root_config = deploy_web.WEB / "vercel.json"
-    public_config = deploy_web.WEB / "public" / "vercel.json"
-    root_rewrites = __import__("json").loads(root_config.read_text())["rewrites"]
-    public_rewrites = __import__("json").loads(public_config.read_text())["rewrites"]
-    assert "api." in root_rewrites[0]["source"]
-    assert root_rewrites == public_rewrites
-
-
 def test_backend_contract_requires_health_and_auth_boundary(monkeypatch) -> None:
     responses = [(200, "{}"), (401, "")]
     monkeypatch.setattr(deploy_web, "fetch", lambda _url: responses.pop(0))

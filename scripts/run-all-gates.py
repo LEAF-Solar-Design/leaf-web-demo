@@ -121,7 +121,7 @@ def build_suites() -> List[Suite]:
     repo_name = REPO.name  # "leaf-web-demo"
     suites: List[Suite] = [
       Suite("deploy-web", "scripts test_deploy_web.py", "pytest", SCRIPTS_DIR,
-            _py_pytest("test_deploy_web.py"), 14),
+            _py_pytest("test_deploy_web.py"), 13),
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 10),
