@@ -25,6 +25,24 @@ builds ``{confirmation_id, approved, proposal: {tool, params, capability}}``
 from it before ever calling ``turn_runner.start_turn`` — the params/tool/
 capability the harness resumes with come from the DURABLE row, never from the
 client (the client only ever sends confirmationId + approved).
+
+APPROVAL CONSUME (merge-gate finding #1): the client's ``confirm.approved``
+boolean is NEVER trusted on its own — this path calls
+``session_store.consume_approval(confirmation_id, session_id, tenant_id)``,
+ONE atomic locked check-then-set that verifies the row belongs to THIS
+session+tenant, has actually been decided (via the separate
+``POST /api/agent/approvals/{confirmation_id}`` call, routers/agent.py), is
+not expired, and has not already been consumed by a prior confirm — then
+returns the DURABLY STORED ``approved`` value, which is what gets wired into
+the ``ConverseTurnInput.confirm`` sent to the harness. A client that skips
+the approvals call, replays a confirm, reuses another session's
+confirmation_id, or sends ``approved: true`` against a row that was actually
+decided ``approved: false`` all fail closed. Wire-compat: console/converse.js
+(leaf_website/console/converse.js)'s ``approve()`` ALWAYS POSTs
+``/api/agent/approvals/{confirmationId}`` (which durably records the decision)
+BEFORE its caller sends the confirm message via ``postMessage({confirm})`` —
+see that file's ``approve()``/``postMessage()`` comments — so requiring
+``decided`` here is compatible with every real client.
 """
 from __future__ import annotations
 
@@ -152,8 +170,11 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
     if not entitlements.entitlements_for(tier).get("converse", False):
         return entitlements.entitlement_denied_response("converse", tier)
 
-    # 4. confirm path: resolve the durable approval row and build the frozen
-    # ConverseTurnInput.confirm shape ourselves (see module docstring).
+    # 4. confirm path: atomically verify-and-consume the durable approval row
+    # (merge-gate finding #1 — see module docstring's APPROVAL CONSUME note)
+    # and build the frozen ConverseTurnInput.confirm shape ourselves, using
+    # the STORED approved value — never the client's req.confirm.approved,
+    # which is read here only to validate the confirm shape, not trusted.
     confirm_payload: Optional[Dict[str, Any]] = None
     if has_confirm:
         confirmation_id = (req.confirm or {}).get("confirmationId")
@@ -162,15 +183,34 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
                 ErrorCode.BAD_PARAMS, "confirm.confirmationId is required",
                 retryable=False, status_code=400,
             )
-        approval = session_store.get_approval(confirmation_id)
-        if approval is None or str(approval.get("tenant_id")) != str(tenant):
-            # unknown / cross-tenant collapse to the SAME response (agent.py's
-            # own /approvals precedent) — no existence leak.
-            return error_response(
-                ErrorCode.BAD_PARAMS, f"unknown confirmation_id {confirmation_id!r}",
-                retryable=False, status_code=404,
-            )
-        if approval.get("expired"):
+        try:
+            approval = session_store.consume_approval(confirmation_id, session_id, str(tenant))
+        except session_store.ApprovalConsumeError as exc:
+            if exc.reason == "not_found":
+                # unknown / cross-session / cross-tenant collapse to the SAME
+                # response (agent.py's own /approvals precedent) — no
+                # existence leak.
+                return error_response(
+                    ErrorCode.BAD_PARAMS, f"unknown confirmation_id {confirmation_id!r}",
+                    retryable=False, status_code=404,
+                )
+            if exc.reason == "undecided":
+                # client is trying to confirm without ever having called
+                # POST /api/agent/approvals first — same (409, BAD_PARAMS)
+                # shape converse.js's classifyAgentError() already reads as
+                # 'approval_stale' for the already-decided case.
+                return error_response(
+                    ErrorCode.BAD_PARAMS,
+                    f"confirmation_id {confirmation_id!r} has not been decided",
+                    retryable=False, status_code=409,
+                )
+            if exc.reason == "already_consumed":
+                return error_response(
+                    ErrorCode.BAD_PARAMS,
+                    f"confirmation_id {confirmation_id!r} was already consumed",
+                    retryable=False, status_code=409,
+                )
+            # exc.reason == "expired"
             return error_response(
                 ErrorCode.CONFIRMATION_EXPIRED,
                 f"confirmation_id {confirmation_id!r} has expired",
@@ -178,7 +218,7 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
             )
         confirm_payload = {
             "confirmation_id": confirmation_id,
-            "approved": bool((req.confirm or {}).get("approved")),
+            "approved": bool(approval.get("approved")),  # STORED value, never the client's
             "proposal": {
                 "tool": approval.get("tool"),
                 "params": approval.get("params"),

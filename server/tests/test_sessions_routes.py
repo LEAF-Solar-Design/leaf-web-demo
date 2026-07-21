@@ -50,6 +50,17 @@ from routers import sessions as sessions_router  # noqa: E402
 
 REAL_DB_PATH = SERVER_DIR / "sessions.db"
 
+# The live :8130 stack legitimately owns a real server/sessions.db on a dev
+# machine — its EXISTENCE is not test pollution. The invariant is that this
+# SUITE never touches it: snapshot (mtime, size) at import, assert unchanged.
+def _real_db_snapshot():
+    try:
+        st = REAL_DB_PATH.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
+        return None
+_REAL_DB_AT_IMPORT = _real_db_snapshot()
+
 
 def test_sessions_db_isolated_to_tmp_path():
     # Full-suite runs race multiple modules' SESSIONS_DB setdefaults — whichever
@@ -58,9 +69,9 @@ def test_sessions_db_isolated_to_tmp_path():
     assert session_store.DB_PATH != REAL_DB_PATH
     session_store.ensure_started()
     assert session_store.DB_PATH.exists()
-    assert not REAL_DB_PATH.exists(), (
-        f"this suite touched the real DB at {REAL_DB_PATH} instead of the "
-        f"SESSIONS_DB-redirected tmp path {session_store.DB_PATH}"
+    assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
+        f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
+        f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )
 
 
@@ -337,6 +348,12 @@ def test_messages_confirm_cross_tenant_approval_same_session_404_bad_params(clie
 def test_messages_confirm_expired_410_confirmation_expired(client):
     sess = _seed_session()
     cid = _seed_approval(sess["session_id"], sess["tenant_id"], ttl_s=0.05)
+    # consume_approval requires `decided` BEFORE it ever looks at expiry (see
+    # session_store.consume_approval's check order) — decide it first via the
+    # real /api/agent/approvals precedent (session_store.decide_approval
+    # directly here, same as the other seeded-approval tests in this file)
+    # so this test still isolates the EXPIRY outcome specifically.
+    session_store.decide_approval(cid, True, by=sess["tenant_id"])
     time.sleep(0.15)
     r = client.post(
         f"/api/sessions/{sess['session_id']}/messages",
@@ -352,6 +369,10 @@ def test_messages_confirm_valid_builds_frozen_proposal_shape_from_approval_row(c
     cid = _seed_approval(sess["session_id"], sess["tenant_id"],
                          tool="write_home_run", params={"length_ft": 12},
                          capability="drawing.write")
+    # consume_approval now REQUIRES a prior decision (mirrors the real
+    # POST /api/agent/approvals call converse.js always makes before sending
+    # the confirm message).
+    session_store.decide_approval(cid, True, by=sess["tenant_id"])
     captured = {}
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None, classifier_hint=None):
@@ -375,6 +396,108 @@ def test_messages_confirm_valid_builds_frozen_proposal_shape_from_approval_row(c
             "capability": "drawing.write",
         },
     }
+
+
+# =========================================================================== #
+# Merge-gate finding #1 — approvals bypassable/replayable. The four attack
+# cases from the review, exercised at the HTTP router layer (store-level
+# atomicity + the full outcome matrix live in tests/test_approval_consume.py).
+# =========================================================================== #
+def test_messages_confirm_skip_approvals_endpoint_409_undecided(client):
+    """A client that jumps straight to the confirm message WITHOUT ever
+    POSTing /api/agent/approvals first (i.e. an undecided row) must be
+    rejected -- 409 BAD_PARAMS, the same (status, error_code) shape
+    converse.js's classifyAgentError() already reads as 'approval_stale'."""
+    sess = _seed_session()
+    cid = _seed_approval(sess["session_id"], sess["tenant_id"])  # never decided
+
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"confirm": {"confirmationId": cid, "approved": True}},
+        headers=_h(sess["tenant_id"]),
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+
+
+def test_messages_confirm_reverse_a_rejection_stored_approved_false_wins(client, monkeypatch):
+    """The approval was DECIDED as rejected (approved=False). A client that
+    sends {approved: true} on the confirm message must NOT be able to flip
+    it -- the turn must receive the STORED approved=False, not the client's
+    claim."""
+    sess = _seed_session()
+    cid = _seed_approval(sess["session_id"], sess["tenant_id"])
+    outcome = session_store.decide_approval(cid, False, by=sess["tenant_id"])
+    assert outcome == "recorded"
+
+    captured = {}
+
+    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None, classifier_hint=None):
+        captured["confirm"] = confirm
+        return "turn-resume-reversed"
+
+    monkeypatch.setattr(turn_runner, "start_turn", _fake_start_turn)
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"confirm": {"confirmationId": cid, "approved": True}},  # client LIES
+        headers=_h(sess["tenant_id"]),
+    )
+    assert r.status_code == 202, r.text
+    assert captured["confirm"]["approved"] is False  # the STORED decision wins
+
+
+def test_messages_confirm_cross_session_use_404_bad_params(client, monkeypatch):
+    """An approval created under session A, presented on session B (same
+    tenant owns both) -- must 404, never resolve to session B's turn."""
+    sess_a = _seed_session(tenant_id="tenant-xsession")
+    sess_b = _seed_session(tenant_id="tenant-xsession")
+    cid = _seed_approval(sess_a["session_id"], "tenant-xsession")
+    session_store.decide_approval(cid, True, by="tenant-xsession")
+
+    def _boom(*a, **kw):
+        raise AssertionError("start_turn must never be called for a cross-session approval")
+
+    monkeypatch.setattr(turn_runner, "start_turn", _boom)
+    r = client.post(
+        f"/api/sessions/{sess_b['session_id']}/messages",
+        json={"confirm": {"confirmationId": cid, "approved": True}},
+        headers=_h("tenant-xsession"),
+    )
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+
+
+def test_messages_confirm_replay_second_confirm_409_bad_params(client, monkeypatch):
+    """A confirm message replayed against an already-consumed approval must
+    be rejected -- the FIRST confirm resumes the turn exactly once; the
+    SECOND must 409, never start a second turn from the same approval."""
+    sess = _seed_session()
+    cid = _seed_approval(sess["session_id"], sess["tenant_id"])
+    session_store.decide_approval(cid, True, by=sess["tenant_id"])
+
+    calls = []
+
+    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None, classifier_hint=None):
+        calls.append(confirm)
+        return f"turn-resume-{len(calls)}"
+
+    monkeypatch.setattr(turn_runner, "start_turn", _fake_start_turn)
+
+    r1 = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"confirm": {"confirmationId": cid, "approved": True}},
+        headers=_h(sess["tenant_id"]),
+    )
+    assert r1.status_code == 202, r1.text
+
+    r2 = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"confirm": {"confirmationId": cid, "approved": True}},
+        headers=_h(sess["tenant_id"]),
+    )
+    assert r2.status_code == 409, r2.text
+    assert r2.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert len(calls) == 1  # the replay never reached start_turn a second time
 
 
 # =========================================================================== #
@@ -477,8 +600,57 @@ def test_transcript_clamps_nonpositive_limit_to_one(client, monkeypatch):
     assert captured["limit"] == 1
 
 
+# =========================================================================== #
+# Merge-gate finding #6 — /api/site/capabilities must be BUILTIN-only (no
+# authored/runtime tool leak). routers/site.py has no dedicated test file of
+# its own (checked: none exists anywhere in this repo) and isn't part of this
+# suite's WRITE-SET scope for a new file, so this coverage lives here instead
+# -- see routers/site.py's own BUILTIN-ONLY docstring note for the loader
+# split this test asserts against.
+# =========================================================================== #
+def test_site_capabilities_never_leaks_an_authored_tool():
+    import deps
+    from routers import site as site_router
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from envelopes import install_error_handlers
+
+    fake_tool = {
+        "name": "zzz-test-authored-leak-probe",
+        "version": "1.0.0",
+        "description": "a fake authored tool that must never reach the public site catalog",
+        "kind": "script",
+        "engine_op": "zzz_test_authored_leak_probe",
+        "params": {"type": "object", "properties": {}},
+        "capabilities": ["drawing.read"],
+        "provenance": {"author": "agent", "created": "2026-07-20T00:00:00Z"},
+    }
+    deps._AUTHORED.append(fake_tool)
+    try:
+        # sanity: it DOES show up in the full (authenticated) tool union --
+        # proves this probe would have failed loudly had the filter been
+        # broken, rather than passing vacuously because the tool never
+        # existed anywhere.
+        assert any(t["name"] == fake_tool["name"] for t in deps.all_tools(deps.DEFAULT_TENANT))
+
+        site_app = FastAPI()
+        install_error_handlers(site_app)
+        site_app.include_router(site_router.router)
+        site_client = TestClient(site_app, raise_server_exceptions=False)
+
+        r = site_client.get("/api/site/capabilities")
+        assert r.status_code == 200, r.text
+        families = r.json()["families"]
+        all_names = {cap["name"] for fam in families for cap in fam["capabilities"]}
+        assert fake_tool["name"] not in all_names, (
+            "an authored/runtime tool leaked into the public /api/site/capabilities catalog"
+        )
+    finally:
+        deps._AUTHORED[:] = [t for t in deps._AUTHORED if t["name"] != fake_tool["name"]]
+
+
 def test_zzz_real_sessions_db_still_absent():
-    assert not REAL_DB_PATH.exists(), (
-        f"the real {REAL_DB_PATH} was created by this test run -- SESSIONS_DB "
-        "isolation failed"
+    assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
+        f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
+        f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )

@@ -7,17 +7,26 @@
  * is a pure function of its arguments and is exercised directly.
  */
 
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
   AgentSdkTurnRunner,
   chunkText,
   mapSdkMessage,
+  resolveWrapperTarget,
   stopReasonFromResult,
   summarizeArgs,
   summarizeToolResultContent,
 } from "../src/ports/impl/agentSdkTurnRunner.js";
 import type { BrokerApsClient, HarnessTurnEvent, OAuthGrantProvider, TenantRepoProvider } from "../src/ports/index.js";
+import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
+import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
+import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const FIXTURE = join(HERE, "fixtures", "tenant-repo");
 
 // --------------------------------------------------------------------------- //
 // Fixture builders - minimal, type-loose (mapSdkMessage takes `unknown`), shaped
@@ -398,5 +407,120 @@ describe("AgentSdkTurnRunner", () => {
       text: "hello",
     });
     expect(typeof (iterable as AsyncIterable<HarnessTurnEvent>)[Symbol.asyncIterator]).toBe("function");
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// resolveWrapperTarget - FINDING 2 (resume executes the wrapper, not the target).
+// `aps_test_run` is a WRAPPER tool; its own call args are {tool, params_json}. This
+// pure helper is what `canUseTool`'s interception uses to persist the proposal, so
+// asserting it directly is a hermetic, SDK-free way to lock in the fix without
+// dynamically importing the real Agent SDK (see the untested-lane note above).
+// --------------------------------------------------------------------------- //
+
+describe("resolveWrapperTarget", () => {
+  it("extracts the inner target tool name + parsed params from the aps_test_run wrapper's call args", () => {
+    expect(
+      resolveWrapperTarget("aps_test_run", { tool: "count-by-layer", params_json: JSON.stringify({ foo: 1 }) }),
+    ).toEqual({ tool: "count-by-layer", params: { foo: 1 } });
+  });
+
+  it("defaults params to {} when params_json is absent", () => {
+    expect(resolveWrapperTarget("aps_test_run", { tool: "count-by-layer" })).toEqual({
+      tool: "count-by-layer",
+      params: {},
+    });
+  });
+
+  it("defaults params to {} when params_json is malformed JSON (never throws)", () => {
+    expect(resolveWrapperTarget("aps_test_run", { tool: "count-by-layer", params_json: "not json" })).toEqual({
+      tool: "count-by-layer",
+      params: {},
+    });
+  });
+
+  it("falls back to the wrapper's own bare name only when the wrapper's args carry no target tool", () => {
+    expect(resolveWrapperTarget("aps_test_run", {})).toEqual({ tool: "aps_test_run", params: {} });
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// AgentSdkTurnRunner.runConfirm - FINDING 2, resume side: given a proposal that
+// (post-fix) already carries the TARGET tool (e.g. "count-by-layer", never
+// "aps_test_run"), confirm-resume must dispatch broker.runTool with that target.
+// Stays hermetic by pulling ONLY the first yielded event (the confirm branch's
+// `tool_result`) and never continuing into `driveSession`, which dynamically
+// imports the real Agent SDK.
+// --------------------------------------------------------------------------- //
+
+describe("AgentSdkTurnRunner.runConfirm: dispatches the TARGET tool, not the wrapper", () => {
+  it("resume executes the proposal's target tool via broker.runTool", async () => {
+    const oauth: OAuthGrantProvider = new FakeOAuthGrantProvider();
+    const tenantRepo: TenantRepoProvider = new FakeTenantRepoProvider(FIXTURE);
+    const broker = new FakeBrokerApsClient();
+    const runner = new AgentSdkTurnRunner({ oauth, tenantRepo, broker });
+
+    const iterator = runner
+      .runTurn({
+        tenant_id: "acme",
+        session_id: "s1",
+        turn_id: "turn1",
+        drawing_id: "d1",
+        messages: [],
+        confirm: {
+          confirmation_id: "conf-1",
+          approved: true,
+          // What a fixed `canUseTool` now persists: the inner target, never the
+          // "aps_test_run" wrapper.
+          proposal: { tool: "count-by-layer", params: {} },
+        },
+      })
+      [Symbol.asyncIterator]();
+
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+    expect(first.value).toMatchObject({ type: "tool_result", data: { tool: "count-by-layer", ok: true } });
+
+    expect(broker.calls).toHaveLength(1);
+    expect(broker.calls[0].tool.name).toBe("count-by-layer");
+    expect(broker.calls[0].tool.name).not.toBe("aps_test_run");
+
+    // Deliberately stop pulling here: the next event would fall through into
+    // driveSession() (a fresh continuation session), which dynamically imports the
+    // real Agent SDK - forbidden in this hermetic suite.
+    await iterator.return?.(undefined);
+  });
+
+  it("looking up 'aps_test_run' itself (the pre-fix bug) would fail to find a registered tool", async () => {
+    const oauth: OAuthGrantProvider = new FakeOAuthGrantProvider();
+    const tenantRepo: TenantRepoProvider = new FakeTenantRepoProvider(FIXTURE);
+    const broker = new FakeBrokerApsClient();
+    const runner = new AgentSdkTurnRunner({ oauth, tenantRepo, broker });
+
+    const iterator = runner
+      .runTurn({
+        tenant_id: "acme",
+        session_id: "s1",
+        turn_id: "turn1",
+        drawing_id: "d1",
+        messages: [],
+        confirm: {
+          confirmation_id: "conf-2",
+          approved: true,
+          proposal: { tool: "aps_test_run", params: {} },
+        },
+      })
+      [Symbol.asyncIterator]();
+
+    const first = await iterator.next();
+    expect(first.value).toMatchObject({
+      type: "tool_result",
+      data: { tool: "aps_test_run", ok: false },
+    });
+    const summary = (first.value as HarnessTurnEvent).data.summary as string;
+    expect(summary).toContain("no registered tool named");
+    expect(broker.calls).toHaveLength(0);
+
+    await iterator.return?.(undefined);
   });
 });

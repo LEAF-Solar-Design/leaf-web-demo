@@ -350,6 +350,19 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
         if finished.wait(timeout=max_s):
             return  # the drain thread already terminalized this turn
         _end_once("turn_complete", {"stop_reason": "timeout"})
+        # The drain thread is very likely still blocked inside
+        # `resp.iter_lines()` waiting on the socket (the harness never sent a
+        # terminal event, which is exactly why we're here) — its own
+        # read-timeout wouldn't fire for up to another TURN_MAX_S, leaking a
+        # thread + connection for that whole extra window even though the
+        # turn has already been terminalized above. Closing the response here
+        # unblocks `iter_lines()` immediately (it raises inside `_drain`,
+        # which is swallowed by its own `except Exception` and is a no-op
+        # against `_end_once` since `terminal_flag` is already set).
+        try:
+            resp.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     threading.Thread(target=_drain, daemon=True, name=f"turn-drain-{turn_id[:8]}").start()
     threading.Thread(target=_watchdog, daemon=True, name=f"turn-watchdog-{turn_id[:8]}").start()

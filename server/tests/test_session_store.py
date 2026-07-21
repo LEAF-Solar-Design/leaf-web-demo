@@ -25,6 +25,17 @@ import session_store  # noqa: E402  (import after env redirect, by design)
 SERVER_DIR = Path(__file__).resolve().parent.parent
 REAL_DB_PATH = SERVER_DIR / "sessions.db"
 
+# The live :8130 stack legitimately owns a real server/sessions.db on a dev
+# machine — its EXISTENCE is not test pollution. The invariant is that this
+# SUITE never touches it: snapshot (mtime, size) at import, assert unchanged.
+def _real_db_snapshot():
+    try:
+        st = REAL_DB_PATH.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
+        return None
+_REAL_DB_AT_IMPORT = _real_db_snapshot()
+
 
 # --------------------------------------------------------------------------- #
 # (e) SESSIONS_DB tmp-path isolation
@@ -40,9 +51,9 @@ def test_sessions_db_isolated_to_tmp_path():
     session_store.ensure_started()
     assert session_store.DB_PATH.exists()
     # the real, non-test sessions.db must never be created by this suite
-    assert not REAL_DB_PATH.exists(), (
-        f"test suite touched the real DB at {REAL_DB_PATH} instead of the "
-        f"SESSIONS_DB-redirected tmp path {session_store.DB_PATH}"
+    assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
+        f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
+        f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )
 
 
@@ -384,7 +395,7 @@ def test_decide_approval_concurrent_only_one_recorded():
 # final isolation re-check (belt-and-suspenders, runs after everything above)
 # --------------------------------------------------------------------------- #
 def test_zzz_real_sessions_db_still_absent():
-    assert not REAL_DB_PATH.exists(), (
-        f"the real {REAL_DB_PATH} was created by this test run — SESSIONS_DB "
-        "isolation failed"
+    assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
+        f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
+        f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )

@@ -74,7 +74,8 @@ DDL:
       approved         INTEGER,
       decided_by       TEXT,
       created_at       REAL,
-      expires_at       REAL
+      expires_at       REAL,
+      consumed         INTEGER NOT NULL DEFAULT 0
     )
 
 Store API v1 (signatures FROZEN — downstream lanes S3/S4 call these exactly):
@@ -91,6 +92,7 @@ Store API v1 (signatures FROZEN — downstream lanes S3/S4 call these exactly):
                     capability, rationale, kind, payload, ttl_s) -> None
     get_approval(confirmation_id) -> Optional[dict]
     decide_approval(confirmation_id, approved, by) -> str   # 'recorded'|'already_decided'|'not_found'
+    consume_approval(confirmation_id, session_id, tenant_id) -> dict   # raises ApprovalConsumeError
 """
 from __future__ import annotations
 
@@ -148,7 +150,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   approved        INTEGER,
   decided_by      TEXT,
   created_at      REAL,
-  expires_at      REAL
+  expires_at      REAL,
+  consumed        INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -236,6 +239,7 @@ def _row_to_approval(row: sqlite3.Row) -> Dict[str, Any]:
         "created_at": row["created_at"],
         "expires_at": expires_at,
         "expired": bool(expires_at is not None and time.time() > expires_at),
+        "consumed": bool(row["consumed"]),
     }
 
 
@@ -441,3 +445,92 @@ def decide_approval(confirmation_id: str, approved: bool, by: Optional[str] = No
         )
         conn.commit()
         return "recorded"
+
+
+class ApprovalConsumeError(Exception):
+    """Raised by consume_approval() on any non-success outcome. ``reason`` is
+    one of:
+
+      'not_found'         -- no row for confirmation_id, OR the row's
+                             session_id/tenant_id doesn't match the caller's.
+                             These three cases are DELIBERATELY collapsed into
+                             one indistinguishable outcome (mirrors get_approval
+                             callers' existing no-existence-leak posture in
+                             routers/agent.py and routers/sessions.py) -- a
+                             cross-session or cross-tenant caller can never
+                             learn "the confirmation_id is real, just not
+                             yours" from the failure alone.
+      'undecided'         -- no decision has been recorded yet (decided=0) --
+                             i.e. the caller is trying to jump straight to the
+                             confirm message WITHOUT ever POSTing
+                             /api/agent/approvals first.
+      'expired'           -- the approval's TTL has lapsed (time.time() >
+                             expires_at).
+      'already_consumed'  -- a prior consume_approval() call for this
+                             confirmation_id already won (replay of the same
+                             confirm message).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def consume_approval(confirmation_id: str, session_id: str, tenant_id: str) -> Dict[str, Any]:
+    """Verify-and-consume an approval for the messages{confirm} resume path,
+    in ONE atomic locked transaction (SELECT -> validate -> UPDATE consumed=1
+    -> commit) so two concurrent callers racing the SAME confirmation_id can
+    never both win: exactly one sees the check-then-set succeed, the other
+    raises ApprovalConsumeError('already_consumed') -- this is what makes a
+    replayed confirm message safely rejected rather than a second resume
+    firing off two turns from one approval.
+
+    Checks, in order (see ApprovalConsumeError's own docstring for what each
+    reason means): row exists AND session_id matches AND tenant_id matches
+    (collapsed -> 'not_found') -> decided (-> 'undecided' if not) -> not
+    already consumed (-> 'already_consumed' if it is) -> not expired (->
+    'expired' if it is).
+
+    On success, marks consumed=1 and returns the full approval dict --
+    INCLUDING the durably STORED `approved` value. Callers MUST resume the
+    turn using THIS stored value, never whatever boolean the client happened
+    to send on the confirm message -- a client that sends {approved: true}
+    against a row that was actually decided/stored as approved=false must
+    still resume with approved=false (the client cannot reverse a rejection
+    by lying on the confirm call). This is wire-compatible with every real
+    client: console/converse.js's `approve()` ALWAYS POSTs
+    /api/agent/approvals/{confirmationId} (which durably records the decision
+    via decide_approval, above) BEFORE its caller ever sends the confirm
+    message via postMessage({confirm}) -- see that file's own `approve()` /
+    `postMessage()` comments -- so a real client's confirm.approved is always
+    already reflected in the stored row by the time this runs, and requiring
+    `decided` here rejects only a client that skips the approvals call
+    entirely (attack case, not a real UX path)."""
+    now = time.time()
+    with _lock:
+        conn = _db()
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT * FROM approvals WHERE confirmation_id = ?", (confirmation_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ApprovalConsumeError("not_found")
+        if str(row["session_id"]) != str(session_id) or str(row["tenant_id"]) != str(tenant_id):
+            # collapsed with the unknown-row case above -- no existence leak.
+            raise ApprovalConsumeError("not_found")
+        if not row["decided"]:
+            raise ApprovalConsumeError("undecided")
+        if row["consumed"]:
+            raise ApprovalConsumeError("already_consumed")
+        expires_at = row["expires_at"]
+        if expires_at is not None and now > expires_at:
+            raise ApprovalConsumeError("expired")
+        conn.execute(
+            "UPDATE approvals SET consumed = 1 WHERE confirmation_id = ?",
+            (confirmation_id,),
+        )
+        conn.commit()
+        result = _row_to_approval(row)
+        result["consumed"] = True
+        return result

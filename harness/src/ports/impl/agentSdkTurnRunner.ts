@@ -307,6 +307,32 @@ function bareToolName(name: string): string {
   return name.startsWith(MCP_TOOL_PREFIX) ? name.slice(MCP_TOOL_PREFIX.length) : name;
 }
 
+/** Parse the wrapper's `params_json` field (see makeApsTestRun / apsTestRun.ts: the
+ *  inner target tool's params travel inside `aps_test_run`'s call args as a JSON
+ *  string, not as the wrapper's own params). Malformed/absent -> {}, never throws. */
+function parseWrapperParams(paramsJson: unknown): Record<string, unknown> {
+  if (typeof paramsJson !== "string" || !paramsJson.trim()) return {};
+  try {
+    return JSON.parse(paramsJson) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+/** Resolve the ACTUAL target tool + params from the `aps_test_run` wrapper's own call
+ *  args (`inp: {tool, params_json}` - see apsTestRun.ts). Used both when the interception
+ *  in `canUseTool` records the proposal (FINDING 2: the proposal must carry the target,
+ *  not the wrapper, or resume looks up "aps_test_run" in the tenant registry and fails
+ *  to find it) and by the `aps_test_run` handler itself. Exported standalone (pure, no
+ *  SDK dependency) so the hermetic suite can assert the interception logic directly. */
+export function resolveWrapperTarget(
+  bareWrapperName: string,
+  inp: Record<string, unknown>,
+): { tool: string; params: Record<string, unknown> } {
+  const targetTool = typeof inp.tool === "string" && inp.tool.trim() ? inp.tool : undefined;
+  return { tool: targetTool ?? bareWrapperName, params: parseWrapperParams(inp.params_json) };
+}
+
 /** Rewrite an event's `data.tool` from the wire-prefixed MCP name to the bare tool
  *  name a client should render (mapSdkMessage itself stays server-name-agnostic). */
 function debarify(ev: HarnessTurnEvent): HarnessTurnEvent {
@@ -430,8 +456,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         // (canUseTool below denies it before the SDK ever calls this handler); kept so
         // a future non-gated tool sharing this shape has a correct handler to reuse.
         const toolName = String(a.tool ?? "");
-        const params =
-          typeof a.params_json === "string" && a.params_json.trim() ? (JSON.parse(a.params_json) as Record<string, unknown>) : {};
+        const params = parseWrapperParams(a.params_json);
         const outcome = await this.executeProposal(input, { tool: toolName, params });
         return outcome.ok
           ? { content: [{ type: "text", text: outcome.summary }] }
@@ -448,22 +473,27 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       const bare = bareToolName(toolName);
       if (!approvalTools.has(bare)) return { behavior: "allow", updatedInput: inp };
 
+      // `inp` here is the WRAPPER's (aps_test_run) own call args - {tool, params_json}
+      // - not the tool the user actually wants to run. The proposal (and therefore the
+      // resume/confirm payload the caller echoes back on approval) must carry the
+      // TARGET tool + its parsed params, or resume looks up "aps_test_run" itself in
+      // the tenant registry instead of e.g. "count-by-layer" and fails to find it.
       const confirmationId = randomUUID();
-      const targetTool = typeof inp.tool === "string" ? inp.tool : undefined;
-      const capability = await this.capabilityFor(input.tenant_id, targetTool);
+      const { tool: proposalTool, params: targetParams } = resolveWrapperTarget(bare, inp);
+      const capability = await this.capabilityFor(input.tenant_id, proposalTool === bare ? undefined : proposalTool);
       pending.push({
         type: "proposed_run",
         data: {
           confirmation_id: confirmationId,
-          tool: bare,
-          params: inp,
-          rationale: `The assistant wants to run "${bare}" - this requires your approval.`,
+          tool: proposalTool,
+          params: targetParams,
+          rationale: `The assistant wants to run "${proposalTool}" - this requires your approval.`,
           ...(capability ? { capability } : {}),
         },
       });
       pending.push({
         type: "confirmation_required",
-        data: { confirmation_id: confirmationId, kind: "tool_run", payload: { tool: bare, params: inp } },
+        data: { confirmation_id: confirmationId, kind: "tool_run", payload: { tool: proposalTool, params: targetParams } },
       });
       awaitingApproval = true;
       abort.abort();

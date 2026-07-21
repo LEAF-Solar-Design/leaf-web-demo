@@ -215,21 +215,16 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
  * followed by a `turn_complete{stop_reason:'error'}` event, matching the FROZEN
  * invariant that every stream ends with one of those two event types.
  *
- * A client disconnect (`req` 'close') aborts the async iterator via
- * `iterator.return()` and stops writing further chunks.
+ * A client disconnect (`res` 'close' - the response socket, see below) aborts the
+ * async iterator via `iterator.return()` and stops writing further chunks.
  */
 async function streamTurn(
-  req: IncomingMessage,
+  _req: IncomingMessage,
   res: ServerResponse,
   runner: ConverseRunner,
   input: ConverseTurnInput,
 ): Promise<void> {
   const iterator = runner.runTurn(input)[Symbol.asyncIterator]();
-
-  // Pull the first event BEFORE writing the response head (see doc comment above).
-  let step = await iterator.next();
-
-  res.writeHead(200, { "content-type": "application/x-ndjson" });
 
   let closed = false;
   const onClose = (): void => {
@@ -239,7 +234,23 @@ async function streamTurn(
       void (ret as Promise<unknown>).catch(() => {});
     }
   };
-  req.on("close", onClose);
+  // Installed on the RESPONSE socket, and BEFORE the first pull. `req` has already been
+  // fully drained by readJsonBody() by the time we get here, so a 'close' listener on it
+  // can miss an early disconnect; and a disconnect that happens WHILE we are still
+  // awaiting the runner's FIRST event (e.g. mid an LLM call, before any response bytes
+  // have gone out) must be observed the moment it fires - EventEmitter drops events
+  // emitted before a listener is attached, so registering this after that first pull (as
+  // before) silently misses exactly that case.
+  res.on("close", onClose);
+  // A write/writeHead issued after the peer has already closed the connection must not
+  // surface as an unhandled 'error' event (process crash) - onClose above already stops
+  // both writing and pulling; this just keeps the EventEmitter contract safe either way.
+  res.on("error", () => {});
+
+  // Pull the first event BEFORE writing the response head (see doc comment above).
+  let step = await iterator.next();
+
+  res.writeHead(200, { "content-type": "application/x-ndjson" });
 
   try {
     while (!step.done) {
@@ -255,7 +266,7 @@ async function streamTurn(
       res.write(`${JSON.stringify({ type: "turn_complete", data: { stop_reason: "error" } })}\n`);
     }
   } finally {
-    req.off("close", onClose);
+    res.off("close", onClose);
     res.end();
   }
 }

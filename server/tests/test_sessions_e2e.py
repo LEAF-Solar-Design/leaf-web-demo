@@ -67,6 +67,17 @@ if str(SERVER_DIR) not in sys.path:
 
 REAL_DB_PATH = SERVER_DIR / "sessions.db"
 
+# The live :8130 stack legitimately owns a real server/sessions.db on a dev
+# machine — its EXISTENCE is not test pollution. The invariant is that this
+# SUITE never touches it: snapshot (mtime, size) at import, assert unchanged.
+def _real_db_snapshot():
+    try:
+        st = REAL_DB_PATH.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
+        return None
+_REAL_DB_AT_IMPORT = _real_db_snapshot()
+
 
 def _free_port() -> int:
     """Bind :0 to let the OS pick a free ephemeral port, then release it. A
@@ -246,9 +257,9 @@ def test_sessions_db_isolated_to_tmp_path():
     assert session_store.DB_PATH != REAL_DB_PATH
     session_store.ensure_started()
     assert session_store.DB_PATH.exists()
-    assert not REAL_DB_PATH.exists(), (
-        f"this suite touched the real DB at {REAL_DB_PATH} instead of the "
-        f"SESSIONS_DB-redirected tmp path {session_store.DB_PATH}"
+    assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
+        f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
+        f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )
 
 
@@ -466,7 +477,7 @@ def test_harness_down_returns_502_broker_unreachable(client, harness):
 
 
 def test_zzz_real_sessions_db_still_absent():
-    assert not REAL_DB_PATH.exists(), (
-        f"the real {REAL_DB_PATH} was created by this test run -- SESSIONS_DB "
-        "isolation failed"
+    assert _real_db_snapshot() == _REAL_DB_AT_IMPORT, (
+        f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
+        f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )

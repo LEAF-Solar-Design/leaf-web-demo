@@ -21,6 +21,7 @@
  *     observably runs).
  */
 
+import { connect } from "node:net";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
@@ -354,5 +355,77 @@ describe("POST /turn - client abort", () => {
 
     await waitUntil(() => cleanedUp, 2000);
     expect(cleanedUp).toBe(true);
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// FINDING 5: the close listener must be installed on the RESPONSE socket, and
+// BEFORE the first pull - a disconnect that happens WHILE the runner's first event
+// is still pending (no response bytes sent yet, res.writeHead() not even called)
+// must still terminate the runner's iteration. The pre-fix code attached its close
+// listener only AFTER that first pull resolved, on `req` (already fully drained by
+// readJsonBody() by that point) - an event emitted before a listener is attached is
+// simply dropped, so this exact window was silently missed.
+// --------------------------------------------------------------------------- //
+
+describe("POST /turn - client disconnect WHILE the first event is still pending", () => {
+  it("destroying the raw socket before any bytes are written still terminates the runner promptly (finally cleanup runs)", async () => {
+    let terminated = false;
+    // NOTE on timing: an async generator's OWN internal `await` (the delay(150) below)
+    // cannot be preempted by an externally-queued `.return()` - per the spec, that
+    // request only takes effect once the generator reaches its next yield/return. So
+    // the fixed code still lets the FIRST event through the pending pull at ~150ms; the
+    // observable difference is what happens next. With the fix, the close listener
+    // (attached BEFORE the first pull, on `res`) already queued `iterator.return()` by
+    // the time the first yield lands, so the SDK-loop equivalent unwinds through
+    // `finally` right away instead of continuing into the long `delay(2000)` below - a
+    // real (non-test-double) runner honoring the same iterator protocol would likewise
+    // stop pulling instead of spending further LLM turns after the client is gone. The
+    // pre-fix code misses the close event entirely (listener attached post-pull, on the
+    // already-drained `req`), so the generator runs to natural completion at ~2150ms.
+    const slowRunner: ConverseRunner = {
+      async *runTurn(): AsyncGenerator<HarnessTurnEvent> {
+        try {
+          // Nothing has gone out on the wire yet, and res.writeHead() has not even been
+          // called, while this first pull is pending.
+          await delay(150);
+          yield { type: "text_delta", data: { text: "first" } };
+          await delay(2000);
+          yield { type: "turn_complete", data: { stop_reason: "end_turn" } };
+        } finally {
+          terminated = true;
+        }
+      },
+    };
+    const { server: s } = listen(basePorts(slowRunner));
+    server = s;
+    const addr = s.address() as AddressInfo;
+
+    const body = JSON.stringify(validBody());
+    const rawRequest =
+      `POST /turn HTTP/1.1\r\n` +
+      `Host: 127.0.0.1:${addr.port}\r\n` +
+      `Content-Type: application/json\r\n` +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+      `Connection: close\r\n` +
+      `\r\n${body}`;
+
+    const socket = connect(addr.port, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+    socket.on("error", () => {}); // destroying our own end can surface ECONNRESET locally
+    socket.write(rawRequest);
+
+    // Destroy well before the runner's simulated 150ms first-pull delay elapses -
+    // exactly the pre-writeHead window the old post-first-pull `req` listener missed.
+    await delay(30);
+    socket.destroy();
+
+    // Comfortably above the ~150ms first-pull settle time, comfortably below the
+    // ~2150ms it would take the pre-fix code's generator to finish on its own.
+    await waitUntil(() => terminated, 1200);
+    expect(terminated).toBe(true);
   });
 });
