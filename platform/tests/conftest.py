@@ -62,14 +62,17 @@ if _DB_CONFIGURED:
 
 
 def pytest_ignore_collect(collection_path, config):
-    """Keep dependency-free ledger checks runnable on a clean checkout.
+    """Keep dependency-free static checks runnable on a clean checkout.
 
     The existing integration suite intentionally imports psycopg and needs a
     PostgreSQL URL.  Without either, avoid importing it at collection time while
-    preserving the static/canonical-hash proof module.
+    preserving the ``*_static.py`` proof modules (ledger, hashing, replay):
+    those load their targets by file path, import nothing DB-shaped, and are
+    exactly the tests that must run everywhere.
     """
     path = pathlib.Path(str(collection_path))
-    if not _DB_CONFIGURED and path.parent == _TESTS_DIR and path.name != "test_ledger_static.py":
+    if not _DB_CONFIGURED and path.parent == _TESTS_DIR \
+            and not path.name.endswith("_static.py"):
         return True
     return False
 
