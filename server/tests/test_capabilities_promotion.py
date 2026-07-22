@@ -131,6 +131,18 @@ def test_availability_registered_when_catalog_has_the_tool(monkeypatch):
     assert entry["reasonCode"] is None
 
 
+def test_locked_tool_returns_empty_evidence_even_with_matching_receipt(tmp_path, monkeypatch):
+    """The discriminating case for the fail-closed rule: a receipt NAMES the
+    tool but the tool is not registered -- evidence must still be []."""
+    receipt = {"tool_name": promo.STRINGING_TOOL, "pass": True}
+    (tmp_path / "fake_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    monkeypatch.setattr(promo, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(deps, "PROJECT_ROOT", tmp_path.parent)
+    entry = promo.availability_for(promo.STRINGING_TOOL)
+    assert entry["state"] == "locked"
+    assert entry["evidence"] == []
+
+
 def test_evidence_cites_a_real_receipt_with_matching_sha256(tmp_path, monkeypatch):
     """When a receipt DOES name the tool, evidence[] must cite the real file
     path and a sha256 that matches the file on disk byte-for-byte."""
