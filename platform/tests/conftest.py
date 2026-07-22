@@ -55,13 +55,31 @@ if "leaf_platform" not in sys.modules:
     sys.modules["leaf_platform"] = _mod
     _spec.loader.exec_module(_mod)
 
-from leaf_platform import db as _db  # noqa: E402
-from leaf_platform import store as _store  # noqa: E402
+_DB_CONFIGURED = bool(os.environ.get("DATABASE_URL") or (_PKG_DIR / ".env.local").exists())
+if _DB_CONFIGURED:
+    from leaf_platform import db as _db  # noqa: E402
+    from leaf_platform import store as _store  # noqa: E402
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Keep dependency-free ledger checks runnable on a clean checkout.
+
+    The existing integration suite intentionally imports psycopg and needs a
+    PostgreSQL URL.  Without either, avoid importing it at collection time while
+    preserving the static/canonical-hash proof module.
+    """
+    path = pathlib.Path(str(collection_path))
+    if not _DB_CONFIGURED and path.parent == _TESTS_DIR and path.name != "test_ledger_static.py":
+        return True
+    return False
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _migrate():
-    """Apply migration 0001 to the target database once per session (idempotent)."""
+    """Apply every idempotent platform migration once per PostgreSQL session."""
+    if not _DB_CONFIGURED:
+        yield
+        return
     _db.apply_migration()
     yield
     _db.reset_pool()
@@ -70,6 +88,8 @@ def _migrate():
 @pytest.fixture
 def make_org():
     """Factory: create a fresh org (unique UUID) so tests don't collide on shared data."""
+    if not _DB_CONFIGURED:
+        pytest.skip("PostgreSQL integration test requires DATABASE_URL")
     created = []
 
     def _make(name="Test Org", tier="hosted_starter"):

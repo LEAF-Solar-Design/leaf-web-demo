@@ -92,7 +92,11 @@ def test_run_params_cap_is_defense_in_depth_at_submit():
 # =========================================================================== #
 def test_unknown_tier_falls_to_restricted_not_demo():
     ent = entitlements.entitlements_for("totally-unknown-tier-xyz")
-    assert ent == {"run_read": True, "run_write": False, "build": False}
+    assert ent == {
+        "run_read": True, "run_write": False, "build": False,
+        "solve": False, "converse": False, "agent_write_autopilot": False,
+        "deploy": False, "platform_customize": False,
+    }
     # the load-bearing property: an unrecognised tier does NOT get write/build.
     assert ent["run_write"] is False and ent["build"] is False
 
@@ -103,12 +107,20 @@ def test_per_key_omission_defaults_false(monkeypatch, tmp_path):
     pf.write_text('{"partialtier": {"run_read": true}}', encoding="utf-8")
     monkeypatch.setenv("LEAF_ENTITLEMENTS_FILE", str(pf))
     ent = entitlements.entitlements_for("partialtier")
-    assert ent == {"run_read": True, "run_write": False, "build": False}
+    assert ent == {
+        "run_read": True, "run_write": False, "build": False,
+        "solve": False, "converse": False, "agent_write_autopilot": False,
+        "deploy": False, "platform_customize": False,
+    }
 
 
 def test_demo_tier_stays_full_access():
     """The auth-off / demo path is unchanged — demo is a known tier granting everything."""
-    assert entitlements.entitlements_for("demo") == {"run_read": True, "run_write": True, "build": True}
+    assert entitlements.entitlements_for("demo") == {
+        "run_read": True, "run_write": True, "build": True,
+        "solve": True, "converse": True, "agent_write_autopilot": True,
+        "deploy": True, "platform_customize": False,
+    }
 
 
 def test_resolve_tier_unchanged_offauth_demo_and_empty_restricted():

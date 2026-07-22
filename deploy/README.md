@@ -46,6 +46,36 @@ rebuild `web` with `--build-arg VITE_API_BASE=https://your-host:8130`.
 
 ---
 
+## Canonical PostgreSQL worker overlay
+
+The default four-service demo remains database-optional. To run the production-shaped
+canonical job authority locally, add `docker-compose.canonical.yml`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.canonical.yml build app canonical-worker migrate
+docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.canonical.yml ps
+```
+
+After the worker is healthy, run the clean-room real-solver receipt:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.canonical.yml run --rm --no-deps \
+  canonical-worker python /app/scripts/canonical-container-smoke.py
+```
+
+The overlay adds PostgreSQL 16, an idempotent migration job that applies migrations
+`0001` through `0010`, and a non-root canonical worker with a database-heartbeat
+healthcheck. The worker image receives `../autofill-solver` as a named BuildKit
+context; solver code is not duplicated into this repository, and the adapter hashes
+the exact source tree before and after every invocation. The local PostgreSQL password
+is deliberately non-secret and the database port is not published. Staging must use
+Secrets Manager and a managed PostgreSQL endpoint instead of these local credentials.
+
+Stop without deleting PostgreSQL state using `down`. For a deliberate clean-room
+rehearsal, use `down -v`; that removes all local named volumes, including
+`leaf-postgres`.
+
 ## Env contract (wired by `docker-compose.yml`)
 
 | Env var | Set on | Value | Purpose |

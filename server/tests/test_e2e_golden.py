@@ -251,9 +251,10 @@ def test_golden_path(stack):
     assert ent["error"] is None
     assert ent["tier"] == "demo"
     # 7-capability shape (agent spine, wire contract §9)
-    assert ent["entitlements"] == {"run_read": True, "run_write": True, "build": True,
-                                   "converse": True, "agent_write_autopilot": True,
-                                   "deploy": True, "platform_customize": False}
+    assert ent["entitlements"] == {"run_read": True, "run_write": True, "solve": True,
+                                   "build": True, "converse": True,
+                                   "agent_write_autopilot": True, "deploy": True,
+                                   "platform_customize": False}
     assert ent["source"] == "policy"
 
     # 8) template author -> the new tool is registered and appears in /api/tools

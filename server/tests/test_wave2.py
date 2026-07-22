@@ -392,50 +392,22 @@ def _h(tenant: str) -> dict:
 # B. Contract B — linkage happy path (before/after terminal) + no-headers no-row
 # --------------------------------------------------------------------------- #
 @requires_db
-def test_B_linkage_happy_path_before_and_after_terminal(stack):
+def test_B_project_scoped_legacy_dispatch_is_truthfully_locked(stack):
     store = _pf_store()
     org = store.create_org("Linkage Org")
     project = store.create_project(org.org_id, "Linkage Project")
     hdr = {**_h("wave2-link"),
-           "X-Org-Id": str(org.org_id), "X-Project-Id": str(project.project_id)}
+           "X-Org-Id": str(org.org_id), "X-Project-Id": str(project.project_id),
+           "Idempotency-Key": "wave2-linkage-happy-path"}
 
     # async submit WITH project context; slow the run so we can see the "before"
     r = requests.post(f"{stack['app']}/api/run",
                       json={"tool": READ_TOOL, "params": {"_qa_sleep_s": 2},
                             "dwg": "rooftop_demo"},
                       headers=hdr, timeout=15)
-    assert r.status_code == 202, r.text
-    spine_job_id = r.json()["job_id"]
-
-    # BEFORE terminal: the platform Job row exists, spine_ref set, not yet succeeded
-    before = store.list_jobs(org.org_id, project.project_id)
-    assert len(before) == 1, before
-    b = before[0]
-    assert b.spine_ref == spine_job_id
-    assert b.kind == "run" and b.tool_name == READ_TOOL
-    assert b.status in ("queued", "running"), b.status
-    assert b.result is None
-
-    # wait for the spine to reach terminal
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        # poll as the OWNING tenant (per-tenant job isolation, security-audit F8)
-        jr = requests.get(f"{stack['app']}/api/jobs/{spine_job_id}",
-                          headers=_h("wave2-link"), timeout=10).json()
-        if jr["status"] in ("complete", "failed"):
-            break
-        time.sleep(0.3)
-    assert jr["status"] == "complete", jr
-
-    # AFTER terminal: synced to succeeded, result = the §3 envelope, spine_ref intact
-    time.sleep(0.5)  # allow the terminal UPDATE to land
-    after = store.get_job(org.org_id, b.job_id)
-    assert after is not None
-    assert after.status == "succeeded", after.status
-    assert after.spine_ref == spine_job_id
-    assert isinstance(after.result, dict) and after.result.get("ok") is True
-    # cost_usd comes from the envelope's cost.usd_est (null on a mock run)
-    assert after.cost_usd is None or isinstance(after.cost_usd, float)
+    assert r.status_code == 409, r.text
+    assert "locked" in r.json()["error"]["message"]
+    assert store.list_jobs(org.org_id, project.project_id) == []
 
 
 @requires_db

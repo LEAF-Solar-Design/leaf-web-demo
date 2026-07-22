@@ -59,8 +59,8 @@ def _server_auth():
     return mod
 
 
-def _verified_org(authorization: Optional[str]) -> uuid.UUID:
-    """Derive the org UUID from a VERIFIED Auth0 session.
+def _verified_identity(authorization: Optional[str]) -> Any:
+    """Derive the canonical org UUID from a verified subject binding.
 
     401 on absent/invalid token (server/auth.py). A verified token whose
     namespaced ``org_id`` claim is absent or is not a UUID -> 403 (authenticated
@@ -69,19 +69,24 @@ def _verified_org(authorization: Optional[str]) -> uuid.UUID:
     """
     auth = _server_auth()
     payload = auth.verify_platform_token(authorization)   # -> 401 on bad/absent token
-    org_claim = payload.get(auth.claim_ns() + "org_id")
-    if not org_claim:
+    subject = payload.get("sub")
+    if not subject:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="token verified but carries no org claim; not provisioned for a Leaf org",
+            detail="token verified but carries no external subject",
         )
-    try:
-        return uuid.UUID(str(org_claim))
-    except (ValueError, AttributeError):
+    from .store import resolve_active_identity_binding
+    binding = resolve_active_identity_binding("auth0", str(subject))
+    if binding is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="verified org claim is not a valid org id",
+            detail="verified subject has no active platform identity binding",
         )
+    return binding
+
+
+def _verified_org(authorization: Optional[str]) -> uuid.UUID:
+    return _verified_identity(authorization).platform_tenant_id
 
 
 def get_org_id(
@@ -91,7 +96,7 @@ def get_org_id(
     """Resolve the caller's org.
 
     OFF (auth off): the ``X-Org-Id`` header (dev seam). 400 if absent/malformed.
-    ON  (auth live): the VERIFIED session's org claim. The header is ignored.
+    ON  (auth live): a verified session's active identity binding. Header ignored.
     """
     if not auth_live():
         # DEV SEAM — client-supplied X-Org-Id (documented demo behavior).
@@ -103,6 +108,74 @@ def get_org_id(
             raise HTTPException(status_code=400, detail="invalid X-Org-Id")
     # LIVE AUTH — verified session wins; a client-supplied X-Org-Id is NOT trusted.
     return _verified_org(authorization)
+
+
+def get_write_org_id(
+    x_org_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> uuid.UUID:
+    """Resolve the org for a mutation and enforce the server-owned live role.
+
+    The auth-off demo seam deliberately remains header-scoped and permissive.
+    In live mode, the role is read from the verified subject's tenant-scoped
+    binding; no client claim, header, or request body can select it.
+    """
+    if not auth_live():
+        return get_org_id(x_org_id=x_org_id, authorization=authorization)
+    binding = _verified_identity(authorization)
+    from .store import active_identity_role
+    role = active_identity_role(binding.platform_tenant_id, binding.binding_id)
+    if role not in {"owner", "editor"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="platform role does not permit mutation")
+    return binding.platform_tenant_id
+
+
+def get_write_binding_id(
+    x_actor_binding_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> uuid.UUID:
+    """Resolve the audited actor binding for a project mutation.
+
+    Live mode ignores the client header and derives the binding from the
+    verified subject. The auth-off development seam requires an explicit UUID,
+    which the store still validates against the target organization and role.
+    """
+    if not auth_live():
+        if not x_actor_binding_id:
+            raise HTTPException(status_code=400, detail="missing X-Actor-Binding-Id")
+        try:
+            return uuid.UUID(x_actor_binding_id)
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="invalid X-Actor-Binding-Id")
+    binding = _verified_identity(authorization)
+    from .store import active_identity_role
+    role = active_identity_role(binding.platform_tenant_id, binding.binding_id)
+    if role not in {"owner", "editor"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="platform role does not permit mutation")
+    return binding.binding_id
+
+
+def get_review_binding_id(
+    x_actor_binding_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> uuid.UUID:
+    """Resolve a professional-review actor; live mode permits owner/reviewer only."""
+    if not auth_live():
+        if not x_actor_binding_id:
+            raise HTTPException(status_code=400, detail="missing X-Actor-Binding-Id")
+        try:
+            return uuid.UUID(x_actor_binding_id)
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="invalid X-Actor-Binding-Id")
+    binding = _verified_identity(authorization)
+    from .store import active_identity_role
+    role = active_identity_role(binding.platform_tenant_id, binding.binding_id)
+    if role not in {"owner", "reviewer"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="platform role does not permit professional review")
+    return binding.binding_id
 
 
 def require_auth_when_live(

@@ -1,4 +1,4 @@
-"""Best-effort linkage: mirror an async-spine run into a canonical platform Job row.
+"""Platform job authority adapter.
 
 This is the piece that makes the Projects workspace non-hollow: when a run is
 submitted WITH project context (the new optional ``X-Org-Id`` + ``X-Project-Id``
@@ -44,7 +44,7 @@ _lock = threading.Lock()
 # spine_job_id -> {"platform_job_id": uuid.UUID, "org_id": uuid.UUID}
 _MAP: Dict[str, Dict[str, Any]] = {}
 
-_pkg: Optional[tuple] = None  # (store, db) once loaded
+_pkg: Optional[tuple] = None  # (store, db, platform_deps) once loaded
 
 # spine terminal status -> platform JOB_STATUSES
 _STATUS_MAP = {"complete": "succeeded", "failed": "failed"}
@@ -75,8 +75,9 @@ def _load_platform():
         spec.loader.exec_module(mod)
     import leaf_platform.db as db  # noqa: PLC0415
     import leaf_platform.store as store  # noqa: PLC0415
+    import leaf_platform.deps as platform_deps  # noqa: PLC0415
 
-    _pkg = (store, db)
+    _pkg = (store, db, platform_deps)
     return _pkg
 
 
@@ -85,7 +86,7 @@ def _db_configured() -> bool:
     platform/.env.local). Never raises; a False here is the silent no-op path
     (the DB-less demo) — no per-run logging."""
     try:
-        _store, db = _load_platform()
+        _store, db, _platform_deps = _load_platform()
         db.get_database_url()  # RuntimeError if unset
         return True
     except Exception:
@@ -95,22 +96,111 @@ def _db_configured() -> bool:
 # --------------------------------------------------------------------------- #
 # entry points (all no-op-safe; called from server/jobs.py)
 # --------------------------------------------------------------------------- #
+def resolve_submission_context(org_id: Optional[str], project_id: Optional[str],
+                               authorization: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Resolve project ownership and authority through the canonical boundary."""
+    if not project_id:
+        if org_id:
+            raise ValueError("X-Project-Id is required with X-Org-Id")
+        return None
+    if not _db_configured():
+        raise ValueError("platform database is required for a project-scoped run")
+    store, _db, platform_deps = _load_platform()
+    if platform_deps.auth_live():
+        resolved_org = platform_deps.get_write_org_id(
+            x_org_id=None, authorization=authorization)
+        if org_id is not None and uuid.UUID(str(org_id)) != resolved_org:
+            raise ValueError("project context does not belong to the verified platform tenant")
+    else:
+        if not org_id:
+            raise ValueError("X-Org-Id is required for a project-scoped run")
+        resolved_org = uuid.UUID(str(org_id))
+    resolved_project = uuid.UUID(str(project_id))
+    if store.get_project(resolved_org, resolved_project) is None:
+        raise ValueError("project context was not found for the verified platform tenant")
+    authority_mode = store.get_authority_mode(resolved_org, resolved_project)
+    if authority_mode != "postgres_canonical":
+        raise ValueError(
+            f"{authority_mode} project-scoped Marathon dispatch is locked; select "
+            "postgres_canonical only after the durable worker is available")
+    return {"org_id": resolved_org, "project_id": resolved_project,
+            "authority_mode": authority_mode}
+
+
+def _canonical_jobs_module():
+    _load_platform()
+    import leaf_platform.canonical_jobs as canonical_jobs  # noqa: PLC0415
+    return canonical_jobs
+
+
+def submit_canonical_solve(context: Dict[str, Any], request_tenant_id: str,
+                           tool_name: str, params: Dict[str, Any],
+                           idempotency_key: Optional[str], input_version_id: str) -> str:
+    """Submit directly to PostgreSQL; never creates or mirrors a SQLite row."""
+    if context.get("authority_mode") != "postgres_canonical":
+        raise ValueError("canonical solve submission requires postgres_canonical authority")
+    job = _canonical_jobs_module().submit_solve_job(
+        context["org_id"], context["project_id"], str(request_tenant_id), tool_name,
+        dict(params), idempotency_key, input_version_id=uuid.UUID(str(input_version_id)))
+    return str(job["job_id"])
+
+
+def _canonical_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if record is None:
+        return None
+    rec = dict(record)
+    status = str(rec.get("status", ""))
+    rec["status"] = {"queued": "submitted", "succeeded": "complete"}.get(status, status)
+    rec["tenant_id"] = str(rec.pop("request_tenant_id", rec.get("tenant_id", "")))
+    rec.setdefault("progress", "done" if rec["status"] == "complete" else rec["status"])
+    rec.setdefault("elapsed_ms", None)
+    rec.setdefault("lease", ({"owner": rec.get("lease_owner"),
+                               "expires_at": rec.get("lease_expires_at"),
+                               "heartbeat_at": rec.get("heartbeat_at")}
+                              if rec.get("lease_owner") else None))
+    return rec
+
+
+def get_canonical_job(job_id: str, request_tenant_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        return _canonical_record(_canonical_jobs_module().get_job_for_tenant(
+            uuid.UUID(str(job_id)), str(request_tenant_id)))
+    except (ValueError, RuntimeError):
+        return None
+
+
+def list_canonical_jobs(request_tenant_id: str, limit: int = 20) -> list[Dict[str, Any]]:
+    try:
+        return [_canonical_record(item) for item in
+                _canonical_jobs_module().list_jobs_for_tenant(str(request_tenant_id), limit=limit)]
+    except RuntimeError:
+        return []
+
+
+def canonical_worker_health(tool_name: str) -> Optional[Dict[str, Any]]:
+    try:
+        return _canonical_jobs_module().worker_health(tool_name)
+    except RuntimeError:
+        return None
+
+
 def on_submit(spine_job_id: str, org_id: Optional[str], project_id: Optional[str],
-              tool_name: Optional[str], params: Optional[Dict[str, Any]]) -> None:
+              tool_name: Optional[str], params: Optional[Dict[str, Any]], *,
+              context: Optional[Dict[str, Any]] = None) -> None:
     """Record a canonical platform Job for a run submitted WITH project context.
 
     No-op unless both headers are present AND the DB resolves. On success the
     spine_job_id -> platform-job mapping is stored so the terminal sync can find
     it. Any error logs one line and is swallowed — the run is never affected.
     """
-    if not org_id or not project_id:
+    if context is None and (not org_id or not project_id):
         return  # no project context -> byte-identical legacy path
     if not _db_configured():
         return  # no DB -> byte-identical legacy path (silent)
     try:
-        store, _db = _load_platform()
-        oid = uuid.UUID(str(org_id))
-        pid = uuid.UUID(str(project_id))
+        store, _db, _platform_deps = _load_platform()
+        oid = (context or {}).get("org_id") or uuid.UUID(str(org_id))
+        pid = (context or {}).get("project_id") or uuid.UUID(str(project_id))
         job = store.create_job(
             oid, pid, "run",
             tool_name=tool_name,
@@ -183,7 +273,7 @@ def _update_by_spine(spine_job_id: str, *, status: str,
     'running' flip, and left as-is by assigning them only when provided)."""
     from psycopg.types.json import Jsonb  # noqa: PLC0415
 
-    _store, db = _load_platform()
+    _store, db, _platform_deps = _load_platform()
     sets = ["status = %(status)s", "updated_at = NOW()"]
     args: Dict[str, Any] = {"status": status, "spine_ref": str(spine_job_id)}
     if result is not None:
@@ -192,7 +282,12 @@ def _update_by_spine(spine_job_id: str, *, status: str,
     if cost_usd is not None:
         sets.append("cost_usd = %(cost_usd)s")
         args["cost_usd"] = cost_usd
+    # The async spine's first accepted terminal callback is immutable. Mirror that
+    # rule in the best-effort canonical linkage so a late/replayed failed callback
+    # cannot relabel an already-succeeded platform Job (or vice versa). Running
+    # syncs are similarly harmless after terminal state.
     sql = ("UPDATE jobs SET " + ", ".join(sets)
-           + " WHERE spine_ref = %(spine_ref)s")
+           + " WHERE spine_ref = %(spine_ref)s"
+           + " AND status NOT IN ('succeeded', 'failed', 'cancelled')")
     with db.cursor() as cur:
         cur.execute(sql, args)

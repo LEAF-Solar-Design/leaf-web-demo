@@ -18,6 +18,7 @@ Other sessions extend this hook for APS WorkItem reaping.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -52,6 +53,16 @@ def heartbeat_stale_s() -> float:
 REAPER_INTERVAL_S = float(os.environ.get("REAPER_INTERVAL_S", "10"))
 MAX_WORKERS = int(os.environ.get("JOB_WORKERS", "4"))
 
+
+def max_attempts() -> int:
+    """Bound automatic delivery attempts; a bad solver must not loop forever."""
+    return max(1, int(os.environ.get("JOB_MAX_ATTEMPTS", "3")))
+
+
+def lease_duration_s() -> float:
+    """A worker owns a job only while it continues to heartbeat this lease."""
+    return max(1.0, float(os.environ.get("JOB_LEASE_S", "60")))
+
 # Worker lanes (CONTRACT-ADDENDUM §10 / wire contract 10): "fast" runs mock reads
 # (tools without drawing.write, APS_LIVE=0) so they never queue behind long writes;
 # "slow" runs drawing.write or live-APS jobs and must stay ≤ the APS concurrency
@@ -80,18 +91,56 @@ CREATE TABLE IF NOT EXISTS jobs (
   finished_at REAL,
   elapsed_ms  INTEGER,
   result_json TEXT,
-  error_json  TEXT
+  error_json  TEXT,
+  execution_json TEXT,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  lease_owner TEXT,
+  lease_expires_at REAL,
+  heartbeat_at REAL,
+  provenance_json TEXT,
+  terminal_fingerprint TEXT,
+  terminal_conflict_json TEXT,
+  org_id TEXT,
+  project_id TEXT,
+  authority_mode TEXT NOT NULL DEFAULT 'legacy_sqlite',
+  idempotency_key TEXT,
+  submission_fingerprint TEXT
 )
 """
+
+_MIGRATIONS = {
+    "execution_json": "TEXT",
+    "attempt": "INTEGER NOT NULL DEFAULT 0",
+    "lease_owner": "TEXT",
+    "lease_expires_at": "REAL",
+    "heartbeat_at": "REAL",
+    "provenance_json": "TEXT",
+    "terminal_fingerprint": "TEXT",
+    "terminal_conflict_json": "TEXT",
+    "org_id": "TEXT",
+    "project_id": "TEXT",
+    "authority_mode": "TEXT NOT NULL DEFAULT 'legacy_sqlite'",
+    "idempotency_key": "TEXT",
+    "submission_fingerprint": "TEXT",
+}
 
 
 def _db() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
         _conn.execute("PRAGMA busy_timeout = 5000")
         _conn.execute("PRAGMA journal_mode = WAL")
         _conn.execute(_SCHEMA)
+        columns = {row[1] for row in _conn.execute("PRAGMA table_info(jobs)")}
+        for name, ddl in _MIGRATIONS.items():
+            if name not in columns:
+                _conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
+        _conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS jobs_project_idempotency_uq "
+            "ON jobs(tenant_id, project_id, idempotency_key) "
+            "WHERE project_id IS NOT NULL AND idempotency_key IS NOT NULL")
         _conn.commit()
     return _conn
 
@@ -126,6 +175,19 @@ def _row_to_record(row: sqlite3.Row) -> Dict[str, Any]:
         "elapsed_ms": row["elapsed_ms"],
         "result": json.loads(row["result_json"]) if row["result_json"] else None,
         "error": json.loads(row["error_json"]) if row["error_json"] else None,
+        # Additive Marathon fields; legacy clients can continue to use the original
+        # record shape unchanged.
+        "attempt": row["attempt"] if "attempt" in row.keys() else 0,
+        "lease": ({"owner": row["lease_owner"], "expires_at": row["lease_expires_at"],
+                   "heartbeat_at": row["heartbeat_at"]}
+                  if "lease_owner" in row.keys() and row["lease_owner"] else None),
+        "provenance": (json.loads(row["provenance_json"])
+                       if "provenance_json" in row.keys() and row["provenance_json"] else None),
+        "org_id": row["org_id"] if "org_id" in row.keys() else None,
+        "project_id": row["project_id"] if "project_id" in row.keys() else None,
+        "authority_mode": (row["authority_mode"] if "authority_mode" in row.keys()
+                           else "legacy_sqlite"),
+        "idempotency_key": row["idempotency_key"] if "idempotency_key" in row.keys() else None,
     }
     return rec
 
@@ -185,7 +247,9 @@ def lane_workers() -> Dict[str, int]:
 def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg: str,
                aps_live: bool, org_id: Optional[str] = None,
                project_id: Optional[str] = None,
-               dwg_version: Optional[int] = None) -> str:
+               dwg_version: Optional[int] = None, *, idempotency_key: Optional[str] = None,
+               authority_mode: str = "legacy_sqlite",
+               platform_context: Optional[Dict[str, Any]] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -210,17 +274,56 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     any durable row / broker payload is written (security-audit F15).
     """
     _reject_oversized_params(params)
+    if project_id and not idempotency_key:
+        raise ValueError("Idempotency-Key is required for project-scoped runs")
+    fingerprint_payload = {
+        "tenantId": str(tenant_id), "orgId": org_id, "projectId": project_id,
+        "tool": tool, "params": params, "dwg": dwg, "apsLive": bool(aps_live),
+        "authorityMode": authority_mode,
+    }
+    submission_fingerprint = hashlib.sha256(json.dumps(
+        fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()
     ensure_started()
     job_id = str(uuid.uuid4())
     now = time.time()
-    _exec(
-        "INSERT INTO jobs (job_id, tenant_id, tool, params_json, dwg, status, progress,"
-        " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (job_id, tenant_id, tool["name"], json.dumps(params), dwg, "submitted",
-         "queued", now, now),
-    )
-    # best-effort platform Job linkage (never raises, never affects the run)
-    platform_link.on_submit(job_id, org_id, project_id, tool.get("name"), params)
+    with _lock:
+        conn = _db()
+        if project_id and idempotency_key:
+            existing = conn.execute(
+                "SELECT job_id, submission_fingerprint FROM jobs "
+                "WHERE tenant_id = ? AND project_id = ? AND idempotency_key = ?",
+                (str(tenant_id), str(project_id), idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                if existing["submission_fingerprint"] != submission_fingerprint:
+                    raise ValueError("idempotency key already exists with different run input")
+                return str(existing["job_id"])
+        try:
+            conn.execute(
+                "INSERT INTO jobs (job_id, tenant_id, tool, params_json, dwg, status, progress, "
+                "created_at, updated_at, execution_json, org_id, project_id, authority_mode, "
+                "idempotency_key, submission_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, str(tenant_id), tool["name"], json.dumps(params), dwg, "submitted",
+                 "queued", now, now, json.dumps({"tool": tool, "aps_live": bool(aps_live)}),
+                 org_id, project_id, authority_mode, idempotency_key, submission_fingerprint),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            existing = conn.execute(
+                "SELECT job_id, submission_fingerprint FROM jobs "
+                "WHERE tenant_id = ? AND project_id = ? AND idempotency_key = ?",
+                (str(tenant_id), str(project_id), idempotency_key),
+            ).fetchone()
+            if existing is None or existing["submission_fingerprint"] != submission_fingerprint:
+                raise ValueError("idempotency key already exists with different run input")
+            return str(existing["job_id"])
+    # In legacy_sqlite this is a diagnostic mirror. postgres_canonical requests
+    # are rejected by resolve_submission_context until the Postgres dispatcher is
+    # connected, so this path can never silently become a second authority.
+    platform_link.on_submit(job_id, org_id, project_id, tool.get("name"), params,
+                            context=platform_context)
     executor = _executors.get(lane_for(tool, aps_live))
     assert executor is not None
     executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live, dwg_version)
@@ -262,6 +365,186 @@ def wait_for_terminal(job_id: str, timeout_s: float, poll_s: float = 0.15) -> Op
 
 
 # --------------------------------------------------------------------------- #
+# Marathon delivery ownership and terminal callback idempotency
+# --------------------------------------------------------------------------- #
+def claim_lease(job_id: str, worker_id: str, now: Optional[float] = None) -> Optional[int]:
+    """Atomically acquire a submitted or expired lease and return its attempt number.
+
+    The compare-and-set UPDATE is deliberately the ownership authority: a second
+    worker sees zero changed rows, including after a process restart where only the
+    SQLite row remains.  SQLite's write transaction plus this predicate prevents
+    two workers from executing the same attempt.
+    """
+    stamp = time.time() if now is None else now
+    expires = stamp + lease_duration_s()
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "UPDATE jobs SET status = 'running', progress = 'running', "
+            "started_at = COALESCE(started_at, ?), updated_at = ?, "
+            "attempt = attempt + 1, lease_owner = ?, lease_expires_at = ?, heartbeat_at = ? "
+            "WHERE job_id = ? AND (status = 'submitted' OR "
+            "(status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))) "
+            "AND attempt < ?",
+            (stamp, stamp, worker_id, expires, stamp, job_id, stamp, max_attempts()))
+        conn.commit()
+        if cur.rowcount != 1:
+            return None
+        row = conn.execute("SELECT attempt FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        return int(row[0])
+
+
+def heartbeat_lease(job_id: str, worker_id: str, progress: Optional[str] = None) -> bool:
+    """Extend only the current holder's lease; a reclaimed worker cannot revive it."""
+    now = time.time()
+    sets = "updated_at = ?, lease_expires_at = ?, heartbeat_at = ?"
+    args: List[Any] = [now, now + lease_duration_s(), now]
+    if progress is not None:
+        sets += ", progress = ?"
+        args.append(progress)
+    args.extend([job_id, worker_id, now])
+    with _lock:
+        cur = _db().execute(
+            f"UPDATE jobs SET {sets} WHERE job_id = ? AND status = 'running' "
+            "AND lease_owner = ? AND lease_expires_at >= ?",
+            tuple(args))
+        _db().commit()
+        return cur.rowcount == 1
+
+
+def _terminal_fingerprint(status: str, result_env: Optional[Dict[str, Any]],
+                          error: Optional[Dict[str, Any]],
+                          provenance: Optional[Dict[str, Any]]) -> str:
+    payload = json.dumps({"status": status, "result": result_env, "error": error,
+                          "provenance": provenance},
+                         sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str, Any]] = None,
+                      error: Optional[Dict[str, Any]] = None,
+                      worker_id: Optional[str] = None,
+                      provenance: Optional[Dict[str, Any]] = None) -> str:
+    """Apply one terminal callback exactly once.
+
+    Returns ``applied``, ``duplicate``, ``conflict``, or ``not_owner``. A terminal
+    result is immutable: a different later callback is retained as conflict audit
+    metadata and never changes the first outcome.
+    """
+    if status not in TERMINAL:
+        raise ValueError("terminal status must be complete or failed")
+    if status == "complete":
+        if not isinstance(result_env, dict) or result_env.get("ok") is not True:
+            raise ValueError("successful terminal callback requires result.ok true")
+        if error is not None:
+            raise ValueError("successful terminal callback cannot include terminal error")
+        if not isinstance(provenance, dict):
+            raise ValueError("successful terminal callback requires provenance")
+        attempt = provenance.get("attempt")
+        execution_path = provenance.get("execution_path")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+            raise ValueError("successful terminal provenance requires a positive attempt")
+        if execution_path not in {"cloud", "local"}:
+            raise ValueError("successful terminal provenance requires cloud or local execution_path")
+        if "fallback" in provenance and not isinstance(provenance["fallback"], bool):
+            raise ValueError("successful terminal fallback flag must be boolean")
+        embedded_provenance = result_env.get("execution_provenance")
+        if embedded_provenance is not None and json.dumps(
+                embedded_provenance, sort_keys=True, separators=(",", ":"), default=str
+        ) != json.dumps(provenance, sort_keys=True, separators=(",", ":"), default=str):
+            raise ValueError("result execution_provenance contradicts terminal provenance")
+    now = time.time()
+    applied = False
+    with _lock:
+        conn = _db()
+        durable = conn.execute(
+            "SELECT attempt, execution_json FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        if durable is None:
+            return "missing"
+        durable_attempt = int(durable["attempt"] or 0)
+        if status == "complete":
+            if attempt != durable_attempt:
+                raise ValueError("successful terminal provenance attempt does not match durable attempt")
+            execution = json.loads(durable["execution_json"] or "{}")
+            aps_live = bool(execution.get("aps_live", False))
+            fallback = provenance.get("fallback") is True
+            if aps_live and execution_path == "local" and not fallback:
+                raise ValueError("APS-live local success must declare fallback")
+            if aps_live and execution_path == "cloud" and fallback:
+                raise ValueError("cloud success cannot declare local fallback")
+            if not aps_live and (execution_path != "local" or fallback):
+                raise ValueError("non-APS success requires a non-fallback local execution_path")
+            if fallback:
+                fallback_reason = provenance.get("fallback_reason")
+                cloud_failure = provenance.get("cloud_failure")
+                failure = cloud_failure.get("failure") if isinstance(cloud_failure, dict) else None
+                cloud_attempt = (cloud_failure.get("attempt")
+                                 if isinstance(cloud_failure, dict) else None)
+                meaningful_failure = (
+                    isinstance(failure, str) and bool(failure.strip())
+                ) or (
+                    isinstance(failure, dict)
+                    and isinstance(failure.get("code"), str)
+                    and bool(failure["code"].strip())
+                    and isinstance(failure.get("message"), str)
+                    and bool(failure["message"].strip())
+                )
+                if not isinstance(fallback_reason, str) or not fallback_reason.strip() \
+                        or not isinstance(cloud_failure, dict) or not cloud_failure \
+                        or not isinstance(cloud_attempt, int) or isinstance(cloud_attempt, bool) \
+                        or cloud_attempt != durable_attempt \
+                        or cloud_failure.get("execution_path") != "cloud" \
+                        or not meaningful_failure:
+                    raise ValueError(
+                        "fallback success requires a reason and matching meaningful cloud_failure")
+        fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
+        owner_clause = ""
+        args: List[Any] = [
+            status, "done" if status == "complete" else "error", now, now, now, now,
+            json.dumps(result_env) if result_env is not None else None,
+            json.dumps(error) if error is not None else None,
+            json.dumps(provenance) if provenance is not None else None,
+            fingerprint, job_id, durable_attempt,
+        ]
+        if worker_id is not None:
+            owner_clause = " AND lease_owner = ? AND lease_expires_at >= ?"
+            args.extend([worker_id, now])
+        cur = conn.execute(
+            "UPDATE jobs SET status = ?, progress = ?, updated_at = ?, finished_at = ?, "
+            "elapsed_ms = CAST((? - COALESCE(started_at, ?)) * 1000 AS INTEGER), "
+            "result_json = ?, error_json = ?, provenance_json = ?, "
+            "terminal_fingerprint = ?, lease_owner = NULL, lease_expires_at = NULL "
+            "WHERE job_id = ? AND attempt = ? AND status NOT IN ('complete', 'failed')" + owner_clause,
+            tuple(args))
+        conn.commit()
+        if cur.rowcount == 1:
+            applied = True
+        else:
+            row = conn.execute(
+                "SELECT status, terminal_fingerprint FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                return "missing"
+            if row["status"] not in TERMINAL:
+                return "not_owner"
+            if row["terminal_fingerprint"] == fingerprint:
+                return "duplicate"
+            conflict = {"status": status, "result": result_env, "error": error,
+                        "provenance": provenance, "received_at": now}
+            conn.execute(
+                "UPDATE jobs SET terminal_conflict_json = ?, updated_at = ? "
+                "WHERE job_id = ? AND status IN ('complete', 'failed')",
+                (json.dumps(conflict), now, job_id))
+            conn.commit()
+            return "conflict"
+    if applied:
+        platform_link.on_terminal(job_id, status, result_env, error)
+        return "applied"
+    return "not_owner"  # pragma: no cover - defensive
+
+
+# --------------------------------------------------------------------------- #
 # execution
 # --------------------------------------------------------------------------- #
 def _progress_phase(tool: Dict[str, Any], aps_live: bool) -> str:
@@ -275,43 +558,67 @@ def _progress_phase(tool: Dict[str, Any], aps_live: bool) -> str:
     return "executing"
 
 
-def _heartbeat(job_id: str, progress: Optional[str] = None) -> None:
-    if progress is None:
-        _exec("UPDATE jobs SET updated_at = ? WHERE job_id = ?", (time.time(), job_id))
-    else:
-        _exec("UPDATE jobs SET updated_at = ?, progress = ? WHERE job_id = ?",
-              (time.time(), progress, job_id))
+def _heartbeat(job_id: str, worker_id: str, progress: Optional[str] = None) -> bool:
+    return heartbeat_lease(job_id, worker_id, progress)
 
 
 def _finish(job_id: str, status: str, started: float,
             result_env: Optional[Dict[str, Any]] = None,
-            error: Optional[Dict[str, Any]] = None) -> None:
+            error: Optional[Dict[str, Any]] = None,
+            worker_id: Optional[str] = None,
+            provenance: Optional[Dict[str, Any]] = None) -> str:
+    # ``started`` remains part of this private compatibility seam for current
+    # callers. complete_callback reads the durable started_at instead, which is
+    # necessary after a dead process has been reclaimed.
+    return complete_callback(job_id, status, result_env=result_env, error=error,
+                             worker_id=worker_id, provenance=provenance)
+
+
+def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str, Any],
+                     params: Dict[str, Any], dwg: str, aps_live: bool,
+                     error: Dict[str, Any], provenance: Dict[str, Any],
+                     dwg_version: Optional[int] = None) -> None:
+    """Release a retryable attempt back to submitted, or record its final failure."""
+    rec = get_job(job_id)
+    if rec is None or not isinstance(rec.get("lease"), dict) or rec["lease"].get("owner") != worker_id:
+        return
     now = time.time()
-    _exec(
-        "UPDATE jobs SET status = ?, progress = ?, updated_at = ?, finished_at = ?,"
-        " elapsed_ms = ?, result_json = ?, error_json = ? WHERE job_id = ?",
-        (status, "done" if status == "complete" else "error", now, now,
-         int((now - started) * 1000),
-         json.dumps(result_env) if result_env is not None else None,
-         json.dumps(error) if error is not None else None,
-         job_id),
-    )
-    # best-effort platform Job terminal sync (all terminal paths funnel here:
-    # success, timeout, exception, and the orphan reaper). No-op if unlinked.
-    platform_link.on_terminal(job_id, status, result_env, error)
+    if rec["lease"].get("expires_at") is None or float(rec["lease"]["expires_at"]) < now:
+        return
+    if error.get("retryable") and int(rec.get("attempt") or 0) < max_attempts():
+        with _lock:
+            cur = _db().execute(
+                "UPDATE jobs SET status = 'submitted', progress = 'retrying', updated_at = ?, "
+                "error_json = ?, provenance_json = ?, lease_owner = NULL, lease_expires_at = NULL "
+                "WHERE job_id = ? AND status = 'running' AND lease_owner = ? "
+                "AND lease_expires_at >= ?",
+                (now, json.dumps(error), json.dumps(provenance), job_id, worker_id, now))
+            _db().commit()
+        if cur.rowcount:
+            executor = _executors.get(lane_for(tool, aps_live))
+            if executor is not None:
+                # Thread the pin through the in-process retry: dropping it here
+                # would silently rerun a pinned job against head.
+                executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live,
+                                dwg_version)
+        return
+    _finish(job_id, "failed", time.time(), error=error, worker_id=worker_id,
+            provenance=provenance)
 
 
 def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
              dwg: str, aps_live: bool, dwg_version: Optional[int] = None) -> None:
+    worker_id = str(uuid.uuid4())
+    attempt = claim_lease(job_id, worker_id)
+    if attempt is None:
+        return
     started = time.time()
     max_s = job_max_s()
-    _exec("UPDATE jobs SET status = 'running', progress = 'running', started_at = ?,"
-          " updated_at = ? WHERE job_id = ?", (started, started, job_id))
     platform_link.on_running(job_id)  # best-effort; no-op if unlinked
 
     # Richer progress (Contract 5c, §15): mark the real phase this run is ENTERING
     # before the (blocking) broker call, so SSE/poll consumers see more than status flips.
-    _heartbeat(job_id, _progress_phase(tool, aps_live))
+    _heartbeat(job_id, worker_id, _progress_phase(tool, aps_live))
 
     holder: Dict[str, Any] = {}
 
@@ -330,14 +637,16 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     while inner.is_alive() and time.time() < deadline:
         inner.join(timeout=1.0)
         if inner.is_alive():
-            _heartbeat(job_id)  # long broker poll still heartbeats
+            if not _heartbeat(job_id, worker_id):
+                return  # lease was reclaimed; never let an old worker complete it
 
     if inner.is_alive():
         # TIMEOUT — abandon the broker call (best-effort cancel: the broker
         # client's own HTTP timeout reaps the daemon thread soon after).
-        _finish(job_id, "failed", started,
-                error=error_obj(ErrorCode.TIMEOUT,
-                                f"job exceeded JOB_MAX_S={max_s:g}s", retryable=True))
+        err = error_obj(ErrorCode.TIMEOUT, f"job exceeded JOB_MAX_S={max_s:g}s", retryable=True)
+        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err,
+                         {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
+                          "failure": "timeout"}, dwg_version=dwg_version)
         return
 
     if "exc" in holder:
@@ -346,16 +655,84 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             err = error_obj(ErrorCode.BROKER_UNREACHABLE, str(exc), retryable=True)
         else:
             err = error_obj(ErrorCode.INTERNAL, f"{type(exc).__name__}: {exc}", retryable=False)
-        _finish(job_id, "failed", started, error=err)
+        cloud_failure = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
+                         "failure": {"code": err["error_code"], "message": err["message"]}}
+        if aps_live and _allows_local_fallback(tool):
+            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, cloud_failure)
+            return
+        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, cloud_failure, dwg_version=dwg_version)
         return
 
     env = holder.get("env") or {}
     if env.get("ok"):
-        _finish(job_id, "complete", started, result_env=env)
+        provenance = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local"}
+        env = dict(env)
+        env["execution_provenance"] = provenance
+        _finish(job_id, "complete", started, result_env=env, worker_id=worker_id,
+                provenance=provenance)
     else:
         err = env.get("error") or error_obj(ErrorCode.INTERNAL, "broker returned no error detail",
                                             retryable=False)
-        _finish(job_id, "failed", started, error=err)
+        provenance = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
+                      "failure": {"code": err.get("error_code"), "message": err.get("message")}}
+        if aps_live and _allows_local_fallback(tool):
+            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance)
+            return
+        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, provenance, dwg_version=dwg_version)
+
+
+def _allows_local_fallback(tool: Dict[str, Any]) -> bool:
+    """Fallback is opt-in only in trusted authored tool policy, never by callers."""
+    policy = tool.get("marathon") if isinstance(tool.get("marathon"), dict) else {}
+    return bool(policy.get("allow_local_fallback") or tool.get("allow_local_fallback"))
+
+
+def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str, Any],
+                        params: Dict[str, Any], dwg: str, attempt: int,
+                        cloud_failure: Dict[str, Any]) -> None:
+    """Run local only after recording a cloud-path failure in the success provenance."""
+    holder: Dict[str, Any] = {}
+
+    def _call() -> None:
+        try:
+            holder["env"] = broker_client.run_via_broker(
+                tenant_id, tool, params, dwg, False, timeout_s=job_max_s() + 30)
+        except Exception as exc:  # noqa: BLE001
+            holder["exc"] = exc
+
+    inner = threading.Thread(target=_call, daemon=True, name=f"fallback-{job_id[:8]}")
+    inner.start()
+    deadline = time.time() + job_max_s()
+    while inner.is_alive() and time.time() < deadline:
+        inner.join(timeout=1.0)
+        if inner.is_alive() and not heartbeat_lease(job_id, worker_id, "local fallback"):
+            return
+    if inner.is_alive():
+        err = error_obj(ErrorCode.TIMEOUT, "local fallback timed out", True)
+        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, True, err,
+                         {"attempt": attempt, "execution_path": "local",
+                          "fallback_from": cloud_failure, "failure": "local fallback timeout"}, dwg_version=dwg_version)
+        return
+    if "exc" in holder:
+        exc = holder["exc"]
+        err = error_obj(ErrorCode.INTERNAL, f"local fallback {type(exc).__name__}: {exc}", True)
+        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, True, err,
+                         {"attempt": attempt, "execution_path": "local",
+                          "fallback_from": cloud_failure, "failure": "local fallback failed"}, dwg_version=dwg_version)
+        return
+    env = holder.get("env") or {}
+    if env.get("ok"):
+        provenance = {"attempt": attempt, "execution_path": "local", "fallback": True,
+                      "fallback_reason": "cloud execution failed", "cloud_failure": cloud_failure}
+        out = dict(env)
+        out["execution_provenance"] = provenance
+        _finish(job_id, "complete", time.time(), result_env=out, worker_id=worker_id,
+                provenance=provenance)
+        return
+    err = env.get("error") or error_obj(ErrorCode.INTERNAL, "local fallback returned no error", True)
+    _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, True, err,
+                     {"attempt": attempt, "execution_path": "local",
+                      "fallback_from": cloud_failure, "failure": "local fallback failed"}, dwg_version=dwg_version)
 
 
 def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -370,20 +747,59 @@ def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
 # orphan reaper
 # --------------------------------------------------------------------------- #
 def _reap_orphans_once() -> int:
-    """Fail in-flight jobs that are orphaned: heartbeat stale OR flagged closed
-    (tab-close). Marking a closed job's row failed is the durable-spine half of
-    orphan reaping; cancelling its APS WorkItem is the broker's half
-    (POST /broker/reap, da/reaper.py)."""
+    """Redispatch stale work from its serialized execution context.
+
+    A prior process may still have a thread in flight, so this routine does not
+    terminate the row first.  A new worker must win ``claim_lease`` after expiry;
+    the old worker's heartbeat/completion is then rejected by lease ownership.
+    Closed browser sessions remain terminal retryable failures, preserving the
+    pre-existing close contract.
+    """
     stale_before = time.time() - heartbeat_stale_s()
     rows = _query(
-        "SELECT job_id, started_at, progress FROM jobs WHERE status IN ('submitted','running')"
-        " AND (updated_at < ? OR progress = ?)", (stale_before, CLOSED_PROGRESS))
-    for r in rows:
-        reason = ("orphaned: session closed (tab-close)" if r["progress"] == CLOSED_PROGRESS
-                  else "orphaned: heartbeat stale")
-        _finish(r["job_id"], "failed", r["started_at"] or stale_before,
-                error=error_obj(ErrorCode.INTERNAL, reason, retryable=True))
-    return len(rows)
+        "SELECT * FROM jobs WHERE status IN ('submitted','running') AND "
+        "(updated_at < ? OR progress = ? OR (lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
+        (stale_before, CLOSED_PROGRESS, time.time()))
+    handled = 0
+    for row in rows:
+        if row["progress"] == CLOSED_PROGRESS:
+            complete_callback(row["job_id"], "failed",
+                              error=error_obj(ErrorCode.INTERNAL,
+                                              "orphaned: session closed (tab-close)", True))
+            handled += 1
+            continue
+        if _redispatch_record(row["job_id"]):
+            handled += 1
+    return handled
+
+
+def _redispatch_record(job_id: str) -> bool:
+    """Schedule persisted work after a restart; malformed legacy context fails safely."""
+    rec = get_job(job_id)
+    if rec is None or rec["status"] in TERMINAL:
+        return False
+    if int(rec.get("attempt") or 0) >= max_attempts():
+        complete_callback(
+            job_id, "failed",
+            error=error_obj(ErrorCode.TIMEOUT, "job exhausted its delivery attempts", False),
+            provenance={"attempt": int(rec.get("attempt") or 0),
+                        "execution_path": "unknown", "failure": "attempt limit exhausted"},
+        )
+        return True
+    rows = _query("SELECT execution_json FROM jobs WHERE job_id = ?", (job_id,))
+    try:
+        execution = json.loads(rows[0]["execution_json"] or "{}")
+        tool = execution["tool"]
+        aps_live = bool(execution.get("aps_live", False))
+    except (IndexError, KeyError, TypeError, ValueError):
+        complete_callback(job_id, "failed", error=error_obj(
+            ErrorCode.INTERNAL, "cannot recover job: missing execution context", False))
+        return False
+    executor = _executors.get(lane_for(tool, aps_live))
+    if executor is None:
+        return False
+    executor.submit(_run_job, job_id, rec["tenant_id"], tool, rec["params"], rec["dwg"], aps_live)
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -445,10 +861,19 @@ def ensure_started() -> None:
     """Idempotent: open the DB, start the lane executors + reaper daemon."""
     global _reaper_started
     _db()
+    executors_started = False
     if not _executors:
         for lane, workers in lane_workers().items():
             _executors[lane] = ThreadPoolExecutor(
                 max_workers=workers, thread_name_prefix=f"jobworker-{lane}")
+        executors_started = True
     if not _reaper_started:
         threading.Thread(target=_reaper_loop, daemon=True, name="job-reaper").start()
         _reaper_started = True
+    if executors_started:
+        # A submitted row can outlive a process before its executor starts. Scan
+        # exactly once when this process creates its pools; scanning on every
+        # submit would enqueue duplicate contenders (the lease would reject them,
+        # but it would still waste executor capacity).
+        for row in _query("SELECT job_id FROM jobs WHERE status = 'submitted'"):
+            _redispatch_record(row["job_id"])

@@ -10,6 +10,7 @@ Tier / status vocabularies mirror the cadwalk-studio tenancy prior art
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,6 +23,94 @@ ORG_STATUSES = ("active", "offboarding", "deleted")
 PROJECT_STATUSES = ("active", "archived", "deleted")
 JOB_KINDS = ("run", "solve", "build", "extract")
 JOB_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
+AUTHORITY_MODES = ("legacy_sqlite", "postgres_canonical")
+HASH_ALGORITHM = "sha256"
+HASH_CANONICALIZATION = "RFC8785-JCS"
+
+
+@dataclass(frozen=True)
+class CanonicalHash:
+    """Self-describing, domain-separated canonical record digest."""
+
+    algorithm: str
+    canonicalization: str
+    domain: str
+    value: str
+
+    def to_dict(self) -> Dict[str, str]:
+        return {"algorithm": self.algorithm, "canonicalization": self.canonicalization,
+                "domain": self.domain, "value": self.value}
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Return RFC 8785 JCS bytes.
+
+    There is deliberately no look-alike fallback: stdlib sorted JSON differs
+    from RFC 8785 for numbers and Unicode edge cases and must never be labelled
+    as authoritative JCS evidence.
+    """
+    import rfc8785  # type: ignore[import-not-found]
+    return rfc8785.dumps(value)
+
+
+def canonical_hash(record_type: str, payload: Any) -> CanonicalHash:
+    domain = f"leaf:{record_type}:v1"
+    digest = hashlib.sha256(domain.encode("utf-8") + b"\0" + canonical_json_bytes(payload)).hexdigest()
+    return CanonicalHash(HASH_ALGORITHM, HASH_CANONICALIZATION, domain, digest)
+
+
+def verify_canonical_hash(record_type: str, payload: Any, metadata: Dict[str, str]) -> bool:
+    expected = canonical_hash(record_type, payload)
+    return metadata == expected.to_dict()
+
+
+@dataclass(frozen=True)
+class IdentityBinding:
+    binding_id: uuid.UUID
+    external_authority: str
+    external_subject: str
+    platform_tenant_id: uuid.UUID
+    platform_user_id: uuid.UUID
+    status: str = "active"
+    created_at: Optional[datetime] = None
+
+    @classmethod
+    def from_row(cls, r: Dict[str, Any]) -> "IdentityBinding":
+        return cls(r["binding_id"], r["external_authority"], r["external_subject"],
+                   r["platform_tenant_id"], r["platform_user_id"], r["status"], r.get("created_at"))
+
+
+@dataclass(frozen=True)
+class HistoryOperation:
+    operation_id: uuid.UUID
+    org_id: uuid.UUID
+    project_id: uuid.UUID
+    operation_type: str
+    payload: Dict[str, Any]
+    content_hash: CanonicalHash
+    idempotency_key: str
+
+    @classmethod
+    def from_row(cls, r: Dict[str, Any]) -> "HistoryOperation":
+        return cls(r["operation_id"], r["org_id"], r["project_id"], r["operation_type"],
+                   r["payload"], CanonicalHash(r["hash_algorithm"], r["hash_canonicalization"],
+                   r["hash_domain"], r["hash_value"]), r["idempotency_key"])
+
+
+@dataclass(frozen=True)
+class SolveRecord:
+    solve_id: uuid.UUID
+    org_id: uuid.UUID
+    project_id: uuid.UUID
+    payload: Dict[str, Any]
+    content_hash: CanonicalHash
+    idempotency_key: str
+
+    @classmethod
+    def from_row(cls, r: Dict[str, Any]) -> "SolveRecord":
+        return cls(r["solve_id"], r["org_id"], r["project_id"], r["payload"],
+                   CanonicalHash(r["hash_algorithm"], r["hash_canonicalization"],
+                   r["hash_domain"], r["hash_value"]), r["idempotency_key"])
 
 
 def new_uuid() -> uuid.UUID:
@@ -98,8 +187,29 @@ class Project:
 
 
 @dataclass
+class DrawingArtifact:
+    drawing_id: uuid.UUID
+    project_id: uuid.UUID
+    org_id: uuid.UUID
+    name: str
+    status: str = "active"
+    created_at: Optional[datetime] = None
+
+    @classmethod
+    def from_row(cls, r: Dict[str, Any]) -> "DrawingArtifact":
+        return cls(r["drawing_id"], r["project_id"], r["org_id"], r["name"],
+                   r["status"], r.get("created_at"))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"drawing_id": str(self.drawing_id), "project_id": str(self.project_id),
+                "org_id": str(self.org_id), "name": self.name, "status": self.status,
+                "created_at": _iso(self.created_at)}
+
+
+@dataclass
 class DrawingVersion:
     version_id: uuid.UUID
+    drawing_id: uuid.UUID
     project_id: uuid.UUID
     org_id: uuid.UUID
     seq: int
@@ -115,7 +225,8 @@ class DrawingVersion:
     @classmethod
     def from_row(cls, r: Dict[str, Any]) -> "DrawingVersion":
         return cls(
-            version_id=r["version_id"], project_id=r["project_id"], org_id=r["org_id"],
+            version_id=r["version_id"], drawing_id=r["drawing_id"],
+            project_id=r["project_id"], org_id=r["org_id"],
             seq=r["seq"], oss_object=r.get("oss_object"), intake_ref=r.get("intake_ref"),
             created_by=r.get("created_by"), created_at=r.get("created_at"),
             deleted_at=r.get("deleted_at"),
@@ -125,7 +236,8 @@ class DrawingVersion:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "version_id": str(self.version_id), "project_id": str(self.project_id),
+            "version_id": str(self.version_id), "drawing_id": str(self.drawing_id),
+            "project_id": str(self.project_id),
             "org_id": str(self.org_id), "seq": self.seq, "oss_object": self.oss_object,
             "intake_ref": self.intake_ref, "created_by": self.created_by,
             "created_at": _iso(self.created_at),

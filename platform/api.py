@@ -16,12 +16,13 @@ import os
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import store
 from .db import cursor
-from .deps import get_org_id, require_auth_when_live
+from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
+                   require_auth_when_live)
 from .models import JOB_KINDS, TIERS, Org
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 
@@ -46,6 +47,44 @@ class CreateJobBody(BaseModel):
     params: Optional[Dict[str, Any]] = None
 
 
+class CanonicalRecordBody(BaseModel):
+    payload: Dict[str, Any]
+    operation_type: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    parent_operation_ids: list[uuid.UUID] = Field(default_factory=list)
+    branch_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+
+
+class ShareGrantBody(BaseModel):
+    role: str = "reviewer"
+    ttl_seconds: int = 86400
+
+
+class ShareTokenBody(BaseModel):
+    token: str
+
+
+class SnapshotDiffBody(BaseModel):
+    left_snapshot_id: uuid.UUID
+    right_snapshot_id: uuid.UUID
+
+
+class ComplianceRunBody(BaseModel):
+    inputs: Dict[str, Any]
+
+
+class WaiverBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=4000)
+
+
+class WaiverTransitionBody(BaseModel):
+    state: str
+    note: str = Field(default="", max_length=4000)
+
+
+class ReviewSignatureBody(BaseModel):
+    credential_id: uuid.UUID
+
+
 # --------------------------------------------------------------------------- #
 # orgs — the tenant anchor every project/job route requires
 # --------------------------------------------------------------------------- #
@@ -63,8 +102,23 @@ class CreateJobBody(BaseModel):
 def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)):
     if body.tier is not None and body.tier not in TIERS:
         raise HTTPException(status_code=422, detail=f"tier must be one of {list(TIERS)}")
-    org = (store.create_org(body.name, tier=body.tier) if body.tier is not None
-           else store.create_org(body.name))
+    if _auth is not None:
+        subject = _auth.get("sub")
+        if not subject:
+            raise HTTPException(status_code=403, detail="verified token has no external subject")
+        if store.resolve_active_identity_binding("auth0", str(subject)) is not None:
+            raise HTTPException(status_code=409, detail="verified subject already has a platform identity binding")
+    if _auth is not None:
+        try:
+            org = store.create_org_with_identity(
+                body.name, "auth0", str(subject),
+                tier=body.tier or "hosted_starter",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+    else:
+        org = (store.create_org(body.name, tier=body.tier) if body.tier is not None
+               else store.create_org(body.name))
     return {"org": org.to_dict()}
 
 
@@ -91,7 +145,7 @@ def get_org(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id)):
 # projects
 # --------------------------------------------------------------------------- #
 @router.post("/projects")
-def create_project(body: CreateProjectBody, org_id: uuid.UUID = Depends(get_org_id)):
+def create_project(body: CreateProjectBody, org_id: uuid.UUID = Depends(get_write_org_id)):
     project = store.create_project(org_id, body.name)
     return {"project": project.to_dict()}
 
@@ -115,7 +169,7 @@ def open_project(project_id: uuid.UUID, org_id: uuid.UUID = Depends(get_org_id))
 # --------------------------------------------------------------------------- #
 @router.post("/projects/{project_id}/jobs")
 def create_job(project_id: uuid.UUID, body: CreateJobBody,
-               org_id: uuid.UUID = Depends(get_org_id)):
+               org_id: uuid.UUID = Depends(get_write_org_id)):
     if body.kind not in JOB_KINDS:
         raise HTTPException(status_code=422, detail=f"kind must be one of {list(JOB_KINDS)}")
     # ownership check first: 404 (not 403) if the project is not the caller's
@@ -140,6 +194,235 @@ def get_job(job_id: uuid.UUID, org_id: uuid.UUID = Depends(get_org_id)):
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return {"job": job.to_dict()}
+
+
+# Canonical records require a server-owned postgres_canonical cutover.  Clients
+# cannot select authority mode in a header or body.
+@router.post("/projects/{project_id}/history")
+def append_history(project_id: uuid.UUID, body: CanonicalRecordBody,
+                   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+                   org_id: uuid.UUID = Depends(get_write_org_id)):
+    if store.get_project(org_id, project_id) is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    try:
+        operation = store.append_history_operation(
+            org_id, project_id, body.operation_type or "drawing.mutation", body.payload,
+            idempotency_key or "", parent_operation_ids=body.parent_operation_ids,
+            branch_name=body.branch_name,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"operation": {"operation_id": str(operation.operation_id),
+                           "content_hash": operation.content_hash.to_dict(),
+                           "idempotency_key": operation.idempotency_key}}
+
+
+@router.post("/projects/{project_id}/solves")
+def append_solve(project_id: uuid.UUID, body: CanonicalRecordBody,
+                 idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+                 org_id: uuid.UUID = Depends(get_write_org_id)):
+    raise HTTPException(
+        status_code=405,
+        detail="canonical solve records are worker-owned; submit a durable solve job",
+    )
+
+
+@router.post("/projects/{project_id}/share-grants", status_code=201)
+def create_share_grant(
+    project_id: uuid.UUID,
+    body: ShareGrantBody,
+    org_id: uuid.UUID = Depends(get_write_org_id),
+    binding_id: uuid.UUID = Depends(get_write_binding_id),
+):
+    from . import access
+    try:
+        grant = access.create_project_share_grant(
+            org_id, project_id, binding_id,
+            role=body.role, ttl_seconds=body.ttl_seconds)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"grant": grant}
+
+
+@router.delete("/projects/{project_id}/share-grants/{grant_id}")
+def revoke_share_grant(
+    project_id: uuid.UUID,
+    grant_id: uuid.UUID,
+    org_id: uuid.UUID = Depends(get_write_org_id),
+    binding_id: uuid.UUID = Depends(get_write_binding_id),
+):
+    from . import access
+    try:
+        outcome = access.revoke_project_share_grant(
+            org_id, project_id, grant_id, binding_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if outcome == "missing":
+        raise HTTPException(status_code=404, detail="share grant not found")
+    return {"grant_id": str(grant_id), "status": "revoked"}
+
+
+@router.post("/share-grants/resolve")
+def resolve_share_grant(body: ShareTokenBody):
+    from . import access
+    try:
+        grant = access.resolve_project_share_token(body.token)
+    except ValueError:
+        grant = None
+    if grant is None:
+        # Avoid an oracle across malformed, unknown, expired, and revoked tokens.
+        raise HTTPException(status_code=404, detail="share grant not found")
+    return {"grant": grant}
+
+
+@router.get("/snapshots/{snapshot_id}")
+def read_snapshot(snapshot_id: uuid.UUID, _org_id: uuid.UUID = Depends(get_org_id)):
+    from . import snapshots
+    item = snapshots.get_snapshot(snapshot_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    return {"snapshot": item}
+
+
+@router.post("/snapshots/diff")
+def diff_snapshots(body: SnapshotDiffBody, _org_id: uuid.UUID = Depends(get_org_id)):
+    from . import snapshots
+    left = snapshots.get_snapshot(body.left_snapshot_id)
+    right = snapshots.get_snapshot(body.right_snapshot_id)
+    if left is None or right is None or left["snapshot_kind"] != right["snapshot_kind"]:
+        raise HTTPException(status_code=404, detail="comparable snapshots not found")
+    return {"kind": left["snapshot_kind"], "changes": snapshots.diff(left["content"], right["content"])}
+
+
+@router.post("/projects/{project_id}/solves/{solve_id}/compliance", status_code=201)
+def run_compliance(project_id: uuid.UUID, solve_id: uuid.UUID, body: ComplianceRunBody,
+                   org_id: uuid.UUID = Depends(get_write_org_id)):
+    from . import compliance_store
+    try:
+        return compliance_store.record_pinned_run(org_id, project_id, solve_id, body.inputs)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/projects/{project_id}/solves/{solve_id}/compliance-findings")
+def compliance_findings(project_id: uuid.UUID, solve_id: uuid.UUID,
+                        org_id: uuid.UUID = Depends(get_org_id)):
+    from . import compliance_store
+    return {"findings": compliance_store.list_findings(org_id, project_id, solve_id)}
+
+
+@router.post("/projects/{project_id}/compliance-findings/{finding_id}/waivers", status_code=201)
+def propose_compliance_waiver(project_id: uuid.UUID, finding_id: uuid.UUID, body: WaiverBody,
+                              org_id: uuid.UUID = Depends(get_write_org_id),
+                              binding_id: uuid.UUID = Depends(get_write_binding_id)):
+    from . import compliance_store
+    try:
+        return compliance_store.propose_waiver(
+            org_id, project_id, finding_id, binding_id, body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/projects/{project_id}/compliance-waivers/{waiver_id}/transitions")
+def transition_compliance_waiver(project_id: uuid.UUID, waiver_id: uuid.UUID,
+                                 body: WaiverTransitionBody,
+                                 org_id: uuid.UUID = Depends(get_write_org_id),
+                                 binding_id: uuid.UUID = Depends(get_write_binding_id)):
+    from . import compliance_store
+    try:
+        return compliance_store.transition_waiver(
+            org_id, project_id, waiver_id, binding_id, body.state, body.note)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/projects/{project_id}/solves/{solve_id}/evidence-bundles", status_code=201)
+def create_evidence_bundle(project_id: uuid.UUID, solve_id: uuid.UUID,
+                           idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+                           org_id: uuid.UUID = Depends(get_write_org_id)):
+    from . import evidence_store
+    try:
+        return evidence_store.create_bundle(
+            org_id, project_id, solve_id, idempotency_key or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/projects/{project_id}/evidence-bundles/{bundle_id}")
+def export_evidence_bundle(project_id: uuid.UUID, bundle_id: uuid.UUID,
+                           org_id: uuid.UUID = Depends(get_org_id)):
+    from . import evidence_store
+    bundle = evidence_store.export_bundle(org_id, project_id, bundle_id)
+    if bundle is None:
+        raise HTTPException(status_code=404, detail="evidence bundle not found")
+    return bundle
+
+
+@router.get("/projects/{project_id}/evidence-bundles")
+def list_evidence_bundles(
+    project_id: uuid.UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+    org_id: uuid.UUID = Depends(get_org_id),
+):
+    from . import evidence_store
+    return {"bundles": evidence_store.list_bundles(org_id, project_id, limit=limit)}
+
+
+@router.get("/professional-review/context")
+def get_professional_review_context(
+    org_id: uuid.UUID = Depends(get_org_id),
+    binding_id: uuid.UUID = Depends(get_review_binding_id),
+):
+    from . import signing
+    return signing.review_context(org_id, binding_id)
+
+
+@router.post("/projects/{project_id}/evidence-bundles/{bundle_id}/signatures", status_code=201)
+def countersign_evidence_bundle(
+    project_id: uuid.UUID,
+    bundle_id: uuid.UUID,
+    body: ReviewSignatureBody,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    org_id: uuid.UUID = Depends(get_org_id),
+    binding_id: uuid.UUID = Depends(get_review_binding_id),
+):
+    from . import signing
+    try:
+        return signing.countersign(
+            org_id, project_id, bundle_id, body.credential_id, binding_id,
+            idempotency_key or "")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/projects/{project_id}/review-signatures/{signature_id}/verify")
+def verify_review_signature(project_id: uuid.UUID, signature_id: uuid.UUID,
+                            org_id: uuid.UUID = Depends(get_org_id)):
+    from . import signing
+    result = signing.verify_signature(org_id, project_id, signature_id)
+    if result.get("errors") == ["signature_not_found"]:
+        raise HTTPException(status_code=404, detail="review signature not found")
+    return result
+
+
+@router.post("/shared/evidence-bundles/{bundle_id}/resolve")
+def resolve_shared_evidence_bundle(bundle_id: uuid.UUID, body: ShareTokenBody):
+    from . import access, evidence_store
+    try:
+        grant = access.resolve_project_share_token(body.token)
+    except ValueError:
+        grant = None
+    if grant is None:
+        raise HTTPException(status_code=404, detail="shared evidence bundle not found")
+    bundle = evidence_store.export_bundle(
+        uuid.UUID(grant["org_id"]), uuid.UUID(grant["project_id"]), bundle_id)
+    if bundle is None:
+        raise HTTPException(status_code=404, detail="shared evidence bundle not found")
+    return {"role": grant["role"], **bundle}
 
 
 # --------------------------------------------------------------------------- #

@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.7
+#
+# Leaf Platform canonical PostgreSQL worker. This is a separate process from
+# the API and owns the lease/heartbeat/terminal transition loop for the first
+# real solver adapter. The solver source is supplied as a named build context so
+# it stays owned by its repository and its exact bytes are hashed at runtime.
+FROM python:3.12-slim AS canonical-worker
+
+WORKDIR /app
+
+COPY platform/requirements.txt /app/platform/requirements.txt
+RUN pip install --no-cache-dir -r /app/platform/requirements.txt
+
+COPY server/ /app/server/
+COPY platform/ /app/platform/
+COPY scripts/canonical-container-smoke.py /app/scripts/canonical-container-smoke.py
+COPY --from=autofill_solver . /opt/leaf/autofill-solver/
+
+WORKDIR /app/server
+
+ENV AUTOFILL_SOLVER_ROOT=/opt/leaf/autofill-solver \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# A live process is insufficient: require the worker's recent PostgreSQL
+# heartbeat so a broken DB or source mount reports unhealthy.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
+  CMD python -c "import platform_link; raise SystemExit(0 if platform_link.canonical_worker_health('autofill-string-targets') else 1)"
+
+USER 65532:65532
+
+CMD ["python", "canonical_worker.py", "--poll-seconds", "1", "--lease-seconds", "30"]

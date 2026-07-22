@@ -19,14 +19,23 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from psycopg.types.json import Jsonb
+from psycopg.errors import UniqueViolation
 
 from .db import connection, cursor
 from .models import (
     BuiltTool,
+    CanonicalHash,
+    DrawingArtifact,
     DrawingVersion,
+    HistoryOperation,
+    IdentityBinding,
     Job,
     Org,
     Project,
+    SolveRecord,
+    AUTHORITY_MODES,
+    canonical_hash,
+    verify_canonical_hash,
     new_uuid,
 )
 
@@ -50,6 +59,36 @@ def create_org(name: str, tier: str = "hosted_starter",
         return Org.from_row(cur.fetchone())
 
 
+def create_org_with_identity(name: str, external_authority: str, external_subject: str, *,
+                             tier: str = "hosted_starter") -> Org:
+    """Atomically bootstrap an org and its first verified identity binding.
+
+    A concurrent request for the same external subject rolls the org insert back
+    instead of leaving an unreachable tenant row behind.
+    """
+    org_id, binding_id, user_id = new_uuid(), new_uuid(), new_uuid()
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO orgs (org_id, name, tier) VALUES (%(org_id)s, %(name)s, %(tier)s) "
+                    "RETURNING org_id, name, tier, status, created_at, offboarded_at, "
+                    "deleted_at, purge_requested_at, purge_completed_at",
+                    {"org_id": org_id, "name": name, "tier": tier},
+                )
+                org_row = cur.fetchone()
+                cur.execute(
+                    "INSERT INTO identity_bindings (binding_id, external_authority, external_subject, "
+                    "platform_tenant_id, platform_user_id, role) VALUES "
+                    "(%(binding_id)s, %(authority)s, %(subject)s, %(org_id)s, %(user_id)s, 'owner')",
+                    {"binding_id": binding_id, "authority": external_authority,
+                     "subject": external_subject, "org_id": org_id, "user_id": user_id},
+                )
+                return Org.from_row(org_row)
+    except UniqueViolation as exc:
+        raise ValueError("verified external subject already has a platform identity binding") from exc
+
+
 def create_project(org_id: uuid.UUID, name: str) -> Project:
     with cursor() as cur:
         cur.execute(
@@ -62,29 +101,384 @@ def create_project(org_id: uuid.UUID, name: str) -> Project:
         return Project.from_row(cur.fetchone())
 
 
+# --------------------------------------------------------------------------- #
+# Server-owned authority and verified external identity binding
+# --------------------------------------------------------------------------- #
+def set_tenant_authority_mode(org_id: uuid.UUID, authority_mode: str) -> None:
+    """Server control-plane write; requests have no route to select this value."""
+    if authority_mode not in AUTHORITY_MODES:
+        raise ValueError(f"authority_mode must be one of {AUTHORITY_MODES}")
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO tenant_authority_modes (org_id, authority_mode, selected_by) "
+            "VALUES (%(org_id)s, %(authority_mode)s, 'server') "
+            "ON CONFLICT (org_id) DO UPDATE SET authority_mode = EXCLUDED.authority_mode, "
+            "selected_by = 'server', selected_at = NOW()",
+            {"org_id": org_id, "authority_mode": authority_mode},
+        )
+
+
+def set_project_authority_mode(org_id: uuid.UUID, project_id: uuid.UUID, authority_mode: str) -> None:
+    if authority_mode not in AUTHORITY_MODES:
+        raise ValueError(f"authority_mode must be one of {AUTHORITY_MODES}")
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO project_authority_modes (org_id, project_id, authority_mode, selected_by) "
+            "VALUES (%(org_id)s, %(project_id)s, %(authority_mode)s, 'server') "
+            "ON CONFLICT (org_id, project_id) DO UPDATE SET authority_mode = EXCLUDED.authority_mode, "
+            "selected_by = 'server', selected_at = NOW()",
+            {"org_id": org_id, "project_id": project_id, "authority_mode": authority_mode},
+        )
+
+
+def get_authority_mode(org_id: uuid.UUID, project_id: uuid.UUID) -> str:
+    """Resolve exactly one authority; absent cutover deliberately means legacy."""
+    with cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE("
+            "(SELECT authority_mode FROM project_authority_modes "
+            " WHERE org_id = %(org_id)s AND project_id = %(project_id)s), "
+            "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = %(org_id)s), "
+            "'legacy_sqlite') AS authority_mode",
+            {"org_id": org_id, "project_id": project_id},
+        )
+        row = cur.fetchone()
+    return row["authority_mode"]
+
+
+def _require_postgres_authority(org_id: uuid.UUID, project_id: uuid.UUID) -> None:
+    if get_authority_mode(org_id, project_id) != "postgres_canonical":
+        raise RuntimeError("canonical ledger is unavailable while authority is legacy_sqlite")
+
+
+def create_identity_binding(org_id: uuid.UUID, external_authority: str, external_subject: str,
+                            platform_user_id: Optional[uuid.UUID] = None, *,
+                            role: str = "owner") -> IdentityBinding:
+    """Bind a verified external subject to one platform tenant/user.
+
+    The caller supplies this only from server-verified authentication code; there
+    is intentionally no browser-facing binding API.
+    """
+    if not external_authority or not external_subject:
+        raise ValueError("external authority and subject are required")
+    if role not in {"owner", "editor", "reviewer", "read_only"}:
+        raise ValueError("role must be owner, editor, reviewer, or read_only")
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO identity_bindings (binding_id, external_authority, external_subject, "
+            "platform_tenant_id, platform_user_id, role) VALUES (%(binding_id)s, %(authority)s, "
+            "%(subject)s, %(org_id)s, %(user_id)s, %(role)s) "
+            "ON CONFLICT (external_authority, external_subject) WHERE status = 'active' "
+            "DO NOTHING "
+            "RETURNING binding_id, external_authority, external_subject, platform_tenant_id, "
+            "platform_user_id, status, created_at",
+            {"binding_id": new_uuid(), "authority": external_authority,
+             "subject": external_subject, "org_id": org_id,
+              "user_id": platform_user_id or new_uuid(), "role": role},
+        )
+        row = cur.fetchone()
+    if row is not None:
+        return IdentityBinding.from_row(row)
+    existing = resolve_active_identity_binding(external_authority, external_subject)
+    if existing is None:  # pragma: no cover - concurrent revoke edge
+        raise RuntimeError("identity binding conflict could not be resolved")
+    if existing.platform_tenant_id != org_id:
+        raise ValueError("verified external subject is already bound to another platform tenant")
+    return existing
+
+
+def _lookup_active_identity_binding(external_authority: str, external_subject: str) -> Optional[IdentityBinding]:
+    with cursor() as cur:
+        cur.execute(
+            "SELECT binding_id, external_authority, external_subject, platform_tenant_id, "
+            "platform_user_id, status, created_at FROM identity_bindings "
+            "WHERE external_authority = %(authority)s AND external_subject = %(subject)s "
+            "AND status = 'active'",
+            {"authority": external_authority, "subject": external_subject},
+        )
+        row = cur.fetchone()
+    return IdentityBinding.from_row(row) if row else None
+
+
+def resolve_active_identity_binding(external_authority: str, external_subject: str) -> Optional[IdentityBinding]:
+    """Identity lookup used only after JWT verification; never accepts org hints."""
+    return _lookup_active_identity_binding(external_authority, external_subject)
+
+
+def active_identity_role(org_id: uuid.UUID, binding_id: uuid.UUID) -> Optional[str]:
+    """Return an active binding's role only when it remains scoped to ``org_id``."""
+    with cursor() as cur:
+        cur.execute(
+            "SELECT role FROM identity_bindings WHERE platform_tenant_id = %(org_id)s "
+            "AND binding_id = %(binding_id)s AND status = 'active'",
+            {"org_id": org_id, "binding_id": binding_id},
+        )
+        row = cur.fetchone()
+    return row["role"] if row else None
+
+
+# --------------------------------------------------------------------------- #
+# Canonical immutable history / solve ledger.  These writers are only reachable
+# after the server control plane selected postgres_canonical for the project.
+# --------------------------------------------------------------------------- #
+def append_history_operation(org_id: uuid.UUID, project_id: uuid.UUID, operation_type: str,
+                             payload: Dict[str, Any], idempotency_key: str, *,
+                             parent_operation_ids: Optional[List[uuid.UUID]] = None,
+                             branch_name: Optional[str] = None) -> HistoryOperation:
+    _require_postgres_authority(org_id, project_id)
+    if not idempotency_key:
+        raise ValueError("idempotency_key is required")
+    normalized_parents = sorted({str(parent_id) for parent_id in parent_operation_ids or []})
+    # Topology/ref semantics are intentionally compared separately from the
+    # established content hash contract (operation type + payload).
+    request_semantics = {"parentOperationIds": normalized_parents, "branchName": branch_name}
+    digest_input = {"operationType": operation_type, "payload": payload}
+    digest = canonical_hash("history-operation", digest_input)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO history_operations (operation_id, org_id, project_id, operation_type, "
+                "payload, idempotency_key, hash_algorithm, hash_canonicalization, hash_domain, hash_value) "
+                "VALUES (%(id)s, %(org_id)s, %(project_id)s, %(type)s, %(payload)s, %(key)s, "
+                "%(algorithm)s, %(canonicalization)s, %(domain)s, %(value)s) "
+                "ON CONFLICT (org_id, project_id, idempotency_key) DO NOTHING "
+                "RETURNING operation_id, org_id, project_id, operation_type, payload, idempotency_key, "
+                "hash_algorithm, hash_canonicalization, hash_domain, hash_value",
+                {"id": new_uuid(), "org_id": org_id, "project_id": project_id, "type": operation_type,
+                 "payload": Jsonb(payload), "key": idempotency_key, **digest.to_dict()},
+            )
+            row = cur.fetchone()
+            created = row is not None
+            if not created:
+                cur.execute(
+                    "SELECT operation_id, org_id, project_id, operation_type, payload, idempotency_key, "
+                    "hash_algorithm, hash_canonicalization, hash_domain, hash_value FROM history_operations "
+                    "WHERE org_id = %(org_id)s AND project_id = %(project_id)s AND idempotency_key = %(key)s",
+                    {"org_id": org_id, "project_id": project_id, "key": idempotency_key},
+                )
+                row = cur.fetchone()
+            operation = HistoryOperation.from_row(row)
+            if not created:
+                if operation.content_hash.to_dict() != digest.to_dict():
+                    raise ValueError("idempotency key already exists with different history input")
+                cur.execute(
+                    "SELECT parent_operation_id FROM history_edges WHERE org_id = %(org_id)s "
+                    "AND project_id = %(project_id)s AND child_operation_id = %(operation_id)s "
+                    "ORDER BY parent_operation_id",
+                    {"org_id": org_id, "project_id": project_id, "operation_id": operation.operation_id},
+                )
+                stored_parents = [str(item["parent_operation_id"]) for item in cur.fetchall()]
+                cur.execute(
+                    "SELECT ref_name FROM branch_refs WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+                    "AND operation_id = %(operation_id)s ORDER BY sequence DESC LIMIT 1",
+                    {"org_id": org_id, "project_id": project_id, "operation_id": operation.operation_id},
+                )
+                stored_ref = cur.fetchone()
+                stored_semantics = {"parentOperationIds": stored_parents,
+                                    "branchName": stored_ref["ref_name"] if stored_ref else None}
+                if stored_semantics != request_semantics:
+                    raise ValueError("idempotency key already exists with different history topology or branch")
+                return operation
+            for parent_id in normalized_parents:
+                cur.execute(
+                    "INSERT INTO history_edges (edge_id, org_id, project_id, parent_operation_id, child_operation_id) "
+                    "SELECT %(edge_id)s, %(org_id)s, %(project_id)s, operation_id, %(child)s "
+                    "FROM history_operations WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+                    "AND operation_id = %(parent)s",
+                    {"edge_id": new_uuid(), "org_id": org_id, "project_id": project_id,
+                     "parent": parent_id, "child": operation.operation_id},
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("parent operation is not owned by this project")
+            if branch_name:
+                cur.execute(
+                    "SELECT 1 FROM projects WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+                    "FOR UPDATE",
+                    {"org_id": org_id, "project_id": project_id},
+                )
+                cur.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM branch_refs "
+                    "WHERE org_id = %(org_id)s AND project_id = %(project_id)s AND ref_name = %(name)s",
+                    {"org_id": org_id, "project_id": project_id, "name": branch_name},
+                )
+                next_sequence = cur.fetchone()["sequence"]
+                cur.execute(
+                    "INSERT INTO branch_refs (ref_id, org_id, project_id, ref_name, sequence, operation_id) "
+                    "VALUES (%(id)s, %(org_id)s, %(project_id)s, %(name)s, %(sequence)s, %(operation_id)s)",
+                    {"id": new_uuid(), "org_id": org_id, "project_id": project_id, "name": branch_name,
+                     "sequence": next_sequence, "operation_id": operation.operation_id},
+                )
+            _insert_outbox(cur, org_id, project_id, "history_operation", operation.operation_id,
+                           "history.operation.appended", {"operationId": str(operation.operation_id)})
+            return operation
+
+
+def append_solve_record(org_id: uuid.UUID, project_id: uuid.UUID, payload: Dict[str, Any],
+                        idempotency_key: str) -> SolveRecord:
+    _require_postgres_authority(org_id, project_id)
+    if not idempotency_key:
+        raise ValueError("idempotency_key is required")
+    digest = canonical_hash("solve-record", payload)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO solve_records (solve_id, org_id, project_id, payload, idempotency_key, "
+                "hash_algorithm, hash_canonicalization, hash_domain, hash_value) "
+                "VALUES (%(id)s, %(org_id)s, %(project_id)s, %(payload)s, %(key)s, %(algorithm)s, "
+                "%(canonicalization)s, %(domain)s, %(value)s) "
+                "ON CONFLICT (org_id, project_id, idempotency_key) DO NOTHING "
+                "RETURNING solve_id, org_id, project_id, payload, idempotency_key, hash_algorithm, "
+                "hash_canonicalization, hash_domain, hash_value",
+                {"id": new_uuid(), "org_id": org_id, "project_id": project_id,
+                 "payload": Jsonb(payload), "key": idempotency_key, **digest.to_dict()},
+            )
+            row = cur.fetchone()
+            created = row is not None
+            if not created:
+                cur.execute(
+                    "SELECT solve_id, org_id, project_id, payload, idempotency_key, hash_algorithm, "
+                    "hash_canonicalization, hash_domain, hash_value FROM solve_records "
+                    "WHERE org_id = %(org_id)s AND project_id = %(project_id)s AND idempotency_key = %(key)s",
+                    {"org_id": org_id, "project_id": project_id, "key": idempotency_key},
+                )
+                row = cur.fetchone()
+            solve = SolveRecord.from_row(row)
+            if not created and solve.content_hash.to_dict() != digest.to_dict():
+                raise ValueError("idempotency key already exists with different solve input")
+            if created:
+                _insert_outbox(cur, org_id, project_id, "solve_record", solve.solve_id,
+                               "solve.recorded", {"solveId": str(solve.solve_id)})
+            return solve
+
+
+def _insert_outbox(cur: Any, org_id: uuid.UUID, project_id: uuid.UUID, aggregate_type: str,
+                   aggregate_id: uuid.UUID, event_type: str, payload: Dict[str, Any]) -> None:
+    cur.execute(
+        "INSERT INTO outbox_entries (outbox_id, org_id, project_id, aggregate_type, aggregate_id, "
+        "event_type, payload) VALUES (%(id)s, %(org_id)s, %(project_id)s, %(aggregate_type)s, "
+        "%(aggregate_id)s, %(event_type)s, %(payload)s) ON CONFLICT DO NOTHING",
+        {"id": new_uuid(), "org_id": org_id, "project_id": project_id,
+         "aggregate_type": aggregate_type, "aggregate_id": aggregate_id,
+         "event_type": event_type, "payload": Jsonb(payload)},
+    )
+
+
+def _get_history_operation(org_id: uuid.UUID, operation_id: uuid.UUID) -> Optional[HistoryOperation]:
+    with cursor() as cur:
+        cur.execute(
+            "SELECT operation_id, org_id, project_id, operation_type, payload, idempotency_key, "
+            "hash_algorithm, hash_canonicalization, hash_domain, hash_value FROM history_operations "
+            "WHERE org_id = %(org_id)s AND operation_id = %(operation_id)s",
+            {"org_id": org_id, "operation_id": operation_id},
+        )
+        row = cur.fetchone()
+    return HistoryOperation.from_row(row) if row else None
+
+
+def verify_history_operation(org_id: uuid.UUID, operation_id: uuid.UUID) -> bool:
+    operation = _get_history_operation(org_id, operation_id)
+    return operation is not None and verify_canonical_hash(
+        "history-operation",
+        {"operationType": operation.operation_type, "payload": operation.payload},
+        operation.content_hash.to_dict(),
+    )
+
+
+def _get_solve_record(org_id: uuid.UUID, solve_id: uuid.UUID) -> Optional[SolveRecord]:
+    with cursor() as cur:
+        cur.execute(
+            "SELECT solve_id, org_id, project_id, payload, idempotency_key, hash_algorithm, "
+            "hash_canonicalization, hash_domain, hash_value FROM solve_records "
+            "WHERE org_id = %(org_id)s AND solve_id = %(solve_id)s",
+            {"org_id": org_id, "solve_id": solve_id},
+        )
+        row = cur.fetchone()
+    return SolveRecord.from_row(row) if row else None
+
+
+def verify_solve_record(org_id: uuid.UUID, solve_id: uuid.UUID) -> bool:
+    solve = _get_solve_record(org_id, solve_id)
+    return solve is not None and verify_canonical_hash(
+        "solve-record", solve.payload, solve.content_hash.to_dict())
+
+
+def create_drawing_artifact(org_id: uuid.UUID, project_id: uuid.UUID,
+                            name: str = "Primary drawing") -> DrawingArtifact:
+    if not name or len(name) > 200:
+        raise ValueError("drawing name must contain 1 to 200 characters")
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO drawing_artifacts (drawing_id, project_id, org_id, name) "
+            "SELECT %(drawing_id)s, p.project_id, p.org_id, %(name)s FROM projects p "
+            "WHERE p.project_id = %(project_id)s AND p.org_id = %(org_id)s "
+            "AND p.deleted_at IS NULL "
+            "ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name "
+            "RETURNING drawing_id, project_id, org_id, name, status, created_at",
+            {"drawing_id": new_uuid(), "project_id": project_id, "org_id": org_id,
+             "name": name},
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError("project not found")
+        return DrawingArtifact.from_row(row)
+
+
 def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
+                           drawing_id: Optional[uuid.UUID] = None,
                            oss_object: Optional[str] = None,
                            intake_ref: Optional[str] = None,
                            created_by: Optional[str] = None) -> DrawingVersion:
     """Append the next monotonic version to a project's chain (single-writer)."""
     with connection() as conn:
         with conn.cursor() as cur:
+            if drawing_id is None:
+                cur.execute(
+                    "SELECT drawing_id FROM drawing_artifacts "
+                    "WHERE project_id = %(project_id)s AND org_id = %(org_id)s "
+                    "AND status = 'active' ORDER BY created_at, drawing_id LIMIT 1",
+                    {"project_id": project_id, "org_id": org_id},
+                )
+                artifact = cur.fetchone()
+                if artifact is None:
+                    drawing_id = new_uuid()
+                    cur.execute(
+                        "INSERT INTO drawing_artifacts "
+                        "(drawing_id, project_id, org_id, name) "
+                        "SELECT %(drawing_id)s, project_id, org_id, 'Primary drawing' "
+                        "FROM projects WHERE project_id = %(project_id)s "
+                        "AND org_id = %(org_id)s AND deleted_at IS NULL RETURNING drawing_id",
+                        {"drawing_id": drawing_id, "project_id": project_id, "org_id": org_id},
+                    )
+                    if cur.fetchone() is None:
+                        raise ValueError("project not found")
+                else:
+                    drawing_id = artifact["drawing_id"]
+            else:
+                cur.execute(
+                    "SELECT drawing_id FROM drawing_artifacts WHERE drawing_id = %(drawing_id)s "
+                    "AND project_id = %(project_id)s AND org_id = %(org_id)s AND status = 'active'",
+                    {"drawing_id": drawing_id, "project_id": project_id, "org_id": org_id},
+                )
+                if cur.fetchone() is None:
+                    raise ValueError("drawing artifact not found")
             # next seq, scoped to the owning org (guards against cross-org project_id)
             cur.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM drawing_versions "
-                "WHERE project_id = %(project_id)s AND org_id = %(org_id)s",
-                {"project_id": project_id, "org_id": org_id},
+                "WHERE drawing_id = %(drawing_id)s AND project_id = %(project_id)s "
+                "AND org_id = %(org_id)s",
+                {"drawing_id": drawing_id, "project_id": project_id, "org_id": org_id},
             )
             next_seq = cur.fetchone()["next_seq"]
             cur.execute(
                 "INSERT INTO drawing_versions "
-                "(version_id, project_id, org_id, seq, oss_object, intake_ref, created_by) "
-                "VALUES (%(version_id)s, %(project_id)s, %(org_id)s, %(seq)s, "
+                "(version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, created_by) "
+                "VALUES (%(version_id)s, %(drawing_id)s, %(project_id)s, %(org_id)s, %(seq)s, "
                 "%(oss_object)s, %(intake_ref)s, %(created_by)s) "
-                "RETURNING version_id, project_id, org_id, seq, oss_object, intake_ref, "
+                "RETURNING version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, "
                 "created_by, created_at, deleted_at, purge_requested_at, purge_completed_at",
                 {
-                    "version_id": new_uuid(), "project_id": project_id, "org_id": org_id,
+                    "version_id": new_uuid(), "drawing_id": drawing_id,
+                    "project_id": project_id, "org_id": org_id,
                     "seq": next_seq, "oss_object": oss_object, "intake_ref": intake_ref,
                     "created_by": created_by,
                 },
@@ -169,7 +563,7 @@ def get_project(org_id: uuid.UUID, project_id: uuid.UUID) -> Optional[Project]:
 def list_drawing_versions(org_id: uuid.UUID, project_id: uuid.UUID) -> List[DrawingVersion]:
     with cursor() as cur:
         cur.execute(
-            "SELECT version_id, project_id, org_id, seq, oss_object, intake_ref, created_by, "
+            "SELECT version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, created_by, "
             "created_at, deleted_at, purge_requested_at, purge_completed_at "
             "FROM drawing_versions "
             "WHERE org_id = %(org_id)s AND project_id = %(project_id)s AND deleted_at IS NULL "
@@ -177,6 +571,17 @@ def list_drawing_versions(org_id: uuid.UUID, project_id: uuid.UUID) -> List[Draw
             {"org_id": org_id, "project_id": project_id},
         )
         return [DrawingVersion.from_row(r) for r in cur.fetchall()]
+
+
+def list_drawing_artifacts(org_id: uuid.UUID, project_id: uuid.UUID) -> List[DrawingArtifact]:
+    with cursor() as cur:
+        cur.execute(
+            "SELECT drawing_id, project_id, org_id, name, status, created_at "
+            "FROM drawing_artifacts WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+            "ORDER BY created_at, drawing_id",
+            {"org_id": org_id, "project_id": project_id},
+        )
+        return [DrawingArtifact.from_row(row) for row in cur.fetchall()]
 
 
 def list_jobs(org_id: uuid.UUID, project_id: uuid.UUID) -> List[Job]:
@@ -231,6 +636,7 @@ def hydrate_project(org_id: uuid.UUID, project_id: uuid.UUID) -> Optional[Dict[s
         return None
     return {
         "project": project.to_dict(),
+        "drawing_artifacts": [d.to_dict() for d in list_drawing_artifacts(org_id, project_id)],
         "drawing_versions": [v.to_dict() for v in list_drawing_versions(org_id, project_id)],
         "jobs": [j.to_dict() for j in list_jobs(org_id, project_id)],
         "built_tools": [t.to_dict() for t in list_built_tools(org_id, project_id)],

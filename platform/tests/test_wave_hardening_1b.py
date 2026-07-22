@@ -26,6 +26,8 @@ import time
 
 import jwt
 import pytest
+
+import leaf_platform.store as platform_store
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
@@ -49,10 +51,11 @@ _JWKS_FILE = _TMP / "jwks.json"
 _JWKS_FILE.write_text(json.dumps({"keys": [_jwk]}), encoding="utf-8")
 
 
-def _mint(org_id: str, *, tenant_id: str = "tenant-1b", with_org: bool = True) -> str:
+def _mint(org_id: str, *, tenant_id: str = "tenant-1b", with_org: bool = True,
+          subject: str = "auth0|1b") -> str:
     now = int(time.time())
     payload = {
-        "iss": ISS, "aud": AUD, "iat": now, "exp": now + 3600, "sub": "auth0|1b",
+        "iss": ISS, "aud": AUD, "iat": now, "exp": now + 3600, "sub": subject,
         NS + "tenant_id": tenant_id,
     }
     if with_org:
@@ -62,6 +65,15 @@ def _mint(org_id: str, *, tenant_id: str = "tenant-1b", with_org: bool = True) -
 
 def _bearer(org_id: str, **kw) -> dict:
     return {"Authorization": "Bearer " + _mint(org_id, **kw)}
+
+
+def _bind(org, subject: str):
+    """Live platform auth resolves the verified subject through this binding."""
+    platform_store.create_identity_binding(org.org_id, "auth0", subject)
+
+
+def _bind_as(org, subject: str, role: str):
+    platform_store.create_identity_binding(org.org_id, "auth0", subject, role=role)
 
 
 @pytest.fixture
@@ -90,16 +102,20 @@ def test_live_auth_ignores_cross_org_header_exploit_now_blocked(client, make_org
     POST-FIX: the header is ignored, caller org == verified A, so reading B -> 404."""
     org_a = make_org(name="Victim-adjacent A")
     org_b = make_org(name="Other-tenant B")
+    subject = "auth0|1b-cross-org"
+    _bind(org_a, subject)
 
     # Attacker holds a VALID session for A but forges the header to name B.
-    forged = _bearer(str(org_a.org_id))
+    forged = _bearer(str(org_a.org_id), subject=subject)
     forged["X-Org-Id"] = str(org_b.org_id)   # the pre-fix trusted input
 
     r_cross = client.get(f"/api/orgs/{org_b.org_id}", headers=forged)
     assert r_cross.status_code == 404, r_cross.text   # header NOT trusted -> B invisible
 
     # The same session reads its OWN org fine (verified claim wins).
-    r_self = client.get(f"/api/orgs/{org_a.org_id}", headers=_bearer(str(org_a.org_id)))
+    r_self = client.get(
+        f"/api/orgs/{org_a.org_id}", headers=_bearer(str(org_a.org_id), subject=subject)
+    )
     assert r_self.status_code == 200, r_self.text
     assert r_self.json()["org"]["org_id"] == str(org_a.org_id)
 
@@ -108,15 +124,17 @@ def test_live_auth_project_scope_follows_verified_org_not_header(client, make_or
     """A forged `X-Org-Id: <B>` cannot pivot the project list off the verified org A."""
     org_a = make_org(name="Proj Owner A")
     org_b = make_org(name="Empty B")
+    subject = "auth0|1b-project-scope"
+    _bind(org_a, subject)
 
     # create a project as verified A
     r_make = client.post("/api/projects", json={"name": "A-only project"},
-                         headers=_bearer(str(org_a.org_id)))
+                         headers=_bearer(str(org_a.org_id), subject=subject))
     assert r_make.status_code == 200, r_make.text
     pid = r_make.json()["project"]["project_id"]
 
     # session A, but header forged to B -> still scoped to A (sees A's project)
-    forged = _bearer(str(org_a.org_id))
+    forged = _bearer(str(org_a.org_id), subject=subject)
     forged["X-Org-Id"] = str(org_b.org_id)
     r_list = client.get("/api/projects", headers=forged)
     assert r_list.status_code == 200, r_list.text
@@ -134,7 +152,7 @@ def test_live_auth_unauthenticated_read_is_401(client, live_auth):
 
 def test_live_auth_verified_token_without_org_claim_is_403(client, live_auth):
     """A verified identity that carries no org claim is authenticated-but-unprovisioned -> 403."""
-    tok = _mint("unused", with_org=False)
+    tok = _mint("unused", with_org=False, subject="auth0|1b-unbound")
     r = client.get("/api/projects", headers={"Authorization": "Bearer " + tok})
     assert r.status_code == 403, r.text
 
@@ -150,7 +168,7 @@ def test_live_auth_post_orgs_unauthenticated_is_rejected(client, live_auth):
 
 def test_live_auth_post_orgs_with_valid_session_succeeds(client, live_auth):
     """A verified caller may still bootstrap an org (org claim not required to mint)."""
-    tok = _mint("unused", with_org=False)
+    tok = _mint("unused", with_org=False, subject="auth0|1b-bootstrap")
     r = client.post("/api/orgs", json={"name": "legit org"},
                     headers={"Authorization": "Bearer " + tok})
     assert r.status_code == 200, r.text
@@ -175,6 +193,41 @@ def test_off_auth_header_dev_seam_unchanged(client, make_org, off_auth):
     assert r.json()["org"]["org_id"] == str(org.org_id)
     # missing header still 400 (unchanged contract)
     assert client.get("/api/projects").status_code == 400
+
+
+@pytest.mark.parametrize("role", ["reviewer", "read_only"])
+def test_live_auth_read_only_roles_cannot_mutate_canonical_records_or_jobs(client, make_org, live_auth, role):
+    org = make_org(name=f"{role} org")
+    project = platform_store.create_project(org.org_id, f"{role} project")
+    platform_store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
+    subject = f"auth0|{role}-denied"
+    _bind_as(org, subject, role)
+    headers = _bearer(str(org.org_id), subject=subject)
+    headers["Idempotency-Key"] = "reviewer-key"
+    assert client.post(f"/api/projects/{project.project_id}/history", json={"payload": {"n": 1}},
+                       headers=headers).status_code == 403
+    assert client.post(f"/api/projects/{project.project_id}/solves", json={"payload": {"n": 1}},
+                       headers=headers).status_code == 403
+    assert client.post(f"/api/projects/{project.project_id}/jobs", json={"kind": "run"},
+                       headers=headers).status_code == 403
+
+
+@pytest.mark.parametrize("role", ["owner", "editor"])
+def test_live_auth_owner_and_editor_can_mutate_canonical_records_and_jobs(client, make_org, live_auth, role):
+    org = make_org(name=f"{role} org")
+    project = platform_store.create_project(org.org_id, f"{role} project")
+    platform_store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
+    subject = f"auth0|{role}-allowed"
+    _bind_as(org, subject, role)
+    headers = _bearer(str(org.org_id), subject=subject)
+    headers["Idempotency-Key"] = f"{role}-history"
+    assert client.post(f"/api/projects/{project.project_id}/history", json={"payload": {"n": 1}},
+                       headers=headers).status_code == 200
+    headers["Idempotency-Key"] = f"{role}-solve"
+    assert client.post(f"/api/projects/{project.project_id}/solves", json={"payload": {"n": 1}},
+                       headers=headers).status_code == 405
+    assert client.post(f"/api/projects/{project.project_id}/jobs", json={"kind": "run"},
+                       headers=headers).status_code == 200
 
 
 # --------------------------------------------------------------------------- #
