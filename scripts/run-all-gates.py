@@ -231,9 +231,10 @@ def build_suites() -> List[Suite]:
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
               SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
         # NOT registered (red at measurement 2026-07-22, one process per file,
-        # pre-existing on main — tracked for deliberate fixes, not silently
-        # dropped): test_hardening_1f.py (3F/5P), tests/test_autofill_adapter.py
-        # (1F/1P), tests/test_broker_boundary.py (1F/41P),
+        # pre-existing on main). Durable tracker with the fix-then-register
+        # rule: https://github.com/Evan-Haug/leaf-web-demo/issues/29
+        # test_hardening_1f.py (3F/5P), tests/test_autofill_adapter.py (1F/1P),
+        # tests/test_broker_boundary.py (1F/41P),
         # tests/test_capabilities_promotion.py (4F/7P),
         # tests/test_engine_registry_scripts.py (1F/3P),
         # tests/test_sessions_e2e.py (7 errors/2P).
@@ -243,11 +244,13 @@ def build_suites() -> List[Suite]:
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # Expected 33 = the recorded 11 (DB tests + ledger static) + the 22
-        # hashing/replay static tests merged 2026-07-22 (PRs #24/#26), which the
-        # conftest now collects by the *_static.py convention.
+        # Expected 118 = the full DB-configured collection, measured on this
+        # tree 2026-07-22 via `DATABASE_URL=... pytest --collect-only -q
+        # platform/tests` (the conftest ignore-hook only prunes when NO
+        # DATABASE_URL is set, so with a DB every module collects, not just the
+        # *_static.py proofs).
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 33, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 118, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout. Explicit file targets, not
@@ -439,21 +442,33 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     if suite.kind == "pytest":
         c = parse_pytest(out)
         passed = rc == 0 and c["failed"] == 0 and c["errors"] == 0
-        got = str(c["got"])
         note = pre_note
         if c["skipped"]:
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
-        if suite.expected is not None and c["got"] != suite.expected and passed:
+        # Expected counts are a FLOOR: fewer tests than registered means the
+        # suite silently lost coverage (deselected file, import skip, renamed
+        # module) even when everything that ran was green. Growth is fine and
+        # only noted.
+        if suite.expected is not None and passed and c["got"] < suite.expected:
+            passed = False
+            note = (note + " " if note else "") + \
+                f"count regression: expected >= {suite.expected}, got {c['got']}"
+        elif suite.expected is not None and c["got"] > suite.expected and passed:
             note = (note + " " if note else "") + f"(count drift: expected {suite.expected})"
-        return Result(suite, "PASS" if passed else "FAIL", got, seconds,
+        return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
                       note=note.strip(), log_path=log_path, counts=c)
 
     if suite.kind == "vitest":
         c = parse_vitest(out)
         passed = rc == 0 and c["failed"] == 0
+        note = f"{c['skipped']} skipped" if c.get("skipped") else ""
+        # Same floor rule as pytest suites.
+        if suite.expected is not None and passed and c["got"] < suite.expected:
+            passed = False
+            note = (note + " " if note else "") + \
+                f"count regression: expected >= {suite.expected}, got {c['got']}"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
-                      note=(f"{c['skipped']} skipped" if c.get("skipped") else ""),
-                      log_path=log_path, counts=c)
+                      note=note.strip(), log_path=log_path, counts=c)
 
     # tsc: pass/fail on exit code only
     passed = rc == 0
