@@ -136,9 +136,27 @@ def _db() -> sqlite3.Connection:
         _conn.execute("PRAGMA journal_mode = WAL")
         _conn.execute(_SCHEMA)
         columns = {row[1] for row in _conn.execute("PRAGMA table_info(jobs)")}
+        added = set()
         for name, ddl in _MIGRATIONS.items():
             if name not in columns:
                 _conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
+                added.add(name)
+        if "dwg_version" in added:
+            # One-time backfill at the migration moment: releases BEFORE this
+            # column existed persisted the pin only inside execution_json, so
+            # historical job provenance must survive the upgrade. Parsed in
+            # Python (not json_extract) to avoid a JSON1 build dependency;
+            # idempotent — only NULL rows are touched.
+            for row in _conn.execute(
+                    "SELECT job_id, execution_json FROM jobs "
+                    "WHERE dwg_version IS NULL AND execution_json IS NOT NULL").fetchall():
+                try:
+                    pin = json.loads(row["execution_json"]).get("dwg_version")
+                except (ValueError, TypeError):
+                    pin = None
+                if pin is not None:
+                    _conn.execute("UPDATE jobs SET dwg_version = ? WHERE job_id = ?",
+                                  (pin, row["job_id"]))
         _conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS jobs_project_idempotency_uq "
             "ON jobs(tenant_id, project_id, idempotency_key) "
@@ -267,7 +285,9 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     (resolved 2026-07-22, closing the follow-up recorded at the pinning merge), so
     ``GET /api/jobs/{id}`` shows which version a past run was pinned to. Already-
     deployed ``jobs.db`` files gain the column via the ``_MIGRATIONS`` upgrade
-    path; legacy rows read back ``dwg_version: None``.
+    path, and rows written by releases that stored the pin only in
+    ``execution_json`` are backfilled from it at the migration moment; rows with
+    no recorded pin read back ``dwg_version: None``.
 
     Rejects an over-cap ``params`` blob (> ``MAX_PARAMS_BYTES``) with HTTP 400 before
     any durable row / broker payload is written (security-audit F15).
