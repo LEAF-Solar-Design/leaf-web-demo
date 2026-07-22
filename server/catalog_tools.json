@@ -1,0 +1,68 @@
+{
+  "_note": "Tracked, server-lane seed registry for GENERAL (non-drawing.write) catalog tools whose only reachable implementation is a server/builtins/*.py file that engine/registry.json (Lane B) does not itself carry. deps.all_tools() folds these in additively (same mechanism as write_tools.json) so a tenant POST /api/run resolves them by name via deps.find_tool. Kept separate from write_tools.json (drawing.write tools) and the gitignored authored_tools.json (harness-authored tools).",
+  "tools": [
+    {
+      "name": "autofill-string-targets",
+      "version": "1.0.0",
+      "description": "Derive string targets from the drawing's panel polylines: bank-clustered, rotation-aware serpentine DC string routing over the Panels layer with an NEC 690.7 cold-temperature string-size check. Read-only; runs server/builtins/string_panels.py against the intake.",
+      "kind": "script",
+      "engine_op": "autofill_string_targets",
+      "entry": "builtins/string_panels.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "voc": {
+            "type": "number",
+            "default": 48.5,
+            "description": "Module open-circuit voltage at STC, volts (demo default)."
+          },
+          "temp_coeff_pct_per_c": {
+            "type": "number",
+            "default": -0.27,
+            "description": "Voc temperature coefficient, %/degC (demo default)."
+          },
+          "design_min_temp_c": {
+            "type": "number",
+            "default": -25.0,
+            "description": "Design minimum ambient temperature, degC (demo default)."
+          },
+          "max_system_voltage": {
+            "type": "number",
+            "default": 1000.0,
+            "description": "NEC 690.7 maximum system voltage, volts (commercial-rooftop demo default)."
+          },
+          "panel_layer": {
+            "type": "string",
+            "default": "Panels",
+            "description": "Intake layer carrying the closed panel polylines."
+          },
+          "cluster_radius_factor": {
+            "type": "number",
+            "default": 3.0,
+            "description": "Bank clustering radius as a multiple of the median nearest-neighbor panel distance; strings never cross bank gaps."
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "module": { "type": "object" },
+          "electrical": { "type": "object" },
+          "strings": { "type": "array" },
+          "stats": { "type": "object" }
+        }
+      },
+      "default_params": {
+        "voc": 48.5,
+        "temp_coeff_pct_per_c": -0.27,
+        "design_min_temp_c": -25.0,
+        "max_system_voltage": 1000.0,
+        "panel_layer": "Panels",
+        "cluster_radius_factor": 3.0
+      },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-07-22T00:00:00Z" }
+    }
+  ]
+}

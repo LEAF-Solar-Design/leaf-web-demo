@@ -184,7 +184,8 @@ def lane_workers() -> Dict[str, int]:
 # --------------------------------------------------------------------------- #
 def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg: str,
                aps_live: bool, org_id: Optional[str] = None,
-               project_id: Optional[str] = None) -> str:
+               project_id: Optional[str] = None,
+               dwg_version: Optional[int] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -192,6 +193,18 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     present AND a platform DB resolves, a canonical platform Job row is recorded
     (best-effort, env-gated; see platform_link). With no project context this is
     a no-op and the spine is byte-identical to before.
+
+    ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
+    immutable drawing version (da/store.py resolve_version); threaded through to
+    the broker call ONLY (not persisted in the durable row — this is an execution
+    parameter, not a stored job field).
+
+    FOLLOW-UP (deliberate, recorded 2026-07-22): ``dwg_version`` provenance is NOT
+    persisted on the job row (no ``dwg_version`` column in ``_SCHEMA``) — so
+    ``GET /api/jobs/{id}`` cannot yet show which version a past run was pinned to.
+    Adding that column requires a SQLite migration (``ALTER TABLE jobs ADD COLUMN``)
+    for any already-deployed ``jobs.db``, which is out of scope for this minimal
+    threading change; tracked as a follow-up, not silently dropped.
 
     Rejects an over-cap ``params`` blob (> ``MAX_PARAMS_BYTES``) with HTTP 400 before
     any durable row / broker payload is written (security-audit F15).
@@ -210,7 +223,7 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     platform_link.on_submit(job_id, org_id, project_id, tool.get("name"), params)
     executor = _executors.get(lane_for(tool, aps_live))
     assert executor is not None
-    executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live)
+    executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live, dwg_version)
     return job_id
 
 
@@ -289,7 +302,7 @@ def _finish(job_id: str, status: str, started: float,
 
 
 def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
-             dwg: str, aps_live: bool) -> None:
+             dwg: str, aps_live: bool, dwg_version: Optional[int] = None) -> None:
     started = time.time()
     max_s = job_max_s()
     _exec("UPDATE jobs SET status = 'running', progress = 'running', started_at = ?,"
@@ -305,7 +318,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     def _call() -> None:
         try:
             holder["env"] = broker_client.run_via_broker(
-                tenant_id, tool, params, dwg, aps_live, timeout_s=max_s + 30
+                tenant_id, tool, params, dwg, aps_live, timeout_s=max_s + 30,
+                dwg_version=dwg_version,
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc

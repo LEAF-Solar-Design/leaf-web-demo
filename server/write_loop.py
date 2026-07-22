@@ -237,18 +237,19 @@ def _status_for(env: Dict[str, Any]) -> int:
 
 def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,
                    backend, t0: float, run_tool_dynamic_fn,
-                   degraded: bool = False) -> Tuple[Dict[str, Any], int]:
+                   degraded: bool = False, version="head") -> Tuple[Dict[str, Any], int]:
     """APS_LIVE=0 write: run the tool file for its mutations, apply them to the
-    current version's intake, persist a new version, stamp result.new_version."""
+    BASE version's intake (``version``; default "head", unchanged), persist a new
+    version whose parent is that base, stamp result.new_version."""
     name = tool.get("name")
-    version = tool.get("version", "1.0.0")
+    tool_version = tool.get("version", "1.0.0")
     drawing_id = _drawing_id(params)
     try:
         ensure_demo_drawing(backend, tenant_id, drawing_id)
-        head_v, cur_intake = read_intake(backend, tenant_id, drawing_id, "head")
+        head_v, cur_intake = read_intake(backend, tenant_id, drawing_id, version)
     except (KeyError, ValueError) as exc:
         return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
-                             retryable=False, tool=name, version=version),
+                             retryable=False, tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
     env = run_tool_dynamic_fn(tool, cur_intake, dict(params or {}),
@@ -267,7 +268,7 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             meta={"tool": name, "note": "mock write (intake payload)"})
     except Exception as exc:  # noqa: BLE001
         return (err_envelope(ErrorCode.INTERNAL, f"write persist failed: {type(exc).__name__}: {exc}",
-                             retryable=False, tool=name, version=version),
+                             retryable=False, tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL])
 
     result["new_version"] = {"drawing_id": drawing_id, "version": new_v, "parent": head_v}
@@ -279,22 +280,24 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
 
 def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,
                    backend, da: Any, t0: float,
-                   ledger_entry: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], int]:
-    """APS_LIVE=1 write: run the proven LeafWriteProbe Activity on the current
-    version's DWG, store output.dwg as a new version, re-extract for the intake
-    cache, stamp result.new_version. `da` is the credential-holding client."""
+                   ledger_entry: Optional[Dict[str, Any]] = None,
+                   version="head") -> Tuple[Dict[str, Any], int]:
+    """APS_LIVE=1 write: run the proven LeafWriteProbe Activity on the BASE
+    version's DWG (``version``; default "head", unchanged), store output.dwg as a
+    new version whose parent is that base, re-extract for the intake cache, stamp
+    result.new_version. `da` is the credential-holding client."""
     import store
     name = tool.get("name")
-    version = tool.get("version", "1.0.0")
+    tool_version = tool.get("version", "1.0.0")
     drawing_id = _drawing_id(params)
     try:
         if not backend.exists(store.manifest_key(tenant_id, drawing_id)):
             return (err_envelope(ErrorCode.BAD_PARAMS,
                                  f"drawing not in store: {tenant_id}/{drawing_id} "
                                  f"(ingest it before a live write)", retryable=False,
-                                 tool=name, version=version),
+                                 tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
-        head_v, vkey = store.resolve_version(backend, tenant_id, drawing_id, "head")
+        head_v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
 
         in_url = da.signed_download_url(vkey)
         ts = int(time.time())
@@ -309,13 +312,13 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             return (err_envelope(ErrorCode.WORKITEM_FAILED,
                                  f"write WorkItem {status.get('id')} status={status.get('status')} "
                                  f"report={status.get('reportUrl')}", retryable=True,
-                                 tool=name, version=version),
+                                 tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
         da.finalize_upload(out_key, up_key)
         out_bytes = da.download_object(out_key)
         if not out_bytes:
             return (err_envelope(ErrorCode.WORKITEM_FAILED, "write produced 0-byte output.dwg",
-                                 retryable=True, tool=name, version=version),
+                                 retryable=True, tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
 
         wi_id = status.get("id")
@@ -352,16 +355,27 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             "probe_layer": PROBE_LAYER,
             "output_dwg_bytes": len(out_bytes),
         }
-        env = ok_envelope(name, version, result,
+        env = ok_envelope(name, tool_version, result,
                           overlay={"probe_layer_added": PROBE_LAYER},
                           timing_ms=int((time.perf_counter() - t0) * 1000),
                           cost=cost, degraded_mode=False)
         return env, 200
     except FileNotFoundError as exc:  # creds missing
         return (err_envelope(ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False,
-                             tool=name, version=version),
+                             tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE])
+    except (KeyError, ValueError) as exc:
+        # unknown drawing/BASE version (da/store.py resolve_version, or a missing
+        # manifest key on a race) — a CLIENT input error, not a WorkItem failure.
+        # MUST be caught here, before the broad Exception handler below, so an
+        # unknown `version` surfaces as BAD_PARAMS/non-retryable (review 2026-07-22
+        # finding: it was previously falling through to WORKITEM_FAILED/retryable,
+        # i.e. an HTTP 502 for what is really a 400) — matches run_write_mock's own
+        # (KeyError, ValueError) -> BAD_PARAMS surfacing exactly.
+        return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
+                             retryable=False, tool=name, version=tool_version),
+                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
     except Exception as exc:  # noqa: BLE001
         return (err_envelope(ErrorCode.WORKITEM_FAILED, f"{type(exc).__name__}: {exc}",
-                             retryable=True, tool=name, version=version),
+                             retryable=True, tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
