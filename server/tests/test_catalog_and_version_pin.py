@@ -273,3 +273,159 @@ def test_submit_job_threads_dwg_version_to_broker_client(monkeypatch, tmp_path):
     rec = jobs_mod.wait_for_terminal(job_id, timeout_s=10)
     assert rec is not None and rec["status"] == "complete", rec
     assert captured["dwg_version"] == 42
+
+
+# =========================================================================== #
+# Review round 1 (2026-07-22) fixes
+# =========================================================================== #
+class _FakeLiveDa:
+    """Minimal live-capable APS client stand-in: has `run_tool` (so broker.py's
+    `hasattr(da, "run_tool")` gate lets it through) and `ensure_tool_activity`.
+    Records every call so a test can assert the credential-holding client was
+    (or was NOT) actually reached."""
+
+    def __init__(self) -> None:
+        self.ensure_tool_activity_calls: list = []
+        self.run_tool_calls: list = []
+
+    def ensure_tool_activity(self, tool):
+        self.ensure_tool_activity_calls.append(tool.get("name"))
+        return {}
+
+    def run_tool(self, local, tool, params):
+        self.run_tool_calls.append((local, tool.get("name"), dict(params)))
+        return {"ok": True, "result": {"ran": True}, "overlay": None}
+
+
+# --------------------------------------------------------------------------- #
+# FIX 1 (HIGH): a Python-only tool (no engine_script/.lsp script) must fail
+# closed on aps_live=True, never provision an EMPTY-script Activity.
+# --------------------------------------------------------------------------- #
+def test_live_read_fails_closed_for_tool_with_no_live_script(monkeypatch, tmp_path):
+    _quiet_broker(monkeypatch, tmp_path)
+    fake_da = _FakeLiveDa()
+    monkeypatch.setattr(broker, "_get_da", lambda: fake_da)
+
+    tool = dict(READ_TOOL)  # engine_op only -> no engine_script, no .lsp script
+    assert broker._has_live_script(tool) is False
+    req = broker.BrokerRunRequest(tenant_id="live-noscript", tool=tool, params={},
+                                  dwg="rooftop_demo", aps_live=True)
+    resp = broker.broker_run(req)
+
+    assert resp.status_code == 400, resp.body
+    body = json.loads(resp.body)
+    assert body["error"]["error_code"] == "BAD_PARAMS"
+    assert body["error"]["retryable"] is False
+    assert "live" in body["error"]["message"].lower()
+    # FAIL CLOSED means BEFORE submission: the credential-holding client must
+    # never be reached.
+    assert fake_da.ensure_tool_activity_calls == []
+    assert fake_da.run_tool_calls == []
+
+
+def test_live_read_still_proceeds_for_a_tool_with_a_real_lsp_script(monkeypatch, tmp_path):
+    """Regression guard: the new guard must not block a genuinely live-capable
+    tool (matches engine/registry.json's real shape: a `.lsp` `script`)."""
+    _quiet_broker(monkeypatch, tmp_path)
+    fake_da = _FakeLiveDa()
+    monkeypatch.setattr(broker, "_get_da", lambda: fake_da)
+
+    tool = dict(READ_TOOL)
+    tool["script"] = "tools/count_by_layer.lsp"
+    assert broker._has_live_script(tool) is True
+    req = broker.BrokerRunRequest(tenant_id="live-hasscript", tool=tool, params={},
+                                  dwg="rooftop_demo", aps_live=True)
+    resp = broker.broker_run(req)
+
+    assert resp.status_code == 200, resp.body
+    assert len(fake_da.run_tool_calls) == 1, "the real live path must be reached"
+
+
+# --------------------------------------------------------------------------- #
+# FIX 2 (HIGH): dwg_version must NEVER be silently ignored on a live read —
+# reject before submission rather than execute the unpinned live DWG.
+# --------------------------------------------------------------------------- #
+def test_live_read_with_dwg_version_fails_closed_never_executes(monkeypatch, tmp_path):
+    _quiet_broker(monkeypatch, tmp_path)
+    fake_da = _FakeLiveDa()
+    monkeypatch.setattr(broker, "_get_da", lambda: fake_da)
+
+    tool = dict(READ_TOOL)
+    tool["script"] = "tools/count_by_layer.lsp"  # a LIVE-CAPABLE tool must ALSO fail closed
+    req = broker.BrokerRunRequest(tenant_id="live-vpin", tool=tool, params={},
+                                  dwg="rooftop_demo", aps_live=True, dwg_version=999)
+    resp = broker.broker_run(req)
+
+    assert resp.status_code == 400, resp.body
+    body = json.loads(resp.body)
+    assert body["error"]["error_code"] == "BAD_PARAMS"
+    assert body["error"]["retryable"] is False
+    assert "dwg_version" in body["error"]["message"]
+    # the exact regression the review caught: a pin must never be silently
+    # dropped and the unpinned live DWG executed instead.
+    assert fake_da.run_tool_calls == [], "dwg_version must never be silently ignored on a live read"
+
+
+# --------------------------------------------------------------------------- #
+# FIX 3 (MEDIUM): a live WRITE against an unknown BASE version must surface
+# BAD_PARAMS/non-retryable (400-class), not WORKITEM_FAILED/retryable (502).
+# --------------------------------------------------------------------------- #
+def test_run_write_live_unknown_base_version_fails_closed_bad_params(tmp_path):
+    import store
+
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    tenant_id = "vpin-live-write"
+    write_loop.ensure_demo_drawing(backend, tenant_id, write_loop.DEMO_DRAWING_ID)  # v1 only
+
+    class _NeverCalledDa:
+        """If code reached ANY da.* call for an unknown BASE version, that would
+        itself be a bug (resolve_version must raise before any APS call)."""
+
+        def __getattr__(self, name):
+            raise AssertionError(f"da.{name} must never be reached for an unknown base version")
+
+    env, status = write_loop.run_write_live(
+        WRITE_TOOL, {"drawing_id": "demo"}, tenant_id,
+        backend=backend, da=_NeverCalledDa(), t0=0.0, version=999)
+
+    assert status == 400, env
+    assert env["error"]["error_code"] == "BAD_PARAMS"
+    assert env["error"]["retryable"] is False
+    assert "version" in env["error"]["message"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# FIX 4 (LOW): duplicate tool names across the GLOBAL, no-override-relationship
+# catalog tiers must raise loudly, never silently swap capabilities.
+# --------------------------------------------------------------------------- #
+def test_all_tools_raises_on_global_seed_name_collision(monkeypatch):
+    monkeypatch.setattr(deps, "load_seed_catalog_tools",
+                        lambda: [{"name": "count-by-layer", "params": {}}])  # collides w/ engine registry
+    with pytest.raises(deps.ToolCatalogCollisionError):
+        deps.all_tools()
+
+
+def test_all_tools_no_collision_among_the_real_current_global_tiers():
+    """Regression guard: today's REAL global tiers (engine registry,
+    catalog_tools.json, write_tools.json) have zero name collisions with each
+    other, so the new guard changes nothing for normal operation."""
+    names = [t["name"] for t in deps.all_tools()]
+    assert len(names) == len(set(names)), names
+
+
+def test_tenant_repo_override_of_global_tool_is_not_flagged_as_a_collision(monkeypatch, tmp_path):
+    """The documented precedence (tenant-repo intentionally overriding a
+    same-named GLOBAL tool) must NOT raise — only the three GLOBAL tiers with
+    no override relationship are guarded."""
+    repo = tmp_path / "repo"
+    (repo / "tools" / "count-by-layer").mkdir(parents=True)
+    (repo / "tools" / "count-by-layer" / "tool.py").write_text(
+        "def run(intake, params):\n    return {}, None\n", encoding="utf-8")
+    (repo / "registry.json").write_text(json.dumps({"tools": [
+        {"name": "count-by-layer", "entry": "tools/count-by-layer/tool.py",
+         "params": {"type": "object", "properties": {}, "required": []}},
+    ]}), encoding="utf-8")
+    monkeypatch.setenv("LEAF_TENANT_REPO", str(repo))
+
+    tool = deps.find_tool("count-by-layer")  # must NOT raise
+    assert tool is not None and tool.get("entry") == "tools/count-by-layer/tool.py"  # tenant tool WINS

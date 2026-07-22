@@ -166,6 +166,13 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     the broker call ONLY (not persisted in the durable row — this is an execution
     parameter, not a stored job field).
 
+    FOLLOW-UP (deliberate, recorded 2026-07-22): ``dwg_version`` provenance is NOT
+    persisted on the job row (no ``dwg_version`` column in ``_SCHEMA``) — so
+    ``GET /api/jobs/{id}`` cannot yet show which version a past run was pinned to.
+    Adding that column requires a SQLite migration (``ALTER TABLE jobs ADD COLUMN``)
+    for any already-deployed ``jobs.db``, which is out of scope for this minimal
+    threading change; tracked as a follow-up, not silently dropped.
+
     Rejects an over-cap ``params`` blob (> ``MAX_PARAMS_BYTES``) with HTTP 400 before
     any durable row / broker payload is written (security-audit F15).
     """

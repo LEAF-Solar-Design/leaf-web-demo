@@ -346,6 +346,17 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         return (err_envelope(ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False,
                              tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE])
+    except (KeyError, ValueError) as exc:
+        # unknown drawing/BASE version (da/store.py resolve_version, or a missing
+        # manifest key on a race) — a CLIENT input error, not a WorkItem failure.
+        # MUST be caught here, before the broad Exception handler below, so an
+        # unknown `version` surfaces as BAD_PARAMS/non-retryable (review 2026-07-22
+        # finding: it was previously falling through to WORKITEM_FAILED/retryable,
+        # i.e. an HTTP 502 for what is really a 400) — matches run_write_mock's own
+        # (KeyError, ValueError) -> BAD_PARAMS surfacing exactly.
+        return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
+                             retryable=False, tool=name, version=tool_version),
+                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
     except Exception as exc:  # noqa: BLE001
         return (err_envelope(ErrorCode.WORKITEM_FAILED, f"{type(exc).__name__}: {exc}",
                              retryable=True, tool=name, version=tool_version),

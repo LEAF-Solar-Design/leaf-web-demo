@@ -426,6 +426,20 @@ def _resolve_live_dwg(dwg: str) -> Path:
     return resolved
 
 
+def _has_live_script(tool: Dict[str, Any]) -> bool:
+    """True iff the tool carries a LIVE (APS accoreconsole) implementation source:
+    literal LISP (`engine_script`) or a `.lsp` `script` reference. Mirrors
+    da/client.py:tool_activity_spec's own source resolution EXACTLY — a tool with
+    neither (e.g. a kind:script tool whose only implementation is a local Python
+    `entry`, the APS_LIVE=0 builtins/*.py shape) has no live counterpart yet; that
+    module would otherwise provision an Activity with an EMPTY script (silent
+    no-op WorkItem, never a real run)."""
+    if tool.get("engine_script"):
+        return True
+    script = tool.get("script")
+    return bool(script) and str(script).endswith(".lsp")
+
+
 @app.get("/broker/health")
 def health() -> Dict[str, Any]:
     return with_envelope_fields({
@@ -670,6 +684,39 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         da = _get_da()
         if da is None or not hasattr(da, "run_tool"):
             degraded = True  # fall back to the pure-python path, flagged
+        elif req.dwg_version is not None:
+            # FAIL CLOSED (review 2026-07-22, HIGH): the live (APS) read path
+            # resolves a single broker-owned DWG file via `_resolve_live_dwg` — it
+            # has NO versioned-store wiring at all, so a `dwg_version` pin was being
+            # silently ignored here (a pinned read against an aps_live=True run
+            # executed the unpinned live DWG regardless of the pin, e.g.
+            # dwg_version=999 still returned 200). A pin must never be silently
+            # dropped: reject before any WorkItem submission rather than execute
+            # against the wrong drawing. Follow-up: wire live reads through the
+            # versioned store's DWG representation (mirrors the write path).
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "dwg_version pinning is not yet supported for live (APS_LIVE=1) reads; "
+                "omit dwg_version or run with aps_live=false",
+                retryable=False, tool=tool.get("name")),
+                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+        elif not _has_live_script(tool):
+            # FAIL CLOSED (review 2026-07-22, HIGH): da/client.py:tool_activity_spec
+            # builds a tool's live Activity script from `engine_script` or a `.lsp`
+            # `script` — a tool with ONLY a local Python `entry` (e.g. the
+            # autofill-string-targets catalog entry, kind:script/APS_LIVE=0 shape)
+            # has neither, so provisioning its Activity would submit an EMPTY
+            # accoreconsole script (a silent no-op WorkItem, not a real run). Do NOT
+            # fabricate a live script here. Live/APS wiring for Python-only builtin
+            # tools is a TRACKED FOLLOW-UP; until it lands this must reject up front.
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS,
+                f"tool {tool.get('name')!r} has no live (APS) implementation yet "
+                f"(kind=script with only a local Python entry; no engine_script/.lsp "
+                f"script) — live (APS_LIVE=1) runs of this tool are not supported; "
+                f"run with aps_live=false",
+                retryable=False, tool=tool.get("name")),
+                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
         else:
             try:
                 # Validated before any live branch: app input is a drawing name,
