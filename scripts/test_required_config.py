@@ -5,6 +5,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SERVICES = ("app", "web", "broker", "harness")
 REQUIRED_KEYS = ("environment", "secrets", "mountPaths")
+WORKFLOWS = (
+    ROOT / ".github" / "workflows" / "web-deployment-contract.yml",
+    ROOT / ".github" / "workflows" / "platform-backend-contract.yml",
+)
 
 
 def test_every_platform_service_has_a_well_formed_required_config_manifest() -> None:
@@ -32,3 +36,22 @@ def test_manifests_pin_the_existing_runtime_contract() -> None:
     assert "LEAF_HARNESS_SECRET" in harness["required"]["secrets"]
     assert "/data/state" in app["required"]["mountPaths"]
     assert "/data/grants" in harness["required"]["mountPaths"]
+
+
+def test_both_required_deployment_checks_run_for_every_main_commit() -> None:
+    for workflow in WORKFLOWS:
+        text = workflow.read_text(encoding="utf-8")
+        push_block = text.split("  push:\n", 1)[1].split("\n\npermissions:", 1)[0]
+        assert "branches: [main]" in push_block
+        assert "paths:" not in push_block
+
+
+def test_deployment_inputs_trigger_pull_request_checks() -> None:
+    web = WORKFLOWS[0].read_text(encoding="utf-8")
+    backend = WORKFLOWS[1].read_text(encoding="utf-8")
+    web_pr = web.split("  pull_request:\n", 1)[1].split("  push:\n", 1)[0]
+    backend_pr = backend.split("  pull_request:\n", 1)[1].split("  push:\n", 1)[0]
+
+    assert '- "deploy/**"' in web_pr
+    assert '- "deploy/**"' in backend_pr
+    assert '- "scripts/test_required_config.py"' in backend_pr

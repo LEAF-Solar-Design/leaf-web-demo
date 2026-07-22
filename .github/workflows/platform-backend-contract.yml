@@ -4,24 +4,16 @@ on:
   pull_request:
     paths:
       - "server/**"
-      - "deploy/Dockerfile.app"
+      - "deploy/**"
       - "platform/**"
       - "da/**"
       - "engine/**"
       - "contract/**"
       - "data/**"
+      - "scripts/test_required_config.py"
       - ".github/workflows/platform-backend-contract.yml"
   push:
     branches: [main]
-    paths:
-      - "server/**"
-      - "deploy/Dockerfile.app"
-      - "platform/**"
-      - "da/**"
-      - "engine/**"
-      - "contract/**"
-      - "data/**"
-      - ".github/workflows/platform-backend-contract.yml"
 
 permissions:
   contents: read

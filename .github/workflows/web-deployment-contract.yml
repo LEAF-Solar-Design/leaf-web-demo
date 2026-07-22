@@ -4,18 +4,13 @@ on:
   pull_request:
     paths:
       - ".github/workflows/web-deployment-contract.yml"
+      - "deploy/**"
       - "scripts/deploy-web.py"
       - "scripts/test_deploy_web.py"
       - "scripts/run-all-gates.py"
       - "web/**"
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/web-deployment-contract.yml"
-      - "scripts/deploy-web.py"
-      - "scripts/test_deploy_web.py"
-      - "scripts/run-all-gates.py"
-      - "web/**"
 
 permissions:
   contents: read
