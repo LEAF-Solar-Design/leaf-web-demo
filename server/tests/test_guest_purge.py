@@ -1,0 +1,136 @@
+"""
+The retention promise-keeper (§19): purge_expired deletes guest drawings at
+their STAMPED expiry — drawing dir, staged upload file, and the empty tenant
+dir — and logs every deletion to purge.log.jsonl. Proven with a short
+retention override, exactly as the definition of done demands.
+
+Run:  cd server && python -m pytest tests/test_guest_purge.py -q
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app as app_module
+import guest_uploads
+import write_loop
+
+DXF = ("0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\nAB\n8\nL1\n70\n1\n"
+       "10\n1.0\n20\n2.0\n10\n3.0\n20\n4.0\n0\nENDSEC\n0\nEOF\n").encode()
+
+
+@pytest.fixture()
+def client(monkeypatch, tmp_path):
+    monkeypatch.setenv("LEAF_GUEST_STORE_DIR", str(tmp_path / "guest"))
+    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    guest_uploads._reset_rate_state()
+    monkeypatch.setattr(
+        guest_uploads, "start_extraction_thread",
+        lambda tenant_id, drawing_id, ext: guest_uploads.run_extraction(
+            tenant_id, drawing_id, ext))
+    return TestClient(app_module.app)
+
+
+def _upload(client):
+    r = client.post("/api/drawings/upload",
+                    files={"file": ("p.dxf", io.BytesIO(DXF))})
+    assert r.status_code == 202
+    return r.json()["tenant_id"], r.json()["drawing_id"]
+
+
+def _drawing_dir(tenant, did) -> Path:
+    return Path(write_loop.guest_store_dir()) / "tenants" / tenant / "drawings" / did
+
+
+def test_expired_guest_drawing_is_purged_with_log(client, monkeypatch):
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")  # ~72 ms
+    tenant, did = _upload(client)
+    ddir = _drawing_dir(tenant, did)
+    staged = guest_uploads.staged_path(did, ".dxf")
+    assert ddir.is_dir() and staged.is_file()
+
+    time.sleep(0.2)  # let the stamped expiry pass
+    result = guest_uploads.purge_expired()
+
+    assert result["count"] == 1
+    assert result["purged"] == [{"tenant_id": tenant, "drawing_id": did}]
+    assert result["freed_bytes"] > 0
+    assert not ddir.exists(), "drawing dir must be deleted"
+    assert not staged.exists(), "staged upload file must be deleted"
+    assert not (Path(write_loop.guest_store_dir()) / "tenants" / tenant).exists(), \
+        "empty tenant dir must be dropped"
+
+    log = (Path(write_loop.guest_store_dir()) / "purge.log.jsonl").read_text()
+    entry = json.loads(log.strip().splitlines()[-1])
+    assert entry["tenant_id"] == tenant and entry["drawing_id"] == did
+    assert entry["freed_bytes"] > 0
+
+    # the surface is now honestly gone
+    assert client.get(f"/api/drawings/{did}/upload-status",
+                      headers={"X-Tenant-Id": tenant}).status_code == 404
+    assert client.get(f"/api/drawings/{did}/intake",
+                      headers={"X-Tenant-Id": tenant}).status_code == 404
+
+
+def test_unexpired_guest_drawing_survives(client, monkeypatch):
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "24")
+    tenant, did = _upload(client)
+    result = guest_uploads.purge_expired()
+    assert result["count"] == 0
+    assert _drawing_dir(tenant, did).is_dir()
+    assert client.get(f"/api/drawings/{did}/intake",
+                      headers={"X-Tenant-Id": tenant}).status_code == 200
+
+
+def test_purge_is_idempotent(client, monkeypatch):
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
+    _upload(client)
+    time.sleep(0.2)
+    assert guest_uploads.purge_expired()["count"] == 1
+    assert guest_uploads.purge_expired()["count"] == 0
+
+
+def test_purge_honors_stamp_not_current_env(client, monkeypatch):
+    """The STAMPED expiry rules: a drawing uploaded under a long window is NOT
+    purged just because the env later shrank — the promise shown at upload
+    time is the promise kept."""
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "24")
+    tenant, did = _upload(client)
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00001")
+    assert guest_uploads.purge_expired()["count"] == 0
+    assert _drawing_dir(tenant, did).is_dir()
+
+
+def test_account_uploads_untouched_by_purge(client, monkeypatch):
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
+    r = client.post("/api/drawings/upload",
+                    files={"file": ("p.dxf", io.BytesIO(DXF))},
+                    headers={"X-Tenant-Id": "acme-solar"})
+    assert r.status_code == 202
+    did = r.json()["drawing_id"]
+    time.sleep(0.2)
+    guest_uploads.purge_expired()
+    # account drawing (default store) survives — no retention promise was made
+    assert client.get(f"/api/drawings/{did}/intake",
+                      headers={"X-Tenant-Id": "acme-solar"}).status_code == 200
+
+
+def test_orphan_staged_file_swept_by_mtime(client, monkeypatch):
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
+    updir = guest_uploads.uploads_dir()
+    updir.mkdir(parents=True, exist_ok=True)
+    orphan = updir / "u-orphan.dxf"
+    orphan.write_bytes(b"leftover")
+    old = time.time() - 3600
+    os.utime(orphan, (old, old))
+    guest_uploads.purge_expired()
+    assert not orphan.exists()

@@ -38,6 +38,7 @@ from routers import (
     site,
     tenant,
     tools,
+    uploads,
     usage,
 )
 
@@ -87,6 +88,15 @@ app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
+app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
+
+# §19 retention promise-keeper: the purge daemon deletes expired guest drawings
+# at their STAMPED expiry. Started here (not lazily) so the promise holds from
+# process start; a sweep failure logs and retries — it never kills the app.
+import guest_uploads  # noqa: E402
+
+if guest_uploads.enabled():
+    guest_uploads.start_purge_daemon()
 
 
 # --- platform Project/Job router (org-scoped persistence; platform/README.md) --- #

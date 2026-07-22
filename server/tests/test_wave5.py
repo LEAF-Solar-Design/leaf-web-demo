@@ -284,20 +284,20 @@ def test_grant_status_roundtrip_carries_kind(monkeypatch, harness_stub):
 # =========================================================================== #
 def test_entitlements_get_matrix(live_auth):
     c = _client()
-    # 8-capability shape (canonical solve + agent spine / entitlements.py CAPABILITIES)
+    # 9-capability shape (canonical solve + agent spine + §19 upload / entitlements.py CAPABILITIES)
     for tier, expected in [
         ("hosted_pro", {"run_read": True, "run_write": True, "solve": True,
                         "build": True,
                         "converse": True, "agent_write_autopilot": True,
-                        "deploy": True, "platform_customize": False}),
+                        "deploy": True, "platform_customize": False, "upload": True}),
         ("hosted_starter", {"run_read": True, "run_write": True, "solve": False,
                             "build": False,
                             "converse": True, "agent_write_autopilot": False,
-                            "deploy": False, "platform_customize": False}),
+                            "deploy": False, "platform_customize": False, "upload": True}),
         ("self_hosted", {"run_read": True, "run_write": True, "solve": True,
                          "build": True,
                          "converse": True, "agent_write_autopilot": True,
-                         "deploy": True, "platform_customize": False}),
+                         "deploy": True, "platform_customize": False, "upload": True}),
     ]:
         r = c.get("/api/entitlements", headers=bearer(tier))
         assert r.status_code == 200, r.text
@@ -404,7 +404,8 @@ def test_entitlements_demo_offauth(demo_offauth):
     assert b["entitlements"] == {"run_read": True, "run_write": True, "solve": True,
                                  "build": True,
                                  "converse": True, "agent_write_autopilot": True,
-                                 "deploy": True, "platform_customize": False}
+                                 "deploy": True, "platform_customize": False,
+                                 "upload": True}
     assert b["source"] == "policy"
 
 

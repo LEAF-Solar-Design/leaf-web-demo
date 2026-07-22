@@ -49,6 +49,12 @@ if _DA_DIR not in sys.path:
 
 # Well-known demo drawing bootstrapped from the cached intake at APS_LIVE=0.
 DEMO_DRAWING_ID = "demo"
+# Reserved tenant-id namespace for ephemeral guest uploads (server/guest_uploads.py
+# mints these; server-side ONLY). The prefix is load-bearing for two fail-closed
+# rules: guest tenants store in an isolated, purgeable filesystem root
+# (backend_for_tenant), and ensure_demo_drawing NEVER bootstraps a drawing for
+# them (a guest has no drawings except what extraction actually produced).
+GUEST_TENANT_PREFIX = "guest-"
 # The already-provisioned, proven write Activity reused on the live path.
 WRITE_ACTIVITY = os.environ.get("LEAF_WRITE_ACTIVITY", "LeafWriteProbe")
 PROBE_LAYER = "LEAF_WRITE_PROBE"
@@ -80,6 +86,28 @@ def default_backend(*, aps_live: bool = False, da: Any = None):
     return store.FilesystemBackend(store_dir())
 
 
+def guest_store_dir() -> str:
+    """Isolated store root for GUEST tenants only (gitignored, env-overridable).
+
+    Guests get their own filesystem root — never the default backend — because
+    the retention promise ("deleted after N hours") is only honest on a store
+    the purge job can provably delete from, and the StorageBackend interface
+    has no delete: guest_uploads.purge_expired() deletes at the FILESYSTEM
+    level, which is only sound when every guest artifact lives under this one
+    root and nothing else does."""
+    return os.environ.get("LEAF_GUEST_STORE_DIR", str(SERVER_DIR / "guest_drawings"))
+
+
+def backend_for_tenant(tenant_id: str, *, aps_live: bool = False, da: Any = None):
+    """The store backend for ONE tenant: guest tenants -> the isolated local
+    guest store (always filesystem, even at APS_LIVE=1 — see guest_store_dir);
+    everyone else -> default_backend, byte-identical to before this seam."""
+    import store  # lazy (store imports da/client)
+    if str(tenant_id).startswith(GUEST_TENANT_PREFIX):
+        return store.FilesystemBackend(guest_store_dir())
+    return default_backend(aps_live=aps_live, da=da)
+
+
 def _drawing_id(params: Dict[str, Any]) -> str:
     did = (params or {}).get("drawing_id")
     return str(did) if did else DEMO_DRAWING_ID
@@ -95,6 +123,16 @@ def intake_cache_key(tenant_id: str, drawing_id: str, version: int) -> str:
     v = int(version)
     return (f"tenants/{store.sanitize_id(tenant_id)}/drawings/"
             f"{store.sanitize_id(drawing_id)}/v/{v:08d}.intake.json")
+
+
+def upload_marker_key(tenant_id: str, drawing_id: str) -> str:
+    """Sibling key holding an uploaded drawing's upload/extraction state
+    (server/guest_uploads.py writes it; ensure_demo_drawing consults it as a
+    fail-closed guard). Lives next to manifest.json so purge deletes it with
+    the drawing directory."""
+    import store
+    return (f"tenants/{store.sanitize_id(tenant_id)}/drawings/"
+            f"{store.sanitize_id(drawing_id)}/upload.state.json")
 
 
 def read_intake(backend, tenant_id: str, drawing_id: str,
@@ -178,6 +216,23 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
     validate_tenant_id(drawing_id, kind="drawing id")  # reject path-y / malformed ids, up front
     if backend.exists(store.manifest_key(tenant_id, drawing_id)):
         return
+    # FAIL-CLOSED GUARDS (guest-upload lane, CONTRACT-ADDENDUM §19): the
+    # auto-bootstrap below serves the CACHED DEMO ROOF's geometry. For an
+    # uploaded drawing that is fabricated data — worse than an error — so two
+    # classes of id must never reach it:
+    #   (a) ANY drawing under a guest tenant: guests own nothing except what
+    #       extraction actually produced. Unknown -> KeyError (routes 404).
+    #   (b) ANY drawing with an upload marker but no manifest: its extraction
+    #       is pending or failed. ValueError names the state (routes 404 with
+    #       the message; the honest status lives at .../upload-status).
+    if str(tenant_id).startswith(GUEST_TENANT_PREFIX):
+        raise KeyError(f"unknown drawing {drawing_id!r} for guest tenant "
+                       f"(guest drawings exist only via upload + extraction)")
+    if backend.exists(upload_marker_key(tenant_id, drawing_id)):
+        raise ValueError(
+            f"drawing {drawing_id!r} was uploaded but extraction has not "
+            f"produced geometry (see /api/drawings/{drawing_id}/upload-status); "
+            f"refusing the demo-intake bootstrap")
     data = CACHED_INTAKE_PATH.read_bytes()
     fd, tmp = tempfile.mkstemp(suffix=".intake.json")
     try:

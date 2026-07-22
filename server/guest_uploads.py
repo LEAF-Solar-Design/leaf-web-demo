@@ -1,0 +1,574 @@
+"""
+Guest drawing uploads (CONTRACT-ADDENDUM §19) — the feature's core module.
+
+Owns everything the upload lane promises OUT LOUD in the UI, so the promise and
+the mechanism cannot drift apart:
+
+  * retention_hours() is THE one retention constant. The SB3/NT2 copy the
+    frontend renders comes from /api/site/guest-upload-policy, which reads this
+    function; purge_expired() honors the expiry STAMPED from this same function
+    at upload time. There is no second copy of the number anywhere.
+  * Guest tenants (``guest-<hex>``, write_loop.GUEST_TENANT_PREFIX) live in an
+    isolated filesystem store (write_loop.guest_store_dir) so deletion is a
+    provable filesystem operation — the StorageBackend interface has no delete.
+  * The upload marker (upload.state.json, write_loop.upload_marker_key) is the
+    single source of upload truth: ``extracting`` -> ``ready`` | ``failed``.
+    ensure_demo_drawing treats a marker-without-manifest as a hard stop, which
+    is what closes the fabrication trap (an uploaded id must NEVER fall through
+    to the cached rooftop_demo intake bootstrap — real extraction or an honest
+    error, nothing else).
+
+HONESTY RULE for extraction: geometry only ever comes from the user's actual
+bytes. At APS_LIVE=1 both .dwg and .dxf go through the credential-holding
+broker (POST /broker/extract {upload: true}). At APS_LIVE=0 a .dxf is parsed
+locally by server/dxf_intake.py (a real parse of their file); a .dwg fails
+honestly (APS_UNAVAILABLE) because no local DWG reader exists.
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import shutil
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import requests
+
+import broker_client
+import write_loop
+from write_loop import GUEST_TENANT_PREFIX
+
+SERVER_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SERVER_DIR.parent
+
+ACCEPTED_EXTENSIONS = (".dwg", ".dxf")
+
+
+# --------------------------------------------------------------------------- #
+# config — env with defaults, read at CALL time (test/subprocess overridable)
+# --------------------------------------------------------------------------- #
+def enabled() -> bool:
+    """Feature master switch (policy endpoint reports it; routes 503 when off)."""
+    return os.environ.get("LEAF_GUEST_UPLOADS_ENABLED", "1") == "1"
+
+
+def retention_hours() -> float:
+    """THE one retention constant (D-1, default 24 h). Every user-facing copy of
+    the retention window and the purge job's stamped expiry both derive from
+    this function — change the env, and the copy and the deletion move together."""
+    try:
+        return float(os.environ.get("LEAF_GUEST_RETENTION_HOURS", "24"))
+    except ValueError:
+        return 24.0
+
+
+def max_upload_bytes() -> int:
+    try:
+        return int(os.environ.get("LEAF_UPLOAD_MAX_BYTES", str(25 * 1024 * 1024)))
+    except ValueError:
+        return 25 * 1024 * 1024
+
+
+def uploads_dir() -> Path:
+    """Staging area for raw uploaded files, broker-readable. MUST agree with the
+    broker's _resolve_upload_dwg root (same env, same default)."""
+    return Path(os.environ.get("LEAF_UPLOADS_DIR", str(PROJECT_ROOT / "data" / "uploads")))
+
+
+def extract_timeout_s() -> float:
+    try:
+        return float(os.environ.get("LEAF_UPLOAD_EXTRACT_TIMEOUT_S", "900"))
+    except ValueError:
+        return 900.0
+
+
+def purge_interval_s() -> float:
+    try:
+        return float(os.environ.get("LEAF_GUEST_PURGE_INTERVAL_S", "300"))
+    except ValueError:
+        return 300.0
+
+
+def guest_secret() -> Optional[str]:
+    """HMAC secret for guest-session tokens (live-auth mode only). Unset =>
+    the guest lane is OFF in live mode (upload returns an honest 503) — never
+    an unsigned fallback."""
+    return os.environ.get("LEAF_GUEST_SECRET") or None
+
+
+def per_ip_daily_cap() -> int:
+    try:
+        return int(os.environ.get("LEAF_GUEST_UPLOADS_PER_IP_PER_DAY", "10"))
+    except ValueError:
+        return 10
+
+
+def global_daily_cap() -> int:
+    try:
+        return int(os.environ.get("LEAF_GUEST_UPLOADS_PER_DAY", "100"))
+    except ValueError:
+        return 100
+
+
+def policy_view() -> Dict[str, Any]:
+    """The public /api/site/guest-upload-policy payload (pre-envelope). The
+    frontend renders ALL retention/size copy from THIS — zero copy drift by
+    construction."""
+    import deps  # lazy: avoid import cycle at module load
+    return {
+        "enabled": enabled(),
+        "retention_hours": retention_hours(),
+        "max_bytes": max_upload_bytes(),
+        "accepted": list(ACCEPTED_EXTENSIONS),
+        "extract_live": bool(deps.APS_LIVE),
+        "dxf_local_ok": True,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# identity: guest tenant ids + guest-session tokens
+# --------------------------------------------------------------------------- #
+def is_guest_tenant(tenant_id: str) -> bool:
+    return str(tenant_id).startswith(GUEST_TENANT_PREFIX)
+
+
+def mint_guest_tenant_id() -> str:
+    """``guest-<12 hex>`` — slug-safe under the shared id rule (starts alnum,
+    lowercase, within 63 chars)."""
+    return GUEST_TENANT_PREFIX + secrets.token_hex(6)
+
+
+def new_upload_drawing_id() -> str:
+    """``u-<10 hex>`` — slug-safe; distinct namespace from the well-known
+    ``demo`` id and from UUID drawing ids so an upload is recognizable in logs."""
+    return "u-" + secrets.token_hex(5)
+
+
+def _sign(payload: str, secret: str) -> str:
+    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def mint_guest_session(tenant_id: str, expires_epoch: int) -> Optional[str]:
+    """``<tenant_id>.<exp_epoch>.<hmac_hex>`` or None when no secret is set
+    (auth-off demo: the X-Tenant-Id header stub is the identity instead)."""
+    secret = guest_secret()
+    if secret is None:
+        return None
+    payload = f"{tenant_id}.{int(expires_epoch)}"
+    return f"{payload}.{_sign(payload, secret)}"
+
+
+def verify_guest_session(token: str) -> Optional[str]:
+    """Constant-time verify -> tenant_id, or None on ANY defect (malformed,
+    expired, tampered, non-guest prefix, secret unset). Callers fall through to
+    the ordinary auth path on None — never a permissive default."""
+    secret = guest_secret()
+    if secret is None or not isinstance(token, str):
+        return None
+    parts = token.rsplit(".", 2)
+    if len(parts) != 3:
+        return None
+    tenant_id, exp_raw, sig = parts
+    if not tenant_id.startswith(GUEST_TENANT_PREFIX):
+        return None
+    try:
+        exp = int(exp_raw)
+    except ValueError:
+        return None
+    expected = _sign(f"{tenant_id}.{exp}", secret)
+    if not hmac.compare_digest(sig, expected):
+        return None
+    if time.time() >= exp:
+        return None
+    return tenant_id
+
+
+# --------------------------------------------------------------------------- #
+# guest rate limiting (cost exposure: each live extraction is a paid APS run)
+# --------------------------------------------------------------------------- #
+_RATE_LOCK = threading.Lock()
+_RATE_STATE: Dict[str, Any] = {"day": None, "per_ip": {}, "total": 0}
+
+
+def check_and_count_guest_upload(client_ip: str) -> Optional[str]:
+    """Count one guest upload attempt. Returns None (allowed), "ip", or
+    "global" naming the exceeded cap. In-memory + per-process by design (the
+    demo topology is single-process; the GLOBAL cap is the cost backstop)."""
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ip = str(client_ip or "unknown")
+    with _RATE_LOCK:
+        if _RATE_STATE["day"] != day:
+            _RATE_STATE["day"] = day
+            _RATE_STATE["per_ip"] = {}
+            _RATE_STATE["total"] = 0
+        if _RATE_STATE["total"] >= global_daily_cap():
+            return "global"
+        if _RATE_STATE["per_ip"].get(ip, 0) >= per_ip_daily_cap():
+            return "ip"
+        _RATE_STATE["per_ip"][ip] = _RATE_STATE["per_ip"].get(ip, 0) + 1
+        _RATE_STATE["total"] += 1
+        return None
+
+
+def _reset_rate_state() -> None:  # test helper
+    with _RATE_LOCK:
+        _RATE_STATE["day"] = None
+        _RATE_STATE["per_ip"] = {}
+        _RATE_STATE["total"] = 0
+
+
+# --------------------------------------------------------------------------- #
+# upload marker — the single source of upload truth
+# --------------------------------------------------------------------------- #
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
+def read_marker(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, Any]]:
+    key = write_loop.upload_marker_key(tenant_id, drawing_id)
+    if not backend.exists(key):
+        return None
+    try:
+        return json.loads(backend.get(key).decode("utf-8"))
+    except (KeyError, ValueError):
+        return None
+
+
+def write_marker(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any]) -> None:
+    backend.put(write_loop.upload_marker_key(tenant_id, drawing_id),
+                json.dumps(marker, separators=(",", ":")).encode("utf-8"))
+
+
+def new_marker(*, filename: str, data: bytes, tenant_kind: str) -> Dict[str, Any]:
+    now = _now()
+    expires = (_iso(now + timedelta(hours=retention_hours()))
+               if tenant_kind == "guest" else None)
+    return {
+        "schema": 1,
+        "status": "extracting",
+        "filename": str(filename),
+        "bytes": len(data),
+        "content_sha256": hashlib.sha256(data).hexdigest(),
+        "uploaded_at": _iso(now),
+        "retention_expires_at": expires,
+        "tenant_kind": tenant_kind,
+        "error": None,
+        "extracted_version": None,
+    }
+
+
+def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
+                 error_code: str, message: str, retryable: bool) -> None:
+    marker = dict(marker)
+    marker["status"] = "failed"
+    marker["error"] = {"error_code": error_code, "message": message,
+                       "retryable": bool(retryable)}
+    write_marker(backend, tenant_id, drawing_id, marker)
+
+
+# --------------------------------------------------------------------------- #
+# extraction — real geometry or an honest failure, never the demo intake
+# --------------------------------------------------------------------------- #
+def staged_path(drawing_id: str, ext: str) -> Path:
+    return uploads_dir() / f"{drawing_id}{ext}"
+
+
+def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
+    """Synchronous extraction body (the thread target calls this; tests call it
+    directly). Reads the staged file, produces intake, ingests it as v1 under
+    the tenant's backend, and transitions the marker. NEVER raises out — every
+    failure path lands in the marker as an honest §10 error object."""
+    import deps  # lazy: call-time APS_LIVE so tests can monkeypatch
+
+    backend = write_loop.backend_for_tenant(
+        tenant_id, aps_live=deps.APS_LIVE,
+        da=deps.get_da_client() if deps.APS_LIVE else None)
+    marker = read_marker(backend, tenant_id, drawing_id)
+    if marker is None:
+        return  # purged mid-flight; nothing to report against
+
+    try:
+        if deps.APS_LIVE:
+            intake = _extract_via_broker(tenant_id, drawing_id)
+        elif ext == ".dxf":
+            import dxf_intake
+            intake = dxf_intake.parse_dxf_file(staged_path(drawing_id, ext),
+                                               source_name=marker.get("filename") or drawing_id)
+        else:
+            _mark_failed(backend, tenant_id, drawing_id, marker, "APS_UNAVAILABLE",
+                         "DWG extraction requires the live APS path; "
+                         "upload a DXF to try the local demo", retryable=False)
+            return
+    except _ExtractError as exc:
+        _mark_failed(backend, tenant_id, drawing_id, marker,
+                     exc.error_code, exc.message, exc.retryable)
+        return
+    except Exception as exc:  # noqa: BLE001 — thread boundary, must not leak
+        _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
+                     f"{type(exc).__name__}: {exc}", retryable=False)
+        return
+
+    # Ingest THEIR geometry as v1. ingest_drawing refuses an existing drawing,
+    # which is correct: an upload id is minted fresh and collision-checked.
+    fd, tmp = tempfile.mkstemp(suffix=".intake.json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(intake, fh)
+        import store  # importable via write_loop's sys.path setup
+        store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
+    except ValueError as exc:
+        _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
+                     f"ingest failed: {exc}", retryable=False)
+        return
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    marker = dict(marker)
+    marker["status"] = "ready"
+    marker["extracted_version"] = 1
+    write_marker(backend, tenant_id, drawing_id, marker)
+
+
+class _ExtractError(Exception):
+    def __init__(self, error_code: str, message: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.retryable = retryable
+
+
+def _extract_via_broker(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
+    """POST /broker/extract {upload: true} — the SAME credential boundary as
+    every other APS operation (the app process never reads the credential)."""
+    try:
+        resp = requests.post(
+            f"{broker_client.broker_url()}/broker/extract",
+            json={"tenant_id": tenant_id, "dwg": drawing_id, "upload": True},
+            headers=broker_client.broker_headers(),
+            timeout=extract_timeout_s(),
+        )
+        body = resp.json()
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise _ExtractError("BROKER_UNREACHABLE",
+                            f"APS broker extraction failed: {exc}", True) from exc
+    except ValueError as exc:
+        raise _ExtractError("BROKER_UNREACHABLE",
+                            f"broker returned non-JSON: {exc}", True) from exc
+    if resp.status_code >= 400 or not isinstance(body, dict) or "intake" not in body:
+        err = (body.get("error") if isinstance(body, dict) else None) or {}
+        raise _ExtractError(
+            str(err.get("error_code") or "WORKITEM_FAILED"),
+            str(err.get("message") or f"extraction failed (HTTP {resp.status_code})"),
+            bool(err.get("retryable", True)))
+    return body["intake"]
+
+
+def start_extraction_thread(tenant_id: str, drawing_id: str, ext: str) -> threading.Thread:
+    t = threading.Thread(target=run_extraction, args=(tenant_id, drawing_id, ext),
+                         name=f"guest-extract-{drawing_id}", daemon=True)
+    t.start()
+    return t
+
+
+# --------------------------------------------------------------------------- #
+# status view (marker -> response body; stale ``extracting`` becomes honest)
+# --------------------------------------------------------------------------- #
+def status_view(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, Any]]:
+    marker = read_marker(backend, tenant_id, drawing_id)
+    if marker is None:
+        return None
+    status = marker.get("status")
+    error = marker.get("error")
+    if status == "extracting":
+        try:
+            started = datetime.fromisoformat(str(marker.get("uploaded_at")))
+            stale = (_now() - started).total_seconds() > extract_timeout_s()
+        except ValueError:
+            stale = True
+        if stale:
+            # Persist the honest terminal state so the surface is stable —
+            # an "extracting" that outlived its budget is a failure, not a
+            # forever-spinner.
+            _mark_failed(backend, tenant_id, drawing_id, marker, "TIMEOUT",
+                         "extraction did not finish within the time budget",
+                         retryable=True)
+            status = "failed"
+            error = {"error_code": "TIMEOUT",
+                     "message": "extraction did not finish within the time budget",
+                     "retryable": True}
+    return {
+        "drawing_id": drawing_id,
+        "status": status,
+        "error": error,
+        "filename": marker.get("filename"),
+        "uploaded_at": marker.get("uploaded_at"),
+        "retention_expires_at": marker.get("retention_expires_at"),
+        "tenant_kind": marker.get("tenant_kind"),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# purge — the promise-keeper. Deletes at the STAMPED expiry, logs every kill.
+# --------------------------------------------------------------------------- #
+def _purge_log_path() -> Path:
+    return Path(write_loop.guest_store_dir()) / "purge.log.jsonl"
+
+
+def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Delete every guest drawing whose STAMPED retention_expires_at has passed
+    (plus its staged upload file), drop empty tenant dirs, and append one
+    purge.log.jsonl line per deletion. Idempotent; safe to run concurrently
+    with uploads (a drawing uploaded after the walk simply survives to the
+    next sweep). Returns {count, freed_bytes, purged:[{tenant_id, drawing_id}]}."""
+    now = now or _now()
+    root = Path(write_loop.guest_store_dir()) / "tenants"
+    purged = []
+    freed = 0
+    if root.is_dir():
+        for tenant_dir in sorted(root.iterdir()):
+            drawings_root = tenant_dir / "drawings"
+            if drawings_root.is_dir():
+                for drawing_dir in sorted(drawings_root.iterdir()):
+                    marker_path = drawing_dir / "upload.state.json"
+                    expires = _read_expiry(marker_path)
+                    if expires is None or expires > now:
+                        continue
+                    size = sum(p.stat().st_size for p in drawing_dir.rglob("*")
+                               if p.is_file())
+                    shutil.rmtree(drawing_dir, ignore_errors=True)
+                    for ext in ACCEPTED_EXTENSIONS:
+                        _unlink_quiet(staged_path(drawing_dir.name, ext))
+                    freed += size
+                    purged.append({"tenant_id": tenant_dir.name,
+                                   "drawing_id": drawing_dir.name})
+                    _append_purge_log({"ts": _iso(now), "tenant_id": tenant_dir.name,
+                                       "drawing_id": drawing_dir.name,
+                                       "freed_bytes": size})
+            # a tenant dir whose drawings are all gone is itself expired
+            try:
+                if drawings_root.is_dir() and not any(drawings_root.iterdir()):
+                    drawings_root.rmdir()
+                if not any(tenant_dir.iterdir()):
+                    tenant_dir.rmdir()
+            except OSError:
+                pass
+    # Orphaned staged files (marker/store already gone — e.g. a crash between
+    # staging and marker write): mtime-based, same window, guest-or-account
+    # agnostic because only upload staging ever writes here.
+    updir = uploads_dir()
+    if updir.is_dir():
+        cutoff = now - timedelta(hours=retention_hours())
+        for f in updir.iterdir():
+            if not f.is_file() or f.suffix.lower() not in ACCEPTED_EXTENSIONS:
+                continue
+            try:
+                mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                continue
+            if mtime <= cutoff:
+                # Staged files are extraction INPUT only (the stored drawing is
+                # the extracted intake); account uploads lose their raw staged
+                # file on the same window without losing the drawing.
+                size = f.stat().st_size
+                _unlink_quiet(f)
+                freed += size
+    return {"count": len(purged), "freed_bytes": freed, "purged": purged}
+
+
+def _read_expiry(marker_path: Path) -> Optional[datetime]:
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        raw = marker.get("retention_expires_at")
+        return datetime.fromisoformat(raw) if raw else None
+    except (OSError, ValueError):
+        # Unreadable marker in the GUEST store: treat as expired-now? No —
+        # deleting on a parse error could destroy a live upload on a transient
+        # read race. It stays until its marker reads cleanly; the guest store
+        # is bounded by the rate caps.
+        return None
+
+
+def _unlink_quiet(p: Path) -> None:
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+def _append_purge_log(entry: Dict[str, Any]) -> None:
+    try:
+        path = _purge_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    except OSError as exc:  # pragma: no cover - best-effort observability
+        print(f"[guest-uploads] purge log append failed: {exc}", file=sys.stderr)
+
+
+_PURGE_THREAD: Optional[threading.Thread] = None
+
+
+def start_purge_daemon() -> Optional[threading.Thread]:
+    """Idempotent daemon starter (app.py startup). Best-effort-wrapped loop —
+    a purge failure logs and retries next interval; it never kills the app."""
+    global _PURGE_THREAD
+    if _PURGE_THREAD is not None and _PURGE_THREAD.is_alive():
+        return _PURGE_THREAD
+
+    def _loop() -> None:
+        while True:
+            time.sleep(purge_interval_s())
+            try:
+                result = purge_expired()
+                if result["count"]:
+                    print(f"[guest-uploads] purged {result['count']} expired "
+                          f"guest drawing(s), {result['freed_bytes']} bytes",
+                          file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 - daemon must survive
+                print(f"[guest-uploads] purge sweep failed: {exc}", file=sys.stderr)
+
+    _PURGE_THREAD = threading.Thread(target=_loop, name="guest-purge", daemon=True)
+    _PURGE_THREAD.start()
+    return _PURGE_THREAD
+
+
+# --------------------------------------------------------------------------- #
+# upload validation
+# --------------------------------------------------------------------------- #
+def validate_upload(filename: str, data: bytes) -> Tuple[str, Optional[str]]:
+    """Returns (ext, None) when acceptable, else ("", reason). Checks extension,
+    emptiness, and cheap content sniffs (DWG magic 'AC1…'; DXF ASCII group-code
+    structure or the binary sentinel). The size cap is enforced by the caller
+    (it needs the pre-read length)."""
+    name = str(filename or "").lower()
+    ext = next((e for e in ACCEPTED_EXTENSIONS if name.endswith(e)), "")
+    if not ext:
+        return "", "only .dwg and .dxf files are accepted"
+    if not data:
+        return "", "the uploaded file is empty"
+    if ext == ".dwg":
+        if not data[:3] == b"AC1":
+            return "", "not a DWG file (missing AC1 version magic)"
+        return ext, None
+    head = data[:4096]
+    if head.startswith(b"AutoCAD Binary DXF"):
+        return ext, None
+    if b"SECTION" in head or b"HEADER" in head or b"ENTITIES" in head:
+        return ext, None
+    return "", "not a DXF file (no group-code structure in the first 4 KB)"

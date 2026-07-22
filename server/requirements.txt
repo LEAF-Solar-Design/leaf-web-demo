@@ -2,6 +2,7 @@ fastapi
 uvicorn
 pydantic
 requests
+python-multipart  # multipart parsing for POST /api/drawings/upload (§19); was installed-but-undeclared
 # tests
 jsonschema
 pytest

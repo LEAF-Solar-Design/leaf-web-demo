@@ -460,6 +460,11 @@ class BrokerRunRequest(BaseModel):
 class BrokerExtractRequest(BaseModel):
     tenant_id: str
     dwg: str = "rooftop_demo"
+    # Guest/account upload lane (CONTRACT-ADDENDUM §19): when true, `dwg`
+    # resolves inside the UPLOADS staging area (data/uploads/) instead of the
+    # curated library — via _resolve_upload_dwg, which applies the IDENTICAL
+    # strictness. The two namespaces never cross-resolve.
+    upload: bool = False
 
 
 _DWG_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
@@ -488,6 +493,41 @@ def _resolve_live_dwg(dwg: str) -> Path:
     if resolved.parent != root or not resolved.is_file():
         raise ValueError("dwg must resolve to a regular file in the drawing store")
     return resolved
+
+
+def _uploads_root() -> Path:
+    """The upload staging root the app process writes into (guest_uploads.
+    uploads_dir — SAME env, SAME default, kept in lockstep by
+    tests/test_broker_upload_resolver.py)."""
+    return Path(os.environ.get("LEAF_UPLOADS_DIR", str(PROJECT_ROOT / "data" / "uploads")))
+
+
+def _resolve_upload_dwg(name: str) -> Path:
+    """Resolve an uploaded drawing id inside the uploads staging area ONLY.
+
+    Same defense posture as _resolve_live_dwg (bare name, no symlinks, must
+    resolve to a regular file whose parent IS the uploads root) so a
+    compromised app process cannot use the upload lane to make APS read an
+    arbitrary local file. Tries `.dwg` then `.dxf` — the upload endpoint
+    stages exactly one of the two."""
+    if not isinstance(name, str) or not _DWG_NAME_RE.fullmatch(name):
+        raise ValueError("dwg must be a bare drawing name (letters, digits, '_' or '-')")
+    try:
+        root = _uploads_root().resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError(f"unknown uploaded drawing: {name}") from exc
+    for suffix in (".dwg", ".dxf"):
+        candidate = _uploads_root() / f"{name}{suffix}"
+        if candidate.is_symlink():
+            raise ValueError("dwg symlinks are not allowed")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError:
+            continue
+        if resolved.parent != root or not resolved.is_file():
+            raise ValueError("dwg must resolve to a regular file in the uploads area")
+        return resolved
+    raise ValueError(f"unknown uploaded drawing: {name}")
 
 
 def _live_script_is_nonempty(tool: Dict[str, Any], da: Any) -> bool:
@@ -592,7 +632,7 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
             ),
         )
     try:
-        local = _resolve_live_dwg(req.dwg)
+        local = _resolve_upload_dwg(req.dwg) if req.upload else _resolve_live_dwg(req.dwg)
     except ValueError as exc:
         return JSONResponse(
             status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS],

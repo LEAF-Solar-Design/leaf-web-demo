@@ -869,3 +869,74 @@ fallback, and nothing in §18 assumes either answer.
 > default, `server/jobs.py:53`; per-job SSE 0.5 s poll, `server/routers/jobs.py:145`;
 > public job API/schema unchanged) work at full fidelity — public API and behavior
 > identical to today's product.
+
+## §19 Guest drawing uploads (ephemeral tenants, honest retention, fail-closed extraction)
+
+The signed-out "upload your own DWG/DXF" lane. Operator decisions D-1 (retention
+window, default **24 h**) and D-2 (**guest extraction runs**, capped + rate-limited)
+are built against their defaults; both are env-tunable without a code change.
+
+**Surface** (`server/routers/uploads.py` + one public policy route in `site.py`):
+
+* `POST /api/drawings/upload` — multipart `{file}` (.dwg/.dxf, capped by
+  `LEAF_UPLOAD_MAX_BYTES`, default 25 MB). Auth OPTIONAL by design:
+  live+Bearer → the verified account tenant; live+`X-Guest-Session` → the same
+  guest tenant again; live+neither → a freshly minted `guest-<hex>` tenant plus
+  an HMAC guest-session token (`LEAF_GUEST_SECRET`; unset → honest 503, never an
+  unsigned identity); auth-off → the X-Tenant-Id stub world, byte-compatible.
+  → `202 {drawing_id, tenant_id, tenant_kind, retention_expires_at|null,
+  guest_session|null, status: "extracting"}` (§10-enveloped). Guest rate caps:
+  `LEAF_GUEST_UPLOADS_PER_IP_PER_DAY` (10), `LEAF_GUEST_UPLOADS_PER_DAY` (100)
+  → 429 `quota_exceeded` (each live extraction is a paid APS run).
+* `GET /api/drawings/{id}/upload-status` — the upload marker's honest state
+  (`extracting|ready|failed` + §10 error; stale `extracting` past
+  `LEAF_UPLOAD_EXTRACT_TIMEOUT_S` is PERSISTED as failed/TIMEOUT).
+* `GET /api/site/guest-upload-policy` — public config `{enabled,
+  retention_hours, max_bytes, accepted, extract_live, dxf_local_ok}`. The
+  frontend renders ALL retention/size copy from this payload.
+
+**The fabrication trap is closed** (`write_loop.ensure_demo_drawing` guards):
+a guest tenant NEVER bootstraps the cached rooftop intake (KeyError → 404), and
+any drawing with an upload marker but no manifest refuses the bootstrap
+(ValueError → 404 naming `/upload-status`). An uploaded id yields the user's
+real extracted geometry or an honest error — never demo data labeled as theirs.
+
+**Storage + retention**: guest tenants live in an ISOLATED local filesystem
+store (`write_loop.guest_store_dir`, env `LEAF_GUEST_STORE_DIR`) because the
+StorageBackend interface has no delete — the purge promise is only honest on a
+store deletion can provably cover. `guest_uploads.retention_hours()` is THE one
+constant: it stamps `retention_expires_at` at upload AND rules
+`purge_expired()` (which honors the STAMP, not the current env — the promise
+shown at upload time is the promise kept). The purge daemon
+(`LEAF_GUEST_PURGE_INTERVAL_S`, default 300 s) deletes expired drawing dirs +
+staged upload files, drops empty tenant dirs, and appends one
+`purge.log.jsonl` line per deletion. Account uploads ride the default backend
+with NO retention promise (and none is shown).
+
+**Extraction** (`guest_uploads.run_extraction`, background thread + durable
+marker — deliberately NOT the tool-shaped jobs spine): at APS_LIVE=1 both
+formats go through `POST /broker/extract {upload: true}`; the broker's
+`_resolve_upload_dwg` applies the IDENTICAL strictness as the library resolver
+(bare name, no symlink, parent must BE `data/uploads/`) and the two namespaces
+never cross-resolve. At APS_LIVE=0 a .dxf is parsed locally
+(`server/dxf_intake.py` — a REAL parse of the user's bytes, LWPOLYLINE/
+POLYLINE + layers; nothing invented) and a .dwg fails honestly
+(APS_UNAVAILABLE: no local DWG reader exists).
+
+**Entitlements** (§17 extended): new capability `upload` (explicit grant
+required everywhere, per-key omission stays False) + new tier `guest` =
+upload-only, every other capability false. The guest-session leg in
+`deps.require_tenant` resolves a valid token to `TenantContext(tier="guest")`;
+any token defect falls through to the ordinary 401.
+
+**Suites** (registered in `scripts/run-all-gates.py`, one process per file):
+`tests/test_guest_uploads.py` (14 — incl. the byte-provable their-geometry-
+not-rooftop test), `tests/test_guest_fail_closed.py` (7),
+`tests/test_guest_purge.py` (6 — short-override deletion proof),
+`tests/test_guest_session_auth.py` (12 — incl. the json↔hardcoded policy
+mirror), `tests/test_broker_upload_resolver.py` (19).
+
+**Honestly out of scope v1**: converting a guest tenant's drawing into a
+freshly created account (the UI copy never promises it — "Create account"
+starts a signed-in workspace); OSS-backed guest storage; DWG extraction
+without APS.

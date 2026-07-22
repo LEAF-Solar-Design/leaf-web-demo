@@ -1,5 +1,5 @@
 {
-  "_note": "Tier -> capability policy (CONTRACT-ADDENDUM §17 + agent spine §18). Operator-tunable: edit these booleans (or point LEAF_ENTITLEMENTS_FILE at another file) to change what each Auth0 tier may do. Read at request time by server/entitlements.py. Off-auth (and unknown) tenants resolve tier 'demo' (full access, friction-free). run_read gates POST /api/run of drawing.read tools; run_write gates drawing.write tools; build gates POST /api/author; converse gates the conversational agent surface; agent_write_autopilot lets the agent auto-dispatch write tools; deploy gates registering an authored tool (R6); platform_customize gates R7 (false everywhere at launch).",
+  "_note": "Tier -> capability policy (CONTRACT-ADDENDUM §17 + agent spine §18 + guest uploads §19). Operator-tunable: edit these booleans (or point LEAF_ENTITLEMENTS_FILE at another file) to change what each Auth0 tier may do. Read at request time by server/entitlements.py. Off-auth (and unknown) tenants resolve tier 'demo' (full access, friction-free). run_read gates POST /api/run of drawing.read tools; run_write gates drawing.write tools; build gates POST /api/author; converse gates the conversational agent surface; agent_write_autopilot lets the agent auto-dispatch write tools; deploy gates registering an authored tool (R6); platform_customize gates R7 (false everywhere at launch); upload gates POST /api/drawings/upload (§19 — the 'guest' tier is the ephemeral signed-out identity: upload only, everything else denied).",
   "demo": {
     "run_read": true,
     "run_write": true,
@@ -8,7 +8,8 @@
     "converse": true,
     "agent_write_autopilot": true,
     "deploy": true,
-    "platform_customize": false
+    "platform_customize": false,
+    "upload": true
   },
   "self_hosted": {
     "run_read": true,
@@ -18,7 +19,8 @@
     "converse": true,
     "agent_write_autopilot": true,
     "deploy": true,
-    "platform_customize": false
+    "platform_customize": false,
+    "upload": true
   },
   "hosted_starter": {
     "run_read": true,
@@ -28,7 +30,8 @@
     "converse": true,
     "agent_write_autopilot": false,
     "deploy": false,
-    "platform_customize": false
+    "platform_customize": false,
+    "upload": true
   },
   "hosted_pro": {
     "run_read": true,
@@ -38,7 +41,8 @@
     "converse": true,
     "agent_write_autopilot": true,
     "deploy": true,
-    "platform_customize": false
+    "platform_customize": false,
+    "upload": true
   },
   "restricted": {
     "run_read": true,
@@ -48,6 +52,18 @@
     "converse": false,
     "agent_write_autopilot": false,
     "deploy": false,
-    "platform_customize": false
+    "platform_customize": false,
+    "upload": false
+  },
+  "guest": {
+    "run_read": false,
+    "run_write": false,
+    "solve": false,
+    "build": false,
+    "converse": false,
+    "agent_write_autopilot": false,
+    "deploy": false,
+    "platform_customize": false,
+    "upload": true
   }
 }

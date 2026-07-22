@@ -433,6 +433,7 @@ def require_tenant(
     x_tenant_id: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
     x_dispatch_secret: Optional[str] = Header(default=None),
+    x_guest_session: Optional[str] = Header(default=None),
 ):
     """FastAPI dependency: resolve the calling tenant.
 
@@ -452,6 +453,17 @@ def require_tenant(
             and _dispatch_backedge_route(request.method, request.url.path)
             and _dispatch_secret_ok(x_dispatch_secret)):
         return backedge_tenant(x_tenant_id)
+
+    # Guest-session leg (CONTRACT-ADDENDUM §19): a VALID HMAC guest token — for
+    # a `guest-*` tenant only, verified constant-time against LEAF_GUEST_SECRET
+    # with its own expiry — resolves the guest identity at tier "guest" (whose
+    # entitlements deny everything but upload). ANY defect in the token falls
+    # through to the ordinary JWT path, which 401s honestly without a Bearer.
+    if x_guest_session:
+        import guest_uploads  # lazy: mirrors the auth/tenancy lazy-import discipline
+        guest_tid = guest_uploads.verify_guest_session(x_guest_session)
+        if guest_tid is not None:
+            return TenantContext(guest_tid, tier="guest")
 
     # LEAF_AUTH_LIVE=1: verified JWT claims win over the header stub.
     # Imported lazily so PyJWT is only needed when auth is actually live.

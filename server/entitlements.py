@@ -37,9 +37,13 @@ from envelopes import ErrorCode, error_obj
 # lets the agent auto-dispatch write tools without a confirm chip, `deploy`
 # gates registering an authored tool (R6, split from `build`), and
 # `platform_customize` gates R7 — false everywhere at launch).
+# `upload` (guest-upload lane, §19) gates POST /api/drawings/upload — per-key
+# omission still defaults False, so adding it here forces every policy entry to
+# grant it EXPLICITLY.
 CAPABILITIES = (
     "run_read", "run_write", "solve", "build",
     "converse", "agent_write_autopilot", "deploy", "platform_customize",
+    "upload",
 )
 
 # Fail-safe defaults — used verbatim if the JSON file is absent or unreadable. These
@@ -47,19 +51,25 @@ CAPABILITIES = (
 _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
     "demo": {"run_read": True, "run_write": True, "solve": True, "build": True,
              "converse": True, "agent_write_autopilot": True, "deploy": True,
-             "platform_customize": False},
+             "platform_customize": False, "upload": True},
     "restricted": {"run_read": True, "run_write": False, "solve": False, "build": False,
                    "converse": False, "agent_write_autopilot": False, "deploy": False,
-                   "platform_customize": False},
+                   "platform_customize": False, "upload": False},
     "self_hosted": {"run_read": True, "run_write": True, "solve": True, "build": True,
                     "converse": True, "agent_write_autopilot": True, "deploy": True,
-                    "platform_customize": False},
+                    "platform_customize": False, "upload": True},
     "hosted_starter": {"run_read": True, "run_write": True, "solve": False, "build": False,
                        "converse": True, "agent_write_autopilot": False, "deploy": False,
-                       "platform_customize": False},
+                       "platform_customize": False, "upload": True},
     "hosted_pro": {"run_read": True, "run_write": True, "solve": True, "build": True,
                    "converse": True, "agent_write_autopilot": True, "deploy": True,
-                   "platform_customize": False},
+                   "platform_customize": False, "upload": True},
+    # Ephemeral signed-out guests (§19): upload + nothing else. Their intake
+    # reads go through require_tenant (guest session) but run/solve/build/
+    # converse are all denied — extraction-only, fail closed.
+    "guest": {"run_read": False, "run_write": False, "solve": False, "build": False,
+              "converse": False, "agent_write_autopilot": False, "deploy": False,
+              "platform_customize": False, "upload": True},
 }
 
 DEFAULT_TIER = "demo"
@@ -256,6 +266,9 @@ def tool_required_capability(tool: Dict[str, Any]) -> str:
 
 
 def _denied_message(required: str, tier: str) -> str:
+    if required == "upload":
+        return (f"the '{tier}' plan does not include uploading drawings; "
+                "upgrade the workspace plan to enable uploads.")
     if required == "solve":
         return (f"the '{tier}' plan does not include canonical solver execution; "
                 "upgrade the workspace plan to enable Solve.")
