@@ -317,31 +317,28 @@ def _load_real_da_client():
 # --------------------------------------------------------------------------- #
 # FIX 1 (HIGH, round 2 — sharper): the guard must verify the REAL
 # da/client.py:tool_activity_spec resolution, not a heuristic that merely checks
-# for the PRESENCE of an `engine_script`/`.lsp` `script` reference. Reproduces the
-# reviewer's exact dependency-free finding: engine/registry.json's shipped
-# `count-by-layer` entry (`script: "tools/count_by_layer.lsp"`) resolves via
-# da/client.py to a PROJECT-ROOT-relative path that does not exist (the real file
-# lives under engine/tools/), so the REAL emitted script is length 0 TODAY.
+# for the PRESENCE of an `engine_script`/`.lsp` `script` reference. Originally
+# reproduced the reviewer's dependency-free finding (the shipped count-by-layer
+# entry declared `tools/<name>.lsp` and emitted a ZERO-length script); PR #15
+# fixed the registry path convention (root-relative `engine/tools/<name>.lsp`),
+# so the REAL emitted script is now the actual LISP source.
 # --------------------------------------------------------------------------- #
-def test_real_tool_activity_spec_confirms_the_reviewers_empty_script_finding():
-    """Sanity check (no broker involved): the exact dependency-free reproduction
-    the reviewer ran. If this ever starts passing (script becomes non-empty) it
-    means da/client.py's resolution or engine/registry.json's path convention
-    changed upstream — not this session's concern, but this test would then
-    correctly flag that the `test_live_read_fails_closed_...` test below needs a
-    different fixture."""
+def test_real_tool_activity_spec_resolves_the_shipped_tool_nonempty():
+    """Sanity check (no broker involved): the shipped count-by-layer entry
+    declares a root-relative `.lsp` path the REAL resolution reads. Per-tool
+    coverage for the whole registry lives in test_engine_registry_scripts.py."""
     da_mod = _load_real_da_client()
     tool = deps.find_tool("count-by-layer")
-    assert tool is not None and tool.get("script") == "tools/count_by_layer.lsp"
+    assert tool is not None and tool.get("script") == "engine/tools/count_by_layer.lsp"
     spec = da_mod.tool_activity_spec(tool)
-    assert spec["settings"]["script"]["value"] == ""
+    assert spec["settings"]["script"]["value"].strip()
 
 
 def test_live_read_fails_closed_when_real_resolution_emits_empty_script(monkeypatch, tmp_path):
-    """The REAL bug the round-2 review caught: aps_live=True + the REAL shipped
-    count-by-layer tool (whose declared `.lsp` path does not actually resolve)
-    must fail closed via the REAL da.client.tool_activity_spec call — never
-    silently submit an empty-script WorkItem."""
+    """aps_live=True + a tool whose declared `.lsp` path does not resolve must
+    fail closed via the REAL da.client.tool_activity_spec call — never
+    silently submit an empty-script WorkItem. (Since PR #15 the shipped
+    registry tools resolve, so the fixture is a dangling-path tool.)"""
     _quiet_broker(monkeypatch, tmp_path)
     da_mod = _load_real_da_client()
 
@@ -356,7 +353,8 @@ def test_live_read_fails_closed_when_real_resolution_emits_empty_script(monkeypa
                         raising=False)
     monkeypatch.setattr(broker, "_get_da", lambda: da_mod)
 
-    tool = deps.find_tool("count-by-layer")  # the REAL shipped catalog entry
+    tool = dict(READ_TOOL)
+    tool["script"] = "tools/does_not_exist.lsp"  # dangling: resolves nowhere
     assert broker._live_script_is_nonempty(tool, da_mod) is False
 
     req = broker.BrokerRunRequest(tenant_id="live-realmismatch", tool=tool, params={},
