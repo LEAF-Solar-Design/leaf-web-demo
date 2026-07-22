@@ -148,6 +148,31 @@ def test_purge_failure_is_logged_honestly_never_as_a_kill(client, monkeypatch):
     assert not _drawing_dir(tenant, did).exists()
 
 
+def test_staged_file_deletion_failure_is_honest_too(client, monkeypatch):
+    """Round-2 MAJOR: a surviving staged RAW file must block the success
+    receipt exactly like a surviving drawing dir — and because staged files
+    delete FIRST, the drawing dir (and its marker) survive for a full retry."""
+    real_unlink = guest_uploads._unlink_quiet  # captured for explicit restore
+    # (monkeypatch.undo() would also revert the fixture's store isolation)
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
+    tenant, did = _upload(client)
+    staged = guest_uploads.staged_path(tenant, did, ".dxf")
+    assert staged.is_file()
+    time.sleep(0.2)
+    monkeypatch.setattr(guest_uploads, "_unlink_quiet", lambda p: None)
+    result = guest_uploads.purge_expired()
+    assert result["count"] == 0
+    assert staged.exists(), "staged file survives the simulated failure"
+    assert _drawing_dir(tenant, did).is_dir(), \
+        "dir must NOT be deleted while its staged file survives (full-retry invariant)"
+    log = (Path(write_loop.guest_store_dir()) / "purge.log.jsonl").read_text()
+    assert json.loads(log.strip().splitlines()[-1])["status"] == "failed"
+    monkeypatch.setattr(guest_uploads, "_unlink_quiet", real_unlink)
+    result2 = guest_uploads.purge_expired()
+    assert result2["count"] == 1
+    assert not staged.exists() and not _drawing_dir(tenant, did).exists()
+
+
 def test_orphan_staged_file_swept_by_mtime(client, monkeypatch):
     monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
     updir = guest_uploads.uploads_dir()

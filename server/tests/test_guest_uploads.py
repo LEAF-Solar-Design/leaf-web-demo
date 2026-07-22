@@ -228,20 +228,90 @@ def test_oversize_request_precheck_rejects_declared_length(client, monkeypatch):
     assert "upload cap" in r.json()["error"]["message"]
 
 
-def test_store_representation_raw_bytes_v1_plus_intake_cache(client):
-    """Round-1 MAJOR: v1's version blob must hold the user's RAW bytes (what
-    a live write would send to APS) and the parsed intake must live at the
-    sibling cache key write_loop.read_intake prefers."""
+def test_store_representation_dxf_intake_blob_plus_cache(client):
+    """Rounds 1+2: a .dxf upload's v1 blob is the intake JSON (the demo
+    drawing's own mock representation — raw DXF bytes under the store's
+    immutable `.dwg` version key would be a mislabeled HostDwg on the first
+    live write), and the parsed intake also sits at the cache sibling
+    write_loop.read_intake prefers."""
     import store
     r = _upload(client)
     tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
     backend = write_loop.backend_for_tenant(tenant)
     vkey = store.drawing_version_key(tenant, did, 1)
-    assert backend.get(vkey) == DXF_BYTES, "version blob must be the raw upload"
+    blob = json.loads(backend.get(vkey).decode("utf-8"))
+    assert blob["layers"] == ["Panels"], "dxf v1 blob must be the intake JSON"
     ckey = write_loop.intake_cache_key(tenant, did, 1)
     assert backend.exists(ckey), "parsed intake must sit at the cache sibling"
-    cached = json.loads(backend.get(ckey).decode("utf-8"))
-    assert cached["layers"] == ["Panels"]
+    assert json.loads(backend.get(ckey).decode("utf-8"))["layers"] == ["Panels"]
+
+
+def test_store_representation_dwg_raw_bytes_v1(client, monkeypatch):
+    """A .dwg upload's v1 blob is the user's RAW DWG bytes — what a later
+    live write signs and sends to APS as HostDwg. Extraction is mocked at
+    the broker seam (the live path); the ingest branch under test is real."""
+    import deps
+    import store
+    dwg_bytes = b"AC1032" + b"\x00" * 64
+    fake_intake = {"dwg": "real.dwg", "layers": ["L1"],
+                   "polylines": [{"layer": "L1", "closed": True,
+                                  "pts": [[1, 2, 0], [3, 4, 0]],
+                                  "xdata": None, "handle": "AA"}]}
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.setattr(guest_uploads, "_extract_via_broker",
+                        lambda tenant_id, drawing_id: fake_intake)
+    r = _upload(client, data=dwg_bytes, name="real.dwg")
+    assert r.status_code == 202
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant)
+    assert backend.get(store.drawing_version_key(tenant, did, 1)) == dwg_bytes
+    cached = json.loads(backend.get(
+        write_loop.intake_cache_key(tenant, did, 1)).decode("utf-8"))
+    assert cached == fake_intake
+    # and the intake read serves the CACHE (their geometry), not the raw blob
+    i = client.get(f"/api/drawings/{did}/intake", headers={"X-Tenant-Id": tenant})
+    assert i.status_code == 200
+    assert i.json()["intake"] == fake_intake
+
+
+def test_chunked_oversized_body_hits_the_asgi_wall(client, monkeypatch):
+    """Round-2 MAJOR: a LENGTH-LESS (chunked) oversized body must be stopped
+    by the byte-counting ASGI middleware before multipart parsing can spool
+    it to disk — no Content-Length header to pre-check."""
+    monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "1024")
+    boundary = "x-test-boundary"
+
+    def chunks():
+        yield (f"--{boundary}\r\ncontent-disposition: form-data; "
+               f"name=\"file\"; filename=\"big.dxf\"\r\n\r\n").encode()
+        for _ in range(2100):  # ~2.1 MB, far past cap + slack
+            yield b"y" * 1024
+        yield f"\r\n--{boundary}--\r\n".encode()
+
+    r = client.post("/api/drawings/upload", content=chunks(),
+                    headers={"content-type": f"multipart/form-data; boundary={boundary}"})
+    # The abort raised by the counting receive() lands inside starlette's
+    # multipart parser, whose broad except answers 400; a clean 413 comes
+    # only from the declared-length path. EITHER status proves the wall —
+    # the bounded spool is the security property, so also prove no drawing
+    # was ever staged or marked.
+    assert r.status_code in (400, 413)
+    assert not any(guest_uploads.uploads_dir().glob("*")), \
+        "nothing may reach staging past the byte wall"
+
+
+def test_compose_stack_shares_the_uploads_staging_volume():
+    """Round-2 BLOCKER guard: the app stages uploads and the broker extracts
+    them — in the compose stack that only works through a SHARED volume with
+    a matching LEAF_UPLOADS_DIR in BOTH services. String-level lockstep check
+    so the wiring cannot silently drift out of the compose file."""
+    compose = (Path(__file__).resolve().parent.parent.parent
+               / "docker-compose.yml").read_text(encoding="utf-8")
+    assert compose.count("LEAF_UPLOADS_DIR: /data/uploads") == 2, \
+        "both app and broker must point at the shared staging dir"
+    assert compose.count("- leaf-uploads:/data/uploads") == 2, \
+        "both app and broker must mount the shared uploads volume"
+    assert "\n  leaf-uploads:" in compose, "the named volume must be declared"
 
 
 def test_session_route_serves_uploaded_drawing_not_demo(client):

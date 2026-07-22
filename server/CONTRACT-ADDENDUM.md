@@ -954,6 +954,19 @@ Content-Length. NOTE: FastAPI spools multipart to temp disk before the
 handler runs — the deployment's ingress proxy body limit is the outer wall
 against length-less oversized bodies (set it to ~LEAF_UPLOAD_MAX_BYTES).
 
+**Review round 3** (round-2 findings, all addressed): the compose stack
+shares a `leaf-uploads` volume between app and broker with matching
+`LEAF_UPLOADS_DIR` (staging is broker-resolvable in containers, guarded by a
+lockstep test); a byte-counting ASGI middleware bounds the upload body
+in-process (declared oversize -> 413; chunked oversize -> the multipart
+parser aborts at the cap with its 400 — spool bounded either way); purge
+deletes staged raw files FIRST and verifies both deletions before any
+success receipt (a surviving staged file keeps the marker for a full retry);
+.dxf uploads ingest as intake-JSON blobs (the demo drawing's own mock
+representation — never raw DXF under a `.dwg` version key) while .dwg
+uploads keep raw HostDwg-correct bytes; a presented Bearer always beats a
+guest-session header in `require_tenant`.
+
 **Honestly out of scope v1**: converting a guest tenant's drawing into a
 freshly created account (the UI copy never promises it — "Create account"
 starts a signed-in workspace); OSS-backed guest storage; DWG extraction

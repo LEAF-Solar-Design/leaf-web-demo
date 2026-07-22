@@ -132,6 +132,21 @@ def test_live_without_guest_secret_503(monkeypatch, tmp_path):
     assert "LEAF_GUEST_SECRET" in r.json()["error"]["message"]
 
 
+def test_bearer_always_beats_guest_header(live_client):
+    """Round-2 MAJOR: a presented Authorization header takes PRECEDENCE over
+    a guest session — a signed-in user with a stale guest header must resolve
+    via the JWT path (here: its honest 401 for a garbage token), never the
+    guest allowlist's 403."""
+    r = live_client.post("/api/drawings/upload",
+                         files={"file": ("f.dxf", io.BytesIO(DXF))})
+    token = r.json()["guest_session"]
+    did = r.json()["drawing_id"]
+    resp = live_client.get(f"/api/drawings/{did}/intake",
+                           headers={"X-Guest-Session": token,
+                                    "Authorization": "Bearer not-a-real-jwt"})
+    assert resp.status_code == 401  # JWT path verdict, not a guest 200/403
+
+
 def test_live_invalid_session_falls_to_honest_401(live_client):
     r = live_client.get("/api/drawings/u-x/upload-status",
                         headers={"X-Guest-Session": "guest-x.99.tampered"})

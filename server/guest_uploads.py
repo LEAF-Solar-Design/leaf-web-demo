@@ -325,19 +325,37 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                      f"{type(exc).__name__}: {exc}", retryable=False)
         return
 
-    # Ingest v1 in the STORE'S LIVE REPRESENTATION (review round 1, MAJOR):
-    # the version blob holds the user's RAW uploaded bytes (what a later live
-    # write signs and sends to APS as the host drawing), and the parsed/
-    # extracted intake JSON goes to the sibling intake-cache key —
-    # write_loop.read_intake PREFERS that key, so every intake read serves
-    # their geometry on both backends. Storing intake JSON as the version
-    # blob (the previous shape) would hand APS a JSON file labeled .dwg on
-    # the first live write. ingest_drawing refuses an existing drawing,
-    # which is correct: an upload id is minted fresh and collision-checked.
+    # Ingest v1 in the FORMAT-CORRECT representation (review rounds 1+2):
+    #   * .dwg uploads: the version blob holds the user's RAW DWG bytes —
+    #     exactly what a later live write signs and sends to APS as HostDwg.
+    #   * .dxf uploads: the version blob holds the intake JSON — the SAME
+    #     mock representation the demo drawing itself uses (a raw DXF under
+    #     the store's immutable `.dwg` version key would hand APS a
+    #     mislabeled file on the first live write; intake-JSON blobs are the
+    #     established local shape and live writes on them fail the same
+    #     honest way they do for the demo drawing).
+    # Either way the parsed intake ALSO goes to the sibling intake-cache key,
+    # which write_loop.read_intake prefers — one uniform read path.
+    # ingest_drawing refuses an existing drawing, which is correct: an upload
+    # id is minted fresh and collision-checked.
+    import tempfile
     try:
         import store  # importable via write_loop's sys.path setup
-        source = staged_path(tenant_id, drawing_id, ext)
-        store.ingest_drawing(backend, tenant_id, str(source), drawing_id=drawing_id)
+        if ext == ".dwg":
+            store.ingest_drawing(backend, tenant_id,
+                                 str(staged_path(tenant_id, drawing_id, ext)),
+                                 drawing_id=drawing_id)
+        else:
+            fd, tmp = tempfile.mkstemp(suffix=".intake.json")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(intake, fh)
+                store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
         backend.put(write_loop.intake_cache_key(tenant_id, drawing_id, 1),
                     json.dumps(intake, separators=(",", ":")).encode("utf-8"))
     except (OSError, ValueError) as exc:
@@ -455,10 +473,23 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
                     expires = _read_expiry(marker_path)
                     if expires is None or expires > now:
                         continue
+                    # Order is load-bearing (round-2 review, MAJOR): staged
+                    # RAW files first, VERIFIED gone, then the drawing dir.
+                    # If the staged file survives we stop BEFORE touching the
+                    # dir — the marker stays, so the next sweep retries the
+                    # WHOLE drawing. Deleting the dir first would orphan a
+                    # surviving raw file behind a "deleted" receipt.
+                    staged_files = [staged_path(tenant_dir.name, drawing_dir.name, ext)
+                                    for ext in ACCEPTED_EXTENSIONS]
+                    staged_bytes = sum(f.stat().st_size for f in staged_files
+                                       if f.is_file())
+                    for f in staged_files:
+                        _unlink_quiet(f)
                     size = sum(p.stat().st_size for p in drawing_dir.rglob("*")
                                if p.is_file())
-                    shutil.rmtree(drawing_dir, ignore_errors=True)
-                    if drawing_dir.exists():
+                    if not any(f.exists() for f in staged_files):
+                        shutil.rmtree(drawing_dir, ignore_errors=True)
+                    if drawing_dir.exists() or any(f.exists() for f in staged_files):
                         # Deletion FAILED (permissions, open handle). Never
                         # log it as a kill — a false purge line is the exact
                         # promise-breaking lie this module exists to prevent.
@@ -469,15 +500,13 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
                               f"{tenant_dir.name}/{drawing_dir.name}; will retry "
                               f"next sweep", file=sys.stderr)
                         continue
-                    for ext in ACCEPTED_EXTENSIONS:
-                        _unlink_quiet(staged_path(tenant_dir.name, drawing_dir.name, ext))
-                    freed += size
+                    freed += size + staged_bytes
                     purged.append({"tenant_id": tenant_dir.name,
                                    "drawing_id": drawing_dir.name})
                     _append_purge_log({"ts": _iso(now), "status": "deleted",
                                        "tenant_id": tenant_dir.name,
                                        "drawing_id": drawing_dir.name,
-                                       "freed_bytes": size})
+                                       "freed_bytes": size + staged_bytes})
             # a tenant dir whose drawings are all gone is itself expired
             try:
                 if drawings_root.is_dir() and not any(drawings_root.iterdir()):
@@ -564,6 +593,86 @@ def start_purge_daemon() -> Optional[threading.Thread]:
     _PURGE_THREAD = threading.Thread(target=_loop, name="guest-purge", daemon=True)
     _PURGE_THREAD.start()
     return _PURGE_THREAD
+
+
+# --------------------------------------------------------------------------- #
+# ASGI body limit — the REAL in-process wall against oversized upload bodies
+# --------------------------------------------------------------------------- #
+class _BodyTooLarge(Exception):
+    pass
+
+
+class UploadBodyLimitMiddleware:
+    """Byte-counting ASGI guard on POST /api/drawings/upload (round-2 review,
+    MAJOR): FastAPI spools multipart to temp disk BEFORE the route handler
+    runs, so a handler-level check cannot bound disk use, and a chunked
+    (length-less) body bypasses any Content-Length check. This wraps
+    `receive` and aborts the request the moment the cumulative body exceeds
+    the cap (+1 MiB multipart framing slack). Outcomes, both bounded:
+      * oversized DECLARED Content-Length -> clean 413 before any read;
+      * oversized chunked body -> the raised abort lands inside starlette's
+        multipart parser, whose own broad except answers 400 ("error parsing
+        the body") — the spool stops at the cap either way, which is the
+        security property; the 413 fallback below fires only if the abort
+        ever escapes the parser. Every other route passes through untouched."""
+
+    _SLACK = 1_048_576
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (scope.get("type") != "http" or scope.get("method") != "POST"
+                or scope.get("path") != "/api/drawings/upload"):
+            await self.app(scope, receive, send)
+            return
+
+        cap = max_upload_bytes() + self._SLACK
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        declared = headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > cap:
+            await self._send_413(send)
+            return
+
+        seen = 0
+        response_started = False
+
+        async def counting_receive():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body") or b"")
+                if seen > cap:
+                    raise _BodyTooLarge()
+            return message
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except _BodyTooLarge:
+            if response_started:  # pragma: no cover - parse happens pre-response
+                raise
+            await self._send_413(send)
+
+    @staticmethod
+    async def _send_413(send):
+        import json as _json
+        body = _json.dumps({
+            "error": {"error_code": "BAD_PARAMS",
+                      "message": f"request exceeds the {max_upload_bytes()} byte upload cap",
+                      "retryable": False},
+            "degraded_mode": False,
+        }).encode("utf-8")
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
 
 
 # --------------------------------------------------------------------------- #

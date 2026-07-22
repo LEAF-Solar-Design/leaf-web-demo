@@ -23,11 +23,13 @@ services:
       BROKER_LEDGER: /data/state/broker_ledger.jsonl   # shared with the app (usage reads it)
       BROKER_TENANTS: /data/state/broker_tenants.json  # persisted kill-switch
       LEAF_STORE_DIR: /data/drawings                   # shared with the app (write loop)
+      LEAF_UPLOADS_DIR: /data/uploads                  # shared with the app (S19 upload staging: app writes, broker extracts)
       # --- operator opt-in for APS_LIVE=1 (NEVER baked into the image): -------
       # APS_CRED: /run/secrets/aps/credentials.json
     volumes:
       - leaf-state:/data/state
       - leaf-drawings:/data/drawings
+      - leaf-uploads:/data/uploads
       # - ${HOME:-~}/.aps:/run/secrets/aps:ro          # mount your ~/.aps for live APS
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8140/broker/health', timeout=4)"]
@@ -81,6 +83,7 @@ services:
       LEAF_AUTHOR_HARNESS_URL: http://harness:8150
       LEAF_TENANTS_DIR: /data/tenants                  # MUST match the harness (§16.H)
       LEAF_STORE_DIR: /data/drawings                   # shared with the broker (write loop)
+      LEAF_UPLOADS_DIR: /data/uploads                  # shared with the broker (S19: staged uploads must be broker-resolvable)
       BROKER_LEDGER: /data/state/broker_ledger.jsonl   # app reads the broker's ledger for /api/usage
       JOBS_DB: /data/state/jobs.db                     # durable async job records (restart-survivable)
       SESSIONS_DB: /data/state/sessions.db             # conversational sessions/events/approvals (same durability tier as jobs.db). SINGLE-WRITER: SQLite+WAL+threading.Lock assumes ONE app process — keep one replica/one uvicorn worker, and on network filesystems (EFS/NFS, where WAL is unsafe) point JOBS_DB/SESSIONS_DB at task-local storage instead (see the production task definition)
@@ -90,6 +93,7 @@ services:
       - leaf-tenants:/data/tenants
       - leaf-drawings:/data/drawings
       - leaf-state:/data/state
+      - leaf-uploads:/data/uploads
     depends_on:
       broker:
         condition: service_healthy
@@ -137,3 +141,4 @@ volumes:
   leaf-grants:
   leaf-drawings:
   leaf-state:
+  leaf-uploads:

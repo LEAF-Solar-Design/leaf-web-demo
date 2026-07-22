@@ -75,6 +75,12 @@ app.add_middleware(
 )
 install_error_handlers(app)
 
+# §19: byte-counting wall on the upload route — bounds multipart pre-parse
+# disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.
+import guest_uploads as _guest_uploads_mw  # noqa: E402
+
+app.add_middleware(_guest_uploads_mw.UploadBodyLimitMiddleware)
+
 app.include_router(session.router)
 app.include_router(sessions.router)  # sessions wire spec (S2): POST /api/sessions, .../messages, .../stream, .../transcript
 app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_id} (record-only)

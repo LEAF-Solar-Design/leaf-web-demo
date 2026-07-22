@@ -480,7 +480,12 @@ def require_tenant(
     # guest token would be a general-purpose identity (review round 1, MAJOR).
     # Off-list -> 403 naming the boundary. ANY token defect falls through to
     # the ordinary JWT path, which 401s honestly without a Bearer.
-    if x_guest_session:
+    # PRECEDENCE (round-2 review, MAJOR): a presented Bearer token ALWAYS
+    # wins — a newly signed-in user with a stale guest header must resolve as
+    # their account (or get the JWT path's honest 401), never the guest
+    # allowlist's 403. The guest leg only exists for callers with no
+    # Authorization at all.
+    if x_guest_session and not authorization:
         import guest_uploads  # lazy: mirrors the auth/tenancy lazy-import discipline
         guest_tid = guest_uploads.verify_guest_session(x_guest_session)
         if guest_tid is not None:
