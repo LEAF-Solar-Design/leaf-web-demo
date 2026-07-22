@@ -19,6 +19,16 @@
       "family_id": "internal_qa",
       "label": "Internal / QA",
       "description": "Internal QA-only tools. Filtered server-side; never shown to tenants."
+    },
+    {
+      "family_id": "stringing",
+      "label": "Stringing",
+      "description": "Panel-to-inverter string layout and target-count solving. Two names, one capability (operator ruling R-A, 2026-07-22): the heuristic autofill-string-targets and the real optimizer string-autofill-opt."
+    },
+    {
+      "family_id": "placement",
+      "label": "Equipment placement",
+      "description": "Provisional family for inverter/combiner placement tools. No member is registered in the catalog yet; entries below are reservations for the R2 registry-promotion lane."
     }
   ],
   "tool_families": {
@@ -29,7 +39,11 @@
     "measure_panel_area": "measurement",
     "measure_area_by_layer": "measurement",
     "highlight_panels_near_edge": "selection",
-    "highlight_near_edge": "selection"
+    "highlight_near_edge": "selection",
+    "autofill-string-targets": "stringing",
+    "string-autofill-opt": "stringing",
+    "inverter-placement": "placement",
+    "combiner-placement": "placement"
   },
   "filter_rules": {
     "internal_flag": "internal",
