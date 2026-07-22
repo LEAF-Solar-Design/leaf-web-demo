@@ -686,6 +686,13 @@ def tool_activity_spec(tool: dict) -> dict:
     Built from the tool's LISP source: `engine_script` if present, else the
     contents of its `.lsp` `script`. Pure-LISP via accoreconsole, same shape as
     the extract Activity, plus a Params (get) input for the tool's arguments.
+
+    A relative `.lsp` `script` path is resolved against the project root, then
+    the engine dir: registry `script` paths are relative to the registry file's
+    own directory, so engine/registry.json's `tools/<name>.lsp` entries live at
+    <root>/engine/tools/<name>.lsp (same convention engine/selfcheck.py
+    resolves). An unresolvable path still yields an EMPTY script (never a
+    raise) so live-path guards can fail closed on it.
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
     script_src = tool.get("engine_script")
@@ -693,12 +700,18 @@ def tool_activity_spec(tool: dict) -> dict:
         sp = tool.get("script")
         if sp and str(sp).endswith(".lsp"):
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            path = sp if os.path.isabs(sp) else os.path.join(base, sp)
-            try:
-                with open(path, encoding="utf-8") as fh:
-                    script_src = fh.read()
-            except OSError:
-                script_src = ""
+            if os.path.isabs(sp):
+                candidates = [sp]
+            else:
+                candidates = [os.path.join(base, sp), os.path.join(base, "engine", sp)]
+            script_src = ""
+            for path in candidates:
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        script_src = fh.read()
+                    break
+                except OSError:
+                    continue
     return {
         "id": f"{TOOL_ACTIVITY_PREFIX}{engine_op}",
         "engine": ENGINE,
