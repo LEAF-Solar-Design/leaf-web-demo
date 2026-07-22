@@ -1,15 +1,34 @@
+import os
 from pathlib import Path
+
+import pytest
 
 from solver_adapters import inverter_placement
 
-# The adapter's default solver root follows the autofill.py sibling-repo
-# convention (server/solver_adapters/../../../<solver-repo>), which resolves
-# correctly in the real leaf-web-demo checkout but not in this rescue
-# worktree under C:\tmp.  Point at the real aws-inverter-placement checkout
-# explicitly rather than relying on the default or an ambient env var, so
-# this test runs solo with no environment setup beyond PYTHONPATH.
-SOLVER_ROOT = Path(
-    r"C:\Users\ehaug\OneDrive\Documents\GitHub\aws-inverter-placement"
+# Portable root: env override, then the autofill.py sibling-repo convention
+# (leaf-web-demo and aws-inverter-placement as siblings), then the known real
+# checkout. The suite SKIPS when neither the solver source nor its runtime deps
+# are available, so it never hard-fails on a machine without the solver.
+_CANDIDATES = [
+    os.environ.get("INVERTER_SOLVER_ROOT"),
+    str(Path(__file__).resolve().parents[3] / "aws-inverter-placement"),
+    r"C:\Users\ehaug\OneDrive\Documents\GitHub\aws-inverter-placement",
+]
+SOLVER_ROOT = next((Path(c) for c in _CANDIDATES
+                    if c and (Path(c) / "minimax_optimizer.py").is_file()), None)
+
+
+def _solver_deps_importable():
+    try:
+        import numpy  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    SOLVER_ROOT is None or not _solver_deps_importable(),
+    reason="aws-inverter-placement source or its runtime deps (numpy) unavailable",
 )
 
 # Known-good fixture, matches aws-inverter-placement/tests/test_inverter_placement.py
@@ -67,14 +86,24 @@ def test_real_minimax_solver_reports_infeasible_details_instead_of_raising():
 
 
 def test_adapter_rejects_invalid_input():
+    good_string = {"handle": "s", "startPoint": {"coordinate": "0,0"},
+                   "endPoint": {"coordinate": "1,0"}}
     invalid_inputs = (
         {},
         {"groups": [{}], "stringsPerInverter": 2},
         {"groups": [{"strings": []}], "stringsPerInverter": 2},
-        {"groups": [{"strings": [{}]}], "stringsPerInverter": True},
-        {"groups": [{"strings": [{}]}], "stringsPerInverter": 0},
-        {"groups": [{"strings": [{}]}], "stringsPerInverter": 1, "algorithm": "bogus"},
-        {"groups": [{"strings": [{}]}], "stringsPerInverter": 1, "fixedCentroids": "nope"},
+        {"groups": [{"strings": [good_string]}], "stringsPerInverter": True},
+        {"groups": [{"strings": [good_string]}], "stringsPerInverter": 0},
+        {"groups": [{"strings": [good_string]}], "stringsPerInverter": 1, "algorithm": "bogus"},
+        {"groups": [{"strings": [good_string]}], "stringsPerInverter": 1, "fixedCentroids": "nope"},
+        # legacy is rejected (it reports infeasible-as-success; not exposed)
+        {"groups": [{"strings": [good_string]}], "stringsPerInverter": 1, "algorithm": "legacy"},
+        # unknown top-level field is rejected (fail closed)
+        {"groups": [{"strings": [good_string]}], "stringsPerInverter": 1, "spurious": 1},
+        # a string missing its endpoints is rejected before the solver crashes
+        {"groups": [{"strings": [{"handle": "x"}]}], "stringsPerInverter": 1},
+        {"groups": [{"strings": [{"startPoint": {"coordinate": ""},
+                                  "endPoint": {"coordinate": "1,0"}}]}], "stringsPerInverter": 1},
     )
     for invalid in invalid_inputs:
         try:
