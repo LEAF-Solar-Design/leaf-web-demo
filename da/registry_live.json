@@ -6,7 +6,7 @@
       "description": "Counts every model-space entity per layer.",
       "kind": "script",
       "engine_op": "count_by_layer",
-      "script": "tools/count_by_layer.lsp",
+      "script": "engine/tools/count_by_layer.lsp",
       "params": {
         "type": "object",
         "properties": {},
@@ -38,7 +38,7 @@
       "description": "Sums closed-polyline area (total + per layer) in square feet; assumes 1 drawing unit = 1 inch.",
       "kind": "script",
       "engine_op": "measure_panel_area",
-      "script": "tools/measure_panel_area.lsp",
+      "script": "engine/tools/measure_panel_area.lsp",
       "params": {
         "type": "object",
         "properties": {},
@@ -76,7 +76,7 @@
       "description": "Returns handles of polylines on a layer whose centroid is within a distance of the drawing extents edge.",
       "kind": "script",
       "engine_op": "highlight_panels_near_edge",
-      "script": "tools/highlight_panels_near_edge.lsp",
+      "script": "engine/tools/highlight_panels_near_edge.lsp",
       "params": {
         "type": "object",
         "properties": {

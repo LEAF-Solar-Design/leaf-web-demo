@@ -1,12 +1,16 @@
 """Every engine-registry tool must emit a non-empty live Activity script.
 
 Follow-up to the leaf-web-demo PR #14 (round-2) review finding (2026-07-22):
-da/client.py `tool_activity_spec` resolved a relative `.lsp` `script` path
-against the project root ONLY, while engine/registry.json declares those paths
-relative to the registry's own directory (`tools/<name>.lsp` ->
-engine/tools/<name>.lsp — the convention engine/selfcheck.py resolves). Every
-shipped engine-registry tool therefore emitted an EMPTY Activity script on the
-APS-live path, and the read failure was swallowed silently.
+engine/registry.json declared its `.lsp` `script` paths as `tools/<name>.lsp`
+while the files live at engine/tools/<name>.lsp, and da/client.py
+`tool_activity_spec` resolves relative paths against the project root only —
+so every shipped engine-registry tool emitted an EMPTY Activity script on the
+APS-live path, with the read failure swallowed silently.
+
+The fix declares root-relative paths (`engine/tools/<name>.lsp`) in the
+registry. Resolution stays single-root ON PURPOSE: a fallback root would let
+a tool from one registry silently load another registry's script on a path
+collision (sol-critic round-1 finding on the first attempted fix).
 
 These tests call the REAL da/client.py function (dependency-free file-path
 import: no APS creds, no network) against the REAL engine/registry.json, so a
@@ -53,24 +57,36 @@ def test_every_engine_registry_tool_emits_a_nonempty_live_script():
         f"(these would fail closed / silently no-op on the APS-live path)")
 
 
-def test_lsp_scripts_resolve_to_the_declared_registry_relative_file():
-    """The emitted script must be the exact bytes of the file the registry
-    declares — proves the resolution found the registry-relative file, not
-    some unrelated fallback. Mirrors tool_activity_spec's candidate order:
-    project root first, then the engine dir."""
+def test_lsp_scripts_resolve_to_the_declared_root_relative_file():
+    """The emitted script must be the exact contents of the file the registry
+    declares, resolved against the project root ONLY (the tool_activity_spec
+    contract; registries declare root-relative paths)."""
     da_mod = _load_real_da_client()
     checked = 0
     for tool in _registry_tools():
         sp = tool.get("script")
         if tool.get("engine_script") or not (sp and str(sp).endswith(".lsp")):
             continue
-        candidates = [REPO_ROOT / sp, REPO_ROOT / "engine" / sp]
-        on_disk = next((c for c in candidates if c.is_file()), None)
-        assert on_disk is not None, f"{tool.get('name')}: dangling script path {sp!r}"
+        on_disk = REPO_ROOT / sp
+        assert on_disk.is_file(), (
+            f"{tool.get('name')}: declared script path {sp!r} does not resolve "
+            f"at the project root — registry paths must be root-relative")
         assert _emitted_script(da_mod, tool) == on_disk.read_text(encoding="utf-8"), \
             tool.get("name")
         checked += 1
     assert checked, "expected at least one .lsp-declared engine-registry tool"
+
+
+def test_no_cross_registry_fallback_on_colliding_relative_paths():
+    """sol-critic round-1 finding on the first attempted fix: a NON-engine
+    tool declaring a relative path that does NOT resolve at the project root
+    but DOES name an existing engine/tools file must emit an EMPTY script —
+    never silently load the engine registry's script."""
+    da_mod = _load_real_da_client()
+    assert (REPO_ROOT / "engine" / "tools" / "count_by_layer.lsp").is_file()
+    assert not (REPO_ROOT / "tools" / "count_by_layer.lsp").exists()
+    foreign = {"name": "tenant-foreign-tool", "script": "tools/count_by_layer.lsp"}
+    assert _emitted_script(da_mod, foreign) == ""
 
 
 def test_unresolvable_lsp_path_still_emits_an_empty_script_not_a_raise():

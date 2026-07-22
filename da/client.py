@@ -687,12 +687,12 @@ def tool_activity_spec(tool: dict) -> dict:
     contents of its `.lsp` `script`. Pure-LISP via accoreconsole, same shape as
     the extract Activity, plus a Params (get) input for the tool's arguments.
 
-    A relative `.lsp` `script` path is resolved against the project root, then
-    the engine dir: registry `script` paths are relative to the registry file's
-    own directory, so engine/registry.json's `tools/<name>.lsp` entries live at
-    <root>/engine/tools/<name>.lsp (same convention engine/selfcheck.py
-    resolves). An unresolvable path still yields an EMPTY script (never a
-    raise) so live-path guards can fail closed on it.
+    A relative `.lsp` `script` path resolves against the PROJECT ROOT ONLY, so
+    registries must declare root-relative paths (engine/registry.json declares
+    `engine/tools/<name>.lsp`). Deliberately no fallback root: one would let a
+    tool from one registry silently load another registry's script on a path
+    collision. An unresolvable path yields an EMPTY script (never a raise) so
+    live-path guards can fail closed on it.
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
     script_src = tool.get("engine_script")
@@ -700,18 +700,12 @@ def tool_activity_spec(tool: dict) -> dict:
         sp = tool.get("script")
         if sp and str(sp).endswith(".lsp"):
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if os.path.isabs(sp):
-                candidates = [sp]
-            else:
-                candidates = [os.path.join(base, sp), os.path.join(base, "engine", sp)]
-            script_src = ""
-            for path in candidates:
-                try:
-                    with open(path, encoding="utf-8") as fh:
-                        script_src = fh.read()
-                    break
-                except OSError:
-                    continue
+            path = sp if os.path.isabs(sp) else os.path.join(base, sp)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    script_src = fh.read()
+            except OSError:
+                script_src = ""
     return {
         "id": f"{TOOL_ACTIVITY_PREFIX}{engine_op}",
         "engine": ENGINE,
