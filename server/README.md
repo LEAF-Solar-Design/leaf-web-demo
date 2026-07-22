@@ -72,14 +72,38 @@ curl localhost:8130/api/jobs/$JOB/stream   # SSE until terminal
 
 ## Tests
 
+Canonical full gate: the per-suite subprocess runner (one clean process per
+suite, one scoreboard; `scripts/README.md` documents why the suites must not
+share a process):
+
 ```bash
-cd C:/tmp/leaf-web-demo/server && python -m pytest tests/test_backbone.py -q
+python scripts/run-all-gates.py
 ```
 
-Boots real broker + app subprocesses (APS_LIVE=0, `APS_CRED=/nonexistent` for
-the app — proving the credential boundary), covers 202 latency, restart
-durability, TIMEOUT, kill-switch, ledger, catalog filtering, envelope schema,
-and legacy-shape regression.
+Day-to-day subset runs (cwd MUST be `server/`, to avoid the repo-root
+`platform/` stdlib shadow):
+
+```bash
+cd server && python -m pytest tests -q                    # the tests/ suite only
+cd server && python -m pytest test_auth.py -q             # one root gate file
+cd server && python -m pytest tests/test_backbone.py -q   # backbone harness only
+```
+
+A bare `cd server && python -m pytest -q` (root gate files plus `tests/` in
+one process) also passes since 2026-07-22. It used to produce ~56 auth-shaped
+failures because `test_auth.py` flipped `LEAF_AUTH_LIVE=1` at import time,
+and pytest imports every module at collection, so the flag leaked into all
+other modules and their uvicorn subprocesses. That env is now scoped in a
+module fixture. Keep it that way: never mutate `os.environ` at module import
+in a test file; scope env in fixtures, as `tests/test_wave5.py` does. The
+subprocess runner stays canonical because suites also share on-disk state
+(`jobs.db`, `authored_tools.json`, the drawing store), which a single process
+cannot fully isolate.
+
+`tests/test_backbone.py` boots real broker + app subprocesses (APS_LIVE=0,
+`APS_CRED=/nonexistent` for the app — proving the credential boundary), covers
+202 latency, restart durability, TIMEOUT, kill-switch, ledger, catalog
+filtering, envelope schema, and legacy-shape regression.
 
 ## Files (ownership map for sibling sessions)
 
