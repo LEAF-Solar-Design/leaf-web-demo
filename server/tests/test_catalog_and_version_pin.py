@@ -548,3 +548,57 @@ def test_dwg_version_survives_local_fallback(monkeypatch, tmp_path):
     assert captured["dwg_version"] == 5
     if jobs._conn is not None:
         jobs._conn.close()
+
+
+def test_idempotency_fingerprint_includes_dwg_version(monkeypatch, tmp_path):
+    """Round-3 finding 2: same idempotency key + DIFFERENT pin must be rejected
+    as different run input, not deduped to the prior job."""
+    import jobs
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "idem.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+
+    class _Inert:
+        def submit(self, fn, *a, **k):
+            return None
+
+    monkeypatch.setattr(jobs, "_executors", {jobs.LANE_FAST: _Inert(), jobs.LANE_SLOW: _Inert()})
+    monkeypatch.setattr(jobs.platform_link, "on_submit", lambda *a, **k: None)
+    tool = {"name": "count-by-layer", "capabilities": ["drawing.read"]}
+    kw = dict(org_id="org-1", project_id="proj-1", idempotency_key="key-1")
+    j1 = jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=1, **kw)
+    # same key, same pin -> dedupes to the same job
+    j1b = jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=1, **kw)
+    assert j1b == j1
+    # same key, DIFFERENT pin -> rejected
+    with pytest.raises(ValueError, match="different run input"):
+        jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=2, **kw)
+    if jobs._conn is not None:
+        jobs._conn.close()
+
+
+def test_restart_recovery_recovers_the_version_pin(monkeypatch, tmp_path):
+    """Round-3 finding 1: a restart-recovered pinned job must NOT rerun against
+    head; the pin is persisted in execution_json and threaded back to _run_job."""
+    import jobs
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "recover.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    captured = {}
+
+    class _Capture:
+        def submit(self, fn, *a, **k):
+            # _run_job(job_id, tenant, tool, params, dwg, aps_live, dwg_version)
+            captured["dwg_version"] = a[6] if len(a) > 6 else None
+            return None
+
+    monkeypatch.setattr(jobs, "_executors", {jobs.LANE_FAST: _Capture(), jobs.LANE_SLOW: _Capture()})
+    monkeypatch.setattr(jobs.platform_link, "on_submit", lambda *a, **k: None)
+    tool = {"name": "count-by-layer", "capabilities": ["drawing.read"]}
+    job_id = jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=7)
+    captured.clear()
+    # simulate a fresh process picking the durable row back up
+    assert jobs._redispatch_record(job_id) is True
+    assert captured["dwg_version"] == 7
+    if jobs._conn is not None:
+        jobs._conn.close()

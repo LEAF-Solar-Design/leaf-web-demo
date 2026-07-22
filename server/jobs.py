@@ -280,6 +280,10 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         "tenantId": str(tenant_id), "orgId": org_id, "projectId": project_id,
         "tool": tool, "params": params, "dwg": dwg, "apsLive": bool(aps_live),
         "authorityMode": authority_mode,
+        # The pinned version is part of run identity: reusing an idempotency key
+        # with a different dwg_version is different input and must be rejected,
+        # not silently deduped to the prior job.
+        "dwgVersion": dwg_version,
     }
     submission_fingerprint = hashlib.sha256(json.dumps(
         fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str,
@@ -305,7 +309,9 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
                 "created_at, updated_at, execution_json, org_id, project_id, authority_mode, "
                 "idempotency_key, submission_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, str(tenant_id), tool["name"], json.dumps(params), dwg, "submitted",
-                 "queued", now, now, json.dumps({"tool": tool, "aps_live": bool(aps_live)}),
+                 "queued", now, now,
+                 json.dumps({"tool": tool, "aps_live": bool(aps_live),
+                             "dwg_version": dwg_version}),
                  org_id, project_id, authority_mode, idempotency_key, submission_fingerprint),
             )
             conn.commit()
@@ -793,6 +799,9 @@ def _redispatch_record(job_id: str) -> bool:
         execution = json.loads(rows[0]["execution_json"] or "{}")
         tool = execution["tool"]
         aps_live = bool(execution.get("aps_live", False))
+        # Recover the version pin from the durable execution context so a
+        # restart-recovered pinned job does not silently rerun against head.
+        dwg_version = execution.get("dwg_version")
     except (IndexError, KeyError, TypeError, ValueError):
         complete_callback(job_id, "failed", error=error_obj(
             ErrorCode.INTERNAL, "cannot recover job: missing execution context", False))
@@ -800,7 +809,8 @@ def _redispatch_record(job_id: str) -> bool:
     executor = _executors.get(lane_for(tool, aps_live))
     if executor is None:
         return False
-    executor.submit(_run_job, job_id, rec["tenant_id"], tool, rec["params"], rec["dwg"], aps_live)
+    executor.submit(_run_job, job_id, rec["tenant_id"], tool, rec["params"], rec["dwg"],
+                    aps_live, dwg_version)
     return True
 
 
