@@ -66,6 +66,14 @@ def _cors_origins() -> list[str]:
 
 
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
+
+# §19: byte-counting wall on the upload route — bounds multipart pre-parse
+# disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.
+# Registered BEFORE CORSMiddleware so CORS wraps it (last-added = outermost):
+# the limiter's own 413 then carries CORS headers for permitted origins.
+import guest_uploads as _guest_uploads_mw  # noqa: E402
+
+app.add_middleware(_guest_uploads_mw.UploadBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),  # F17: env-driven allow-list, default-deny in live-auth
@@ -74,12 +82,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 install_error_handlers(app)
-
-# §19: byte-counting wall on the upload route — bounds multipart pre-parse
-# disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.
-import guest_uploads as _guest_uploads_mw  # noqa: E402
-
-app.add_middleware(_guest_uploads_mw.UploadBodyLimitMiddleware)
 
 app.include_router(session.router)
 app.include_router(sessions.router)  # sessions wire spec (S2): POST /api/sessions, .../messages, .../stream, .../transcript

@@ -115,3 +115,56 @@ def test_guest_cannot_reach_demo_bootstrap_even_for_wellknown_id(client):
     r = client.get("/api/drawings/demo/intake",
                    headers={"X-Tenant-Id": "guest-abc123"})
     assert r.status_code == 404
+
+
+def test_live_write_refuses_non_dwg_uploaded_source():
+    """Round-3 MAJOR: a live write signs the v1 blob as HostDwg — for a DXF
+    upload that blob is the extracted intake, so the write path must refuse
+    honestly instead of handing APS a mislabeled file."""
+    import store
+
+    class _NeverCalledDa:
+        def __getattr__(self, name):  # any DA use would mean the guard failed
+            raise AssertionError(f"da.{name} must not be reached")
+
+    backend = store.InMemoryBackend()
+    backend.put(store.manifest_key("acme-solar", "u-dxf1"),
+                json.dumps({"schema": 1, "tenant_id": "acme-solar",
+                            "drawing_id": "u-dxf1", "head": 1, "latest": 1,
+                            "versions": [], "checkout": None}).encode())
+    backend.put(write_loop.upload_marker_key("acme-solar", "u-dxf1"),
+                json.dumps({"status": "ready", "source_ext": ".dxf"}).encode())
+    import time
+    env, status = write_loop.run_write_live(
+        {"name": "delete-marked-panel"}, {"drawing_id": "u-dxf1"},
+        "acme-solar", backend=backend, da=_NeverCalledDa(), t0=time.perf_counter())
+    assert status == 400
+    assert "DWG source" in env["error"]["message"]
+
+
+def test_purge_extraction_race_cannot_resurrect(client, monkeypatch, tmp_path):
+    """Round-3 MAJOR: an extraction that finishes AFTER the purge deleted its
+    drawing must not resurrect anything — the marker re-check under the shared
+    store lock aborts the ingest, and the deletion receipt stays true."""
+    import time
+    import guest_uploads as gu
+    monkeypatch.setattr(gu, "start_extraction_thread", lambda *a, **k: None)
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
+    import io
+    dxf = b"0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\nAB\n8\nL1\n70\n1\n" \
+          b"10\n1.0\n20\n2.0\n10\n3.0\n20\n4.0\n0\nENDSEC\n0\nEOF\n"
+    r = client.post("/api/drawings/upload",
+                    files={"file": ("f.dxf", io.BytesIO(dxf))})
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+    time.sleep(0.2)
+    assert gu.purge_expired()["count"] == 1  # deleted + receipted while "extracting"
+
+    gu.run_extraction(tenant, did, ".dxf")  # the slow extraction lands NOW
+
+    guest_root = Path(write_loop.guest_store_dir())
+    assert not (guest_root / "tenants" / tenant).exists(), \
+        "nothing may be recreated after the deletion receipt"
+    assert client.get(f"/api/drawings/{did}/upload-status",
+                      headers={"X-Tenant-Id": tenant}).status_code == 404
+    assert client.get(f"/api/drawings/{did}/intake",
+                      headers={"X-Tenant-Id": tenant}).status_code == 404

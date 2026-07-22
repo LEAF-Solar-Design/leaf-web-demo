@@ -177,7 +177,8 @@ def upload_drawing(
     # fail-closed bootstrap guard exist the instant the id is public; (2) stage
     # the bytes; (3) extraction thread against the staged file.
     marker = guest_uploads.new_marker(filename=file.filename or f"upload{ext}",
-                                      data=data, tenant_kind=tenant_kind)
+                                      data=data, tenant_kind=tenant_kind,
+                                      source_ext=ext)
     guest_uploads.write_marker(backend, str(tenant), drawing_id, marker)
 
     staged = guest_uploads.staged_path(str(tenant), drawing_id, ext)

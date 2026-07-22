@@ -352,6 +352,26 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                                  f"(ingest it before a live write)", retryable=False,
                                  tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+        # §19 fail-closed guard (review round 3, MAJOR): a live write signs the
+        # version blob as HostDwg — that is only truthful when the blob IS DWG
+        # bytes. An UPLOADED drawing records its source format in the upload
+        # marker; anything non-.dwg (a DXF's intake-JSON mock blob) must refuse
+        # honestly here rather than hand APS a mislabeled file.
+        if backend.exists(upload_marker_key(tenant_id, drawing_id)):
+            try:
+                marker = json.loads(backend.get(
+                    upload_marker_key(tenant_id, drawing_id)).decode("utf-8"))
+            except (KeyError, ValueError):
+                marker = {}
+            source_ext = str(marker.get("source_ext") or "")
+            if source_ext != ".dwg":
+                return (err_envelope(
+                    ErrorCode.BAD_PARAMS,
+                    f"live writes need a DWG source; drawing {drawing_id!r} was "
+                    f"uploaded as {source_ext or 'an unknown format'} (its store "
+                    f"blob is the extracted intake, not DWG bytes)",
+                    retryable=False, tool=name, version=tool_version),
+                    DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
         head_v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
 
         in_url = da.signed_download_url(vkey)

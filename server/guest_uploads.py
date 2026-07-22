@@ -251,13 +251,15 @@ def write_marker(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any
                 json.dumps(marker, separators=(",", ":")).encode("utf-8"))
 
 
-def new_marker(*, filename: str, data: bytes, tenant_kind: str) -> Dict[str, Any]:
+def new_marker(*, filename: str, data: bytes, tenant_kind: str,
+               source_ext: str = "") -> Dict[str, Any]:
     now = _now()
     expires = (_iso(now + timedelta(hours=retention_hours()))
                if tenant_kind == "guest" else None)
     return {
         "schema": 1,
         "status": "extracting",
+        "source_ext": source_ext,  # write_loop's live-write guard reads this
         "filename": str(filename),
         "bytes": len(data),
         "content_sha256": hashlib.sha256(data).hexdigest(),
@@ -271,11 +273,17 @@ def new_marker(*, filename: str, data: bytes, tenant_kind: str) -> Dict[str, Any
 
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
                  error_code: str, message: str, retryable: bool) -> None:
-    marker = dict(marker)
-    marker["status"] = "failed"
-    marker["error"] = {"error_code": error_code, "message": message,
-                       "retryable": bool(retryable)}
-    write_marker(backend, tenant_id, drawing_id, marker)
+    # Under the store lock, and only onto a still-existing marker: writing a
+    # failure record for a drawing the purge already deleted would resurrect
+    # a marker file behind the deletion receipt (same race class as ingest).
+    with _GUEST_STORE_LOCK:
+        if read_marker(backend, tenant_id, drawing_id) is None:
+            return
+        marker = dict(marker)
+        marker["status"] = "failed"
+        marker["error"] = {"error_code": error_code, "message": message,
+                           "retryable": bool(retryable)}
+        write_marker(backend, tenant_id, drawing_id, marker)
 
 
 # --------------------------------------------------------------------------- #
@@ -338,35 +346,45 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     # which write_loop.read_intake prefers — one uniform read path.
     # ingest_drawing refuses an existing drawing, which is correct: an upload
     # id is minted fresh and collision-checked.
+    #
+    # The whole ingest runs INSIDE the guest-store lock, with a marker
+    # re-check first: extraction can be slow, and the purge sweep may have
+    # deleted this drawing (and logged its receipt) mid-flight — ingesting
+    # after that would resurrect purged data behind a "deleted" receipt
+    # (review round 3, MAJOR). A vanished marker means purged: abort, no
+    # trace rewritten.
     import tempfile
-    try:
-        import store  # importable via write_loop's sys.path setup
-        if ext == ".dwg":
-            store.ingest_drawing(backend, tenant_id,
-                                 str(staged_path(tenant_id, drawing_id, ext)),
-                                 drawing_id=drawing_id)
-        else:
-            fd, tmp = tempfile.mkstemp(suffix=".intake.json")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(intake, fh)
-                store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
-            finally:
+    with _GUEST_STORE_LOCK:
+        if read_marker(backend, tenant_id, drawing_id) is None:
+            return  # purged while extracting; the receipt stands, nothing returns
+        try:
+            import store  # importable via write_loop's sys.path setup
+            if ext == ".dwg":
+                store.ingest_drawing(backend, tenant_id,
+                                     str(staged_path(tenant_id, drawing_id, ext)),
+                                     drawing_id=drawing_id)
+            else:
+                fd, tmp = tempfile.mkstemp(suffix=".intake.json")
                 try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-        backend.put(write_loop.intake_cache_key(tenant_id, drawing_id, 1),
-                    json.dumps(intake, separators=(",", ":")).encode("utf-8"))
-    except (OSError, ValueError) as exc:
-        _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
-                     f"ingest failed: {exc}", retryable=False)
-        return
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        json.dump(intake, fh)
+                    store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
+                finally:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+            backend.put(write_loop.intake_cache_key(tenant_id, drawing_id, 1),
+                        json.dumps(intake, separators=(",", ":")).encode("utf-8"))
+        except (OSError, ValueError) as exc:
+            _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
+                         f"ingest failed: {exc}", retryable=False)
+            return
 
-    marker = dict(marker)
-    marker["status"] = "ready"
-    marker["extracted_version"] = 1
-    write_marker(backend, tenant_id, drawing_id, marker)
+        marker = dict(marker)
+        marker["status"] = "ready"
+        marker["extracted_version"] = 1
+        write_marker(backend, tenant_id, drawing_id, marker)
 
 
 class _ExtractError(Exception):
@@ -473,40 +491,46 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
                     expires = _read_expiry(marker_path)
                     if expires is None or expires > now:
                         continue
-                    # Order is load-bearing (round-2 review, MAJOR): staged
-                    # RAW files first, VERIFIED gone, then the drawing dir.
-                    # If the staged file survives we stop BEFORE touching the
-                    # dir — the marker stays, so the next sweep retries the
-                    # WHOLE drawing. Deleting the dir first would orphan a
-                    # surviving raw file behind a "deleted" receipt.
-                    staged_files = [staged_path(tenant_dir.name, drawing_dir.name, ext)
-                                    for ext in ACCEPTED_EXTENSIONS]
-                    staged_bytes = sum(f.stat().st_size for f in staged_files
-                                       if f.is_file())
-                    for f in staged_files:
-                        _unlink_quiet(f)
-                    size = sum(p.stat().st_size for p in drawing_dir.rglob("*")
-                               if p.is_file())
-                    if not any(f.exists() for f in staged_files):
-                        shutil.rmtree(drawing_dir, ignore_errors=True)
-                    if drawing_dir.exists() or any(f.exists() for f in staged_files):
-                        # Deletion FAILED (permissions, open handle). Never
-                        # log it as a kill — a false purge line is the exact
-                        # promise-breaking lie this module exists to prevent.
-                        _append_purge_log({"ts": _iso(now), "status": "failed",
+                    # Per-drawing critical section shared with the extraction
+                    # threads (see run_extraction): deletion and ingest can
+                    # never interleave, so nothing returns after its receipt.
+                    with _GUEST_STORE_LOCK:
+                        # Order is load-bearing (round-2 review, MAJOR):
+                        # staged RAW files first, VERIFIED gone, then the
+                        # drawing dir. If the staged file survives we stop
+                        # BEFORE touching the dir — the marker stays, so the
+                        # next sweep retries the WHOLE drawing. Deleting the
+                        # dir first would orphan a surviving raw file behind
+                        # a "deleted" receipt.
+                        staged_files = [staged_path(tenant_dir.name, drawing_dir.name, ext)
+                                        for ext in ACCEPTED_EXTENSIONS]
+                        staged_bytes = sum(f.stat().st_size for f in staged_files
+                                           if f.is_file())
+                        for f in staged_files:
+                            _unlink_quiet(f)
+                        size = sum(p.stat().st_size for p in drawing_dir.rglob("*")
+                                   if p.is_file())
+                        if not any(f.exists() for f in staged_files):
+                            shutil.rmtree(drawing_dir, ignore_errors=True)
+                        if drawing_dir.exists() or any(f.exists() for f in staged_files):
+                            # Deletion FAILED (permissions, open handle).
+                            # Never log it as a kill — a false purge line is
+                            # the exact promise-breaking lie this module
+                            # exists to prevent.
+                            _append_purge_log({"ts": _iso(now), "status": "failed",
+                                               "tenant_id": tenant_dir.name,
+                                               "drawing_id": drawing_dir.name})
+                            print(f"[guest-uploads] purge FAILED to delete "
+                                  f"{tenant_dir.name}/{drawing_dir.name}; will retry "
+                                  f"next sweep", file=sys.stderr)
+                            continue
+                        freed += size + staged_bytes
+                        purged.append({"tenant_id": tenant_dir.name,
+                                       "drawing_id": drawing_dir.name})
+                        _append_purge_log({"ts": _iso(now), "status": "deleted",
                                            "tenant_id": tenant_dir.name,
-                                           "drawing_id": drawing_dir.name})
-                        print(f"[guest-uploads] purge FAILED to delete "
-                              f"{tenant_dir.name}/{drawing_dir.name}; will retry "
-                              f"next sweep", file=sys.stderr)
-                        continue
-                    freed += size + staged_bytes
-                    purged.append({"tenant_id": tenant_dir.name,
-                                   "drawing_id": drawing_dir.name})
-                    _append_purge_log({"ts": _iso(now), "status": "deleted",
-                                       "tenant_id": tenant_dir.name,
-                                       "drawing_id": drawing_dir.name,
-                                       "freed_bytes": size + staged_bytes})
+                                           "drawing_id": drawing_dir.name,
+                                           "freed_bytes": size + staged_bytes})
             # a tenant dir whose drawings are all gone is itself expired
             try:
                 if drawings_root.is_dir() and not any(drawings_root.iterdir()):
@@ -567,6 +591,14 @@ def _append_purge_log(entry: Dict[str, Any]) -> None:
     except OSError as exc:  # pragma: no cover - best-effort observability
         print(f"[guest-uploads] purge log append failed: {exc}", file=sys.stderr)
 
+
+# Purge and extraction both mutate guest-store state from THIS process (the
+# daemon thread and the per-upload extraction threads live in the app
+# process), so a plain module lock fully closes the resurrect race (review
+# round 3, MAJOR): a slow extraction re-checks its marker INSIDE the lock
+# before ingesting, and the sweep deletes inside the same lock — an expired
+# drawing can never be re-created after its deletion receipt.
+_GUEST_STORE_LOCK = threading.RLock()  # re-entrant: _mark_failed runs under it too
 
 _PURGE_THREAD: Optional[threading.Thread] = None
 
