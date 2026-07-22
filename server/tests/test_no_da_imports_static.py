@@ -1,0 +1,130 @@
+"""The "app imports no da/" static invariant as its OWN gate (census #4).
+
+CONTRACT-ADDENDUM §8 (FROZEN): the tenant-facing app process NEVER holds the
+APS credential; server/broker.py is the only process that loads da/client.py.
+Until now the static half of that property lived inside test_backbone.py's
+booted-stack e2e (app.py/jobs.py only). This suite is the standalone,
+dependency-free version covering the WHOLE app-side surface, so CI fails the
+moment any app-side file grows a da/ import — no server boot required.
+
+The documented, allowed seams (checked here, not waived silently):
+  * broker.py            — IS the broker process (loads da/client.py by path).
+  * write_loop_live.py   — standalone live-receipt SCRIPT (`python
+                           write_loop_live.py`), imported by nothing app-side;
+                           runs credential-side by design.
+  * deps.get_da_client() — the ONE §11 legacy loader for APS_LIVE=1 store
+                           reads (OSSBackend); every call-site must be
+                           APS_LIVE-gated (`... if deps.APS_LIVE else None`).
+  * `import store` (da/store.py via write_loop's sys.path append) — the §11
+    versioned-store seam; store.py itself imports da/client as a MODULE, but
+    the credential file is only read on live token fetch (the dynamic
+    APS_CRED=/nonexistent test in test_backbone.py proves APS_LIVE=0 stays
+    credential-free).
+  * deps._load_module_from(DA_DIR / "usage.py") — pure metering module, holds
+    no credential (usage/ops routers).
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+SERVER_DIR = Path(__file__).resolve().parent.parent
+
+# Files that legitimately live on the credential side of the boundary.
+CREDENTIAL_SIDE = {"broker.py", "write_loop_live.py"}
+
+IMPORT_DA_RE = re.compile(r"^\s*(import|from)\s+da\b")
+IMPORT_CLIENT_RE = re.compile(r"^\s*(import|from)\s+client\b")
+GET_DA_CLIENT_RE = re.compile(r"deps\.get_da_client\(\)")
+# The §11 idiom every app-side call-site must use, verbatim:
+GATED_IDIOM = "deps.get_da_client() if deps.APS_LIVE else None"
+DA_PATH_LOAD_RE = re.compile(r"""DA_DIR\s*/\s*["']([\w.]+)["']""")
+
+
+def _app_side_files() -> list[Path]:
+    files = [p for p in sorted(SERVER_DIR.glob("*.py"))
+             if p.name not in CREDENTIAL_SIDE and not p.name.startswith("test_")]
+    files += sorted((SERVER_DIR / "routers").glob("*.py"))
+    assert len(files) > 20, "app-side sweep found suspiciously few files"
+    return files
+
+
+def _src(p: Path) -> str:
+    return p.read_text(encoding="utf-8")
+
+
+def test_no_app_side_file_imports_da_package():
+    """No `import da` / `from da import` anywhere the app process can import."""
+    offenders = []
+    for p in _app_side_files():
+        for i, line in enumerate(_src(p).splitlines(), 1):
+            if IMPORT_DA_RE.match(line):
+                offenders.append(f"{p.name}:{i}: {line.strip()}")
+    assert not offenders, "app-side da import(s): " + "; ".join(offenders)
+
+
+def test_no_app_side_file_imports_bare_client_module():
+    """`import client` (da/client.py via the store seam's sys.path append) is
+    credential-side only — write_loop_live.py and da/ itself, never the app."""
+    offenders = []
+    for p in _app_side_files():
+        for i, line in enumerate(_src(p).splitlines(), 1):
+            if IMPORT_CLIENT_RE.match(line):
+                offenders.append(f"{p.name}:{i}: {line.strip()}")
+    assert not offenders, "app-side bare client import(s): " + "; ".join(offenders)
+
+
+def test_app_and_jobs_never_reference_da_client():
+    """The frozen §8 wording, verbatim, as its own gate: app.py/jobs.py contain
+    no da import and no `da.client` reference (mirrors test_backbone check 4)."""
+    for fname in ("app.py", "jobs.py"):
+        src = _src(SERVER_DIR / fname)
+        for i, line in enumerate(src.splitlines(), 1):
+            assert not IMPORT_DA_RE.match(line), f"{fname}:{i}: {line.strip()!r}"
+        assert "da.client" not in src, f"{fname} references da.client"
+
+
+def test_broker_client_reaches_execution_over_http_only():
+    """broker_client.py is the app's ONLY road to APS-capable execution — it
+    must stay a pure HTTP client: no da import, no path-based module loading."""
+    src = _src(SERVER_DIR / "broker_client.py")
+    for i, line in enumerate(src.splitlines(), 1):
+        assert not IMPORT_DA_RE.match(line), f"broker_client.py:{i}: {line.strip()!r}"
+    assert "spec_from_file_location" not in src
+    assert "_load_module_from" not in src
+    assert "DA_DIR" not in src
+
+
+def test_every_get_da_client_call_site_is_aps_live_gated():
+    """Every app-side use of the §11 legacy loader must be the gated idiom
+    `deps.get_da_client() if deps.APS_LIVE else None` — never unconditional.
+    (deps.py itself defines the function; call-sites live elsewhere.)"""
+    offenders = []
+    for p in _app_side_files():
+        if p.name == "deps.py":
+            continue
+        for i, line in enumerate(_src(p).splitlines(), 1):
+            if GET_DA_CLIENT_RE.search(line) and GATED_IDIOM not in line:
+                offenders.append(f"{p.name}:{i}: {line.strip()}")
+    assert not offenders, "ungated get_da_client call(s): " + "; ".join(offenders)
+
+
+def test_da_path_loads_target_only_documented_pure_modules():
+    """App-side `DA_DIR / "<file>"` references may target only the documented
+    seams: usage.py (pure metering) everywhere, client.py only inside
+    deps.get_da_client (the loader) and app.py's health presence-probe
+    (`.exists()` — reads nothing)."""
+    allowed_anywhere = {"usage.py"}
+    client_allowed_in = {"deps.py", "app.py"}
+    offenders = []
+    for p in _app_side_files():
+        for i, line in enumerate(_src(p).splitlines(), 1):
+            for target in DA_PATH_LOAD_RE.findall(line):
+                if target in allowed_anywhere:
+                    continue
+                if target == "client.py" and p.name in client_allowed_in:
+                    if p.name == "app.py" and ".exists()" not in line:
+                        offenders.append(f"{p.name}:{i}: {line.strip()}")
+                    continue
+                offenders.append(f"{p.name}:{i}: {line.strip()}")
+    assert not offenders, "undocumented DA_DIR load(s): " + "; ".join(offenders)

@@ -60,7 +60,12 @@ def test_live_session_extracts_through_broker_only(monkeypatch):
     assert "da.client" not in source
 
 
-def test_mock_session_remains_cached_and_never_calls_broker(monkeypatch):
+def test_mock_session_default_dwg_serves_cached_intake_and_never_calls_broker(monkeypatch):
+    """APS_LIVE=0 + the default drawing -> the unchanged cached-intake path.
+
+    (Until §19 the offline branch ignored `dwg` entirely; a non-default name now
+    reads the tenant's own store — covered by the next test. This one pins the
+    byte-identical demo default.)"""
     monkeypatch.setattr(session_router.deps, "APS_LIVE", False)
     monkeypatch.setattr(session_router.deps, "load_cached_intake",
                         lambda: {"polylines": [{"layer": "Panels"}]})
@@ -70,12 +75,50 @@ def test_mock_session_remains_cached_and_never_calls_broker(monkeypatch):
         lambda *args, **kwargs: pytest.fail("mock session called broker"),
     )
 
-    body = session_router.session(dwg="ignored-in-mock", tenant="demo-tenant")
+    body = session_router.session(dwg="rooftop_demo", tenant="demo-tenant")
     assert body == {
         "intake": {"polylines": [{"layer": "Panels"}]},
         "error": None,
         "degraded_mode": False,
     }
+
+
+def test_mock_session_non_default_dwg_reads_tenant_store_never_broker(monkeypatch):
+    """APS_LIVE=0 + a NON-default drawing -> the tenant's own versioned store
+    (§19: serving the cached demo intake under a user's drawing name would be
+    fabricated data). Still strictly app-process-local: the broker is never
+    called on any offline read."""
+    import write_loop  # the module the router lazily imports inside the branch
+
+    calls = []
+    sentinel_backend = object()
+    monkeypatch.setattr(session_router.deps, "APS_LIVE", False)
+    monkeypatch.setattr(
+        session_router.requests,
+        "post",
+        lambda *args, **kwargs: pytest.fail("offline session called broker"),
+    )
+    monkeypatch.setattr(write_loop, "backend_for_tenant",
+                        lambda tid, **kw: calls.append(("backend", tid)) or sentinel_backend)
+    monkeypatch.setattr(write_loop, "ensure_demo_drawing",
+                        lambda backend, tid, did: calls.append(("ensure", backend, tid, did)))
+    monkeypatch.setattr(write_loop, "read_intake",
+                        lambda backend, tid, did, version: (
+                            calls.append(("read", backend, tid, did, version))
+                            or (1, {"polylines": [{"layer": "Uploaded"}]})))
+
+    body = session_router.session(dwg="my-upload", tenant="demo-tenant")
+
+    assert body == {
+        "intake": {"polylines": [{"layer": "Uploaded"}]},
+        "error": None,
+        "degraded_mode": False,
+    }
+    assert calls == [
+        ("backend", "demo-tenant"),
+        ("ensure", sentinel_backend, "demo-tenant", "my-upload"),
+        ("read", sentinel_backend, "demo-tenant", "my-upload", "head"),
+    ]
 
 
 @pytest.mark.parametrize(

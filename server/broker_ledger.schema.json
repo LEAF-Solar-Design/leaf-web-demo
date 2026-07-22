@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "leaf.broker-ledger-line.v1",
+  "title": "Leaf APS broker attribution ledger line (CONTRACT-ADDENDUM §8, FROZEN 2026-07-22)",
+  "description": "Exactly ONE such JSON object per line of broker_ledger.jsonl (env BROKER_LEDGER), appended by server/broker.py for EVERY POST /broker/run — including kill-switch and quota denials. The nine properties below are guaranteed present on every line; additions are allowed only as new OPTIONAL keys (additive evolution), never by renaming, retyping, or dropping a frozen key. Consumers: da/usage.py (spend caps §1a, daily run quota §1d, /api/usage aggregation §13).",
+  "type": "object",
+  "required": [
+    "ts",
+    "tenant_id",
+    "tool",
+    "engine_op",
+    "aps_endpoint",
+    "aps_live",
+    "engine_seconds",
+    "usd_est",
+    "status"
+  ],
+  "properties": {
+    "ts": {
+      "type": "number",
+      "description": "Append time, UNIX epoch seconds (time.time()). The UTC-day bucket key for the daily run quota and the today/total split in /api/usage."
+    },
+    "tenant_id": {
+      "type": "string",
+      "description": "The tenant the run is attributed to (request body tenant_id; every metering read filters on equality)."
+    },
+    "tool": {
+      "type": ["string", "null"],
+      "description": "tool package `name` (null when the request carried no usable tool package)."
+    },
+    "engine_op": {
+      "type": "string",
+      "description": "tool package `engine_op` ('' when absent)."
+    },
+    "aps_endpoint": {
+      "type": "string",
+      "description": "The APS base URL this broker process targets (constant per process)."
+    },
+    "aps_live": {
+      "type": "boolean",
+      "description": "True iff the run was requested against real APS (APS-money path). Metered quotas count ONLY aps_live:true lines; APS_LIVE=0 runs are un-metered/free."
+    },
+    "engine_seconds": {
+      "type": ["number", "null"],
+      "description": "Engine time reported by the run's cost block; null when the path yields no cost (mock, denial, failure before execution)."
+    },
+    "usd_est": {
+      "type": ["number", "null"],
+      "description": "Estimated spend in USD from the run's cost block; null when unknown. Spend aggregation sums non-null values on non-denied lines."
+    },
+    "status": {
+      "type": "string",
+      "description": "'ok' for a successful envelope; otherwise the §10 error_code of the returned envelope (e.g. TENANT_DISABLED, QUOTA_EXCEEDED, BAD_PARAMS, WORKITEM_FAILED) or 'INTERNAL' for an unhandled exception. Denial statuses (TENANT_DISABLED, QUOTA_EXCEEDED) are excluded from spend/run counting."
+    }
+  }
+}
