@@ -681,6 +681,15 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 
 > **§10 enum update (2026-07-18):** `GRANT_REQUIRED` (HTTP 401) and `ENTITLEMENT_REQUIRED` (HTTP 403) promoted into the frozen ErrorCode enum + `envelope_schema.json`. The grant-required (§16) and entitlement-denied (§17) responses now carry these dedicated `error.error_code`s instead of `BAD_PARAMS`; the additive top-level markers (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are unchanged, so existing consumers keep working.
 
+> **§17 platform-lane extension (2026-07-22):** the platform jobs lane
+> (`POST /api/projects/{id}/jobs`, `platform/entitlements.py`) now enforces the
+> SAME tier policy: job kinds map onto §17's capabilities (`solve`/`run` →
+> `run_write`, `extract` → `run_read`, `build` → `build`), resolved through
+> `server/entitlements.py`'s fail-closed `entitlements_for` and denied with the
+> §17 envelope. The org's STORED tier (orgs.tier) is the source there, not the
+> JWT claim; non-`active` org status also denies. Binary proof:
+> `scripts/entitlement-gate.py` (READY/NOT-READY, exit 0/1).
+
 ## §18 Conversational agent sessions (agent spine, Phase 1)
 
 Session: `agent-spine-phase1`, 2026-07-20. The contract for the conversational spine:

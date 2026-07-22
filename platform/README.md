@@ -114,6 +114,24 @@ The Wave-1 build ran against an **ephemeral Neon branch** `leaf-platform-dev-w1`
 reproducible backing stores for platform integration tests; do not delete them
 until those tests have moved to the deployed environment.
 
+## Tier entitlement enforcement on the jobs lane (P1 floor)
+
+`POST /api/projects/{id}/jobs` branches on the caller org's stored `tier`
+(`platform/entitlements.py`): each job kind consumes a server-lane capability
+(`solve`/`run` → `run_write`, `extract` → `run_read`, `build` → `build`) and
+the tier→capability policy is the SAME operator-tunable file the server lane
+enforces (`server/entitlements.json`, override `LEAF_ENTITLEMENTS_FILE`),
+resolved through `server/entitlements.py`'s fail-closed `entitlements_for`.
+Denials return the documented `entitlement_required` 403 envelope
+(CONTRACT-ADDENDUM §17). Fail-closed rules: missing org row, non-`active` org
+status, unknown/blank tier (→ `restricted`), unmapped kind, and an unloadable
+policy seam (503) all refuse the job.
+
+Binary proof: `python scripts/entitlement-gate.py` exits 0 (READY) only when
+an entitled org's solve succeeds AND a restricted org's solve is DENIED;
+anything else — including an unreachable enforcement point — is NOT-READY
+exit 1. Tests: `platform/tests/test_entitlement.py`.
+
 ## Org bootstrap route — `POST /api/orgs` (dev posture: OPEN)
 
 `POST /api/orgs {name, tier?}` mints an org and returns `{org: {org_id, name,
