@@ -151,7 +151,8 @@ def _reject_oversized_params(params: Dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg: str,
                aps_live: bool, org_id: Optional[str] = None,
-               project_id: Optional[str] = None) -> str:
+               project_id: Optional[str] = None,
+               dwg_version: Optional[int] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -159,6 +160,11 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     present AND a platform DB resolves, a canonical platform Job row is recorded
     (best-effort, env-gated; see platform_link). With no project context this is
     a no-op and the spine is byte-identical to before.
+
+    ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
+    immutable drawing version (da/store.py resolve_version); threaded through to
+    the broker call ONLY (not persisted in the durable row — this is an execution
+    parameter, not a stored job field).
 
     Rejects an over-cap ``params`` blob (> ``MAX_PARAMS_BYTES``) with HTTP 400 before
     any durable row / broker payload is written (security-audit F15).
@@ -176,7 +182,7 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     # best-effort platform Job linkage (never raises, never affects the run)
     platform_link.on_submit(job_id, org_id, project_id, tool.get("name"), params)
     assert _executor is not None
-    _executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live)
+    _executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live, dwg_version)
     return job_id
 
 
@@ -255,7 +261,7 @@ def _finish(job_id: str, status: str, started: float,
 
 
 def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
-             dwg: str, aps_live: bool) -> None:
+             dwg: str, aps_live: bool, dwg_version: Optional[int] = None) -> None:
     started = time.time()
     max_s = job_max_s()
     _exec("UPDATE jobs SET status = 'running', progress = 'running', started_at = ?,"
@@ -271,7 +277,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     def _call() -> None:
         try:
             holder["env"] = broker_client.run_via_broker(
-                tenant_id, tool, params, dwg, aps_live, timeout_s=max_s + 30
+                tenant_id, tool, params, dwg, aps_live, timeout_s=max_s + 30,
+                dwg_version=dwg_version,
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc

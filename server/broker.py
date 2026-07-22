@@ -389,6 +389,8 @@ class BrokerRunRequest(BaseModel):
     params: Dict[str, Any] = {}
     dwg: str = "rooftop_demo"
     aps_live: bool = False
+    dwg_version: Optional[int] = None  # None -> head (unchanged); pin to a specific
+    # immutable drawing version (da/store.py resolve_version) otherwise.
 
 
 class BrokerExtractRequest(BaseModel):
@@ -643,21 +645,25 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     #     LEAF_SANDBOX=e2b out-of-process sandbox as the read path (no tenant-code exec in
     #     this credential-holding PID when sandboxed).
     if write_loop.is_write_tool(tool):
+        # dwg_version pins the version this write branches FROM (parent); None -> "head"
+        # (byte-identical to before this feature).
+        base_version = req.dwg_version if req.dwg_version is not None else "head"
         if req.aps_live:
             da = _get_da()
             if da is not None and hasattr(da, "run_tool"):
                 backend = write_loop.default_backend(aps_live=True, da=da)
                 return write_loop.run_write_live(tool, params, req.tenant_id,
                                                  backend=backend, da=da, t0=t0,
-                                                 ledger_entry=entry)
+                                                 ledger_entry=entry, version=base_version)
             # requested live but no da client -> degraded pure-python write
             backend = write_loop.default_backend(aps_live=False)
             return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
                                              t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
-                                             degraded=True)
+                                             degraded=True, version=base_version)
         backend = write_loop.default_backend(aps_live=False)
         return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
-                                         t0=t0, run_tool_dynamic_fn=run_tool_dynamic)
+                                         t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
+                                         version=base_version)
 
     # 2) live path — the ONLY code path that touches da/client.py + the credential
     if req.aps_live:
@@ -715,11 +721,29 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             time.sleep(min(float(qa_sleep), QA_SLEEP_CAP_S))  # QA latency-simulation hook
         except (TypeError, ValueError):
             pass
-    try:
-        intake = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        return (err_envelope(ErrorCode.INTERNAL, f"cached intake unavailable: {exc}",
-                             retryable=False, tool=tool.get("name")), 500)
+    if req.dwg_version is not None:
+        # VERSION-PINNED read: load the requested version through the SAME versioned
+        # store the write branch uses (da/store.py resolve_version), scoped to this
+        # tenant's well-known `demo` drawing (write_loop.DEMO_DRAWING_ID) — mirrors
+        # write_loop.run_write_mock's own read_intake call. An unknown version raises
+        # (KeyError/ValueError from store.resolve_version) -> a clean BAD_PARAMS
+        # envelope, never a crash. Omitted dwg_version (None) takes the UNCHANGED
+        # DATA_FILE path below — byte-identical to before this feature.
+        try:
+            backend = write_loop.default_backend(aps_live=False)
+            write_loop.ensure_demo_drawing(backend, req.tenant_id, write_loop.DEMO_DRAWING_ID)
+            _, intake = write_loop.read_intake(backend, req.tenant_id,
+                                               write_loop.DEMO_DRAWING_ID, req.dwg_version)
+        except (KeyError, ValueError) as exc:
+            return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
+                                 retryable=False, tool=tool.get("name")),
+                    DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+    else:
+        try:
+            intake = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            return (err_envelope(ErrorCode.INTERNAL, f"cached intake unavailable: {exc}",
+                                 retryable=False, tool=tool.get("name")), 500)
     # F2 / lane 2B: run_tool_dynamic executes the tenant tool FILE. When LEAF_SANDBOX=e2b it
     # runs that body OUT of this credential-holding broker PID, in a locked-down sandbox with
     # no APS credential / token reachability and no egress (tool_loader._run_in_sandbox). With

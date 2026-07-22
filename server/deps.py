@@ -29,6 +29,11 @@ DA_DIR = PROJECT_ROOT / "da"
 ENGINE_REGISTRY = ENGINE_DIR / "registry.json"
 AUTHORED_STORE = SERVER_DIR / "authored_tools.json"  # our lane persists authored tools here
 WRITE_TOOLS_STORE = SERVER_DIR / "write_tools.json"  # tracked server-lane seed for drawing.write tools (M2)
+CATALOG_TOOLS_STORE = SERVER_DIR / "catalog_tools.json"  # tracked server-lane seed for GENERAL
+# (non-write) tools whose only reachable implementation is a server/builtins/*.py file that
+# engine/registry.json (Lane B) does not itself carry — e.g. autofill-string-targets. Folded
+# the SAME way as WRITE_TOOLS_STORE so /api/run resolves them by name regardless of what the
+# engine registry happens to contain.
 
 # make sibling lanes importable (engine.selfcheck, da.client)
 for p in (str(PROJECT_ROOT), str(SERVER_DIR)):
@@ -115,6 +120,21 @@ def load_seed_write_tools() -> List[Dict[str, Any]]:
     return []
 
 
+def load_seed_catalog_tools() -> List[Dict[str, Any]]:
+    """Tracked server-lane seed (catalog_tools.json) for general read-class tools
+    that need to resolve via deps.find_tool regardless of engine/registry.json's
+    own contents (Lane B owns that file; this repo lane does not edit it). Kept
+    separate from WRITE_TOOLS_STORE, which is documented + used for drawing.write
+    tools specifically."""
+    if CATALOG_TOOLS_STORE.exists():
+        try:
+            tools = json.loads(CATALOG_TOOLS_STORE.read_text(encoding="utf-8")).get("tools", [])
+            return [t for t in tools if isinstance(t, dict) and t.get("name")]
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[leaf-demo] bad catalog_tools.json: {exc}", file=sys.stderr)
+    return []
+
+
 def save_authored_tools(tools: List[Dict[str, Any]]) -> None:
     AUTHORED_STORE.write_text(json.dumps({"tools": tools}, indent=2), encoding="utf-8")
 
@@ -167,19 +187,23 @@ _AUTHORED: List[Dict[str, Any]] = load_authored_tools()
 
 
 def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
-    """Registry tools + THIS TENANT's repo tools + write seed + authored tools, de-duped
-    by name. PRECEDENCE (last wins): engine registry < tenant-repo (per tenant) <
-    write seed < authored_tools.json — so a tenant-repo tool overrides an engine tool
-    of the same name, and an authored tool overrides both (CONTRACT-ADDENDUM §15).
+    """Registry tools + general-catalog seed + THIS TENANT's repo tools + write seed +
+    authored tools, de-duped by name. PRECEDENCE (last wins): engine registry <
+    general-catalog seed < tenant-repo (per tenant) < write seed < authored_tools.json —
+    so a tenant-repo tool overrides an engine/catalog-seed tool of the same name, and an
+    authored tool overrides all of them (CONTRACT-ADDENDUM §15).
 
     TENANT SCOPE (wave 4): only the tenant-repo fold is per-tenant — the engine
-    registry, write seed, and the process-global authored store are GLOBAL (visible to
-    every tenant). So tenant A's harness-authored tools (in A's repo) are invisible to
-    tenant B, while shared globals are visible to both. With no tenant repo resolvable
-    (neither $LEAF_TENANTS_DIR nor $LEAF_TENANT_REPO set) the tenant fold is empty and
-    this is BYTE-IDENTICAL to the pre-wave-3 union."""
+    registry, general-catalog seed, write seed, and the process-global authored store
+    are GLOBAL (visible to every tenant). So tenant A's harness-authored tools (in A's
+    repo) are invisible to tenant B, while shared globals are visible to both. With no
+    tenant repo resolvable (neither $LEAF_TENANTS_DIR nor $LEAF_TENANT_REPO set) the
+    tenant fold is empty and this is BYTE-IDENTICAL to the pre-wave-3 union (plus the
+    additive general-catalog seed)."""
     by_name: Dict[str, Dict[str, Any]] = {}
     for t in load_engine_registry_tools():
+        by_name[t["name"]] = t
+    for t in load_seed_catalog_tools():  # tracked general-catalog seed (non-write)
         by_name[t["name"]] = t
     for t in load_tenant_repo_tools(tenant_id):  # the REQUESTING tenant's OWN registry
         by_name[t["name"]] = t
