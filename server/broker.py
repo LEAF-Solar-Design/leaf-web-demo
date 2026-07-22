@@ -495,31 +495,23 @@ def _live_script_is_nonempty(tool: Dict[str, Any], da: Any) -> bool:
     that provisions this tool's live Activity — produces a non-empty (non-whitespace)
     accoreconsole script for it.
 
-    Review 2026-07-22 (round 2, HIGH — sharper than round 1): a PRIOR version of this
-    guard only checked for the PRESENCE of an `engine_script`/`.lsp` `script`
-    reference, which is not sufficient. `tool_activity_spec` resolves a `.lsp`
-    `script` path relative to the PROJECT ROOT (two directories up from
-    da/client.py), but `engine/registry.json`'s shipped tool entries write that path
-    as `tools/<name>.lsp` — while the `.lsp` FILES actually live at
-    `engine/tools/<name>.lsp`. The resolved read therefore fails (caught, silently
-    falls back to an EMPTY script). Reproduced dependency-free (no APS creds
-    needed): calling the real `da.client.tool_activity_spec({"script":
-    "tools/count_by_layer.lsp"})` emits a ZERO-length script TODAY — for EVERY
-    currently shipped engine-registry tool (count-by-layer, measure-panel-area,
-    highlight-panels-near-edge all share that same path convention), not just the
-    new autofill-string-targets entry.
+    Ongoing purpose: this guard calls the REAL function (never a re-implemented
+    heuristic of what "looks like" a live script), so it tracks any future drift
+    in that resolution logic and FAILS CLOSED on any tool whose emitted script is
+    empty or unreadable (a dangling or mistyped `script` path, an unreadable
+    file, a spec-build failure). Such a tool gets an explicit, non-retryable
+    BAD_PARAMS instead of silently submitting an EMPTY-script WorkItem to APS.
 
-    That path-resolution mismatch lives in da/client.py + engine/registry.json —
-    OUTSIDE this session's server/-only write-set — and is NOT fixed here (no file
-    move, no da/client.py edit). This guard now calls the REAL function (never a
-    re-implemented heuristic of what "looks like" a live script), so it is immune
-    to any future drift in that resolution logic, and it FAILS CLOSED for those
-    pre-existing tools too. That is a deliberate, honest behaviour change: those
-    tools could never run live correctly before this fix either (they would have
-    silently submitted an EMPTY-script WorkItem to APS); they now get an explicit,
-    non-retryable BAD_PARAMS instead of a silent no-op. The path-resolution fix
-    itself is a tracked follow-up for the da/client.py + engine/registry.json
-    owners (Lane B / Lane A), not this session's to make.
+    History (review 2026-07-22, round 2, HIGH): a PRIOR version of this guard
+    only checked for the PRESENCE of an `engine_script`/`.lsp` `script`
+    reference, which was not sufficient. At the time, `engine/registry.json`'s
+    shipped tool entries declared their `.lsp` path as `tools/<name>.lsp` while
+    the files lived at `engine/tools/<name>.lsp`, so `tool_activity_spec`'s
+    project-root-relative read failed (caught, silently fell back to an EMPTY
+    script) for EVERY then-shipped engine-registry tool. That path mismatch was
+    fixed in PR #15: `engine/registry.json` + `da/registry_live.json` now declare
+    root-relative `engine/tools/<name>.lsp` paths, so the shipped tools resolve
+    to non-empty scripts and pass this guard.
     """
     if da is None or not hasattr(da, "tool_activity_spec"):
         return False  # can't verify the REAL resolution -> fail closed, never guess
@@ -797,11 +789,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
         elif not _live_script_is_nonempty(tool, da):
             # FAIL CLOSED (review 2026-07-22, HIGH, round 2): verified against the
-            # REAL da/client.py:tool_activity_spec resolution (see
-            # `_live_script_is_nonempty`'s docstring for the full story, incl. why
-            # this ALSO fails closed for the pre-existing shipped engine tools whose
-            # declared `.lsp` path does not resolve today) — never a re-implemented
-            # heuristic, and never a fabricated live script.
+            # REAL da/client.py:tool_activity_spec resolution, never a
+            # re-implemented heuristic and never a fabricated live script. See
+            # `_live_script_is_nonempty`'s docstring (the shipped-tool `.lsp` path
+            # mismatch this guard originally caught was fixed in PR #15).
             return (err_envelope(
                 ErrorCode.BAD_PARAMS,
                 f"tool {tool.get('name')!r} has no usable live (APS) implementation "
