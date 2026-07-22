@@ -41,13 +41,19 @@ class BrokerUnreachable(Exception):
 
 
 def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
-                   dwg: str, aps_live: bool, timeout_s: Optional[float] = None) -> Dict[str, Any]:
-    """POST /broker/run -> extended section-3 envelope (ok true OR false)."""
+                   dwg: str, aps_live: bool, timeout_s: Optional[float] = None,
+                   dwg_version: Optional[int] = None) -> Dict[str, Any]:
+    """POST /broker/run -> extended section-3 envelope (ok true OR false).
+
+    ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
+    immutable drawing version; carried straight through as an extra JSON field so
+    an older broker (that ignores unknown fields) stays compatible.
+    """
     try:
         resp = requests.post(
             f"{broker_url()}/broker/run",
             json={"tenant_id": tenant_id, "tool": tool, "params": params,
-                  "dwg": dwg, "aps_live": bool(aps_live)},
+                  "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version},
             headers=broker_headers(),
             timeout=timeout_s or 600,
         )

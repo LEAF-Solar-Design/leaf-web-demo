@@ -30,6 +30,8 @@ class RunRequest(BaseModel):
     tool: str
     params: Dict[str, Any] = {}
     dwg: str = "rooftop_demo"
+    dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
+    # specific immutable drawing version (da/store.py resolve_version) otherwise.
 
 
 def _record_body(rec: Dict[str, Any]) -> Dict[str, Any]:
@@ -87,7 +89,8 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     params.update(req.params or {})
 
     job_id = jobs.submit_job(tenant_id, tool, params, req.dwg, aps_live=deps.APS_LIVE,
-                             org_id=x_org_id, project_id=x_project_id)
+                             org_id=x_org_id, project_id=x_project_id,
+                             dwg_version=req.dwg_version)
 
     if wait:
         rec = jobs.wait_for_terminal(job_id, timeout_s=jobs.job_max_s() + 30)

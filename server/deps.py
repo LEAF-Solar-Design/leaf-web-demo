@@ -15,7 +15,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Header, Request
 
@@ -30,6 +30,11 @@ DA_DIR = PROJECT_ROOT / "da"
 ENGINE_REGISTRY = ENGINE_DIR / "registry.json"
 AUTHORED_STORE = SERVER_DIR / "authored_tools.json"  # our lane persists authored tools here
 WRITE_TOOLS_STORE = SERVER_DIR / "write_tools.json"  # tracked server-lane seed for drawing.write tools (M2)
+CATALOG_TOOLS_STORE = SERVER_DIR / "catalog_tools.json"  # tracked server-lane seed for GENERAL
+# (non-write) tools whose only reachable implementation is a server/builtins/*.py file that
+# engine/registry.json (Lane B) does not itself carry — e.g. autofill-string-targets. Folded
+# the SAME way as WRITE_TOOLS_STORE so /api/run resolves them by name regardless of what the
+# engine registry happens to contain.
 
 import platform as _stdlib_platform  # noqa: F401,E402  (cache stdlib before the
 #   PROJECT_ROOT sys.path insert below makes the local platform/ package shadow it;
@@ -122,6 +127,21 @@ def load_seed_write_tools() -> List[Dict[str, Any]]:
     return []
 
 
+def load_seed_catalog_tools() -> List[Dict[str, Any]]:
+    """Tracked server-lane seed (catalog_tools.json) for general read-class tools
+    that need to resolve via deps.find_tool regardless of engine/registry.json's
+    own contents (Lane B owns that file; this repo lane does not edit it). Kept
+    separate from WRITE_TOOLS_STORE, which is documented + used for drawing.write
+    tools specifically."""
+    if CATALOG_TOOLS_STORE.exists():
+        try:
+            tools = json.loads(CATALOG_TOOLS_STORE.read_text(encoding="utf-8")).get("tools", [])
+            return [t for t in tools if isinstance(t, dict) and t.get("name")]
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[leaf-demo] bad catalog_tools.json: {exc}", file=sys.stderr)
+    return []
+
+
 def save_authored_tools(tools: List[Dict[str, Any]]) -> None:
     AUTHORED_STORE.write_text(json.dumps({"tools": tools}, indent=2), encoding="utf-8")
 
@@ -173,24 +193,83 @@ def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, A
 _AUTHORED: List[Dict[str, Any]] = load_authored_tools()
 
 
+class ToolCatalogCollisionError(RuntimeError):
+    """Raised when the SAME tool name is defined by more than one GLOBAL catalog
+    tier that has no documented override relationship with the others."""
+
+
+def _check_global_seed_collisions(tiers: List[Tuple[str, List[Dict[str, Any]]]]) -> None:
+    """Fail LOUDLY (raise) on a name collision across the GLOBAL, non-per-tenant,
+    non-authored catalog tiers (engine registry, general-catalog seed, write seed).
+
+    These three tiers are maintained independently (Lane B owns engine/registry.json;
+    this lane owns catalog_tools.json / write_tools.json) and have NO documented
+    override relationship with EACH OTHER — unlike tenant-repo and authored_tools.json,
+    which are INTENTIONALLY the override tiers (CONTRACT-ADDENDUM §15; see
+    tests/test_wave3.py's Contract 2 fold-precedence tests, which rely on a
+    tenant-repo/authored tool DELIBERATELY shadowing a same-named engine tool). Those
+    two tiers are therefore excluded from this check — this only guards the tiers
+    where a same-name collision could only ever be an accident, and where Python
+    dict-insertion order would otherwise silently decide which tool's capabilities
+    (read vs write, params schema, entry) win.
+
+    Review 2026-07-22 (LOW, cheap-to-fix): added so a future name clash cannot
+    silently swap capabilities.
+    """
+    owner: Dict[str, str] = {}
+    for tier_name, tools in tiers:
+        for t in tools:
+            name = t.get("name")
+            if not name:
+                continue
+            prior = owner.get(name)
+            if prior is not None and prior != tier_name:
+                raise ToolCatalogCollisionError(
+                    f"tool name collision across GLOBAL catalog tiers: {name!r} is "
+                    f"defined in both {prior!r} and {tier_name!r}; these tiers have no "
+                    f"documented override precedence over each other (unlike "
+                    f"tenant-repo/authored_tools.json, which intentionally shadow) — "
+                    f"rename one of them.")
+            owner.setdefault(name, tier_name)
+
+
 def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
-    """Registry tools + THIS TENANT's repo tools + write seed + authored tools, de-duped
-    by name. PRECEDENCE (last wins): engine registry < tenant-repo (per tenant) <
-    write seed < authored_tools.json — so a tenant-repo tool overrides an engine tool
-    of the same name, and an authored tool overrides both (CONTRACT-ADDENDUM §15).
+    """Registry tools + general-catalog seed + THIS TENANT's repo tools + write seed +
+    authored tools, de-duped by name. PRECEDENCE (last wins): engine registry <
+    general-catalog seed < tenant-repo (per tenant) < write seed < authored_tools.json —
+    so a tenant-repo tool overrides an engine/catalog-seed tool of the same name, and an
+    authored tool overrides all of them (CONTRACT-ADDENDUM §15).
 
     TENANT SCOPE (wave 4): only the tenant-repo fold is per-tenant — the engine
-    registry, write seed, and the process-global authored store are GLOBAL (visible to
-    every tenant). So tenant A's harness-authored tools (in A's repo) are invisible to
-    tenant B, while shared globals are visible to both. With no tenant repo resolvable
-    (neither $LEAF_TENANTS_DIR nor $LEAF_TENANT_REPO set) the tenant fold is empty and
-    this is BYTE-IDENTICAL to the pre-wave-3 union."""
+    registry, general-catalog seed, write seed, and the process-global authored store
+    are GLOBAL (visible to every tenant). So tenant A's harness-authored tools (in A's
+    repo) are invisible to tenant B, while shared globals are visible to both. With no
+    tenant repo resolvable (neither $LEAF_TENANTS_DIR nor $LEAF_TENANT_REPO set) the
+    tenant fold is empty and this is BYTE-IDENTICAL to the pre-wave-3 union (plus the
+    additive general-catalog seed).
+
+    Raises ``ToolCatalogCollisionError`` if the SAME name is defined by more than one
+    of the three GLOBAL, no-override-relationship tiers (engine registry / general-
+    catalog seed / write seed) — see ``_check_global_seed_collisions``. Tenant-repo and
+    authored_tools.json are excluded from that check: they are the DOCUMENTED override
+    tiers and a same-name collision there is the intended shadowing behaviour, not a bug."""
+    engine_tools = load_engine_registry_tools()
+    catalog_tools = load_seed_catalog_tools()
+    write_tools = load_seed_write_tools()
+    _check_global_seed_collisions([
+        ("engine_registry", engine_tools),
+        ("catalog_seed", catalog_tools),
+        ("write_seed", write_tools),
+    ])
+
     by_name: Dict[str, Dict[str, Any]] = {}
-    for t in load_engine_registry_tools():
+    for t in engine_tools:
+        by_name[t["name"]] = t
+    for t in catalog_tools:  # tracked general-catalog seed (non-write)
         by_name[t["name"]] = t
     for t in load_tenant_repo_tools(tenant_id):  # the REQUESTING tenant's OWN registry
         by_name[t["name"]] = t
-    for t in load_seed_write_tools():  # tracked drawing.write seed (M2)
+    for t in write_tools:  # tracked drawing.write seed (M2)
         by_name[t["name"]] = t
     for t in _AUTHORED:  # in-memory authored list (also persisted)
         by_name[t["name"]] = t
