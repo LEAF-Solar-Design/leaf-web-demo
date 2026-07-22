@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   project_id TEXT,
   authority_mode TEXT NOT NULL DEFAULT 'legacy_sqlite',
   idempotency_key TEXT,
-  submission_fingerprint TEXT
+  submission_fingerprint TEXT,
+  dwg_version INTEGER
 )
 """
 
@@ -122,6 +123,7 @@ _MIGRATIONS = {
     "authority_mode": "TEXT NOT NULL DEFAULT 'legacy_sqlite'",
     "idempotency_key": "TEXT",
     "submission_fingerprint": "TEXT",
+    "dwg_version": "INTEGER",
 }
 
 
@@ -137,6 +139,23 @@ def _db() -> sqlite3.Connection:
         for name, ddl in _MIGRATIONS.items():
             if name not in columns:
                 _conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
+        # Backfill dwg_version for rows written by releases that stored the pin
+        # only inside execution_json. Runs on EVERY first-connect and touches
+        # only NULL rows, so a previously interrupted backfill is retried rather
+        # than permanently skipped (the ALTER above may already have committed
+        # the column before a mid-backfill failure). Python-side parse — no
+        # JSON1 dependency; malformed or non-object payloads are skipped.
+        for row in _conn.execute(
+                "SELECT job_id, execution_json FROM jobs "
+                "WHERE dwg_version IS NULL AND execution_json IS NOT NULL").fetchall():
+            try:
+                decoded = json.loads(row["execution_json"])
+            except (ValueError, TypeError):
+                continue
+            pin = decoded.get("dwg_version") if isinstance(decoded, dict) else None
+            if isinstance(pin, int) and not isinstance(pin, bool):
+                _conn.execute("UPDATE jobs SET dwg_version = ? WHERE job_id = ?",
+                              (pin, row["job_id"]))
         _conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS jobs_project_idempotency_uq "
             "ON jobs(tenant_id, project_id, idempotency_key) "
@@ -188,6 +207,7 @@ def _row_to_record(row: sqlite3.Row) -> Dict[str, Any]:
         "authority_mode": (row["authority_mode"] if "authority_mode" in row.keys()
                            else "legacy_sqlite"),
         "idempotency_key": row["idempotency_key"] if "idempotency_key" in row.keys() else None,
+        "dwg_version": row["dwg_version"] if "dwg_version" in row.keys() else None,
     }
     return rec
 
@@ -259,16 +279,14 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     a no-op and the spine is byte-identical to before.
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
-    immutable drawing version (da/store.py resolve_version); threaded through to
-    the broker call ONLY (not persisted in the durable row — this is an execution
-    parameter, not a stored job field).
-
-    FOLLOW-UP (deliberate, recorded 2026-07-22): ``dwg_version`` provenance is NOT
-    persisted on the job row (no ``dwg_version`` column in ``_SCHEMA``) — so
-    ``GET /api/jobs/{id}`` cannot yet show which version a past run was pinned to.
-    Adding that column requires a SQLite migration (``ALTER TABLE jobs ADD COLUMN``)
-    for any already-deployed ``jobs.db``, which is out of scope for this minimal
-    threading change; tracked as a follow-up, not silently dropped.
+    immutable drawing version (da/store.py resolve_version). It is threaded to the
+    broker call AND persisted on the job row as an additive ``dwg_version`` column
+    (resolved 2026-07-22, closing the follow-up recorded at the pinning merge), so
+    ``GET /api/jobs/{id}`` shows which version a past run was pinned to. Already-
+    deployed ``jobs.db`` files gain the column via the ``_MIGRATIONS`` upgrade
+    path, and rows written by releases that stored the pin only in
+    ``execution_json`` are backfilled from it at the migration moment; rows with
+    no recorded pin read back ``dwg_version: None``.
 
     Rejects an over-cap ``params`` blob (> ``MAX_PARAMS_BYTES``) with HTTP 400 before
     any durable row / broker payload is written (security-audit F15).
@@ -307,12 +325,14 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
             conn.execute(
                 "INSERT INTO jobs (job_id, tenant_id, tool, params_json, dwg, status, progress, "
                 "created_at, updated_at, execution_json, org_id, project_id, authority_mode, "
-                "idempotency_key, submission_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "idempotency_key, submission_fingerprint, dwg_version) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, str(tenant_id), tool["name"], json.dumps(params), dwg, "submitted",
                  "queued", now, now,
                  json.dumps({"tool": tool, "aps_live": bool(aps_live),
                              "dwg_version": dwg_version}),
-                 org_id, project_id, authority_mode, idempotency_key, submission_fingerprint),
+                 org_id, project_id, authority_mode, idempotency_key, submission_fingerprint,
+                 dwg_version),
             )
             conn.commit()
         except sqlite3.IntegrityError:
