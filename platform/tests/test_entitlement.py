@@ -147,3 +147,103 @@ def test_missing_org_row_is_denied(pinned_policy):
     assert body["entitlement_required"] is True
     assert body["required"] == "org_active"
     assert body["tier"] == "restricted"
+
+
+# --------------------------------------------------------------------------- #
+# canonical submission choke point (POST /api/run spine path) — the STORED
+# org's tier/status decides at submit_solve_job itself, so no caller (UI,
+# spine, off-auth demo tenant) can bypass the floor with a permissive
+# request-side tier.
+# --------------------------------------------------------------------------- #
+def _canonical_project(make_org, name, **org_overrides):
+    from leaf_platform import store
+
+    org = make_org(name=name, **({"tier": org_overrides.pop("tier")} if "tier" in org_overrides else {}))
+    if org_overrides:
+        _set_org(org.org_id, **org_overrides)
+    project = store.create_project(org.org_id, name)
+    store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
+    return org, project
+
+
+def test_canonical_submission_denies_stored_restricted_org(make_org, pinned_policy):
+    from leaf_platform import canonical_jobs
+    from leaf_platform.entitlements import EntitlementDenied
+
+    org, project = _canonical_project(make_org, "Canon Restricted")
+    _set_org(org.org_id, tier="restricted")
+    with pytest.raises(EntitlementDenied) as excinfo:
+        canonical_jobs.submit_solve_job(
+            org.org_id, project.project_id, str(org.org_id),
+            "string-autofill-opt", {}, "ent-canon-deny-1")
+    resp = excinfo.value.response
+    assert resp.status_code == 403
+    body = json.loads(resp.body)
+    assert body["entitlement_required"] is True
+    assert body["required"] == "run_write"
+    assert body["tier"] == "restricted"
+    assert body["error"]["error_code"] == "ENTITLEMENT_REQUIRED"
+    assert body["error"]["retryable"] is False
+    assert body["degraded_mode"] is False
+
+
+def test_canonical_submission_denies_inactive_org_and_allows_entitled(make_org, pinned_policy):
+    from leaf_platform import canonical_jobs
+    from leaf_platform.entitlements import EntitlementDenied
+
+    org, project = _canonical_project(make_org, "Canon Entitled", tier="hosted_starter")
+    job = canonical_jobs.submit_solve_job(
+        org.org_id, project.project_id, str(org.org_id),
+        "string-autofill-opt", {}, "ent-canon-allow-1")
+    assert job["kind"] == "solve" and job["status"] == "queued"
+
+    _set_org(org.org_id, status="offboarding")
+    with pytest.raises(EntitlementDenied) as excinfo:
+        canonical_jobs.submit_solve_job(
+            org.org_id, project.project_id, str(org.org_id),
+            "string-autofill-opt", {}, "ent-canon-deny-2")
+    body = json.loads(excinfo.value.response.body)
+    assert body["required"] == "org_active"
+    assert body["error"]["error_code"] == "ENTITLEMENT_REQUIRED"
+
+
+# --------------------------------------------------------------------------- #
+# policy/enforcement-data unavailability — structured 503, never a bare 500,
+# never an allow (MAJOR fix: the boundary covers the WHOLE evaluation, not
+# just module loading).
+# --------------------------------------------------------------------------- #
+def test_unreadable_policy_is_structured_503(client, make_org, tmp_path, monkeypatch):
+    org = make_org(name="Broken Policy Org", tier="hosted_pro")
+    hdr, pid = _make_project(client, org)
+    bad = tmp_path / "broken-entitlements.json"
+    bad.write_text("{this is not json", encoding="utf-8")
+    monkeypatch.setenv("LEAF_ENTITLEMENTS_FILE", str(bad))
+    r = _post_job(client, hdr, pid, "solve")
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["entitlement_required"] is True
+    assert body["required"] == "run_write"
+    assert body["tier"] == "hosted_pro"
+    assert body["degraded_mode"] is False
+    assert body["error"]["error_code"] == "INTERNAL"  # frozen §10 enum, not an ad-hoc code
+    assert body["error"]["retryable"] is True
+    assert isinstance(body["error"]["message"], str) and body["error"]["message"]
+
+
+def test_org_read_failure_is_structured_503(monkeypatch, pinned_policy):
+    import uuid as _uuid
+
+    from leaf_platform import entitlements as ents_mod
+
+    def _boom(_org_id):
+        raise RuntimeError("enforcement DB unreachable")
+
+    monkeypatch.setattr(ents_mod.store, "get_org", _boom)
+    denial = ents_mod.stored_job_entitlement_denial(_uuid.uuid4(), "solve")
+    assert denial is not None and denial.status_code == 503
+    body = json.loads(denial.body)
+    assert body["entitlement_required"] is True
+    assert body["required"] == "run_write"
+    assert body["tier"] == "restricted"
+    assert body["error"]["error_code"] == "INTERNAL"
+    assert body["error"]["retryable"] is True

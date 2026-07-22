@@ -170,8 +170,10 @@ def create_job(project_id: uuid.UUID, body: CreateJobBody,
     if store.get_project(org_id, project_id) is None:
         raise HTTPException(status_code=404, detail="project not found")
     # Tier-branching entitlement enforcement (P1 floor): the caller org's tier
-    # must grant the capability this job kind consumes; fail closed.
-    denial = entitlements.job_entitlement_denial(store.get_org(org_id), body.kind)
+    # must grant the capability this job kind consumes; fail closed. The org
+    # read happens INSIDE the helper's fail-closed boundary (a DB hiccup on the
+    # enforcement read refuses with the structured 503, not a bare 500).
+    denial = entitlements.stored_job_entitlement_denial(org_id, body.kind)
     if denial is not None:
         return denial
     job = store.create_job(

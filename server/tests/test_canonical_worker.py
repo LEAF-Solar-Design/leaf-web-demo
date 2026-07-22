@@ -237,3 +237,35 @@ def test_canonical_worker_container_contract_is_non_root_and_source_bound():
 
     assert "idempotent resubmission created another job" in smoke
     assert 'expected = {"jobs": 1, "solves": 1, "history": 1, "outbox": 2, "solvePins": 3}' in smoke
+
+
+def test_run_route_returns_stored_entitlement_denial_verbatim(monkeypatch):
+    """P1 floor: a stored-org denial raised at the canonical choke point comes
+    back as the documented envelope, never rewrapped as BAD_PARAMS."""
+    from fastapi.responses import JSONResponse
+
+    tool = {"name": "string-autofill-opt", "canonical_only": True,
+            "capabilities": ["drawing.read"], "default_params": {}}
+    context = {"org_id": "org-1", "project_id": "project-1",
+               "authority_mode": "postgres_canonical"}
+    denial = JSONResponse(status_code=403, content={
+        "entitlement_required": True, "required": "run_write", "tier": "restricted",
+        "error": {"error_code": "ENTITLEMENT_REQUIRED",
+                  "message": "denied", "retryable": False},
+        "degraded_mode": False})
+
+    def _deny(*_args, **_kwargs):
+        raise jobs_router.jobs.platform_link.CanonicalEntitlementDenied(denial)
+
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: tool)
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
+                        lambda *_args: context)
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "submit_canonical_solve", _deny)
+    monkeypatch.setattr(jobs_router.jobs, "submit_job",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            AssertionError("denied canonical run touched SQLite")))
+    response = jobs_router.run(
+        jobs_router.RunRequest(tool="string-autofill-opt", params={}, dwg=str(uuid.uuid4())),
+        tenant_id="tenant-1", x_org_id="org-1", x_project_id="project-1",
+        idempotency_key="request-denied-1", authorization="Bearer verified")
+    assert response is denial

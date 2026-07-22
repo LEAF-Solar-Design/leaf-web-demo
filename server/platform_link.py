@@ -133,15 +133,39 @@ def _canonical_jobs_module():
     return canonical_jobs
 
 
+class CanonicalEntitlementDenied(Exception):
+    """The STORED platform org is not entitled to canonical submission.
+
+    Defined here (not imported from the platform package) so the route layer
+    can catch it even in a DB-less process where leaf_platform never loads.
+    ``response`` is the documented 403/503 denial envelope, returned verbatim.
+    """
+
+    def __init__(self, response: Any):
+        super().__init__("canonical entitlement denied")
+        self.response = response
+
+
 def submit_canonical_solve(context: Dict[str, Any], request_tenant_id: str,
                            tool_name: str, params: Dict[str, Any],
                            idempotency_key: Optional[str], input_version_id: str) -> str:
-    """Submit directly to PostgreSQL; never creates or mirrors a SQLite row."""
+    """Submit directly to PostgreSQL; never creates or mirrors a SQLite row.
+
+    Entitlement enforcement (P1 floor) happens INSIDE ``submit_solve_job``
+    against the stored org row; a denial surfaces as the typed
+    ``CanonicalEntitlementDenied`` (NOT best-effort-swallowed — enforcement is
+    the one linkage concern that must affect the run)."""
     if context.get("authority_mode") != "postgres_canonical":
         raise ValueError("canonical solve submission requires postgres_canonical authority")
-    job = _canonical_jobs_module().submit_solve_job(
-        context["org_id"], context["project_id"], str(request_tenant_id), tool_name,
-        dict(params), idempotency_key, input_version_id=uuid.UUID(str(input_version_id)))
+    _load_platform()
+    import leaf_platform.entitlements as platform_entitlements  # noqa: PLC0415
+
+    try:
+        job = _canonical_jobs_module().submit_solve_job(
+            context["org_id"], context["project_id"], str(request_tenant_id), tool_name,
+            dict(params), idempotency_key, input_version_id=uuid.UUID(str(input_version_id)))
+    except platform_entitlements.EntitlementDenied as exc:
+        raise CanonicalEntitlementDenied(exc.response) from None
     return str(job["job_id"])
 
 

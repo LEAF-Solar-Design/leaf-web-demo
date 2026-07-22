@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from psycopg.types.json import Jsonb
 
+from . import entitlements
 from .db import connection
 from .models import canonical_hash, new_uuid
 from .store import _insert_outbox
@@ -90,6 +91,14 @@ def submit_solve_job(org_id: uuid.UUID, project_id: uuid.UUID, request_tenant_id
         raise ValueError("job params must be an object")
     if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or max_attempts < 1:
         raise ValueError("max_attempts must be a positive integer")
+    # ENTITLEMENT (P1 floor): the STORED org's tier/status decides, here at the
+    # single choke point every canonical submission crosses (the POST /api/run
+    # spine path included) — the request-side JWT/demo tier gate upstream is not
+    # this check and cannot substitute for it. Fail closed; the denial carries
+    # the documented HTTP envelope up through the typed exception.
+    denial = entitlements.stored_job_entitlement_denial(org_id, "solve")
+    if denial is not None:
+        raise entitlements.EntitlementDenied(denial)
     submission = {
         "orgId": str(org_id), "projectId": str(project_id),
         "requestTenantId": str(request_tenant_id), "toolName": tool_name,

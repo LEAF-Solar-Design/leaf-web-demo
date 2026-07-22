@@ -687,8 +687,17 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 > `run_write`, `extract` → `run_read`, `build` → `build`), resolved through
 > `server/entitlements.py`'s fail-closed `entitlements_for` and denied with the
 > §17 envelope. The org's STORED tier (orgs.tier) is the source there, not the
-> JWT claim; non-`active` org status also denies. Binary proof:
-> `scripts/entitlement-gate.py` (READY/NOT-READY, exit 0/1).
+> JWT claim; non-`active` org status also denies. The same stored-org check
+> runs at the canonical submission choke point
+> (`platform/canonical_jobs.submit_solve_job`), so the `POST /api/run` spine
+> path cannot bypass it with a permissive request-side (JWT/demo) tier — the
+> denial surfaces through `server/platform_link.CanonicalEntitlementDenied`
+> and is returned verbatim. When enforcement itself cannot be evaluated
+> (policy file present-but-unreadable/invalid, org row unreadable) the refusal
+> is a structured 503 carrying the full §17 envelope with
+> `error.error_code = INTERNAL` (frozen §10 enum), `retryable = true` — never
+> a bare 500 and never an allow. Binary proof: `scripts/entitlement-gate.py`
+> (READY/NOT-READY, exit 0/1; the denial leg validates the FULL envelope).
 
 ## §18 Conversational agent sessions (agent spine, Phase 1)
 

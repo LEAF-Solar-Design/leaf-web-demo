@@ -159,6 +159,11 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                 idempotency_key=idempotency_key, authority_mode=authority_mode,
                 platform_context=platform_context,
             )
+    except jobs.platform_link.CanonicalEntitlementDenied as exc:
+        # STORED-org entitlement denial from the canonical choke point (P1
+        # floor): hand the documented 403/503 envelope back verbatim — never
+        # rewrap it as BAD_PARAMS.
+        return exc.response
     except ValueError as exc:
         message = str(exc)
         return error_response(

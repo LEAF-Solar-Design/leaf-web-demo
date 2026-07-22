@@ -124,8 +124,14 @@ enforces (`server/entitlements.json`, override `LEAF_ENTITLEMENTS_FILE`),
 resolved through `server/entitlements.py`'s fail-closed `entitlements_for`.
 Denials return the documented `entitlement_required` 403 envelope
 (CONTRACT-ADDENDUM §17). Fail-closed rules: missing org row, non-`active` org
-status, unknown/blank tier (→ `restricted`), unmapped kind, and an unloadable
-policy seam (503) all refuse the job.
+status, unknown/blank tier (→ `restricted`), unmapped kind, and an
+unevaluable enforcement seam (policy file present-but-invalid, org row
+unreadable) all refuse the job — the last as a structured 503 with the full
+envelope (`error.error_code = INTERNAL`, `retryable = true`), never a bare
+500. The same stored-org check runs inside
+`canonical_jobs.submit_solve_job`, the choke point of the `POST /api/run`
+canonical spine path, so a permissive request-side tier cannot bypass the
+floor there.
 
 Binary proof: `python scripts/entitlement-gate.py` exits 0 (READY) only when
 an entitled org's solve succeeds AND a restricted org's solve is DENIED;

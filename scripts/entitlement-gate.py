@@ -74,8 +74,24 @@ def _check(resp_status: int, body: dict, *, expect_denied: bool, label: str) -> 
     if expect_denied:
         if resp_status != 403:
             _fail(f"{label}: expected HTTP 403 DENIED, got {resp_status}: {body}")
+        # The FULL documented envelope (CONTRACT-ADDENDUM §17), not just the
+        # marker — a denial the frontend cannot classify is not a proven denial.
         if body.get("entitlement_required") is not True:
             _fail(f"{label}: 403 without entitlement_required marker: {body}")
+        for field in ("required", "tier"):
+            if not isinstance(body.get(field), str) or not body[field].strip():
+                _fail(f"{label}: 403 denial missing/blank '{field}': {body}")
+        if body.get("degraded_mode") is not False:
+            _fail(f"{label}: 403 denial without degraded_mode=false: {body}")
+        err = body.get("error")
+        if not isinstance(err, dict):
+            _fail(f"{label}: 403 denial without a §10 error object: {body}")
+        if err.get("error_code") != "ENTITLEMENT_REQUIRED":
+            _fail(f"{label}: denial error_code must be ENTITLEMENT_REQUIRED, got {err.get('error_code')!r}: {body}")
+        if not isinstance(err.get("message"), str) or not err["message"].strip():
+            _fail(f"{label}: denial error.message missing/blank: {body}")
+        if err.get("retryable") is not False:
+            _fail(f"{label}: denial error.retryable must be false: {body}")
         print(f"[entitlement-gate] {label}: DENIED as required "
               f"(403, required={body.get('required')}, tier={body.get('tier')})")
     else:
