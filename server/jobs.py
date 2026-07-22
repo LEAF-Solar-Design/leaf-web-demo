@@ -801,7 +801,12 @@ def _redispatch_record(job_id: str) -> bool:
         aps_live = bool(execution.get("aps_live", False))
         # Recover the version pin from the durable execution context so a
         # restart-recovered pinned job does not silently rerun against head.
-        dwg_version = execution.get("dwg_version")
+        # This version ALWAYS writes the key (null for unpinned), so its
+        # ABSENCE means the row predates pin persistence and its pin is
+        # unrecoverable -- fail closed rather than default to head.
+        if "dwg_version" not in execution:
+            raise KeyError("dwg_version")
+        dwg_version = execution["dwg_version"]
     except (IndexError, KeyError, TypeError, ValueError):
         complete_callback(job_id, "failed", error=error_obj(
             ErrorCode.INTERNAL, "cannot recover job: missing execution context", False))

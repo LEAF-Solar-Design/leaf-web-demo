@@ -602,3 +602,35 @@ def test_restart_recovery_recovers_the_version_pin(monkeypatch, tmp_path):
     assert captured["dwg_version"] == 7
     if jobs._conn is not None:
         jobs._conn.close()
+
+
+def test_restart_recovery_fails_closed_on_row_predating_pin_persistence(monkeypatch, tmp_path):
+    """Round-4 finding: a job row written before pin-persistence lacks the
+    dwg_version key; recovery must fail closed, never default to head."""
+    import jobs
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "old.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    dispatched = {"called": False}
+
+    class _Capture:
+        def submit(self, fn, *a, **k):
+            dispatched["called"] = True
+            return None
+
+    monkeypatch.setattr(jobs, "_executors", {jobs.LANE_FAST: _Capture(), jobs.LANE_SLOW: _Capture()})
+    monkeypatch.setattr(jobs.platform_link, "on_submit", lambda *a, **k: None)
+    tool = {"name": "count-by-layer", "capabilities": ["drawing.read"]}
+    job_id = jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=7)
+    # Simulate an OLD row: rewrite execution_json without the dwg_version key.
+    with jobs._lock:
+        jobs._db().execute(
+            "UPDATE jobs SET execution_json = ? WHERE job_id = ?",
+            (json.dumps({"tool": tool, "aps_live": False}), job_id))
+        jobs._db().commit()
+    dispatched["called"] = False
+    assert jobs._redispatch_record(job_id) is False
+    assert dispatched["called"] is False
+    assert jobs.get_job(job_id)["status"] == "failed"
+    if jobs._conn is not None:
+        jobs._conn.close()
