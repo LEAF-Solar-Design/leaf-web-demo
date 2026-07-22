@@ -39,11 +39,13 @@ def test_manifests_pin_the_existing_runtime_contract() -> None:
 
 
 def test_both_required_deployment_checks_run_for_every_main_commit() -> None:
-    for workflow in WORKFLOWS:
+    expected_jobs = ("contract", "public-site-api")
+    for workflow, expected_job in zip(WORKFLOWS, expected_jobs, strict=True):
         text = workflow.read_text(encoding="utf-8")
         push_block = text.split("  push:\n", 1)[1].split("\n\npermissions:", 1)[0]
         assert "branches: [main]" in push_block
         assert "paths:" not in push_block
+        assert f"\n  {expected_job}:\n" in text
 
 
 def test_deployment_inputs_trigger_pull_request_checks() -> None:
