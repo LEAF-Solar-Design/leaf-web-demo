@@ -483,3 +483,58 @@ def test_stale_worker_cannot_overwrite_replaced_attempt(client, monkeypatch):
     assert final["attempt"] == state["new_attempt"], \
         "the old worker must not overwrite the replacement attempt"
     assert final["status"] == "ready"
+
+
+def test_mark_failed_never_demotes_a_terminal_state(client):
+    """Round-6 MAJOR: a committed ready must never be overwritten by a late
+    failure — a twin worker's error or a stale status snapshot arrives with
+    a matching attempt token, and the status guard alone must stop it."""
+    first = _upload(client)
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+    ready = guest_uploads.read_marker(backend, tenant, did)
+    assert ready["status"] == "ready"
+
+    stale_snapshot = dict(ready, status="extracting")  # same attempt token
+    wrote = guest_uploads._mark_failed(backend, tenant, did, stale_snapshot,
+                                       "TIMEOUT", "late twin failure",
+                                       retryable=True)
+    assert wrote is False
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"
+
+
+def test_failed_retry_wipe_failure_is_honest_and_recoverable(client, monkeypatch):
+    """Round-6 MAJOR: if the residue wipe cannot be verified, the retry must
+    fail honestly (500, retryable) — never fall through to a random id or a
+    wedged ingest — and the surviving failed marker must route a LATER retry
+    straight back into the replace path."""
+    import dxf_intake
+    real_parse = dxf_intake.parse_dxf_file
+    calls = {"n": 0}
+
+    def flaky_parse(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise guest_uploads._ExtractError("INTERNAL", "boom", retryable=True)
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(dxf_intake, "parse_dxf_file", flaky_parse)
+    first = _upload(client)
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "failed"
+
+    real_wipe = guest_uploads.wipe_failed_attempt_residue
+    monkeypatch.setattr(guest_uploads, "wipe_failed_attempt_residue",
+                        lambda *a: False)
+    blocked = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert blocked.status_code == 500
+    assert blocked.json()["error"]["retryable"] is True
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "failed"
+
+    monkeypatch.setattr(guest_uploads, "wipe_failed_attempt_residue", real_wipe)
+    monkeypatch.setattr(dxf_intake, "parse_dxf_file", real_parse)
+    retry = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert retry.status_code == 202
+    assert retry.json()["drawing_id"] == did
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"

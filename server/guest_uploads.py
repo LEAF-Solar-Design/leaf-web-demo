@@ -344,24 +344,56 @@ def guest_drawing_dir(tenant_id: str, drawing_id: str) -> Path:
             / "drawings" / drawing_id)
 
 
+def wipe_failed_attempt_residue(tenant_id: str, drawing_id: str) -> bool:
+    """Delete a failed attempt's ingest residue (manifest, version blobs,
+    intake cache — everything under the drawing dir EXCEPT the upload
+    marker), then VERIFY the deletion (round-6 review, MAJOR: an unchecked
+    rmtree that partially fails would either wedge the derived id behind
+    version residue or, if the manifest survived, silently break same-id
+    retry semantics). The marker survives any partial failure ON PURPOSE:
+    it is what routes the next retry back into the replace path — the
+    caller overwrites it after a True return, and never touches residue
+    behind a False."""
+    root = guest_drawing_dir(tenant_id, drawing_id)
+    if not root.is_dir():
+        return True
+    ok = True
+    for child in root.iterdir():
+        if child.name == "upload.state.json":
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            _unlink_quiet(child)
+        ok = ok and not child.exists()
+    return ok
+
+
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
-                 error_code: str, message: str, retryable: bool) -> None:
+                 error_code: str, message: str, retryable: bool) -> bool:
     # Under the drawing's lock, and only onto a marker that still IS this
-    # attempt: a purged drawing must not get a marker resurrected behind its
-    # deletion receipt, and a failed-retry's REPLACEMENT marker (new attempt
-    # token) must not be overwritten by the old attempt's late failure
-    # (round-5 review, MAJOR).
+    # attempt AND is still non-terminal: a purged drawing must not get a
+    # marker resurrected behind its deletion receipt; a failed-retry's
+    # REPLACEMENT marker (new attempt token) must not be overwritten by the
+    # old attempt's late failure (round-5 review, MAJOR); and a committed
+    # terminal state must never be demoted to failed by a twin worker's late
+    # error or a caller holding a stale status snapshot (round-6 review,
+    # MAJOR). Returns whether the failure record was actually written, so
+    # callers reporting state can tell a persisted failure from a lost race.
     with drawing_lock(tenant_id, drawing_id):
         current = read_marker(backend, tenant_id, drawing_id)
         if current is None:
-            return
+            return False
         if current.get("attempt") != marker.get("attempt"):
-            return
+            return False
+        if current.get("status") != "extracting":
+            return False
         marker = dict(marker)
         marker["status"] = "failed"
         marker["error"] = {"error_code": error_code, "message": message,
                            "retryable": bool(retryable)}
         write_marker(backend, tenant_id, drawing_id, marker)
+        return True
 
 
 # --------------------------------------------------------------------------- #
@@ -536,14 +568,23 @@ def status_view(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, 
         if stale:
             # Persist the honest terminal state so the surface is stable —
             # an "extracting" that outlived its budget is a failure, not a
-            # forever-spinner.
-            _mark_failed(backend, tenant_id, drawing_id, marker, "TIMEOUT",
-                         "extraction did not finish within the time budget",
-                         retryable=True)
-            status = "failed"
-            error = {"error_code": "TIMEOUT",
-                     "message": "extraction did not finish within the time budget",
-                     "retryable": True}
+            # forever-spinner. If the persist LOSES the race (extraction
+            # committed ready between our read and the locked write), report
+            # the marker's true state instead of a failure this view merely
+            # imagined (round-6 review, MAJOR).
+            if _mark_failed(backend, tenant_id, drawing_id, marker, "TIMEOUT",
+                            "extraction did not finish within the time budget",
+                            retryable=True):
+                status = "failed"
+                error = {"error_code": "TIMEOUT",
+                         "message": "extraction did not finish within the time budget",
+                         "retryable": True}
+            else:
+                current = read_marker(backend, tenant_id, drawing_id)
+                if current is None:
+                    return None  # purged under us — honest 404 upstream
+                status = current.get("status")
+                error = current.get("error")
     return {
         "drawing_id": drawing_id,
         "status": status,

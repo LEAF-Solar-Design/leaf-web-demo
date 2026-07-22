@@ -197,15 +197,18 @@ def upload_drawing(
                     # would wedge the derived id in an immutable-version
                     # refusal loop) or a manifest without its cache/marker
                     # transition (which would force a random-id fallback and
-                    # abandon the derived-id contract). Wiping the drawing
-                    # dir under the lock resets every residue shape (guest
-                    # stores are always local-filesystem), and the fresh
-                    # marker's attempt token fences out the old worker
-                    # thread if it is still alive.
-                    import shutil
-                    shutil.rmtree(
-                        guest_uploads.guest_drawing_dir(str(tenant), derived),
-                        ignore_errors=True)
+                    # abandon the derived-id contract). The wipe is VERIFIED
+                    # and keeps the marker (overwritten below) so a partial
+                    # deletion routes the NEXT retry back into this same
+                    # path instead of stranding residue (round-6 review,
+                    # MAJOR); the fresh marker's attempt token fences out
+                    # the old worker thread if it is still alive.
+                    if not guest_uploads.wipe_failed_attempt_residue(
+                            str(tenant), derived):
+                        return error_response(
+                            ErrorCode.INTERNAL,
+                            "could not reset the failed attempt's residue; "
+                            "try again", retryable=True, status_code=500)
                 if not backend.exists(store.manifest_key(str(tenant), derived)):
                     # Effect order is load-bearing: (1) marker — so
                     # /upload-status and the fail-closed bootstrap guard
