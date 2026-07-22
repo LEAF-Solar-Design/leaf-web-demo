@@ -48,4 +48,11 @@ jobs:
         working-directory: scripts
         run: python -m pytest test_required_config.py -q --color=no -p no:cacheprovider
       - name: Build the deployable application image
-        run: docker build --file deploy/Dockerfile.app --tag leaf-platform-app:contract .
+        env:
+          LEAF_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          docker build
+          --file deploy/Dockerfile.app
+          --build-arg LEAF_SOURCE_SHA="$LEAF_SOURCE_SHA"
+          --tag leaf-platform-app:contract
+          .

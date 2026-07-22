@@ -42,7 +42,10 @@ COPY data/      /app/data/
 # stays stdlib. Run from the server workdir.
 WORKDIR /app/server
 
-ENV APS_LIVE=0 \
+ARG LEAF_SOURCE_SHA=unknown
+
+ENV LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA} \
+    APS_LIVE=0 \
     APP_PORT=8130 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1

@@ -57,3 +57,14 @@ def test_deployment_inputs_trigger_pull_request_checks() -> None:
     assert '- "deploy/**"' in web_pr
     assert '- "deploy/**"' in backend_pr
     assert '- "scripts/test_required_config.py"' in backend_pr
+
+
+def test_application_image_carries_the_exact_source_identity() -> None:
+    dockerfile = (ROOT / "deploy" / "Dockerfile.app").read_text(encoding="utf-8")
+    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    app = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+
+    assert "ARG LEAF_SOURCE_SHA=unknown" in dockerfile
+    assert "ENV LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}" in dockerfile
+    assert '--build-arg LEAF_SOURCE_SHA="$LEAF_SOURCE_SHA"' in workflow
+    assert '"source_sha": os.environ.get("LEAF_SOURCE_SHA"' in app

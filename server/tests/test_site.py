@@ -191,6 +191,16 @@ def test_site_endpoints_public_when_auth_live(monkeypatch, intake, site_env):
     assert r3.status_code == 401, r3.text
 
 
+def test_app_health_exposes_the_exact_build_source(monkeypatch):
+    source_sha = "a" * 40
+    monkeypatch.setenv("LEAF_SOURCE_SHA", source_sha)
+    from app import health
+
+    body = health()
+    assert body["ok"] is True
+    assert body["source_sha"] == source_sha
+
+
 # --------------------------------------------------------------------------- #
 # 5. ETag / If-None-Match -> 304 (+ exact cache headers)
 # --------------------------------------------------------------------------- #

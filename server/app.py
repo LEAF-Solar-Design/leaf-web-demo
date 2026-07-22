@@ -123,6 +123,7 @@ _mount_platform_router()
 def health() -> Dict[str, Any]:
     return with_envelope_fields({
         "ok": True,
+        "source_sha": os.environ.get("LEAF_SOURCE_SHA", "unknown").strip().lower(),
         "aps_live": deps.APS_LIVE,
         "data_file_present": deps.DATA_FILE.exists(),
         "engine_registry_present": deps.ENGINE_REGISTRY.exists(),
