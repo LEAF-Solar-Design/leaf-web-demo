@@ -72,9 +72,11 @@ def test_malformed_records_skip_visibly_never_crash():
     gold.append({"id": "bad-payload", "payload": object(),           # unhashable
                  "expected_digest": "0" * 64})
     gold.append("not-a-dict")                                        # wrong shape
-    report = replay.replay_gold_set(gold)
+    gold.append({"id": "overflow", "payload": {"x": 1e308},          # finite float
+                 "expected_digest": "0" * 64})                       # that overflows
+    report = replay.replay_gold_set(gold)                            # the 1e-4 grid
     assert report.matched == 2
-    assert set(report.skipped) == {"no-digest", "bad-payload", "index:4"}
+    assert set(report.skipped) == {"no-digest", "bad-payload", "index:4", "overflow"}
     assert not report.ok  # skips are visible failures of the gate, not silence
 
 

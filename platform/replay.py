@@ -97,7 +97,9 @@ def replay_gold_set(records: Iterable[dict[str, Any]],
             continue
         try:
             actual = stable_hash(record["payload"], resolution)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: a finite float like 1e308 overflows to inf when
+            # divided by the resolution grid — must skip visibly, not crash.
             skipped.append(str(record.get("id", f"index:{index}")))
             continue
         if actual == record["expected_digest"]:
