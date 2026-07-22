@@ -136,27 +136,26 @@ def _db() -> sqlite3.Connection:
         _conn.execute("PRAGMA journal_mode = WAL")
         _conn.execute(_SCHEMA)
         columns = {row[1] for row in _conn.execute("PRAGMA table_info(jobs)")}
-        added = set()
         for name, ddl in _MIGRATIONS.items():
             if name not in columns:
                 _conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
-                added.add(name)
-        if "dwg_version" in added:
-            # One-time backfill at the migration moment: releases BEFORE this
-            # column existed persisted the pin only inside execution_json, so
-            # historical job provenance must survive the upgrade. Parsed in
-            # Python (not json_extract) to avoid a JSON1 build dependency;
-            # idempotent — only NULL rows are touched.
-            for row in _conn.execute(
-                    "SELECT job_id, execution_json FROM jobs "
-                    "WHERE dwg_version IS NULL AND execution_json IS NOT NULL").fetchall():
-                try:
-                    pin = json.loads(row["execution_json"]).get("dwg_version")
-                except (ValueError, TypeError):
-                    pin = None
-                if pin is not None:
-                    _conn.execute("UPDATE jobs SET dwg_version = ? WHERE job_id = ?",
-                                  (pin, row["job_id"]))
+        # Backfill dwg_version for rows written by releases that stored the pin
+        # only inside execution_json. Runs on EVERY first-connect and touches
+        # only NULL rows, so a previously interrupted backfill is retried rather
+        # than permanently skipped (the ALTER above may already have committed
+        # the column before a mid-backfill failure). Python-side parse — no
+        # JSON1 dependency; malformed or non-object payloads are skipped.
+        for row in _conn.execute(
+                "SELECT job_id, execution_json FROM jobs "
+                "WHERE dwg_version IS NULL AND execution_json IS NOT NULL").fetchall():
+            try:
+                decoded = json.loads(row["execution_json"])
+            except (ValueError, TypeError):
+                continue
+            pin = decoded.get("dwg_version") if isinstance(decoded, dict) else None
+            if isinstance(pin, int) and not isinstance(pin, bool):
+                _conn.execute("UPDATE jobs SET dwg_version = ? WHERE job_id = ?",
+                              (pin, row["job_id"]))
         _conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS jobs_project_idempotency_uq "
             "ON jobs(tenant_id, project_id, idempotency_key) "

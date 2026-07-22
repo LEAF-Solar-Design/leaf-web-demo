@@ -60,6 +60,9 @@ _PREDECESSOR_SCHEMA = (
 _PINNED_JOB_ID = str(uuid.uuid4())      # execution_json carries dwg_version: 7
 _NULLPIN_JOB_ID = str(uuid.uuid4())     # execution_json carries dwg_version: null
 _NOEXEC_JOB_ID = str(uuid.uuid4())      # execution_json is NULL (ancient row)
+_LISTEXEC_JOB_ID = str(uuid.uuid4())    # execution_json is valid JSON but a list
+_JSONNULL_JOB_ID = str(uuid.uuid4())    # execution_json is the JSON literal null
+_MALFORMED_JOB_ID = str(uuid.uuid4())   # execution_json is not JSON at all
 
 
 def _insert_predecessor_row(conn: sqlite3.Connection, job_id: str,
@@ -81,6 +84,11 @@ _insert_predecessor_row(_legacy, _PINNED_JOB_ID, json.dumps(
 _insert_predecessor_row(_legacy, _NULLPIN_JOB_ID, json.dumps(
     {"tool": {"name": "legacy-tool"}, "aps_live": False, "dwg_version": None}))
 _insert_predecessor_row(_legacy, _NOEXEC_JOB_ID, None)
+# hostile payloads: valid-but-non-object JSON and malformed JSON must neither
+# crash the first connect (review round 2: uncaught AttributeError) nor backfill
+_insert_predecessor_row(_legacy, _LISTEXEC_JOB_ID, "[]")
+_insert_predecessor_row(_legacy, _JSONNULL_JOB_ID, "null")
+_insert_predecessor_row(_legacy, _MALFORMED_JOB_ID, "{not json")
 _legacy.commit()
 _legacy.close()
 
@@ -108,7 +116,8 @@ def test_migration_backfills_pin_from_execution_json():
 def test_migration_adds_column_and_unpinned_rows_read_none():
     cols = {row[1] for row in jobs._db().execute("PRAGMA table_info(jobs)")}
     assert "dwg_version" in cols  # added by the _MIGRATIONS upgrade path
-    for job_id in (_NULLPIN_JOB_ID, _NOEXEC_JOB_ID):
+    for job_id in (_NULLPIN_JOB_ID, _NOEXEC_JOB_ID,
+                   _LISTEXEC_JOB_ID, _JSONNULL_JOB_ID, _MALFORMED_JOB_ID):
         rec = jobs.get_job(job_id)
         assert rec is not None
         assert rec["dwg_version"] is None
@@ -130,3 +139,27 @@ def test_submit_without_pin_reads_none(monkeypatch):
     rec = jobs.get_job(job_id)
     assert rec is not None
     assert rec["dwg_version"] is None
+
+
+def test_interrupted_backfill_is_retried_on_next_connect(monkeypatch):
+    """Column already present but NULL (a prior backfill crashed after the DDL
+    autocommitted): the next first-connect must backfill anyway (review round 2:
+    a migration-moment-only gate would skip these rows forever). Runs LAST —
+    it swaps the module singleton to a second DB and restores it via monkeypatch.
+    """
+    retry_db = Path(tempfile.mkdtemp(prefix="dwgver-retry-")) / "jobs.db"
+    conn = sqlite3.connect(str(retry_db))
+    conn.execute(_PREDECESSOR_SCHEMA)
+    conn.execute("ALTER TABLE jobs ADD COLUMN dwg_version INTEGER")  # crashed-run state
+    stranded = str(uuid.uuid4())
+    _insert_predecessor_row(conn, stranded, json.dumps(
+        {"tool": {"name": "legacy-tool"}, "aps_live": False, "dwg_version": 9}))
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(jobs, "DB_PATH", retry_db)
+    monkeypatch.setattr(jobs, "_conn", None)  # force a fresh first-connect
+    rec = jobs.get_job(stranded)
+    assert rec is not None
+    assert rec["dwg_version"] == 9  # retried, not permanently skipped
+    # monkeypatch restores DB_PATH and the original _conn for any later use
