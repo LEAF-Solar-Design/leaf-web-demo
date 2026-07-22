@@ -703,6 +703,15 @@ Two ground rules frame everything below:
 
 ### 18.1 App endpoints (`server/routers/sessions.py`, new)
 
+> **IMPLEMENTATION NOTE (2026-07-21 merge resolution).** The live
+> `server/routers/sessions.py` is the §2.1 sessions wire: state lives in the
+> FastAPI-side store (`server/session_store.py`) and turns drive the harness via
+> `POST /turn` — NOT the harness-proxy model this section originally described.
+> Of the table below, POST create / POST messages / GET stream / GET transcript
+> are LIVE (shapes as documented); `GET /api/sessions` (list) and
+> `DELETE /api/sessions/{id}` (archive) are PARKED — not served — until spine
+> unification. The normative wire spec is `leaf-backend-gaps.md` §2.1.
+
 All `/api/*` routes resolve the tenant via the existing `require_tenant` dependency
 (`server/deps.py:251–277`; off-auth header stub, live-auth verified JWT — unchanged).
 All response bodies carry the §10 envelope fields (`error`, `degraded_mode`;
@@ -733,7 +742,13 @@ Cross-tenant probing returns 404, never 403, on every `/api/sessions/*` route �
 same no-existence-oracle rule the job routes already enforce
 (`server/routers/jobs.py:98–105`).
 
-### 18.2 Harness mirror routes (`harness/src/server.ts`, new)
+### 18.2 Harness mirror routes (PARKED — not served)
+
+> **PARKED at the 2026-07-21 merge resolution (spine × sessions-wire).** The harness
+> registers `POST /turn` only; every `/converse/*` route below returns 404. The live
+> path is §2.1: app `/api/sessions*` routes (which ARE live, per 18.1) drive the
+> harness through `POST /turn` (`application/x-ndjson`). This spec is retained
+> verbatim for the spine-unification follow-up; do not build against it.
 
 All `/converse/*` routes sit behind the existing F5 shared-secret gate — header
 `X-Harness-Secret`, checked by `harnessAuthDenial` (`harness/src/server.ts:114–130`;

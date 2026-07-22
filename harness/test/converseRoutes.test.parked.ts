@@ -1,3 +1,13 @@
+/*
+ * PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): this file
+ * tests the §18 /converse/* server surface, which is UNWIRED while the §2.1
+ * sessions wire (POST /turn) owns the live turn path. Renamed *.test.parked.ts
+ * so vitest skips it; restore the name when spine unification re-wires the
+ * routes. The spine's module-level suites (converseLoop, converseSdkRunner,
+ * sessionStore, converseRuntimeSeparation) still run.
+ */
+// @ts-nocheck -- parked: written against the spine's HarnessPorts.converseRunner
+// typing, which the sessions wire now owns; un-park + retype at unification.
 /**
  * /converse/* HTTP route tests — hermetic (fakes only, zero network egress, zero
  * Anthropic). Proves the wire-contract section-1 surface as served by

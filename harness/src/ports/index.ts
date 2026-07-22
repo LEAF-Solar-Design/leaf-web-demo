@@ -293,8 +293,27 @@ export interface AgentRunner {
 }
 
 // --------------------------------------------------------------------------- //
-// Conversational spine ports (section 18 / converse lane). Additive: nothing
-// above this line changes. The ConverseLoop PLANS/EXPLAINS/DISPATCHES —
+// Port 5 - ConverseRunner (the sessions/turn-engine loop boundary)
+// --------------------------------------------------------------------------- //
+
+import type { ConverseRunner } from "./converse.js";
+
+/**
+ * Re-exported from ./converse.js (FROZEN — leaf-backend-gaps.md §2.1): the
+ * `POST /turn` NDJSON boundary the turn engine (server/turn_runner.py, S3)
+ * drives. Defined in its own module so converse.ts stays a single-purpose,
+ * dependency-free port; re-exported here so callers can import everything
+ * from `ports/index.js` like the other four ports.
+ */
+export type { StopReason, HarnessTurnEvent, ConverseTurnInput, ConverseRunner, ConverseRunOptions } from "./converse.js";
+
+// --------------------------------------------------------------------------- //
+// Conversational spine ports (section 18 / converse lane — PR #5). PARKED at
+// the 2026-07-21 merge resolution: the §2.1 sessions wire above owns the live
+// turn path (`converseRunner` in HarnessPorts + POST /turn); the spine's
+// model-loop runner below is renamed SpineConverseRunner (`ConverseRunner`
+// stays the FROZEN §2.1 name) and its /converse/* server surface is unwired
+// pending spine unification. The ConverseLoop PLANS/EXPLAINS/DISPATCHES —
 // registered-tool EXECUTION stays on the deterministic job spine (invariant v2,
 // enforced by test/converseRuntimeSeparation.test.ts).
 // --------------------------------------------------------------------------- //
@@ -418,7 +437,7 @@ export interface ConverseRunInput {
  * impl is the ONLY Anthropic egress on the converse path; the fake is scripted.
  * One run() = one TURN.
  */
-export interface ConverseRunner {
+export interface SpineConverseRunner {
   run(input: ConverseRunInput): AsyncIterable<ConverseRunnerEvent>;
 }
 
@@ -627,10 +646,19 @@ export interface HarnessPorts {
    */
   grantAdmin?: TenantGrantAdminStore;
   /**
-   * OPTIONAL conversational-spine ports (section 18). When all four are present the
-   * harness serves the /converse/* surface; when absent those routes return 501.
+   * OPTIONAL converse-turn runner (sessions wire, leaf-backend-gaps.md §2.1).
+   * When present, the harness serves `POST /turn` (NDJSON) for the FastAPI
+   * turn engine to drive; when absent that route returns 501, matching the
+   * `grantAdmin` precedent. Hermetic tests that don't exercise the sessions
+   * lane omit this.
    */
   converseRunner?: ConverseRunner;
+  /**
+   * OPTIONAL §18 spine ports (PR #5) — PARKED: retained so spine modules and
+   * their tests keep compiling/running, but no server surface consumes them
+   * until spine unification (the /converse/* routes were unwired at the
+   * 2026-07-21 merge resolution).
+   */
   appRun?: AppRunClient;
   gate?: GateClient;
   sessionStore?: SessionStore;

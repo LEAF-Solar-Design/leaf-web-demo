@@ -1,6 +1,6 @@
 /**
- * LIVE ConverseRunner - the ONLY Anthropic egress on the converse path, behind
- * the ConverseRunner port. One run() = one conversational TURN driven through
+ * LIVE SpineConverseRunner - the ONLY Anthropic egress on the converse path, behind
+ * the SpineConverseRunner port. One run() = one conversational TURN driven through
  * the Agent SDK; the ConverseLoop owns ALL tool semantics (gate checks, event
  * emission, dispatch) - this runner only TRANSPORTS: it mounts the six spine
  * tools as an in-process MCP server whose handlers delegate to the loop's
@@ -73,7 +73,7 @@
 import type {
   AgentGrant,
   ConverseRunInput,
-  ConverseRunner,
+  SpineConverseRunner,
   ConverseRunnerEvent,
   ConverseStopReason,
   ConverseTurnUsage,
@@ -166,7 +166,7 @@ export interface ConverseSdkRunnerOptions {
   zodImport?: () => Promise<unknown>;
 }
 
-export class ConverseSdkRunner implements ConverseRunner {
+export class ConverseSdkRunner implements SpineConverseRunner {
   // NO mutable instance state (see header) - options are readonly.
   private readonly grant: AgentGrant;
   private readonly model: string;

@@ -2,7 +2,7 @@
  * The conversational spine loop — sibling of AuthorLoop. One instance owns the
  * section-18 converse behavior: idempotent session create/attach, the ONE-active-
  * turn lock, prompt assembly (context packet + user text, or the split-turn
- * confirm line), driving the ConverseRunner, and mapping everything onto the
+ * confirm line), driving the SpineConverseRunner, and mapping everything onto the
  * EXACT wire event vocabulary (pinned wire contract section 3) with store-
  * persisted seq.
  *
@@ -25,7 +25,7 @@ import type {
   ConfirmationRecord,
   ConverseEvent,
   ConverseEventType,
-  ConverseRunner,
+  SpineConverseRunner,
   ConverseStopReason,
   GateClient,
   SessionRecord,
@@ -79,7 +79,7 @@ export class ConfirmationInvalidError extends Error {
 // --------------------------------------------------------------------------- //
 
 export interface ConversePorts {
-  runner: ConverseRunner;
+  runner: SpineConverseRunner;
   appRun: AppRunClient;
   gate: GateClient;
   store: SessionStore;

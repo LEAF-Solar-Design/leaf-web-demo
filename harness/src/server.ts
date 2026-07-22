@@ -16,6 +16,13 @@
  *   POST /run-registered  -> run route (design-time-ONLY invariant). Body
  *                            {tool, params?, dwg?, aps_live?}. 200 section-3 envelope.
  *                            NEVER constructs the Agent SDK / touches AgentRunner.
+ *   POST /turn             -> converse-turn route (sessions wire, leaf-backend-gaps.md
+ *                            §2.1; ports/converse.ts, FROZEN). Body = ConverseTurnInput.
+ *                            200 application/x-ndjson, one HarnessTurnEvent per line,
+ *                            always terminated by turn_complete or error. A grant error
+ *                            resolved on/before the first event -> non-stream 401
+ *                            {grant_required:true,...} (never a half-open stream). No
+ *                            converseRunner wired -> 501. Bad body -> 400.
  *
  * Tenant id comes from the X-Tenant-Id header stub (default "demo-tenant"),
  * matching the backbone. Concern 1 (Auth0 platform identity) is resolved upstream
@@ -36,17 +43,10 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
-import {
-  BadMessageError,
-  ConfirmationInvalidError,
-  ConverseLoop,
-  SessionNotFoundError,
-  TurnInProgressError,
-} from "./agent/converseLoop.js";
 import { GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import { DEFAULT_TENANT } from "./ports/index.js";
-import type { ConverseEvent, ConverseRunner, HarnessPorts } from "./ports/index.js";
+import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent } from "./ports/index.js";
 
 export { DEFAULT_TENANT };
 
@@ -159,6 +159,140 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+// --------------------------------------------------------------------------- //
+// POST /turn - converse-turn route (sessions wire, leaf-backend-gaps.md §2.1).
+// --------------------------------------------------------------------------- //
+
+type ConverseTurnValidation = { ok: true; input: ConverseTurnInput } | { ok: false; message: string };
+
+/**
+ * Minimal validation of ConverseTurnInput: the four required id fields, and at
+ * least one of `text` / `confirm` to drive the turn. Deliberately does not
+ * validate deeper into `confirm.proposal` — that is the runner's job. `messages`
+ * defaults to [] when absent/malformed (the turn engine always sends it, but a
+ * missing array here should not be a reason to reject the whole request).
+ */
+function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnValidation {
+  const tenant_id = typeof body.tenant_id === "string" ? body.tenant_id.trim() : "";
+  const session_id = typeof body.session_id === "string" ? body.session_id.trim() : "";
+  const turn_id = typeof body.turn_id === "string" ? body.turn_id.trim() : "";
+  const drawing_id = typeof body.drawing_id === "string" ? body.drawing_id.trim() : "";
+  if (!tenant_id) return { ok: false, message: "tenant_id is required" };
+  if (!session_id) return { ok: false, message: "session_id is required" };
+  if (!turn_id) return { ok: false, message: "turn_id is required" };
+  if (!drawing_id) return { ok: false, message: "drawing_id is required" };
+
+  const hasText = typeof body.text === "string" && body.text.length > 0;
+  const rawConfirm = body.confirm;
+  const hasConfirm = typeof rawConfirm === "object" && rawConfirm !== null;
+  if (!hasText && !hasConfirm) {
+    return { ok: false, message: "one of text or confirm is required" };
+  }
+
+  const messages = Array.isArray(body.messages)
+    ? (body.messages as ConverseTurnInput["messages"])
+    : [];
+
+  const input: ConverseTurnInput = { tenant_id, session_id, turn_id, drawing_id, messages };
+  if (hasText) input.text = body.text as string;
+  if (hasConfirm) input.confirm = rawConfirm as ConverseTurnInput["confirm"];
+  return { ok: true, input };
+}
+
+/**
+ * Drive one converse turn to completion, streaming `application/x-ndjson`.
+ *
+ * Ordering is the load-bearing part: the FIRST event is pulled BEFORE
+ * `res.writeHead` is called. If the runner rejects synchronously or on that
+ * first yield — e.g. `GrantRequiredError` (missing per-tenant Claude grant) —
+ * the rejection propagates out of this function (it is NOT caught here) so the
+ * caller's outer try/catch renders the same non-stream 401 `{grant_required:true}`
+ * shape /author uses (server.ts:258-263). The caller therefore never observes a
+ * half-open 200 stream for a turn that never started.
+ *
+ * Once streaming has begun, a mid-stream throw from the runner is caught here
+ * (headers are already committed) and rendered as an in-band `error` event
+ * followed by a `turn_complete{stop_reason:'error'}` event, matching the FROZEN
+ * invariant that every stream ends with one of those two event types.
+ *
+ * A client disconnect (`res` 'close' - the response socket, see below) does TWO
+ * things, in order: (1) fires the AbortSignal handed to `runTurn` — because
+ * `iterator.return()` alone merely QUEUES behind a pending `next()` per the
+ * async-generator spec, so a hung/expensive first SDK call would keep running
+ * until it settled on its own; the signal preempts that pull by aborting the
+ * runner's underlying work (the SDK's AbortController) immediately — and then
+ * (2) calls `iterator.return()` so the generator unwinds through `finally` and
+ * no further chunks are written.
+ */
+async function streamTurn(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  runner: ConverseRunner,
+  input: ConverseTurnInput,
+): Promise<void> {
+  const turnAbort = new AbortController();
+  const iterator = runner.runTurn(input, { signal: turnAbort.signal })[Symbol.asyncIterator]();
+
+  let closed = false;
+  const onClose = (): void => {
+    closed = true;
+    turnAbort.abort();
+    const ret = iterator.return?.(undefined);
+    if (ret && typeof (ret as Promise<unknown>).catch === "function") {
+      void (ret as Promise<unknown>).catch(() => {});
+    }
+  };
+  // Installed on the RESPONSE socket, and BEFORE the first pull. `req` has already been
+  // fully drained by readJsonBody() by the time we get here, so a 'close' listener on it
+  // can miss an early disconnect; and a disconnect that happens WHILE we are still
+  // awaiting the runner's FIRST event (e.g. mid an LLM call, before any response bytes
+  // have gone out) must be observed the moment it fires - EventEmitter drops events
+  // emitted before a listener is attached, so registering this after that first pull (as
+  // before) silently misses exactly that case.
+  res.on("close", onClose);
+  // A write/writeHead issued after the peer has already closed the connection must not
+  // surface as an unhandled 'error' event (process crash) - onClose above already stops
+  // both writing and pulling; this just keeps the EventEmitter contract safe either way.
+  res.on("error", () => {});
+
+  // Pull the first event BEFORE writing the response head (see doc comment above).
+  let step: IteratorResult<HarnessTurnEvent>;
+  try {
+    step = await iterator.next();
+  } catch (err) {
+    res.off("close", onClose);
+    if (closed) {
+      // Our own disconnect-triggered abort surfaced as a rejection (e.g. the SDK's
+      // AbortError). The peer is gone — there is no response left to shape.
+      res.end();
+      return;
+    }
+    // Genuine pre-stream failure (GrantRequiredError etc.): propagate so the caller
+    // renders the non-stream 401/error shape, exactly as before.
+    throw err;
+  }
+
+  res.writeHead(200, { "content-type": "application/x-ndjson" });
+
+  try {
+    while (!step.done) {
+      if (closed) break;
+      const ev = step.value as HarnessTurnEvent;
+      res.write(`${JSON.stringify(ev)}\n`);
+      step = await iterator.next();
+    }
+  } catch (err) {
+    if (!closed) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.write(`${JSON.stringify({ type: "error", data: { message } })}\n`);
+      res.write(`${JSON.stringify({ type: "turn_complete", data: { stop_reason: "error" } })}\n`);
+    }
+  } finally {
+    res.off("close", onClose);
+    res.end();
+  }
+}
+
 export interface Harness {
   handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   listen(port?: number): Server;
@@ -169,261 +303,10 @@ export interface Harness {
  * Create the harness. `opts.auth` explicitly pins the F5 caller-auth gate (used by tests
  * to stay hermetic); when omitted the gate resolves per-request from the environment via
  * resolveHarnessAuth() — so the live serve path needs no code change, only the env vars.
- *
- * `opts.converseRunnerFor` is the LIVE converse-runner source: a factory building a
- * FRESH runner for one tenant's grant (called per turn, so no runner instance — and no
- * telemetry — is ever shared across sessions). It may throw GrantRequiredError, which
- * the messages route maps to the wire 401 {error:"grant_required"}. When absent,
- * `ports.converseRunner` (the hermetic shared fake) is used instead.
  */
-export function createHarness(
-  ports: HarnessPorts,
-  opts?: {
-    auth?: HarnessAuthConfig;
-    converseRunnerFor?: (tenantId: string) => Promise<ConverseRunner>;
-  },
-): Harness {
+export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthConfig }): Harness {
   const loop = new AuthorLoop(ports);
   const explicitAuth = opts?.auth ?? null;
-
-  // Converse surface (wire contract section 1): mounted only when the section-18
-  // ports are wired; otherwise those routes answer 501 (grant-admin precedent).
-  const converse =
-    ports.appRun && ports.gate && ports.sessionStore
-      ? { appRun: ports.appRun, gate: ports.gate, store: ports.sessionStore }
-      : null;
-
-  // Live SSE fan-out hub: every ConverseLoop event is persisted FIRST (store seq
-  // is truth), then broadcast here so open /stream tails see it without polling.
-  const liveSinks = new Map<string, Set<(ev: ConverseEvent) => void>>();
-  const broadcast = (ev: ConverseEvent): void => {
-    const sinks = liveSinks.get(ev.session_id);
-    if (!sinks) return;
-    for (const sink of sinks) {
-      try {
-        sink(ev);
-      } catch {
-        // a broken subscriber never corrupts the turn; the transcript has the event
-      }
-    }
-  };
-
-  /** Wire envelope (section 3) from a stored row or a live event. */
-  const toWire = (ev: {
-    session_id: string;
-    turn_id: string;
-    seq: number;
-    type: string;
-    data: Record<string, unknown>;
-  }): ConverseEvent => ({
-    v: 1,
-    session_id: ev.session_id,
-    turn_id: ev.turn_id,
-    seq: ev.seq,
-    type: ev.type as ConverseEvent["type"],
-    data: ev.data,
-  });
-
-  /** Session lookup with the tenant-mismatch rule: mismatch answers EXACTLY like
-   *  absence (404 session_not_found; no cross-tenant existence oracle). */
-  const sessionForTenant = async (sessionId: string, tenantId: string) => {
-    if (!converse) return null;
-    const s = await converse.store.getSession(sessionId);
-    if (!s || s.tenant_id !== tenantId || s.status === "archived") return null;
-    return s;
-  };
-
-  /** Tenant for a converse request: body tenantId (camelCase per wire contract
-   *  section 1) wins, else the X-Tenant-Id header, else DEFAULT_TENANT. Trusted
-   *  for the same reason as tenantForRequest (the F5 shared-secret gate). */
-  const converseTenant = (req: IncomingMessage, body: Record<string, unknown>): string => {
-    const t = body.tenantId;
-    if (typeof t === "string" && t.trim()) return t.trim();
-    return tenantOf(req);
-  };
-
-  const handleConverse = async (
-    req: IncomingMessage,
-    res: ServerResponse,
-    method: string,
-    path: string,
-  ): Promise<void> => {
-    if (!converse || (!ports.converseRunner && !opts?.converseRunnerFor)) {
-      return send(res, 501, { error: { message: "converse ports not configured" } });
-    }
-    const url = new URL(req.url ?? "/", "http://converse.local");
-
-    // POST /converse/sessions — idempotent create-or-get per (tenant, drawing).
-    if (method === "POST" && path === "/converse/sessions") {
-      const body = await readJsonBody(req);
-      const tenantId = converseTenant(req, body);
-      const drawingId = typeof body.drawingId === "string" ? body.drawingId.trim() : "";
-      if (!drawingId) return send(res, 400, { error: { message: "drawingId is required" } });
-      const session = await converse.store.createOrGetSession(tenantId, drawingId);
-      return send(res, 200, {
-        sessionId: session.session_id,
-        status: session.status,
-        createdAt: session.created_at,
-      });
-    }
-
-    const m = /^\/converse\/sessions\/([^/]+)(?:\/(messages|stream|transcript))?$/.exec(path);
-    if (!m) return send(res, 404, { error: { message: `no route for ${method} ${path}` } });
-    const sessionId = decodeURIComponent(m[1]!);
-    const sub = m[2];
-
-    // POST /converse/sessions/{id}/messages — start a turn (202 async).
-    if (method === "POST" && sub === "messages") {
-      const body = await readJsonBody(req);
-      const tenantId = converseTenant(req, body);
-
-      // Resolve the runner FIRST: the live factory needs the tenant's grant, and a
-      // missing grant must 401 before any turn state is touched.
-      let runner: ConverseRunner;
-      try {
-        runner = ports.converseRunner ?? (await opts!.converseRunnerFor!(tenantId));
-      } catch (e) {
-        if (e instanceof GrantRequiredError) {
-          return send(res, 401, { error: "grant_required" });
-        }
-        throw e;
-      }
-
-      const rawConfirm = body.confirm as Record<string, unknown> | undefined;
-      const confirm =
-        rawConfirm &&
-        typeof rawConfirm.confirmationId === "string" &&
-        typeof rawConfirm.approved === "boolean"
-          ? { confirmationId: rawConfirm.confirmationId, approved: rawConfirm.approved }
-          : undefined;
-
-      const converseLoop = new ConverseLoop({ runner, ...converse });
-      try {
-        const { turnId, done } = await converseLoop.handleMessage({
-          sessionId,
-          tenantId,
-          ...(typeof body.text === "string" ? { text: body.text } : {}),
-          ...(confirm ? { confirm } : {}),
-          contextPacket:
-            body.contextPacket && typeof body.contextPacket === "object"
-              ? (body.contextPacket as Record<string, unknown>)
-              : {},
-          classifierHint:
-            body.classifierHint && typeof body.classifierHint === "object"
-              ? (body.classifierHint as Record<string, unknown>)
-              : null,
-          onEvent: broadcast,
-        });
-        // 202: the turn runs on; its outcome is persisted (and streamed) — a turn
-        // failure after this point is a transcript fact, not an HTTP error.
-        done.catch(() => undefined);
-        return send(res, 202, { turnId });
-      } catch (e) {
-        if (e instanceof TurnInProgressError) {
-          return send(res, 409, { error: "turn_in_progress", turnId: e.turnId });
-        }
-        if (e instanceof SessionNotFoundError) {
-          return send(res, 404, { error: "session_not_found" });
-        }
-        if (e instanceof BadMessageError) {
-          return send(res, 400, { error: { message: e.message } });
-        }
-        if (e instanceof ConfirmationInvalidError) {
-          return send(res, e.reason === "expired" ? 410 : 400, {
-            error: { message: e.message, reason: e.reason },
-          });
-        }
-        throw e;
-      }
-    }
-
-    // GET /converse/sessions/{id}/stream?afterSeq=N — replay from the store, then
-    // live-tail loop events. Tenant rides the query (app relay) or the header.
-    if (method === "GET" && sub === "stream") {
-      const tenantId = (url.searchParams.get("tenantId") ?? "").trim() || tenantOf(req);
-      const session = await sessionForTenant(sessionId, tenantId);
-      if (!session) return send(res, 404, { error: "session_not_found" });
-      const afterSeq = Math.max(0, Number(url.searchParams.get("afterSeq") ?? "0") || 0);
-
-      res.writeHead(200, {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      });
-      let lastSeq = afterSeq;
-      const writeEvent = (ev: ConverseEvent): void => {
-        if (ev.seq <= lastSeq) return; // monotonic guard dedups replay/live overlap
-        lastSeq = ev.seq;
-        try {
-          res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
-        } catch {
-          // a torn client connection must never take down the handler
-        }
-      };
-
-      // Register the live sink BEFORE the replay read (buffering until replay is
-      // written) so no event can fall between replay and live registration; the
-      // seq guard drops any overlap duplicates.
-      let live = false;
-      const pending: ConverseEvent[] = [];
-      const sink = (ev: ConverseEvent): void => {
-        if (live) writeEvent(ev);
-        else pending.push(ev);
-      };
-      let sinks = liveSinks.get(sessionId);
-      if (!sinks) {
-        sinks = new Set();
-        liveSinks.set(sessionId, sinks);
-      }
-      sinks.add(sink);
-      const ping = setInterval(() => {
-        try {
-          res.write(": ping\n\n");
-        } catch {
-          // ignore; close cleanup below tears the tail down
-        }
-      }, 15_000);
-      ping.unref?.();
-      req.on("close", () => {
-        clearInterval(ping);
-        sinks.delete(sink);
-        if (sinks.size === 0) liveSinks.delete(sessionId);
-      });
-
-      const replay = await converse.store.eventsAfter(sessionId, afterSeq);
-      for (const ev of replay) writeEvent(toWire(ev));
-      for (const ev of pending) writeEvent(ev);
-      pending.length = 0;
-      live = true;
-      return; // response intentionally left open (SSE)
-    }
-
-    // GET /converse/sessions/{id}/transcript?limit=N — most recent N, ascending seq.
-    if (method === "GET" && sub === "transcript") {
-      const tenantId = (url.searchParams.get("tenantId") ?? "").trim() || tenantOf(req);
-      const session = await sessionForTenant(sessionId, tenantId);
-      if (!session) return send(res, 404, { error: "session_not_found" });
-      const limitRaw = Number(url.searchParams.get("limit") ?? "");
-      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.trunc(limitRaw) : undefined;
-      const events = await converse.store.eventsAfter(sessionId, 0, limit);
-      return send(res, 200, { events: events.map(toWire) });
-    }
-
-    // DELETE /converse/sessions/{id} — archive (the store keeps the transcript).
-    // The app relay sends tenantId as a QUERY param (like stream/transcript);
-    // JSON body / header stay accepted for direct callers.
-    if (method === "DELETE" && sub === undefined) {
-      const body = await readJsonBody(req);
-      const tenantId =
-        (url.searchParams.get("tenantId") ?? "").trim() || converseTenant(req, body);
-      const session = await sessionForTenant(sessionId, tenantId);
-      if (!session) return send(res, 404, { error: "session_not_found" });
-      await converse.store.updateSession(sessionId, { status: "archived" });
-      return send(res, 200, { archived: true });
-    }
-
-    return send(res, 405, { error: { message: `method ${method} not allowed on ${path}` } });
-  };
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = (req.url ?? "").split("?")[0];
@@ -439,12 +322,6 @@ export function createHarness(
       const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
-
-      // Conversational spine surface (wire contract section 1) — behind the SAME
-      // X-Harness-Secret gate as every other route.
-      if (path === "/converse/sessions" || path.startsWith("/converse/sessions/")) {
-        return handleConverse(req, res, method, path ?? "");
-      }
 
       // Per-tenant grant admin (wave 4 + §17): PUT/GET/DELETE /grants/{tenantId}. Backs
       // the app's /api/tenant/claude-grant proxy. Returns ONLY {linked, linked_at, kind}
@@ -497,6 +374,25 @@ export function createHarness(
         // default author route = build (author + register + one commit)
         const out = await loop.build(tenant, description);
         return send(res, 200, out);
+      }
+
+      if (method === "POST" && path === "/turn") {
+        const body = await readJsonBody(req);
+        const validated = validateConverseTurnInput(body);
+        if (!validated.ok) {
+          return send(res, 400, { error: { message: validated.message } });
+        }
+        if (!ports.converseRunner) {
+          return send(res, 501, {
+            error: { message: "converse runner not configured", code: "not_implemented" },
+          });
+        }
+        // Awaited (not `return`ed bare) so a rejection — e.g. GrantRequiredError on the
+        // first event — is caught by THIS function's own try/catch below, not silently
+        // dropped: async-function `return somePromise` does not route through a local
+        // catch, only `await` does.
+        await streamTurn(req, res, ports.converseRunner, validated.input);
+        return;
       }
 
       if (method === "POST" && path === "/run-registered") {
@@ -559,38 +455,19 @@ export async function startReal(port = 8130): Promise<Server> {
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
   const { FileTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
-  const { HttpAppRunClient } = await import("./ports/impl/appRunClient.js");
-  const { HttpGateClient } = await import("./ports/impl/gateClient.js");
-  const { FileSessionStore } = await import("./ports/impl/sessionStore.js");
-  const { ConverseSdkRunner } = await import("./ports/impl/converseSdkRunner.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
   const grantStore = new FileTenantGrantStore(); // per-tenant grant + admin (one store)
-  const oauth = new OAuthGrantProviderImpl({ store: grantStore });
-
-  // Converse back-edge (wire contract section 0): app base URL + dispatch secret.
-  // With LEAF_APP_DISPATCH_SECRET unset the app rejects the back-edge (401) and the
-  // gate client fails CLOSED, so an unconfigured deployment cannot dispatch anything.
-  const appUrl = process.env.LEAF_APP_URL ?? "http://127.0.0.1:8130";
-  const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
 
   const ports: HarnessPorts = {
     agentRunner: new AgentSdkRunner(),
     broker: new BrokerApsClientHttp(),
-    oauth,
+    oauth: new OAuthGrantProviderImpl({ store: grantStore }),
     grantAdmin: grantStore,
     tenantRepo: new TenantRepoProviderImpl({
       locator: { async repoRef(t) { return `${tenantsDir}/${t}`; } },
       inPlace: true,
     }),
-    appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
-    gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
-    sessionStore: new FileSessionStore(),
   };
-  return createHarness(ports, {
-    // A FRESH live runner per turn, for THIS tenant's grant: no shared instance,
-    // no cross-tenant telemetry bleed. GrantRequiredError -> 401 grant_required.
-    converseRunnerFor: async (tenantId) =>
-      new ConverseSdkRunner({ grant: await oauth.getGrant(tenantId) }),
-  }).listen(port);
+  return createHarness(ports).listen(port);
 }

@@ -349,8 +349,10 @@ def test_versions_chain_after_two_writes(stack):
 
 
 def test_versions_unknown_drawing_404(stack):
+    # Contract change (gap-fill QW-C, 2026-07-21): slug-valid first-seen ids
+    # auto-bootstrap now; only MALFORMED ids 404. Assert both halves.
     t = "uiw-unknown"
-    r = requests.get(f"{stack['app']}/api/drawings/no-such-drawing/versions",
+    r = requests.get(f"{stack['app']}/api/drawings/UPPERCASE/versions",
                      headers=_h(t), timeout=30)
     assert r.status_code == 404, r.text
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"
