@@ -583,6 +583,12 @@ def status_view(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, 
                 current = read_marker(backend, tenant_id, drawing_id)
                 if current is None:
                     return None  # purged under us — honest 404 upstream
+                # Adopt the WHOLE re-read marker, not just status/error: the
+                # response below also serves filename/uploaded_at/retention,
+                # and splicing the new status onto the stale snapshot's
+                # metadata would hand out an incoherent hybrid (round-7
+                # review, MINOR).
+                marker = current
                 status = current.get("status")
                 error = current.get("error")
     return {

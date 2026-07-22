@@ -509,6 +509,11 @@ def test_failed_retry_wipe_failure_is_honest_and_recoverable(client, monkeypatch
     wedged ingest — and the surviving failed marker must route a LATER retry
     straight back into the replace path."""
     import dxf_intake
+    # Round-7 MAJOR scenario: a per-IP cap of exactly 2 proves the failed
+    # wipe consumes NO slot — slot 1 is the failed extraction, slot 2 must
+    # still be available for the successful recovery retry.
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_PER_IP_PER_DAY", "2")
+    guest_uploads._reset_rate_state()
     real_parse = dxf_intake.parse_dxf_file
     calls = {"n": 0}
 
@@ -538,3 +543,31 @@ def test_failed_retry_wipe_failure_is_honest_and_recoverable(client, monkeypatch
     assert retry.status_code == 202
     assert retry.json()["drawing_id"] == did
     assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"
+
+
+def test_timeout_view_lost_race_reports_one_coherent_snapshot(client, monkeypatch):
+    """Round-7 MINOR: when the TIMEOUT persist loses to a replacement
+    attempt, the status view must serve the NEW marker wholesale — never the
+    new status spliced onto the stale snapshot's filename and times."""
+    r = _upload(client)
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant)
+    stale = guest_uploads.read_marker(backend, tenant, did)
+    stale["status"] = "extracting"
+    stale["uploaded_at"] = "2020-01-01T00:00:00+00:00"
+    guest_uploads.write_marker(backend, tenant, did, stale)
+
+    replacement = dict(stale, attempt="ffffffffffffffff", status="ready",
+                       filename="replacement.dxf",
+                       uploaded_at="2026-01-01T00:00:00+00:00")
+    real_mark = guest_uploads._mark_failed
+
+    def swap_then_mark(backend_, tenant_, did_, marker_, *args, **kwargs):
+        guest_uploads.write_marker(backend_, tenant_, did_, replacement)
+        return real_mark(backend_, tenant_, did_, marker_, *args, **kwargs)
+
+    monkeypatch.setattr(guest_uploads, "_mark_failed", swap_then_mark)
+    view = guest_uploads.status_view(backend, tenant, did)
+    assert view["status"] == "ready"
+    assert view["filename"] == "replacement.dxf"
+    assert view["uploaded_at"] == "2026-01-01T00:00:00+00:00"
