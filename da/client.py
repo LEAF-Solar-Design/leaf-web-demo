@@ -686,6 +686,13 @@ def tool_activity_spec(tool: dict) -> dict:
     Built from the tool's LISP source: `engine_script` if present, else the
     contents of its `.lsp` `script`. Pure-LISP via accoreconsole, same shape as
     the extract Activity, plus a Params (get) input for the tool's arguments.
+
+    A relative `.lsp` `script` path resolves against the PROJECT ROOT ONLY, so
+    registries must declare root-relative paths (engine/registry.json declares
+    `engine/tools/<name>.lsp`). Deliberately no fallback root: one would let a
+    tool from one registry silently load another registry's script on a path
+    collision. An unresolvable path yields an EMPTY script (never a raise) so
+    live-path guards can fail closed on it.
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
     script_src = tool.get("engine_script")
