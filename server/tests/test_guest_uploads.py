@@ -640,3 +640,40 @@ def test_visible_wipe_failure_refunds_the_quota_charge(client, monkeypatch):
     assert retry.status_code == 202, "the refunded slot must still be available"
     assert retry.json()["drawing_id"] == did
     assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"
+
+
+def test_raising_wipe_still_refunds_the_paid_charge(client, monkeypatch):
+    """Round-9 MAJOR: the wipe's failure can be an OSError (e.g. iterdir on
+    the residue root), not just a False return. The containment inside
+    wipe_failed_attempt_residue must convert it to False so the paid-path
+    refund still runs — cap-2 proof: the recovery retry gets the slot."""
+    real_cache_key = write_loop.intake_cache_key
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_PER_IP_PER_DAY", "2")
+    guest_uploads._reset_rate_state()
+    monkeypatch.setattr(write_loop, "intake_cache_key",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+    first = _upload(client)
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "failed"
+    monkeypatch.setattr(write_loop, "intake_cache_key", real_cache_key)
+
+    class _BoomDir:
+        def is_dir(self):
+            return True
+
+        def iterdir(self):
+            raise OSError("residue enumeration failed")
+
+    real_dir = guest_uploads.guest_drawing_dir
+    monkeypatch.setattr(guest_uploads, "guest_drawing_dir",
+                        lambda *a: _BoomDir())
+    blocked = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert blocked.status_code == 500
+    assert blocked.json()["error"]["retryable"] is True
+
+    monkeypatch.setattr(guest_uploads, "guest_drawing_dir", real_dir)
+    retry = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert retry.status_code == 202, "the refunded slot must still be available"
+    assert retry.json()["drawing_id"] == did
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"

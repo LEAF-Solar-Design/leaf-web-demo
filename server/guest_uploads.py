@@ -371,19 +371,26 @@ def wipe_failed_attempt_residue(tenant_id: str, drawing_id: str) -> bool:
     it is what routes the next retry back into the replace path — the
     caller overwrites it after a True return, and never touches residue
     behind a False."""
-    root = guest_drawing_dir(tenant_id, drawing_id)
-    if not root.is_dir():
-        return True
-    ok = True
-    for child in root.iterdir():
-        if child.name == "upload.state.json":
-            continue
-        if child.is_dir():
-            shutil.rmtree(child, ignore_errors=True)
-        else:
-            _unlink_quiet(child)
-        ok = ok and not child.exists()
-    return ok
+    # NEVER raises: every filesystem error (enumeration included) is
+    # contained to the False return, so False is the ONE unsuccessful
+    # outcome and the caller's refund/500 handling cannot be skipped by an
+    # exception path (round-9 review, MAJOR).
+    try:
+        root = guest_drawing_dir(tenant_id, drawing_id)
+        if not root.is_dir():
+            return True
+        ok = True
+        for child in root.iterdir():
+            if child.name == "upload.state.json":
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                _unlink_quiet(child)
+            ok = ok and not child.exists()
+        return ok
+    except OSError:
+        return False
 
 
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
