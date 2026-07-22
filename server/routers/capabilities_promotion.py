@@ -107,7 +107,9 @@ def availability_for(tool_name: str) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     tool = deps.find_tool(tool_name)
     family_id = _family_id_for(tool_name)
-    evidence = _receipt_evidence(tool_name)
+    # Evidence only for REGISTERED tools: a locked entry carrying receipts would
+    # dress an unreachable capability in proof (fail-open by implication).
+    evidence = _receipt_evidence(tool_name) if tool is not None else []
     if tool is not None:
         state = "registered"
         implementation_state = "implemented"

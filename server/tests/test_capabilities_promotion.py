@@ -138,7 +138,13 @@ def test_evidence_cites_a_real_receipt_with_matching_sha256(tmp_path, monkeypatc
     (tmp_path / "fake_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
     monkeypatch.setattr(promo, "DATA_DIR", tmp_path)
     monkeypatch.setattr(deps, "PROJECT_ROOT", tmp_path.parent)
+    # Evidence requires REGISTRATION (locked tools must return evidence: []),
+    # so register the tool before expecting receipts to surface.
+    monkeypatch.setattr(deps, "find_tool",
+                        lambda name, tenant=None: {"name": name}
+                        if name == promo.STRINGING_TOOL else None)
     entry = promo.availability_for(promo.STRINGING_TOOL)
+    assert entry["state"] == "registered"
     assert len(entry["evidence"]) == 1
     ev = entry["evidence"][0]
     expected_sha = hashlib.sha256((tmp_path / "fake_receipt.json").read_bytes()).hexdigest()
