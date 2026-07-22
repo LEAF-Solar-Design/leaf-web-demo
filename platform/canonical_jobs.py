@@ -184,9 +184,16 @@ def submit_solve_job(org_id: uuid.UUID, project_id: uuid.UUID, request_tenant_id
                 # and insert (the TOCTOU guard fired). Re-evaluate so a real
                 # mid-flight downgrade denies with the documented envelope
                 # instead of the generic project error.
-                recheck, _org = entitlements.stored_job_entitlement_verdict(org_id, "solve")
+                recheck, org_now = entitlements.stored_job_entitlement_verdict(org_id, "solve")
                 if recheck is not None:
                     raise entitlements.EntitlementDenied(recheck)
+                if org_now is not None and org_now.tier != pinned_tier:
+                    # The tier changed mid-flight to ANOTHER entitled tier
+                    # (e.g. hosted_pro -> hosted_starter): the guard refused
+                    # conservatively, but a retry should succeed — say so,
+                    # retryably, instead of blaming the project.
+                    raise entitlements.EntitlementDenied(
+                        entitlements.entitlement_state_conflict_response("solve"))
                 raise ValueError("project is unavailable or not postgres_canonical")
             if existing["submission_fingerprint"] != fingerprint:
                 raise ValueError("idempotency key already exists with different run input")

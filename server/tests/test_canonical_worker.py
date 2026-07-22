@@ -293,3 +293,23 @@ def test_run_route_invalid_policy_is_structured_503(monkeypatch, tmp_path):
     assert body["degraded_mode"] is False
     assert body["error"]["error_code"] == "INTERNAL"
     assert body["error"]["retryable"] is True
+
+
+def test_run_route_non_utf8_policy_is_structured_503(monkeypatch, tmp_path):
+    """UnicodeDecodeError is a ValueError, not an OSError — a non-UTF-8 policy
+    file must still convert to the structured 503, never a bare 500."""
+    import json
+
+    bad = tmp_path / "binary-entitlements.json"
+    bad.write_bytes(b"\xff\xfe\x00garbage\x9c")
+    monkeypatch.setenv("LEAF_ENTITLEMENTS_FILE", str(bad))
+    tool = {"name": "demo-read-tool", "capabilities": ["drawing.read"], "default_params": {}}
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: tool)
+    response = jobs_router.run(
+        jobs_router.RunRequest(tool="demo-read-tool", params={}),
+        tenant_id="tenant-1", x_org_id=None, x_project_id=None,
+        idempotency_key=None, authorization=None)
+    assert response.status_code == 503
+    body = json.loads(response.body)
+    assert body["error"]["error_code"] == "INTERNAL"
+    assert body["error"]["retryable"] is True

@@ -305,3 +305,39 @@ def test_toctou_downgrade_between_check_and_insert_is_denied(make_org, pinned_po
             "string-autofill-opt", {}, "toctou-key-1")
     assert excinfo.value.response.status_code == 403
     assert calls["n"] >= 2  # the stale read passed; the atomic guard + recheck denied
+
+
+def test_entitled_tier_flap_returns_retryable_conflict_not_project_error(make_org, pinned_policy, monkeypatch):
+    """A mid-flight change between two ENTITLED tiers (hosted_pro ->
+    hosted_starter) is refused conservatively by the atomic guard, but must
+    surface as a retryable 409 entitlement-state conflict — not the generic
+    non-retryable project error."""
+    import dataclasses
+
+    from leaf_platform import canonical_jobs
+    from leaf_platform import entitlements as ents_mod
+    from leaf_platform.entitlements import EntitlementDenied
+
+    org, project = _canonical_project(make_org, "Tier Flap Org", tier="hosted_starter")
+
+    real_get_org = ents_mod.store.get_org
+    calls = {"n": 0}
+
+    def pro_then_real(oid):
+        calls["n"] += 1
+        real = real_get_org(oid)
+        if calls["n"] == 1:
+            return dataclasses.replace(real, tier="hosted_pro")
+        return real
+
+    monkeypatch.setattr(ents_mod.store, "get_org", pro_then_real)
+    with pytest.raises(EntitlementDenied) as excinfo:
+        canonical_jobs.submit_solve_job(
+            org.org_id, project.project_id, str(org.org_id),
+            "string-autofill-opt", {}, "flap-key-1")
+    resp = excinfo.value.response
+    assert resp.status_code == 409
+    body = json.loads(resp.body)
+    assert body["entitlement_required"] is False
+    assert body["error"]["error_code"] == "INTERNAL"
+    assert body["error"]["retryable"] is True

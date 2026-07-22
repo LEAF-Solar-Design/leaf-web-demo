@@ -159,10 +159,13 @@ def load_policy() -> Dict[str, Dict[str, Any]]:
         # ABSENT is the only fail-SAFE case: the operator never wrote a policy,
         # so the shipped defaults are the intended answer.
         return dict(_HARDCODED_DEFAULTS)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         # PRESENT but unreadable is NOT the same thing. Restoring the permissive
         # defaults here would silently re-grant every capability a truncated or
-        # unreadable TIGHTENED policy was withholding.
+        # unreadable TIGHTENED policy was withholding. UnicodeDecodeError (a
+        # ValueError, NOT an OSError) covers a non-UTF-8 file — it must convert
+        # to EntitlementsError like every other unreadable-policy case so the
+        # request-path handlers produce the structured 503, not a bare 500.
         raise EntitlementsError(f"entitlements file unreadable at {path}: {exc}") from exc
     try:
         raw = json.loads(text)

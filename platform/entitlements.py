@@ -111,6 +111,26 @@ def policy_unavailable_response(org: Optional[Org], kind: str) -> JSONResponse:
     })
 
 
+def entitlement_state_conflict_response(kind: str) -> JSONResponse:
+    """409: the org's entitlement state changed between evaluation and the
+    atomic insert guard, but the CURRENT state is still entitled (e.g. a
+    hosted_pro -> hosted_starter flap where both grant the capability). The
+    submission was refused conservatively; an immediate retry should succeed —
+    so unlike a denial this is explicitly retryable, and unlike BAD_PARAMS it
+    names the transient conflict instead of blaming the request."""
+    return JSONResponse(status_code=409, content={
+        "entitlement_required": False,
+        "required": JOB_KIND_CAPABILITY.get(kind, kind),
+        "error": {
+            "error_code": "INTERNAL",
+            "message": "the organization's entitlement state changed during submission; "
+                       "the job was not created — retry the request.",
+            "retryable": True,
+        },
+        "degraded_mode": False,
+    })
+
+
 def job_entitlement_denial(org: Optional[Org], kind: str) -> Optional[JSONResponse]:
     """None when ``org`` may run ``kind``; otherwise the 403/503 response.
 
