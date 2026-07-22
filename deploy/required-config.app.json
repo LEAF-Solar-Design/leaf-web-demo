@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "container": "leaf-platform-app",
+  "required": {
+    "environment": [
+      "APS_LIVE",
+      "BROKER_LEDGER",
+      "BROKER_URL",
+      "JOBS_DB",
+      "LEAF_AUTH0_AUDIENCE",
+      "LEAF_AUTH0_ISSUER",
+      "LEAF_AUTH0_JWKS_URL",
+      "LEAF_AUTHOR_HARNESS_URL",
+      "LEAF_AUTH_LIVE",
+      "LEAF_CORS_ORIGINS",
+      "LEAF_STORE_DIR",
+      "LEAF_TENANTS_DIR",
+      "LEAF_TENANT_CLAIM_NS"
+    ],
+    "secrets": [
+      "DATABASE_URL",
+      "LEAF_BROKER_SECRET",
+      "LEAF_HARNESS_SECRET",
+      "LEAF_OPS_SECRET"
+    ],
+    "mountPaths": [
+      "/data/drawings",
+      "/data/state",
+      "/data/tenants"
+    ]
+  }
+}

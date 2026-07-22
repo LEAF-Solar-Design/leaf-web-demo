@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "container": "leaf-platform-broker",
+  "required": {
+    "environment": [
+      "APS_LIVE",
+      "APS_MAX_CONCURRENCY",
+      "BROKER_LEDGER",
+      "BROKER_TENANTS",
+      "LEAF_DAILY_RUN_QUOTA",
+      "LEAF_SANDBOX",
+      "LEAF_STORE_DIR"
+    ],
+    "secrets": [
+      "APS_CREDENTIALS_JSON",
+      "LEAF_BROKER_SECRET"
+    ],
+    "mountPaths": [
+      "/data/drawings",
+      "/data/state"
+    ]
+  }
+}
