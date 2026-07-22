@@ -52,10 +52,13 @@ The backend emit must conform to these, field for field:
 
 ## Naming interlock
 
-Capability names in the emit follow ADOPTION.md §3 (ruling R-A): the
-registry emits ONE product capability for string solving
-(`drawing.solve.strings`, `server/capabilities_promotion.py:57`) carrying
-two distinct tool names, `autofill-string-targets` (heuristic) and
-`string-autofill-opt` (real optimizer). Distinct tool names within one
-capability; every run result discloses which solver ran. No shared tool
-names, no precedence.
+Capability names in the emit follow ADOPTION.md §3 (ruling R-A). String
+solving is ONE product capability, `drawing.solve.strings`
+(`server/routers/capabilities_promotion.py:57`; the authenticated registry
+emit builds its availability at `server/routers/jobs.py:332-355`). Current
+state, named honestly: the promotion router is standalone and reflects only
+the heuristic; the jobs.py emit carries no tool names. REQUIRED at
+adoption: the emit lists both tool names under that one capability,
+`autofill-string-targets` (heuristic) and `string-autofill-opt` (real
+optimizer), as distinct tool names within one capability, and every run
+result discloses which solver ran. No shared tool names, no precedence.
