@@ -151,6 +151,17 @@ def new_upload_drawing_id() -> str:
     return "u-" + secrets.token_hex(5)
 
 
+def derived_upload_drawing_id(tenant_id: str, data: bytes) -> str:
+    """Content-derived id for GUEST uploads (same ``u-<10 hex>`` shape as the
+    random mint): sha256(tenant : content). This is the upload idempotency
+    key — a guest re-posting the SAME bytes lands on the SAME drawing, so an
+    aborted upload whose receipt the client never saw is recovered by
+    re-uploading instead of duplicated (FE review round 3, MAJOR)."""
+    digest = hashlib.sha256(
+        tenant_id.encode("utf-8") + b":" + hashlib.sha256(data).digest()).hexdigest()
+    return "u-" + digest[:10]
+
+
 def _sign(payload: str, secret: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"),
                     hashlib.sha256).hexdigest()
@@ -271,12 +282,37 @@ def new_marker(*, filename: str, data: bytes, tenant_kind: str,
     }
 
 
+# Per-drawing re-entrant locks shared by the upload route's marker+staging
+# writes, the extraction ingest tail, _mark_failed, and the purge sweep's
+# per-drawing delete (review round 4, both MAJORs): scoping the critical
+# section to ONE drawing means an account tenant's slow live ingest can never
+# serialize other uploads or delay the purge deadline of an unrelated guest
+# drawing, while the SAME drawing's stage/ingest/fail/delete operations still
+# can never interleave. Re-entrant because _mark_failed runs inside the
+# extraction tail's held lock. The registry mutex guards only dict access and
+# is never held during drawing work; purge evicts an entry after a receipted
+# deletion, which is safe because a deleted drawing id is never re-minted
+# (mint collision-checks against both manifests and markers).
+_DRAWING_LOCKS: Dict[Tuple[str, str], threading.RLock] = {}
+_DRAWING_LOCKS_MU = threading.Lock()
+
+
+def drawing_lock(tenant_id: str, drawing_id: str) -> threading.RLock:
+    with _DRAWING_LOCKS_MU:
+        return _DRAWING_LOCKS.setdefault((tenant_id, drawing_id), threading.RLock())
+
+
+def _evict_drawing_lock(tenant_id: str, drawing_id: str) -> None:
+    with _DRAWING_LOCKS_MU:
+        _DRAWING_LOCKS.pop((tenant_id, drawing_id), None)
+
+
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
                  error_code: str, message: str, retryable: bool) -> None:
-    # Under the store lock, and only onto a still-existing marker: writing a
-    # failure record for a drawing the purge already deleted would resurrect
+    # Under the drawing's lock, and only onto a still-existing marker: writing
+    # a failure record for a drawing the purge already deleted would resurrect
     # a marker file behind the deletion receipt (same race class as ingest).
-    with _GUEST_STORE_LOCK:
+    with drawing_lock(tenant_id, drawing_id):
         if read_marker(backend, tenant_id, drawing_id) is None:
             return
         marker = dict(marker)
@@ -347,14 +383,14 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     # ingest_drawing refuses an existing drawing, which is correct: an upload
     # id is minted fresh and collision-checked.
     #
-    # The whole ingest runs INSIDE the guest-store lock, with a marker
+    # The whole ingest runs INSIDE this drawing's lock, with a marker
     # re-check first: extraction can be slow, and the purge sweep may have
     # deleted this drawing (and logged its receipt) mid-flight — ingesting
     # after that would resurrect purged data behind a "deleted" receipt
     # (review round 3, MAJOR). A vanished marker means purged: abort, no
     # trace rewritten.
     import tempfile
-    with _GUEST_STORE_LOCK:
+    with drawing_lock(tenant_id, drawing_id):
         if read_marker(backend, tenant_id, drawing_id) is None:
             return  # purged while extracting; the receipt stands, nothing returns
         try:
@@ -494,7 +530,7 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
                     # Per-drawing critical section shared with the extraction
                     # threads (see run_extraction): deletion and ingest can
                     # never interleave, so nothing returns after its receipt.
-                    with _GUEST_STORE_LOCK:
+                    with drawing_lock(tenant_dir.name, drawing_dir.name):
                         # Order is load-bearing (round-2 review, MAJOR):
                         # staged RAW files first, VERIFIED gone, then the
                         # drawing dir. If the staged file survives we stop
@@ -531,6 +567,7 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
                                            "tenant_id": tenant_dir.name,
                                            "drawing_id": drawing_dir.name,
                                            "freed_bytes": size + staged_bytes})
+                    _evict_drawing_lock(tenant_dir.name, drawing_dir.name)
             # a tenant dir whose drawings are all gone is itself expired
             try:
                 if drawings_root.is_dir() and not any(drawings_root.iterdir()):
@@ -591,14 +628,6 @@ def _append_purge_log(entry: Dict[str, Any]) -> None:
     except OSError as exc:  # pragma: no cover - best-effort observability
         print(f"[guest-uploads] purge log append failed: {exc}", file=sys.stderr)
 
-
-# Purge and extraction both mutate guest-store state from THIS process (the
-# daemon thread and the per-upload extraction threads live in the app
-# process), so a plain module lock fully closes the resurrect race (review
-# round 3, MAJOR): a slow extraction re-checks its marker INSIDE the lock
-# before ingesting, and the sweep deletes inside the same lock — an expired
-# drawing can never be re-created after its deletion receipt.
-_GUEST_STORE_LOCK = threading.RLock()  # re-entrant: _mark_failed runs under it too
 
 _PURGE_THREAD: Optional[threading.Thread] = None
 

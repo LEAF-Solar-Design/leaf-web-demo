@@ -168,3 +168,88 @@ def test_purge_extraction_race_cannot_resurrect(client, monkeypatch, tmp_path):
                       headers={"X-Tenant-Id": tenant}).status_code == 404
     assert client.get(f"/api/drawings/{did}/intake",
                       headers={"X-Tenant-Id": tenant}).status_code == 404
+
+
+def test_live_write_dwg_marker_without_source_ext_uses_filename():
+    """Round-4 MINOR (compat): markers persisted before source_ext existed
+    must not brick live writes — the guard falls back to the recorded
+    filename's extension. A .dwg filename passes the guard; a .dxf filename
+    is still refused."""
+    import store
+    import time
+
+    def _marker_backend(filename):
+        backend = store.InMemoryBackend()
+        backend.put(store.manifest_key("acme-solar", "u-old1"),
+                    json.dumps({"schema": 1, "tenant_id": "acme-solar",
+                                "drawing_id": "u-old1", "head": 1, "latest": 1,
+                                "versions": [], "checkout": None}).encode())
+        backend.put(write_loop.upload_marker_key("acme-solar", "u-old1"),
+                    json.dumps({"status": "ready", "filename": filename}).encode())
+        return backend
+
+    class _NeverCalledDa:
+        def __getattr__(self, name):
+            raise AssertionError(f"da.{name} must not be reached")
+
+    # .dxf filename, no source_ext: refused at the guard, DA never touched.
+    env, status = write_loop.run_write_live(
+        {"name": "delete-marked-panel"}, {"drawing_id": "u-old1"},
+        "acme-solar", backend=_marker_backend("roof plan.dxf"),
+        da=_NeverCalledDa(), t0=time.perf_counter())
+    assert status == 400
+    assert "DWG source" in env["error"]["message"]
+
+    # .dwg filename, no source_ext: PASSES the guard (the next failure, if
+    # any, is version resolution — not the DWG-source refusal).
+    class _SentinelDa:
+        def signed_download_url(self, key):
+            raise RuntimeError("guard-passed-reached-DA")
+
+    env, status = write_loop.run_write_live(
+        {"name": "delete-marked-panel"}, {"drawing_id": "u-old1"},
+        "acme-solar", backend=_marker_backend("roof plan.dwg"),
+        da=_SentinelDa(), t0=time.perf_counter())
+    assert not (status == 400 and "DWG source" in (env.get("error") or {}).get("message", ""))
+
+
+def test_purge_landing_mid_extraction_cannot_resurrect(client, monkeypatch):
+    """Round-4 MINOR: the round-3 race test only proved the ENTRY check
+    (purge fully before extraction). This one interleaves the purge INSIDE
+    extraction — after the initial marker read, before ingest — so it
+    exercises the locked re-check itself: the ingest tail must see the
+    vanished marker and abort, leaving the deletion receipt true."""
+    import time
+    import guest_uploads as gu
+    import dxf_intake
+
+    monkeypatch.setattr(gu, "start_extraction_thread", lambda *a, **k: None)
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
+    dxf = b"0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\nAB\n8\nL1\n70\n1\n" \
+          b"10\n1.0\n20\n2.0\n10\n3.0\n20\n4.0\n0\nENDSEC\n0\nEOF\n"
+    r = client.post("/api/drawings/upload",
+                    files={"file": ("f.dxf", io.BytesIO(dxf))})
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+    time.sleep(0.2)  # let the retention window lapse
+
+    receipts = {}
+    real_parse = dxf_intake.parse_dxf_file
+
+    def parse_then_purge(*args, **kwargs):
+        intake = real_parse(*args, **kwargs)
+        # The sweep lands NOW: extraction already passed its entry check and
+        # holds real intake in hand — only the locked re-check can stop it.
+        receipts["purge"] = gu.purge_expired()
+        return intake
+
+    monkeypatch.setattr(dxf_intake, "parse_dxf_file", parse_then_purge)
+    gu.run_extraction(tenant, did, ".dxf")
+
+    assert receipts["purge"]["count"] == 1  # deleted + receipted mid-flight
+    guest_root = Path(write_loop.guest_store_dir())
+    assert not (guest_root / "tenants" / tenant).exists(), \
+        "nothing may be recreated after the deletion receipt"
+    assert client.get(f"/api/drawings/{did}/upload-status",
+                      headers={"X-Tenant-Id": tenant}).status_code == 404
+    assert client.get(f"/api/drawings/{did}/intake",
+                      headers={"X-Tenant-Id": tenant}).status_code == 404

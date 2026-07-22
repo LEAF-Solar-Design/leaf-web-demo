@@ -888,6 +888,15 @@ are built against their defaults; both are env-tunable without a code change.
   guest_session|null, status: "extracting"}` (§10-enveloped). Guest rate caps:
   `LEAF_GUEST_UPLOADS_PER_IP_PER_DAY` (10), `LEAF_GUEST_UPLOADS_PER_DAY` (100)
   → 429 `quota_exceeded` (each live extraction is a paid APS run).
+  GUEST uploads are idempotent by content: the drawing id derives from
+  (tenant, sha256(bytes)), so re-posting the same bytes as the same guest
+  returns the SAME drawing's receipt (its CURRENT `status`, original
+  retention window, fresh session token) and consumes no quota — an aborted
+  upload whose 202 the client never saw is recovered by re-uploading, never
+  duplicated. A terminally `failed` attempt is the exception: its retry
+  reuses the derived id, replaces the failure, and counts quota (it
+  extracts again). Account uploads mint random ids (two intentional copies
+  of one file stay two drawings).
 * `GET /api/drawings/{id}/upload-status` — the upload marker's honest state
   (`extracting|ready|failed` + §10 error; stale `extracting` past
   `LEAF_UPLOAD_EXTRACT_TIMEOUT_S` is PERSISTED as failed/TIMEOUT).

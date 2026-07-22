@@ -364,6 +364,14 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             except (KeyError, ValueError):
                 marker = {}
             source_ext = str(marker.get("source_ext") or "")
+            if not source_ext:
+                # Pre-round-4 markers (schema 1, no source_ext field): fall
+                # back to the recorded filename's extension — present in every
+                # marker since the feature commit — instead of bricking live
+                # writes on already-persisted DWG uploads (review round 4,
+                # MINOR: compatibility path for old markers).
+                source_ext = os.path.splitext(
+                    str(marker.get("filename") or ""))[1].lower()
             if source_ext != ".dwg":
                 return (err_envelope(
                     ErrorCode.BAD_PARAMS,

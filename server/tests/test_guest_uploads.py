@@ -332,3 +332,69 @@ def test_session_route_serves_uploaded_drawing_not_demo(client):
     assert default.status_code == 200
     default_coords = [c for p in default.json()["intake"]["polylines"] for pt in p["pts"] for c in pt]
     assert ROOFTOP_COORD in default_coords
+
+
+def test_guest_same_bytes_reupload_returns_same_receipt_and_quota_once(client, monkeypatch):
+    """§19 idempotent guest uploads (FE round-3 MAJOR, receipt recovery): the
+    guest drawing id is content-derived, so re-posting the SAME bytes returns
+    the SAME drawing — and does NOT consume quota again. Proven with a 1/day
+    IP cap: the identical re-upload still succeeds; different bytes then 429."""
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_PER_IP_PER_DAY", "1")
+    guest_uploads._reset_rate_state()
+
+    first = _upload(client)
+    assert first.status_code == 202
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+
+    again = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert again.status_code == 202, again.text
+    assert again.json()["drawing_id"] == did          # same drawing, not a copy
+    assert again.json()["tenant_id"] == tenant
+    assert again.json()["status"] == "ready"          # echoes the CURRENT state
+
+    other = DXF_BYTES.replace(b"111.25", b"999.99")
+    blocked = _upload(client, data=other, headers={"X-Tenant-Id": tenant})
+    assert blocked.status_code == 429                 # cap was 1: dedupe was free
+
+    # Same bytes as a DIFFERENT (fresh) guest still mints its own drawing.
+    fresh = _upload(client)
+    assert fresh.status_code == 429                   # ...but the cap stops it here
+
+
+def test_guest_failed_upload_retry_replaces_failure(client, monkeypatch):
+    """A terminally FAILED attempt is not deduped: re-uploading the same
+    bytes reuses the derived id and replaces the failure with a fresh
+    extraction. The failure is produced the real way (extraction raises, so
+    no manifest exists) — that is the shape the retry path keys on."""
+    import dxf_intake
+    real_parse = dxf_intake.parse_dxf_file
+    calls = {"n": 0}
+
+    def flaky_parse(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise guest_uploads._ExtractError("INTERNAL", "transient boom",
+                                              retryable=True)
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(dxf_intake, "parse_dxf_file", flaky_parse)
+
+    first = _upload(client)
+    assert first.status_code == 202
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "failed"
+
+    retry = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert retry.status_code == 202
+    assert retry.json()["drawing_id"] == did
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"
+
+
+def test_account_same_bytes_reupload_mints_new_drawing(client):
+    """Account uploads keep random ids: two intentional uploads of one file
+    stay two independent drawings (dedupe is a GUEST posture only)."""
+    a = _upload(client, headers={"X-Tenant-Id": "acme-solar"})
+    b = _upload(client, headers={"X-Tenant-Id": "acme-solar"})
+    assert a.status_code == 202 and b.status_code == 202
+    assert a.json()["drawing_id"] != b.json()["drawing_id"]
