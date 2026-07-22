@@ -658,7 +658,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         cloud_failure = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
                          "failure": {"code": err["error_code"], "message": err["message"]}}
         if aps_live and _allows_local_fallback(tool):
-            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, cloud_failure)
+            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, cloud_failure, dwg_version)
             return
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, cloud_failure, dwg_version=dwg_version)
         return
@@ -676,7 +676,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         provenance = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
                       "failure": {"code": err.get("error_code"), "message": err.get("message")}}
         if aps_live and _allows_local_fallback(tool):
-            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance)
+            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance, dwg_version)
             return
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, provenance, dwg_version=dwg_version)
 
@@ -689,14 +689,16 @@ def _allows_local_fallback(tool: Dict[str, Any]) -> bool:
 
 def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str, Any],
                         params: Dict[str, Any], dwg: str, attempt: int,
-                        cloud_failure: Dict[str, Any]) -> None:
+                        cloud_failure: Dict[str, Any],
+                        dwg_version: Optional[int] = None) -> None:
     """Run local only after recording a cloud-path failure in the success provenance."""
     holder: Dict[str, Any] = {}
 
     def _call() -> None:
         try:
             holder["env"] = broker_client.run_via_broker(
-                tenant_id, tool, params, dwg, False, timeout_s=job_max_s() + 30)
+                tenant_id, tool, params, dwg, False, timeout_s=job_max_s() + 30,
+                dwg_version=dwg_version)
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
 

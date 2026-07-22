@@ -512,3 +512,39 @@ def test_tenant_repo_override_of_global_tool_is_not_flagged_as_a_collision(monke
 
     tool = deps.find_tool("count-by-layer")  # must NOT raise
     assert tool is not None and tool.get("entry") == "tools/count-by-layer/tool.py"  # tenant tool WINS
+
+
+def test_dwg_version_survives_local_fallback(monkeypatch, tmp_path):
+    """The discriminating pin-through-fallback case (round-2 review finding):
+    cloud fails, the local fallback broker call must still carry the pin."""
+    import jobs
+
+    class _InertExecutor:
+        def submit(self, fn, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    monkeypatch.setattr(jobs, "_executors", {jobs.LANE_FAST: _InertExecutor(),
+                                             jobs.LANE_SLOW: _InertExecutor()})
+    monkeypatch.setattr(jobs.platform_link, "on_submit", lambda *a, **k: None)
+    monkeypatch.setattr(jobs.platform_link, "on_running", lambda *a, **k: None)
+    monkeypatch.setattr(jobs.platform_link, "on_terminal", lambda *a, **k: None)
+    captured = {}
+
+    def broker_stub(_tenant, _tool, _params, _dwg, aps_live, **kwargs):
+        if aps_live:
+            raise broker_client.BrokerUnreachable("cloud down")
+        captured["dwg_version"] = kwargs.get("dwg_version")
+        return {"ok": True, "result": {"source": "local"}}
+
+    monkeypatch.setattr(broker_client, "run_via_broker", broker_stub)
+    tool = {"name": "count-by-layer", "capabilities": ["drawing.read"],
+            "allow_local_fallback": True}
+    job_id = jobs.submit_job("pin-tenant", tool, {}, "rooftop_demo", aps_live=True,
+                             dwg_version=5)
+    jobs._run_job(job_id, "pin-tenant", tool, {}, "rooftop_demo", True, dwg_version=5)
+    assert captured["dwg_version"] == 5
+    if jobs._conn is not None:
+        jobs._conn.close()
