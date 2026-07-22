@@ -23,6 +23,8 @@ LEAF_AUTH0_JWKS_FILE. Covers:
 Run (cwd MUST be server/, to avoid the repo-root platform/ stdlib shadow):
     cd server && python test_auth.py           # -> exit 0
     cd server && python -m pytest test_auth.py -q
+    cd server && python -m pytest -q           # whole suite; safe (the live-auth
+                                               # env is fixture-scoped to this module)
 """
 from __future__ import annotations
 
@@ -73,20 +75,38 @@ _TMP = Path(tempfile.mkdtemp(prefix="leaf-auth-test-"))
 _JWKS_FILE = _TMP / "jwks.json"
 _JWKS_FILE.write_text(json.dumps({"keys": [_jwk]}), encoding="utf-8")
 
-# point the verifier + tenant store at the local fixtures and turn auth ON
-os.environ.update({
+# env that points the verifier + tenant store at the local fixtures and turns
+# auth ON. Applied ONLY inside the module-scoped fixture below (pytest) or
+# _run_all (script mode) — NEVER at import time: pytest imports every test
+# module during collection, before any test runs, so an import-time
+# os.environ.update would leak LEAF_AUTH_LIVE=1 into the whole process and
+# 401 the entire tests/ suite in a bare `python -m pytest -q` run.
+_ENV = {
     "LEAF_AUTH_LIVE": "1",
     "LEAF_AUTH0_ISSUER": ISS,
     "LEAF_AUTH0_AUDIENCE": AUD,
     "LEAF_TENANT_CLAIM_NS": NS,
     "LEAF_AUTH0_JWKS_FILE": str(_JWKS_FILE),
     "LEAF_TENANTS_FILE": str(SERVER_DIR.parent / "data" / "tenants.sample.json"),
-})
+}
 
 import auth  # noqa: E402
 import tenancy  # noqa: E402
 
-tenancy.reset_store()
+
+@pytest.fixture(autouse=True, scope="module")
+def _auth_env():
+    """Scope the live-auth env to THIS module (same pattern as tests/
+    test_wave5.py's live_auth fixture). Teardown restores the prior env and
+    drops the cached tenant store so later-collected modules inherit a clean
+    process — auth.py/deps.py read the env at call time, so restore is enough."""
+    mp = pytest.MonkeyPatch()
+    for k, v in _ENV.items():
+        mp.setenv(k, v)
+    tenancy.reset_store()
+    yield
+    mp.undo()
+    tenancy.reset_store()
 
 
 def mint(*, key=_priv_pem, kid=KID, aud=AUD, iss=ISS, exp_delta=3600,
@@ -200,6 +220,10 @@ def test_http_session_missing_claim_403():
 # script runner (acceptance: `python test_auth.py` exits 0)
 # --------------------------------------------------------------------------- #
 def _run_all() -> int:
+    # script mode has no pytest fixtures: apply the env directly (process-local,
+    # the interpreter exits right after the run so nothing can leak).
+    os.environ.update(_ENV)
+    tenancy.reset_store()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
     for t in tests:
