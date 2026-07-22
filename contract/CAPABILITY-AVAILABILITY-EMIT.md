@@ -29,9 +29,13 @@ The backend emit must conform to these, field for field:
    `implementationState: "planned"`, `state: "locked_planned"`. Never
    fabricate availability for a dead or unproven backend (element-inventory
    §7: "dead backend: locked, never fabricated").
-2. `runtimeState` is measured, not asserted: `degraded` iff the last run for
-   that capability set `degraded_mode: true` (CONTRACT.md §10) inside the
-   `expiresAt` window; `unavailable` on fail-closed dependency checks.
+2. `runtimeState` is measured, not asserted, and it is a statement about NOW:
+   derive it from current dependency and worker health (the jobs worker and
+   broker delivery machinery in `server/routers/jobs.py`), not from the last
+   run's outcome. CONTRACT.md §10 scopes `degraded_mode` to APS fallback
+   runs; a capability can be degraded (for example `read_only` fallback on
+   worker loss) without any prior degraded run. Recent `degraded_mode: true`
+   runs may serve as supporting evidence, never as the definition.
 3. `evidence` carries real receipts. Initial wiring: attach the existing
    proof artifacts named in the port matrix (test-suite receipts as
    `contract_test`, live write receipt as `end_to_end`, broker ledger line as
@@ -49,6 +53,9 @@ The backend emit must conform to these, field for field:
 ## Naming interlock
 
 Capability names in the emit follow ADOPTION.md §3 (ruling R-A): the
-stringing family emits `autofill-string-targets` (heuristic) and
-`string-autofill-opt` (real optimizer) as distinct capabilities, each with
-its own evidence. No shared names, no precedence.
+registry emits ONE product capability for string solving
+(`drawing.solve.strings`, `server/capabilities_promotion.py:57`) carrying
+two distinct tool names, `autofill-string-targets` (heuristic) and
+`string-autofill-opt` (real optimizer). Distinct tool names within one
+capability; every run result discloses which solver ran. No shared tool
+names, no precedence.

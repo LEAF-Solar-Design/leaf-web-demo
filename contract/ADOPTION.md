@@ -17,9 +17,14 @@ Authority:
 - Envelope + frozen `error_code` enum: `contract/CONTRACT.md` §10
   (`UNKNOWN_TOOL, BAD_PARAMS, APS_UNAVAILABLE, BROKER_UNREACHABLE,
   WORKITEM_FAILED, TIMEOUT, TENANT_DISABLED, INTERNAL`).
-- Promoted additions: `grant_required` / `GRANT_REQUIRED` mapping
-  (`server/CONTRACT-ADDENDUM.md:550,570-577`) and the entitlement vocabulary
-  the gate suites assert (census #3 records promotion at 9e498ce).
+- Promoted additions: the §10 enum update of 2026-07-18
+  (`server/CONTRACT-ADDENDUM.md:682`) promotes `GRANT_REQUIRED` (HTTP 401)
+  and `ENTITLEMENT_REQUIRED` (HTTP 403) into the frozen ErrorCode enum and
+  `envelope_schema.json`. Both codes are part of the adopted taxonomy. The
+  earlier grant-required mapping text at addendum lines 550-577 predates
+  this update and is superseded by it; the additive top-level markers
+  (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are
+  unchanged.
 - Validation errors (422) are enveloped as `BAD_PARAMS` (CONTRACT.md:231).
 - `degraded_mode` semantics: CONTRACT.md:226-228. A fallback run must say so.
 

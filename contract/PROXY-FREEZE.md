@@ -1,9 +1,13 @@
 # Console proxy freeze: header allowlist + error vocabulary (wave 1 lane B2)
 
-Status: FROZEN. The lists below are measured from the live proxy source at
-leaf_website `app/api/app/[...path]/route.ts` (the single seam every console
-API call rides). Changing either list requires the operator-promotion ritual
-and a matching update in both repos the same day. Date: 2026-07-22.
+Status: FROZEN. Scope: the AUTHENTICATED console proxy at leaf_website
+`app/api/app/[...path]/route.ts` only (the seam every signed-in console API
+call rides). The signed-out guest seam (`/api/guest`, CONTRACT §19, with its
+own `X-Guest-Session` and validated `X-Tenant-Id` headers) is a separate
+proxy with its own freeze, documented with the §19 guest-upload work; it is
+NOT covered by the lists below. Changing either list below requires the
+operator-promotion ritual and a matching update in both repos the same day.
+Date: 2026-07-22.
 
 ## 1. Request header allowlist (route.ts:91-101)
 
@@ -18,12 +22,14 @@ dropped, named or not):
 6. `x-org-id` (validated upstream against the resolved tenant; carries no auth)
 7. `x-project-id` (same)
 
-Plus exactly one server-minted header: `Authorization: Bearer <token>` is
-attached by the proxy after entitlement passes, never copied from the client
-(route.ts:52-57).
+Plus the server-minted headers, never copied from the client (route.ts:52-57):
+
+- `Authorization: Bearer <token>`, attached after entitlement passes.
+- `X-Ops-Secret`, attached only on internal ops requests after the
+  internal-only gate (route.ts:366; env sourcing and refusal at :335-338).
 
 Note: census #3 called this an "8-header allowlist". Measured today the
-allowlist is 7 entries plus the server-minted Authorization. This document
+allowlist is 7 entries plus the server-minted headers above. This document
 freezes the measured list; the census figure counted Authorization.
 
 Defense in depth (also frozen):
