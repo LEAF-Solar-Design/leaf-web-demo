@@ -274,3 +274,27 @@ in production. Do not block the executor on them.
   namespaced claims for sample events.
 - `cd server && python -m pytest tests/test_backbone.py -q` → **10/10** with the
   toggle off (byte-identical backbone; `X-Tenant-Id` stub preserved).
+
+---
+
+## 10. Machine-to-machine tenant claims
+
+Client Credentials tokens do not run the Post-Login action because they have no
+user. Deploy `server/auth0-actions/credentials-exchange-add-tenant-claim.js` on
+the `credentials-exchange` trigger for approved machine clients.
+
+The action does nothing unless the client has exact Auth0 metadata values for
+`leaf_tenant_id` and `leaf_tenant_audience`. It also requires the requested
+resource-server identifier to equal `leaf_tenant_audience`. Optional metadata
+keys are `leaf_org_id` and `leaf_tier`. An absent or invalid tier becomes
+`restricted`, which keeps the client read-only. Tenant and org IDs must match
+the canonical `^[a-z0-9][a-z0-9_-]{0,62}$` rule.
+
+Verify locally with:
+
+```bash
+node server/auth0-actions/credentials-exchange-add-tenant-claim.test.js
+```
+
+Before deployment, capture the current client metadata and the current
+`credentials-exchange` bindings. Roll back by restoring both captured values.
