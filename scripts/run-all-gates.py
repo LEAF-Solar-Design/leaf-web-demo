@@ -186,14 +186,79 @@ def build_suites() -> List[Suite]:
         # --- the golden-path composed e2e (this runner's sibling deliverable) --- #
         Suite("server-e2e-golden", "server tests/test_e2e_golden.py", "pytest", SERVER,
               _py_pytest("tests/test_e2e_golden.py"), 1),
+        # --- registration sweep 2026-07-22 (census #17: suites shipped without --- #
+        # --- gate entries; every count below measured one-process-per-file)   --- #
+        Suite("server-catalog-version-pin", "server tests/test_catalog_and_version_pin.py",
+              "pytest", SERVER, _py_pytest("tests/test_catalog_and_version_pin.py"), 21),
+        Suite("server-job-dwg-version", "server tests/test_job_dwg_version_persist.py",
+              "pytest", SERVER, _py_pytest("tests/test_job_dwg_version_persist.py"), 5),
+        Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
+              SERVER, _py_pytest("tests/test_canonical_worker.py"), 10),
+        Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
+              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 15),
+        Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
+              "pytest", SERVER, _py_pytest("tests/test_inverter_placement_adapter.py"), 3),
+        Suite("server-adapter-combiner", "server tests/test_combiner_placement_adapter.py",
+              "pytest", SERVER, _py_pytest("tests/test_combiner_placement_adapter.py"), 3),
+        Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
+              SERVER, _py_pytest("tests/test_agent_approvals.py"), 10),
+        Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
+              SERVER, _py_pytest("tests/test_approval_consume.py"), 13),
+        Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
+              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 16),
+        Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
+              _py_pytest("tests/test_entitlements.py"), 26),
+        Suite("server-entitlements-converse", "server tests/test_entitlements_converse.py",
+              "pytest", SERVER, _py_pytest("tests/test_entitlements_converse.py"), 6),
+        Suite("server-hardening-1c", "server tests/test_hardening_1c.py", "pytest", SERVER,
+              _py_pytest("tests/test_hardening_1c.py"), 12),
+        Suite("server-hardening-2b", "server tests/test_hardening_2b.py", "pytest", SERVER,
+              _py_pytest("tests/test_hardening_2b.py"), 13),
+        Suite("server-hardening-3b", "server tests/test_hardening_3b.py", "pytest", SERVER,
+              _py_pytest("tests/test_hardening_3b.py"), 9),
+        Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
+              SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
+        Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
+              _py_pytest("tests/test_quota_shape.py"), 12),
+        Suite("server-session-store", "server tests/test_session_store.py", "pytest", SERVER,
+              _py_pytest("tests/test_session_store.py"), 19),
+        Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
+              SERVER, _py_pytest("tests/test_sessions_routes.py"), 33),
+        Suite("server-turn-runner", "server tests/test_turn_runner.py", "pytest", SERVER,
+              _py_pytest("tests/test_turn_runner.py"), 12),
+        # g1a canonical e2e self-skips without a reachable Postgres; gate it the
+        # same way as the platform suite so the skip is visible, not silent.
+        Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
+              SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
+        # NOT registered (red at measurement 2026-07-22, one process per file,
+        # pre-existing on main). Durable tracker with the fix-then-register
+        # rule: https://github.com/Evan-Haug/leaf-web-demo/issues/29
+        # test_hardening_1f.py (3F/5P), tests/test_autofill_adapter.py (1F/1P),
+        # tests/test_broker_boundary.py (1F/41P),
+        # tests/test_capabilities_promotion.py (4F/7P),
+        # tests/test_engine_registry_scripts.py (1F/3P),
+        # tests/test_sessions_e2e.py (7 errors/2P).
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 14),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
         # --- platform (cwd=repo parent; DB-gated) --- #
+        # Expected 118 = the full DB-configured collection, measured on this
+        # tree 2026-07-22 via `DATABASE_URL=... pytest --collect-only -q
+        # platform/tests` (the conftest ignore-hook only prunes when NO
+        # DATABASE_URL is set, so with a DB every module collects, not just the
+        # *_static.py proofs).
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 11, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 118, db_gated=True),
+        # Dependency-free *_static proofs must run even with NO Postgres: the
+        # conftest's pytest_ignore_collect exempts them, so this un-gated suite
+        # keeps them in the gate on a clean checkout. Explicit file targets, not
+        # the dir, so the collected count (26) is invariant to DB presence.
+        Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
+              _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
+              + [f"{repo_name}/platform/tests/test_hashing_static.py",
+                 f"{repo_name}/platform/tests/test_replay_static.py"], 26),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
               [_npm(), "test"], 63),
@@ -377,21 +442,33 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     if suite.kind == "pytest":
         c = parse_pytest(out)
         passed = rc == 0 and c["failed"] == 0 and c["errors"] == 0
-        got = str(c["got"])
         note = pre_note
         if c["skipped"]:
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
-        if suite.expected is not None and c["got"] != suite.expected and passed:
+        # Expected counts are a FLOOR: fewer tests than registered means the
+        # suite silently lost coverage (deselected file, import skip, renamed
+        # module) even when everything that ran was green. Growth is fine and
+        # only noted.
+        if suite.expected is not None and passed and c["got"] < suite.expected:
+            passed = False
+            note = (note + " " if note else "") + \
+                f"count regression: expected >= {suite.expected}, got {c['got']}"
+        elif suite.expected is not None and c["got"] > suite.expected and passed:
             note = (note + " " if note else "") + f"(count drift: expected {suite.expected})"
-        return Result(suite, "PASS" if passed else "FAIL", got, seconds,
+        return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
                       note=note.strip(), log_path=log_path, counts=c)
 
     if suite.kind == "vitest":
         c = parse_vitest(out)
         passed = rc == 0 and c["failed"] == 0
+        note = f"{c['skipped']} skipped" if c.get("skipped") else ""
+        # Same floor rule as pytest suites.
+        if suite.expected is not None and passed and c["got"] < suite.expected:
+            passed = False
+            note = (note + " " if note else "") + \
+                f"count regression: expected >= {suite.expected}, got {c['got']}"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
-                      note=(f"{c['skipped']} skipped" if c.get("skipped") else ""),
-                      log_path=log_path, counts=c)
+                      note=note.strip(), log_path=log_path, counts=c)
 
     # tsc: pass/fail on exit code only
     passed = rc == 0

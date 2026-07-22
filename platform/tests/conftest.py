@@ -62,22 +62,34 @@ if _DB_CONFIGURED:
 
 
 def pytest_ignore_collect(collection_path, config):
-    """Keep dependency-free ledger checks runnable on a clean checkout.
+    """Keep dependency-free static checks runnable on a clean checkout.
 
     The existing integration suite intentionally imports psycopg and needs a
     PostgreSQL URL.  Without either, avoid importing it at collection time while
-    preserving the static/canonical-hash proof module.
+    preserving the ``*_static.py`` proof modules (ledger, hashing, replay):
+    those load their targets by file path, import nothing DB-shaped, and are
+    exactly the tests that must run everywhere.
     """
     path = pathlib.Path(str(collection_path))
-    if not _DB_CONFIGURED and path.parent == _TESTS_DIR and path.name != "test_ledger_static.py":
+    if not _DB_CONFIGURED and path.parent == _TESTS_DIR \
+            and not path.name.endswith("_static.py"):
         return True
     return False
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _migrate():
-    """Apply every idempotent platform migration once per PostgreSQL session."""
-    if not _DB_CONFIGURED:
+def _migrate(request):
+    """Apply every idempotent platform migration once per PostgreSQL session.
+
+    Static-only runs (the platform-static gate) must stay DB-free even when a
+    DATABASE_URL happens to be configured: an unreachable DB would otherwise
+    fail the dependency-free *_static.py proofs at migration time. So migrate
+    only when at least one collected test lives outside the *_static.py modules.
+    """
+    needs_db = _DB_CONFIGURED and any(
+        not item.path.name.endswith("_static.py") for item in request.session.items
+    )
+    if not needs_db:
         yield
         return
     _db.apply_migration()
