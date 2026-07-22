@@ -183,3 +183,52 @@ def test_orphan_staged_file_swept_by_mtime(client, monkeypatch):
     os.utime(orphan, (old, old))
     guest_uploads.purge_expired()
     assert not orphan.exists()
+
+
+def test_retry_landing_between_expiry_read_and_lock_survives(client, monkeypatch):
+    """Round-5 MAJOR: purge reads the expiry BEFORE acquiring the drawing
+    lock. If a failed-retry replaces the marker (fresh quota-charged attempt,
+    fresh expiry) in that window, the in-lock expiry re-check must veto the
+    stale deletion verdict — the fresh attempt survives, no receipt is
+    logged."""
+    import dxf_intake
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")  # ~72 ms
+
+    # First attempt fails terminally (real path: the extractor raises), so
+    # the marker is 'failed' and expired shortly after.
+    real_parse = dxf_intake.parse_dxf_file
+    monkeypatch.setattr(
+        dxf_intake, "parse_dxf_file",
+        lambda *a, **k: (_ for _ in ()).throw(
+            guest_uploads._ExtractError("INTERNAL", "boom", retryable=True)))
+    tenant, did = _upload(client)
+    time.sleep(0.2)  # marker now expired
+
+    # The retry lands INSIDE purge's read->lock window: hook _read_expiry so
+    # that, right after purge reads the STALE expiry for this drawing, the
+    # same-bytes retry replaces the marker with a fresh 24h attempt.
+    monkeypatch.setattr(dxf_intake, "parse_dxf_file", real_parse)
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "24")
+    real_read = guest_uploads._read_expiry
+    fired = {"done": False}
+
+    def read_then_retry(marker_path):
+        expires = real_read(marker_path)
+        if not fired["done"] and marker_path.parent.name == did:
+            fired["done"] = True
+            retry = client.post(
+                "/api/drawings/upload",
+                files={"file": ("p.dxf", io.BytesIO(DXF))},
+                headers={"X-Tenant-Id": tenant})
+            assert retry.status_code == 202
+            assert retry.json()["drawing_id"] == did
+        return expires
+
+    monkeypatch.setattr(guest_uploads, "_read_expiry", read_then_retry)
+    result = guest_uploads.purge_expired()
+
+    assert result["count"] == 0, "stale verdict must not delete the fresh attempt"
+    assert _drawing_dir(tenant, did).exists()
+    marker = guest_uploads.read_marker(
+        write_loop.backend_for_tenant(tenant, aps_live=False, da=None), tenant, did)
+    assert marker is not None and marker["status"] == "ready"

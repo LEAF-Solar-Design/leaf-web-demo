@@ -398,3 +398,88 @@ def test_account_same_bytes_reupload_mints_new_drawing(client):
     b = _upload(client, headers={"X-Tenant-Id": "acme-solar"})
     assert a.status_code == 202 and b.status_code == 202
     assert a.json()["drawing_id"] != b.json()["drawing_id"]
+
+
+def test_guest_failed_retry_wipes_partial_ingest_residue(client, monkeypatch):
+    """Round-5 MAJOR: a failed ingest can leave partial residue (a v1 blob
+    without a manifest would wedge the derived id in ingest's immutable-
+    version refusal forever). The retry must WIPE the drawing dir and start
+    clean under the same derived id."""
+    import store
+    import dxf_intake
+    real_parse = dxf_intake.parse_dxf_file
+    calls = {"n": 0}
+
+    def flaky_parse(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise guest_uploads._ExtractError("INTERNAL", "boom", retryable=True)
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(dxf_intake, "parse_dxf_file", flaky_parse)
+    first = _upload(client)
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "failed"
+
+    # Plant the worst residue shape: a v1 version blob with NO manifest.
+    backend.put(store.drawing_version_key(tenant, did, 1), b"partial-ingest-residue")
+
+    retry = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert retry.status_code == 202
+    assert retry.json()["drawing_id"] == did
+    marker = guest_uploads.read_marker(backend, tenant, did)
+    assert marker["status"] == "ready", marker.get("error")
+    intake = client.get(f"/api/drawings/{did}/intake",
+                        headers={"X-Tenant-Id": tenant})
+    assert intake.status_code == 200
+
+
+def test_stale_worker_cannot_overwrite_replaced_attempt(client, monkeypatch):
+    """Round-5 MAJOR: a timed-out attempt's worker thread that is STILL
+    RUNNING when the retry replaces the marker must fence itself out — the
+    locked tail re-checks the attempt token, not mere marker existence."""
+    import dxf_intake
+    real_parse = dxf_intake.parse_dxf_file
+    state = {"old_worker_ran": False}
+
+    def parse_with_midflight_replacement(*args, **kwargs):
+        intake = real_parse(*args, **kwargs)
+        if not state["old_worker_ran"]:
+            state["old_worker_ran"] = True
+            tenant, did = state["tenant"], state["did"]
+            backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+            # The attempt times out (status_view's persistence, simulated
+            # here with the marker this worker owns)...
+            marker = guest_uploads.read_marker(backend, tenant, did)
+            guest_uploads._mark_failed(backend, tenant, did, marker,
+                                       "TIMEOUT", "budget exceeded", retryable=True)
+            # ...and the user's retry replaces the attempt and completes
+            # fully (inline extraction) before the old worker resumes.
+            retry = _upload(client, headers={"X-Tenant-Id": tenant})
+            assert retry.status_code == 202
+            assert retry.json()["drawing_id"] == did
+            state["new_attempt"] = guest_uploads.read_marker(
+                backend, tenant, did)["attempt"]
+        return intake
+
+    # First upload: capture ids BEFORE extraction runs, so run the thread
+    # manually instead of inline.
+    monkeypatch.setattr(guest_uploads, "start_extraction_thread", lambda *a, **k: None)
+    monkeypatch.setattr(dxf_intake, "parse_dxf_file", parse_with_midflight_replacement)
+    first = _upload(client)
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+    state["tenant"], state["did"] = tenant, did
+    # Re-enable inline extraction for the RETRY inside the wrapper.
+    monkeypatch.setattr(
+        guest_uploads, "start_extraction_thread",
+        lambda t, d, e: guest_uploads.run_extraction(t, d, e))
+
+    guest_uploads.run_extraction(tenant, did, ".dxf")  # the OLD worker
+
+    backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+    final = guest_uploads.read_marker(backend, tenant, did)
+    assert state["old_worker_ran"]
+    assert final["attempt"] == state["new_attempt"], \
+        "the old worker must not overwrite the replacement attempt"
+    assert final["status"] == "ready"

@@ -26,6 +26,7 @@ honestly (APS_UNAVAILABLE) because no local DWG reader exists.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -270,6 +271,11 @@ def new_marker(*, filename: str, data: bytes, tenant_kind: str,
     return {
         "schema": 1,
         "status": "extracting",
+        # Attempt generation (round-5 review, MAJOR): a failed-retry REPLACES
+        # the marker with a fresh token; the old attempt's still-running
+        # worker thread must then fence itself out instead of overwriting the
+        # new attempt's state.
+        "attempt": secrets.token_hex(8),
         "source_ext": source_ext,  # write_loop's live-write guard reads this
         "filename": str(filename),
         "bytes": len(data),
@@ -282,38 +288,74 @@ def new_marker(*, filename: str, data: bytes, tenant_kind: str,
     }
 
 
-# Per-drawing re-entrant locks shared by the upload route's marker+staging
-# writes, the extraction ingest tail, _mark_failed, and the purge sweep's
-# per-drawing delete (review round 4, both MAJORs): scoping the critical
-# section to ONE drawing means an account tenant's slow live ingest can never
-# serialize other uploads or delay the purge deadline of an unrelated guest
-# drawing, while the SAME drawing's stage/ingest/fail/delete operations still
-# can never interleave. Re-entrant because _mark_failed runs inside the
-# extraction tail's held lock. The registry mutex guards only dict access and
-# is never held during drawing work; purge evicts an entry after a receipted
-# deletion, which is safe because a deleted drawing id is never re-minted
-# (mint collision-checks against both manifests and markers).
-_DRAWING_LOCKS: Dict[Tuple[str, str], threading.RLock] = {}
-_DRAWING_LOCKS_MU = threading.Lock()
+# Per-drawing re-entrant critical sections shared by the upload route's
+# marker+staging writes, the extraction ingest tail, _mark_failed, and the
+# purge sweep's per-drawing delete (review round 4, both MAJORs): scoping the
+# critical section to ONE drawing means an account tenant's slow live ingest
+# can never serialize other uploads or delay the purge deadline of an
+# unrelated guest drawing, while the SAME drawing's stage/ingest/fail/delete
+# operations still can never interleave.
+#
+# REFCOUNTED (review round 5, MAJOR + MINOR): an entry exists only while some
+# thread holds or awaits it, so (a) the registry stays bounded — account
+# uploads no longer grow it forever — and (b) there is no eviction race: every
+# acquire goes through the registry mutex, so a new caller either joins the
+# entry a holder/waiter keeps alive or creates a fresh one only when nobody
+# references the key. (The round-4 post-release eviction could hand two
+# concurrent callers DIFFERENT lock objects for one key; content-derived
+# guest ids are also re-mintable after purge, so eviction could not lean on
+# "deleted ids never return" either.) Re-entrant: _mark_failed runs inside
+# the extraction tail's held section.
+class _KeyedLocks:
+    def __init__(self) -> None:
+        self._mu = threading.Lock()
+        self._entries: Dict[Tuple[str, str], list] = {}  # key -> [RLock, refs]
+
+    @contextlib.contextmanager
+    def hold(self, key: Tuple[str, str]):
+        with self._mu:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = [threading.RLock(), 0]
+                self._entries[key] = entry
+            entry[1] += 1
+        try:
+            with entry[0]:
+                yield
+        finally:
+            with self._mu:
+                entry[1] -= 1
+                if entry[1] <= 0:
+                    self._entries.pop(key, None)
 
 
-def drawing_lock(tenant_id: str, drawing_id: str) -> threading.RLock:
-    with _DRAWING_LOCKS_MU:
-        return _DRAWING_LOCKS.setdefault((tenant_id, drawing_id), threading.RLock())
+_DRAWING_LOCKS = _KeyedLocks()
 
 
-def _evict_drawing_lock(tenant_id: str, drawing_id: str) -> None:
-    with _DRAWING_LOCKS_MU:
-        _DRAWING_LOCKS.pop((tenant_id, drawing_id), None)
+def drawing_lock(tenant_id: str, drawing_id: str):
+    """Context manager: the per-(tenant, drawing) critical section."""
+    return _DRAWING_LOCKS.hold((tenant_id, drawing_id))
+
+
+def guest_drawing_dir(tenant_id: str, drawing_id: str) -> Path:
+    """The guest store's on-disk directory for one drawing (guest tenants are
+    ALWAYS filesystem-backed — write_loop.backend_for_tenant)."""
+    return (Path(write_loop.guest_store_dir()) / "tenants" / tenant_id
+            / "drawings" / drawing_id)
 
 
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
                  error_code: str, message: str, retryable: bool) -> None:
-    # Under the drawing's lock, and only onto a still-existing marker: writing
-    # a failure record for a drawing the purge already deleted would resurrect
-    # a marker file behind the deletion receipt (same race class as ingest).
+    # Under the drawing's lock, and only onto a marker that still IS this
+    # attempt: a purged drawing must not get a marker resurrected behind its
+    # deletion receipt, and a failed-retry's REPLACEMENT marker (new attempt
+    # token) must not be overwritten by the old attempt's late failure
+    # (round-5 review, MAJOR).
     with drawing_lock(tenant_id, drawing_id):
-        if read_marker(backend, tenant_id, drawing_id) is None:
+        current = read_marker(backend, tenant_id, drawing_id)
+        if current is None:
+            return
+        if current.get("attempt") != marker.get("attempt"):
             return
         marker = dict(marker)
         marker["status"] = "failed"
@@ -391,8 +433,20 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     # trace rewritten.
     import tempfile
     with drawing_lock(tenant_id, drawing_id):
-        if read_marker(backend, tenant_id, drawing_id) is None:
+        current = read_marker(backend, tenant_id, drawing_id)
+        if current is None:
             return  # purged while extracting; the receipt stands, nothing returns
+        if current.get("attempt") != marker.get("attempt"):
+            return  # a failed-retry REPLACED this attempt; its worker owns the
+            # drawing now — ingesting here would overwrite the new attempt
+            # (round-5 review, MAJOR)
+        if current.get("status") != "extracting":
+            return  # already terminal: a twin worker of the SAME attempt (a
+            # late-starting thread that read the replacement marker at entry)
+            # finished first, or the timeout was PERSISTED as failed — a
+            # second ingest would trip the already-exists refusal and flip a
+            # good drawing to failed, and a post-timeout success would
+            # destabilize the contract's persisted terminal state
         try:
             import store  # importable via write_loop's sys.path setup
             if ext == ".dwg":
@@ -531,6 +585,14 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
                     # threads (see run_extraction): deletion and ingest can
                     # never interleave, so nothing returns after its receipt.
                     with drawing_lock(tenant_dir.name, drawing_dir.name):
+                        # Re-check the expiry INSIDE the lock (round-5
+                        # review, MAJOR): between the read above and lock
+                        # acquisition, a failed-retry can REPLACE this
+                        # marker with a fresh quota-charged attempt — its
+                        # new expiry must veto the stale deletion verdict.
+                        expires = _read_expiry(marker_path)
+                        if expires is None or expires > now:
+                            continue
                         # Order is load-bearing (round-2 review, MAJOR):
                         # staged RAW files first, VERIFIED gone, then the
                         # drawing dir. If the staged file survives we stop
@@ -567,7 +629,6 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
                                            "tenant_id": tenant_dir.name,
                                            "drawing_id": drawing_dir.name,
                                            "freed_bytes": size + staged_bytes})
-                    _evict_drawing_lock(tenant_dir.name, drawing_dir.name)
             # a tenant dir whose drawings are all gone is itself expired
             try:
                 if drawings_root.is_dir() and not any(drawings_root.iterdir()):

@@ -190,6 +190,22 @@ def upload_drawing(
                         f"the daily guest upload limit for {scope} is "
                         "exhausted; try again tomorrow or create an account",
                         retryable=True, status_code=429)
+                if existing is not None:
+                    # status == "failed": REPLACE the attempt wholesale
+                    # (round-5 review, MAJOR). A failed ingest can leave
+                    # partial residue — a v1 blob without a manifest (which
+                    # would wedge the derived id in an immutable-version
+                    # refusal loop) or a manifest without its cache/marker
+                    # transition (which would force a random-id fallback and
+                    # abandon the derived-id contract). Wiping the drawing
+                    # dir under the lock resets every residue shape (guest
+                    # stores are always local-filesystem), and the fresh
+                    # marker's attempt token fences out the old worker
+                    # thread if it is still alive.
+                    import shutil
+                    shutil.rmtree(
+                        guest_uploads.guest_drawing_dir(str(tenant), derived),
+                        ignore_errors=True)
                 if not backend.exists(store.manifest_key(str(tenant), derived)):
                     # Effect order is load-bearing: (1) marker — so
                     # /upload-status and the fail-closed bootstrap guard
