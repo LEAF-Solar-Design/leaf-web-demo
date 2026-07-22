@@ -36,8 +36,11 @@ from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 router = APIRouter()
 
 
-def _backend():
-    return write_loop.default_backend(
+def _backend(tenant_id: str = ""):
+    """Per-tenant store selection (§19): guest tenants read/write the isolated
+    guest store; every other tenant keeps the exact pre-§19 default backend."""
+    return write_loop.backend_for_tenant(
+        str(tenant_id),
         aps_live=deps.APS_LIVE,
         da=deps.get_da_client() if deps.APS_LIVE else None,
     )
@@ -50,7 +53,7 @@ def get_intake(drawing_id: str, version: str = "head",
     if isinstance(version, str) and version not in ("head", "latest") and version.lstrip("-").isdigit():
         ver = int(version)
     try:
-        view = write_loop.intake_view(str(tenant_id), drawing_id, ver, backend=_backend())
+        view = write_loop.intake_view(str(tenant_id), drawing_id, ver, backend=_backend(str(tenant_id)))
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
                               retryable=False, status_code=404)
@@ -60,7 +63,7 @@ def get_intake(drawing_id: str, version: str = "head",
 @router.post("/api/drawings/{drawing_id}/undo")
 def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
     try:
-        view = write_loop.undo_view(str(tenant_id), drawing_id, backend=_backend())
+        view = write_loop.undo_view(str(tenant_id), drawing_id, backend=_backend(str(tenant_id)))
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
@@ -69,7 +72,7 @@ def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict
 @router.post("/api/drawings/{drawing_id}/redo")
 def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
     try:
-        view = write_loop.redo_view(str(tenant_id), drawing_id, backend=_backend())
+        view = write_loop.redo_view(str(tenant_id), drawing_id, backend=_backend(str(tenant_id)))
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
@@ -114,7 +117,7 @@ def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_tenant))
     APS_LIVE=0; any other unknown drawing → BAD_PARAMS 404)."""
     import store  # da/store.py; importable via write_loop's sys.path setup (imported above)
 
-    backend = _backend()
+    backend = _backend(str(tenant_id))
     try:
         write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
         m = store.load_manifest(backend, str(tenant_id), drawing_id)
@@ -173,7 +176,7 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     drawing (the well-known `demo` bootstraps on first use at APS_LIVE=0)."""
     import store  # da/store.py; importable via write_loop's sys.path setup
 
-    backend = _backend()
+    backend = _backend(str(tenant_id))
     try:
         write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
     except (KeyError, ValueError) as exc:
@@ -224,7 +227,7 @@ def release_checkout_route(drawing_id: str, holder: Optional[str] = None,
     cleared state. §10-enveloped `{drawing_id, released, checkout: null}`."""
     import store  # da/store.py; importable via write_loop's sys.path setup
 
-    backend = _backend()
+    backend = _backend(str(tenant_id))
     try:
         write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
         m = store.load_manifest(backend, str(tenant_id), drawing_id)

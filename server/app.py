@@ -38,6 +38,7 @@ from routers import (
     site,
     tenant,
     tools,
+    uploads,
     usage,
 )
 
@@ -65,6 +66,14 @@ def _cors_origins() -> list[str]:
 
 
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
+
+# §19: byte-counting wall on the upload route — bounds multipart pre-parse
+# disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.
+# Registered BEFORE CORSMiddleware so CORS wraps it (last-added = outermost):
+# the limiter's own 413 then carries CORS headers for permitted origins.
+import guest_uploads as _guest_uploads_mw  # noqa: E402
+
+app.add_middleware(_guest_uploads_mw.UploadBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),  # F17: env-driven allow-list, default-deny in live-auth
@@ -87,6 +96,17 @@ app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
+app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
+
+# §19 retention promise-keeper: the purge daemon deletes expired guest drawings
+# at their STAMPED expiry. Started UNCONDITIONALLY (review round 1, MAJOR):
+# LEAF_GUEST_UPLOADS_ENABLED=0 stops NEW uploads, but retention promises
+# already stamped on existing guest drawings must still be kept — disabling
+# the feature never strands data past its promised deletion. A sweep failure
+# logs and retries; it never kills the app.
+import guest_uploads  # noqa: E402
+
+guest_uploads.start_purge_daemon()
 
 
 # --- platform Project/Job router (org-scoped persistence; platform/README.md) --- #

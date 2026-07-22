@@ -20,3 +20,5 @@ engine/appbundle-write/build/
 server/sessions.db
 server/sessions.db-shm
 server/sessions.db-wal
+server/guest_drawings/
+data/uploads/

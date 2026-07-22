@@ -64,6 +64,19 @@ def site_capabilities() -> Dict[str, Any]:
     return with_envelope_fields({"families": families})
 
 
+@router.get("/api/site/guest-upload-policy")
+def guest_upload_policy() -> Dict[str, Any]:
+    """PUBLIC upload policy for the guest console (CONTRACT-ADDENDUM §19).
+
+    Pure config, no tenant state, safe with no session — squarely inside this
+    namespace's rules (the BUILTIN-ONLY tool rule is about the catalog and is
+    untouched). The retention/size numbers here come from the SAME
+    guest_uploads functions the purge job and upload endpoint read, so the
+    copy the frontend renders can never drift from what the server enforces."""
+    import guest_uploads  # lazy: keeps this module's import surface unchanged
+    return with_envelope_fields(guest_uploads.policy_view())
+
+
 @router.get("/api/site/demo-solve")
 def site_demo_solve() -> Dict[str, Any]:
     """The canned demo solve artifact the marketing stage renders."""
