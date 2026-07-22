@@ -78,9 +78,18 @@ def pytest_ignore_collect(collection_path, config):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _migrate():
-    """Apply every idempotent platform migration once per PostgreSQL session."""
-    if not _DB_CONFIGURED:
+def _migrate(request):
+    """Apply every idempotent platform migration once per PostgreSQL session.
+
+    Static-only runs (the platform-static gate) must stay DB-free even when a
+    DATABASE_URL happens to be configured: an unreachable DB would otherwise
+    fail the dependency-free *_static.py proofs at migration time. So migrate
+    only when at least one collected test lives outside the *_static.py modules.
+    """
+    needs_db = _DB_CONFIGURED and any(
+        not item.path.name.endswith("_static.py") for item in request.session.items
+    )
+    if not needs_db:
         yield
         return
     _db.apply_migration()
