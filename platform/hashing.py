@@ -8,9 +8,9 @@ Delineation from ``models.canonical_hash`` (this package already hashes): the
 ledger hasher canonicalizes via RFC8785-JCS with domain separation and treats
 floats verbatim — right for ledger/config records where the bytes ARE the
 content. THIS module is the geometry-bearing contract: floats are quantized to a
-fixed resolution grid before canonicalization, so nearly-equal coordinates
-(within resolution) and cross-platform float-formatting differences produce the
-SAME digest. Use ``models.canonical_hash`` for ledger records; use
+fixed resolution grid before canonicalization, so coordinates that land in the
+same quantization cell and cross-platform float-formatting differences produce
+the SAME digest. Use ``models.canonical_hash`` for ledger records; use
 ``stable_hash`` here for run outputs, replay comparison, and output caching.
 
 ``DEFAULT_RESOLUTION_M`` is FROZEN: changing it invalidates every stored hash.
