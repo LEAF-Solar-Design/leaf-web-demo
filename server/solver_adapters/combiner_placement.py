@@ -41,6 +41,11 @@ TOOL_NAME = "combiner-placement-row-end"
 
 _ALLOWED_PLACEMENT_STRATEGIES = {"row-end", "lane-sweep"}
 _ALLOWED_LOCATION_MODES = {"segment", "chunk"}
+# Fail closed on unknown fields: an option this adapter does not wire into the
+# solver CLI (e.g. optimizeL2Swaps) must be REJECTED, never silently dropped so
+# the caller believes it was applied. These are the only keys the adapter maps.
+_ALLOWED_TOP_LEVEL_KEYS = {"dump", "options"}
+_ALLOWED_OPTION_KEYS = {"stringsPerInput", "dcInputsPerL2", "placementStrategy", "locationMode"}
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -55,6 +60,9 @@ def _sha256(value: Any) -> str:
 def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(params, dict):
         raise ValueError("combiner placement params must be an object")
+    unknown = set(params) - _ALLOWED_TOP_LEVEL_KEYS
+    if unknown:
+        raise ValueError(f"combiner placement rejects unknown fields: {sorted(unknown)}")
     dump = params.get("dump")
     if not isinstance(dump, dict):
         raise ValueError("combiner placement dump must be an object")
@@ -73,6 +81,11 @@ def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _validated_options(options: Dict[str, Any]) -> Dict[str, Any]:
+    unknown = set(options) - _ALLOWED_OPTION_KEYS
+    if unknown:
+        raise ValueError(
+            f"combiner placement rejects unsupported options (not wired to the "
+            f"solver CLI): {sorted(unknown)}")
     strings_per_input = options.get("stringsPerInput", 10)
     dc_inputs_per_l2 = options.get("dcInputsPerL2", 36)
     placement_strategy = options.get("placementStrategy", "lane-sweep")

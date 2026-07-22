@@ -54,6 +54,12 @@ def test_adapter_rejects_invalid_dump_and_options():
         {"dump": {"inputs": {}}, "options": {"dcInputsPerL2": 0}},
         {"dump": {"inputs": {}}, "options": {"placementStrategy": "bogus"}},
         {"dump": {"inputs": {}}, "options": {"locationMode": "bogus"}},
+        # Fail closed on unknown fields (review finding): an unwired option or a
+        # stray top-level key must be REJECTED, not silently ignored so the
+        # caller believes it was applied.
+        {"dump": {"inputs": {}}, "options": {"optimizeL2Swaps": True}},
+        {"dump": {"inputs": {}}, "options": {"optimizeL2Chains": True}},
+        {"dump": {"inputs": {}}, "spuriousTopLevel": 1},
     )
     for invalid in invalid_cases:
         with pytest.raises(ValueError):
