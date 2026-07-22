@@ -169,10 +169,13 @@ def load_policy() -> Dict[str, Dict[str, Any]]:
         # ABSENT is the only fail-SAFE case: the operator never wrote a policy,
         # so the shipped defaults are the intended answer.
         return dict(_HARDCODED_DEFAULTS)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         # PRESENT but unreadable is NOT the same thing. Restoring the permissive
         # defaults here would silently re-grant every capability a truncated or
-        # unreadable TIGHTENED policy was withholding.
+        # unreadable TIGHTENED policy was withholding. UnicodeDecodeError (a
+        # ValueError, NOT an OSError) covers a non-UTF-8 file — it must convert
+        # to EntitlementsError like every other unreadable-policy case so the
+        # request-path handlers produce the structured 503, not a bare 500.
         raise EntitlementsError(f"entitlements file unreadable at {path}: {exc}") from exc
     try:
         raw = json.loads(text)
@@ -279,6 +282,27 @@ def _denied_message(required: str, tier: str) -> str:
         return (f"the '{tier}' plan does not include running tools that modify the drawing; "
                 "upgrade the workspace plan to enable write tools.")
     return (f"the '{tier}' plan does not include running tools; upgrade the workspace plan.")
+
+
+def policy_unavailable_response(required: str, tier: str) -> JSONResponse:
+    """503: the policy file is PRESENT but cannot be trusted (EntitlementsError).
+
+    Fail closed with the full §17 envelope — never an unstructured 500, and
+    never an allow. INTERNAL is the frozen §10 code for "the server cannot
+    evaluate this right now"; retryable because an operator fixing the policy
+    file resolves it without a client change.
+    """
+    return JSONResponse(status_code=503, content={
+        "entitlement_required": True,
+        "required": required,
+        "tier": tier,
+        "error": error_obj(
+            ErrorCode.INTERNAL,
+            "entitlement policy is unavailable; request refused (fail closed).",
+            retryable=True,
+        ),
+        "degraded_mode": False,
+    })
 
 
 def entitlement_denied_response(required: str, tier: str) -> JSONResponse:

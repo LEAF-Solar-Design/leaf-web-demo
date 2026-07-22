@@ -151,6 +151,7 @@ is in `server/CONTRACT-ADDENDUM.md`.
 | **Real Claude authoring (Build lane)** | A per-tenant grant via `POST /api/tenant/claude-grant` — either a "sign in with Claude" OAuth token (`claude setup-token`, individual-use) or a **BYO Anthropic API key** (enterprise, `sk-ant-api…`, auto-detected). Boot the harness with `--with-harness`. |
 | **Platform Project/Job/org persistence** | `DATABASE_URL` (Postgres/Neon). Empty by default so `/api/orgs` etc. stay dark on a plain demo. |
 | **Real tenant identity + tier gates (`LEAF_AUTH_LIVE=1`)** | Auth0 RS256 JWT verification (needs PyJWT via `server/requirements-auth.txt`). Off = open demo, tier `demo` = full access. |
+| **Entitlement floor proof (platform jobs lane)** | `python scripts/entitlement-gate.py` — binary READY/NOT-READY: exit 0 only when an entitled org's solve succeeds AND a restricted org's solve is DENIED (403 `entitlement_required`). Needs `DATABASE_URL`/`platform/.env.local`. |
 
 ---
 

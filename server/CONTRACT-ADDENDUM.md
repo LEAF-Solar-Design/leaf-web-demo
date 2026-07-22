@@ -681,6 +681,31 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 
 > **§10 enum update (2026-07-18):** `GRANT_REQUIRED` (HTTP 401) and `ENTITLEMENT_REQUIRED` (HTTP 403) promoted into the frozen ErrorCode enum + `envelope_schema.json`. The grant-required (§16) and entitlement-denied (§17) responses now carry these dedicated `error.error_code`s instead of `BAD_PARAMS`; the additive top-level markers (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are unchanged, so existing consumers keep working.
 
+> **§17 platform-lane extension (2026-07-22):** the platform jobs lane
+> (`POST /api/projects/{id}/jobs`, `platform/entitlements.py`) now enforces the
+> SAME tier policy: job kinds map onto §17's capabilities (`solve`/`run` →
+> `run_write`, `extract` → `run_read`, `build` → `build`), resolved through
+> `server/entitlements.py`'s fail-closed `entitlements_for` and denied with the
+> §17 envelope. The org's STORED tier (orgs.tier) is the source there, not the
+> JWT claim; non-`active` org status also denies. The same stored-org check
+> runs at the canonical submission choke point
+> (`platform/canonical_jobs.submit_solve_job`), so the `POST /api/run` spine
+> path cannot bypass it with a permissive request-side (JWT/demo) tier — the
+> denial surfaces through `server/platform_link.CanonicalEntitlementDenied`
+> and is returned verbatim. When enforcement itself cannot be evaluated
+> (policy file present-but-unreadable/invalid, org row unreadable) the refusal
+> is a structured 503 carrying the full §17 envelope with
+> `error.error_code = INTERNAL` (frozen §10 enum), `retryable = true` — never
+> a bare 500 and never an allow (this covers the `/api/run` request-tier gate
+> too). Two boundary semantics are deliberate: (1) idempotent REPLAY precedes
+> enforcement — an already-accepted Idempotency-Key returns its original job
+> even after a tier downgrade (the job exists; denying the lookup would only
+> break client retries), while NEW submissions are gated; (2) the evaluated
+> tier and `active` status are re-checked atomically INSIDE the job INSERT
+> (TOCTOU guard), so a downgrade racing the submission denies rather than
+> slipping a job through. Binary proof: `scripts/entitlement-gate.py`
+> (READY/NOT-READY, exit 0/1; the denial leg validates the FULL envelope).
+
 ## §18 Conversational agent sessions (agent spine, Phase 1)
 
 Session: `agent-spine-phase1`, 2026-07-20. The contract for the conversational spine:

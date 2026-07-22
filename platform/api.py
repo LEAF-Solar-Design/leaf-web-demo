@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import store
+from . import entitlements, store
 from .db import cursor
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
@@ -127,18 +127,11 @@ def get_org(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id)):
     # 404-not-403: a caller may only read its own org; a mismatch leaks nothing.
     if org_id != caller_org:
         raise HTTPException(status_code=404, detail="org not found")
-    # store.py has no get_org (and is not this lane's to edit); this read is
-    # org-scoped by construction (WHERE org_id = the caller's verified org).
-    with cursor() as cur:
-        cur.execute(
-            "SELECT org_id, name, tier, status, created_at, offboarded_at "
-            "FROM orgs WHERE org_id = %(org_id)s",
-            {"org_id": org_id},
-        )
-        row = cur.fetchone()
-    if row is None:
+    # Org-scoped by construction: org_id == the caller's verified org.
+    org = store.get_org(org_id)
+    if org is None:
         raise HTTPException(status_code=404, detail="org not found")
-    return {"org": Org.from_row(row).to_dict()}
+    return {"org": org.to_dict()}
 
 
 # --------------------------------------------------------------------------- #
@@ -173,8 +166,16 @@ def create_job(project_id: uuid.UUID, body: CreateJobBody,
     if body.kind not in JOB_KINDS:
         raise HTTPException(status_code=422, detail=f"kind must be one of {list(JOB_KINDS)}")
     # ownership check first: 404 (not 403) if the project is not the caller's
+    # — kept BEFORE entitlement so a cross-org probe learns nothing new.
     if store.get_project(org_id, project_id) is None:
         raise HTTPException(status_code=404, detail="project not found")
+    # Tier-branching entitlement enforcement (P1 floor): the caller org's tier
+    # must grant the capability this job kind consumes; fail closed. The org
+    # read happens INSIDE the helper's fail-closed boundary (a DB hiccup on the
+    # enforcement read refuses with the structured 503, not a bare 500).
+    denial = entitlements.stored_job_entitlement_denial(org_id, body.kind)
+    if denial is not None:
+        return denial
     job = store.create_job(
         org_id, project_id, body.kind, tool_name=body.tool, params=body.params
     )

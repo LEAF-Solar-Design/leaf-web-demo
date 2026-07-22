@@ -547,6 +547,22 @@ def list_projects(org_id: uuid.UUID) -> List[Project]:
         return [Project.from_row(r) for r in cur.fetchall()]
 
 
+def get_org(org_id: uuid.UUID) -> Optional[Org]:
+    """The caller's own org row (``org_id`` IS the scope: the verified caller org).
+
+    Selects exactly the columns the pre-refactor GET /api/orgs/{id} query read,
+    so that endpoint's response stays byte-identical (deletion/purge timestamps
+    keep reading as null there; ``Org.from_row`` tolerates their absence)."""
+    with cursor() as cur:
+        cur.execute(
+            "SELECT org_id, name, tier, status, created_at, offboarded_at "
+            "FROM orgs WHERE org_id = %(org_id)s",
+            {"org_id": org_id},
+        )
+        row = cur.fetchone()
+        return Org.from_row(row) if row else None
+
+
 def get_project(org_id: uuid.UUID, project_id: uuid.UUID) -> Optional[Project]:
     with cursor() as cur:
         cur.execute(
