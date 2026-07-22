@@ -269,3 +269,27 @@ def test_run_route_returns_stored_entitlement_denial_verbatim(monkeypatch):
         tenant_id="tenant-1", x_org_id="org-1", x_project_id="project-1",
         idempotency_key="request-denied-1", authorization="Bearer verified")
     assert response is denial
+
+
+def test_run_route_invalid_policy_is_structured_503(monkeypatch, tmp_path):
+    """A present-but-invalid entitlements file must refuse /api/run with the
+    documented 503 envelope, never an unstructured 500."""
+    import json
+
+    bad = tmp_path / "bad-entitlements.json"
+    bad.write_text("{this is not json", encoding="utf-8")
+    monkeypatch.setenv("LEAF_ENTITLEMENTS_FILE", str(bad))
+    tool = {"name": "demo-read-tool", "capabilities": ["drawing.read"], "default_params": {}}
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: tool)
+    response = jobs_router.run(
+        jobs_router.RunRequest(tool="demo-read-tool", params={}),
+        tenant_id="tenant-1", x_org_id=None, x_project_id=None,
+        idempotency_key=None, authorization=None)
+    assert response.status_code == 503
+    body = json.loads(response.body)
+    assert body["entitlement_required"] is True
+    assert body["required"] == "run_read"
+    assert body["tier"] == "demo"
+    assert body["degraded_mode"] is False
+    assert body["error"]["error_code"] == "INTERNAL"
+    assert body["error"]["retryable"] is True

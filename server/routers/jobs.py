@@ -118,7 +118,13 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     # bypassed by the UI. Off-auth/demo tier grants everything (friction-free).
     tier = entitlements.resolve_tier(tenant_id)
     required = entitlements.tool_required_capability(tool)
-    if not entitlements.entitlements_for(tier).get(required, False):
+    try:
+        allowed = entitlements.entitlements_for(tier).get(required, False)
+    except entitlements.EntitlementsError:
+        # Present-but-untrustworthy policy file: refuse with the structured
+        # 503, never an unstructured 500 (and never an allow).
+        return entitlements.policy_unavailable_response(required, tier)
+    if not allowed:
         return entitlements.entitlement_denied_response(required, tier)
 
     # merge authored default_params under caller params
@@ -319,7 +325,12 @@ def platform_capabilities(
     health = jobs.platform_link.canonical_worker_health(AUTOFILL_TOOL)
     now = datetime.now(timezone.utc)
     tier = entitlements.resolve_tier(tenant)
-    entitled = entitlements.entitlements_for(tier).get("solve", False)
+    try:
+        entitled = entitlements.entitlements_for(tier).get("solve", False)
+    except entitlements.EntitlementsError:
+        # An unreadable policy grants nothing; the projection reports
+        # not-entitled while the write path answers with the structured 503.
+        entitled = False
     observed = str(health["observed_at"]) if health else now.isoformat()
     expires = ((datetime.fromisoformat(observed) if health else now)
                + timedelta(seconds=15)).isoformat()

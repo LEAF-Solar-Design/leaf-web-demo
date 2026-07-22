@@ -247,3 +247,61 @@ def test_org_read_failure_is_structured_503(monkeypatch, pinned_policy):
     assert body["tier"] == "restricted"
     assert body["error"]["error_code"] == "INTERNAL"
     assert body["error"]["retryable"] is True
+
+
+# --------------------------------------------------------------------------- #
+# round-3 semantics: idempotent replay precedes enforcement; the INSERT
+# re-checks org status/tier atomically (TOCTOU guard); the /api/run
+# request-tier gate 503s structurally on an untrustworthy policy file.
+# --------------------------------------------------------------------------- #
+def test_idempotent_replay_survives_downgrade_but_new_submissions_deny(make_org, pinned_policy):
+    from leaf_platform import canonical_jobs
+    from leaf_platform.entitlements import EntitlementDenied
+
+    org, project = _canonical_project(make_org, "Replay Downgrade", tier="hosted_starter")
+    first = canonical_jobs.submit_solve_job(
+        org.org_id, project.project_id, str(org.org_id),
+        "string-autofill-opt", {"panelsPerString": 9}, "replay-key-1")
+
+    _set_org(org.org_id, tier="restricted")
+    replay = canonical_jobs.submit_solve_job(
+        org.org_id, project.project_id, str(org.org_id),
+        "string-autofill-opt", {"panelsPerString": 9}, "replay-key-1")
+    assert replay["job_id"] == first["job_id"]
+
+    with pytest.raises(EntitlementDenied):
+        canonical_jobs.submit_solve_job(
+            org.org_id, project.project_id, str(org.org_id),
+            "string-autofill-opt", {"panelsPerString": 9}, "replay-key-2")
+
+
+def test_toctou_downgrade_between_check_and_insert_is_denied(make_org, pinned_policy, monkeypatch):
+    """Simulate the race: the entitlement read sees a stale entitled org while
+    the DB row is already restricted. The INSERT's pinned-tier guard must
+    refuse the row and the re-evaluation must surface the documented denial."""
+    import dataclasses
+
+    from leaf_platform import canonical_jobs
+    from leaf_platform import entitlements as ents_mod
+    from leaf_platform.entitlements import EntitlementDenied
+
+    org, project = _canonical_project(make_org, "TOCTOU Org")
+    _set_org(org.org_id, tier="restricted")
+
+    real_get_org = ents_mod.store.get_org
+    calls = {"n": 0}
+
+    def stale_then_real(oid):
+        calls["n"] += 1
+        real = real_get_org(oid)
+        if calls["n"] == 1:
+            return dataclasses.replace(real, tier="hosted_starter", status="active")
+        return real
+
+    monkeypatch.setattr(ents_mod.store, "get_org", stale_then_real)
+    with pytest.raises(EntitlementDenied) as excinfo:
+        canonical_jobs.submit_solve_job(
+            org.org_id, project.project_id, str(org.org_id),
+            "string-autofill-opt", {}, "toctou-key-1")
+    assert excinfo.value.response.status_code == 403
+    assert calls["n"] >= 2  # the stale read passed; the atomic guard + recheck denied

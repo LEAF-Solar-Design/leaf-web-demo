@@ -167,14 +167,28 @@ def job_entitlement_denial(org: Optional[Org], kind: str) -> Optional[JSONRespon
         return policy_unavailable_response(org, kind)
 
 
-def stored_job_entitlement_denial(org_id, kind: str) -> Optional[JSONResponse]:
-    """Entitlement verdict for the STORED org row — the one enforcement entry
-    point every job-creating path shares (platform api.py AND the canonical
-    submission chain under POST /api/run). The org read itself is inside the
-    fail-closed boundary: if the row cannot be read we refuse (503), because
-    "could not check" must never resolve to "allowed"."""
+def stored_job_entitlement_verdict(org_id, kind: str):
+    """``(denial, org)`` for the STORED org row — the shared enforcement entry
+    point of both CAPABILITY-GRANTING job paths: the platform route
+    (api.py create_job) and the canonical submission choke point
+    (canonical_jobs.submit_solve_job, under POST /api/run). NOT in scope:
+    server/platform_link.on_submit's best-effort mirror row, which RECORDS a
+    spine run the route already gated — refusing the record would hide
+    activity, not prevent it (and that path never receives org context today,
+    because context-bearing requests always go canonical).
+
+    The org read itself is inside the fail-closed boundary: if the row cannot
+    be read we refuse (503), because "could not check" must never resolve to
+    "allowed". ``org`` is returned so the caller can PIN the evaluated
+    tier/status in the same SQL statement that creates the job (TOCTOU guard).
+    """
     try:
         org = store.get_org(org_id)
     except Exception:
-        return policy_unavailable_response(None, kind)
-    return job_entitlement_denial(org, kind)
+        return policy_unavailable_response(None, kind), None
+    return job_entitlement_denial(org, kind), org
+
+
+def stored_job_entitlement_denial(org_id, kind: str) -> Optional[JSONResponse]:
+    denial, _org = stored_job_entitlement_verdict(org_id, kind)
+    return denial

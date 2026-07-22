@@ -91,14 +91,6 @@ def submit_solve_job(org_id: uuid.UUID, project_id: uuid.UUID, request_tenant_id
         raise ValueError("job params must be an object")
     if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or max_attempts < 1:
         raise ValueError("max_attempts must be a positive integer")
-    # ENTITLEMENT (P1 floor): the STORED org's tier/status decides, here at the
-    # single choke point every canonical submission crosses (the POST /api/run
-    # spine path included) — the request-side JWT/demo tier gate upstream is not
-    # this check and cannot substitute for it. Fail closed; the denial carries
-    # the documented HTTP envelope up through the typed exception.
-    denial = entitlements.stored_job_entitlement_denial(org_id, "solve")
-    if denial is not None:
-        raise entitlements.EntitlementDenied(denial)
     submission = {
         "orgId": str(org_id), "projectId": str(project_id),
         "requestTenantId": str(request_tenant_id), "toolName": tool_name,
@@ -106,6 +98,34 @@ def submit_solve_job(org_id: uuid.UUID, project_id: uuid.UUID, request_tenant_id
         "maxAttempts": max_attempts,
     }
     fingerprint = _fingerprint("canonical-job-submission", submission)
+
+    # IDEMPOTENT REPLAY FIRST: an already-accepted key returns its original
+    # job even if the org's tier has since been downgraded — the job exists;
+    # denying the lookup would only break client retry semantics, never
+    # un-create it. Entitlement gates NEW submissions only. (The identical
+    # in-transaction lookup below still covers the two-concurrent-submits
+    # race on the same key.)
+    if idempotency_key:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                replay = _existing_by_idempotency_key(cur, org_id, project_id, idempotency_key)
+                if replay is not None:
+                    if replay["submission_fingerprint"] != fingerprint:
+                        raise ValueError("idempotency key already exists with different run input")
+                    return _record(replay)
+
+    # ENTITLEMENT (P1 floor): the STORED org's tier/status decides, here at the
+    # single choke point every canonical submission crosses (the POST /api/run
+    # spine path included) — the request-side JWT/demo tier gate upstream is not
+    # this check and cannot substitute for it. Fail closed; the denial carries
+    # the documented HTTP envelope up through the typed exception. The evaluated
+    # tier is PINNED into the INSERT below so a concurrent downgrade between
+    # this read and the insert cannot slip a job through (TOCTOU guard).
+    denial, org = entitlements.stored_job_entitlement_verdict(org_id, "solve")
+    if denial is not None:
+        raise entitlements.EntitlementDenied(denial)
+    pinned_tier = org.tier if org is not None else None
+
     with connection() as conn:
         with conn.cursor() as cur:
             snapshot_pins = _resolve_snapshot_pins(cur)
@@ -132,6 +152,11 @@ def submit_solve_job(org_id: uuid.UUID, project_id: uuid.UUID, request_tenant_id
                 "WHERE org_id = p.org_id AND project_id = p.project_id), "
                 "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = p.org_id), "
                 "'legacy_sqlite') = 'postgres_canonical' "
+                # TOCTOU guard: the insert commits only if the org is STILL
+                # active with the exact tier the entitlement evaluation used —
+                # both re-read atomically with the insert itself.
+                "AND EXISTS (SELECT 1 FROM orgs o WHERE o.org_id = p.org_id "
+                "AND o.status = 'active' AND o.tier IS NOT DISTINCT FROM %(pinned_tier)s) "
                 "ON CONFLICT (org_id, project_id, idempotency_key) "
                 "WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING " + _job_columns(),
                 {"job_id": new_uuid(), "org_id": org_id, "project_id": project_id,
@@ -139,7 +164,7 @@ def submit_solve_job(org_id: uuid.UUID, project_id: uuid.UUID, request_tenant_id
                  "input_version_id": input_version_id, "key": idempotency_key,
                  "fingerprint": fingerprint,
                  "execution": Jsonb(execution_context),
-                 "max_attempts": max_attempts},
+                 "max_attempts": max_attempts, "pinned_tier": pinned_tier},
             )
             row = cur.fetchone()
             if row is not None:
@@ -152,18 +177,31 @@ def submit_solve_job(org_id: uuid.UUID, project_id: uuid.UUID, request_tenant_id
                      for kind, pin in snapshot_pins.items()],
                 )
                 return _record(row)
-            cur.execute(
-                "SELECT " + _job_columns() + ", submission_fingerprint FROM jobs "
-                "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
-                "AND idempotency_key = %(key)s AND deleted_at IS NULL",
-                {"org_id": org_id, "project_id": project_id, "key": idempotency_key},
-            )
-            existing = cur.fetchone()
+            existing = _existing_by_idempotency_key(cur, org_id, project_id, idempotency_key)
             if existing is None:
+                # No row and no idempotent twin: either a project predicate
+                # failed, or the org's status/tier changed between evaluation
+                # and insert (the TOCTOU guard fired). Re-evaluate so a real
+                # mid-flight downgrade denies with the documented envelope
+                # instead of the generic project error.
+                recheck, _org = entitlements.stored_job_entitlement_verdict(org_id, "solve")
+                if recheck is not None:
+                    raise entitlements.EntitlementDenied(recheck)
                 raise ValueError("project is unavailable or not postgres_canonical")
             if existing["submission_fingerprint"] != fingerprint:
                 raise ValueError("idempotency key already exists with different run input")
             return _record(existing)
+
+
+def _existing_by_idempotency_key(cur: Any, org_id: uuid.UUID, project_id: uuid.UUID,
+                                 idempotency_key: str) -> Optional[Dict[str, Any]]:
+    cur.execute(
+        "SELECT " + _job_columns() + ", submission_fingerprint FROM jobs "
+        "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+        "AND idempotency_key = %(key)s AND deleted_at IS NULL",
+        {"org_id": org_id, "project_id": project_id, "key": idempotency_key},
+    )
+    return cur.fetchone()
 
 
 def claim_next(worker_id: str, *, lease_seconds: float = 30,

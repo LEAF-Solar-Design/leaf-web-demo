@@ -696,7 +696,14 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 > (policy file present-but-unreadable/invalid, org row unreadable) the refusal
 > is a structured 503 carrying the full §17 envelope with
 > `error.error_code = INTERNAL` (frozen §10 enum), `retryable = true` — never
-> a bare 500 and never an allow. Binary proof: `scripts/entitlement-gate.py`
+> a bare 500 and never an allow (this covers the `/api/run` request-tier gate
+> too). Two boundary semantics are deliberate: (1) idempotent REPLAY precedes
+> enforcement — an already-accepted Idempotency-Key returns its original job
+> even after a tier downgrade (the job exists; denying the lookup would only
+> break client retries), while NEW submissions are gated; (2) the evaluated
+> tier and `active` status are re-checked atomically INSIDE the job INSERT
+> (TOCTOU guard), so a downgrade racing the submission denies rather than
+> slipping a job through. Binary proof: `scripts/entitlement-gate.py`
 > (READY/NOT-READY, exit 0/1; the denial leg validates the FULL envelope).
 
 ## §18 Conversational agent sessions (agent spine, Phase 1)
