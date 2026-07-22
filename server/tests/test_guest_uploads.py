@@ -571,3 +571,72 @@ def test_timeout_view_lost_race_reports_one_coherent_snapshot(client, monkeypatc
     assert view["status"] == "ready"
     assert view["filename"] == "replacement.dxf"
     assert view["uploaded_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_quota_rejected_retry_cannot_destroy_readable_data(client, monkeypatch):
+    """Round-8 MAJOR: a failed attempt can leave a COMMITTED manifest that
+    intake still serves (ingest succeeded, the cache write did not). A
+    quota-rejected retry must NOT delete that readable data — the visible
+    wipe runs only after the quota charge, as part of a paid replacement."""
+    real_cache_key = write_loop.intake_cache_key
+
+    def broken_cache_key(*args, **kwargs):
+        raise ValueError("cache write breaks AFTER ingest committed the manifest")
+
+    monkeypatch.setattr(write_loop, "intake_cache_key", broken_cache_key)
+    first = _upload(client)
+    assert first.status_code == 202
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "failed"
+    import store
+    assert backend.exists(store.manifest_key(tenant, did)), \
+        "precondition: the failed attempt left a committed manifest"
+    monkeypatch.setattr(write_loop, "intake_cache_key", real_cache_key)
+    assert client.get(f"/api/drawings/{did}/intake",
+                      headers={"X-Tenant-Id": tenant}).status_code == 200, \
+        "precondition: the manifest is API-visible despite the failed marker"
+
+    # Exhaust the quota, then retry: 429 — and the data must SURVIVE.
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_PER_IP_PER_DAY", "1")
+    blocked = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert blocked.status_code == 429
+    assert backend.exists(store.manifest_key(tenant, did))
+    assert client.get(f"/api/drawings/{did}/intake",
+                      headers={"X-Tenant-Id": tenant}).status_code == 200
+
+    # With quota available the paid replacement proceeds under the same id.
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_PER_IP_PER_DAY", "10")
+    retry = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert retry.status_code == 202
+    assert retry.json()["drawing_id"] == did
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"
+
+
+def test_visible_wipe_failure_refunds_the_quota_charge(client, monkeypatch):
+    """Round-8 companion: when the PAID visible-manifest wipe fails, the
+    charge is refunded — proven with a cap of exactly 2: slot 1 is the
+    failed extraction, the failed-wipe 500 must not hold slot 2."""
+    real_cache_key = write_loop.intake_cache_key
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_PER_IP_PER_DAY", "2")
+    guest_uploads._reset_rate_state()
+    monkeypatch.setattr(write_loop, "intake_cache_key",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+    first = _upload(client)
+    tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "failed"
+    monkeypatch.setattr(write_loop, "intake_cache_key", real_cache_key)
+
+    real_wipe = guest_uploads.wipe_failed_attempt_residue
+    monkeypatch.setattr(guest_uploads, "wipe_failed_attempt_residue",
+                        lambda *a: False)
+    blocked = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert blocked.status_code == 500
+    assert blocked.json()["error"]["retryable"] is True
+
+    monkeypatch.setattr(guest_uploads, "wipe_failed_attempt_residue", real_wipe)
+    retry = _upload(client, headers={"X-Tenant-Id": tenant})
+    assert retry.status_code == 202, "the refunded slot must still be available"
+    assert retry.json()["drawing_id"] == did
+    assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"

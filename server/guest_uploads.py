@@ -230,6 +230,23 @@ def check_and_count_guest_upload(client_ip: str) -> Optional[str]:
         return None
 
 
+def refund_guest_upload(client_ip: str) -> None:
+    """Undo one check_and_count_guest_upload charge — used ONLY when the
+    charged request then fails before any extraction starts (round-8 review:
+    the visible-manifest replacement charges BEFORE its wipe so a rejected
+    request never destroys readable data, and refunds if that wipe fails so
+    the failure never burns a slot either). Floors at 0. A UTC-midnight
+    rollover in the charge->refund microseconds can misdirect at most one
+    count into the fresh day: an accepted plus-or-minus-one on an in-memory
+    cost backstop, stated here so it is a decision, not a surprise."""
+    ip = str(client_ip or "unknown")
+    with _RATE_LOCK:
+        if _RATE_STATE["per_ip"].get(ip, 0) > 0:
+            _RATE_STATE["per_ip"][ip] -= 1
+        if _RATE_STATE["total"] > 0:
+            _RATE_STATE["total"] -= 1
+
+
 def _reset_rate_state() -> None:  # test helper
     with _RATE_LOCK:
         _RATE_STATE["day"] = None

@@ -175,26 +175,21 @@ def upload_drawing(
                 marker = existing
                 drawing_id = derived
             else:
-                if existing is not None:
-                    # status == "failed": REPLACE the attempt wholesale
-                    # (round-5 review, MAJOR). A failed ingest can leave
-                    # partial residue — a v1 blob without a manifest (which
-                    # would wedge the derived id in an immutable-version
-                    # refusal loop) or a manifest without its cache/marker
-                    # transition (which would force a random-id fallback and
-                    # abandon the derived-id contract). The wipe is VERIFIED
-                    # and keeps the marker (overwritten below) so a partial
-                    # deletion routes the NEXT retry back into this same
-                    # path instead of stranding residue (round-6 review,
+                has_manifest = backend.exists(
+                    store.manifest_key(str(tenant), derived))
+                if existing is not None and not has_manifest:
+                    # status == "failed" with INVISIBLE residue only (no
+                    # committed manifest — e.g. a v1 blob without its
+                    # manifest, which would wedge the derived id in an
+                    # immutable-version refusal loop). Wipe BEFORE the quota
+                    # charge: a failed wipe answers 500 WITHOUT consuming a
+                    # slot (round-7 review, MAJOR), and a quota-destined 429
+                    # can only ever have destroyed state the API never
+                    # served (round-8 review, MAJOR). The wipe is VERIFIED
+                    # and keeps the marker so a partial deletion routes the
+                    # NEXT retry back into this same path (round-6 review,
                     # MAJOR); the fresh marker's attempt token fences out
                     # the old worker thread if it is still alive.
-                    # The wipe runs BEFORE the quota charge (round-7 review,
-                    # MAJOR): a failed wipe answers 500 WITHOUT consuming a
-                    # slot — §19 defines quota in terms of extraction, and
-                    # no extraction starts here. The trade: an eventual 429
-                    # below leaves this failed attempt's residue already
-                    # wiped — invisible to the API (the marker survives and
-                    # still reads failed), unlike a burned slot.
                     if not guest_uploads.wipe_failed_attempt_residue(
                             str(tenant), derived):
                         return error_response(
@@ -216,6 +211,24 @@ def upload_drawing(
                         f"the daily guest upload limit for {scope} is "
                         "exhausted; try again tomorrow or create an account",
                         retryable=True, status_code=429)
+                if existing is not None and has_manifest:
+                    # status == "failed" with VISIBLE residue: a committed
+                    # manifest a failed attempt left behind (DXF ingest
+                    # succeeded, the cache/marker transition did not) —
+                    # intake and versions still SERVE it. Deleting readable
+                    # data happens only AFTER the quota charge, as part of
+                    # the PAID replacement — never as a side effect of a
+                    # request the very next line would 429 (round-8 review,
+                    # MAJOR). If the wipe then fails, the charge is
+                    # REFUNDED: no extraction started, no slot burned
+                    # (round-7 review, MAJOR).
+                    if not guest_uploads.wipe_failed_attempt_residue(
+                            str(tenant), derived):
+                        guest_uploads.refund_guest_upload(_client_ip(request))
+                        return error_response(
+                            ErrorCode.INTERNAL,
+                            "could not reset the failed attempt's residue; "
+                            "try again", retryable=True, status_code=500)
                 if not backend.exists(store.manifest_key(str(tenant), derived)):
                     # Effect order is load-bearing: (1) marker — so
                     # /upload-status and the fail-closed bootstrap guard
