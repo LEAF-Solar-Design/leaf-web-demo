@@ -51,12 +51,22 @@ services:
       LEAF_TENANTS_DIR: /data/tenants     # MUST match the app's LEAF_TENANTS_DIR (§16.H)
       LEAF_GRANTS_DIR: /data/grants       # per-tenant Claude token files (harness-only)
       LEAF_TENANT_FIXTURE: /app/test/fixtures/tenant-repo
+      # --- Converse lane (§18 spine mount, census #12 chip 1) -----------------
+      # BOTH must be non-empty or the lane stays dark FAIL-CLOSED (POST /turn
+      # answers 501; author/Build lane unaffected). The secret is the harness->
+      # app back-edge credential (X-Dispatch-Secret; gate consult + dispatch);
+      # the SAME value must reach the app below. No baked default: the
+      # zero-secret demo compose keeps the converse lane off by design.
+      LEAF_APP_URL: http://app:8130
+      LEAF_APP_DISPATCH_SECRET: ${LEAF_APP_DISPATCH_SECRET:-}
+      LEAF_SESSIONS_DIR: /data/sessions   # loop-side durable store (sdk resume ids, confirmation mirrors)
       # --- operator opt-ins (NEVER baked): ------------------------------------
       # LEAF_TENANT_REPO: /data/tenants/demo-tenant  # demo single-repo back-compat override
       # LEAF_GRANT_FILE: /run/secrets/claude-grant   # a demo-tenant grant token file
     volumes:
       - leaf-tenants:/data/tenants        # shared with the app (§16.H)
       - leaf-grants:/data/grants
+      - leaf-sessions:/data/sessions      # harness-only converse store
       # - ./.secrets/claude-grant:/run/secrets/claude-grant:ro
     depends_on:
       broker:
@@ -87,6 +97,10 @@ services:
       BROKER_LEDGER: /data/state/broker_ledger.jsonl   # app reads the broker's ledger for /api/usage
       JOBS_DB: /data/state/jobs.db                     # durable async job records (restart-survivable)
       SESSIONS_DB: /data/state/sessions.db             # conversational sessions/events/approvals (same durability tier as jobs.db). SINGLE-WRITER: SQLite+WAL+threading.Lock assumes ONE app process — keep one replica/one uvicorn worker, and on network filesystems (EFS/NFS, where WAL is unsafe) point JOBS_DB/SESSIONS_DB at task-local storage instead (see the production task definition)
+      # Converse back-edge (§18.5): SAME value as the harness's copy above.
+      # Empty => /internal/agent/gate and the dispatch back-edge answer 401
+      # (fail closed) and the harness keeps the converse lane dark.
+      LEAF_APP_DISPATCH_SECRET: ${LEAF_APP_DISPATCH_SECRET:-}
       # --- operator opt-in: platform Project/Job persistence (Neon/Postgres) ---
       DATABASE_URL: ${DATABASE_URL:-}                  # empty => platform DB endpoints stay dark (demo-safe)
     volumes:
@@ -134,11 +148,15 @@ services:
 # Named volumes. `down -v` drops them all (fresh state next up).
 #   leaf-tenants  : per-tenant mushy repos      — SHARED app <-> harness (§16.H)
 #   leaf-grants   : per-tenant Claude tokens     — harness only
+#   leaf-sessions : converse loop store (sdk resume ids, confirmation mirrors) — harness only.
+#                   Dropping it burns in-flight approvals fail-safe (the gate denies the
+#                   foreign-session redemption; the user simply re-proposes).
 #   leaf-drawings : versioned drawing store      — SHARED app <-> broker (write loop)
 #   leaf-state    : broker ledger + kill-switch + app jobs.db — SHARED app <-> broker
 volumes:
   leaf-tenants:
   leaf-grants:
+  leaf-sessions:
   leaf-drawings:
   leaf-state:
   leaf-uploads:

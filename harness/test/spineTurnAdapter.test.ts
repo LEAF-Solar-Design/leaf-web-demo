@@ -1,0 +1,232 @@
+/**
+ * SpineTurnAdapter tests — hermetic (fakes only, zero network, zero Anthropic).
+ * Proves the mount chip's contract: the frozen `POST /turn` wire is now served
+ * by the §18 spine engine — gate consult before EVERY tool execution, submitRun
+ * the only side effect, app-authoritative confirmation ids, wire-only event
+ * vocabulary (the loop's turn_started / confirmation_resolved / session_state
+ * never leak onto the /turn hop), GrantRequiredError pre-stream, and the
+ * store-loss confirm reseed path.
+ */
+
+import { describe, expect, it } from "vitest";
+
+import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
+import { GrantRequiredError } from "../src/ports/impl/oauthGrantProvider.js";
+import { FakeAppRunClient } from "../src/ports/fakes/fakeAppRunClient.js";
+import { FakeConverseRunner } from "../src/ports/fakes/fakeConverseRunner.js";
+import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
+import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
+import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
+import type { AgentGrant, OAuthGrantProvider } from "../src/ports/index.js";
+import type { ConverseTurnInput, HarnessTurnEvent } from "../src/ports/converse.js";
+
+/** The 9 types the frozen wire admits (ports/converse.ts HarnessTurnEvent). */
+const WIRE_TYPES = new Set([
+  "text_delta", "tool_call", "tool_result", "job_linked", "proposed_run",
+  "confirmation_required", "turn_usage", "turn_complete", "error",
+]);
+
+function makeAdapter(opts?: { oauth?: OAuthGrantProvider; store?: FakeSessionStore }) {
+  const runner = new FakeConverseRunner();
+  const appRun = new FakeAppRunClient();
+  const gate = new FakeGateClient();
+  const store = opts?.store ?? new FakeSessionStore();
+  const grants: AgentGrant[] = [];
+  const adapter = new SpineTurnAdapter({
+    oauth: opts?.oauth ?? new FakeOAuthGrantProvider(),
+    appRun,
+    gate,
+    store,
+    runnerFor: (grant) => {
+      grants.push(grant);
+      return runner;
+    },
+  });
+  return { adapter, runner, appRun, gate, store, grants };
+}
+
+function turnInput(partial: Partial<ConverseTurnInput>): ConverseTurnInput {
+  return {
+    tenant_id: "demo-tenant",
+    session_id: "app-session-1",
+    turn_id: "app-turn-1",
+    drawing_id: "rooftop_demo",
+    messages: [],
+    ...partial,
+  };
+}
+
+async function drain(gen: AsyncIterable<HarnessTurnEvent>): Promise<HarnessTurnEvent[]> {
+  const events: HarnessTurnEvent[] = [];
+  for await (const ev of gen) events.push(ev);
+  return events;
+}
+
+const typesOf = (events: HarnessTurnEvent[]): string[] => events.map((e) => e.type);
+
+describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
+  it("read turn: streams wire-only events, gate consulted, dispatch through appRun", async () => {
+    const { adapter, appRun, gate } = makeAdapter();
+    const events = await drain(adapter.runTurn(turnInput({ text: "STATE:summary" })));
+
+    const types = typesOf(events);
+    expect(types).toContain("tool_call");
+    expect(types).toContain("tool_result");
+    expect(types[types.length - 1]).toBe("turn_complete");
+    // The turn engine owns turn_started/session_state on its own hop.
+    for (const t of types) expect(WIRE_TYPES.has(t)).toBe(true);
+
+    // Gate before the read, then the read through the back-edge client.
+    expect(gate.checks.length).toBeGreaterThanOrEqual(1);
+    expect(gate.checks[0].action).toBe("read_platform_state");
+    expect(appRun.methodLog).toContain("getDrawingState");
+    expect(appRun.submitCalls.length).toBe(0);
+
+    const complete = events[events.length - 1];
+    expect(complete.data.stop_reason).toBe("end_turn");
+  });
+
+  it("first turn folds the wire's prior messages into the context packet as data", async () => {
+    const { adapter, runner } = makeAdapter();
+    await drain(
+      adapter.runTurn(
+        turnInput({
+          text: "hello there",
+          messages: [
+            { role: "user", text: "earlier question" },
+            { role: "assistant", text: "earlier answer" },
+          ],
+        }),
+      ),
+    );
+    expect(runner.runs.length).toBe(1);
+    expect(runner.runs[0].userMessage).toContain("prior_messages");
+    expect(runner.runs[0].userMessage).toContain("earlier question");
+  });
+
+  it("write turn: proposed_run with the APP-minted id, mirror row persisted, no dispatch", async () => {
+    const { adapter, appRun, gate, store } = makeAdapter();
+    gate.nextConfirmationId = "app-cid-1";
+
+    const events = await drain(adapter.runTurn(turnInput({ text: "RUN:add-panel" })));
+
+    const proposed = events.find((e) => e.type === "proposed_run");
+    expect(proposed).toBeDefined();
+    expect(proposed!.data.confirmation_id).toBe("app-cid-1");
+    expect(proposed!.data.tool).toBe("add-panel");
+    expect(appRun.submitCalls.length).toBe(0);
+
+    const complete = events[events.length - 1];
+    expect(complete.type).toBe("turn_complete");
+    expect(complete.data.stop_reason).toBe("awaiting_approval");
+
+    const mirror = await store.getConfirmation("app-cid-1");
+    expect(mirror).not.toBeNull();
+    expect(mirror!.action).toBe("run_capability");
+  });
+
+  it("approved confirm resume: dispatches exactly once, wire-only events", async () => {
+    const { adapter, appRun, gate } = makeAdapter();
+    gate.nextConfirmationId = "app-cid-2";
+    await drain(adapter.runTurn(turnInput({ text: "RUN:add-panel" })));
+    gate.grant("app-cid-2");
+
+    const events = await drain(
+      adapter.runTurn(
+        turnInput({
+          turn_id: "app-turn-2",
+          confirm: {
+            confirmation_id: "app-cid-2",
+            approved: true,
+            proposal: { tool: "add-panel", params: {} },
+          },
+        }),
+      ),
+    );
+
+    expect(appRun.submitCalls.length).toBe(1);
+    expect(appRun.submitCalls[0].tool).toBe("add-panel");
+    const types = typesOf(events);
+    for (const t of types) expect(WIRE_TYPES.has(t)).toBe(true);
+    expect(types).not.toContain("confirmation_resolved");
+    expect(events[events.length - 1].data.stop_reason).toBe("end_turn");
+  });
+
+  it("store loss between propose and confirm: reseed keeps the turn streaming; the gate denies the foreign-session redemption fail-safe", async () => {
+    const shared = makeAdapter();
+    shared.gate.nextConfirmationId = "app-cid-3";
+    await drain(shared.adapter.runTurn(turnInput({ text: "RUN:add-panel" })));
+    shared.gate.grant("app-cid-3");
+
+    // Fresh store (harness redeploy / volume loss) — same app-side gate + appRun.
+    // The loop mints a NEW session identity, so the gate's session-bound approval
+    // MUST NOT redeem (that binding is the security property). The reseed's value
+    // is the failure MODE: a streamed, calmly-relayed denial instead of a
+    // pre-stream ConfirmationInvalid crash that burns the approval opaquely.
+    const fresh = new FakeSessionStore();
+    const revived = new SpineTurnAdapter({
+      oauth: new FakeOAuthGrantProvider(),
+      appRun: shared.appRun,
+      gate: shared.gate,
+      store: fresh,
+      runnerFor: () => shared.runner,
+    });
+
+    const events = await drain(
+      revived.runTurn(
+        turnInput({
+          turn_id: "app-turn-2",
+          confirm: {
+            confirmation_id: "app-cid-3",
+            approved: true,
+            proposal: { tool: "add-panel", params: {} },
+          },
+        }),
+      ),
+    );
+
+    // Denied, not dispatched — and the turn still streamed to a clean end.
+    expect(shared.appRun.submitCalls.length).toBe(0);
+    const result = events.find((e) => e.type === "tool_result");
+    expect(result).toBeDefined();
+    expect(result!.data.ok).toBe(false);
+    expect(events[events.length - 1].type).toBe("turn_complete");
+    expect(events[events.length - 1].data.stop_reason).toBe("end_turn");
+  });
+
+  it("gate deny: relayed as an isError tool result, nothing dispatched, turn survives", async () => {
+    const { adapter, appRun, gate } = makeAdapter();
+    gate.deny("add-panel", "blocked by policy");
+
+    const events = await drain(adapter.runTurn(turnInput({ text: "RUN:add-panel" })));
+
+    const result = events.find((e) => e.type === "tool_result");
+    expect(result).toBeDefined();
+    expect(result!.data.ok).toBe(false);
+    expect(appRun.submitCalls.length).toBe(0);
+    expect(events[events.length - 1].type).toBe("turn_complete");
+    expect(events[events.length - 1].data.stop_reason).toBe("end_turn");
+  });
+
+  it("missing grant: rejects BEFORE the first event (non-stream 401 path)", async () => {
+    const throwing: OAuthGrantProvider = {
+      async getGrant(tenantId: string): Promise<AgentGrant> {
+        throw new GrantRequiredError(tenantId);
+      },
+    };
+    const { adapter } = makeAdapter({ oauth: throwing });
+    const iterator = adapter.runTurn(turnInput({ text: "hello" }))[Symbol.asyncIterator]();
+    await expect(iterator.next()).rejects.toBeInstanceOf(GrantRequiredError);
+  });
+
+  it("aborted signal: the stream ends without yielding further events", async () => {
+    const { adapter } = makeAdapter();
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const iterator = adapter
+      .runTurn(turnInput({ text: "STATE:summary" }), { signal: ctrl.signal })
+      [Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.done).toBe(true);
+  });
+});

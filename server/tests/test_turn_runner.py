@@ -242,6 +242,45 @@ def test_confirmation_required_creates_approval_row_with_ttl(monkeypatch, turn_s
     _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None)
 
 
+def test_spine_proposed_run_creates_approval_row_at_awaiting_approval_end(monkeypatch, turn_stub):
+    """Spine unification (census #12 chip 1): the mounted §18 engine proposes a
+    write with proposed_run ONLY — no confirmation_required follows — so the
+    relay must still create the tenant-facing approvals row (at the
+    awaiting_approval turn end) or the chip is undeliverable."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setenv("SESSIONS_APPROVAL_TTL_S", "7")
+
+    stub.SCRIPT = [
+        {"type": "proposed_run", "data": {"confirmation_id": "cid-spine-1", "tool": "add-panel",
+                                          "params": {"col": 2}, "dwg": "d-1",
+                                          "capability": "drawing.write",
+                                          "rationale": "approval required by policy"}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
+    ]
+
+    sess = _new_session("tenant-spine")
+    session_id = sess["session_id"]
+    turn_id = turn_runner.start_turn("tenant-spine", session_id, text="add a panel at col 2")
+
+    ok = _wait_until(lambda: session_store.get_approval("cid-spine-1") is not None)
+    assert ok, "spine proposed_run never produced an approvals row"
+
+    approval = session_store.get_approval("cid-spine-1")
+    assert approval["session_id"] == session_id
+    assert approval["tenant_id"] == "tenant-spine"
+    assert approval["turn_id"] == turn_id
+    assert approval["tool"] == "add-panel"
+    assert approval["params"] == {"col": 2}
+    assert approval["capability"] == "drawing.write"
+    assert approval["rationale"] == "approval required by policy"
+    assert approval["kind"] == "run_capability"
+    assert approval["decided"] is False
+
+    _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None)
+
+
 # =========================================================================== #
 # (c) immediate rejections release the CAS
 # =========================================================================== #

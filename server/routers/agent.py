@@ -12,13 +12,15 @@ Agent surface — UNION of two lanes (merge resolution, 2026-07-21):
 
 Both lanes shipped an approvals route at the same path. The SESSIONS-WIRE one
 wins: the live console (leaf_website) drives turns through the §2.1 turn
-engine, whose `confirmation_required` events create rows in
-server/session_store.py — so tenant decisions must land in THAT store. The
-§18 gate chain's own pending-approval grant path (agent_gate.grant_approval /
-deny_approval) is PARKED pending spine unification: the gate back-edge below
-still records/queries its ledger, but nothing tenant-facing resolves its
-pending records until the two state models are unified (follow-up, named in
-the merge commit).
+engine, whose relayed proposal events create rows in server/session_store.py —
+so tenant decisions land in THAT store first. SPINE UNIFICATION (census #12
+chip 1): with the §18 engine mounted behind POST /turn, the gate mints every
+confirmation_id and holds its own args-bound pending record, so a recorded
+tenant decision is now ALSO bridged into the gate store
+(agent_gate.grant_approval / deny_approval below) — that record is what the
+resume turn's gate consult redeems before dispatching. A confirmation_id with
+no gate record (pre-spine turns) bridges as a silent not_found: record-only
+behavior for those is unchanged.
 
 BACK-EDGE TRUST (wire contract §0): `/internal/agent/gate` is the endpoint the
 harness's canUseTool calls before EVERY conversational tool call. It is gated
@@ -145,6 +147,19 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
         )
 
     # outcome == "recorded"
+    # Spine unification (census #12 chip 1): land the decision in the §18 gate
+    # store too — the resume turn's gate consult redeems THAT args-bound record
+    # before any dispatch. not_found is normal (a pre-spine confirmation_id the
+    # gate never minted). A gate-store write failure leaves its record pending:
+    # the resume consult then answers awaiting_approval again (a fresh chip)
+    # instead of dispatching — degraded but fail-safe, never an unapproved run.
+    try:
+        if req.approved:
+            agent_gate.grant_approval(confirmation_id, by=str(tenant))
+        else:
+            agent_gate.deny_approval(confirmation_id, by=str(tenant))
+    except Exception:  # noqa: BLE001
+        pass
     session_store.append_event(
         approval["session_id"], approval["turn_id"], "confirmation_resolved",
         {"confirmation_id": confirmation_id, "approved": bool(req.approved), "by": str(tenant)},

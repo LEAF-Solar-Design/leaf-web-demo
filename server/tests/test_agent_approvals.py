@@ -43,7 +43,9 @@ if str(SERVER_DIR) not in sys.path:
 
 import pytest  # noqa: E402
 
+import agent_gate  # noqa: E402  (reads its env paths per call — safe to import here)
 import session_store  # noqa: E402  (import after env redirect, by design)
+from agent_policy import AgentAction  # noqa: E402
 from routers import agent as agent_router  # noqa: E402
 
 REAL_DB_PATH = SERVER_DIR / "sessions.db"
@@ -285,6 +287,73 @@ def test_decide_expired_but_undecided_still_records_200_not_410(client):
     stored = session_store.get_approval(seed["confirmation_id"])
     assert stored["decided"] is True
     assert stored["approved"] is True
+
+
+# --------------------------------------------------------------------------- #
+# spine unification (census #12 chip 1): a recorded decision bridges into the
+# §18 gate store, whose args-bound record the resume turn's gate consult
+# redeems before any dispatch.
+# --------------------------------------------------------------------------- #
+_WRITE_ACTION = AgentAction(
+    name="run_write_tool", description="", rung=3,
+    required_capability="converse", policy="always_confirm", dispatch={},
+)
+
+
+def _seed_both_stores(tmp_path, monkeypatch, tenant_id: str) -> str:
+    """Seed the gate's pending record (it mints the id in the live flow) plus the
+    matching session_store row; return the shared confirmation_id."""
+    monkeypatch.setenv("LEAF_AGENT_APPROVALS_DIR", str(tmp_path / "gate-approvals"))
+    monkeypatch.setenv("LEAF_AGENT_AUDIT", str(tmp_path / "gate-audit.jsonl"))
+    sess = session_store.get_or_create_session(tenant_id, f"drawing-{tenant_id}")
+    record = agent_gate.create_pending(
+        tenant_id=tenant_id, session_id=sess["session_id"], turn_id="turn-bridge",
+        action=_WRITE_ACTION, args={"tool": "add-panel", "params": {"col": 2}}, ttl_s=300,
+    )
+    cid = record["confirmation_id"]
+    session_store.create_approval(
+        cid, sess["session_id"], tenant_id, "turn-bridge",
+        tool="add-panel", params={"col": 2}, capability="drawing.write",
+        rationale="approval required by policy", kind="run_capability",
+        payload=None, ttl_s=300,
+    )
+    return cid
+
+
+def test_decide_approved_bridges_grant_into_gate_store(client, tmp_path, monkeypatch):
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-a")
+    r = client.post(f"/api/agent/approvals/{cid}",
+                    headers=_h("tenant-bridge-a"), json={"approved": True})
+    assert r.status_code == 200, r.text
+    gate_rec = agent_gate.read_pending(cid)
+    assert gate_rec is not None
+    assert gate_rec["granted"] is True
+    assert gate_rec["denied"] is False
+    assert gate_rec["decided_by"] == "tenant-bridge-a"
+
+
+def test_decide_rejected_bridges_deny_into_gate_store(client, tmp_path, monkeypatch):
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-d")
+    r = client.post(f"/api/agent/approvals/{cid}",
+                    headers=_h("tenant-bridge-d"), json={"approved": False})
+    assert r.status_code == 200, r.text
+    gate_rec = agent_gate.read_pending(cid)
+    assert gate_rec is not None
+    assert gate_rec["granted"] is False
+    assert gate_rec["denied"] is True
+
+
+def test_decide_without_gate_record_still_records(client, tmp_path, monkeypatch):
+    """A sessions-wire-only confirmation_id (pre-spine turn) has no gate record:
+    the bridge is a silent not_found and record-only behavior is unchanged."""
+    monkeypatch.setenv("LEAF_AGENT_APPROVALS_DIR", str(tmp_path / "gate-approvals-empty"))
+    monkeypatch.setenv("LEAF_AGENT_AUDIT", str(tmp_path / "gate-audit.jsonl"))
+    seeded = _seed_approval("tenant-nogate")
+    r = client.post(f"/api/agent/approvals/{seeded['confirmation_id']}",
+                    headers=_h("tenant-nogate"), json={"approved": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["resolved"] is True
+    assert agent_gate.read_pending(seeded["confirmation_id"]) is None
 
 
 def test_zzz_real_sessions_db_still_absent():

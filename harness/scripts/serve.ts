@@ -43,11 +43,16 @@ import { join } from "node:path";
 
 import { createHarness } from "../src/server.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
-import type { HarnessPorts } from "../src/ports/index.js";
-import type { ConverseRunner, ConverseTurnInput, HarnessTurnEvent } from "../src/ports/converse.js";
+import type { AgentGrant, HarnessPorts } from "../src/ports/index.js";
+import type { ConverseRunner } from "../src/ports/converse.js";
+import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { E2bAgentRunner } from "../src/ports/impl/e2bAgentRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
+import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
+import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
+import { HttpGateClient } from "../src/ports/impl/gateClient.js";
+import { FileSessionStore } from "../src/ports/impl/sessionStore.js";
 import { FileTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
@@ -91,61 +96,38 @@ function tenantRepoDir(tenantId: string): string {
 }
 
 /**
- * Non-literal dynamic import (mirrors agentSdkRunner.ts's own `dynImport`) so tsc never
- * tries to resolve this path at compile time — the real converse turn runner (H2:
- * src/ports/impl/agentSdkTurnRunner.ts) may not exist yet in every checkout.
+ * SPINE MOUNT (chip-spine-harness-mount, census #12): compose the §18 spine
+ * engine — ConverseLoop behind the frozen `POST /turn` wire via
+ * SpineTurnAdapter — as the LIVE converse runner. Every tool execution inside a
+ * turn now runs gate-before-exec (HttpGateClient -> POST /internal/agent/gate)
+ * and dispatches only registered tool NAMES through HttpAppRunClient.submitRun
+ * (invariant v2). The pre-mount AgentSdkTurnRunner (SDK-direct, broker-direct
+ * tools, no app gate consult) is deliberately NO LONGER reachable from serve.
+ *
+ * FAIL CLOSED: both LEAF_APP_URL and LEAF_APP_DISPATCH_SECRET must be set or
+ * the converse lane stays unwired and `POST /turn` answers 501 — there is no
+ * ungated fallback. The author/Build lane is unaffected either way.
  */
-function dynImportTurnRunner(parts: string[]): Promise<unknown> {
-  return import(parts.join("/"));
-}
-
-/**
- * Lazily construct the real Agent-SDK-backed ConverseRunner (H2's
- * `AgentSdkTurnRunner`, src/ports/impl/agentSdkTurnRunner.ts). The import only fires on
- * the FIRST real `/turn` call it serves — never at startup, never in mock mode — so:
- *   - a checkout without H2's file yet still boots and serves every other route;
- *   - the SDK is never loaded unless a real turn is actually driven;
- *   - a missing/broken module surfaces as a clean per-request error (caught here),
- *     not a process crash.
- * LEAF_AGENT_MOCK=1 never constructs this wrapper at all (see buildPorts below).
- */
-function lazyAgentSdkTurnRunner(ports: {
-  oauth: OAuthGrantProviderImpl;
-  tenantRepo: TenantRepoProviderImpl;
-  broker: BrokerApsClientHttp;
-}): ConverseRunner {
-  let real: ConverseRunner | undefined;
-  let loadError: Error | undefined;
-
-  async function ensureReal(): Promise<ConverseRunner> {
-    if (real) return real;
-    if (loadError) throw loadError;
-    try {
-      // Constructor is (ports, opts) — AgentSdkTurnRunnerPorts first (oauth/
-      // tenantRepo/broker, the SAME instances buildPorts hands the harness),
-      // options second. The earlier opts-as-first-arg guess crashed on
-      // this.ports.oauth at the first real turn.
-      const mod = (await dynImportTurnRunner(["..", "src", "ports", "impl", "agentSdkTurnRunner.js"])) as {
-        AgentSdkTurnRunner: new (
-          p: { oauth: unknown; tenantRepo: unknown; broker: unknown },
-          opts?: { maxTurns?: number; maxTotalTokens?: number },
-        ) => ConverseRunner;
-      };
-      real = new mod.AgentSdkTurnRunner(ports, { maxTurns: 40, maxTotalTokens: 500_000 });
-      return real;
-    } catch (err) {
-      loadError = err instanceof Error ? err : new Error(String(err));
-      log(`[harness] AgentSdkTurnRunner unavailable (${loadError.message}) — /turn will error until it lands.`);
-      throw loadError;
-    }
+function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefined {
+  const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
+  const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
+  if (!appUrl || !dispatchSecret) {
+    log(
+      "[harness] converse lane DISABLED (fail closed): set LEAF_APP_URL and " +
+        "LEAF_APP_DISPATCH_SECRET to mount the spine turn engine — POST /turn answers 501.",
+    );
+    return undefined;
   }
-
-  return {
-    async *runTurn(input: ConverseTurnInput): AsyncGenerator<HarnessTurnEvent> {
-      const runner = await ensureReal();
-      yield* runner.runTurn(input);
-    },
-  };
+  // Durable loop-side store (sdk resume ids, transcript mirror, confirmation
+  // mirrors): $LEAF_SESSIONS_DIR, else ./sessions-data under the harness cwd.
+  const store = new FileSessionStore();
+  return new SpineTurnAdapter({
+    oauth,
+    appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
+    gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
+    store,
+    runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({ grant }),
+  });
 }
 
 /** Compose the real multi-tenant ports. */
@@ -164,7 +146,7 @@ function buildPorts(): HarnessPorts {
     log("[harness] LEAF_AGENT_MOCK=1 — agentRunner=FakeAgentRunner, converseRunner=FakeTurnRunner (scripted; no SDK, no network).");
   } else {
     log(`[harness] author runner: ${useE2b ? "E2bAgentRunner (LEAF_SANDBOX=e2b, egress-locked sandbox)" : "AgentSdkRunner (in-process; default)"}`);
-    log("[harness] converse runner: AgentSdkTurnRunner (lazy; loaded on first /turn call).");
+    log("[harness] converse runner: spine ConverseLoop via SpineTurnAdapter (gate-before-exec; SDK loads on first /turn).");
   }
   const oauth = new OAuthGrantProviderImpl({ store: grantStore });
   const tenantRepo = new TenantRepoProviderImpl({
@@ -183,7 +165,12 @@ function buildPorts(): HarnessPorts {
       : useE2b
         ? new E2bAgentRunner({ brokerHost: process.env.LEAF_SANDBOX_BROKER_HOST || undefined })
         : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
-    converseRunner: mockAgent ? new FakeTurnRunner() : lazyAgentSdkTurnRunner({ oauth, tenantRepo, broker }),
+    ...(mockAgent
+      ? { converseRunner: new FakeTurnRunner() }
+      : (() => {
+          const spine = spineTurnRunner(oauth);
+          return spine ? { converseRunner: spine } : {};
+        })()),
   };
 }
 
