@@ -174,15 +174,15 @@ def build_suites() -> List[Suite]:
         # these toggle LEAF_AUTH_LIVE / LEAF_GUEST_* env and share the guest
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_uploads.py"), 14),
+              _py_pytest("tests/test_guest_uploads.py"), 19),
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
               SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 7),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_purge.py"), 6),
+              _py_pytest("tests/test_guest_purge.py"), 7),
         Suite("server-guest-session-auth", "server tests/test_guest_session_auth.py", "pytest",
-              SERVER, _py_pytest("tests/test_guest_session_auth.py"), 12),
+              SERVER, _py_pytest("tests/test_guest_session_auth.py"), 13),
         Suite("server-broker-upload-resolver", "server tests/test_broker_upload_resolver.py",
-              "pytest", SERVER, _py_pytest("tests/test_broker_upload_resolver.py"), 19),
+              "pytest", SERVER, _py_pytest("tests/test_broker_upload_resolver.py"), 22),
         # --- the golden-path composed e2e (this runner's sibling deliverable) --- #
         Suite("server-e2e-golden", "server tests/test_e2e_golden.py", "pytest", SERVER,
               _py_pytest("tests/test_e2e_golden.py"), 1),

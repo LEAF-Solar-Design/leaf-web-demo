@@ -55,7 +55,7 @@ def test_expired_guest_drawing_is_purged_with_log(client, monkeypatch):
     monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")  # ~72 ms
     tenant, did = _upload(client)
     ddir = _drawing_dir(tenant, did)
-    staged = guest_uploads.staged_path(did, ".dxf")
+    staged = guest_uploads.staged_path(tenant, did, ".dxf")
     assert ddir.is_dir() and staged.is_file()
 
     time.sleep(0.2)  # let the stamped expiry pass
@@ -124,11 +124,35 @@ def test_account_uploads_untouched_by_purge(client, monkeypatch):
                       headers={"X-Tenant-Id": "acme-solar"}).status_code == 200
 
 
+def test_purge_failure_is_logged_honestly_never_as_a_kill(client, monkeypatch):
+    """A failed deletion must NEVER produce a success log line — the purge
+    log is the retention promise's receipt (round 1, MAJOR)."""
+    import shutil as _shutil
+    real_rmtree = _shutil.rmtree  # capture BEFORE patching: guest_uploads.shutil
+    # IS this same module object, so restoring via _shutil.rmtree later would
+    # re-assign the lambda (aliasing).
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
+    tenant, did = _upload(client)
+    time.sleep(0.2)
+    monkeypatch.setattr(guest_uploads.shutil, "rmtree", lambda *a, **k: None)
+    result = guest_uploads.purge_expired()
+    assert result["count"] == 0, "a surviving dir must not count as purged"
+    assert _drawing_dir(tenant, did).is_dir()
+    log = (Path(write_loop.guest_store_dir()) / "purge.log.jsonl").read_text()
+    entry = json.loads(log.strip().splitlines()[-1])
+    assert entry["status"] == "failed" and entry["drawing_id"] == did
+    monkeypatch.setattr(guest_uploads.shutil, "rmtree", real_rmtree)
+    # and the NEXT sweep (deletion working again) keeps the promise
+    result2 = guest_uploads.purge_expired()
+    assert result2["count"] == 1
+    assert not _drawing_dir(tenant, did).exists()
+
+
 def test_orphan_staged_file_swept_by_mtime(client, monkeypatch):
     monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")
     updir = guest_uploads.uploads_dir()
     updir.mkdir(parents=True, exist_ok=True)
-    orphan = updir / "u-orphan.dxf"
+    orphan = updir / "guest-x--u-orphan.dxf"
     orphan.write_bytes(b"leftover")
     old = time.time() - 3600
     os.utime(orphan, (old, old))

@@ -199,3 +199,66 @@ def test_disabled_flag_503_and_policy_reports_it(client, monkeypatch):
     monkeypatch.setenv("LEAF_GUEST_UPLOADS_ENABLED", "0")
     assert _upload(client).status_code == 503
     assert client.get("/api/site/guest-upload-policy").json()["enabled"] is False
+
+
+def test_purge_daemon_starts_even_when_uploads_disabled(monkeypatch):
+    """Round-1 MAJOR: disabling NEW uploads never strands already-stamped
+    retention promises — the daemon runs regardless of the enable flag."""
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_ENABLED", "0")
+    thread = guest_uploads.start_purge_daemon()
+    assert thread is not None and thread.is_alive()
+
+
+def test_invalid_upload_does_not_consume_guest_quota(client, monkeypatch):
+    """Round-1 MAJOR: garbage requests must not drain the shared daily pool —
+    quota is counted only after validation passes."""
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_PER_IP_PER_DAY", "1")
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_PER_DAY", "1")
+    assert _upload(client, name="junk.pdf").status_code == 400
+    assert _upload(client, data=b"not a dwg", name="junk.dwg").status_code == 400
+    # the one real slot is still available
+    assert _upload(client).status_code == 202
+
+
+def test_oversize_request_precheck_rejects_declared_length(client, monkeypatch):
+    monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "64")
+    big = b"0\nSECTION\n" + b"x" * 200_000
+    r = _upload(client, data=big)
+    assert r.status_code == 413
+    assert "upload cap" in r.json()["error"]["message"]
+
+
+def test_store_representation_raw_bytes_v1_plus_intake_cache(client):
+    """Round-1 MAJOR: v1's version blob must hold the user's RAW bytes (what
+    a live write would send to APS) and the parsed intake must live at the
+    sibling cache key write_loop.read_intake prefers."""
+    import store
+    r = _upload(client)
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+    backend = write_loop.backend_for_tenant(tenant)
+    vkey = store.drawing_version_key(tenant, did, 1)
+    assert backend.get(vkey) == DXF_BYTES, "version blob must be the raw upload"
+    ckey = write_loop.intake_cache_key(tenant, did, 1)
+    assert backend.exists(ckey), "parsed intake must sit at the cache sibling"
+    cached = json.loads(backend.get(ckey).decode("utf-8"))
+    assert cached["layers"] == ["Panels"]
+
+
+def test_session_route_serves_uploaded_drawing_not_demo(client):
+    """Round-1 BLOCKER (session half): offline GET /api/session?dwg=<upload>
+    must serve THEIR intake (or 404), never the cached rooftop demo."""
+    r = _upload(client)
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+    s = client.get(f"/api/session?dwg={did}", headers={"X-Tenant-Id": tenant})
+    assert s.status_code == 200
+    coords = [c for p in s.json()["intake"]["polylines"] for pt in p["pts"] for c in pt]
+    assert DISTINCTIVE_COORD in coords
+    assert ROOFTOP_COORD not in coords
+    # unknown drawing under a guest tenant: honest 404, no bootstrap
+    missing = client.get("/api/session?dwg=u-missing", headers={"X-Tenant-Id": tenant})
+    assert missing.status_code == 404
+    # regression: the default dwg still serves the cached demo intake
+    default = client.get("/api/session", headers={"X-Tenant-Id": "acme-solar"})
+    assert default.status_code == 200
+    default_coords = [c for p in default.json()["intake"]["polylines"] for pt in p["pts"] for c in pt]
+    assert ROOFTOP_COORD in default_coords

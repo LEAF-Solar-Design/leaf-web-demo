@@ -33,7 +33,6 @@ import os
 import secrets
 import shutil
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -282,8 +281,13 @@ def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any
 # --------------------------------------------------------------------------- #
 # extraction — real geometry or an honest failure, never the demo intake
 # --------------------------------------------------------------------------- #
-def staged_path(drawing_id: str, ext: str) -> Path:
-    return uploads_dir() / f"{drawing_id}{ext}"
+def staged_path(tenant_id: str, drawing_id: str, ext: str) -> Path:
+    """Tenant-BOUND staging name (`<tenant>--<drawing><ext>`): the broker's
+    upload resolver rebuilds this exact name from the request's tenant_id, so
+    a broker-authorized caller can only ever extract its OWN tenant's staged
+    bytes — knowing another tenant's drawing id is not enough (review round 1,
+    MAJOR: flat namespace had no tenant binding)."""
+    return uploads_dir() / f"{tenant_id}--{drawing_id}{ext}"
 
 
 def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
@@ -305,7 +309,7 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             intake = _extract_via_broker(tenant_id, drawing_id)
         elif ext == ".dxf":
             import dxf_intake
-            intake = dxf_intake.parse_dxf_file(staged_path(drawing_id, ext),
+            intake = dxf_intake.parse_dxf_file(staged_path(tenant_id, drawing_id, ext),
                                                source_name=marker.get("filename") or drawing_id)
         else:
             _mark_failed(backend, tenant_id, drawing_id, marker, "APS_UNAVAILABLE",
@@ -321,23 +325,25 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                      f"{type(exc).__name__}: {exc}", retryable=False)
         return
 
-    # Ingest THEIR geometry as v1. ingest_drawing refuses an existing drawing,
+    # Ingest v1 in the STORE'S LIVE REPRESENTATION (review round 1, MAJOR):
+    # the version blob holds the user's RAW uploaded bytes (what a later live
+    # write signs and sends to APS as the host drawing), and the parsed/
+    # extracted intake JSON goes to the sibling intake-cache key —
+    # write_loop.read_intake PREFERS that key, so every intake read serves
+    # their geometry on both backends. Storing intake JSON as the version
+    # blob (the previous shape) would hand APS a JSON file labeled .dwg on
+    # the first live write. ingest_drawing refuses an existing drawing,
     # which is correct: an upload id is minted fresh and collision-checked.
-    fd, tmp = tempfile.mkstemp(suffix=".intake.json")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(intake, fh)
         import store  # importable via write_loop's sys.path setup
-        store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
-    except ValueError as exc:
+        source = staged_path(tenant_id, drawing_id, ext)
+        store.ingest_drawing(backend, tenant_id, str(source), drawing_id=drawing_id)
+        backend.put(write_loop.intake_cache_key(tenant_id, drawing_id, 1),
+                    json.dumps(intake, separators=(",", ":")).encode("utf-8"))
+    except (OSError, ValueError) as exc:
         _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
                      f"ingest failed: {exc}", retryable=False)
         return
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
 
     marker = dict(marker)
     marker["status"] = "ready"
@@ -452,12 +458,24 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
                     size = sum(p.stat().st_size for p in drawing_dir.rglob("*")
                                if p.is_file())
                     shutil.rmtree(drawing_dir, ignore_errors=True)
+                    if drawing_dir.exists():
+                        # Deletion FAILED (permissions, open handle). Never
+                        # log it as a kill — a false purge line is the exact
+                        # promise-breaking lie this module exists to prevent.
+                        _append_purge_log({"ts": _iso(now), "status": "failed",
+                                           "tenant_id": tenant_dir.name,
+                                           "drawing_id": drawing_dir.name})
+                        print(f"[guest-uploads] purge FAILED to delete "
+                              f"{tenant_dir.name}/{drawing_dir.name}; will retry "
+                              f"next sweep", file=sys.stderr)
+                        continue
                     for ext in ACCEPTED_EXTENSIONS:
-                        _unlink_quiet(staged_path(drawing_dir.name, ext))
+                        _unlink_quiet(staged_path(tenant_dir.name, drawing_dir.name, ext))
                     freed += size
                     purged.append({"tenant_id": tenant_dir.name,
                                    "drawing_id": drawing_dir.name})
-                    _append_purge_log({"ts": _iso(now), "tenant_id": tenant_dir.name,
+                    _append_purge_log({"ts": _iso(now), "status": "deleted",
+                                       "tenant_id": tenant_dir.name,
                                        "drawing_id": drawing_dir.name,
                                        "freed_bytes": size})
             # a tenant dir whose drawings are all gone is itself expired

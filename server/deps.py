@@ -421,6 +421,23 @@ def backedge_tenant(tenant_id: str) -> Any:
     return TenantContext(tenant_id, tier=backedge_tier(tenant_id))
 
 
+import re as _re
+
+_GUEST_GET_ROUTE_RE = _re.compile(
+    r"^/api/drawings/[a-z0-9][a-z0-9_-]*/(intake|upload-status|versions)$")
+
+
+def _guest_route_allowed(method: str, path: str) -> bool:
+    """The COMPLETE surface a guest-session identity may touch (§19): its own
+    uploads and reads of them. Everything else — run/author/sessions/tenant/
+    undo/redo/checkout — needs a real account, full stop."""
+    if method == "POST":
+        return path == "/api/drawings/upload"
+    if method == "GET":
+        return bool(_GUEST_GET_ROUTE_RE.match(path))
+    return False
+
+
 def _dispatch_secret_ok(presented: Optional[str]) -> bool:
     secret = os.environ.get("LEAF_APP_DISPATCH_SECRET", "").strip()
     if not secret or not presented:
@@ -456,13 +473,24 @@ def require_tenant(
 
     # Guest-session leg (CONTRACT-ADDENDUM §19): a VALID HMAC guest token — for
     # a `guest-*` tenant only, verified constant-time against LEAF_GUEST_SECRET
-    # with its own expiry — resolves the guest identity at tier "guest" (whose
-    # entitlements deny everything but upload). ANY defect in the token falls
-    # through to the ordinary JWT path, which 401s honestly without a Bearer.
+    # with its own expiry — resolves the guest identity at tier "guest", and
+    # ONLY on the guest lane's own routes (_guest_route_allowed): the tier
+    # policy gates capabilities, but many routes (sessions, tenant grants,
+    # undo/redo/checkout) carry no capability gate, so without this allowlist a
+    # guest token would be a general-purpose identity (review round 1, MAJOR).
+    # Off-list -> 403 naming the boundary. ANY token defect falls through to
+    # the ordinary JWT path, which 401s honestly without a Bearer.
     if x_guest_session:
         import guest_uploads  # lazy: mirrors the auth/tenancy lazy-import discipline
         guest_tid = guest_uploads.verify_guest_session(x_guest_session)
         if guest_tid is not None:
+            if not _guest_route_allowed(request.method, request.url.path):
+                from fastapi import HTTPException  # noqa: PLC0415
+                raise HTTPException(
+                    status_code=403,
+                    detail="guest sessions are upload-only: upload, upload-status, "
+                           "intake and versions reads; create an account for "
+                           "everything else")
             return TenantContext(guest_tid, tier="guest")
 
     # LEAF_AUTH_LIVE=1: verified JWT claims win over the header stub.

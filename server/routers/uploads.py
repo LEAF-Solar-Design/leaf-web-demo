@@ -117,21 +117,19 @@ def upload_drawing(
     if not entitlements.entitlements_for(tier).get("upload", False):
         return entitlements.entitlement_denied_response("upload", tier)
 
-    # Guest cost-exposure caps (each live extraction is a paid APS run).
-    if tenant_kind == "guest":
-        exceeded = guest_uploads.check_and_count_guest_upload(_client_ip(request))
-        if exceeded is not None:
-            scope = ("this network address" if exceeded == "ip"
-                     else "the shared guest pool")
-            return error_response(
-                ErrorCode.QUOTA_EXCEEDED,
-                f"the daily guest upload limit for {scope} is exhausted; "
-                "try again tomorrow or create an account",
-                retryable=True, status_code=429)
-
-    # Size cap: read one byte past the cap so an oversized body is detected
-    # without buffering more than cap+1.
+    # Size cap. Two layers: (1) the declared Content-Length is rejected up
+    # front; (2) the handler never buffers more than cap+1 bytes. NOTE
+    # (review round 1, MAJOR): FastAPI parses the multipart body (spooling to
+    # temp disk) BEFORE this handler runs, so a length-less/chunked oversized
+    # body still costs transient disk — the deployment's ingress proxy body
+    # limit is the real outer wall (documented in CONTRACT-ADDENDUM §19).
     cap = guest_uploads.max_upload_bytes()
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > cap + 65536:
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            f"request exceeds the {cap} byte upload cap", retryable=False,
+            status_code=413)
     data = file.file.read(cap + 1)
     if len(data) > cap:
         return error_response(
@@ -143,6 +141,21 @@ def upload_drawing(
     if reason is not None:
         return error_response(ErrorCode.BAD_PARAMS, reason, retryable=False,
                               status_code=400)
+
+    # Guest cost-exposure caps (each live extraction is a paid APS run).
+    # Counted AFTER validation on purpose (review round 1, MAJOR): garbage
+    # requests must not be able to exhaust the shared daily pool — only an
+    # upload that will actually stage + extract consumes quota.
+    if tenant_kind == "guest":
+        exceeded = guest_uploads.check_and_count_guest_upload(_client_ip(request))
+        if exceeded is not None:
+            scope = ("this network address" if exceeded == "ip"
+                     else "the shared guest pool")
+            return error_response(
+                ErrorCode.QUOTA_EXCEEDED,
+                f"the daily guest upload limit for {scope} is exhausted; "
+                "try again tomorrow or create an account",
+                retryable=True, status_code=429)
 
     backend = write_loop.backend_for_tenant(
         str(tenant), aps_live=deps.APS_LIVE,
@@ -167,7 +180,7 @@ def upload_drawing(
                                       data=data, tenant_kind=tenant_kind)
     guest_uploads.write_marker(backend, str(tenant), drawing_id, marker)
 
-    staged = guest_uploads.staged_path(drawing_id, ext)
+    staged = guest_uploads.staged_path(str(tenant), drawing_id, ext)
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_bytes(data)
 

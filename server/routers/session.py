@@ -43,6 +43,23 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_tenant)):
         if response.status_code >= 400:
             return JSONResponse(status_code=response.status_code, content=body)
         return deps.tenant_echo(body, tenant)
+    if dwg != "rooftop_demo":
+        # §19 (review round 1, BLOCKER): this offline branch used to IGNORE
+        # `dwg` and serve the cached DEMO intake for ANY name — for an
+        # uploaded drawing id that is fabricated data labeled as the user's
+        # own. A non-default dwg now reads the tenant's own store (real
+        # geometry for an extracted upload; ensure_demo_drawing's fail-closed
+        # guards -> honest 404 for anything unextracted/unknown).
+        import write_loop  # noqa: PLC0415 - lazy, keeps module import surface
+
+        backend = write_loop.backend_for_tenant(str(tenant), aps_live=False)
+        try:
+            write_loop.ensure_demo_drawing(backend, str(tenant), dwg)
+            _, intake = write_loop.read_intake(backend, str(tenant), dwg, "head")
+        except (KeyError, ValueError) as exc:
+            return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
+                                  retryable=False, status_code=404)
+        return deps.tenant_echo(with_envelope_fields({"intake": intake}), tenant)
     if not deps.DATA_FILE.exists():
         return error_response(ErrorCode.INTERNAL, f"cached intake not found: {deps.DATA_FILE}",
                               retryable=False, status_code=404)

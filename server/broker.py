@@ -502,22 +502,29 @@ def _uploads_root() -> Path:
     return Path(os.environ.get("LEAF_UPLOADS_DIR", str(PROJECT_ROOT / "data" / "uploads")))
 
 
-def _resolve_upload_dwg(name: str) -> Path:
-    """Resolve an uploaded drawing id inside the uploads staging area ONLY.
+def _resolve_upload_dwg(name: str, tenant_id: str) -> Path:
+    """Resolve an uploaded drawing id inside the uploads staging area ONLY,
+    BOUND to the requesting tenant.
 
-    Same defense posture as _resolve_live_dwg (bare name, no symlinks, must
+    Same defense posture as _resolve_live_dwg (bare names, no symlinks, must
     resolve to a regular file whose parent IS the uploads root) so a
     compromised app process cannot use the upload lane to make APS read an
-    arbitrary local file. Tries `.dwg` then `.dxf` — the upload endpoint
-    stages exactly one of the two."""
+    arbitrary local file. The staged filename is `<tenant>--<drawing><ext>`
+    (guest_uploads.staged_path) and BOTH parts are re-validated here, so a
+    caller can only reach files staged under the tenant_id it presents —
+    knowing another tenant's drawing id resolves nothing (review round 1,
+    MAJOR: the flat namespace had no tenant binding). Tries `.dwg` then
+    `.dxf` — the upload endpoint stages exactly one of the two."""
     if not isinstance(name, str) or not _DWG_NAME_RE.fullmatch(name):
         raise ValueError("dwg must be a bare drawing name (letters, digits, '_' or '-')")
+    if not isinstance(tenant_id, str) or not _DWG_NAME_RE.fullmatch(tenant_id):
+        raise ValueError("tenant_id must be a bare id (letters, digits, '_' or '-')")
     try:
         root = _uploads_root().resolve(strict=True)
     except FileNotFoundError as exc:
         raise ValueError(f"unknown uploaded drawing: {name}") from exc
     for suffix in (".dwg", ".dxf"):
-        candidate = _uploads_root() / f"{name}{suffix}"
+        candidate = _uploads_root() / f"{tenant_id}--{name}{suffix}"
         if candidate.is_symlink():
             raise ValueError("dwg symlinks are not allowed")
         try:
@@ -632,7 +639,8 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
             ),
         )
     try:
-        local = _resolve_upload_dwg(req.dwg) if req.upload else _resolve_live_dwg(req.dwg)
+        local = (_resolve_upload_dwg(req.dwg, req.tenant_id) if req.upload
+                 else _resolve_live_dwg(req.dwg))
     except ValueError as exc:
         return JSONResponse(
             status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS],
@@ -892,24 +900,34 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             time.sleep(min(float(qa_sleep), QA_SLEEP_CAP_S))  # QA latency-simulation hook
         except (TypeError, ValueError):
             pass
-    if req.dwg_version is not None:
-        # VERSION-PINNED read: load the requested version through the SAME versioned
-        # store the write branch uses (da/store.py resolve_version), scoped to this
-        # tenant's well-known `demo` drawing (write_loop.DEMO_DRAWING_ID) — mirrors
-        # write_loop.run_write_mock's own read_intake call. An unknown version raises
-        # (KeyError/ValueError from store.resolve_version) -> a clean BAD_PARAMS
-        # envelope, never a crash. Omitted dwg_version (None) takes the UNCHANGED
-        # DATA_FILE path below — byte-identical to before this feature.
+    # Which STORE drawing does this run target? The public `dwg` default
+    # ("rooftop_demo") maps to the tenant's well-known `demo` store drawing —
+    # unchanged. ANY OTHER dwg now resolves through the tenant's own store
+    # (§19 review round 1, BLOCKER): before this, `req.dwg` was IGNORED
+    # offline, so a run against an uploaded drawing silently executed on the
+    # cached DEMO geometry — fabricated results labeled as the user's own.
+    # Now an uploaded/extracted drawing runs on ITS real intake, and an
+    # unknown/unextracted one fails closed (ensure_demo_drawing's guards
+    # raise -> honest BAD_PARAMS).
+    store_dwg = (write_loop.DEMO_DRAWING_ID if req.dwg == "rooftop_demo" else req.dwg)
+    if req.dwg_version is not None or store_dwg != write_loop.DEMO_DRAWING_ID:
+        # VERSION-PINNED read, or a NON-DEFAULT drawing at head: load through
+        # the SAME versioned store the write branch uses (da/store.py) —
+        # mirrors write_loop.run_write_mock's own read_intake call. Unknown
+        # drawing/version raises (KeyError/ValueError) -> clean BAD_PARAMS.
         try:
-            backend = write_loop.default_backend(aps_live=False)
-            write_loop.ensure_demo_drawing(backend, req.tenant_id, write_loop.DEMO_DRAWING_ID)
-            _, intake = write_loop.read_intake(backend, req.tenant_id,
-                                               write_loop.DEMO_DRAWING_ID, req.dwg_version)
+            backend = write_loop.backend_for_tenant(req.tenant_id, aps_live=False)
+            write_loop.ensure_demo_drawing(backend, req.tenant_id, store_dwg)
+            _, intake = write_loop.read_intake(
+                backend, req.tenant_id, store_dwg,
+                req.dwg_version if req.dwg_version is not None else "head")
         except (KeyError, ValueError) as exc:
             return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
                                  retryable=False, tool=tool.get("name")),
                     DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
     else:
+        # Default drawing, no pin: the UNCHANGED cached-intake path,
+        # byte-identical to the pre-§19 demo.
         try:
             intake = json.loads(DATA_FILE.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001

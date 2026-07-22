@@ -138,6 +138,36 @@ def test_live_invalid_session_falls_to_honest_401(live_client):
     assert r.status_code == 401  # fell through to the JWT path, no bearer
 
 
+def test_live_guest_token_is_upload_only_allowlist(live_client):
+    """Round-1 MAJOR: a guest token must NOT be a general-purpose identity.
+    Off-allowlist routes 403 with the boundary named; allowlisted reads work."""
+    r = live_client.post("/api/drawings/upload",
+                         files={"file": ("f.dxf", io.BytesIO(DXF))})
+    token = r.json()["guest_session"]
+    did = r.json()["drawing_id"]
+    h = {"X-Guest-Session": token}
+
+    # allowlisted: intake, upload-status, versions
+    assert live_client.get(f"/api/drawings/{did}/intake", headers=h).status_code == 200
+    assert live_client.get(f"/api/drawings/{did}/upload-status", headers=h).status_code == 200
+    assert live_client.get(f"/api/drawings/{did}/versions", headers=h).status_code == 200
+
+    # everything else: 403 naming the boundary — sessions, tenant grants,
+    # drawing mutations, the legacy session route, jobs
+    for method, path in [
+        ("post", f"/api/drawings/{did}/undo"),
+        ("post", f"/api/drawings/{did}/redo"),
+        ("post", f"/api/drawings/{did}/checkout"),
+        ("get", "/api/session"),
+        ("get", "/api/jobs"),
+        ("post", "/api/sessions"),
+        ("get", "/api/usage"),
+    ]:
+        response = getattr(live_client, method)(path, headers=h)
+        assert response.status_code == 403, (path, response.status_code)
+        assert "upload-only" in response.text
+
+
 def test_live_guest_cannot_run_tools(live_client):
     r = live_client.post("/api/drawings/upload",
                          files={"file": ("f.dxf", io.BytesIO(DXF))})
@@ -145,9 +175,11 @@ def test_live_guest_cannot_run_tools(live_client):
     run = live_client.post("/api/run",
                            json={"tool": "count-by-layer", "params": {}},
                            headers={"X-Guest-Session": token})
+    # The route ALLOWLIST in require_tenant denies before the per-route
+    # entitlement gate even runs — defense in depth; either layer alone
+    # would already deny (the guest tier grants no run capability).
     assert run.status_code == 403
-    assert run.json().get("entitlement_required") is True
-    assert run.json()["tier"] == "guest"
+    assert "upload-only" in run.json()["error"]["message"]
 
 
 # --------------------------------------------------------------------------- #

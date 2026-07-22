@@ -936,6 +936,24 @@ not-rooftop test), `tests/test_guest_fail_closed.py` (7),
 `tests/test_guest_session_auth.py` (12 — incl. the json↔hardcoded policy
 mirror), `tests/test_broker_upload_resolver.py` (19).
 
+**Review round 2 hardening** (sol-critic round-1 findings, all addressed):
+the offline `/api/session` route and offline `/broker/run` now resolve a
+NON-DEFAULT `dwg` through the tenant's own store (real geometry for extracted
+uploads; the fail-closed guards -> honest 404/BAD_PARAMS) instead of ignoring
+it; v1 ingest stores the user's RAW bytes at the version key + parsed intake
+at the sibling cache key (the live representation — a later live write sends
+real source bytes to APS, never intake JSON labeled .dwg); staged uploads are
+tenant-BOUND (`<tenant>--<drawing><ext>`, resolver re-validates both parts);
+guest-session identities are restricted to an upload-only route allowlist in
+`require_tenant` (upload + intake/upload-status/versions reads; everything
+else 403s naming the boundary); guest quota is counted only AFTER validation;
+the purge daemon starts regardless of the enable flag (stamped promises
+outlive the feature switch) and a failed deletion logs `status: "failed"`,
+never a false kill; the upload route pre-rejects oversized declared
+Content-Length. NOTE: FastAPI spools multipart to temp disk before the
+handler runs — the deployment's ingress proxy body limit is the outer wall
+against length-less oversized bodies (set it to ~LEAF_UPLOAD_MAX_BYTES).
+
 **Honestly out of scope v1**: converting a guest tenant's drawing into a
 freshly created account (the UI copy never promises it — "Create account"
 starts a signed-in workspace); OSS-backed guest storage; DWG extraction
