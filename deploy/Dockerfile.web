@@ -13,8 +13,10 @@ WORKDIR /web
 
 ARG VITE_API_BASE=http://localhost:8130
 ARG VITE_MOCK=0
+ARG LEAF_SOURCE_SHA
 ENV VITE_API_BASE=${VITE_API_BASE} \
-    VITE_MOCK=${VITE_MOCK}
+    VITE_MOCK=${VITE_MOCK} \
+    LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}
 
 COPY web/package.json web/package-lock.json /web/
 RUN npm ci

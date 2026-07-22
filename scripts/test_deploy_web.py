@@ -13,11 +13,20 @@ from unittest.mock import Mock
 
 import pytest
 
+
+ROOT = Path(__file__).resolve().parents[1]
+
 SCRIPT = Path(__file__).with_name("deploy-web.py")
 SPEC = importlib.util.spec_from_file_location("deploy_web", SCRIPT)
 assert SPEC and SPEC.loader
 deploy_web = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(deploy_web)
+
+
+def test_web_container_forwards_immutable_source_sha() -> None:
+    dockerfile = (ROOT / "deploy" / "Dockerfile.web").read_text(encoding="utf-8")
+    assert "ARG LEAF_SOURCE_SHA" in dockerfile
+    assert "LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}" in dockerfile
 
 
 def _result(stdout: str = "https://leaf-web-abc.vercel.app") -> SimpleNamespace:
