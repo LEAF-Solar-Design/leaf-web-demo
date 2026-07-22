@@ -3,6 +3,7 @@
   "demo": {
     "run_read": true,
     "run_write": true,
+    "solve": true,
     "build": true,
     "converse": true,
     "agent_write_autopilot": true,
@@ -12,6 +13,7 @@
   "self_hosted": {
     "run_read": true,
     "run_write": true,
+    "solve": true,
     "build": true,
     "converse": true,
     "agent_write_autopilot": true,
@@ -21,6 +23,7 @@
   "hosted_starter": {
     "run_read": true,
     "run_write": true,
+    "solve": false,
     "build": false,
     "converse": true,
     "agent_write_autopilot": false,
@@ -30,6 +33,7 @@
   "hosted_pro": {
     "run_read": true,
     "run_write": true,
+    "solve": true,
     "build": true,
     "converse": true,
     "agent_write_autopilot": true,
@@ -39,6 +43,7 @@
   "restricted": {
     "run_read": true,
     "run_write": false,
+    "solve": false,
     "build": false,
     "converse": false,
     "agent_write_autopilot": false,

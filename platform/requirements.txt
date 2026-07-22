@@ -4,6 +4,10 @@ fastapi>=0.110
 pydantic>=2.6
 psycopg[binary]>=3.1
 psycopg-pool>=3.2
+# Live verifier imports and canonical JSON hashing used by deps/models.
+PyJWT[crypto]>=2.8
+cryptography>=42
+rfc8785>=0.1.4
 # test-only
 pytest>=8.0
 httpx>=0.27          # required by fastapi/starlette TestClient

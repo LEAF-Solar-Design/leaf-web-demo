@@ -120,6 +120,13 @@ def offboard_org(org_id: uuid.UUID, *,
                 "DELETE FROM projects WHERE org_id = %(org_id)s", {"org_id": org_id}
             )
             deleted_projects = cur.rowcount
+            # These records are tenant authority/identity control-plane data, not
+            # project children. Purge them in the same transaction before the org
+            # tombstone is finalized so offboarding cannot leave stale bindings.
+            cur.execute("DELETE FROM identity_bindings WHERE platform_tenant_id = %(org_id)s",
+                        {"org_id": org_id})
+            cur.execute("DELETE FROM tenant_authority_modes WHERE org_id = %(org_id)s",
+                        {"org_id": org_id})
             # step 4: tombstone + close the erasure window (purge_completed_at=NOW())
             cur.execute(
                 "UPDATE orgs SET status = 'deleted', offboarded_at = NOW(), "

@@ -95,19 +95,69 @@ def cursor() -> Iterator[psycopg.Cursor]:
 
 
 def _split_sql_statements(sql: str) -> List[str]:
-    """Split a simple DDL script into individual statements.
+    """Split migration DDL without breaking quoted or dollar-quoted bodies.
 
-    Strips line/inline ``--`` comments then splits on ``;``. Adequate for this
-    migration (no dollar-quoted bodies, no semicolons inside string literals).
+    Migrations are intentionally plain SQL, but immutable-ledger triggers use
+    PostgreSQL ``$$`` function bodies.  A naïve ``split(';')`` would execute a
+    function one fragment at a time.  This small lexer is sufficient for SQL
+    migrations: it recognizes line comments, single-quoted strings, and tagged
+    dollar quotes while preserving every byte sent to PostgreSQL.
     """
-    cleaned_lines = []
-    for line in sql.splitlines():
-        idx = line.find("--")
-        if idx != -1:
-            line = line[:idx]
-        cleaned_lines.append(line)
-    body = "\n".join(cleaned_lines)
-    return [s.strip() for s in body.split(";") if s.strip()]
+    statements, current = [], []
+    i, quote, dollar = 0, False, None
+    while i < len(sql):
+        if not quote and dollar is None and sql.startswith("--", i):
+            end = sql.find("\n", i)
+            if end == -1:
+                break
+            i = end
+            continue
+        if dollar is not None:
+            if sql.startswith(dollar, i):
+                current.append(dollar)
+                i += len(dollar)
+                dollar = None
+            else:
+                current.append(sql[i])
+                i += 1
+            continue
+        char = sql[i]
+        if quote:
+            current.append(char)
+            if char == "'":
+                if i + 1 < len(sql) and sql[i + 1] == "'":
+                    current.append("'")
+                    i += 2
+                    continue
+                quote = False
+            i += 1
+            continue
+        if char == "'":
+            quote = True
+            current.append(char)
+            i += 1
+            continue
+        if char == "$":
+            end = sql.find("$", i + 1)
+            if end != -1:
+                candidate = sql[i:end + 1]
+                if candidate[1:-1].replace("_", "a").isalnum() or candidate == "$$":
+                    dollar = candidate
+                    current.append(candidate)
+                    i = end + 1
+                    continue
+        if char == ";":
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(statement)
+            current = []
+        else:
+            current.append(char)
+        i += 1
+    statement = "".join(current).strip()
+    if statement:
+        statements.append(statement)
+    return statements
 
 
 def _apply_one(path: Path) -> None:

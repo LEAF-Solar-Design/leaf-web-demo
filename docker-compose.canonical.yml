@@ -1,0 +1,66 @@
+# Opt-in canonical PostgreSQL overlay.
+#
+# Usage from the leaf-web-demo repository root:
+#   docker compose -f docker-compose.yml -f docker-compose.canonical.yml build app canonical-worker migrate
+#   docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
+#
+# The sibling autofill-solver repository remains the source owner. Compose
+# passes it as a named BuildKit context rather than copying it into this repo.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: leaf
+      POSTGRES_USER: leaf
+      POSTGRES_PASSWORD: leaf-local-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leaf -d leaf"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - leaf-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  migrate:
+    image: leaf-canonical-worker:local
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.canonical-worker
+      additional_contexts:
+        autofill_solver: ../autofill-solver
+    environment:
+      DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
+    command:
+      - python
+      - -c
+      - "import sys; sys.path.insert(0, '/app/platform'); import db; db.apply_migration()"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  canonical-worker:
+    image: leaf-canonical-worker:local
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.canonical-worker
+      additional_contexts:
+        autofill_solver: ../autofill-solver
+    environment:
+      DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  app:
+    environment:
+      DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  leaf-postgres:

@@ -5,6 +5,7 @@ without an org_id predicate, and that every read takes org_id as its first
 parameter. Also confirms the stdlib-`platform` shadow fix: `import platform`
 resolves the genuine stdlib module inside the test process.
 """
+import ast
 import inspect
 import re
 
@@ -44,9 +45,22 @@ def test_every_select_binds_org_id_predicate():
     offenders = []
     for name, fn in _public_functions():
         src = inspect.getsource(fn)
-        if "SELECT" not in src.upper():
+        tree = ast.parse(src)
+        execute_calls = (
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "execute"
+        )
+        sql_literals = "\n".join(
+            literal.value
+            for call in execute_calls
+            for literal in ast.walk(call)
+            if isinstance(literal, ast.Constant) and isinstance(literal.value, str)
+        )
+        if not re.search(r"\bSELECT\b", sql_literals, re.IGNORECASE):
             continue
         # a WHERE clause that mentions org_id must appear in the function body
-        if not re.search(r"where[\s\S]*?org_id", src, re.IGNORECASE):
+        if not re.search(r"where[\s\S]*?org_id", sql_literals, re.IGNORECASE):
             offenders.append(name)
     assert not offenders, f"store read functions missing an org_id predicate: {offenders}"

@@ -38,26 +38,26 @@ from envelopes import ErrorCode, error_obj
 # gates registering an authored tool (R6, split from `build`), and
 # `platform_customize` gates R7 — false everywhere at launch).
 CAPABILITIES = (
-    "run_read", "run_write", "build",
+    "run_read", "run_write", "solve", "build",
     "converse", "agent_write_autopilot", "deploy", "platform_customize",
 )
 
 # Fail-safe defaults — used verbatim if the JSON file is absent or unreadable. These
 # MUST mirror server/entitlements.json so enforcement is identical with or without it.
 _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
-    "demo": {"run_read": True, "run_write": True, "build": True,
+    "demo": {"run_read": True, "run_write": True, "solve": True, "build": True,
              "converse": True, "agent_write_autopilot": True, "deploy": True,
              "platform_customize": False},
-    "restricted": {"run_read": True, "run_write": False, "build": False,
+    "restricted": {"run_read": True, "run_write": False, "solve": False, "build": False,
                    "converse": False, "agent_write_autopilot": False, "deploy": False,
                    "platform_customize": False},
-    "self_hosted": {"run_read": True, "run_write": True, "build": True,
+    "self_hosted": {"run_read": True, "run_write": True, "solve": True, "build": True,
                     "converse": True, "agent_write_autopilot": True, "deploy": True,
                     "platform_customize": False},
-    "hosted_starter": {"run_read": True, "run_write": True, "build": False,
+    "hosted_starter": {"run_read": True, "run_write": True, "solve": False, "build": False,
                        "converse": True, "agent_write_autopilot": False, "deploy": False,
                        "platform_customize": False},
-    "hosted_pro": {"run_read": True, "run_write": True, "build": True,
+    "hosted_pro": {"run_read": True, "run_write": True, "solve": True, "build": True,
                    "converse": True, "agent_write_autopilot": True, "deploy": True,
                    "platform_customize": False},
 }
@@ -250,10 +250,15 @@ def tool_required_capability(tool: Dict[str, Any]) -> str:
     caps = record["capabilities"]
     if not isinstance(caps, (list, tuple)):
         return "run_write"
+    if "solve" in caps:
+        return "solve"
     return "run_write" if "drawing.write" in caps else "run_read"
 
 
 def _denied_message(required: str, tier: str) -> str:
+    if required == "solve":
+        return (f"the '{tier}' plan does not include canonical solver execution; "
+                "upgrade the workspace plan to enable Solve.")
     if required == "build":
         return (f"the '{tier}' plan does not include authoring new tools (Build); "
                 "upgrade the workspace plan to enable it.")

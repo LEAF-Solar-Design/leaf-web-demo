@@ -230,21 +230,25 @@ def test_run_request_threads_dwg_version_through_router_to_submit_job(monkeypatc
     captured = {}
 
     def fake_submit_job(tenant_id, tool, params, dwg, aps_live, org_id=None,
-                        project_id=None, dwg_version=None):
+                        project_id=None, dwg_version=None, **_platform_kwargs):
         captured["dwg_version"] = dwg_version
         return "fake-job-id"
 
     monkeypatch.setattr(jobs_router.jobs, "submit_job", fake_submit_job)
     req = jobs_router.RunRequest(tool="count-by-layer", params={}, dwg="rooftop_demo",
                                  dwg_version=7)
-    resp = jobs_router.run(req, wait=0, tenant_id="demo-tenant")
+    resp = jobs_router.run(req, wait=0, tenant_id="demo-tenant",
+                           x_org_id=None, x_project_id=None,
+                           idempotency_key=None, authorization=None)
     assert resp.status_code == 202
     assert captured["dwg_version"] == 7
 
     # omitted dwg_version -> None threads through unchanged
     captured.clear()
     req2 = jobs_router.RunRequest(tool="count-by-layer", params={}, dwg="rooftop_demo")
-    jobs_router.run(req2, wait=0, tenant_id="demo-tenant")
+    jobs_router.run(req2, wait=0, tenant_id="demo-tenant",
+                    x_org_id=None, x_project_id=None,
+                    idempotency_key=None, authorization=None)
     assert captured["dwg_version"] is None
 
 
@@ -508,3 +512,125 @@ def test_tenant_repo_override_of_global_tool_is_not_flagged_as_a_collision(monke
 
     tool = deps.find_tool("count-by-layer")  # must NOT raise
     assert tool is not None and tool.get("entry") == "tools/count-by-layer/tool.py"  # tenant tool WINS
+
+
+def test_dwg_version_survives_local_fallback(monkeypatch, tmp_path):
+    """The discriminating pin-through-fallback case (round-2 review finding):
+    cloud fails, the local fallback broker call must still carry the pin."""
+    import jobs
+
+    class _InertExecutor:
+        def submit(self, fn, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    monkeypatch.setattr(jobs, "_executors", {jobs.LANE_FAST: _InertExecutor(),
+                                             jobs.LANE_SLOW: _InertExecutor()})
+    monkeypatch.setattr(jobs.platform_link, "on_submit", lambda *a, **k: None)
+    monkeypatch.setattr(jobs.platform_link, "on_running", lambda *a, **k: None)
+    monkeypatch.setattr(jobs.platform_link, "on_terminal", lambda *a, **k: None)
+    captured = {}
+
+    def broker_stub(_tenant, _tool, _params, _dwg, aps_live, **kwargs):
+        if aps_live:
+            raise broker_client.BrokerUnreachable("cloud down")
+        captured["dwg_version"] = kwargs.get("dwg_version")
+        return {"ok": True, "result": {"source": "local"}}
+
+    monkeypatch.setattr(broker_client, "run_via_broker", broker_stub)
+    tool = {"name": "count-by-layer", "capabilities": ["drawing.read"],
+            "allow_local_fallback": True}
+    job_id = jobs.submit_job("pin-tenant", tool, {}, "rooftop_demo", aps_live=True,
+                             dwg_version=5)
+    jobs._run_job(job_id, "pin-tenant", tool, {}, "rooftop_demo", True, dwg_version=5)
+    assert captured["dwg_version"] == 5
+    if jobs._conn is not None:
+        jobs._conn.close()
+
+
+def test_idempotency_fingerprint_includes_dwg_version(monkeypatch, tmp_path):
+    """Round-3 finding 2: same idempotency key + DIFFERENT pin must be rejected
+    as different run input, not deduped to the prior job."""
+    import jobs
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "idem.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+
+    class _Inert:
+        def submit(self, fn, *a, **k):
+            return None
+
+    monkeypatch.setattr(jobs, "_executors", {jobs.LANE_FAST: _Inert(), jobs.LANE_SLOW: _Inert()})
+    monkeypatch.setattr(jobs.platform_link, "on_submit", lambda *a, **k: None)
+    tool = {"name": "count-by-layer", "capabilities": ["drawing.read"]}
+    kw = dict(org_id="org-1", project_id="proj-1", idempotency_key="key-1")
+    j1 = jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=1, **kw)
+    # same key, same pin -> dedupes to the same job
+    j1b = jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=1, **kw)
+    assert j1b == j1
+    # same key, DIFFERENT pin -> rejected
+    with pytest.raises(ValueError, match="different run input"):
+        jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=2, **kw)
+    if jobs._conn is not None:
+        jobs._conn.close()
+
+
+def test_restart_recovery_recovers_the_version_pin(monkeypatch, tmp_path):
+    """Round-3 finding 1: a restart-recovered pinned job must NOT rerun against
+    head; the pin is persisted in execution_json and threaded back to _run_job."""
+    import jobs
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "recover.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    captured = {}
+
+    class _Capture:
+        def submit(self, fn, *a, **k):
+            # _run_job(job_id, tenant, tool, params, dwg, aps_live, dwg_version)
+            captured["dwg_version"] = a[6] if len(a) > 6 else None
+            return None
+
+    monkeypatch.setattr(jobs, "_executors", {jobs.LANE_FAST: _Capture(), jobs.LANE_SLOW: _Capture()})
+    monkeypatch.setattr(jobs.platform_link, "on_submit", lambda *a, **k: None)
+    tool = {"name": "count-by-layer", "capabilities": ["drawing.read"]}
+    job_id = jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=7)
+    captured.clear()
+    # simulate a fresh process picking the durable row back up
+    assert jobs._redispatch_record(job_id) is True
+    assert captured["dwg_version"] == 7
+    if jobs._conn is not None:
+        jobs._conn.close()
+
+
+def test_restart_recovery_fails_closed_on_row_predating_pin_persistence(monkeypatch, tmp_path):
+    """Round-4 finding: a job row written before pin-persistence lacks the
+    dwg_version key; recovery must fail closed, never default to head."""
+    import jobs
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "old.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    dispatched = {"called": False}
+
+    class _Capture:
+        def submit(self, fn, *a, **k):
+            dispatched["called"] = True
+            return None
+
+    monkeypatch.setattr(jobs, "_executors", {jobs.LANE_FAST: _Capture(), jobs.LANE_SLOW: _Capture()})
+    monkeypatch.setattr(jobs.platform_link, "on_submit", lambda *a, **k: None)
+    tool = {"name": "count-by-layer", "capabilities": ["drawing.read"]}
+    job_id = jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=7)
+    # Simulate an OLD row: rewrite execution_json without the dwg_version key.
+    with jobs._lock:
+        jobs._db().execute(
+            "UPDATE jobs SET execution_json = ? WHERE job_id = ?",
+            (json.dumps({"tool": tool, "aps_live": False}), job_id))
+        jobs._db().commit()
+    dispatched["called"] = False
+    assert jobs._redispatch_record(job_id) is False
+    assert dispatched["called"] is False
+    assert jobs.get_job(job_id)["status"] == "failed"
+    if jobs._conn is not None:
+        jobs._conn.close()

@@ -10,8 +10,13 @@ GET  /api/jobs?tenant_id=&limit= -> recent jobs (reconnect-after-tab-close)
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
+import os
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header
@@ -25,6 +30,9 @@ from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_response, with_envel
 
 router = APIRouter()
 
+PLATFORM_CONTRACT_VERSION = "leaf.platform.v1alpha1"
+AUTOFILL_TOOL = "string-autofill-opt"
+
 
 class RunRequest(BaseModel):
     tool: str
@@ -32,6 +40,15 @@ class RunRequest(BaseModel):
     dwg: str = "rooftop_demo"
     dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
     # specific immutable drawing version (da/store.py resolve_version) otherwise.
+
+
+class TerminalCallback(BaseModel):
+    """Broker/worker terminal delivery. Replays are safe by job fingerprint."""
+    worker_id: str
+    status: str
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[Dict[str, Any]] = None
+    provenance: Dict[str, Any]
 
 
 def _record_body(rec: Dict[str, Any]) -> Dict[str, Any]:
@@ -54,10 +71,30 @@ def _record_body(rec: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
+def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+    legacy = jobs.get_job(job_id)
+    if legacy is not None:
+        return legacy if legacy.get("tenant_id") == str(tenant_id) else None
+    return jobs.platform_link.get_canonical_job(job_id, str(tenant_id))
+
+
+def _canonical_tenant_id(tenant: Any, context: Dict[str, Any]) -> str:
+    """Bind JWT tenant/org claims to the server-owned platform identity."""
+    canonical = str(context["org_id"])
+    if deps.auth_live():
+        if not isinstance(tenant, deps.TenantContext) \
+                or str(tenant) != canonical or str(tenant.org_id or "") != canonical:
+            raise ValueError(
+                "verified tenant and org claims must match the active platform identity binding")
+    return canonical if context.get("authority_mode") == "postgres_canonical" else str(tenant)
+
+
 @router.post("/api/run")
 def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_tenant),
         x_org_id: Optional[str] = Header(default=None),
-        x_project_id: Optional[str] = Header(default=None)):
+        x_project_id: Optional[str] = Header(default=None),
+        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+        authorization: Optional[str] = Header(default=None)):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
@@ -88,12 +125,57 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
 
-    job_id = jobs.submit_job(tenant_id, tool, params, req.dwg, aps_live=deps.APS_LIVE,
-                             org_id=x_org_id, project_id=x_project_id,
-                             dwg_version=req.dwg_version)
+    try:
+        platform_context = jobs.platform_link.resolve_submission_context(
+            x_org_id, x_project_id, authorization)
+        resolved_org = (str(platform_context["org_id"]) if platform_context else None)
+        resolved_project = (str(platform_context["project_id"]) if platform_context else None)
+        authority_mode = (str(platform_context["authority_mode"])
+                          if platform_context else "legacy_sqlite")
+        if platform_context is not None:
+            if not tool.get("canonical_only"):
+                raise ValueError(
+                    "project-scoped canonical execution is enabled only for a connected solver adapter")
+            if req.dwg_version is not None:
+                # Fail closed on ambiguity: canonical drawings pin by version
+                # UUID in ``dwg``; the legacy integer pin has no meaning here.
+                raise ValueError(
+                    "dwg_version applies to the legacy path; canonical runs pin by version UUID in dwg")
+            try:
+                input_version_id = str(uuid.UUID(req.dwg))
+            except (ValueError, AttributeError):
+                raise ValueError("a canonical drawing version UUID is required") from None
+            request_tenant = _canonical_tenant_id(tenant_id, platform_context)
+            job_id = jobs.platform_link.submit_canonical_solve(
+                platform_context, request_tenant, str(tool["name"]), params,
+                idempotency_key, input_version_id)
+        else:
+            if tool.get("canonical_only"):
+                raise ValueError("X-Org-Id and X-Project-Id are required for this canonical solver")
+            job_id = jobs.submit_job(
+                tenant_id, tool, params, req.dwg, aps_live=deps.APS_LIVE,
+                org_id=resolved_org, project_id=resolved_project,
+                dwg_version=req.dwg_version,
+                idempotency_key=idempotency_key, authority_mode=authority_mode,
+                platform_context=platform_context,
+            )
+    except ValueError as exc:
+        message = str(exc)
+        return error_response(
+            ErrorCode.BAD_PARAMS, message, retryable=False,
+            status_code=400 if "required" in message else 409,
+        )
 
     if wait:
-        rec = jobs.wait_for_terminal(job_id, timeout_s=jobs.job_max_s() + 30)
+        if platform_context is None:
+            rec = jobs.wait_for_terminal(job_id, timeout_s=jobs.job_max_s() + 30)
+        else:
+            deadline = time.time() + jobs.job_max_s() + 30
+            rec = _job_for_tenant(job_id, str(tenant_id))
+            while rec is not None and rec["status"] not in jobs.TERMINAL \
+                    and time.time() < deadline:
+                time.sleep(0.1)
+                rec = _job_for_tenant(job_id, str(tenant_id))
         if rec is None:
             return error_response(ErrorCode.INTERNAL, "job record vanished", retryable=False)
         if rec["status"] == "complete":
@@ -112,13 +194,50 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
 
 @router.get("/api/jobs/{job_id}")
 def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
-    rec = jobs.get_job(job_id)
+    rec = _job_for_tenant(job_id, str(tenant))
     # 404 (never 403) both when the job is unknown AND when it belongs to another
     # tenant — no cross-tenant existence leak (security-audit F8).
     if rec is None or rec.get("tenant_id") != str(tenant):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
     return _record_body(rec)
+
+
+@router.post("/internal/jobs/{job_id}/callback")
+def terminal_callback(job_id: str, callback: TerminalCallback,
+                      x_tenant_id: Optional[str] = Header(default=None),
+                      x_broker_secret: Optional[str] = Header(default=None)):
+    """Idempotent worker callback, fail-closed behind the broker credential.
+
+    The public tenant session is deliberately insufficient authority to complete
+    work. The configured broker secret, tenant correlation, and active lease owner
+    must all match. A repeated matching callback returns success; a differing
+    terminal result is retained as a conflict and cannot overwrite the first.
+    """
+    secret = os.environ.get("LEAF_BROKER_SECRET")
+    if not secret:
+        return error_response(ErrorCode.INTERNAL, "worker callbacks are disabled",
+                              retryable=False, status_code=503)
+    if not hmac.compare_digest(x_broker_secret or "", secret):
+        return error_response(ErrorCode.BAD_PARAMS, "invalid worker callback credential",
+                              retryable=False, status_code=401)
+    rec = jobs.get_job(job_id)
+    if rec is None or rec.get("tenant_id") != str(x_tenant_id):
+        return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
+                              retryable=False, status_code=404)
+    try:
+        outcome = jobs.complete_callback(job_id, callback.status, result_env=callback.result,
+                                         error=callback.error, provenance=callback.provenance,
+                                         worker_id=callback.worker_id)
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
+    if outcome == "conflict":
+        return error_response(ErrorCode.BAD_PARAMS, "conflicting terminal callback",
+                              retryable=False, status_code=409)
+    if outcome == "not_owner":
+        return error_response(ErrorCode.BAD_PARAMS, "callback lease is not current",
+                              retryable=True, status_code=409)
+    return _record_body(jobs.get_job(job_id) or rec)
 
 
 @router.get("/api/jobs/{job_id}/stream")
@@ -130,7 +249,7 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
     lifetime — N concurrent streams starve every sync endpoint. The 0.5s cadence
     now awaits on the event loop; the per-tick DB read hops to a thread so the
     loop never blocks on the jobs-module lock. Wire format/timing unchanged."""
-    _rec0 = await asyncio.to_thread(jobs.get_job, job_id)
+    _rec0 = await asyncio.to_thread(_job_for_tenant, job_id, str(tenant))
     if _rec0 is None or _rec0.get("tenant_id") != str(tenant):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
@@ -139,7 +258,7 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
         last = None
         deadline = time.time() + jobs.job_max_s() + 60
         while time.time() < deadline:
-            rec = await asyncio.to_thread(jobs.get_job, job_id)
+            rec = await asyncio.to_thread(_job_for_tenant, job_id, str(tenant))
             if rec is None:
                 yield "data: " + json.dumps({"job_id": job_id, "status": "unknown"}) + "\n\n"
                 return
@@ -165,9 +284,76 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
 def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
+    canonical = jobs.platform_link.list_canonical_jobs(str(tenant), limit=limit)
+    legacy = jobs.list_jobs(str(tenant), limit)
     return with_envelope_fields(
-        {"jobs": [_record_body(r) for r in jobs.list_jobs(str(tenant), limit)]}
+        {"jobs": [_record_body(r) for r in (canonical + legacy)[:limit]]}
     )
+
+
+@router.get("/api/platform/capabilities")
+def platform_capabilities(
+    tenant=Depends(deps.require_tenant),
+    x_org_id: Optional[str] = Header(default=None),
+    x_project_id: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Authenticated capability truth; never promotes from configuration alone."""
+    try:
+        context = jobs.platform_link.resolve_submission_context(
+            x_org_id, x_project_id, authorization)
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=409)
+    if context is None:
+        return error_response(ErrorCode.BAD_PARAMS, "X-Project-Id is required",
+                              retryable=False, status_code=400)
+    try:
+        _canonical_tenant_id(tenant, context)
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=409)
+    health = jobs.platform_link.canonical_worker_health(AUTOFILL_TOOL)
+    now = datetime.now(timezone.utc)
+    tier = entitlements.resolve_tier(tenant)
+    entitled = entitlements.entitlements_for(tier).get("solve", False)
+    observed = str(health["observed_at"]) if health else now.isoformat()
+    expires = ((datetime.fromisoformat(observed) if health else now)
+               + timedelta(seconds=15)).isoformat()
+    evidence = []
+    if health:
+        evidence_payload = {"tool": AUTOFILL_TOOL, "runtime": health["runtime"],
+                            "sourceRevision": health["source_revision"],
+                            "sourceSha256": health["source_sha256"],
+                            "observedAt": observed}
+        digest = hashlib.sha256(json.dumps(
+            evidence_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        evidence = [{"kind": "observability", "uri": "urn:leaf:runtime:autofill-worker",
+                     "verifiedAt": observed,
+                     "digest": {"algorithm": "sha256", "value": digest}}]
+    availability = {
+        "contractVersion": PLATFORM_CONTRACT_VERSION,
+        "authority": "leaf-platform-registry",
+        "productCapability": "drawing.solve.strings",
+        "implementationState": "implemented",
+        "runtimeState": "degraded" if health else "unavailable",
+        # A heartbeat proves a connected runtime, not the staging G1A gate.  Do
+        # not elevate the customer surface to shipping until a durable gate
+        # attestation exists and is checked here.
+        "state": "connected_degraded" if health else "failed_retryable",
+        "observedAt": observed,
+        "expiresAt": expires,
+        "reasonCode": "staging_gate_unverified" if health else "canonical_worker_offline",
+        "evidence": evidence,
+        **({"fallback": {"mode": "read_only", "provenanceRequired": True}}
+           if health else {}),
+    }
+    return with_envelope_fields({
+        "contractVersion": PLATFORM_CONTRACT_VERSION,
+        "projectId": str(context["project_id"]),
+        "capabilities": [{"id": "drawing.solve.strings", "label": "Solve strings",
+                          "description": "Run the canonical AutoFill target solver.",
+                          "availability": availability, "toolCapabilities": ["solve"],
+                          "entitlements": ["solve"], "entitled": bool(entitled)}],
+    })
 
 
 @router.post("/api/jobs/{job_id}/close")

@@ -96,3 +96,33 @@ def test_offboard_default_secret_ref_provider(make_org):
     )
     assert key_calls == [f"leaf/{org.org_id}/credentials"]
     assert result.status == "deleted"
+
+
+def test_offboard_purges_authority_identity_ledger_and_outbox(make_org):
+    org = make_org(name="Canonical purge org")
+    project = store.create_project(org.org_id, "Canonical purge project")
+    store.set_tenant_authority_mode(org.org_id, "postgres_canonical")
+    store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
+    store.create_identity_binding(org.org_id, "auth0", "auth0|offboard-canonical")
+    store.append_history_operation(
+        org.org_id, project.project_id, "drawing.mutation", {"delete": True}, "purge-history",
+        branch_name="main",
+    )
+    store.append_solve_record(org.org_id, project.project_id, {"answer": "purge"}, "purge-solve")
+
+    result = offboard_org(org.org_id, key_purge_hook=lambda _: None, blob_purge_hook=lambda _: None)
+    assert result.status == "deleted"
+    with db.cursor() as cur:
+        for table, predicate in (
+            ("tenant_authority_modes", "org_id"),
+            ("project_authority_modes", "org_id"),
+            ("identity_bindings", "platform_tenant_id"),
+            ("history_operations", "org_id"),
+            ("history_edges", "org_id"),
+            ("branch_refs", "org_id"),
+            ("solve_records", "org_id"),
+            ("outbox_entries", "org_id"),
+        ):
+            cur.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE {predicate} = %(org_id)s",
+                        {"org_id": org.org_id})
+            assert cur.fetchone()["n"] == 0, table

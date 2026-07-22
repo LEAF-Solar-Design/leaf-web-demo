@@ -1,6 +1,29 @@
 {
   "tools": [
     {
+      "name": "string-autofill-opt",
+      "version": "1.0.0",
+      "description": "Runs the existing AutoFill target solver and records deterministic input/result hashes and source revision.",
+      "kind": "solver",
+      "engine_op": "autofill_string_targets",
+      "canonical_only": true,
+      "params": {
+        "type": "object",
+        "properties": {
+          "groups": { "type": "array", "items": { "type": "object" }, "minItems": 1 },
+          "panelsPerString": { "type": "integer", "minimum": 3 },
+          "options": { "type": "object" },
+          "panelAngle": { "type": "number", "default": 0 },
+          "panelWidth": { "type": "number", "default": 0 },
+          "panelHeight": { "type": "number", "default": 0 }
+        },
+        "required": ["groups", "panelsPerString"]
+      },
+      "returns": { "type": "object" },
+      "capabilities": ["solve"],
+      "provenance": { "source": "autofill-solver/solver.py", "entry": "solve_targets" }
+    },
+    {
       "name": "count-by-layer",
       "version": "1.0.0",
       "description": "Counts every model-space entity per layer.",
