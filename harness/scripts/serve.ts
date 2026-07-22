@@ -48,7 +48,7 @@ import type { ConverseRunner, ConverseTurnInput, HarnessTurnEvent } from "../src
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { E2bAgentRunner } from "../src/ports/impl/e2bAgentRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
-import { FileTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
+import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
@@ -150,7 +150,10 @@ function lazyAgentSdkTurnRunner(ports: {
 
 /** Compose the real multi-tenant ports. */
 function buildPorts(): HarnessPorts {
-  const grantStore = new FileTenantGrantStore(); // reads $LEAF_GRANTS_DIR (default C:/tmp/leaf-grants)
+  // F18 seam: the backend is selected by $LEAF_GRANT_STORE (default `file` →
+  // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
+  // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
+  const grantStore = createTenantGrantStore();
   // F2 (2A): when LEAF_SANDBOX=e2b, run the design-time author session INSIDE an
   // egress-locked E2B sandbox instead of in-process. Default (unset/anything else) keeps
   // AgentSdkRunner so the proven demo + hermetic tests are unchanged. LEAF_SANDBOX_BROKER_HOST

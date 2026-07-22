@@ -27,6 +27,9 @@ Special handling, all documented on the scoreboard:
     reason rather than reported red.
   * harness `npm test` + `npx tsc --noEmit` + `npx tsc -p tsconfig.build.json`
     are included.
+  * the containerized harness smoke (census #13) is OPT-IN: it builds + boots
+    the compose stack, so it runs only with LEAF_CONTAINER_SMOKE=1 and SKIPs
+    (with reason) otherwise, or when Docker is unavailable (script exit 3).
 
 USAGE
 -----
@@ -91,6 +94,8 @@ class Suite:
     expected: Optional[int] # expected test count (None for tsc: pass/fail only)
     reset_authored: bool = False   # reset authored_tools.json before this suite
     db_gated: bool = False         # SKIP unless the platform DB is reachable
+    opt_in_env: str = ""           # SKIP unless this env flag is truthy (opt-in suite)
+    timeout_s: int = 900           # per-attempt subprocess timeout
 
 
 @dataclass
@@ -266,6 +271,14 @@ def build_suites() -> List[Suite]:
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
               [_npx(), "tsc", "-p", "tsconfig.build.json"], None),
+        # --- containerized harness smoke (census #13) — OPT-IN --- #
+        # Builds + boots the real compose stack (broker+harness+app, mock agent)
+        # and proves the authed app->harness hop, durable grant/tenant volumes,
+        # and secret-free logs. Needs Docker + compose >= 2.24 and several minutes
+        # on a cold image cache, so it only runs when LEAF_CONTAINER_SMOKE=1.
+        Suite("harness-container-smoke", "harness container smoke (compose)", "script",
+              REPO, [sys.executable, "scripts/harness-container-smoke.py"], None,
+              opt_in_env="LEAF_CONTAINER_SMOKE", timeout_s=1800),
     ]
     return suites
 
@@ -279,6 +292,9 @@ _ENV_DENYLIST = (
     "LEAF_AUTHOR_LLM", "LEAF_TENANTS_DIR", "LEAF_TENANT_REPO", "BROKER_URL",
     "BROKER_LEDGER", "BROKER_TENANTS",
     "LEAF_SANDBOX", "LEAF_SANDBOX_TIMEOUT_S", "LEAF_E2B_HELPER", "E2B_API_KEY",
+    # harness F5 caller-auth + agent-mock toggles: ambient values would 401 (or
+    # fake out) the hermetic harness suites, which pin these per-test instead.
+    "LEAF_HARNESS_AUTH", "LEAF_HARNESS_SECRET", "LEAF_AGENT_MOCK", "LEAF_GRANT_STORE",
 )
 
 
@@ -411,6 +427,13 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
             return Result(suite, "SKIP", "skip", 0.0,
                           note=f"platform DB unreachable ({msg})", log_path=None)
 
+    # Opt-in suites: SKIP-with-reason unless their env flag is truthy.
+    if suite.opt_in_env and os.environ.get(suite.opt_in_env, "").strip().lower() \
+            not in ("1", "true", "yes", "on"):
+        return Result(suite, "SKIP", "skip", 0.0,
+                      note=f"opt-in: set {suite.opt_in_env}=1 (needs Docker)",
+                      log_path=None)
+
     pre_note = ""
     if suite.reset_authored:
         pre_note = reset_authored_tools(log_dir)
@@ -423,7 +446,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
             proc = subprocess.run(
                 [str(a) for a in suite.argv],
                 cwd=str(suite.cwd), env=clean_env(),
-                capture_output=True, text=True, timeout=900,
+                capture_output=True, text=True, timeout=suite.timeout_s,
                 # text=True without an explicit encoding decodes with the system
                 # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and
                 # quote glyphs. A byte outside cp1252 killed the reader thread,
@@ -434,7 +457,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
             out = (proc.stdout or "") + "\n" + (proc.stderr or "")
             rc = proc.returncode
         except subprocess.TimeoutExpired as exc:
-            out = (exc.stdout or "") + "\n" + (exc.stderr or "") + "\n[TIMEOUT >900s]"
+            out = ((exc.stdout or "") + "\n" + (exc.stderr or "")
+                   + f"\n[TIMEOUT >{suite.timeout_s}s]")
             rc = 124
         logf.write(out)
     seconds = time.perf_counter() - t0
@@ -469,6 +493,19 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                 f"count regression: expected >= {suite.expected}, got {c['got']}"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
                       note=note.strip(), log_path=log_path, counts=c)
+
+    if suite.kind == "script":
+        # standalone smoke script: exit 0 PASS; exit 3 = environment unavailable
+        # (e.g. no Docker) -> SKIP with reason; anything else FAIL.
+        if rc == 3:
+            last = next((ln for ln in out.strip().splitlines() if ln.strip()), "")
+            return Result(suite, "SKIP", "skip", seconds,
+                          note=last[:120] or "environment unavailable",
+                          log_path=log_path, counts={})
+        return Result(suite, "PASS" if rc == 0 else "FAIL",
+                      "ok" if rc == 0 else "err", seconds,
+                      note=("" if rc == 0 else f"exit {rc}"),
+                      log_path=log_path, counts={})
 
     # tsc: pass/fail on exit code only
     passed = rc == 0

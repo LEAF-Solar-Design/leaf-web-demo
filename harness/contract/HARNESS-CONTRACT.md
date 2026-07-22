@@ -14,6 +14,18 @@ READ-ONLY references. This document is the harness's own contract; it honors —
 does not re-freeze — `contract/CONTRACT.md` (§1–§6), `server/CONTRACT-ADDENDUM.md`
 (§7–§10), and `contract/AUTH.md`.
 
+> **STATUS: FROZEN (census #13, NL-build lane, 2026-07-22).** The contract
+> surfaces this document defines — the HTTP API (§1, including the F5
+> `X-Harness-Secret` caller-auth gate), the four ports (§2), the routing rule
+> (§3), the runtime/LLM separation invariant v2 (§4), the forbidden legacy paths
+> (§5), the two-concern separation (§6), and the tool-package layout (§7) — are
+> change-controlled: a breaking change is stop-the-line and needs an operator
+> ruling plus a versioned supersession note (the §4 v1→v2 pattern), never a
+> silent in-place edit. Additive absent-safe fields follow the ADDENDUM §10
+> additive rule. The PARKED `/converse/*` spec in §1 stays parked, not frozen —
+> the live conversational surface is `POST /turn`. Sibling freeze: ADDENDUM
+> §15/§16/§17 (same date).
+
 ---
 
 ## 1. HTTP API
@@ -242,3 +254,30 @@ installed, a broker is running on `BROKER_URL`, and the per-tenant grant store +
 repo locator exist. The sibling `C:/tmp/hosted-oauth-spike/` is READY-FOR-CLICK and
 demonstrates the clean-env single-turn pattern this harness's `agentSdkRunner.ts`
 mirrors. Rollback = delete `harness/`.
+
+The CONTAINERIZED smoke is NOT deferred: `scripts/harness-container-smoke.py`
+boots the real compose stack (broker + harness + app, `LEAF_AGENT_MOCK=1` so no
+Anthropic egress) and proves the authed app→harness hop, durable grant/tenant
+volumes across a container restart, the §16.H shared-volume catalog fold, and
+secret-free logs. Opt-in gate entry: `LEAF_CONTAINER_SMOKE=1` in
+`scripts/run-all-gates.py`.
+
+## 11. Manifest-v1 adoption (tool-package intake; census #13)
+
+The cross-host CAD tool-package contract ("manifest v1":
+`LEAF-Solar-Design/cad-tool-package` → `contract/CONTRACT.md` +
+`contract/tool.schema.json`) is FROZEN as of 2026-07-22, with a recorded
+round-trip gate PASS on both legs (C# in-process host + hosted Linux runner).
+This lane adopts it:
+
+- The §7 layout above (`tool.json` SPEC §7.1 + `registry.json` CONTRACT §2
+  entry) is the platform's OWN registry shape and is unchanged by this adoption.
+- Any NL-build-lane container that accepts EXTERNALLY-authored tool packages as
+  intake (a future surface — today the harness only authors packages itself)
+  MUST reuse the manifest-v1 Linux runner (`runner-linux/runner.py`: validate +
+  introspect + re-emit) rather than re-implement package validation, and MUST
+  keep its report honesty floor: `cad_execution: not-attempted` — a validation
+  container never fakes CAD execution.
+- Any change to the package format re-runs the manifest-v1 gate
+  (`gate/run_gate.py --all` in that repo) on both legs before merge; a breaking
+  change to a frozen field is stop-the-line.

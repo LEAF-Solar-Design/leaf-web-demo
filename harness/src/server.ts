@@ -453,11 +453,12 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
 export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
-  const { FileTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
+  const { createTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
-  const grantStore = new FileTenantGrantStore(); // per-tenant grant + admin (one store)
+  // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
+  const grantStore = createTenantGrantStore();
 
   const ports: HarnessPorts = {
     agentRunner: new AgentSdkRunner(),

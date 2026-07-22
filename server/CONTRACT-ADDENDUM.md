@@ -430,6 +430,25 @@ straight from the store manifest's single-writer lock — read-only (no
 acquire/release endpoints this wave), for a calm "someone else is editing" chip.
 Ownership: extends `server/routers/drawings.py` (`da/store.py` unchanged).
 
+> **FREEZE (census #13, NL-build lane, 2026-07-22): §15, §16, and §17 are FROZEN.**
+> The frozen surface is the contracts, not the prose: every wire shape, env name,
+> route, status code, and law these three sections define — the §15 sidecar API and
+> fold-precedence law; the §16 tenant→repo resolution law, per-tenant grant-store
+> admin wire (`{linked, linked_at, kind}`, NEVER the token), 401 `grant_required`
+> shape, and §16.H same-dir deployment law; the §17 grant-kind vocabulary
+> (`oauth` | `api_key`) + auto-detection law, entitlement policy keys, and 403
+> entitlement shape — plus the F5 app→harness caller-auth hop (`X-Harness-Secret`
+> from `LEAF_HARNESS_SECRET`, gate `LEAF_HARNESS_AUTH`, fail-closed when enabled
+> with no secret, `GET /health` exempt). A breaking change to any of these is
+> stop-the-line: it needs an operator ruling and a new section, never an in-place
+> edit; additive absent-safe fields remain allowed (the §10 additive rule).
+> Enforced by `tests/test_wave3.py` / `test_wave4.py` / `test_wave5.py`, the
+> harness hermetic suites (`harnessAuth`, `grantStore`, `grantAdmin.e2e`,
+> `tenantProvision`), `tests/test_contract_freeze.py`, and the containerized smoke
+> (`scripts/harness-container-smoke.py`). Sibling freeze:
+> `harness/contract/HARNESS-CONTRACT.md` (same date). Grant handling for
+> enterprise review: `docs/GRANT-PRIVACY.md`.
+
 ## §15 UI wave 3 — the Build lane made REAL (harness sidecar) + hygiene
 
 Session: `ui-wave-3-backend`, 2026-07-18. Makes the web UI's authoring path drive the

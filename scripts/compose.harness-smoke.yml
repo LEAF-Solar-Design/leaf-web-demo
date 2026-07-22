@@ -1,0 +1,22 @@
+# Overrides used ONLY by scripts/harness-container-smoke.py (census #13
+# containerized smoke). Never part of the plain deploy stack.
+#
+#   docker compose -p leaf-harness-smoke \
+#     -f docker-compose.yml -f scripts/compose.harness-smoke.yml up -d --wait app
+#
+# - The harness runs its SCRIPTED fakes (LEAF_AGENT_MOCK=1): no Agent SDK, no
+#   Anthropic egress, no LLM credit. Everything else (auth gate, grant store,
+#   tenant repos, volumes, the app->harness secret hop) is the real stack.
+# - The harness stays compose-network-internal (same posture as the base stack);
+#   the smoke probes it from INSIDE the network via `docker compose exec`, so it
+#   does not depend on host loopback port forwarding at all.
+# - The app's host publish moves to 127.0.0.1:18130 purely so the smoke can
+#   never collide with a dev app already bound to :8130. (`!override` REPLACES
+#   the base list; requires compose v2.24+.) The smoke itself never uses it.
+services:
+  harness:
+    environment:
+      LEAF_AGENT_MOCK: "1"
+  app:
+    ports: !override
+      - "127.0.0.1:18130:8130"
