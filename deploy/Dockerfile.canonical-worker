@@ -25,7 +25,7 @@ ENV AUTOFILL_SOLVER_ROOT=/opt/leaf/autofill-solver \
 # A live process is insufficient: require the worker's recent PostgreSQL
 # heartbeat so a broken DB or source mount reports unhealthy.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
-  CMD python -c "import platform_link; raise SystemExit(0 if platform_link.canonical_worker_health('autofill-string-targets') else 1)"
+  CMD python -c "import platform_link; raise SystemExit(0 if platform_link.canonical_worker_health('string-autofill-opt') else 1)"
 
 USER 65532:65532
 
