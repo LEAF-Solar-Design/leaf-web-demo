@@ -252,7 +252,12 @@ def test_read_tools_unaffected(stack):
 # 6. unknown drawing -> clean 404 (no crash, structured envelope)
 # --------------------------------------------------------------------------- #
 def test_unknown_drawing_intake_404(stack):
+    # Contract change (gap-fill QW-C, 2026-07-21): a slug-valid first-seen id
+    # now auto-bootstraps (200) instead of 404ing — 'no-such-drawing' is a
+    # legitimate new drawing. The 404 contract survives for MALFORMED ids,
+    # which is what this test now asserts (id from test_drawings_bootstrap's
+    # BAD_IDS set).
     t = "wl-unknown"
-    r = get_intake(stack, "no-such-drawing", "head", t)
+    r = get_intake(stack, "UPPERCASE", "head", t)
     assert r.status_code == 404
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"

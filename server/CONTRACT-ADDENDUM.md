@@ -224,6 +224,8 @@ primitive and a `FilesystemBackend`; `da/client.py` is unchanged.
 
 ## §12 NL prompt router (one prompt box → lanes)
 
+> Section 12 is FROZEN and serves as the degraded-mode floor for the section 18 conversational surface.
+
 Session: `m3-nl-prompt-router`, 2026-07-17. MATRIX frontend gap #2: the
 product's single prompt box dispatches across the **Run / Solve / Build** lanes.
 This section adds the backend classifier the frontend lane builds against.
@@ -678,3 +680,192 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
   gate lives in the run/author chains and cannot be bypassed via this endpoint.
 
 > **§10 enum update (2026-07-18):** `GRANT_REQUIRED` (HTTP 401) and `ENTITLEMENT_REQUIRED` (HTTP 403) promoted into the frozen ErrorCode enum + `envelope_schema.json`. The grant-required (§16) and entitlement-denied (§17) responses now carry these dedicated `error.error_code`s instead of `BAD_PARAMS`; the additive top-level markers (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are unchanged, so existing consumers keep working.
+
+## §18 Conversational agent sessions (agent spine, Phase 1)
+
+Session: `agent-spine-phase1`, 2026-07-20. The contract for the conversational spine:
+durable per-drawing agent sessions, streamed turns, and gated dispatch into the existing
+deterministic job chain. Proposed (not yet frozen), same promotion discipline as
+§11–§17; design rationale lives in `docs/AGENT-SPINE-DESIGN.md`. Verification: Phase-1
+implementation + tests in this change set.
+
+Two ground rules frame everything below:
+
+1. **§12 stays frozen and is the degraded-mode floor.** `POST /api/nl-prompt`
+   (CONTRACT-ADDENDUM.md:225–289) remains global, tenant-free, and side-effect-free
+   ("No tenant/auth dependency — classification is read-only and side-effect-free",
+   :250–252; reaffirmed :607–608). Nothing in §18 modifies it. When the harness is
+   stopped, the grant is missing, or the LLM quota is exhausted, the product falls back
+   to the §12 classifier and behaves byte-for-byte as it does today.
+2. **Registered-tool execution never touches the LLM.** The session plans, explains,
+   and *dispatches*; execution is the existing chain `POST /api/run → jobs → broker →
+   tool_loader` (entitlement gate at `server/routers/jobs.py:68–71`), unchanged.
+
+### 18.1 App endpoints (`server/routers/sessions.py`, new)
+
+> **IMPLEMENTATION NOTE (2026-07-21 merge resolution).** The live
+> `server/routers/sessions.py` is the §2.1 sessions wire: state lives in the
+> FastAPI-side store (`server/session_store.py`) and turns drive the harness via
+> `POST /turn` — NOT the harness-proxy model this section originally described.
+> Of the table below, POST create / POST messages / GET stream / GET transcript
+> are LIVE (shapes as documented); `GET /api/sessions` (list) and
+> `DELETE /api/sessions/{id}` (archive) are PARKED — not served — until spine
+> unification. The normative wire spec is `leaf-backend-gaps.md` §2.1.
+
+All `/api/*` routes resolve the tenant via the existing `require_tenant` dependency
+(`server/deps.py:251–277`; off-auth header stub, live-auth verified JWT — unchanged).
+All response bodies carry the §10 envelope fields (`error`, `degraded_mode`;
+`with_envelope_fields`, `server/envelopes.py:118–124`).
+
+| Method | Path | Behaviour |
+|---|---|---|
+| POST | `/api/sessions` | `{drawing_id, project_id?}` → `{session_id, status, created_at}`. Idempotent per (tenant, drawing). Requires the `converse` entitlement; denial is the standard 403 `ENTITLEMENT_REQUIRED` shape (`server/entitlements.py:123–134`). |
+| GET | `/api/sessions?drawing_id=` | `{sessions:[…]}`, own-tenant only. |
+| POST | `/api/sessions/{id}/messages` | `{text?, confirm?, classifier_hint?}` (exactly one of text/confirm) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The app assembles the ContextPacket (`server/context_packet.py`, new) and forwards to the harness with the resolved tenant id. |
+| GET | `/api/sessions/{id}/stream?after_seq=` | SSE relay of the harness stream (§18.3). One upstream connection per session, fan-out to N clients; `after_seq` passes through for replay. |
+| GET | `/api/sessions/{id}/transcript?limit=` | Passthrough of the harness transcript (most recent N events, ascending seq). |
+| DELETE | `/api/sessions/{id}` | Archive; passthrough → `{archived:true}`. |
+| POST | `/api/agent/approvals/{confirmation_id}` | `{approved: bool}` → `{resolved:true, approved}`. Records the decision in the app's pending store. Does **not** start the resume turn — the client posts the confirm message separately. |
+| GET | `/api/agent/audit?limit=` | Tenant's own audit records, projected through the `audit_extra` allowlist. |
+| GET | `/api/agent/killswitch` | `{active: bool}`, read-only. |
+| GET | `/api/usage` | Existing endpoint (`server/routers/usage.py:70–78`): every existing field stays byte-identical; the response gains one **additive** `agent` key per §6.7 (`today`/`total`/`cap` token aggregates, `estimate_basis` with `"self_metered"` as the only Phase-1 value, `updated_at`). |
+| POST | `/internal/agent/gate` | Back-edge only (§18.5). `{tenant_id, session_id, turn_id, action, args}` → `{decision:"allow"\|"deny"\|"awaiting_approval", reason?, confirmation_id?, policy, rung}`. Runs the full gate chain (kill switch → catalog → args schema → entitlement → revalidate → rate limit → policy) and creates the pending-approval record when `awaiting_approval`. |
+| GET | `/api/ops/agent/tenants` | Ops read (per-tenant session/spend view). |
+| GET | `/api/ops/agent/sessions/{id}` | Ops read (one session detail). |
+| POST | `/api/ops/agent/tenants/{tid}/disable\|enable` | Ops toggle for a tenant's agent access. |
+
+The three ops routes use the existing `LEAF_OPS_SECRET` gate exactly as implemented in
+`server/routers/ops.py:53–89` (constant-time compare; fail-closed 503 when live-auth is
+on and the secret is unset).
+
+Cross-tenant probing returns 404, never 403, on every `/api/sessions/*` route — the
+same no-existence-oracle rule the job routes already enforce
+(`server/routers/jobs.py:98–105`).
+
+### 18.2 Harness mirror routes (PARKED — not served)
+
+> **PARKED at the 2026-07-21 merge resolution (spine × sessions-wire).** The harness
+> registers `POST /turn` only; every `/converse/*` route below returns 404. The live
+> path is §2.1: app `/api/sessions*` routes (which ARE live, per 18.1) drive the
+> harness through `POST /turn` (`application/x-ndjson`). This spec is retained
+> verbatim for the spine-unification follow-up; do not build against it.
+
+All `/converse/*` routes sit behind the existing F5 shared-secret gate — header
+`X-Harness-Secret`, checked by `harnessAuthDenial` (`harness/src/server.ts:114–130`;
+timing-safe compare, fail-closed when the gate is enabled with no secret configured).
+
+| Method | Path | Behaviour |
+|---|---|---|
+| POST | `/converse/sessions` | `{tenantId, drawingId}` → 200 `{sessionId, status:"idle"\|"active"\|"dormant", createdAt}`. Idempotent per (tenantId, drawingId). |
+| POST | `/converse/sessions/{sessionId}/messages` | `{tenantId, text?, confirm?:{confirmationId, approved}, contextPacket, classifierHint?}` → 202 `{turnId}` \| 409 `{error:"turn_in_progress", turnId}` \| 401 `{error:"grant_required"}`. Exactly one of text/confirm. |
+| GET | `/converse/sessions/{sessionId}/stream?afterSeq=N` | SSE: replays persisted events with seq > N from sessions.db, then live events. |
+| GET | `/converse/sessions/{sessionId}/transcript?limit=N` | 200 `{events:[…]}` (most recent N, ascending seq). |
+| DELETE | `/converse/sessions/{sessionId}` | 200 `{archived:true}`. |
+
+Every route verifies the supplied `tenantId` matches the session's tenant; a mismatch
+returns 404 `{error:"session_not_found"}` — the harness-side twin of the app's
+no-existence-oracle rule.
+
+### 18.3 SSE event vocabulary (both hops)
+
+Identical on the harness→app and app→browser hops. One JSON object per SSE `data:`
+line; the SSE event name equals `type`. Envelope:
+
+```json
+{"v": 1, "session_id": "…", "turn_id": "…", "seq": 42, "type": "…", "data": { }}
+```
+
+`seq` is a per-session monotonically increasing integer persisted in the harness
+sessions.db, which is what makes `after_seq` replay (reconnect, second tab) exact.
+
+| type | data payload | Notes |
+|---|---|---|
+| `turn_started` | `{model, classifier_hint?}` | First event of every turn. |
+| `text_delta` | `{text}` | Streamed assistant prose. |
+| `tool_call` | `{tool, args_summary}` | `args_summary` is a short human string — never full params. |
+| `tool_result` | `{tool, ok, summary}` | |
+| `job_linked` | `{job_id, tool}` | Dispatch handoff; job progress rides the existing per-job SSE (`server/routers/jobs.py:110`), not this stream. |
+| `proposed_run` | `{confirmation_id, tool, params, capability, rationale}` | `params` is the full dict — the UI renders server truth, never a model paraphrase. |
+| `confirmation_required` | `{confirmation_id, kind, payload}` | |
+| `confirmation_resolved` | `{confirmation_id, approved, by}` | First approval wins; other tabs observe this event. |
+| `turn_usage` | `{turns, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_tokens, total_cost_usd?, models?}` | `total_cost_usd` is an estimate (no balance API exists — `research/agentsdk-usage-visibility.md`). |
+| `turn_complete` | `{stop_reason}` | `stop_reason` ∈ `end_turn \| awaiting_approval \| cap_hit \| llm_quota_exhausted \| llm_rate_limited \| error \| timeout`. |
+| `session_state` | `{status, head_version?, checkout?}` | |
+| `error` | `{error:{error_code, message, retryable}, degraded_mode}` | The §10 error object, verbatim. |
+
+### 18.4 New ErrorCode values (`server/envelopes.py`, additive)
+
+Four codes (added for §18 — now shipped source: `server/envelopes.py:37–40`, in the
+ErrorCode enum block at :22–58) plus their `DEFAULT_HTTP_STATUS` entries (map starts
+:62). Wire values are lowercase, following the `quota_exceeded` precedent (:34).
+
+| Enum name | Wire value | HTTP | retryable | degraded_mode | Meaning |
+|---|---|---|---|---|---|
+| `LLM_QUOTA_EXHAUSTED` | `llm_quota_exhausted` | 429 | true | true | LLM supply exhausted on a long horizon (subscription window / hard cap). Product drops to the §12 floor until it resets. |
+| `LLM_RATE_LIMITED` | `llm_rate_limited` | 429 | true | false | Short-horizon rate limit; callers may auto-retry. |
+| `TURN_IN_PROGRESS` | `turn_in_progress` | 409 | true | false | One in-flight turn per session (reject-not-queue lock, §2.3); the client retries after observing `turn_complete` on the stream. |
+| `SESSION_NOT_FOUND` | `session_not_found` | 404 | false | false | Unknown session **or** other tenant's session (no existence oracle). |
+
+The 429 pair is disambiguated by reset horizon, not by a distinct upstream error class
+— the threshold is inferred, not yet measured live
+(`research/agentsdk-usage-visibility.md`). `GRANT_REQUIRED` (401) and
+`ENTITLEMENT_REQUIRED` (403) are reused unchanged from the frozen enum.
+
+### 18.5 Back-edge dispatch contract (harness → app)
+
+The spine's tools never execute anything in-process; they dispatch back into the app.
+That back edge is a new authenticated surface:
+
+- **Secret**: `LEAF_APP_DISPATCH_SECRET`, presented as header `X-Dispatch-Secret`.
+  Comparison must be constant-time, matching both existing secret gates
+  (`hmac.compare_digest` in `server/broker.py:340`; `timingSafeEqual` in
+  `harness/src/server.ts:103–107`).
+- **Trust model**: when the secret is present and valid, the app trusts the
+  accompanying `X-Tenant-Id` header as the *already-resolved* tenant — the same model
+  the broker uses for `X-Broker-Secret` (`server/broker.py:329–341`): a shared-secret
+  caller is a trusted internal service relaying an identity it resolved upstream, not
+  an end user. The harness only ever forwards the tenant id the app itself resolved
+  via `require_tenant` when the message arrived, so the identity round-trips through
+  one trusted hop.
+- **Fail-closed**: `LEAF_APP_DISPATCH_SECRET` unset ⇒ the back edge is disabled and
+  every back-edge request gets 401. There is no off-auth demo passthrough on this
+  surface (stricter than the broker gate's off-live behaviour, `broker.py:332–338`,
+  deliberately — the back edge has no browser fallback to protect).
+- **Allowlist**: the secret is accepted **only** on `POST /api/run`,
+  `GET /api/jobs/{id}`, `GET /api/capabilities` (`server/routers/capabilities.py:19`),
+  `GET /api/tools` (`server/routers/tools.py:21`), `GET /api/drawings/*`, and
+  `POST /internal/agent/gate`. Every other route ignores the header entirely.
+  Note: today's GET surface under `/api/drawings/*` is `…/intake`
+  (`server/routers/drawings.py:46`) and `…/versions` (:104); checkout state rides the
+  versions response (`_checkout_view`, :78–85). The allowlist means that read subset.
+- **No privilege escalation**: a trusted `X-Tenant-Id` substitutes only for tenant
+  *resolution*. Every downstream gate still runs against that tenant — the app
+  entitlement gate (`server/routers/jobs.py:68–71`), the broker's independent tier
+  re-check and quota/kill-switch chain, and the §18 agent gate itself. The dispatch
+  identity is the tenant, never a privileged service account.
+
+Sequencing on every spine tool call: harness `canUseTool` → `POST /internal/agent/gate`
+→ `allow` ⇒ dispatch via `POST /api/run` (with `X-Dispatch-Secret` + `X-Tenant-Id`);
+`deny` ⇒ the tool returns the deny reason as an error result the model can relay;
+`awaiting_approval` ⇒ the tool returns `{proposed:true, confirmation_id, …}`, the loop
+emits `proposed_run`, and the turn ends (split-turn confirmation, TTL 300 s — design
+constant, args-bound to tool+params+dwg).
+
+Grant kinds remain `oauth | api_key` and the contract is grant-kind-agnostic
+throughout. Whether subscription (oauth) supply can serve stranger-facing tenants at
+scale is an **open bet** (see the epistemic ledger in the operator's mission file — the MISSION canon); the BYO-API-key lane is the priced
+fallback, and nothing in §18 assumes either answer.
+
+### 18.6 §12 freeze note
+
+> **§12 is frozen and is the documented degraded-mode floor.** `POST /api/nl-prompt`
+> keeps its exact v1 semantics: global, no tenant/auth dependency, read-only,
+> side-effect-free, zero-LLM (CONTRACT-ADDENDUM.md:225–289, :250–252, :607–608), and
+> `server/tests/test_nl_router.py` must stay green and untouched. §18 is additive on
+> top of it: with the harness stopped, the grant absent, or `llm_quota_exhausted`
+> active, the prompt box, the classifier, every registered tool, and the whole job
+> spine (job lanes per §10 of the pinned wire contract: fast pool `JOB_WORKERS_FAST=8`,
+> slow pool `JOB_WORKERS_SLOW=4` with existing `JOB_WORKERS` honored as the slow-lane
+> default, `server/jobs.py:53`; per-job SSE 0.5 s poll, `server/routers/jobs.py:145`;
+> public job API/schema unchanged) work at full fidelity — public API and behavior
+> identical to today's product.

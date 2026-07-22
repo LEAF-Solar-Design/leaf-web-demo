@@ -9,6 +9,7 @@ Sibling-session ownership (see README.md): `auth0-identity-signup` owns
 """
 from __future__ import annotations
 
+import hmac
 import importlib.util
 import json
 import os
@@ -16,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import Header
+from fastapi import Header, Request
 
 # --------------------------------------------------------------------------- #
 # paths + sibling-lane import wiring
@@ -34,6 +35,12 @@ CATALOG_TOOLS_STORE = SERVER_DIR / "catalog_tools.json"  # tracked server-lane s
 # engine/registry.json (Lane B) does not itself carry — e.g. autofill-string-targets. Folded
 # the SAME way as WRITE_TOOLS_STORE so /api/run resolves them by name regardless of what the
 # engine registry happens to contain.
+
+import platform as _stdlib_platform  # noqa: F401,E402  (cache stdlib before the
+#   PROJECT_ROOT sys.path insert below makes the local platform/ package shadow it;
+#   jsonschema imports `platform` lazily inside agent_policy's schema validation,
+#   and the shadow turns every gate call into policy_load_failed. Same guard as
+#   broker.py — this process needs it too.
 
 # make sibling lanes importable (engine.selfcheck, da.client)
 for p in (str(PROJECT_ROOT), str(SERVER_DIR)):
@@ -327,18 +334,124 @@ def auth_live() -> bool:
     return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
 
 
+# --------------------------------------------------------------------------- #
+# harness back-edge trust (wire contract §0): with LEAF_AUTH_LIVE=1 the spine's
+# AppRunClient authenticates with X-Dispatch-Secret + X-Tenant-Id instead of a
+# JWT — same trust model as the broker's X-Broker-Secret — but ONLY on the
+# contract-listed read/dispatch routes. Secret unset in env => back-edge
+# disabled => the ordinary JWT path (which 401s without a token).
+# --------------------------------------------------------------------------- #
+def _dispatch_backedge_route(method: str, path: str) -> bool:
+    """True iff (method, path) is one of the §0 back-edge routes: POST /api/run,
+    GET /api/jobs/{id}, GET /api/capabilities, GET /api/tools, GET /api/drawings/*."""
+    if method == "POST":
+        return path == "/api/run"
+    if method != "GET":
+        return False
+    if path in ("/api/capabilities", "/api/tools"):
+        return True
+    if path.startswith("/api/drawings/"):
+        return True
+    if path.startswith("/api/jobs/"):
+        rest = path[len("/api/jobs/"):]
+        return bool(rest) and "/" not in rest  # the job read only, not /stream etc.
+    return False
+
+
+def backedge_tier(tenant_id: str) -> Optional[str]:
+    """The back-edge caller's tier from the SAME broker-TRUSTED sources the broker's
+    own re-check uses (broker.py:363-376): the persisted broker tenants record
+    (`$BROKER_TENANTS`, default server/broker_tenants.json), then
+    `$LEAF_BROKER_TENANT_TIERS` ({tenant_id: tier}). Never the request body — a
+    back-edge caller could forge it. Read at call time. Returns None when the
+    tenant has no provisioned tier at all; returns the raw (possibly empty) string
+    when it does, so `entitlements.resolve_tier` applies its own fail-closed rule."""
+    path = Path(os.environ.get("BROKER_TENANTS") or (SERVER_DIR / "broker_tenants.json"))
+    # ABSENT primary -> the operator has not provisioned this source, so the env
+    # map is a legitimate fallback. PRESENT-but-corrupt is NOT the same fact:
+    # falling through there let a stale LEAF_BROKER_TENANT_TIERS promote a
+    # downgraded tenant (truncated file + stale env -> hosted_pro instead of
+    # restricted). A primary we cannot read means the tier is UNKNOWN, and an
+    # unknown tier must resolve restricted rather than inherit a secondary.
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = None
+    except OSError:
+        return None  # present but unreadable -> unknown -> resolve_tier fails closed
+    except UnicodeDecodeError:
+        # NOT an OSError (it subclasses ValueError), so it escaped as a 500.
+        # Non-UTF-8 bytes are just another unreadable primary: unknown tier.
+        return None
+    if text is not None:
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            return None  # present but invalid -> unknown, never a stale fallback
+        if not isinstance(raw, dict):
+            return None
+        if tenant_id in raw:
+            rec = raw[tenant_id]
+            if not isinstance(rec, dict):
+                return None  # present-but-corrupt record -> unknown, fail closed
+            if "tier" in rec:
+                return str(rec.get("tier") or "")
+    raw = os.environ.get("LEAF_BROKER_TENANT_TIERS")
+    if raw:
+        try:
+            m = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            m = None
+        if isinstance(m, dict) and tenant_id in m:
+            return str(m.get(tenant_id) or "")
+    return None
+
+
+def backedge_tenant(tenant_id: str) -> Any:
+    """The tenant identity for a verified back-edge call.
+
+    OFF-auth: the plain str (byte-identical legacy — the whole platform is the
+    open demo, so the gate resolving "demo" is the same answer every other route
+    gives). LIVE: a `TenantContext` carrying the broker-trusted tier, so
+    `entitlements.resolve_tier` sees a real rung instead of defaulting a bare
+    string to "demo". No provisioned tier -> `tier=None` -> "restricted"
+    (fail CLOSED: an unresolvable tier must never authorize as demo)."""
+    if not auth_live():
+        return tenant_id
+    return TenantContext(tenant_id, tier=backedge_tier(tenant_id))
+
+
+def _dispatch_secret_ok(presented: Optional[str]) -> bool:
+    secret = os.environ.get("LEAF_APP_DISPATCH_SECRET", "").strip()
+    if not secret or not presented:
+        return False
+    return hmac.compare_digest(presented, secret)
+
+
 def require_tenant(
+    request: Request,
     x_tenant_id: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
+    x_dispatch_secret: Optional[str] = Header(default=None),
 ):
     """FastAPI dependency: resolve the calling tenant.
 
     OFF: returns the plain `x_tenant_id or DEFAULT_TENANT` string (unchanged).
-    ON:  returns a verified `TenantContext` (raises 401 no-token / 403 no-claim).
+    ON:  returns a verified `TenantContext` (raises 401 no-token / 403 no-claim),
+         EXCEPT the harness back-edge: a valid `X-Dispatch-Secret` on a §0-listed
+         route trusts `X-Tenant-Id` as the resolved tenant, carried as a
+         `TenantContext` whose tier comes from the broker-trusted source
+         (`backedge_tenant`) — never a bare str, which would resolve to "demo"
+         and hand a downgraded tenant every capability.
     """
     if not auth_live():
         # BYTE-IDENTICAL legacy path — X-Tenant-Id header stub, plain str.
         return x_tenant_id or DEFAULT_TENANT
+
+    if (x_dispatch_secret is not None and x_tenant_id
+            and _dispatch_backedge_route(request.method, request.url.path)
+            and _dispatch_secret_ok(x_dispatch_secret)):
+        return backedge_tenant(x_tenant_id)
 
     # LEAF_AUTH_LIVE=1: verified JWT claims win over the header stub.
     # Imported lazily so PyJWT is only needed when auth is actually live.

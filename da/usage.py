@@ -99,10 +99,12 @@ def quota_envelope(tenant_id: str, spent: float, est_cost: float, cap: float,
         "result": None,
         "overlay": None,
         "cost": None,
-        "error": {"error_code": QUOTA_EXCEEDED, "message": msg, "retryable": False},
+        "error": {"error_code": QUOTA_EXCEEDED, "message": msg, "retryable": False,
+                  "quota_kind": "spend"},
         "error_code": QUOTA_EXCEEDED,   # top-level convenience mirror (plan §3 shape)
         "retryable": False,
         "message": msg,
+        "quota_kind": "spend",   # disambiguates from the daily-run-count quota (spec: quota-shape)
         "degraded_mode": None,
     }
 
@@ -345,13 +347,14 @@ def daily_quota_envelope(tenant_id: str, tier: str, limit: int, used: int,
         "overlay": None,
         "cost": None,
         "error": {"error_code": QUOTA_EXCEEDED, "message": msg, "retryable": True,
-                  "tier": tier, "limit": limit, "used": used},
+                  "tier": tier, "limit": limit, "used": used, "quota_kind": "daily_runs"},
         "error_code": QUOTA_EXCEEDED,   # top-level convenience mirror (plan §3 shape)
         "retryable": True,
         "message": msg,
         "tier": tier,
         "limit": limit,
         "used": used,
+        "quota_kind": "daily_runs",   # disambiguates from the USD spend-cap quota (spec: quota-shape)
         "degraded_mode": None,
     }
 

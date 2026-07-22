@@ -44,12 +44,15 @@ import { join } from "node:path";
 import { createHarness } from "../src/server.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { HarnessPorts } from "../src/ports/index.js";
+import type { ConverseRunner, ConverseTurnInput, HarnessTurnEvent } from "../src/ports/converse.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { E2bAgentRunner } from "../src/ports/impl/e2bAgentRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { FileTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
+import { FakeTurnRunner } from "../src/ports/fakes/fakeTurnRunner.js";
 
 const HARNESS_PORT = Number(process.env.HARNESS_PORT || 8150);
 const gitWorkerUp = startGitWorker();
@@ -87,6 +90,64 @@ function tenantRepoDir(tenantId: string): string {
   return join(TENANTS_DIR, safeComponent(tenantId));
 }
 
+/**
+ * Non-literal dynamic import (mirrors agentSdkRunner.ts's own `dynImport`) so tsc never
+ * tries to resolve this path at compile time — the real converse turn runner (H2:
+ * src/ports/impl/agentSdkTurnRunner.ts) may not exist yet in every checkout.
+ */
+function dynImportTurnRunner(parts: string[]): Promise<unknown> {
+  return import(parts.join("/"));
+}
+
+/**
+ * Lazily construct the real Agent-SDK-backed ConverseRunner (H2's
+ * `AgentSdkTurnRunner`, src/ports/impl/agentSdkTurnRunner.ts). The import only fires on
+ * the FIRST real `/turn` call it serves — never at startup, never in mock mode — so:
+ *   - a checkout without H2's file yet still boots and serves every other route;
+ *   - the SDK is never loaded unless a real turn is actually driven;
+ *   - a missing/broken module surfaces as a clean per-request error (caught here),
+ *     not a process crash.
+ * LEAF_AGENT_MOCK=1 never constructs this wrapper at all (see buildPorts below).
+ */
+function lazyAgentSdkTurnRunner(ports: {
+  oauth: OAuthGrantProviderImpl;
+  tenantRepo: TenantRepoProviderImpl;
+  broker: BrokerApsClientHttp;
+}): ConverseRunner {
+  let real: ConverseRunner | undefined;
+  let loadError: Error | undefined;
+
+  async function ensureReal(): Promise<ConverseRunner> {
+    if (real) return real;
+    if (loadError) throw loadError;
+    try {
+      // Constructor is (ports, opts) — AgentSdkTurnRunnerPorts first (oauth/
+      // tenantRepo/broker, the SAME instances buildPorts hands the harness),
+      // options second. The earlier opts-as-first-arg guess crashed on
+      // this.ports.oauth at the first real turn.
+      const mod = (await dynImportTurnRunner(["..", "src", "ports", "impl", "agentSdkTurnRunner.js"])) as {
+        AgentSdkTurnRunner: new (
+          p: { oauth: unknown; tenantRepo: unknown; broker: unknown },
+          opts?: { maxTurns?: number; maxTotalTokens?: number },
+        ) => ConverseRunner;
+      };
+      real = new mod.AgentSdkTurnRunner(ports, { maxTurns: 40, maxTotalTokens: 500_000 });
+      return real;
+    } catch (err) {
+      loadError = err instanceof Error ? err : new Error(String(err));
+      log(`[harness] AgentSdkTurnRunner unavailable (${loadError.message}) — /turn will error until it lands.`);
+      throw loadError;
+    }
+  }
+
+  return {
+    async *runTurn(input: ConverseTurnInput): AsyncGenerator<HarnessTurnEvent> {
+      const runner = await ensureReal();
+      yield* runner.runTurn(input);
+    },
+  };
+}
+
 /** Compose the real multi-tenant ports. */
 function buildPorts(): HarnessPorts {
   const grantStore = new FileTenantGrantStore(); // reads $LEAF_GRANTS_DIR (default C:/tmp/leaf-grants)
@@ -95,19 +156,34 @@ function buildPorts(): HarnessPorts {
   // AgentSdkRunner so the proven demo + hermetic tests are unchanged. LEAF_SANDBOX_BROKER_HOST
   // sets the ONE allowlisted egress host (defaults to the proven public stand-in).
   const useE2b = (process.env.LEAF_SANDBOX ?? "").trim().toLowerCase() === "e2b";
-  log(`[harness] author runner: ${useE2b ? "E2bAgentRunner (LEAF_SANDBOX=e2b, egress-locked sandbox)" : "AgentSdkRunner (in-process; default)"}`);
+  // LEAF_AGENT_MOCK=1: fully hermetic mode — scripted fakes for BOTH the design-time
+  // author loop and the converse/turn loop. Never loads the Agent SDK, never touches
+  // Anthropic, never spends LLM credit. Takes priority over LEAF_SANDBOX.
+  const mockAgent = (process.env.LEAF_AGENT_MOCK ?? "").trim() === "1";
+  if (mockAgent) {
+    log("[harness] LEAF_AGENT_MOCK=1 — agentRunner=FakeAgentRunner, converseRunner=FakeTurnRunner (scripted; no SDK, no network).");
+  } else {
+    log(`[harness] author runner: ${useE2b ? "E2bAgentRunner (LEAF_SANDBOX=e2b, egress-locked sandbox)" : "AgentSdkRunner (in-process; default)"}`);
+    log("[harness] converse runner: AgentSdkTurnRunner (lazy; loaded on first /turn call).");
+  }
+  const oauth = new OAuthGrantProviderImpl({ store: grantStore });
+  const tenantRepo = new TenantRepoProviderImpl({
+    locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
+    inPlace: true,
+    autoProvisionFrom: TENANT_FIXTURE,
+  });
+  const broker = new BrokerApsClientHttp({ brokerUrl: BROKER_URL });
   return {
-    oauth: new OAuthGrantProviderImpl({ store: grantStore }),
+    oauth,
     grantAdmin: grantStore,
-    tenantRepo: new TenantRepoProviderImpl({
-      locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
-      inPlace: true,
-      autoProvisionFrom: TENANT_FIXTURE,
-    }),
-    broker: new BrokerApsClientHttp({ brokerUrl: BROKER_URL }),
-    agentRunner: useE2b
-      ? new E2bAgentRunner({ brokerHost: process.env.LEAF_SANDBOX_BROKER_HOST || undefined })
-      : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
+    tenantRepo,
+    broker,
+    agentRunner: mockAgent
+      ? new FakeAgentRunner()
+      : useE2b
+        ? new E2bAgentRunner({ brokerHost: process.env.LEAF_SANDBOX_BROKER_HOST || undefined })
+        : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
+    converseRunner: mockAgent ? new FakeTurnRunner() : lazyAgentSdkTurnRunner({ oauth, tenantRepo, broker }),
   };
 }
 

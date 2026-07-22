@@ -1,0 +1,119 @@
+{
+  "_note": "Operator-owned agent action catalog (agent spine Phase 1). The catalog IS the guardrail: the conversational agent can only be gated through actions defined here, at the policy tier the operator set (auto / confirm-once / always-confirm). Read at request time by server/agent_policy.py (env-overridable LEAF_AGENT_POLICY_FILE); strict-validated — unknown fields are load errors. tier_overrides may retune a tier's policy but can never loosen an action whose tenant_tightenable is false. Per-tenant overlays (agent_tenants.json beside this file) can only TIGHTEN.",
+  "version": 1,
+  "approval_ttl_s": 300,
+  "rate_limits": {
+    "low_per_hour": 120,
+    "medium_per_hour": 60,
+    "high_per_hour": 10
+  },
+  "actions": {
+    "request_confirmation": {
+      "description": "UI-only consent chip: ask the user to approve something before proceeding (R0; wire contract section 5). Dispatches nowhere — the gate mints the confirmation_id and the harness renders the card, then ends the turn. always-confirm is what MAKES the id: the app's pending store is the only authority allowed to mint one (section 6), so a self-issued harness id could never be redeemed.",
+      "rung": 0,
+      "required_capability": "converse",
+      "policy": "always-confirm",
+      "tenant_tightenable": false,
+      "dispatch": {"kind": "app_api", "routes": []},
+      "args_schema": {"type": "object", "properties": {"kind": {"type": "string"}, "payload": {"type": "object"}, "confirmation_id": {"type": "string"}}, "required": ["kind"], "additionalProperties": false},
+      "rate_limit_category": "low",
+      "timeout_s": 30,
+      "audit_extra": ["kind"]
+    },
+    "read_platform_state": {
+      "description": "Read platform state: catalog, usage, jobs, versions, own audit (R1).",
+      "rung": 1,
+      "required_capability": "converse",
+      "policy": "auto",
+      "dispatch": {"kind": "app_api", "routes": ["GET /api/capabilities", "GET /api/usage", "GET /api/jobs", "GET /api/drawings/*", "GET /api/agent/audit"]},
+      "args_schema": {"type": "object", "properties": {"what": {"type": "string"}}, "additionalProperties": false},
+      "rate_limit_category": "low",
+      "timeout_s": 30,
+      "audit_extra": ["what"]
+    },
+    "run_read_tool": {
+      "description": "Dispatch a registered drawing.read tool via POST /api/run (R2).",
+      "rung": 2,
+      "required_capability": "run_read",
+      "policy": "auto",
+      "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
+      "args_schema": {"type": "object", "properties": {"tool": {"type": "string"}, "params": {"type": "object"}, "dwg": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["tool"], "additionalProperties": false},
+      "rate_limit_category": "medium",
+      "timeout_s": 60,
+      "audit_extra": ["tool", "dwg"]
+    },
+    "run_write_tool": {
+      "description": "Dispatch a registered drawing.write tool via POST /api/run (R3; creates vN+1, undoable).",
+      "rung": 3,
+      "required_capability": "run_write",
+      "policy": "confirm-once",
+      "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
+      "args_schema": {"type": "object", "properties": {"tool": {"type": "string"}, "params": {"type": "object"}, "dwg": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["tool"], "additionalProperties": false},
+      "rate_limit_category": "medium",
+      "timeout_s": 120,
+      "audit_extra": ["tool", "dwg"],
+      "cost_class": "write"
+    },
+    "submit_live_solve": {
+      "description": "Dispatch a live APS run (real USD; R4). Broker USD-cap preflight still fires underneath.",
+      "rung": 4,
+      "required_capability": "run_write",
+      "policy": "confirm-once",
+      "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
+      "args_schema": {"type": "object", "properties": {"tool": {"type": "string"}, "params": {"type": "object"}, "dwg": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["tool"], "additionalProperties": false},
+      "rate_limit_category": "high",
+      "timeout_s": 600,
+      "audit_extra": ["tool", "dwg"],
+      "cost_class": "aps_usd"
+    },
+    "undo_drawing_version": {
+      "description": "Undo: repoint the drawing head to a prior version (R3 safety valve — never harder than the write). DISABLED in Phase-1: no spine tool dispatches it and the wire contract §0 back-edge allowlist carries only GET /api/drawings/*, so POST /api/drawings/{dwg}/undo is unreachable from the harness and would 401. The user-facing undo is unaffected (the UI calls that route directly with a tenant token). Enabling this needs a contract revision adding the route to §0 plus a spine mapping — Phase-2.",
+      "rung": 3,
+      "required_capability": "run_write",
+      "policy": "auto",
+      "enabled": false,
+      "dispatch": {"kind": "app_api", "routes": []},
+      "args_schema": {"type": "object", "properties": {"dwg": {"type": "string"}, "to_version": {"type": "integer"}}, "additionalProperties": false},
+      "rate_limit_category": "medium",
+      "timeout_s": 30,
+      "audit_extra": ["dwg", "to_version"]
+    },
+    "author_tool": {
+      "description": "Author a new tool in the design-time sandbox (R5; nothing registered until R6).",
+      "rung": 5,
+      "required_capability": "build",
+      "policy": "confirm-once",
+      "dispatch": {"kind": "harness", "routes": ["POST /author"]},
+      "args_schema": {"type": "object", "properties": {"description": {"type": "string"}, "mode": {"type": "string", "enum": ["build", "one_off"]}, "confirmation_id": {"type": "string"}}, "required": ["description"], "additionalProperties": false},
+      "rate_limit_category": "high",
+      "timeout_s": 600,
+      "audit_extra": []
+    },
+    "register_tool": {
+      "description": "Register/deploy an authored tool into the runnable catalog (R6; highest-leverage injection target).",
+      "rung": 6,
+      "required_capability": "deploy",
+      "policy": "always-confirm",
+      "tenant_tightenable": false,
+      "dispatch": {"kind": "app_api", "routes": ["POST /api/author/register"]},
+      "args_schema": {"type": "object", "properties": {"tool": {"type": "string"}, "manifest_sha256": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["tool", "manifest_sha256"], "additionalProperties": false},
+      "rate_limit_category": "high",
+      "timeout_s": 120,
+      "audit_extra": ["tool", "manifest_sha256"]
+    },
+    "customize_platform": {
+      "description": "Platform customization + redeploy (R7). Disabled everywhere at launch.",
+      "rung": 7,
+      "required_capability": "platform_customize",
+      "policy": "always-confirm",
+      "enabled": false,
+      "tenant_tightenable": false,
+      "dispatch": {"kind": "app_api", "routes": []},
+      "args_schema": {"type": "object"},
+      "rate_limit_category": "high",
+      "timeout_s": 600,
+      "audit_extra": []
+    }
+  },
+  "tier_overrides": {}
+}
