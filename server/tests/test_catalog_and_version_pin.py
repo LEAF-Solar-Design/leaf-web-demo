@@ -280,9 +280,11 @@ def test_submit_job_threads_dwg_version_to_broker_client(monkeypatch, tmp_path):
 # =========================================================================== #
 class _FakeLiveDa:
     """Minimal live-capable APS client stand-in: has `run_tool` (so broker.py's
-    `hasattr(da, "run_tool")` gate lets it through) and `ensure_tool_activity`.
-    Records every call so a test can assert the credential-holding client was
-    (or was NOT) actually reached."""
+    `hasattr(da, "run_tool")` gate lets it through) and `ensure_tool_activity`, but
+    deliberately has NO `tool_activity_spec` — this is the "can't verify the real
+    resolution" case, which must ALSO fail closed (never guess). The REAL
+    resolution case is exercised separately below via the actual da/client.py
+    module (``_load_real_da_client``), per review round 2."""
 
     def __init__(self) -> None:
         self.ensure_tool_activity_calls: list = []
@@ -297,18 +299,67 @@ class _FakeLiveDa:
         return {"ok": True, "result": {"ran": True}, "overlay": None}
 
 
-# --------------------------------------------------------------------------- #
-# FIX 1 (HIGH): a Python-only tool (no engine_script/.lsp script) must fail
-# closed on aps_live=True, never provision an EMPTY-script Activity.
-# --------------------------------------------------------------------------- #
-def test_live_read_fails_closed_for_tool_with_no_live_script(monkeypatch, tmp_path):
-    _quiet_broker(monkeypatch, tmp_path)
-    fake_da = _FakeLiveDa()
-    monkeypatch.setattr(broker, "_get_da", lambda: fake_da)
+def _load_real_da_client():
+    """Load the REAL da/client.py module by file path (dependency-free: no APS
+    creds, no network call at import time — matches how the round-2 reviewer
+    reproduced the finding). Used to exercise the ACTUAL
+    `tool_activity_spec` resolution `_live_script_is_nonempty` now calls,
+    instead of a re-implemented heuristic."""
+    import importlib.util
 
-    tool = dict(READ_TOOL)  # engine_op only -> no engine_script, no .lsp script
-    assert broker._has_live_script(tool) is False
-    req = broker.BrokerRunRequest(tenant_id="live-noscript", tool=tool, params={},
+    da_dir = SERVER_DIR.parent / "da"
+    spec = importlib.util.spec_from_file_location("da_client_version_pin_test", da_dir / "client.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# --------------------------------------------------------------------------- #
+# FIX 1 (HIGH, round 2 — sharper): the guard must verify the REAL
+# da/client.py:tool_activity_spec resolution, not a heuristic that merely checks
+# for the PRESENCE of an `engine_script`/`.lsp` `script` reference. Reproduces the
+# reviewer's exact dependency-free finding: engine/registry.json's shipped
+# `count-by-layer` entry (`script: "tools/count_by_layer.lsp"`) resolves via
+# da/client.py to a PROJECT-ROOT-relative path that does not exist (the real file
+# lives under engine/tools/), so the REAL emitted script is length 0 TODAY.
+# --------------------------------------------------------------------------- #
+def test_real_tool_activity_spec_confirms_the_reviewers_empty_script_finding():
+    """Sanity check (no broker involved): the exact dependency-free reproduction
+    the reviewer ran. If this ever starts passing (script becomes non-empty) it
+    means da/client.py's resolution or engine/registry.json's path convention
+    changed upstream — not this session's concern, but this test would then
+    correctly flag that the `test_live_read_fails_closed_...` test below needs a
+    different fixture."""
+    da_mod = _load_real_da_client()
+    tool = deps.find_tool("count-by-layer")
+    assert tool is not None and tool.get("script") == "tools/count_by_layer.lsp"
+    spec = da_mod.tool_activity_spec(tool)
+    assert spec["settings"]["script"]["value"] == ""
+
+
+def test_live_read_fails_closed_when_real_resolution_emits_empty_script(monkeypatch, tmp_path):
+    """The REAL bug the round-2 review caught: aps_live=True + the REAL shipped
+    count-by-layer tool (whose declared `.lsp` path does not actually resolve)
+    must fail closed via the REAL da.client.tool_activity_spec call — never
+    silently submit an empty-script WorkItem."""
+    _quiet_broker(monkeypatch, tmp_path)
+    da_mod = _load_real_da_client()
+
+    def _poison(name):
+        def _fn(*_a, **_k):
+            pytest.fail(f"da.{name} must never be reached when the REAL emitted "
+                        f"live script is empty")
+        return _fn
+
+    monkeypatch.setattr(da_mod, "run_tool", _poison("run_tool"))
+    monkeypatch.setattr(da_mod, "ensure_tool_activity", _poison("ensure_tool_activity"),
+                        raising=False)
+    monkeypatch.setattr(broker, "_get_da", lambda: da_mod)
+
+    tool = deps.find_tool("count-by-layer")  # the REAL shipped catalog entry
+    assert broker._live_script_is_nonempty(tool, da_mod) is False
+
+    req = broker.BrokerRunRequest(tenant_id="live-realmismatch", tool=tool, params={},
                                   dwg="rooftop_demo", aps_live=True)
     resp = broker.broker_run(req)
 
@@ -317,28 +368,58 @@ def test_live_read_fails_closed_for_tool_with_no_live_script(monkeypatch, tmp_pa
     assert body["error"]["error_code"] == "BAD_PARAMS"
     assert body["error"]["retryable"] is False
     assert "live" in body["error"]["message"].lower()
-    # FAIL CLOSED means BEFORE submission: the credential-holding client must
-    # never be reached.
+
+
+def test_live_read_fails_closed_when_da_cannot_verify_real_resolution(monkeypatch, tmp_path):
+    """A `da` client that has no `tool_activity_spec` at all (can't verify the
+    real resolution) must ALSO fail closed — never guess from a `script`/
+    `engine_script` field's mere presence."""
+    _quiet_broker(monkeypatch, tmp_path)
+    fake_da = _FakeLiveDa()  # deliberately lacks tool_activity_spec
+    monkeypatch.setattr(broker, "_get_da", lambda: fake_da)
+
+    tool = dict(READ_TOOL)
+    tool["script"] = "tools/count_by_layer.lsp"  # presence alone must NOT be enough
+    assert broker._live_script_is_nonempty(tool, fake_da) is False
+
+    req = broker.BrokerRunRequest(tenant_id="live-noverify", tool=tool, params={},
+                                  dwg="rooftop_demo", aps_live=True)
+    resp = broker.broker_run(req)
+
+    assert resp.status_code == 400, resp.body
+    body = json.loads(resp.body)
+    assert body["error"]["error_code"] == "BAD_PARAMS"
     assert fake_da.ensure_tool_activity_calls == []
     assert fake_da.run_tool_calls == []
 
 
-def test_live_read_still_proceeds_for_a_tool_with_a_real_lsp_script(monkeypatch, tmp_path):
-    """Regression guard: the new guard must not block a genuinely live-capable
-    tool (matches engine/registry.json's real shape: a `.lsp` `script`)."""
+def test_live_read_proceeds_when_real_resolution_emits_a_nonempty_script(monkeypatch, tmp_path):
+    """Regression guard: the guard must NOT block a tool whose REAL
+    `tool_activity_spec` resolution genuinely produces a non-empty script.
+    Uses `engine_script` (literal LISP source) so the case is independent of
+    any file-path convention/bug elsewhere in the repo."""
     _quiet_broker(monkeypatch, tmp_path)
-    fake_da = _FakeLiveDa()
-    monkeypatch.setattr(broker, "_get_da", lambda: fake_da)
+    da_mod = _load_real_da_client()
+    calls = []
+
+    def _fake_run_tool(local, tool, params):
+        calls.append((local, tool.get("name")))
+        return {"ok": True, "result": {}, "overlay": None}
+
+    monkeypatch.setattr(da_mod, "run_tool", _fake_run_tool)
+    monkeypatch.setattr(da_mod, "ensure_tool_activity", lambda *_a, **_k: {}, raising=False)
+    monkeypatch.setattr(broker, "_get_da", lambda: da_mod)
 
     tool = dict(READ_TOOL)
-    tool["script"] = "tools/count_by_layer.lsp"
-    assert broker._has_live_script(tool) is True
-    req = broker.BrokerRunRequest(tenant_id="live-hasscript", tool=tool, params={},
+    tool["engine_script"] = '(princ "leaf-test-ok")'
+    assert broker._live_script_is_nonempty(tool, da_mod) is True
+
+    req = broker.BrokerRunRequest(tenant_id="live-realok", tool=tool, params={},
                                   dwg="rooftop_demo", aps_live=True)
     resp = broker.broker_run(req)
 
     assert resp.status_code == 200, resp.body
-    assert len(fake_da.run_tool_calls) == 1, "the real live path must be reached"
+    assert calls, "the real live path must be reached when the script genuinely resolves"
 
 
 # --------------------------------------------------------------------------- #
@@ -351,7 +432,6 @@ def test_live_read_with_dwg_version_fails_closed_never_executes(monkeypatch, tmp
     monkeypatch.setattr(broker, "_get_da", lambda: fake_da)
 
     tool = dict(READ_TOOL)
-    tool["script"] = "tools/count_by_layer.lsp"  # a LIVE-CAPABLE tool must ALSO fail closed
     req = broker.BrokerRunRequest(tenant_id="live-vpin", tool=tool, params={},
                                   dwg="rooftop_demo", aps_live=True, dwg_version=999)
     resp = broker.broker_run(req)
@@ -362,7 +442,8 @@ def test_live_read_with_dwg_version_fails_closed_never_executes(monkeypatch, tmp
     assert body["error"]["retryable"] is False
     assert "dwg_version" in body["error"]["message"]
     # the exact regression the review caught: a pin must never be silently
-    # dropped and the unpinned live DWG executed instead.
+    # dropped and the unpinned live DWG executed instead. The version check fires
+    # BEFORE the live-script check, so this holds regardless of script validity.
     assert fake_da.run_tool_calls == [], "dwg_version must never be silently ignored on a live read"
 
 

@@ -426,18 +426,46 @@ def _resolve_live_dwg(dwg: str) -> Path:
     return resolved
 
 
-def _has_live_script(tool: Dict[str, Any]) -> bool:
-    """True iff the tool carries a LIVE (APS accoreconsole) implementation source:
-    literal LISP (`engine_script`) or a `.lsp` `script` reference. Mirrors
-    da/client.py:tool_activity_spec's own source resolution EXACTLY — a tool with
-    neither (e.g. a kind:script tool whose only implementation is a local Python
-    `entry`, the APS_LIVE=0 builtins/*.py shape) has no live counterpart yet; that
-    module would otherwise provision an Activity with an EMPTY script (silent
-    no-op WorkItem, never a real run)."""
-    if tool.get("engine_script"):
-        return True
-    script = tool.get("script")
-    return bool(script) and str(script).endswith(".lsp")
+def _live_script_is_nonempty(tool: Dict[str, Any], da: Any) -> bool:
+    """True iff da/client.py's REAL `tool_activity_spec(tool)` — the ACTUAL function
+    that provisions this tool's live Activity — produces a non-empty (non-whitespace)
+    accoreconsole script for it.
+
+    Review 2026-07-22 (round 2, HIGH — sharper than round 1): a PRIOR version of this
+    guard only checked for the PRESENCE of an `engine_script`/`.lsp` `script`
+    reference, which is not sufficient. `tool_activity_spec` resolves a `.lsp`
+    `script` path relative to the PROJECT ROOT (two directories up from
+    da/client.py), but `engine/registry.json`'s shipped tool entries write that path
+    as `tools/<name>.lsp` — while the `.lsp` FILES actually live at
+    `engine/tools/<name>.lsp`. The resolved read therefore fails (caught, silently
+    falls back to an EMPTY script). Reproduced dependency-free (no APS creds
+    needed): calling the real `da.client.tool_activity_spec({"script":
+    "tools/count_by_layer.lsp"})` emits a ZERO-length script TODAY — for EVERY
+    currently shipped engine-registry tool (count-by-layer, measure-panel-area,
+    highlight-panels-near-edge all share that same path convention), not just the
+    new autofill-string-targets entry.
+
+    That path-resolution mismatch lives in da/client.py + engine/registry.json —
+    OUTSIDE this session's server/-only write-set — and is NOT fixed here (no file
+    move, no da/client.py edit). This guard now calls the REAL function (never a
+    re-implemented heuristic of what "looks like" a live script), so it is immune
+    to any future drift in that resolution logic, and it FAILS CLOSED for those
+    pre-existing tools too. That is a deliberate, honest behaviour change: those
+    tools could never run live correctly before this fix either (they would have
+    silently submitted an EMPTY-script WorkItem to APS); they now get an explicit,
+    non-retryable BAD_PARAMS instead of a silent no-op. The path-resolution fix
+    itself is a tracked follow-up for the da/client.py + engine/registry.json
+    owners (Lane B / Lane A), not this session's to make.
+    """
+    if da is None or not hasattr(da, "tool_activity_spec"):
+        return False  # can't verify the REAL resolution -> fail closed, never guess
+    try:
+        spec = da.tool_activity_spec(tool)
+    except Exception:
+        return False  # a spec-build failure IS "no usable live script"
+    script = ((spec or {}).get("settings") or {}).get("script") or {}
+    value = script.get("value") if isinstance(script, dict) else None
+    return bool(value) and bool(str(value).strip())
 
 
 @app.get("/broker/health")
@@ -700,21 +728,19 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 "omit dwg_version or run with aps_live=false",
                 retryable=False, tool=tool.get("name")),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
-        elif not _has_live_script(tool):
-            # FAIL CLOSED (review 2026-07-22, HIGH): da/client.py:tool_activity_spec
-            # builds a tool's live Activity script from `engine_script` or a `.lsp`
-            # `script` — a tool with ONLY a local Python `entry` (e.g. the
-            # autofill-string-targets catalog entry, kind:script/APS_LIVE=0 shape)
-            # has neither, so provisioning its Activity would submit an EMPTY
-            # accoreconsole script (a silent no-op WorkItem, not a real run). Do NOT
-            # fabricate a live script here. Live/APS wiring for Python-only builtin
-            # tools is a TRACKED FOLLOW-UP; until it lands this must reject up front.
+        elif not _live_script_is_nonempty(tool, da):
+            # FAIL CLOSED (review 2026-07-22, HIGH, round 2): verified against the
+            # REAL da/client.py:tool_activity_spec resolution (see
+            # `_live_script_is_nonempty`'s docstring for the full story, incl. why
+            # this ALSO fails closed for the pre-existing shipped engine tools whose
+            # declared `.lsp` path does not resolve today) — never a re-implemented
+            # heuristic, and never a fabricated live script.
             return (err_envelope(
                 ErrorCode.BAD_PARAMS,
-                f"tool {tool.get('name')!r} has no live (APS) implementation yet "
-                f"(kind=script with only a local Python entry; no engine_script/.lsp "
-                f"script) — live (APS_LIVE=1) runs of this tool are not supported; "
-                f"run with aps_live=false",
+                f"tool {tool.get('name')!r} has no usable live (APS) implementation "
+                f"(its resolved Activity script is empty/unreadable) — live "
+                f"(APS_LIVE=1) runs of this tool are not supported; run with "
+                f"aps_live=false",
                 retryable=False, tool=tool.get("name")),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
         else:
