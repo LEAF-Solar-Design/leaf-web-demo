@@ -53,6 +53,7 @@ jobs:
         working-directory: server
         run: python -m pytest tests/test_site.py -q --color=no -p no:cacheprovider
       - name: Verify deploy-time configuration manifests
-        run: python -m pytest scripts/test_required_config.py -q --color=no -p no:cacheprovider
+        working-directory: scripts
+        run: python -m pytest test_required_config.py -q --color=no -p no:cacheprovider
       - name: Build the deployable application image
         run: docker build --file deploy/Dockerfile.app --tag leaf-platform-app:contract .
