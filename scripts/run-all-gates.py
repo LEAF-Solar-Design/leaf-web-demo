@@ -173,7 +173,7 @@ def build_suites() -> List[Suite]:
         Suite("server-auth-vocab-freeze", "server tests/test_auth_vocab_freeze.py", "pytest",
               SERVER, _py_pytest("tests/test_auth_vocab_freeze.py"), 8),
         Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
-              _py_pytest("tests/test_billing_tiers.py"), 26),
+              _py_pytest("tests/test_billing_tiers.py"), 30),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
               _py_pytest("tests/test_job_lanes.py"), 11),
         Suite("server-agent-e2e", "server tests/test_agent_e2e.py", "pytest", SERVER,
