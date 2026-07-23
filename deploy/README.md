@@ -92,6 +92,10 @@ rehearsal, use `down -v`; that removes all local named volumes, including
 | `LEAF_TENANT_FIXTURE` | harness | `/app/test/fixtures/tenant-repo` | seed for auto-provisioning a brand-new tenant repo (§16.D) |
 | `LEAF_HARNESS_AUTH` | harness | `1` | F5 caller-auth gate ON: every non-`/health` harness route requires `X-Harness-Secret` |
 | `LEAF_HARNESS_SECRET` | app, harness | `${LEAF_HARNESS_SECRET:-leaf-compose-dev-secret}` | the app→harness hop secret — **same value on both**; the compose default is DEV-ONLY (harness port is compose-network-internal), override via `.env` on any shared host |
+| `LEAF_APP_URL` | harness | `http://app:8130` | harness → app base for the §18 converse back-edge (gate consult + dispatch) |
+| `LEAF_APP_DISPATCH_SECRET` | app, harness | `${LEAF_APP_DISPATCH_SECRET:-}` (empty) | **opt-in** X-Dispatch-Secret (§18.5), same value on both. Empty ⇒ converse lane dark FAIL-CLOSED: harness answers `POST /turn` 501, app back-edge 401s. Author/Build lane unaffected |
+| `LEAF_SESSIONS_DIR` | harness | `/data/sessions` | converse loop store (sdk resume ids, confirmation mirrors) |
+| `SESSIONS_DB` | app | `/data/state/sessions.db` | conversational sessions/events/approvals (single-writer SQLite) |
 | `DATABASE_URL` | app | `${DATABASE_URL:-}` (empty) | **opt-in** platform Project/Job persistence; empty ⇒ platform DB endpoints stay dark, demo-safe |
 
 ### Named volumes
@@ -100,10 +104,11 @@ rehearsal, use `down -v`; that removes all local named volumes, including
 |---|---|---|
 | `leaf-tenants` | app + harness | per-tenant repos (shared per §16.H) |
 | `leaf-grants` | harness | per-tenant Claude tokens |
+| `leaf-sessions` | harness | converse loop store. Dropping it burns in-flight approvals **fail-safe** (the gate denies the foreign-session redemption; the user re-proposes) |
 | `leaf-drawings` | app + broker | versioned drawing store (shared, write loop) |
-| `leaf-state` | app + broker | broker ledger + kill-switch + app `jobs.db` |
+| `leaf-state` | app + broker | broker ledger + kill-switch + app `jobs.db` + `sessions.db` |
 
-`docker compose down -v` drops all four → the next `up` starts from a clean slate.
+`docker compose down -v` drops them all → the next `up` starts from a clean slate.
 
 ---
 

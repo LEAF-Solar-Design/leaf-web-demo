@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 import time
 import uuid
@@ -309,14 +310,34 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                 if not ev_type:
                     continue
 
-                # relay the harness's own event verbatim — the ONLY place besides
-                # `turn_started` that this module appends to the transcript.
-                session_store.append_event(session_id, turn_id, ev_type, data)
-
+                # Approval rows are created BEFORE the event that renders their
+                # chip is published (`append_event` below IS publication — the
+                # SSE relay serves straight from the store), so a visible chip
+                # STRUCTURALLY implies a decidable row, not probabilistically
+                # (review round 2 finding). A duplicate insert is the benign
+                # pair/replay case; any OTHER store failure propagates to the
+                # outer handler, which terminalizes the turn with an in-band
+                # error instead of publishing an undecidable chip. Spine turns
+                # (census #12 chip 1) emit proposed_run alone, so its branch
+                # creates the row with proposal metadata; the legacy pair's
+                # confirmation_required keeps kind/payload on the transcript
+                # EVENT, its duplicate insert a no-op.
                 if ev_type == "proposed_run":
                     cid = data.get("confirmation_id")
                     if cid:
                         proposals[cid] = data
+                        try:
+                            session_store.create_approval(
+                                confirmation_id=cid, session_id=session_id,
+                                tenant_id=tenant_id, turn_id=turn_id,
+                                tool=data.get("tool"), params=data.get("params"),
+                                capability=data.get("capability"),
+                                rationale=data.get("rationale"),
+                                kind="run_capability", payload=None,
+                                ttl_s=approval_ttl_s(),
+                            )
+                        except sqlite3.IntegrityError:
+                            pass  # row already exists (duplicate line / replay)
                 elif ev_type == "confirmation_required":
                     cid = data.get("confirmation_id")
                     if cid:
@@ -329,8 +350,12 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                 rationale=proposal.get("rationale"), kind=data.get("kind"),
                                 payload=data.get("payload"), ttl_s=approval_ttl_s(),
                             )
-                        except Exception:  # noqa: BLE001  duplicate confirmation_id etc.
-                            pass
+                        except sqlite3.IntegrityError:
+                            pass  # row created at proposed_run (pair flow)
+
+                # relay the harness's own event verbatim — the ONLY place besides
+                # `turn_started` that this module appends to the transcript.
+                session_store.append_event(session_id, turn_id, ev_type, data)
 
                 if ev_type in ("turn_complete", "error"):
                     _end_once()  # already relayed above — just release the CAS

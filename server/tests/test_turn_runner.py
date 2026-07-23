@@ -232,14 +232,126 @@ def test_confirmation_required_creates_approval_row_with_ttl(monkeypatch, turn_s
     assert approval["params"] == {"x": 1}
     assert approval["capability"] == "drawing.write"
     assert approval["rationale"] == "move a panel"
-    assert approval["kind"] == "run"
-    assert approval["payload"] == {"note": "confirm?"}
+    # Since the spine unification (census #12 chip 1) the row is created at
+    # proposed_run — race-free with the chip becoming client-visible — so its
+    # metadata comes from the PROPOSAL; confirmation_required's kind/payload
+    # stay on the transcript event (which is what UIs render), and its
+    # duplicate create is a swallowed no-op. No production code reads the
+    # row's kind/payload (consume uses tool/params/capability).
+    assert approval["kind"] == "run_capability"
+    assert approval["payload"] is None
     assert approval["decided"] is False
 
     ttl = approval["expires_at"] - approval["created_at"]
     assert abs(ttl - 7.0) < 0.5, ttl
 
     _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None)
+
+
+def test_spine_proposed_run_creates_approval_row_at_awaiting_approval_end(monkeypatch, turn_stub):
+    """Spine unification (census #12 chip 1): the mounted §18 engine proposes a
+    write with proposed_run ONLY — no confirmation_required follows — so the
+    relay must still create the tenant-facing approvals row (at the
+    awaiting_approval turn end) or the chip is undeliverable."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setenv("SESSIONS_APPROVAL_TTL_S", "7")
+
+    stub.SCRIPT = [
+        {"type": "proposed_run", "data": {"confirmation_id": "cid-spine-1", "tool": "add-panel",
+                                          "params": {"col": 2}, "dwg": "d-1",
+                                          "capability": "drawing.write",
+                                          "rationale": "approval required by policy"}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
+    ]
+
+    sess = _new_session("tenant-spine")
+    session_id = sess["session_id"]
+    turn_id = turn_runner.start_turn("tenant-spine", session_id, text="add a panel at col 2")
+
+    ok = _wait_until(lambda: session_store.get_approval("cid-spine-1") is not None)
+    assert ok, "spine proposed_run never produced an approvals row"
+
+    approval = session_store.get_approval("cid-spine-1")
+    assert approval["session_id"] == session_id
+    assert approval["tenant_id"] == "tenant-spine"
+    assert approval["turn_id"] == turn_id
+    assert approval["tool"] == "add-panel"
+    assert approval["params"] == {"col": 2}
+    assert approval["capability"] == "drawing.write"
+    assert approval["rationale"] == "approval required by policy"
+    assert approval["kind"] == "run_capability"
+    assert approval["decided"] is False
+
+    _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None)
+
+
+def test_proposed_run_row_exists_before_publication(monkeypatch, turn_stub):
+    """Round-2 review invariant: `append_event(proposed_run)` IS publication
+    (the SSE relay serves straight from the store), so the approvals row must
+    already exist at that moment — structurally, not eventually."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+
+    stub.SCRIPT = [
+        {"type": "proposed_run", "data": {"confirmation_id": "cid-order-1", "tool": "add-panel",
+                                          "params": {}, "capability": "drawing.write",
+                                          "rationale": "policy"}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
+    ]
+
+    row_existed_at_publication = []
+    real_append = session_store.append_event
+
+    def spy_append(session_id, turn_id, ev_type, data):
+        if ev_type == "proposed_run":
+            row_existed_at_publication.append(
+                session_store.get_approval(data.get("confirmation_id")) is not None)
+        return real_append(session_id, turn_id, ev_type, data)
+
+    monkeypatch.setattr(session_store, "append_event", spy_append)
+
+    sess = _new_session("tenant-order")
+    turn_runner.start_turn("tenant-order", sess["session_id"], text="add a panel")
+    ok = _wait_until(lambda: session_store.get_session(sess["session_id"])["active_turn_id"] is None)
+    assert ok
+    assert row_existed_at_publication == [True]
+
+
+def test_approval_store_failure_terminalizes_turn_instead_of_dead_chip(monkeypatch, turn_stub):
+    """A non-duplicate approvals-store failure must NOT publish the chip and
+    swallow the error (an undecidable chip): the relay's outer handler
+    terminalizes the turn with an in-band error instead."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+
+    stub.SCRIPT = [
+        {"type": "proposed_run", "data": {"confirmation_id": "cid-dead-1", "tool": "add-panel",
+                                          "params": {}, "capability": "drawing.write",
+                                          "rationale": "policy"}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
+    ]
+
+    def boom(**_kwargs):
+        raise OSError("approvals store down")
+
+    monkeypatch.setattr(session_store, "create_approval", boom)
+
+    sess = _new_session("tenant-deadchip")
+    session_id = sess["session_id"]
+    turn_id = turn_runner.start_turn("tenant-deadchip", session_id, text="add a panel")
+
+    ok = _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None)
+    assert ok, "CAS never released after the store failure"
+
+    events = session_store.recent_events(session_id, 100)
+    types = [e["type"] for e in events if e["turn_id"] == turn_id]
+    assert "proposed_run" not in types, "dead chip was published"
+    assert "error" in types
+    assert session_store.get_approval("cid-dead-1") is None
 
 
 # =========================================================================== #
