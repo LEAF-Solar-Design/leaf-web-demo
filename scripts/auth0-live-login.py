@@ -9,10 +9,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -20,7 +22,7 @@ from pathlib import Path
 ISSUER = "https://leafautomation.us.auth0.com"
 AUDIENCE = "https://api.leafdesign.ai"
 CLIENT_ID = "zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O"
-REDIRECT_URI = "http://localhost:8080"
+REDIRECT_URI = os.environ.get("LEAF_AUTH0_REDIRECT_URI", "http://localhost:8080")
 TOKEN_PATH = Path(r"C:\tmp\leaf-grants\auth0-access-token.txt")
 RECEIPT_PATH = Path(r"C:\tmp\leaf-web-demo\docs\auth0-live-login-receipt.json")
 
@@ -67,7 +69,15 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
 
 print(f"AUTH0_AUTHORIZE_URL={authorize_url}", flush=True)
-server = HTTPServer(("127.0.0.1", 8080), CallbackHandler)
+if os.environ.get("LEAF_AUTH0_OPEN_BROWSER") == "1":
+    webbrowser.open(authorize_url)
+redirect = urllib.parse.urlparse(REDIRECT_URI)
+if redirect.scheme != "http" or redirect.hostname not in {"localhost", "127.0.0.1"}:
+    raise SystemExit("LEAF_AUTH0_REDIRECT_URI must use http://localhost or http://127.0.0.1")
+callback_port = redirect.port
+if callback_port is None:
+    raise SystemExit("LEAF_AUTH0_REDIRECT_URI must include an explicit port")
+server = HTTPServer(("127.0.0.1", callback_port), CallbackHandler)
 server.timeout = 300
 server.handle_request()
 server.server_close()
@@ -121,6 +131,7 @@ receipt = {
     "org_id": payload.get(namespace + "org_id"),
     "tier": payload.get(namespace + "tier"),
     "client_id": CLIENT_ID,
+    "redirect_uri": REDIRECT_URI,
     "token_file": str(TOKEN_PATH),
 }
 RECEIPT_PATH.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
