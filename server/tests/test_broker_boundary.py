@@ -317,6 +317,22 @@ def test_broker_client_sends_secret_header_from_env(monkeypatch):
     assert seen["headers"] == {"X-Broker-Secret": "shhh"}
 
 
+def test_internal_secret_headers_strip_secret_store_whitespace(monkeypatch):
+    monkeypatch.setenv("LEAF_BROKER_SECRET", "broker-secret\n")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "\r\nharness-secret\n")
+
+    assert broker_client.broker_headers() == {"X-Broker-Secret": "broker-secret"}
+    assert broker_client.harness_headers() == {"X-Harness-Secret": "harness-secret"}
+
+
+def test_internal_secret_headers_omit_whitespace_only_values(monkeypatch):
+    monkeypatch.setenv("LEAF_BROKER_SECRET", "\n")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", " \r\n")
+
+    assert broker_client.broker_headers() == {}
+    assert broker_client.harness_headers() == {}
+
+
 # --------------------------------------------------------------------------- #
 # F4(b): the arbitrary-.py primitive in resolve_local_file is killed
 # --------------------------------------------------------------------------- #

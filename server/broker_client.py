@@ -24,7 +24,7 @@ def broker_headers() -> Dict[str, str]:
     protected ``/broker/*`` route must include these headers (``/broker/run`` here;
     the extract sender in ``routers/session.py`` and the disable/enable proxy in
     ``routers/ops.py`` must adopt this helper too — one-line change per site)."""
-    secret = os.environ.get("LEAF_BROKER_SECRET")
+    secret = os.environ.get("LEAF_BROKER_SECRET", "").strip()
     return {"X-Broker-Secret": secret} if secret else {}
 
 
@@ -32,7 +32,7 @@ def harness_headers() -> Dict[str, str]:
     """F5 app->harness caller-auth: ``X-Harness-Secret`` from ``LEAF_HARNESS_SECRET``
     (same env the harness reads; Codex injects at deploy). Empty when unset so the
     off-live demo stays byte-identical."""
-    secret = os.environ.get("LEAF_HARNESS_SECRET")
+    secret = os.environ.get("LEAF_HARNESS_SECRET", "").strip()
     return {"X-Harness-Secret": secret} if secret else {}
 
 
