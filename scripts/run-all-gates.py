@@ -284,6 +284,11 @@ def build_suites() -> List[Suite]:
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
                  f"{repo_name}/platform/tests/test_replay_static.py"], 26),
+        # The committed replay fixture is dependency-free and catches hash or
+        # replay drift before a PR reaches the GitHub simulator-gate workflow.
+        Suite("platform-simgate-self-test", "platform simulator-gate self-test", "script",
+              REPO_PARENT,
+              [sys.executable, f"{repo_name}/platform/simgate/run.py", "--self-test"], None),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
               [_npm(), "test"], 63),
