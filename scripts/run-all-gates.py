@@ -268,6 +268,10 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_static.py"), 9),
         Suite("server-broker-ledger-runtime", "server tests/test_broker_ledger_schema_runtime.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_runtime.py"), 6),
+        # Callback-primary is isolated: it changes completion selection and holds
+        # a durable replay ledger, so it must not share another broker suite.
+        Suite("server-da-callback", "server tests/test_da_callback.py", "pytest",
+              SERVER, _py_pytest("tests/test_da_callback.py"), 7),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 14),
@@ -331,6 +335,8 @@ _ENV_DENYLIST = (
     "LEAF_CONVERSE_HARNESS_URL",
     "LEAF_AUTHOR_LLM", "LEAF_TENANTS_DIR", "LEAF_TENANT_REPO", "BROKER_URL",
     "BROKER_LEDGER", "BROKER_TENANTS",
+    "LEAF_CALLBACK_SECRET", "LEAF_CALLBACK_URL", "LEAF_CALLBACK_PRIMARY",
+    "LEAF_CALLBACK_MAX_AGE_S",
     "LEAF_SANDBOX", "LEAF_SANDBOX_TIMEOUT_S", "LEAF_E2B_HELPER", "E2B_API_KEY",
     # harness F5 caller-auth + agent-mock toggles: ambient values would 401 (or
     # fake out) the hermetic harness suites, which pin these per-test instead.

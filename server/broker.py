@@ -44,7 +44,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -329,8 +329,27 @@ def _load_da_module(filename: str, mod_name: str):
         return None
 
 
+def _load_server_da_module(filename: str, mod_name: str):
+    """Load a broker-local DA seam without importing the deployable ``da`` client."""
+    import importlib.util
+
+    path = SERVER_DIR / "da" / filename
+    if not path.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:  # noqa: BLE001
+        print(f"[broker] server/da/{filename} import failed: {exc}", file=sys.stderr)
+        return None
+
+
 _usage_mod = None
 _reaper_mod = None
+_callbacks_mod = None
 
 
 def _get_usage():
@@ -345,6 +364,48 @@ def _get_reaper():
     if _reaper_mod is None:
         _reaper_mod = _load_da_module("reaper.py", "leaf_reaper")
     return _reaper_mod
+
+
+def _get_callbacks():
+    """Load the broker-owned callback seam without importing the root ``da`` package."""
+    global _callbacks_mod
+    if _callbacks_mod is None:
+        _callbacks_mod = _load_server_da_module("callbacks.py", "leaf_broker_callbacks")
+    return _callbacks_mod
+
+
+class CallbackPrimaryUnavailable(RuntimeError):
+    """The flag selected callbacks but the DA adapter cannot submit them."""
+
+
+class CallbackPrimaryConfigurationError(RuntimeError):
+    """Callback-primary was selected without all required operator settings."""
+
+
+def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Select the configured completion mechanism for one live run.
+
+    The polling call is deliberately byte-for-byte compatible by default.
+    Callback-primary uses an additive ``run_tool_callback`` adapter method so it
+    never silently reverts to polling when an operator has selected callbacks.
+    The existing reaper remains the fallback for abandoned callback work.
+    """
+    callbacks = _get_callbacks()
+    if callbacks is None:
+        return da.run_tool(local, tool, params)
+    config_error = callbacks.callback_primary_configuration_error()
+    if config_error:
+        raise CallbackPrimaryConfigurationError(config_error)
+    if not callbacks.callback_primary_enabled():
+        return da.run_tool(local, tool, params)
+    callback_run = getattr(da, "run_tool_callback", None)
+    if not callable(callback_run):
+        raise CallbackPrimaryUnavailable(
+            "callback-primary requires a DA adapter with run_tool_callback"
+        )
+    url = callbacks.callback_url()
+    assert url is not None  # callback_primary_enabled() checks this configuration
+    return callback_run(local, tool, params, callback_url=url)
 
 
 def _cap_preflight(tenant_id: str, tool: Dict[str, Any]):
@@ -691,6 +752,70 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
     }))
 
 
+def _complete_callback_job(job_id: str, callback: Dict[str, Any]) -> str:
+    """Use the durable job spine's single terminal transition for APS callbacks."""
+    import jobs
+
+    record = jobs.get_job(job_id)
+    if record is None:
+        return "missing"
+    raw_status = str(callback.get("status", "")).strip().lower()
+    if raw_status in {"success", "complete"}:
+        result = callback.get("result")
+        result_env = dict(result) if isinstance(result, dict) else {"result": result}
+        result_env["ok"] = True
+        provenance = {"attempt": int(record.get("attempt") or 0), "execution_path": "cloud"}
+        result_env.setdefault("execution_provenance", provenance)
+        return jobs.complete_callback(job_id, "complete", result_env=result_env,
+                                      provenance=provenance)
+    if raw_status in {"failed", "failure", "cancelled", "canceled"}:
+        message = str(callback.get("message") or f"Design Automation callback status: {raw_status}")
+        return jobs.complete_callback(job_id, "failed", error={
+            "error_code": ErrorCode.WORKITEM_FAILED, "message": message, "retryable": False,
+        }, provenance={"execution_path": "cloud", "callback_status": raw_status})
+    raise ValueError("callback status must be a terminal Design Automation status")
+
+
+@app.post("/da/callback")
+async def da_callback(request: Request,
+                      x_leaf_signature: Optional[str] = Header(default=None),
+                      x_leaf_timestamp: Optional[str] = Header(default=None),
+                      x_leaf_nonce: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Accept exactly one signed Design Automation terminal callback.
+
+    This route intentionally has no broker shared-secret dependency. It is an
+    inbound APS seam, authenticated by the HMAC over its raw body instead.
+    """
+    callbacks = _get_callbacks()
+    if callbacks is None:
+        return JSONResponse(status_code=500, content=err_envelope(
+            ErrorCode.INTERNAL, "callback module unavailable", retryable=False))
+    outcome = callbacks.consume_callback(await request.body(), x_leaf_signature,
+                                         x_leaf_timestamp, x_leaf_nonce)
+    if not outcome.get("ok"):
+        reason = str(outcome.get("reason", "bad_callback"))
+        status_code = 503 if reason == "not_configured" else (409 if reason == "replay" else 401)
+        return JSONResponse(status_code=status_code, content=err_envelope(
+            ErrorCode.BAD_PARAMS, f"callback rejected: {reason}", retryable=False))
+    try:
+        completion = _complete_callback_job(outcome["job_id"], outcome["callback"])
+    except ValueError as exc:
+        return JSONResponse(status_code=409, content=err_envelope(
+            ErrorCode.BAD_PARAMS, f"callback completion rejected: {exc}", retryable=False))
+    if completion == "missing":
+        return JSONResponse(status_code=404, content=err_envelope(
+            ErrorCode.BAD_PARAMS, "callback completion rejected: unknown job_id", retryable=False))
+    if completion not in {"applied", "duplicate"}:
+        return JSONResponse(status_code=409, content=err_envelope(
+            ErrorCode.BAD_PARAMS, f"callback completion rejected: {completion}", retryable=False))
+    return JSONResponse(status_code=200, content=with_envelope_fields({
+        "ok": True,
+        "job_id": outcome["job_id"],
+        "completion_mode": "callback",
+        "completion": completion,
+    }))
+
+
 @app.post("/broker/extract", dependencies=[Depends(require_broker_auth)])
 def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     """Extract intake through the credential-holding process only."""
@@ -769,6 +894,10 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         env, status_code = _execute(req, tool, engine_op, t0, entry)
         entry["status"] = "ok" if env.get("ok") else (env.get("error") or {}).get("error_code", "error")
         return JSONResponse(status_code=status_code, content=env)
+    except CallbackPrimaryConfigurationError as exc:
+        entry["status"] = "INTERNAL"
+        env = err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False, tool=tool.get("name"))
+        return JSONResponse(status_code=DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL], content=env)
     except entitlements.EntitlementsError:
         entry["status"] = "INTERNAL"
         required = entitlements.tool_required_capability(tool)
@@ -930,7 +1059,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 # before the WorkItem is submitted.
                 if hasattr(da, "ensure_tool_activity"):
                     da.ensure_tool_activity(tool)
-                env = dict(da.run_tool(local, tool, params) or {})
+                env = dict(_run_live_tool(da, local, tool, params) or {})
                 env.setdefault("ok", True)
                 env.setdefault("tool", tool.get("name"))
                 env.setdefault("version", tool.get("version", "1.0.0"))
