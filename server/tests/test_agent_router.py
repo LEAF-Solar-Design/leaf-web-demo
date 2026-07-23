@@ -258,6 +258,39 @@ def test_gate_tier_env_source_and_unprovisioned_fails_closed(client, monkeypatch
     assert unprovisioned["reason"].startswith("entitlement_required")
 
 
+def test_gate_prefers_the_authenticated_active_turn_tier(client, monkeypatch, tmp_path):
+    """The live message route already authorized the tenant as hosted_pro.
+    The gate must keep that exact turn authority even when the separate broker
+    provisioning file has no record for the tenant."""
+    import session_store
+
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", DISPATCH_SECRET)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("BROKER_TENANTS", str(tmp_path / "absent.json"))
+    monkeypatch.delenv("LEAF_BROKER_TENANT_TIERS", raising=False)
+    monkeypatch.setattr(
+        session_store, "active_turn_tier",
+        lambda session_id, turn_id, tenant_id: (
+            "hosted_pro"
+            if (session_id, turn_id, tenant_id) == ("s-pro", "turn-pro", "t-pro")
+            else None
+        ),
+    )
+
+    body = _gate_call(
+        client, "read_platform_state", tenant="t-pro",
+        session="s-pro", turn="turn-pro",
+    ).json()
+    assert body["decision"] == "allow"
+
+    mismatched = _gate_call(
+        client, "read_platform_state", tenant="t-pro",
+        session="s-pro", turn="different-turn",
+    ).json()
+    assert mismatched["decision"] == "deny"
+    assert mismatched["reason"].startswith("entitlement_required")
+
+
 def test_gate_offauth_tier_is_unchanged_demo(client, monkeypatch, tmp_path):
     """Auth OFF (the open demo): the gate keeps resolving `demo` regardless of any
     provisioning file — byte-identical to the pre-fix behaviour."""

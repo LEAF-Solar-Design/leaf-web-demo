@@ -51,6 +51,7 @@ os.environ.setdefault("SESSIONS_DB", str(Path(tempfile.mkdtemp(prefix="turnrunne
 
 import session_store  # noqa: E402
 import turn_runner  # noqa: E402
+import deps  # noqa: E402
 from envelopes import ErrorCode  # noqa: E402
 
 
@@ -449,6 +450,26 @@ def test_turn_busy_raised_without_any_http_call(monkeypatch):
 
     # the existing turn's ownership is untouched
     assert session_store.get_session(session_id)["active_turn_id"] == "existing-turn"
+
+
+def test_turn_cas_snapshots_the_verified_tenant_tier(monkeypatch):
+    sess = _new_session("tenant-tier-snapshot")
+    captured = {}
+
+    def reject_after_capture(session_id, turn_id, stale_after_s, tier=None):
+        captured.update(
+            session_id=session_id, turn_id=turn_id,
+            stale_after_s=stale_after_s, tier=tier,
+        )
+        return False
+
+    monkeypatch.setattr(session_store, "try_begin_turn", reject_after_capture)
+    tenant = deps.TenantContext("tenant-tier-snapshot", tier="hosted_pro")
+    with pytest.raises(turn_runner.TurnBusy):
+        turn_runner.start_turn(tenant, sess["session_id"], text="hi")
+
+    assert captured["session_id"] == sess["session_id"]
+    assert captured["tier"] == "hosted_pro"
 
 
 # =========================================================================== #

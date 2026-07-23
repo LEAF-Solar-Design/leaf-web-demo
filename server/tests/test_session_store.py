@@ -253,6 +253,24 @@ def test_end_turn_clears_only_on_match():
     assert session_store.try_begin_turn(session_id, "turn-b", stale_after_s=60) is True
 
 
+def test_active_turn_tier_is_bound_to_session_turn_and_tenant():
+    sess = session_store.get_or_create_session("tenant-tier", "drawing-tier")
+    session_id = sess["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-tier", stale_after_s=60, tier="hosted_pro") is True
+
+    assert session_store.active_turn_tier(
+        session_id, "turn-tier", "tenant-tier") == "hosted_pro"
+    assert session_store.active_turn_tier(
+        session_id, "wrong-turn", "tenant-tier") is None
+    assert session_store.active_turn_tier(
+        session_id, "turn-tier", "wrong-tenant") is None
+
+    session_store.end_turn(session_id, "turn-tier")
+    assert session_store.active_turn_tier(
+        session_id, "turn-tier", "tenant-tier") is None
+
+
 def test_try_begin_turn_concurrent_only_one_winner():
     sess = session_store.get_or_create_session("tenant-turnrace", "drawing-turnrace")
     session_id = sess["session_id"]

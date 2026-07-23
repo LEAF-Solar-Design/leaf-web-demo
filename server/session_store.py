@@ -46,6 +46,7 @@ DDL:
       last_seq         INTEGER DEFAULT 0,
       active_turn_id   TEXT,
       turn_started_at  REAL,
+      active_turn_tier TEXT,
       UNIQUE(tenant_id, drawing_id)
     )
 
@@ -122,6 +123,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seq        INTEGER DEFAULT 0,
   active_turn_id  TEXT,
   turn_started_at REAL,
+  active_turn_tier TEXT,
   UNIQUE(tenant_id, drawing_id)
 );
 
@@ -174,6 +176,11 @@ def _db() -> sqlite3.Connection:
         cols = {r[1] for r in _conn.execute("PRAGMA table_info(approvals)").fetchall()}
         if "consumed" not in cols:
             _conn.execute("ALTER TABLE approvals ADD COLUMN consumed INTEGER NOT NULL DEFAULT 0")
+        session_cols = {
+            r[1] for r in _conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "active_turn_tier" not in session_cols:
+            _conn.execute("ALTER TABLE sessions ADD COLUMN active_turn_tier TEXT")
         _conn.commit()
     return _conn
 
@@ -348,7 +355,8 @@ def recent_events(session_id: str, limit: int) -> List[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # turn CAS
 # --------------------------------------------------------------------------- #
-def try_begin_turn(session_id: str, turn_id: str, stale_after_s: float) -> bool:
+def try_begin_turn(session_id: str, turn_id: str, stale_after_s: float,
+                   tier: Optional[str] = None) -> bool:
     """Atomic compare-and-swap: sets active_turn_id/turn_started_at ONLY when
     the session is unknown-free of an active turn (active_turn_id IS NULL) OR
     the existing active turn is staler than stale_after_s. Returns True iff
@@ -373,12 +381,30 @@ def try_begin_turn(session_id: str, turn_id: str, stale_after_s: float) -> bool:
         if not (is_free or is_stale):
             return False
         conn.execute(
-            "UPDATE sessions SET active_turn_id = ?, turn_started_at = ?, updated_at = ?"
-            " WHERE session_id = ?",
-            (turn_id, now, now, session_id),
+            "UPDATE sessions SET active_turn_id = ?, turn_started_at = ?,"
+            " active_turn_tier = ?, updated_at = ? WHERE session_id = ?",
+            (turn_id, now, tier, now, session_id),
         )
         conn.commit()
         return True
+
+
+def active_turn_tier(session_id: str, turn_id: str,
+                     tenant_id: str) -> Optional[str]:
+    """Return the tier snapshot bound to this exact authenticated turn.
+
+    The session, active turn, and tenant must all match. The value is written
+    atomically with the active-turn CAS before the harness can make a gate call.
+    """
+    rows = _query(
+        "SELECT active_turn_tier FROM sessions"
+        " WHERE session_id = ? AND active_turn_id = ? AND tenant_id = ?",
+        (session_id, turn_id, tenant_id),
+    )
+    if not rows:
+        return None
+    value = rows[0]["active_turn_tier"]
+    return str(value) if value is not None else None
 
 
 def end_turn(session_id: str, turn_id: str) -> None:
@@ -386,7 +412,8 @@ def end_turn(session_id: str, turn_id: str) -> None:
     stale or already-superseded turn_id is a harmless no-op — it never clobbers
     a newer turn that has since taken over via try_begin_turn's stale path)."""
     _exec(
-        "UPDATE sessions SET active_turn_id = NULL, turn_started_at = NULL, updated_at = ?"
+        "UPDATE sessions SET active_turn_id = NULL, turn_started_at = NULL,"
+        " active_turn_tier = NULL, updated_at = ?"
         " WHERE session_id = ? AND active_turn_id = ?",
         (time.time(), session_id, turn_id),
     )
