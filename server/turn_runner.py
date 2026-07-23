@@ -191,12 +191,17 @@ def _safe_json(resp: "requests.Response") -> Optional[Dict[str, Any]]:
 def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                confirm: Optional[Dict[str, Any]] = None,
                classifier_hint: Optional[Dict[str, Any]] = None) -> str:
+    # In live auth this is a deps.TenantContext, a str subclass carrying the
+    # verified claim. Snapshot the claim before normalizing to the frozen
+    # string tenant_id used on the harness wire. Off-auth callers are plain
+    # strings and retain the existing broker/demo fallback.
+    tier = getattr(tenant_id, "tier", None)
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
     turn_id = str(uuid.uuid4())
     max_s = turn_max_s()
-    if not session_store.try_begin_turn(session_id, turn_id, max_s):
+    if not session_store.try_begin_turn(session_id, turn_id, max_s, tier=tier):
         raise TurnBusy(f"session {session_id!r} already has an active turn")
 
     # The durable transcript source: whatever drove this turn (a fresh user

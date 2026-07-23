@@ -233,7 +233,7 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
     # 5. dispatch the turn.
     try:
         turn_id = turn_runner.start_turn(
-            str(tenant), session_id,
+            tenant, session_id,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
         )
     except turn_runner.TurnBusy:

@@ -99,13 +99,23 @@ def internal_gate(req: GateRequest,
     denied = _require_dispatch(x_dispatch_secret)
     if denied is not None:
         return denied
-    # Tier resolution: the back-edge carries only a tenant_id string, so the tier
+    # Legacy tier resolution: without an authenticated active-turn snapshot, the tier
     # comes from the broker-TRUSTED source keyed on it (deps.backedge_tenant) —
     # resolving a bare string would default every caller to "demo" (full access)
     # and silently skip tier_overrides that TIGHTEN a rung. This gate is the ONLY
     # tier check for converse/deploy/agent_write_autopilot: the broker's own
     # re-check (broker.py:588-595) covers run_read/run_write/build alone.
-    tier = entitlements.resolve_tier(deps.backedge_tenant(req.tenant_id))
+    # The client-facing message route binds the verified JWT tier to the exact
+    # active turn before the harness can call this gate. This preserves
+    # authority across the app-to-harness-to-app hop without trusting model
+    # output. Non-session callers retain the broker-trusted fallback.
+    turn_tier = session_store.active_turn_tier(
+        req.session_id, req.turn_id, req.tenant_id)
+    if turn_tier is not None:
+        tier = entitlements.resolve_tier(
+            deps.TenantContext(req.tenant_id, tier=turn_tier))
+    else:
+        tier = entitlements.resolve_tier(deps.backedge_tenant(req.tenant_id))
     try:
         tier_caps = entitlements.entitlements_for(tier)
     except entitlements.EntitlementsError:
