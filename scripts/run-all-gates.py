@@ -234,10 +234,20 @@ def build_suites() -> List[Suite]:
         # pre-existing on main). Durable tracker with the fix-then-register
         # rule: https://github.com/Evan-Haug/leaf-web-demo/issues/29
         # test_hardening_1f.py (3F/5P), tests/test_autofill_adapter.py (1F/1P),
-        # tests/test_broker_boundary.py (1F/41P),
         # tests/test_capabilities_promotion.py (4F/7P),
         # tests/test_engine_registry_scripts.py (1F/3P),
         # tests/test_sessions_e2e.py (7 errors/2P).
+        # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
+        # one red was a stale pre-§19 assertion (offline `dwg` no longer
+        # ignored) — fixed and registered per the #29 fix-then-register rule.
+        # The no-da-imports static invariant + §8 ledger-line schema freeze
+        # gates ride the same lane.
+        Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
+              SERVER, _py_pytest("tests/test_broker_boundary.py"), 43),
+        Suite("server-no-da-imports", "server tests/test_no_da_imports_static.py", "pytest",
+              SERVER, _py_pytest("tests/test_no_da_imports_static.py"), 6),
+        Suite("server-broker-ledger-schema", "server tests/test_broker_ledger_schema_static.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_static.py"), 9),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 14),
