@@ -43,7 +43,9 @@ if str(SERVER_DIR) not in sys.path:
 
 import pytest  # noqa: E402
 
+import agent_gate  # noqa: E402  (reads its env paths per call — safe to import here)
 import session_store  # noqa: E402  (import after env redirect, by design)
+from agent_policy import AgentAction  # noqa: E402
 from routers import agent as agent_router  # noqa: E402
 
 REAL_DB_PATH = SERVER_DIR / "sessions.db"
@@ -285,6 +287,203 @@ def test_decide_expired_but_undecided_still_records_200_not_410(client):
     stored = session_store.get_approval(seed["confirmation_id"])
     assert stored["decided"] is True
     assert stored["approved"] is True
+
+
+# --------------------------------------------------------------------------- #
+# spine unification (census #12 chip 1): a recorded decision bridges into the
+# §18 gate store, whose args-bound record the resume turn's gate consult
+# redeems before any dispatch.
+# --------------------------------------------------------------------------- #
+_WRITE_ACTION = AgentAction(
+    name="run_write_tool", description="", rung=3,
+    required_capability="converse", policy="always_confirm", dispatch={},
+)
+
+
+def _seed_both_stores(tmp_path, monkeypatch, tenant_id: str, gate_ttl_s: int = 300) -> str:
+    """Seed the gate's pending record (it mints the id in the live flow) plus the
+    matching session_store row; return the shared confirmation_id."""
+    monkeypatch.setenv("LEAF_AGENT_APPROVALS_DIR", str(tmp_path / "gate-approvals"))
+    monkeypatch.setenv("LEAF_AGENT_AUDIT", str(tmp_path / "gate-audit.jsonl"))
+    sess = session_store.get_or_create_session(tenant_id, f"drawing-{tenant_id}")
+    record = agent_gate.create_pending(
+        tenant_id=tenant_id, session_id=sess["session_id"], turn_id="turn-bridge",
+        action=_WRITE_ACTION, args={"tool": "add-panel", "params": {"col": 2}},
+        ttl_s=gate_ttl_s,
+    )
+    cid = record["confirmation_id"]
+    session_store.create_approval(
+        cid, sess["session_id"], tenant_id, "turn-bridge",
+        tool="add-panel", params={"col": 2}, capability="drawing.write",
+        rationale="approval required by policy", kind="run_capability",
+        payload=None, ttl_s=300,
+    )
+    return cid
+
+
+def test_decide_approved_bridges_grant_into_gate_store(client, tmp_path, monkeypatch):
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-a")
+    r = client.post(f"/api/agent/approvals/{cid}",
+                    headers=_h("tenant-bridge-a"), json={"approved": True})
+    assert r.status_code == 200, r.text
+    gate_rec = agent_gate.read_pending(cid)
+    assert gate_rec is not None
+    assert gate_rec["granted"] is True
+    assert gate_rec["denied"] is False
+    assert gate_rec["decided_by"] == "tenant-bridge-a"
+
+
+def test_decide_rejected_bridges_deny_into_gate_store(client, tmp_path, monkeypatch):
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-d")
+    r = client.post(f"/api/agent/approvals/{cid}",
+                    headers=_h("tenant-bridge-d"), json={"approved": False})
+    assert r.status_code == 200, r.text
+    gate_rec = agent_gate.read_pending(cid)
+    assert gate_rec is not None
+    assert gate_rec["granted"] is False
+    assert gate_rec["denied"] is True
+
+
+def test_decide_gate_write_failure_aborts_before_recording_then_retry_succeeds(
+        client, tmp_path, monkeypatch):
+    """Gate-first ordering (review round 1 finding): a gate-store write failure
+    must abort the request BEFORE the session_store decision is recorded — the
+    click stays retryable and the stuck divergence 'session row consumed / gate
+    record pending' (which would re-propose an already-consumed id) can never
+    form."""
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-f")
+
+    def _boom(*_a, **_k):
+        raise OSError("gate store write failed")
+
+    orig = agent_gate.grant_approval
+    agent_gate.grant_approval = _boom
+    try:
+        r = client.post(f"/api/agent/approvals/{cid}",
+                        headers=_h("tenant-bridge-f"), json={"approved": True})
+    finally:
+        agent_gate.grant_approval = orig
+
+    assert r.status_code == 503, r.text
+    assert session_store.get_approval(cid)["decided"] is False  # nothing recorded
+    gate_rec = agent_gate.read_pending(cid)
+    assert gate_rec["granted"] is False and gate_rec["denied"] is False
+
+    # The retry lands both stores.
+    r2 = client.post(f"/api/agent/approvals/{cid}",
+                     headers=_h("tenant-bridge-f"), json={"approved": True})
+    assert r2.status_code == 200, r2.text
+    assert agent_gate.read_pending(cid)["granted"] is True
+    assert session_store.get_approval(cid)["decided"] is True
+
+
+def test_decide_gate_expired_answers_410_and_records_nothing(client, tmp_path, monkeypatch):
+    """Approve on an EXPIRED gate record: the gate auto-denies it, so recording
+    a session-side approve would put the two stores in contradiction — 410,
+    nothing recorded (round-2 review finding: outcomes handled, not ignored)."""
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-x", gate_ttl_s=-1)
+    r = client.post(f"/api/agent/approvals/{cid}",
+                    headers=_h("tenant-bridge-x"), json={"approved": True})
+    assert r.status_code == 410, r.text
+    assert session_store.get_approval(cid)["decided"] is False
+    gate_rec = agent_gate.read_pending(cid)
+    assert gate_rec["denied"] is True  # the auto-deny stands
+
+
+def test_decide_contradicting_gate_decision_409_leaves_session_untouched(client, tmp_path, monkeypatch):
+    """The gate already recorded denied: an approve click must refuse (409)
+    rather than let the session row diverge; the SAME-direction retry then
+    completes the session half."""
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-c")
+    agent_gate.deny_approval(cid, by="tenant-bridge-c")
+
+    r = client.post(f"/api/agent/approvals/{cid}",
+                    headers=_h("tenant-bridge-c"), json={"approved": True})
+    assert r.status_code == 409, r.text
+    assert session_store.get_approval(cid)["decided"] is False
+
+    r2 = client.post(f"/api/agent/approvals/{cid}",
+                     headers=_h("tenant-bridge-c"), json={"approved": False})
+    assert r2.status_code == 200, r2.text
+    row = session_store.get_approval(cid)
+    assert row["decided"] is True and row["approved"] is False
+
+
+def test_decide_gate_io_error_answers_503_retryable(client, tmp_path, monkeypatch):
+    """A transient gate-store read failure must be a retryable error, never a
+    silent 'no gate record' that lets the session decision proceed."""
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-io")
+    monkeypatch.setattr(agent_gate, "read_pending_strict", lambda _cid: (None, "io_error"))
+    r = client.post(f"/api/agent/approvals/{cid}",
+                    headers=_h("tenant-bridge-io"), json={"approved": True})
+    assert r.status_code == 503, r.text
+    assert session_store.get_approval(cid)["decided"] is False
+
+
+def test_decide_corrupt_gate_record_proceeds_session_only(client, tmp_path, monkeypatch):
+    """A corrupt gate record reads as absent-equivalent: the session half still
+    records (the gate chain denies that record at resume regardless)."""
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-k")
+    agent_gate._approval_path(cid).write_text("{not json", encoding="utf-8")
+    r = client.post(f"/api/agent/approvals/{cid}",
+                    headers=_h("tenant-bridge-k"), json={"approved": True})
+    assert r.status_code == 200, r.text
+    assert session_store.get_approval(cid)["decided"] is True
+    assert agent_gate.read_pending(cid) is None
+
+
+def test_concurrent_opposite_decisions_never_diverge_stores(client, tmp_path, monkeypatch):
+    """Round-3 review: two OPPOSITE clicks racing must end with the gate file
+    and the session row in agreement — grant/deny are atomic under
+    agent_gate._state_lock, so exactly one decision wins and the loser observes
+    already_decided (409 on contradiction, session untouched)."""
+    import threading as _threading
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from envelopes import install_error_handlers
+
+    app2 = FastAPI()
+    install_error_handlers(app2)
+    app2.include_router(agent_router.router)
+    client2 = TestClient(app2, raise_server_exceptions=False)
+
+    for i in range(12):
+        tenant = f"tenant-race-{i}"
+        cid = _seed_both_stores(tmp_path, monkeypatch, tenant)
+        barrier = _threading.Barrier(2)
+        status = {}
+
+        def _hit(c, approved, key, _cid=cid, _tenant=tenant):
+            barrier.wait()
+            r = c.post(f"/api/agent/approvals/{_cid}",
+                       headers=_h(_tenant), json={"approved": approved})
+            status[key] = r.status_code
+
+        t_a = _threading.Thread(target=_hit, args=(client, True, "approve"))
+        t_d = _threading.Thread(target=_hit, args=(client2, False, "deny"))
+        t_a.start(); t_d.start()
+        t_a.join(10); t_d.join(10)
+
+        gate_rec = agent_gate.read_pending(cid)
+        row = session_store.get_approval(cid)
+        assert gate_rec is not None
+        assert gate_rec["granted"] or gate_rec["denied"], (status, gate_rec)
+        assert row["decided"] is True, (status, row)
+        assert bool(row["approved"]) == bool(gate_rec["granted"]), (status, gate_rec, row)
+
+
+def test_decide_without_gate_record_still_records(client, tmp_path, monkeypatch):
+    """A sessions-wire-only confirmation_id (pre-spine turn) has no gate record:
+    the bridge is a silent not_found and record-only behavior is unchanged."""
+    monkeypatch.setenv("LEAF_AGENT_APPROVALS_DIR", str(tmp_path / "gate-approvals-empty"))
+    monkeypatch.setenv("LEAF_AGENT_AUDIT", str(tmp_path / "gate-audit.jsonl"))
+    seeded = _seed_approval("tenant-nogate")
+    r = client.post(f"/api/agent/approvals/{seeded['confirmation_id']}",
+                    headers=_h("tenant-nogate"), json={"approved": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["resolved"] is True
+    assert agent_gate.read_pending(seeded["confirmation_id"]) is None
 
 
 def test_zzz_real_sessions_db_still_absent():

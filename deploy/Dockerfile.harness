@@ -54,7 +54,7 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
 # F11: authored tenant repositories and grant metadata are writable only through
 # the dedicated non-root harness identity.
 RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home leaf \
-  && mkdir -p /data/tenants /data/grants \
+  && mkdir -p /data/tenants /data/grants /data/sessions \
   && chown -R 10002:10002 /data /home/leaf
 USER 10002:10002
 

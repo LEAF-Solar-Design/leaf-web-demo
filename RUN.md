@@ -110,6 +110,9 @@ is in `server/CONTRACT-ADDENDUM.md`.
 | `BROKER_URL` | `http://127.0.0.1:8140` | app/harness → broker HTTP boundary (§8) |
 | `HARNESS_PORT` | `8150` | Agent-SDK harness sidecar (`§15`) |
 | `LEAF_AUTHOR_HARNESS_URL` | _(unset)_ | app → harness author sidecar; unset = local templater path |
+| `LEAF_APP_URL` | _(unset)_ | harness → app base URL for the §18 converse back-edge (gate consult + dispatch). Unset ⇒ converse lane dark, fail closed (`POST /turn` 501) |
+| `LEAF_APP_DISPATCH_SECRET` | _(unset)_ | X-Dispatch-Secret shared by app + harness (§18.5). **Must be set on BOTH** or the converse lane stays dark (harness) and the back-edge 401s (app). `start-leaf.py --with-harness` mints an ephemeral one per boot |
+| `LEAF_SESSIONS_DIR` | `harness/sessions-data` | harness converse store (sdk resume ids, confirmation mirrors); durable volume in compose (`/data/sessions`) |
 | `LEAF_TENANTS_DIR` | _(unset)_ | base for per-tenant mushy repos (`<base>/<tenant_id>`); **must match on app + harness** (§16.H) |
 | `LEAF_TENANT_REPO` | _(unset)_ | single-repo override for the **demo** tenant (legacy wave-3 mode) |
 | `LEAF_GRANTS_DIR` | `C:/tmp/leaf-grants` | per-tenant Claude token files (harness-only; `mode 0600`, never logged) |

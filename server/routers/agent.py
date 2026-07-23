@@ -12,13 +12,15 @@ Agent surface — UNION of two lanes (merge resolution, 2026-07-21):
 
 Both lanes shipped an approvals route at the same path. The SESSIONS-WIRE one
 wins: the live console (leaf_website) drives turns through the §2.1 turn
-engine, whose `confirmation_required` events create rows in
-server/session_store.py — so tenant decisions must land in THAT store. The
-§18 gate chain's own pending-approval grant path (agent_gate.grant_approval /
-deny_approval) is PARKED pending spine unification: the gate back-edge below
-still records/queries its ledger, but nothing tenant-facing resolves its
-pending records until the two state models are unified (follow-up, named in
-the merge commit).
+engine, whose relayed proposal events create rows in server/session_store.py —
+so tenant decisions land in THAT store first. SPINE UNIFICATION (census #12
+chip 1): with the §18 engine mounted behind POST /turn, the gate mints every
+confirmation_id and holds its own args-bound pending record, so a recorded
+tenant decision is now ALSO bridged into the gate store
+(agent_gate.grant_approval / deny_approval below) — that record is what the
+resume turn's gate consult redeems before dispatching. A confirmation_id with
+no gate record (pre-spine turns) bridges as a silent not_found: record-only
+behavior for those is unchanged.
 
 BACK-EDGE TRUST (wire contract §0): `/internal/agent/gate` is the endpoint the
 harness's canUseTool calls before EVERY conversational tool call. It is gated
@@ -35,9 +37,12 @@ resumes) a turn itself — the client always follows up with a separate
 `POST /sessions/{id}/messages {confirm:{confirmationId, approved}}`.
 Tenant + existence guard (no existence leak): unknown confirmation_id OR one
 owned by another tenant both collapse to the SAME 404 bad_params response.
-Deliberately does NOT check the approval's `expired` flag — an
-expired-but-undecided approval is still recorded; the 410
-confirmation_expired belongs to the SUBSEQUENT /messages{confirm} call.
+The SESSION row's `expired` flag is deliberately not checked here — an
+expired-but-undecided sessions-wire approval is still recorded; its 410
+confirmation_expired belongs to the SUBSEQUENT /messages{confirm} call. A
+GATE-minted record is different: grant on an expired gate record answers 410
+here and records NOTHING (the gate auto-denied it; recording a session-side
+approve would put the two stores in contradiction).
 """
 from __future__ import annotations
 
@@ -132,6 +137,70 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
         # Unknown and cross-tenant collapse to the IDENTICAL response -- no
         # existence leak to a caller who isn't the owning tenant.
         return _not_found(confirmation_id)
+
+    # Spine unification (census #12 chip 1): land the decision in the §18 gate
+    # store FIRST — the resume turn's gate consult redeems THAT args-bound
+    # record before any dispatch. Gate-first ordering is load-bearing: the
+    # session_store row below can only become decidable (and later consumable)
+    # AFTER the gate record is decided, so the stuck divergence "session row
+    # consumed / gate record still pending" (whose re-consult would re-propose
+    # the SAME already-consumed confirmation_id — an undeliverable chip) is
+    # unreachable. Every gate outcome is HANDLED, never ignored (review round 2
+    # finding): the two stores must not record opposite decisions.
+    gate_rec, gate_status = agent_gate.read_pending_strict(confirmation_id)
+    if gate_status == "io_error":
+        return error_response(
+            ErrorCode.INTERNAL,
+            "approval decision not recorded (gate store unreadable) — retry",
+            retryable=True, status_code=503,
+        )
+    if gate_status == "ok":
+        try:
+            if req.approved:
+                ok, rec, reason = agent_gate.grant_approval(confirmation_id, by=str(tenant))
+            else:
+                ok, rec, reason = agent_gate.deny_approval(confirmation_id, by=str(tenant))
+        except Exception as exc:  # noqa: BLE001
+            return error_response(
+                ErrorCode.INTERNAL,
+                f"approval decision not recorded (gate store write failed: "
+                f"{type(exc).__name__}) — retry",
+                retryable=True, status_code=503,
+            )
+        if not ok:
+            if reason == "expired":
+                # grant_approval auto-denied the expired record; recording an
+                # approve session-side would create the exact cross-store
+                # contradiction gate-first ordering exists to prevent.
+                return error_response(
+                    ErrorCode.CONFIRMATION_EXPIRED,
+                    f"confirmation_id {confirmation_id!r} expired before the decision",
+                    retryable=False, status_code=410,
+                )
+            if reason == "already_decided":
+                if bool((rec or {}).get("granted")) != bool(req.approved):
+                    # Contradicts the gate's recorded decision (e.g. an opposite
+                    # click racing a partial earlier failure): refuse rather
+                    # than let the session row diverge from the gate's truth.
+                    return error_response(
+                        ErrorCode.BAD_PARAMS,
+                        f"confirmation_id {confirmation_id!r} already decided",
+                        retryable=False, status_code=409,
+                    )
+                # Same-direction retry completing a partial earlier failure:
+                # fall through and land the session half.
+            elif reason == "not_found":
+                # Existed at the strict read, gone at the write — a raced
+                # rewrite/cleanup. Conservative: retryable, nothing recorded.
+                return error_response(
+                    ErrorCode.INTERNAL,
+                    "approval decision not recorded (gate record raced away) — retry",
+                    retryable=True, status_code=503,
+                )
+    # gate_status absent => a pre-spine sessions-wire-only confirmation_id —
+    # record-only semantics, unchanged. corrupt => the gate chain will deny
+    # that record at resume regardless (malformed reads as absent -> deny),
+    # so the session-side record stays fail-safe.
 
     outcome = session_store.decide_approval(confirmation_id, req.approved, by=str(tenant))
     if outcome == "not_found":
