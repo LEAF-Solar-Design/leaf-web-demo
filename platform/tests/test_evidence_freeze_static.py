@@ -132,6 +132,30 @@ def test_verify_error_vocabulary_matches_doc():
     produced |= set(errors_of(lambda m: m.update(metadata=None)))
     produced |= set(errors_of(lambda m: m["entries"].append("bogus")))
     produced |= set(errors_of(mutate_blobs=lambda b: b.pop("b.json")))
+    # R2 forgery shapes: entry-level smuggling and loose-equality types
+    entry_extra = errors_of(lambda m: m["entries"][0].update(note="unhashed"))
+    assert "invalid_entry" in entry_extra
+    produced |= set(entry_extra)
+    bool_size = errors_of(lambda m: m["entries"][0].update(size=True))
+    assert "invalid_entry" in bool_size
+    produced |= set(bool_size)
+    float_size = errors_of(lambda m: m["entries"][0].update(size=float(m["entries"][0]["size"])))
+    assert "invalid_entry" in float_size
+    produced |= set(float_size)
+    # unhashable path types must return the documented error result, never
+    # raise out of the verifier
+    unhashable = errors_of(lambda m: m["entries"][0].update(path=[]))
+    assert unhashable, "verifier returned no errors for an unhashable path"
+    produced |= set(unhashable)
+    # Windows-separator traversal is refused at build AND verify
+    with pytest.raises(ValueError):
+        evidence.build({"..\\escape": b"x"}, metadata={"k": "v"})
+    with pytest.raises(ValueError):
+        evidence.build({"C:/abs": b"x"}, metadata={"k": "v"})
+    backslash = errors_of(lambda m: m["entries"][0].update(path="..\\escape"),
+                          lambda b: (b.pop("a.json"), b.update({"..\\escape": b"{}"})))
+    assert any(e.startswith("invalid_path:") for e in backslash)
+    produced |= set(backslash)
     # FORGED manifests verify() itself must refuse (R1: these previously
     # returned valid:True — the build-time laws now hold offline too):
     smuggled = errors_of(lambda m: m.update(smuggled="unhashed"))
@@ -250,9 +274,54 @@ def test_history_payload_field_set_frozen():
     section = DOC[start:DOC.index("### 2.3", start)]
     doc_keys = re.findall(r"`(\w+)`", section)
     doc_keys = [k for k in doc_keys if k != "review"]  # operationType token handled below
-    assert doc_keys[:len(code_keys)] == code_keys, (doc_keys, code_keys)
+    # EXACT equality: an appended documented key (doc-only drift) fails too
+    # (sol-critic PR #48 R2 — the prefix compare admitted it).
+    assert doc_keys == code_keys, (doc_keys, code_keys)
     assert '"review.bundle.countersigned"' in SIGNING_SOURCE
     assert "`operationType: review.bundle.countersigned`" in section
+
+
+def test_countersign_precondition_order_pinned():
+    """§2.4's numbered order is pinned BOTH ways (sol-critic PR #48 R2):
+    the code's anchors must appear in countersign() in the documented
+    sequence, and the doc's numbered steps must name them in that order —
+    reordering either side flips this red."""
+    start = SIGNING_SOURCE.index("def countersign(")
+    body = SIGNING_SOURCE[start:]
+    anchors = [
+        'if provider is None',                                # 1 provider
+        'if not idempotency_key',                             # 2 key
+        'signed_at = _now(now)',                              # 3 timestamp
+        'FOR UPDATE"',                                        # 4 project lock
+        'ORDER BY (idempotency_key = %(key)s) DESC LIMIT 1',  # 5 duplicate return
+        '_load_bundle_blobs',                                 # 6 verification
+        '_require_resolved_failures',                         # 8 waivers (7 supersession lives inside _load_bundle_blobs)
+        'FOR UPDATE OF c',                                    # 9 credential lock
+        'payload = {',                                        # signing follows all gates
+    ]
+    positions = []
+    cursor = 0
+    for anchor in anchors:
+        index = body.find(anchor, cursor)
+        assert index >= 0, f"countersign() anchor missing or out of order: {anchor!r}"
+        positions.append(index)
+        cursor = index + 1
+    assert positions == sorted(positions)
+    # supersession is enforced inside _load_bundle_blobs, before waivers
+    helper = SIGNING_SOURCE[SIGNING_SOURCE.index("def _load_bundle_blobs"):SIGNING_SOURCE.index("def _require_resolved_failures")]
+    assert "operation_type NOT IN ('review.bundle.countersigned', 'evidence.root.delivered')" in helper
+    # the doc's numbered steps carry the same order
+    doc_start = DOC.index("### 2.4")
+    doc_section = DOC[doc_start:DOC.index("### 2.5", doc_start)]
+    phrases = ["signature provider is configured", "`Idempotency-Key` is present",
+               "signing timestamp is stamped", "project row is locked",
+               "Idempotent return", "offline verification", "not superseded",
+               "waiver-approved", "credential owned by the acting binding"]
+    cursor = 0
+    for phrase in phrases:
+        index = doc_section.find(phrase, cursor)
+        assert index >= 0, f"doc 2.4 step missing or out of order: {phrase!r}"
+        cursor = index + 1
 
 
 def test_readiness_reason_vocabulary_matches_doc():

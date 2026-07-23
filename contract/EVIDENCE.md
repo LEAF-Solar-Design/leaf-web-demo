@@ -24,7 +24,7 @@ Ground truth: `platform/evidence.py`, `platform/signing.py`, migrations
 | `bundleVersion` | literal `leaf.evidence.v1` |
 | `algorithm` | literal `sha256-merkle-v1` |
 | `metadata` | non-empty JSON object, caller-supplied |
-| `entries` | array of `{path, size, sha256}` — sorted by `path`, unique, relative, traversal-free (no leading `/`, no `..` segment) |
+| `entries` | array of `{path, size, sha256}` — EXACTLY those three keys per entry (`size` a strict integer, never bool/float; `sha256` a string); sorted by `path`, unique; paths are non-empty forward-slash-relative on EVERY platform: no leading `/`, no `..` segment, no backslash anywhere, no drive-letter prefix |
 | `rootSha256` | lowercase hex Merkle root (§1.3) |
 
 ### 1.2 Canonical JSON (`canonical_bytes`)
@@ -110,19 +110,21 @@ deliberate (locks and idempotent returns precede expensive verification):
    whose record already exists (the idempotent return below never runs
    provider-less).
 2. `Idempotency-Key` is present and non-empty.
-3. The project row is locked (`FOR UPDATE`) — the per-project serialization
+3. The signing timestamp is stamped (`signed_at = _now(now)`) — an invalid
+   caller-supplied clock fails here, before any database work.
+4. The project row is locked (`FOR UPDATE`) — the per-project serialization
    point; unknown project fails here.
-4. Idempotent return: an existing record for the same key, or for the same
+5. Idempotent return: an existing record for the same key, or for the same
    `(bundle_id, credential_id)` pair, returns AS-IS — before any bundle,
    supersession, waiver, or credential check. The same key with different
    countersign input errors.
-5. The bundle passes §1.4 offline verification AND its stored `root_sha256`
+6. The bundle passes §1.4 offline verification AND its stored `root_sha256`
    matches — a bundle that cannot be re-verified cannot be signed.
-6. The bundle is not superseded: no later history operation other than
+7. The bundle is not superseded: no later history operation other than
    `review.bundle.countersigned` / `evidence.root.delivered` exists.
-7. Every failing compliance finding is waiver-approved — unresolved failures
+8. Every failing compliance finding is waiver-approved — unresolved failures
    block with the finding ids named.
-8. Active, unexpired credential owned by the acting binding; provider
+9. Active, unexpired credential owned by the acting binding; provider
    algorithm matches the credential's `signature_algorithm`; a second
    duplicate check runs after the credential lock (a competing request may
    have committed while this one waited).
