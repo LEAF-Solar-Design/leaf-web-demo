@@ -1144,3 +1144,18 @@ guest-session header in `require_tenant`.
 freshly created account (the UI copy never promises it — "Create account"
 starts a signed-in workspace); OSS-backed guest storage; DWG extraction
 without APS.
+
+## §20 Production authored-execution containment
+
+The broker uses `LEAF_RUNTIME_ENV=production` as its explicit production
+posture. In that posture, `LEAF_AUTHORED_EXECUTION` defaults to off.
+
+Tracked implementations under `server/builtins/` and APS-only tools remain
+available. A local Python implementation resolved from a tenant repository or
+`server/authored/` is denied before `run_tool_dynamic` can import or execute
+the file.
+
+Setting `LEAF_AUTHORED_EXECUTION=1` in production also requires
+`LEAF_SANDBOX=e2b` or `LEAF_SANDBOX=e2b-microvm`. Broker startup fails when
+that combination is incomplete. Local and demo deployments that do not set
+`LEAF_RUNTIME_ENV=production` keep their existing behavior.

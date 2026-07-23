@@ -541,6 +541,26 @@ def resolve_local_file(tool: Dict[str, Any], tenant_id: Optional[str] = None) ->
     return None
 
 
+def is_trusted_builtin_tool(tool: Dict[str, Any],
+                            tenant_id: Optional[str] = None) -> bool:
+    """Return whether this run cannot load tenant-controlled Python in the broker.
+
+    A tool with no local Python implementation uses APS or fails normally, so it
+    does not execute a file in this process. A local implementation is trusted
+    only when resolution lands inside the tracked ``server/builtins`` tree.
+    Resolution checks the requesting tenant first, so a tenant file that shadows
+    a builtin-looking path remains untrusted.
+    """
+    local = resolve_local_file(tool, tenant_id)
+    if local is None:
+        return True
+    try:
+        local.resolve().relative_to(BUILTIN_DIR.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _needs_aps(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> bool:
     """True when the tool has no local .py and must run on APS DA."""
     return resolve_local_file(tool, tenant_id) is None
