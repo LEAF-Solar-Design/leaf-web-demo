@@ -59,6 +59,25 @@ def create_org(name: str, tier: str = "hosted_starter",
         return Org.from_row(cur.fetchone())
 
 
+def set_org_tier(org_id: uuid.UUID, tier: str) -> Optional[Org]:
+    """Billing-driven stored-tier update (contract/BILLING.md §3).
+
+    Guarded to ACTIVE rows in the same statement (TOCTOU: an org offboarded
+    between the caller's read and this write is left untouched — offboarding
+    state must never be resurrected into a billable tier). Returns the updated
+    row, or ``None`` when no active row matched.
+    """
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE orgs SET tier = %(tier)s "
+            "WHERE org_id = %(org_id)s AND status = 'active' "
+            "RETURNING org_id, name, tier, status, created_at, offboarded_at",
+            {"org_id": org_id, "tier": tier},
+        )
+        row = cur.fetchone()
+        return Org.from_row(row) if row else None
+
+
 def create_org_with_identity(name: str, external_authority: str, external_subject: str, *,
                              tier: str = "hosted_starter") -> Org:
     """Atomically bootstrap an org and its first verified identity binding.

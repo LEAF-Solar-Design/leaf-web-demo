@@ -3,10 +3,12 @@
 Addendum to the **frozen** `contract/CONTRACT.md` (§1–§6, unchanged) and the
 `server/CONTRACT-ADDENDUM.md` backbone (§7–§10, unchanged). This document owns
 **Concern 1 — Leaf platform identity**. It is behind an env toggle; with the
-toggle off the demo is byte-identical to today. Nothing here is frozen until an
-operator promotes it.
+toggle off the demo is byte-identical to today. Nothing here was frozen at
+authoring time; **§11 (claim namespace + tier vocabulary) is now FROZEN** —
+promoted 2026-07-23 by the census item-5 dispatch, gated by
+`server/tests/test_auth_vocab_freeze.py`.
 
-Lane: `auth0-identity-signup`. Session date: 2026-07-17.
+Lane: `auth0-identity-signup`. Session date: 2026-07-17. §11 added 2026-07-23.
 
 ---
 
@@ -298,3 +300,56 @@ node server/auth0-actions/credentials-exchange-add-tenant-claim.test.js
 
 Before deployment, capture the current client metadata and the current
 `credentials-exchange` bindings. Roll back by restoring both captured values.
+
+---
+
+## 11. FROZEN — claim namespace + tier vocabulary (promoted 2026-07-23)
+
+Frozen ahead of enterprise onboarding (census item 5). Gate:
+`server/tests/test_auth_vocab_freeze.py` (registered in
+`scripts/run-all-gates.py`) — it asserts every layer below agrees, so a drift
+in any one copy fails the build. Growing any of these sets is an
+operator-promotion ritual: amend this section and the gate test in the same PR.
+
+**11.1 Claim namespace (frozen string):**
+
+```
+https://leafdesign.ai/
+```
+
+Agreeing copies: `server/auth.py DEFAULT_CLAIM_NS`, the Post-Login Action
+(`server/auth0-actions/post-login-add-tenant-claim.js CLAIM_NS`), the M2M
+credentials-exchange Action. `LEAF_TENANT_CLAIM_NS` remains an env override
+for test rigs only; production uses the frozen default.
+
+**11.2 Tier vocabulary (frozen, 6 members):**
+
+| Tier | Class | Meaning |
+|---|---|---|
+| `demo` | server-resolved | off-auth open-demo identity (full access, `LEAF_AUTH_LIVE=0`) |
+| `guest` | server-resolved | ephemeral signed-out upload identity (§19) |
+| `restricted` | claim-mintable | authenticated but lapsed/unprovisioned — read-only floor |
+| `self_hosted` | claim-mintable | enterprise / BYO-infrastructure seat |
+| `hosted_starter` | claim-mintable | entry hosted seat (default for new/solo users) |
+| `hosted_pro` | claim-mintable | full hosted seat |
+
+The **claim-mintable subset** {`restricted`, `self_hosted`, `hosted_starter`,
+`hosted_pro`} is the only vocabulary a verified identity can carry (JWT tier
+claim, stored org tier). `demo`/`guest` are server-resolved identities and
+must never be minted into a token or stored as an org's billing tier.
+Agreeing copies: `server/entitlements.json` keys, `server/entitlements.py
+_HARDCODED_DEFAULTS` (byte-identical mirror), `server/billing_tiers.py
+TIER_VOCABULARY`/`CLAIM_TIERS`, the Action's `PLAN_TIER` values, and the
+platform lane's fail-closed literal (`platform/entitlements.py`).
+
+**11.3 Capability vocabulary (frozen, 9 members):**
+
+`run_read`, `run_write`, `solve`, `build`, `converse`,
+`agent_write_autopilot`, `deploy`, `platform_customize`, `upload`
+(`server/entitlements.py CAPABILITIES` + every `entitlements.json` entry —
+per-tier boolean values stay operator-tunable; the KEY SET is what is frozen).
+
+**11.4 Billing note:** the plan→tier mapping that FEEDS this vocabulary is
+canonicalized in `server/billing_tiers.py` and parity-gated against the
+hand-pasted Action copy (`server/tests/test_billing_tiers.py`). See
+`contract/BILLING.md` for the subscription → tier design.
