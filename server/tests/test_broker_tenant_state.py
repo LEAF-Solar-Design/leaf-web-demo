@@ -157,3 +157,20 @@ def test_ops_write_refuses_a_corrupt_record_instead_of_typeerror(tmp_path, monke
     assert broker.tenant_disabled("t-ok") is True
     broker.set_tenant_disabled("t-fresh", True)
     assert broker.tenant_disabled("t-fresh") is True
+
+
+def test_interrupted_tenant_state_publish_preserves_disk_and_memory(tmp_path, monkeypatch):
+    broker = _broker_with_tenants(
+        tmp_path, monkeypatch, '{"t-off": {"disabled": false, "tier": "hosted_pro"}}')
+    before = broker.TENANTS_PATH.read_bytes()
+
+    def interrupted_replace(_source, _destination):
+        raise OSError("simulated interruption before atomic replace")
+
+    monkeypatch.setattr(broker.os, "replace", interrupted_replace)
+    with pytest.raises(OSError, match="simulated interruption"):
+        broker.set_tenant_disabled("t-off", True)
+
+    assert broker.TENANTS_PATH.read_bytes() == before
+    assert broker.tenant_disabled("t-off") is False
+    assert list(tmp_path.glob(".broker_tenants.json.*.tmp")) == []

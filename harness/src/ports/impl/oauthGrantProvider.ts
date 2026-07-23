@@ -11,15 +11,27 @@
  * two different concerns with two different cardinalities. They must never mingle.
  *
  * Wave 4 (multi-tenant): the grant is resolved from a PER-TENANT store keyed by
- * tenantId. `FileTenantGrantStore` persists one token file per tenant under
- * `$LEAF_GRANTS_DIR/<tenantId>.token` (default C:/tmp/leaf-grants). The token VALUE is
- * only ever returned inside the AgentGrant or written to its own file; it is NEVER
+ * tenantId. `FileTenantGrantStore` persists one private atomic record per tenant under
+ * `$LEAF_GRANTS_DIR/<tenantId>.grant.json` (default C:/tmp/leaf-grants). The token VALUE is
+ * only ever returned inside the AgentGrant or written to that record; it is NEVER
  * printed or logged here. A real deployment swaps the file store for a vault / DPAPI
  * secret store (same interface).
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { DEFAULT_TENANT } from "../index.js";
 import type {
   AgentGrant,
@@ -142,6 +154,42 @@ function grantKindFileName(tenantId: string): string {
   return `${safeBase(tenantId)}.kind`;
 }
 
+function grantRecordFileName(tenantId: string): string {
+  return `${safeBase(tenantId)}.grant.json`;
+}
+
+interface PersistedGrantRecord {
+  version: 1;
+  kind: GrantKind;
+  token: string;
+}
+
+function writePrivateFileAtomic(path: string, content: string): void {
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let fd: number | null = null;
+  try {
+    fd = openSync(tmp, "wx", 0o600);
+    writeFileSync(fd, content, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(tmp, path);
+    try {
+      const dirFd = openSync(dirname(path), "r");
+      try {
+        fsyncSync(dirFd);
+      } finally {
+        closeSync(dirFd);
+      }
+    } catch {
+      // Windows does not permit opening directories for fsync.
+    }
+  } finally {
+    if (fd !== null) closeSync(fd);
+    rmSync(tmp, { force: true });
+  }
+}
+
 export interface FileTenantGrantStoreOptions {
   /** Default: env LEAF_GRANTS_DIR, then C:/tmp/leaf-grants. */
   dir?: string;
@@ -152,17 +200,17 @@ export interface FileTenantGrantStoreOptions {
 }
 
 /**
- * PER-TENANT file grant store (wave 4). One file per tenant:
- * `$LEAF_GRANTS_DIR/<tenantId>.token`. Implements both the read side
+ * PER-TENANT file grant store (wave 4). New writes use one atomic
+ * `$LEAF_GRANTS_DIR/<tenantId>.grant.json` record. Implements both the read side
  * (`TenantGrantStore.get`, used by OAuthGrantProviderImpl) and the admin side
  * (`TenantGrantAdminStore`, backing the harness /grants endpoints).
  *
- * Secret discipline: the token is written to / read from its own file and returned only
+ * Secret discipline: the token is written to / read from a private record and returned only
  * inside an AgentGrant. `status()` NEVER reads-and-returns the token — only linked +
- * mtime + kind. Nothing here logs the token. `linked_at` is the token file's mtime.
+ * mtime + kind. Nothing here logs the token. `linked_at` is the active record's mtime.
  *
  * Grant KIND (§17): the credential kind (`oauth` per-user token vs `api_key` enterprise
- * BYO key) is persisted in a sidecar `<tid>.kind` file. On `put`, an omitted kind is
+ * BYO key) is persisted with the token in the atomic record. On `put`, an omitted kind is
  * AUTO-DETECTED from the token prefix. On `get`, an api_key grant surfaces as
  * `{kind:"api_key", apiKey}` (→ `ANTHROPIC_API_KEY`); an oauth grant as
  * `{kind:"oauth", oauthToken}` (→ `CLAUDE_CODE_OAUTH_TOKEN`). A legacy token file with
@@ -191,6 +239,33 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     return join(this.dir, grantKindFileName(tenantId));
   }
 
+  private recordFile(tenantId: string): string {
+    return join(this.dir, grantRecordFileName(tenantId));
+  }
+
+  private readRecord(tenantId: string): PersistedGrantRecord | null {
+    const p = this.recordFile(tenantId);
+    if (!existsSync(p)) return null;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
+    }
+    const candidate = raw as Partial<PersistedGrantRecord>;
+    if (
+      typeof raw !== "object" ||
+      raw === null ||
+      candidate.version !== 1 ||
+      (candidate.kind !== "oauth" && candidate.kind !== "api_key") ||
+      typeof candidate.token !== "string" ||
+      !candidate.token.trim()
+    ) {
+      throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
+    }
+    return { version: 1, kind: candidate.kind, token: candidate.token.trim() };
+  }
+
   private readToken(tenantId: string): string | null {
     const p = this.file(tenantId);
     if (!existsSync(p)) return null;
@@ -207,6 +282,9 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
   }
 
   async get(tenantId: string): Promise<AgentGrant | null> {
+    const record = this.readRecord(tenantId);
+    if (record) return grantFor(record.kind, record.token);
+
     const tok = this.readToken(tenantId);
     if (tok) {
       // Sidecar kind wins; a legacy file with no sidecar falls back to prefix detection.
@@ -219,20 +297,23 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
 
   async put(tenantId: string, token: string, kind?: GrantKind): Promise<GrantStatus> {
     const t = (token ?? "").trim();
+    if (!t) throw new Error("grant token must not be empty");
     const k: GrantKind = kind ?? detectGrantKind(t);
     mkdirSync(this.dir, { recursive: true });
-    // 0600 where the platform honors it; content is the raw token and is NEVER logged.
-    writeFileSync(this.file(tenantId), t, { encoding: "utf8", mode: 0o600 });
-    writeFileSync(this.kindFile(tenantId), k, { encoding: "utf8", mode: 0o600 });
-    // `mode:` applies only at CREATION — an overwrite keeps the file's old bits
-    // (sol-critic F7). Tighten explicitly on every write; no-op on Windows,
-    // load-bearing on the Linux container volume.
-    chmodSync(this.file(tenantId), 0o600);
-    chmodSync(this.kindFile(tenantId), 0o600);
+    writePrivateFileAtomic(
+      this.recordFile(tenantId),
+      JSON.stringify({ version: 1, kind: k, token: t } satisfies PersistedGrantRecord) + "\n",
+    );
     return this.status(tenantId);
   }
 
   async status(tenantId: string): Promise<GrantStatus> {
+    const recordPath = this.recordFile(tenantId);
+    const record = this.readRecord(tenantId);
+    if (record) {
+      return { linked: true, linked_at: statSync(recordPath).mtime.toISOString(), kind: record.kind };
+    }
+
     const p = this.file(tenantId);
     if (existsSync(p)) {
       const raw = readFileSync(p, "utf8").trim();
@@ -249,6 +330,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
   }
 
   async remove(tenantId: string): Promise<void> {
+    rmSync(this.recordFile(tenantId), { force: true });
     rmSync(this.file(tenantId), { force: true });
     rmSync(this.kindFile(tenantId), { force: true });
   }
@@ -259,7 +341,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
  * rest is selectable via env `LEAF_GRANT_STORE`, so a production deployment can swap the
  * on-disk file store for a sealed secret store WITHOUT touching call sites:
  *
- *   - `file`  (DEFAULT): `FileTenantGrantStore` — one mode-0600 token file per tenant
+ *   - `file`  (DEFAULT): `FileTenantGrantStore` — one mode-0600 grant record per tenant
  *             under `$LEAF_GRANTS_DIR`. The demo / single-operator default.
  *   - `vault`: a production secret store (HashiCorp Vault / AWS Secrets Manager /
  *             Windows DPAPI). NOT IMPLEMENTED here — this is the documented seam.
