@@ -199,6 +199,8 @@ def build_suites() -> List[Suite]:
         # --- gate entries; every count below measured one-process-per-file)   --- #
         Suite("server-catalog-version-pin", "server tests/test_catalog_and_version_pin.py",
               "pytest", SERVER, _py_pytest("tests/test_catalog_and_version_pin.py"), 21),
+        Suite("server-live-lsp-resolution", "server tests/test_live_lsp_resolution.py",
+              "pytest", SERVER, _py_pytest("tests/test_live_lsp_resolution.py"), 2),
         Suite("server-job-dwg-version", "server tests/test_job_dwg_version_persist.py",
               "pytest", SERVER, _py_pytest("tests/test_job_dwg_version_persist.py"), 5),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
