@@ -123,6 +123,21 @@ services:
       # Empty => /internal/agent/gate and the dispatch back-edge answer 401
       # (fail closed) and the harness keeps the converse lane dark.
       LEAF_APP_DISPATCH_SECRET: ${LEAF_APP_DISPATCH_SECRET:-}
+      # --- Agent gate-chain state (§18 / census #12 chip 3): every MUTABLE gate
+      # artifact is pinned under /data/state (leaf-state volume) so the kill
+      # switch, pending approvals, session grants, rate budgets, audit + turn
+      # ledger and per-tenant flags all survive an app-container restart. The
+      # policy CATALOG is deliberately NOT state: it is versioned config, baked
+      # into the image from server/agent_policy.json (edit via git + rebuild;
+      # the gate re-reads it per request). Drills: docs/AGENT-OPS-RUNBOOK.md.
+      LEAF_AGENT_POLICY_FILE: /app/server/agent_policy.json      # versioned config (git-owned, in-image)
+      LEAF_AGENT_KILL_FILE: /data/state/agent.disabled           # file-presence kill switch, NO API off-toggle (§5)
+      LEAF_AGENT_APPROVALS_DIR: /data/state/agent_approvals      # durable pending approvals (TTL = policy approval_ttl_s)
+      LEAF_AGENT_GRANTS_FILE: /data/state/agent_session_grants.json  # confirm-once session grants
+      LEAF_AGENT_RATE_FILE: /data/state/agent_rate_state.json    # per-tenant per-hour budget snapshot (the authority)
+      LEAF_AGENT_AUDIT: /data/state/agent_audit.jsonl            # append-only gate-decision audit
+      LEAF_AGENT_LEDGER: /data/state/agent_ledger.jsonl          # append-only per-turn metering ledger
+      LEAF_AGENT_TENANTS_FILE: /data/state/agent_tenants.json    # per-tenant kill flag + tighten-only overlay (ops surface writes)
       # --- operator opt-in: platform Project/Job persistence (Neon/Postgres) ---
       DATABASE_URL: ${DATABASE_URL:-}                  # empty => platform DB endpoints stay dark (demo-safe)
     volumes:
@@ -174,7 +189,9 @@ services:
 #                   Dropping it burns in-flight approvals fail-safe (the gate denies the
 #                   foreign-session redemption; the user simply re-proposes).
 #   leaf-drawings : versioned drawing store      — SHARED app <-> broker (write loop)
-#   leaf-state    : broker ledger + kill-switch + app jobs.db — SHARED app <-> broker
+#   leaf-state    : broker ledger + kill-switch + app jobs.db + agent gate-chain
+#                   state (agent.disabled, agent_approvals/, grants, rate, audit,
+#                   ledger, agent_tenants.json)  — SHARED app <-> broker
 volumes:
   leaf-tenants:
   leaf-grants:
