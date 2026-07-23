@@ -1,6 +1,6 @@
 # Agent Spine - Conversational Platform Design
 
-**Status:** Draft accepted 2026-07-20 · Phase-1 shipped (census #12 chips 1–5) · Contract §18 **FROZEN 2026-07-23** (chip 5; freeze gate `server/tests/test_contract_freeze.py`, suite `server-contract-freeze`).
+**Status:** Draft accepted 2026-07-20 · Phase-1 shipped (census #12 chips 1–5) · Contract §18 **FROZEN 2026-07-23** (chip 5; freeze gate `server/tests/test_contract_freeze.py`, suite `server-contract-freeze`). **Where this document and the ADDENDUM's implementation notes disagree, the ADDENDUM wins**: the live wire carries NO ContextPacket (`context_packet.py` is a frozen PARKED schema — ADDENDUM 18.1 note), and the SSE relay serves per-client store-poll loops (the shared per-session fan-out is ledgered Phase-2 debt — ADDENDUM 18.2 note). Design prose below describing those two behaviors is the frozen DESIGN for spine unification, not a claim about today's wire.
 
 - Wire/contract surface (normative): [`../server/CONTRACT-ADDENDUM.md`](../server/CONTRACT-ADDENDUM.md) §18 — mirrored in section 3 below.
 - Mission canon: the operator's mission file (MISSION canon, ratified 2026-07-17) — referenced by name only; positioning statements in this document must not drift from it.
@@ -98,7 +98,8 @@ Four processes today; the spine adds no fifth. New spine components are marked `
         │   POST /api/nl-prompt ─ deterministic classifier (frozen §12,     │
         │        the degraded-mode floor; routers/prompt.py:39-49)          │
         │   routers/sessions.py (NEW, §18) ─ session CRUD, message intake,  │
-        │        SSE relay (one upstream per session, fan-out to N tabs)    │
+        │        SSE relay (per-client store-poll loops today; shared       │
+        │        per-session fan-out = Phase-2 debt, ADDENDUM 18.2 note)    │
         │   POST /internal/agent/gate (NEW) ─ full policy gate chain        │
         │   agent_policy / agent_gate / agent_ledger / agent_audit (NEW)    │
         │   context_packet.py (NEW) ─ turn context, hard cap ≈1.2K tokens   │
@@ -399,8 +400,8 @@ All response bodies carry the §10 envelope fields (`error`, `degraded_mode`;
 |---|---|---|
 | POST | `/api/sessions` | `{drawing_id, project_id?}` → `{session_id, status, created_at}`. Idempotent per (tenant, drawing). Requires the `converse` entitlement; denial is the standard 403 `ENTITLEMENT_REQUIRED` shape (`server/entitlements.py:123–134`). |
 | GET | `/api/sessions?drawing_id=` | `{sessions:[…]}`, own-tenant only. |
-| POST | `/api/sessions/{id}/messages` | `{text?, confirm?, classifier_hint?}` (exactly one of text/confirm) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The app assembles the ContextPacket (`server/context_packet.py`, new) and forwards to the harness with the resolved tenant id. |
-| GET | `/api/sessions/{id}/stream?after_seq=` | SSE relay of the harness stream (§18.3). One upstream connection per session, fan-out to N clients; `after_seq` passes through for replay. |
+| POST | `/api/sessions/{id}/messages` | `{text?, confirm?, classifier_hint?}` (exactly one of text/confirm) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. *(Superseded by the live wire — ADDENDUM 18.1 note: the app forwards the frozen §2.1 `ConverseTurnInput` with NO ContextPacket; `context_packet.py` is a frozen parked schema.)* |
+| GET | `/api/sessions/{id}/stream?after_seq=` | SSE relay (§18.3). *(Live implementation: per-client store-poll loops over the durable event log; the one-upstream-fan-out design is Phase-2 — ADDENDUM 18.2 note.)* `after_seq` replays for reconnect. |
 | GET | `/api/sessions/{id}/transcript?limit=` | Passthrough of the harness transcript (most recent N events, ascending seq). |
 | DELETE | `/api/sessions/{id}` | Archive; passthrough → `{archived:true}`. |
 | POST | `/api/agent/approvals/{confirmation_id}` | `{approved: bool}` → `{resolved:true, approved}`. Records the decision in the app's pending store. Does **not** start the resume turn — the client posts the confirm message separately. |
@@ -619,6 +620,11 @@ grants — `entitlements.py:103`, verified), so the four new flags fail closed o
 policy file and every stale deployment that has not adopted them.
 
 ### 4.4 ContextPacket — the 1.2K-token budget
+
+> **PARKED at the live wire (frozen schema).** No packet ships on `POST /turn`
+> today (ADDENDUM 18.1 note; `build_packet` has no live caller). This section
+> is the frozen DESIGN for spine unification; the schema itself is pinned by
+> `tests/test_contract_freeze.py` so it cannot drift while parked.
 
 The app assembles one packet per turn (`server/context_packet.py`) and the harness injects it
 as a **user-message prefix — never into the system block** — so the cacheable prefix of §4.2

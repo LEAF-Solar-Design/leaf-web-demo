@@ -912,17 +912,26 @@ Every route verifies the supplied `tenantId` matches the session's tenant; a mis
 returns 404 `{error:"session_not_found"}` — the harness-side twin of the app's
 no-existence-oracle rule.
 
-### 18.3 SSE event vocabulary (both hops)
+### 18.3 SSE event vocabulary (the stream vocabulary, and who emits what)
 
-Identical on the harness→app and app→browser hops. One JSON object per SSE `data:`
-line; the SSE event name equals `type`. Envelope:
+> **FROZEN AS THE LIVE WIRE IS (chip 5, 2026-07-23).** The 12-type table below
+> is the full STREAM vocabulary a browser client can observe. The two hops are
+> NOT identical (the original "identical on both hops" claim was the §18-era
+> proxy design): the harness→app NDJSON hop (`POST /turn`) emits exactly the
+> 9-member `HarnessTurnEvent` union (`harness/src/ports/converse.ts`) —
+> `turn_started`, `confirmation_resolved`, and `session_state` are synthesized
+> APP-SIDE by the turn engine/store (`server/turn_runner.py`,
+> `server/session_store.py`). `seq` is a per-session monotonically increasing
+> integer persisted in the APP's session store (`server/session_store.py`,
+> `session_events` — NOT the harness sessions.db, which serves only the parked
+> 18.2 mirror), and that is what makes `after_seq` replay (reconnect, second
+> tab) exact. Pinned by `tests/test_contract_freeze.py`.
+
+One JSON object per SSE `data:` line; the SSE event name equals `type`. Envelope:
 
 ```json
 {"v": 1, "session_id": "…", "turn_id": "…", "seq": 42, "type": "…", "data": { }}
 ```
-
-`seq` is a per-session monotonically increasing integer persisted in the harness
-sessions.db, which is what makes `after_seq` replay (reconnect, second tab) exact.
 
 | type | data payload | Notes |
 |---|---|---|

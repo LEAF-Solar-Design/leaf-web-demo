@@ -163,12 +163,74 @@ STOP_REASONS = {"end_turn", "awaiting_approval", "cap_hit", "llm_rate_limited",
                 "llm_quota_exhausted", "error", "timeout"}
 
 
-def _ts_block(source: str, anchor: str) -> str:
-    """Anchor through the interface's own closing brace (column 0), so nested
-    inline object types don't truncate the slice."""
+import re as _re
+
+
+def _ts_balanced_block(source: str, anchor: str) -> str:
+    """Anchor through its MATCHING closing brace (brace-counted), so nested
+    inline object types can neither truncate nor extend the slice."""
     start = source.index(anchor)
-    end = source.index("\n}", start)
-    return source[start:end]
+    open_idx = source.index("{", start)
+    depth = 0
+    for i in range(open_idx, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    raise AssertionError(f"unbalanced braces after {anchor!r}")
+
+
+def _ts_union_literals(source: str, anchor: str) -> set:
+    """The members of a TS union from `anchor` to its terminating ';'.
+    EVERY member must be a quoted lowercase literal — a permissive member
+    (`| string`, a template type, anything unquoted) FAILS the freeze
+    instead of being silently ignored."""
+    start = source.index(anchor)
+    body = source[start:source.index(";", start)]
+    # Drop the introducer (`type X =` / `type:`), keep the union body.
+    intro_end = max(body.find("="), body.find(":"))
+    members = [m.strip() for m in body[intro_end + 1:].split("|") if m.strip()]
+    literals = set()
+    for member in members:
+        match = _re.fullmatch(r'"([a-z_]+)"', member)
+        assert match, f"non-literal union member {member!r} under {anchor!r}"
+        literals.add(match.group(1))
+    return literals
+
+
+def _ts_field_names(block: str) -> set:
+    """Field names declared at depth 1 of a brace-balanced interface block —
+    nested object-literal fields don't count, and any ADDED field shows up."""
+    names = set()
+    depth = 0
+    for raw in block.splitlines():
+        if depth == 1:
+            match = _re.match(r"(\w+)\??\s*:", raw.strip())
+            if match:
+                names.add(match.group(1))
+        depth += raw.count("{") - raw.count("}")
+    return names
+
+
+def _s183_table_types() -> list:
+    """Every §18.3 table row's event type. ANY data row whose first cell does
+    not contain exactly one backticked lowercase name fails loudly — a
+    decorated rogue row (`| **`x`** |`) cannot hide from the freeze."""
+    s183 = ADDENDUM[ADDENDUM.index("### 18.3"):ADDENDUM.index("### 18.4")]
+    types = []
+    for line in s183.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        first_cell = stripped.split("|")[1].strip()
+        if first_cell in ("type", "") or set(first_cell) <= {"-"}:
+            continue  # header / separator rows
+        match = _re.search(r"`([a-z_]+)`", first_cell)
+        assert match, f"§18.3 row with an unparseable type cell: {stripped[:60]!r}"
+        types.append(match.group(1))
+    return types
 
 
 def test_s18_header_frozen():
@@ -181,46 +243,50 @@ def test_s18_header_frozen():
 
 
 def test_s18_sse_vocabulary_frozen():
-    # Doc table: first backticked cell of each §18.3 row.
-    s183 = ADDENDUM[ADDENDUM.index("### 18.3"):ADDENDUM.index("### 18.4")]
-    doc_types = {line.split("`")[1] for line in s183.splitlines()
-                 if line.startswith("| `")}
-    assert doc_types == S18_STREAM_TYPES, (
-        f"§18.3 table drifted: {sorted(doc_types ^ S18_STREAM_TYPES)}")
-    # Harness union: the string literals of HarnessTurnEvent.type.
-    import re
-    union = set(re.findall(r'"([a-z_]+)"', _ts_block(CONVERSE_TS, "export interface HarnessTurnEvent")))
+    doc_types = _s183_table_types()
+    assert len(doc_types) == len(S18_STREAM_TYPES) and set(doc_types) == S18_STREAM_TYPES, (
+        f"§18.3 table drifted: rows={doc_types}")
+    union = _ts_union_literals(
+        _ts_balanced_block(CONVERSE_TS, "export interface HarnessTurnEvent"), "type:")
     assert union == HARNESS_EVENT_TYPES, (
         f"HarnessTurnEvent union drifted: {sorted(union ^ HARNESS_EVENT_TYPES)}")
-    stop = set(re.findall(r'"([a-z_]+)"',
-                          CONVERSE_TS[CONVERSE_TS.index("export type StopReason"):
-                                      CONVERSE_TS.index(";", CONVERSE_TS.index("export type StopReason"))]))
+    stop = _ts_union_literals(CONVERSE_TS, "export type StopReason")
     assert stop == STOP_REASONS, f"StopReason drifted: {sorted(stop ^ STOP_REASONS)}"
 
 
 def test_s21_turn_input_field_set_frozen_no_packet():
     """The live wire is §2.1 ConverseTurnInput — NO ContextPacket field.
-    (test_sessions_router.py pins the runtime body; this pins the port type.)"""
-    block = _ts_block(CONVERSE_TS, "export interface ConverseTurnInput")
-    for field in ("tenant_id", "session_id", "turn_id", "drawing_id",
-                  "messages", "text?", "confirm?"):
-        assert field in block, f"ConverseTurnInput lost {field}"
+    (test_sessions_router.py pins the runtime body; this pins the port type.)
+    The field SET is exact: an added field fails, not just a removed one."""
+    block = _ts_balanced_block(CONVERSE_TS, "export interface ConverseTurnInput")
+    assert _ts_field_names(block) == {"tenant_id", "session_id", "turn_id",
+                                      "drawing_id", "messages", "text",
+                                      "confirm"}, (
+        f"ConverseTurnInput field set drifted: {sorted(_ts_field_names(block))}")
     assert "contextPacket" not in block and "context_packet" not in block, (
         "ConverseTurnInput grew a packet field — that is a §2.1 wire change, "
         "not a drive-by")
 
 
 def test_context_packet_schema_frozen(monkeypatch, tmp_path):
-    """Frozen field set + size-discipline constants of the parked module."""
+    """Frozen field set, ROW sub-shapes, and size-discipline constants of the
+    parked module — a projection row gaining or losing a key fails here."""
     monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
     monkeypatch.delenv("LEAF_CONVERSE_HARNESS_URL", raising=False)
     monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
     import context_packet
     import deps as deps_mod
+    import jobs as jobs_mod
     monkeypatch.setattr(deps_mod, "all_tools", lambda tid=None: [
         {"name": "tool-000", "version": "1.0.0",
          "description": "counts panels per layer",
-         "capabilities": ["drawing.read"]}])
+         "capabilities": ["drawing.read"],
+         "engine_op": "count_by_layer"}])
+    # One live job with EXTRA upstream keys: the projection must keep exactly
+    # {job_id, tool, status} — nothing more leaks, nothing gets dropped.
+    monkeypatch.setattr(jobs_mod, "list_jobs", lambda tid, limit=25: [
+        {"job_id": "job-1", "tool": "tool-000", "status": "queued",
+         "params": {"secret": "never"}, "attempt": 1}])
     packet = context_packet.build_packet("freeze-tenant", "freeze-drawing")
     assert set(packet) == {"catalog", "catalog_hash", "drawing", "versions",
                            "checkout", "entitlements", "active_jobs", "grant",
@@ -228,6 +294,22 @@ def test_context_packet_schema_frozen(monkeypatch, tmp_path):
     assert set(packet["drawing"]) == {"id", "head_version", "layers", "entity_total"}
     assert set(packet["checkout"]) == {"held_by", "expires_at"}
     assert set(packet["grant"]) == {"kind", "degraded"}
+    # Row sub-shapes (frozen):
+    assert [set(row) for row in packet["catalog"]] == [{"name", "description", "capabilities"}]
+    assert [set(row) for row in packet["active_jobs"]] == [{"job_id", "tool", "status"}]
+    # Entitlement KEY SET = the frozen §11.3 capability vocabulary (AUTH.md).
+    assert set(packet["entitlements"]) == {
+        "run_read", "run_write", "solve", "build", "converse",
+        "agent_write_autopilot", "deploy", "platform_customize", "upload",
+    }, "entitlement capability key set drifted from the §11.3 freeze"
+    assert packet["classifier_hint"] is None
+    # versions/layer row shapes have no hermetic manifest to build from —
+    # frozen as source pins on the projection literals instead.
+    src = (SERVER_DIR / "context_packet.py").read_text(encoding="utf-8")
+    assert '"version": int(e["v"])' in src and '"ts": e.get("created")' in src \
+        and '"tool": e.get("tool")' in src, "versions row projection drifted"
+    assert '{"name": n, "count": c}' in src \
+        and '{"more": len(ranked) - LAYERS_CAP}' in src, "layer row projection drifted"
     assert context_packet.MAX_PACKET_CHARS == 8000
     assert context_packet.CATALOG_CAP == 60
     assert context_packet.VERSIONS_TAIL == 3
