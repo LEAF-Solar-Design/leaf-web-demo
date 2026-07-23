@@ -66,9 +66,9 @@ Baseline gate:
 
 ## Wave 1
 
-- [ ] Tenant Git change-set adapter with isolated refs and compare-and-swap updates.
-- [ ] SQLite coordination store with idempotency and recovery.
-- [ ] Platform release policy loader with strict path normalization.
+- [x] Tenant Git change-set adapter with isolated refs and compare-and-swap updates.
+- [x] SQLite coordination store with idempotency and recovery.
+- [x] Platform release policy loader with strict path normalization.
 
 ## Wave 2
 
