@@ -11,12 +11,11 @@ Covers:
   * the families CONSUMER (catalog.build_catalog) fails CLOSED on a family
     member that has no matching registered tool: the family is silently
     OMITTED from the built catalog, never an exception and never a ghost
-    entry with fabricated capabilities. Verified BOTH with the real (today,
-    tool-absent) catalog and with a synthetic tool list that DOES register
-    the name, proving the wiring is correct once R2 merges the real tool.
-  * GET /api/capabilities/promotion/stringing fails closed against the REAL
-    catalog TODAY (autofill-string-targets is not yet registered anywhere in
-    this worktree) -> state "locked", no fabricated "implemented".
+    entry with fabricated capabilities. Verified with a missing-tool input
+    and with a synthetic tool list that registers the name.
+  * GET /api/capabilities/promotion/stringing reflects the REAL catalog TODAY:
+    autofill-string-targets is registered under the frozen heuristic name, so
+    it reports state "registered" and no fabricated receipt evidence.
   * with the catalog forced to report the tool present (monkeypatched
     deps.find_tool), the endpoint reports state "registered".
   * evidence[] cites a REAL receipt file (path + sha256 that matches the file
@@ -101,20 +100,18 @@ def test_build_catalog_folds_string_autofill_opt_into_same_family():
 
 
 # --------------------------------------------------------------------------- #
-# GET /api/capabilities/promotion/stringing -- fail-closed against the REAL
-# catalog (autofill-string-targets is not registered anywhere in THIS worktree)
+# GET /api/capabilities/promotion/stringing against the real catalog
 # --------------------------------------------------------------------------- #
-def test_real_catalog_has_no_autofill_string_targets_yet():
-    """Baseline fact this whole router leans on -- if this ever starts
-    failing, R2's merge landed and the "locked" test below needs updating."""
-    assert deps.find_tool("autofill-string-targets") is None
+def test_real_catalog_registers_autofill_string_targets():
+    """ADOPTION.md section 3 freezes this as the heuristic's registry name."""
+    assert deps.find_tool(promo.STRINGING_TOOL)["name"] == promo.STRINGING_TOOL
 
 
-def test_availability_locked_against_real_catalog():
+def test_availability_registered_against_real_catalog():
     entry = promo.availability_for(promo.STRINGING_TOOL)
-    assert entry["state"] == "locked"
-    assert entry["implementationState"] == "not_registered"
-    assert entry["reasonCode"] == "not_registered_in_catalog"
+    assert entry["state"] == "registered"
+    assert entry["implementationState"] == "implemented"
+    assert entry["reasonCode"] is None
     assert entry["familyId"] == "stringing"
     assert entry["evidence"] == []  # no receipt in data/ names this tool -- never fabricated
     assert entry["authority"] == "leaf-server-catalog"
@@ -132,15 +129,17 @@ def test_availability_registered_when_catalog_has_the_tool(monkeypatch):
 
 
 def test_locked_tool_returns_empty_evidence_even_with_matching_receipt(tmp_path, monkeypatch):
-    """The discriminating case for the fail-closed rule: a receipt NAMES the
-    tool but the tool is not registered -- evidence must still be []."""
+    """The emit spec's rule 1 requires an unregistered tool to stay locked."""
     receipt = {"tool_name": promo.STRINGING_TOOL, "pass": True}
     (tmp_path / "fake_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
     monkeypatch.setattr(promo, "DATA_DIR", tmp_path)
     monkeypatch.setattr(deps, "PROJECT_ROOT", tmp_path.parent)
+    monkeypatch.setattr(deps, "find_tool", lambda name, tenant_id=deps.DEFAULT_TENANT: None)
     entry = promo.availability_for(promo.STRINGING_TOOL)
     assert entry["state"] == "locked"
     assert entry["evidence"] == []
+    assert entry["implementationState"] == "not_registered"
+    assert entry["reasonCode"] == "not_registered_in_catalog"
 
 
 def test_evidence_cites_a_real_receipt_with_matching_sha256(tmp_path, monkeypatch):
@@ -181,10 +180,10 @@ def _client():
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_http_endpoint_returns_locked_availability():
+def test_http_endpoint_returns_registered_availability():
     resp = _client().get("/api/capabilities/promotion/stringing")
     assert resp.status_code == 200
     body = resp.json()
     assert body["error"] is None
-    assert body["availability"]["state"] == "locked"
+    assert body["availability"]["state"] == "registered"
     assert body["availability"]["toolName"] == "autofill-string-targets"

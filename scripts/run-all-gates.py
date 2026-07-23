@@ -250,9 +250,10 @@ def build_suites() -> List[Suite]:
         # NOT registered (red at measurement 2026-07-22, one process per file,
         # pre-existing on main). Durable tracker with the fix-then-register
         # rule: https://github.com/Evan-Haug/leaf-web-demo/issues/29
-        # tests/test_capabilities_promotion.py (4F/7P),
         # tests/test_engine_registry_scripts.py (1F/3P),
         # tests/test_sessions_e2e.py (7 errors/2P).
+        Suite("server-capabilities-promotion", "server tests/test_capabilities_promotion.py",
+              "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py"), 11),
         # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
         # one red was a stale pre-§19 assertion (offline `dwg` no longer
         # ignored) — fixed and registered per the #29 fix-then-register rule.
