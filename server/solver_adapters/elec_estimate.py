@@ -121,6 +121,12 @@ def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
     coefficient = normalized_module["temperature_coefficient_pct_per_c"]
     if coefficient is not None and coefficient >= 0:
         raise ValueError("module.temperature_coefficient_pct_per_c must be negative")
+    if coefficient is not None and coefficient < -1.0:
+        # Real crystalline/thin-film Voc temperature coefficients are ~-0.2 to
+        # -0.5 %/degC; a magnitude beyond 1.0 is a data error that would drive a
+        # non-physical corrected voltage and a false PASS. Fail closed at input.
+        raise ValueError(
+            "module.temperature_coefficient_pct_per_c magnitude is non-physical (expected >= -1.0 %/degC)")
 
     architecture = inverter.get("architecture")
     if architecture not in {"central", "solaredge"}:
@@ -149,6 +155,18 @@ def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
     low, high = normalized_inverter["design_min_temp_c"], normalized_inverter["design_max_temp_c"]
     if low is not None and high is not None and low > high:
         raise ValueError("inverter.design_min_temp_c must not exceed design_max_temp_c")
+    # Physical-range bounds so a well-typed but wrong temperature cannot produce
+    # a plausible-but-false PASS (e.g. a design "minimum" above STC under-
+    # estimates cold Voc). Cold-Voc is evaluated at design_min (must be <= 25C,
+    # below STC); hot-Vmp at design_max (must be >= 25C, above STC).
+    if low is not None and low > 25:
+        raise ValueError("inverter.design_min_temp_c must be <= 25 C (the cold-Voc minimum, below STC)")
+    if high is not None and high < 25:
+        raise ValueError("inverter.design_max_temp_c must be >= 25 C (the hot-Vmp maximum, above STC)")
+    if low is not None and low < -60:
+        raise ValueError("inverter.design_min_temp_c is below any physical ambient (>= -60 C)")
+    if high is not None and high > 100:
+        raise ValueError("inverter.design_max_temp_c exceeds any physical cell temperature (<= 100 C)")
     mppt_low, mppt_high = normalized_inverter["mppt_min_v"], normalized_inverter["mppt_max_v"]
     if mppt_low is not None and mppt_high is not None and mppt_low > mppt_high:
         raise ValueError("inverter.mppt_min_v must not exceed inverter.mppt_max_v")
