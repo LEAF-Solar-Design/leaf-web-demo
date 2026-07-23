@@ -132,7 +132,7 @@ def build_suites() -> List[Suite]:
     suites: List[Suite] = [
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
-              _py_pytest("tests/test_backbone.py"), 10),
+              _py_pytest("tests/test_backbone.py"), 11),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py"), 13),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
@@ -336,7 +336,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 253),
+              [_npm(), "test"], 256),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

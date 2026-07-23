@@ -76,6 +76,21 @@ export function gitWorkerAvailable(): boolean {
   return worker !== null;
 }
 
+export function stopGitWorker(): void {
+  const active = worker;
+  worker = null;
+  for (const [id, request] of pending) {
+    pending.delete(id);
+    request.resolve({ ok: false, error: "git worker stopped" });
+  }
+  if (!active) return;
+  try {
+    active.kill();
+  } catch {
+    /* process exit remains the final cleanup boundary */
+  }
+}
+
 export function workerCommit(req: GitCommitRequest, timeoutMs = 60_000): Promise<{ ok: boolean; commit?: string; error?: string }> {
   if (!worker || !worker.stdin) return Promise.resolve({ ok: false, error: "no git worker" });
   const id = ++seq;

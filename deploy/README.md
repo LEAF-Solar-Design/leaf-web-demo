@@ -6,7 +6,8 @@ here is **new** — no existing repo file was modified. Runs at `APS_LIVE=0` wit
 **no secrets**; the real cloud legs (APS, Claude) are opt-in mounts documented below.
 
 Contract sources: `RUN.md`, `server/README.md`, `server/CONTRACT-ADDENDUM.md`
-§7–§16.
+§7–§16. Process stop behavior is frozen in
+[`docs/SHUTDOWN-CONTRACT.md`](../docs/SHUTDOWN-CONTRACT.md).
 
 ---
 

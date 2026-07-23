@@ -68,14 +68,57 @@ def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 30.0) -> Non
     raise TimeoutError(f"server at {url} not ready in {timeout_s}s")
 
 
-def stop(proc: subprocess.Popen) -> None:
+def stop(
+    proc: subprocess.Popen,
+    log_path: Path,
+    graceful_timeout_s: float = 10.0,
+) -> dict | None:
     if proc.poll() is None:
+        started = time.monotonic()
         proc.terminate()
         try:
-            proc.wait(timeout=10)
+            proc.wait(timeout=graceful_timeout_s)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=10)
+            kill_error = None
+            try:
+                proc.kill()
+            except Exception as exc:
+                kill_error = f"kill raised {type(exc).__name__}"
+            if kill_error is None:
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    kill_error = "process did not exit within 10 seconds after kill"
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            receipt = {
+                "schema": "leaf.test-shutdown-failure.v1",
+                "pid": proc.pid,
+                "forced_kill": True,
+                "graceful_timeout_ms": round(graceful_timeout_s * 1000),
+                "elapsed_ms": elapsed_ms,
+                "returncode": proc.poll(),
+                "log_path": str(log_path),
+                "log_size_bytes": log_path.stat().st_size if log_path.exists() else None,
+                "cleanup_error": kill_error,
+            }
+            receipt_path = log_path.with_suffix(log_path.suffix + ".shutdown-failure.json")
+            receipt_path.write_text(
+                json.dumps(receipt, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            receipt["receipt_path"] = str(receipt_path)
+            return receipt
+    return None
+
+
+def assert_stopped(proc: subprocess.Popen, log_path: Path) -> None:
+    failure = stop(proc, log_path)
+    if failure is not None:
+        pytest.fail(
+            "forced-kill fallback was required during process cleanup: "
+            + json.dumps(failure, sort_keys=True),
+            pytrace=False,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -112,8 +155,62 @@ def stack(tmp_path_factory):
             "procs": (broker, app),
         }
     finally:
-        stop(app)
-        stop(broker)
+        failures = []
+        for proc, log_path in (
+            (app, tmp / "app.log"),
+            (broker, tmp / "broker.log"),
+        ):
+            failure = stop(proc, log_path)
+            if failure is not None:
+                failures.append(failure)
+        if failures:
+            pytest.fail(
+                "forced-kill fallback was required during stack cleanup: "
+                + json.dumps(failures, sort_keys=True),
+                pytrace=False,
+            )
+
+
+def test_stop_forced_kill_records_receipt_and_reports_failure(tmp_path):
+    class HungProcess:
+        pid = 4242
+        returncode = None
+
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout):
+            if not self.killed:
+                raise subprocess.TimeoutExpired("hung-child", timeout)
+            self.returncode = -9
+            return self.returncode
+
+    log_path = tmp_path / "hung.log"
+    log_path.write_text("child did not stop\n", encoding="utf-8")
+    proc = HungProcess()
+
+    failure = stop(proc, log_path, graceful_timeout_s=0.001)
+
+    assert failure is not None
+    assert proc.terminated is True
+    assert proc.killed is True
+    assert failure["forced_kill"] is True
+    assert failure["returncode"] == -9
+    assert failure["elapsed_ms"] >= 0
+    assert failure["log_path"] == str(log_path)
+    receipt = json.loads(Path(failure["receipt_path"]).read_text(encoding="utf-8"))
+    assert receipt["schema"] == "leaf.test-shutdown-failure.v1"
+    assert receipt["log_size_bytes"] == log_path.stat().st_size
 
 
 def submit(stack, tool="count-by-layer", params=None, tenant=None, wait=False):
@@ -197,7 +294,7 @@ def test_2_progression_envelope_and_restart_durability(stack, tmp_path):
         assert env3["result"]["counts"]["Panels"] == 2345
 
         # kill the app process entirely, restart, record must survive (SQLite)
-        stop(app)
+        assert_stopped(app, tmp_path / "restart_app.log")
         app = start_uvicorn("app:app", port, env, tmp_path / "restart_app.log")
         wait_ready(f"{base}/api/health", app)
         r2 = requests.get(f"{base}/api/jobs/{job_id}", timeout=10)
@@ -206,7 +303,7 @@ def test_2_progression_envelope_and_restart_durability(stack, tmp_path):
         assert rec2["job_id"] == job_id and rec2["status"] == "complete"
         assert rec2["result"]["result"]["counts"]["Panels"] == 2345
     finally:
-        stop(app)
+        assert_stopped(app, tmp_path / "restart_app.log")
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +333,7 @@ def test_3_job_timeout(stack, tmp_path):
         assert rec is not None and rec["status"] == "failed", f"got {rec and rec['status']}"
         assert rec["error"]["error_code"] == "TIMEOUT"
     finally:
-        stop(app)
+        assert_stopped(app, tmp_path / "timeout_app.log")
 
 
 # --------------------------------------------------------------------------- #

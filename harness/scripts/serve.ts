@@ -44,6 +44,7 @@ import { join } from "node:path";
 import { createHarness } from "../src/server.js";
 import { redactTokens } from "../src/redact.js";
 import { authorSandboxProvider, validateProductionHarnessEnv } from "../src/runtimeSafety.js";
+import { createShutdownHandler } from "../src/shutdown.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { AgentGrant, HarnessPorts } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
@@ -56,7 +57,7 @@ import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
 import { HttpGateClient } from "../src/ports/impl/gateClient.js";
 import { FileSessionStore } from "../src/ports/impl/sessionStore.js";
 import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
-import { startGitWorker } from "../src/ports/impl/gitWorker.js";
+import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeTurnRunner } from "../src/ports/fakes/fakeTurnRunner.js";
@@ -195,12 +196,12 @@ function main(): void {
     process.exit(1);
   });
 
-  const shutdown = (sig: string): void => {
-    log(`[harness] ${sig} -> closing`);
-    server.close(() => process.exit(0));
-    // hard-stop backstop if close() hangs on a live connection
-    setTimeout(() => process.exit(0), 2000).unref();
-  };
+  const shutdown = createShutdownHandler({
+    server,
+    log,
+    exit: (code) => process.exit(code),
+    cleanup: stopGitWorker,
+  });
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
