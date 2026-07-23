@@ -4,6 +4,13 @@ name: Build platform images
 # Builds the three leaf-platform production images (app / broker / harness)
 # in parallel from ONE commit and pushes all three to ECR at ONE tag:
 # prod-<shortsha>. Each image has its own registry-backed Buildx cache.
+# ECR tags are immutable, so cache publication uses buildcache-<shortsha> and
+# never overwrites a tag. A push imports only its immediate predecessor's cache.
+# Workflow dispatches and missing predecessor caches build without cache input.
+#
+# Cache retention contract: the AWS repository must expire buildcache-* tags
+# after 14 days or retain no more than the latest 20 per repository. Production
+# prod-* tags use a separate lifecycle and are never cache inputs or outputs.
 # The deploy workflow in LEAF-Solar-Design/leaf-automation-aws-terraform
 # refuses to deploy unless all three repos carry the tag, so a partial push
 # here can never reach production.
@@ -37,6 +44,9 @@ permissions:
   contents: read
 
 concurrency:
+  # Serial main builds make the previous push's cache the normal input. GitHub
+  # can replace an older pending run, so a missing predecessor remains valid
+  # and falls back to an uncached build.
   group: build-platform-images-${{ github.ref }}
   cancel-in-progress: false
 
@@ -47,16 +57,44 @@ jobs:
 
     outputs:
       tag: ${{ steps.tag.outputs.value }}
+      cache_tag: ${{ steps.tag.outputs.cache_value }}
+      previous_cache_tag: ${{ steps.tag.outputs.previous_cache_value }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Validate image workflow invariants
         run: python scripts/test_build_platform_images_workflow.py
 
       - name: Derive immutable image tag
         id: tag
-        run: echo "value=prod-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          current_short="$(git rev-parse --short HEAD)"
+          current_cache_tag="buildcache-$current_short"
+          previous_cache_tag=""
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" \
+            && "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ \
+            && ! "$BEFORE_SHA" =~ ^0+$ \
+            && "$(git cat-file -t "$BEFORE_SHA" 2>/dev/null || true)" == "commit" ]]; then
+            previous_short="$(git rev-parse --short "$BEFORE_SHA")"
+            previous_cache_tag="buildcache-$previous_short"
+          fi
+
+          if [[ -n "$previous_cache_tag" \
+            && "$previous_cache_tag" == "$current_cache_tag" ]]; then
+            echo "::error::Current and previous cache tags must differ"
+            exit 1
+          fi
+
+          echo "value=prod-$current_short" >> "$GITHUB_OUTPUT"
+          echo "cache_value=$current_cache_tag" >> "$GITHUB_OUTPUT"
+          echo "previous_cache_value=$previous_cache_tag" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -73,6 +111,8 @@ jobs:
       ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
       IMAGE_NAME: leaf-platform-${{ matrix.image }}
       IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+      CURRENT_CACHE_TAG: ${{ needs.prepare.outputs.cache_tag }}
+      PREVIOUS_CACHE_TAG: ${{ needs.prepare.outputs.previous_cache_tag }}
 
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +130,44 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Select immutable cache references
+        id: cache
+        run: |
+          set -euo pipefail
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME"
+          cache_from=""
+          cache_to=""
+
+          if [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null || true)"
+            if [[ "$found" == "1" ]]; then
+              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+            else
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+
+          if current_exists="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null)"; then
+            if [[ "$current_exists" == "1" ]]; then
+              echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
+            else
+              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true"
+            fi
+          else
+            echo "::warning::Unable to verify $CURRENT_CACHE_TAG; skipping cache publication"
+          fi
+
+          echo "from=$cache_from" >> "$GITHUB_OUTPUT"
+          echo "to=$cache_to" >> "$GITHUB_OUTPUT"
+
       - name: Build and push ${{ matrix.image }}
         uses: docker/build-push-action@v6
         with:
@@ -97,8 +175,8 @@ jobs:
           file: deploy/Dockerfile.${{ matrix.image }}
           push: true
           tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
 
   verify:
     needs: [prepare, build]
@@ -121,6 +199,10 @@ jobs:
       - name: Verify all three repositories carry the immutable tag
         run: |
           set -euo pipefail
+          if [[ "$TAG" != prod-* ]]; then
+            echo "::error::Refusing to verify non-production tag: $TAG"
+            exit 1
+          fi
           declare -A digests
           for image in app broker harness; do
             repository="leaf-platform-$image"
