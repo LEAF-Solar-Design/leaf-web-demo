@@ -23,6 +23,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -35,6 +36,7 @@ import { dirname, join } from "node:path";
 import { DEFAULT_TENANT } from "../index.js";
 import type {
   AgentGrant,
+  GrantDiagnostic,
   GrantKind,
   GrantStatus,
   OAuthGrantProvider,
@@ -327,6 +329,111 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       if (g) return { linked: true, linked_at: null, kind: g.kind };
     }
     return { linked: false, linked_at: null };
+  }
+
+  async diagnostic(tenantId: string): Promise<GrantDiagnostic> {
+    const legacyPresent = existsSync(this.file(tenantId)) || existsSync(this.kindFile(tenantId));
+    const base = {
+      schema: "leaf.grant-diagnostic.v1" as const,
+      backend: "file" as const,
+      legacy_fallback_present: legacyPresent,
+    };
+    const owner = (path: string): GrantDiagnostic["owner"] => {
+      const st = lstatSync(path);
+      return {
+        uid: typeof st.uid === "number" ? st.uid : null,
+        gid: typeof st.gid === "number" ? st.gid : null,
+        mode: (st.mode & 0o777).toString(8).padStart(4, "0"),
+      };
+    };
+    try {
+      const recordPath = this.recordFile(tenantId);
+      const record = this.readRecord(tenantId);
+      if (record) {
+        const st = statSync(recordPath);
+        return {
+          ...base,
+          linked: true,
+          kind: record.kind,
+          linked_at: st.mtime.toISOString(),
+          path_class: (process.env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase() === "production"
+            ? "efs_access_point"
+            : "local_file",
+          record_format: "v1",
+          owner: owner(recordPath),
+          persistence: {
+            atomic_publish: true,
+            file_fsync: true,
+            directory_fsync: process.platform !== "win32",
+          },
+          degraded: false,
+        };
+      }
+
+      const legacyPath = this.file(tenantId);
+      const legacyToken = this.readToken(tenantId);
+      if (legacyToken) {
+        const st = statSync(legacyPath);
+        return {
+          ...base,
+          linked: true,
+          kind: this.readKind(tenantId) ?? detectGrantKind(legacyToken),
+          linked_at: st.mtime.toISOString(),
+          path_class: (process.env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase() === "production"
+            ? "efs_access_point"
+            : "local_file",
+          record_format: "legacy",
+          owner: owner(legacyPath),
+          persistence: { atomic_publish: false, file_fsync: false, directory_fsync: false },
+          degraded: true,
+        };
+      }
+
+      if (tenantId === this.defaultTenant) {
+        const fallback = await this.envFallback.get(tenantId);
+        if (fallback) {
+          return {
+            ...base,
+            linked: true,
+            kind: fallback.kind,
+            linked_at: null,
+            path_class: "environment",
+            record_format: "environment",
+            owner: { uid: null, gid: null, mode: null },
+            persistence: { atomic_publish: false, file_fsync: false, directory_fsync: false },
+            degraded: true,
+          };
+        }
+      }
+
+      return {
+        ...base,
+        linked: false,
+        kind: "missing",
+        linked_at: null,
+        path_class: (process.env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase() === "production"
+          ? "efs_access_point"
+          : "local_file",
+        record_format: "missing",
+        owner: { uid: null, gid: null, mode: null },
+        persistence: { atomic_publish: false, file_fsync: false, directory_fsync: false },
+        degraded: false,
+      };
+    } catch {
+      return {
+        ...base,
+        linked: false,
+        kind: "missing",
+        linked_at: null,
+        path_class: (process.env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase() === "production"
+          ? "efs_access_point"
+          : "local_file",
+        record_format: "invalid",
+        owner: { uid: null, gid: null, mode: null },
+        persistence: { atomic_publish: false, file_fsync: false, directory_fsync: false },
+        degraded: true,
+      };
+    }
   }
 
   async remove(tenantId: string): Promise<void> {

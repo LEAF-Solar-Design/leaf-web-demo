@@ -11,6 +11,13 @@ import broker
 import tool_loader
 
 
+def _safe_production(monkeypatch):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    monkeypatch.setenv("LEAF_BROKER_SECRET", "test-broker-secret")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_QA_HOOKS", "0")
+
+
 def _package(path, name: str) -> dict:
     tools = json.loads(path.read_text(encoding="utf-8"))["tools"]
     return next(tool for tool in tools if tool["name"] == name)
@@ -122,7 +129,7 @@ def test_local_demo_behavior_remains_enabled(monkeypatch):
 
 def test_production_startup_rejects_enabled_authored_execution_without_sandbox(
         monkeypatch):
-    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    _safe_production(monkeypatch)
     monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
     monkeypatch.delenv("LEAF_SANDBOX", raising=False)
 
@@ -131,7 +138,7 @@ def test_production_startup_rejects_enabled_authored_execution_without_sandbox(
 
 
 def test_fastapi_startup_runs_the_production_safety_check(monkeypatch):
-    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    _safe_production(monkeypatch)
     monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
     monkeypatch.delenv("LEAF_SANDBOX", raising=False)
 
@@ -143,7 +150,7 @@ def test_fastapi_startup_runs_the_production_safety_check(monkeypatch):
 @pytest.mark.parametrize("tier", ["e2b", "E2B-MICROVM"])
 def test_production_startup_accepts_enabled_execution_with_approved_sandbox(
         monkeypatch, tier):
-    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    _safe_production(monkeypatch)
     monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
     monkeypatch.setenv("LEAF_SANDBOX", tier)
 

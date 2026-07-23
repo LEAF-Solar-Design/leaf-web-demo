@@ -43,6 +43,7 @@ import { join } from "node:path";
 
 import { createHarness } from "../src/server.js";
 import { redactTokens } from "../src/redact.js";
+import { validateProductionHarnessEnv } from "../src/runtimeSafety.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { AgentGrant, HarnessPorts } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
@@ -61,6 +62,7 @@ import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeTurnRunner } from "../src/ports/fakes/fakeTurnRunner.js";
 
 const HARNESS_PORT = Number(process.env.HARNESS_PORT || 8150);
+validateProductionHarnessEnv();
 const gitWorkerUp = startGitWorker();
 console.log(`[harness] git worker: ${gitWorkerUp ? "started (clean spawn context)" : "UNAVAILABLE - in-process fallback"}`);
 const REPO_ROOT = process.env.LEAF_REPO_ROOT ?? "C:/tmp/leaf-web-demo";

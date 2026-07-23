@@ -76,6 +76,71 @@ def _status_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
     })
 
 
+def _diagnostic_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Whitelist the frozen token-free diagnostic schema.
+
+    Unknown fields are discarded so a harness defect cannot expose a path,
+    filename, token fact, or other storage detail through the app.
+    """
+    owner = harness_json.get("owner")
+    persistence = harness_json.get("persistence")
+    owner = owner if isinstance(owner, dict) else {}
+    persistence = persistence if isinstance(persistence, dict) else {}
+    return with_envelope_fields({
+        "schema": "leaf.grant-diagnostic.v1",
+        "linked": bool(harness_json.get("linked", False)),
+        "kind": harness_json.get("kind")
+        if harness_json.get("kind") in {"oauth", "api_key", "missing"} else "missing",
+        "linked_at": harness_json.get("linked_at")
+        if isinstance(harness_json.get("linked_at"), str) else None,
+        "backend": "file",
+        "path_class": harness_json.get("path_class")
+        if harness_json.get("path_class") in {"efs_access_point", "local_file", "environment"}
+        else "local_file",
+        "record_format": harness_json.get("record_format")
+        if harness_json.get("record_format") in {
+            "v1", "legacy", "environment", "missing", "invalid"
+        } else "invalid",
+        "legacy_fallback_present": bool(harness_json.get("legacy_fallback_present", False)),
+        "owner": {
+            "uid": owner.get("uid") if isinstance(owner.get("uid"), int) else None,
+            "gid": owner.get("gid") if isinstance(owner.get("gid"), int) else None,
+            "mode": owner.get("mode") if isinstance(owner.get("mode"), str) else None,
+        },
+        "persistence": {
+            "atomic_publish": bool(persistence.get("atomic_publish", False)),
+            "file_fsync": bool(persistence.get("file_fsync", False)),
+            "directory_fsync": bool(persistence.get("directory_fsync", False)),
+        },
+        "degraded": bool(harness_json.get("degraded", True)),
+    })
+
+
+@router.get("/api/tenant/claude-grant/diagnostic")
+def grant_diagnostic(tenant=Depends(deps.require_tenant)):
+    """Return authenticated, token-free grant storage diagnostics."""
+    url = _grant_admin_url(str(tenant))
+    if url is None:
+        return _unreachable("LEAF_AUTHOR_HARNESS_URL not configured")
+    try:
+        import requests
+        import broker_client
+        r = requests.get(
+            f"{url}/diagnostic",
+            headers=broker_client.harness_headers(),
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _unreachable(str(exc))
+    if r.status_code >= 500:
+        return _unreachable(f"harness returned HTTP {r.status_code}")
+    try:
+        hj = r.json()
+    except ValueError:
+        return _unreachable("harness returned non-JSON")
+    return deps.tenant_echo(_diagnostic_body(hj), tenant)
+
+
 @router.post("/api/tenant/claude-grant")
 def link_grant(req: GrantLinkRequest, tenant=Depends(deps.require_tenant)):
     """Link (or replace) THIS tenant's 'sign in with Claude' grant. The token is

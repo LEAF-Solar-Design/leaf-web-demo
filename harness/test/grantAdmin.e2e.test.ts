@@ -97,6 +97,33 @@ describe("harness /grants admin endpoints", () => {
     });
     expect(r.status).toBe(400);
   });
+
+  it("GET diagnostic returns only token-free v1 storage facts", async () => {
+    await store.put("acme", FAKE);
+    const r = await fetch(`${baseUrl}/grants/acme/diagnostic`);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    expect(text).not.toContain(FAKE);
+    expect(text.toLowerCase()).not.toContain("filename");
+    expect(text.toLowerCase()).not.toContain("path\":");
+    const body = JSON.parse(text) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual([
+      "backend", "degraded", "kind", "legacy_fallback_present", "linked",
+      "linked_at", "owner", "path_class", "persistence", "record_format", "schema",
+    ].sort());
+    expect(body).toMatchObject({
+      schema: "leaf.grant-diagnostic.v1",
+      linked: true,
+      kind: "oauth",
+      backend: "file",
+      path_class: "local_file",
+      record_format: "v1",
+      legacy_fallback_present: false,
+      degraded: false,
+      owner: { mode: process.platform === "win32" ? "0666" : "0600" },
+      persistence: { atomic_publish: true, file_fsync: true },
+    });
+  });
 });
 
 describe("harness /grants without a grantAdmin store", () => {

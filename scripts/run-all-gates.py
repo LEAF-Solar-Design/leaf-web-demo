@@ -266,10 +266,13 @@ def build_suites() -> List[Suite]:
         # The no-da-imports static invariant + §8 ledger-line schema freeze
         # gates ride the same lane.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_boundary.py"), 43),
+              SERVER, _py_pytest("tests/test_broker_boundary.py"), 45),
         Suite("server-authored-execution-live-gate",
               "server tests/test_authored_execution_live_gate.py", "pytest",
               SERVER, _py_pytest("tests/test_authored_execution_live_gate.py"), 10),
+        Suite("server-wave2-trust-boundary",
+              "server tests/test_wave2_trust_boundary.py", "pytest",
+              SERVER, _py_pytest("tests/test_wave2_trust_boundary.py"), 8),
         Suite("server-no-da-imports", "server tests/test_no_da_imports_static.py", "pytest",
               SERVER, _py_pytest("tests/test_no_da_imports_static.py"), 8),
         Suite("server-broker-ledger-schema", "server tests/test_broker_ledger_schema_static.py",
@@ -320,7 +323,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 3),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 63),
+              [_npm(), "test"], 246),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
