@@ -342,10 +342,10 @@ def auth_live() -> bool:
 # disabled => the ordinary JWT path (which 401s without a token).
 # --------------------------------------------------------------------------- #
 def _dispatch_backedge_route(method: str, path: str) -> bool:
-    """True iff (method, path) is one of the §0 back-edge routes: POST /api/run,
-    GET /api/jobs/{id}, GET /api/capabilities, GET /api/tools, GET /api/drawings/*."""
+    """True iff (method, path) is a §0 back-edge route: POST /api/run or
+    /api/author, GET /api/jobs/{id}, capabilities, tools, or drawings."""
     if method == "POST":
-        return path == "/api/run"
+        return path in ("/api/run", "/api/author")
     if method != "GET":
         return False
     if path in ("/api/capabilities", "/api/tools"):

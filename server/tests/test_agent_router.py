@@ -143,6 +143,7 @@ def backedge_client():
 def test_backedge_route_matcher_covers_exactly_the_contract_routes():
     import deps
     assert deps._dispatch_backedge_route("POST", "/api/run") is True
+    assert deps._dispatch_backedge_route("POST", "/api/author") is True
     assert deps._dispatch_backedge_route("GET", "/api/jobs/job-123") is True
     assert deps._dispatch_backedge_route("GET", "/api/capabilities") is True
     assert deps._dispatch_backedge_route("GET", "/api/tools") is True
@@ -151,7 +152,6 @@ def test_backedge_route_matcher_covers_exactly_the_contract_routes():
     assert deps._dispatch_backedge_route("GET", "/api/jobs/job-123/stream") is False
     assert deps._dispatch_backedge_route("GET", "/api/jobs") is False
     assert deps._dispatch_backedge_route("GET", "/api/entitlements") is False
-    assert deps._dispatch_backedge_route("POST", "/api/author") is False
     assert deps._dispatch_backedge_route("DELETE", "/api/sessions/x") is False
 
 

@@ -113,6 +113,13 @@ def test_gibberish_is_low_confidence_no_tool():
     assert r["confidence"] <= 0.4
 
 
+def test_sql_shaped_nonsense_never_routes_to_a_destructive_tool():
+    r = _c("'; DROP TABLE drawings; --")
+    assert r["lane"] == LANE_RUN
+    assert r["tool"] is None
+    assert r["confidence"] <= 0.4
+
+
 def test_confidence_is_bounded():
     for text in ("count panels per layer", "asdf", "delete panel 9462",
                  "optimize layout", "build a tool that does X"):

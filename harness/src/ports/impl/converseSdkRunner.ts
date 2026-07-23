@@ -151,7 +151,7 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
     "Dispatch ONE registered catalog tool as a platform job. Args {tool, params?, dwg?}. Read tools may return their result inline; write tools return a proposal requiring user approval (re-invoke with confirmation_id after approval).",
   job_status: "Check a previously dispatched job. Args {job_id}.",
   author_tool:
-    "Request creation of a new tool when nothing in the catalog fits. Args {description, mode?}.",
+    "Request creation of a new tool when nothing in the catalog fits. Args {description, mode?, confirmation_id?}. Re-invoke with the gate-issued confirmation_id after approval.",
   request_confirmation:
     "Ask the user to explicitly approve something before proceeding. Args {kind, payload?}. After a pending result, summarize and end your turn.",
 };
@@ -213,7 +213,11 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         confirmation_id: z.string().optional(),
       },
       job_status: { job_id: z.string() },
-      author_tool: { description: z.string(), mode: z.enum(["build", "one_off"]).optional() },
+      author_tool: {
+        description: z.string(),
+        mode: z.enum(["build", "one_off"]).optional(),
+        confirmation_id: z.string().optional(),
+      },
       request_confirmation: { kind: z.string(), payload: z.record(z.unknown()).optional() },
     };
     const tools = SPINE_TOOL_NAMES.map((name) =>
@@ -246,7 +250,6 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           includePartialMessages: true,
           tools: [], // no built-in tools: the spine MCP server is the whole surface
           mcpServers: { spine: server },
-          allowedTools: SPINE_MCP_TOOL_NAMES,
           ...(resume ? { resume } : {}),
           canUseTool: async (toolName: string, inp: Record<string, unknown>) =>
             // Bridge to the loop's hook (allow spine tools / deny everything else).

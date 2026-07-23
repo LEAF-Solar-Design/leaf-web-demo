@@ -125,14 +125,20 @@ export class FakeGateClient implements GateClient {
     if (actionDenial) {
       return { decision: "deny", reason: actionDenial, policy: "always_deny", rung: "R0" };
     }
-    if (action === "run_read_tool" || action === "run_write_tool" || action === "submit_live_solve") {
+    if (
+      action === "run_read_tool" ||
+      action === "run_write_tool" ||
+      action === "submit_live_solve" ||
+      action === "author_tool"
+    ) {
       const target = String(args.tool ?? "");
       const targetDenial = this.denials.get(target);
       if (targetDenial) {
         return { decision: "deny", reason: targetDenial, policy: "always_deny", rung: "R2" };
       }
       if (action !== "run_read_tool") {
-        const rung = action === "submit_live_solve" ? "R4" : "R3";
+        const rung =
+          action === "submit_live_solve" ? "R4" : action === "author_tool" ? "R5" : "R3";
         const cid = typeof args.confirmation_id === "string" ? args.confirmation_id : null;
         if (cid) {
           const denial = this.consume(cid, action, args, ctx);
@@ -172,7 +178,8 @@ export class FakeGateClient implements GateClient {
     args: Record<string, unknown>,
     ctx: GateCheckContext,
   ): GateCheckResult | null {
-    const rung = action === "submit_live_solve" ? "R4" : "R3";
+    const rung =
+      action === "submit_live_solve" ? "R4" : action === "author_tool" ? "R5" : "R3";
     const deny = (reason: string): GateCheckResult => ({
       decision: "deny",
       reason,

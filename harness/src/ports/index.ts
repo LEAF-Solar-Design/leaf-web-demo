@@ -488,7 +488,9 @@ export interface AppRunClient {
     drawingId: string,
     what: "summary" | "versions" | "checkout",
   ): Promise<Record<string, unknown>>;
-  /** POST /api/run — the ONLY side-effecting call on the converse path. */
+  /** POST /api/author after the author_tool gate grants an approved request. */
+  authorTool(tenantId: string, description: string): Promise<Record<string, unknown>>;
+  /** POST /api/run for registered deterministic tool execution. */
   submitRun(req: SubmitRunRequest): Promise<SubmitRunResponse>;
   /** GET /api/jobs/{id} — section-7 job row. */
   getJob(tenantId: string, jobId: string): Promise<Record<string, unknown>>;

@@ -596,14 +596,43 @@ describe("ConverseLoop — gate deny + policy surface", () => {
 });
 
 describe("ConverseLoop — remaining spine tools", () => {
-  it("author_tool returns the Phase-1 stub message", async () => {
+  it("catalog_search returns no match for SQL-shaped nonsense", async () => {
     const { loop, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
-    await sendText(loop, s, "AUTHOR:panel-gap-checker");
+    await sendText(loop, s, "SEARCH:DROP_TABLE_drawings");
     const events = await store.eventsAfter(s.session_id, 0);
-    expect(ofType(events, "tool_result")[0]!.data).toMatchObject({ tool: "author_tool", ok: true });
-    const text = ofType(events, "text_delta").map((e) => String(e.data.text)).join("");
-    expect(text).toContain("Phase 2");
+    expect(ofType(events, "tool_result")[0]!.data).toMatchObject({
+      tool: "catalog_search",
+      ok: true,
+      summary: "0 matches",
+    });
+  });
+
+  it("author_tool executes through the app back-edge after approval", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, "AUTHOR:panel-gap-checker");
+    const pending = await store.eventsAfter(s.session_id, 0);
+    const cid = String(ofType(pending, "confirmation_required")[0]!.data.confirmation_id);
+    expect(appRun.authorCalls).toHaveLength(0);
+
+    gate.grant(cid);
+    const { done } = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    });
+    await done;
+
+    expect(appRun.authorCalls).toEqual([
+      { tenantId: "demo-tenant", description: "panel-gap-checker" },
+    ]);
+    expect(gate.checks).toContainEqual(expect.objectContaining({
+      action: "author_tool",
+      args: expect.objectContaining({ confirmation_id: cid }),
+      decision: "allow",
+    }));
   });
 
   it("request_confirmation emits the chip carrying the id the GATE minted", async () => {

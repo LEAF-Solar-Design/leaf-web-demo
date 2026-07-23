@@ -11,7 +11,7 @@
  *      not even via the non-literal dynImport escape hatch agentSdkRunner uses.
  *
  *   2. DYNAMIC: across a full read-dispatch + write-propose + confirm-dispatch
- *      scenario, AppRunClient.submitRun is the ONLY side-effecting call surface,
+ *      scenario, AppRunClient.submitRun is the only execution call surface,
  *      its payload is exactly {tenantId, tool, params, dwg, wait?, waitTimeoutS?}
  *      where `tool` is a registered catalog NAME — never code, never a drawing
  *      delta — and a GateClient check precedes EVERY dispatch.

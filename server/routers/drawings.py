@@ -34,6 +34,7 @@ import write_loop
 from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 
 router = APIRouter()
+SUMMARY_LAYER_CAP = 50
 
 
 def _backend(tenant_id: str = ""):
@@ -58,6 +59,57 @@ def get_intake(drawing_id: str, version: str = "head",
         return error_response(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
                               retryable=False, status_code=404)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
+
+
+@router.get("/api/drawings/{drawing_id}/summary")
+def get_summary(drawing_id: str, version: str = "head",
+                tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """Return a bounded drawing digest for assistant context.
+
+    The intake endpoint remains the lossless geometry surface. This route keeps
+    model-facing reads small by returning only version facts, an entity total,
+    and the most populated layers.
+    """
+    ver: Any = version
+    if isinstance(version, str) and version not in ("head", "latest") and version.lstrip("-").isdigit():
+        ver = int(version)
+    try:
+        view = write_loop.intake_view(
+            str(tenant_id), drawing_id, ver, backend=_backend(str(tenant_id))
+        )
+    except (KeyError, ValueError) as exc:
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            f"drawing/version unavailable: {exc}",
+            retryable=False,
+            status_code=404,
+        )
+
+    layers: Dict[str, int] = {}
+    total = 0
+    intake = view.get("intake") or {}
+    for key in ("polylines", "inserts", "faces3d"):
+        for entity in intake.get(key) or []:
+            layer = str(entity.get("layer", "0"))
+            layers[layer] = layers.get(layer, 0) + 1
+            total += 1
+    ranked = sorted(layers.items(), key=lambda item: (-item[1], item[0]))
+    layer_rows: list[Dict[str, Any]] = [
+        {"name": name, "count": count}
+        for name, count in ranked[:SUMMARY_LAYER_CAP]
+    ]
+    if len(ranked) > SUMMARY_LAYER_CAP:
+        layer_rows.append({"more": len(ranked) - SUMMARY_LAYER_CAP})
+
+    summary = {
+        "drawing_id": drawing_id,
+        "version": view.get("version"),
+        "head": view.get("head"),
+        "latest": view.get("latest"),
+        "entity_total": total,
+        "layers": layer_rows,
+    }
+    return with_envelope_fields(deps.tenant_echo(summary, tenant_id))
 
 
 @router.post("/api/drawings/{drawing_id}/undo")

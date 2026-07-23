@@ -64,6 +64,7 @@ function envelopeFor(tool: string): ResultEnvelope {
 export class FakeAppRunClient implements AppRunClient {
   /** Every submitRun payload, verbatim (the invariant spy inspects these). */
   readonly submitCalls: SubmitRunRequest[] = [];
+  readonly authorCalls: Array<{ tenantId: string; description: string }> = [];
   /** Ordered method-name log: proof of which surfaces were touched, and when. */
   readonly methodLog: string[] = [];
   catalog: CapabilityEntry[] = [...FAKE_CATALOG];
@@ -112,6 +113,16 @@ export class FakeAppRunClient implements AppRunClient {
       return { job_id: jobId, status: "complete", result: envelope };
     }
     return { job_id: jobId, status: "submitted" };
+  }
+
+  async authorTool(tenantId: string, description: string): Promise<Record<string, unknown>> {
+    this.methodLog.push("authorTool");
+    this.authorCalls.push({ tenantId, description });
+    return {
+      tool: { name: "panel-gap-checker", capabilities: ["drawing.read"] },
+      preview: "Created panel-gap-checker.",
+      source: "harness",
+    };
   }
 
   async getJob(_tenantId: string, jobId: string): Promise<Record<string, unknown>> {
