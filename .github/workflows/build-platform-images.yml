@@ -2,7 +2,8 @@ name: Build platform images
 
 # ---------------------------------------------------------------------------
 # Builds the three leaf-platform production images (app / broker / harness)
-# from ONE commit and pushes all three to ECR at ONE tag: prod-<shortsha>.
+# in parallel from ONE commit and pushes all three to ECR at ONE tag:
+# prod-<shortsha>. Each image has its own registry-backed Buildx cache.
 # The deploy workflow in LEAF-Solar-Design/leaf-automation-aws-terraform
 # refuses to deploy unless all three repos carry the tag, so a partial push
 # here can never reach production.
@@ -40,54 +41,123 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate image workflow invariants
+        run: python scripts/test_build_platform_images_workflow.py
+
+      - name: Derive immutable image tag
+        id: tag
+        run: echo "value=prod-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [app, broker, harness]
 
     env:
       AWS_REGION: us-east-1
       ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+      IMAGE_NAME: leaf-platform-${{ matrix.image }}
+      IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
           role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: GHA-BuildPlatformImages-${{ github.run_id }}
+          role-session-name: GHA-BuildPlatform-${{ matrix.image }}-${{ github.run_id }}
 
       - name: Login to ECR
-        run: |
-          set -euo pipefail
-          aws ecr get-login-password --region "$AWS_REGION" \
-            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push all three images at one tag
+      - name: Build and push ${{ matrix.image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.${{ matrix.image }}
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+  verify:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+      TAG: ${{ needs.prepare.outputs.tag }}
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-VerifyPlatformImages-${{ github.run_id }}
+
+      - name: Verify all three repositories carry the immutable tag
         run: |
           set -euo pipefail
-          TAG="prod-$(git rev-parse --short HEAD)"
-          echo "Building app/broker/harness at $TAG"
-          for n in app broker harness; do
-            docker build -f "deploy/Dockerfile.$n" -t "$ECR_REGISTRY/leaf-platform-$n:$TAG" .
+          declare -A digests
+          for image in app broker harness; do
+            repository="leaf-platform-$image"
+            digest="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$TAG" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text)"
+            if [[ -z "$digest" || "$digest" == "None" ]]; then
+              echo "::error::$repository does not contain $TAG"
+              exit 1
+            fi
+            digests["$image"]="$digest"
           done
-          for n in app broker harness; do
-            docker push "$ECR_REGISTRY/leaf-platform-$n:$TAG"
-          done
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
           {
-            echo "## Platform images pushed"
+            echo "## Platform image set verified"
             echo ""
             echo "Tag: \`$TAG\` (all three of leaf-platform-app / broker / harness)"
+            for image in app broker harness; do
+              echo "- \`leaf-platform-$image@${digests[$image]}\`"
+            done
             echo ""
             echo "Deploy via the terraform repo: deploy-service-production.yml with service=leaf-platform, image_tag=$TAG"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  promote:
+    needs: [prepare, verify]
+    if: github.event_name == 'workflow_dispatch' && inputs.promote
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+
+    steps:
       - name: Trigger production deploy (manual opt-in only)
-        if: github.event_name == 'workflow_dispatch' && inputs.promote
-        env:
-          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
         run: |
           set -euo pipefail
           gh workflow run deploy-service-production.yml \
