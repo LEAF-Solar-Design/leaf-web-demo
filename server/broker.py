@@ -37,6 +37,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -158,7 +159,30 @@ def _load_tenants() -> Dict[str, Any]:
 
 
 def _save_tenants(t: Dict[str, Any]) -> None:
-    TENANTS_PATH.write_text(json.dumps(t, indent=2), encoding="utf-8")
+    TENANTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{TENANTS_PATH.name}.", suffix=".tmp", dir=TENANTS_PATH.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(t, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, TENANTS_PATH)
+        try:
+            dir_fd = os.open(TENANTS_PATH.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 _tenants: Dict[str, Any] = _load_tenants()
@@ -188,13 +212,13 @@ def tenant_disabled(tid: str) -> bool:
 
 
 def set_tenant_disabled(tid: str, disabled: bool) -> None:
+    global _tenants
     with _tenants_lock:
         existing = _tenants.get(tid, _MISSING_TENANT)
         if existing is _MISSING_TENANT:
             rec: Dict[str, Any] = {}
-            _tenants[tid] = rec
         elif isinstance(existing, dict):
-            rec = existing
+            rec = dict(existing)
         else:
             # A present-but-corrupt record: setdefault would return it unchanged
             # and the item-assignment below would raise a bare TypeError. Refuse
@@ -205,7 +229,10 @@ def set_tenant_disabled(tid: str, disabled: bool) -> None:
                 f"refusing to write over it — repair broker_tenants.json first")
         rec["disabled"] = disabled
         rec["updated_at"] = time.time()
-        _save_tenants(_tenants)
+        candidate = dict(_tenants)
+        candidate[tid] = rec
+        _save_tenants(candidate)
+        _tenants = candidate
 
 
 # --------------------------------------------------------------------------- #

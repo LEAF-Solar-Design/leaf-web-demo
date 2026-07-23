@@ -45,10 +45,14 @@ describe("FileTenantGrantStore", () => {
     const grant = await store.get("acme");
     expect(grant).toEqual({ kind: "oauth", oauthToken: FAKE });
 
-    // persisted to <dir>/acme.token (the ONLY place the token lives)
-    const file = join(dir, "acme.token");
+    // New writes publish one atomic token+kind record.
+    const file = join(dir, "acme.grant.json");
     expect(existsSync(file)).toBe(true);
-    expect(readFileSync(file, "utf8")).toBe(FAKE);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      version: 1,
+      kind: "oauth",
+      token: FAKE,
+    });
   });
 
   it("status NEVER returns the token (only linked + linked_at + kind)", async () => {
@@ -77,6 +81,29 @@ describe("FileTenantGrantStore", () => {
     expect(await store.get("acme")).toBeNull();
     expect((await store.status("acme")).linked).toBe(false);
     await expect(store.remove("acme")).resolves.toBeUndefined(); // idempotent
+  });
+
+  it("ignores an interrupted temp record and keeps the last complete grant", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("acme", FAKE, "oauth");
+    writeFileSync(
+      join(dir, "acme.grant.json.123.interrupted.tmp"),
+      '{"version":1,"kind":"api_key","token":"truncated',
+      "utf8",
+    );
+
+    expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
+    expect((await store.status("acme")).kind).toBe("oauth");
+  });
+
+  it("fails closed on a truncated published record instead of reading stale legacy files", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    writeFileSync(join(dir, "acme.token"), FAKE2, "utf8");
+    writeFileSync(join(dir, "acme.kind"), "oauth", "utf8");
+    writeFileSync(join(dir, "acme.grant.json"), '{"version":1,"kind":"api_key","token":"cut', "utf8");
+
+    await expect(store.get("acme")).rejects.toThrow(/invalid persisted grant record/);
+    await expect(store.status("acme")).rejects.toThrow(/invalid persisted grant record/);
   });
 
   it("demo-tenant falls back to the env grant when it has no per-tenant file; a file overrides it", async () => {
@@ -132,12 +159,12 @@ describe("FileTenantGrantStore", () => {
     expect(await store.get("plain")).toEqual({ kind: "oauth", oauthToken: FAKE });
   });
 
-  it("remove clears the kind sidecar too (a later put re-detects fresh)", async () => {
+  it("remove clears the atomic record (a later put re-detects fresh)", async () => {
     const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
     await store.put("ent3", FAKE, "api_key");
     await store.remove("ent3");
     expect(await store.get("ent3")).toBeNull();
-    // no stale sidecar: a fresh oauth token now resolves as oauth, not api_key.
+    // no stale record: a fresh oauth token now resolves as oauth, not api_key.
     await store.put("ent3", FAKE_OAT);
     expect(await store.get("ent3")).toEqual({ kind: "oauth", oauthToken: FAKE_OAT });
   });
@@ -148,6 +175,14 @@ describe("FileTenantGrantStore", () => {
     writeFileSync(join(dir, "legacy.token"), FAKE_API, "utf8");
     expect(await store.get("legacy")).toEqual({ kind: "api_key", apiKey: FAKE_API });
     expect((await store.status("legacy")).kind).toBe("api_key");
+  });
+
+  it("legacy token and kind sidecar remain readable", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    writeFileSync(join(dir, "legacy-pair.token"), FAKE, "utf8");
+    writeFileSync(join(dir, "legacy-pair.kind"), "api_key", "utf8");
+    expect(await store.get("legacy-pair")).toEqual({ kind: "api_key", apiKey: FAKE });
+    expect((await store.status("legacy-pair")).kind).toBe("api_key");
   });
 });
 
