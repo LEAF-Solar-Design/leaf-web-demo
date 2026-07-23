@@ -33,6 +33,8 @@
                 "WORKITEM_FAILED",
                 "TIMEOUT",
                 "TENANT_DISABLED",
+                "UNAUTHENTICATED",
+                "FORBIDDEN",
                 "INTERNAL",
                 "quota_exceeded",
                 "GRANT_REQUIRED",
