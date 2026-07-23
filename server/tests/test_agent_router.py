@@ -291,6 +291,60 @@ def test_gate_prefers_the_authenticated_active_turn_tier(client, monkeypatch, tm
     assert mismatched["reason"].startswith("entitlement_required")
 
 
+def test_gate_uses_outer_authority_ids_when_harness_has_private_ids(
+        client, monkeypatch, tmp_path):
+    """The harness loop has private session/turn ids for resume and approvals.
+    Entitlement authority stays bound to the authenticated app turn."""
+    import session_store
+
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", DISPATCH_SECRET)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("BROKER_TENANTS", str(tmp_path / "absent.json"))
+    monkeypatch.delenv("LEAF_BROKER_TENANT_TIERS", raising=False)
+    monkeypatch.setattr(
+        session_store, "active_turn_tier",
+        lambda session_id, turn_id, tenant_id: (
+            "hosted_pro"
+            if (session_id, turn_id, tenant_id)
+            == ("app-session", "app-turn", "t-pro")
+            else None
+        ),
+    )
+
+    response = client.post(
+        "/internal/agent/gate",
+        headers={"X-Dispatch-Secret": DISPATCH_SECRET},
+        json={
+            "tenant_id": "t-pro",
+            "session_id": "harness-session",
+            "turn_id": "harness-turn",
+            "authority_session_id": "app-session",
+            "authority_turn_id": "app-turn",
+            "action": "read_platform_state",
+            "args": {},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["decision"] == "allow"
+
+    wrong_authority = client.post(
+        "/internal/agent/gate",
+        headers={"X-Dispatch-Secret": DISPATCH_SECRET},
+        json={
+            "tenant_id": "t-pro",
+            "session_id": "harness-session",
+            "turn_id": "harness-turn",
+            "authority_session_id": "app-session",
+            "authority_turn_id": "wrong-app-turn",
+            "action": "read_platform_state",
+            "args": {},
+        },
+    )
+    assert wrong_authority.status_code == 200
+    assert wrong_authority.json()["decision"] == "deny"
+    assert wrong_authority.json()["reason"].startswith("entitlement_required")
+
+
 def test_gate_offauth_tier_is_unchanged_demo(client, monkeypatch, tmp_path):
     """Auth OFF (the open demo): the gate keeps resolving `demo` regardless of any
     provisioning file — byte-identical to the pre-fix behaviour."""

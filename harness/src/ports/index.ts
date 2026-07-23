@@ -504,6 +504,10 @@ export interface GateCheckContext {
   tenantId: string;
   sessionId: string;
   turnId: string;
+  /** App-owned session/turn ids that authenticated this harness turn.
+   * The loop keeps separate durable ids for resume and confirmation binding. */
+  authoritySessionId?: string;
+  authorityTurnId?: string;
 }
 
 export interface GateCheckResult {
