@@ -561,11 +561,16 @@ def test_concurrent_message_409_turn_in_progress(client, wired):
     _wait_terminal(sess["session_id"], 2)
 
 
-def test_proposed_run_relay_creates_decidable_approval_row(client, wired):
+def test_proposed_run_relay_creates_decidable_approval_row(client, wired, monkeypatch):
     """A spine turn emits proposed_run ALONE (no confirmation_required pair) —
     the relay must create the approvals row with the proposal metadata BEFORE
     the chip event is published, so the visible chip structurally implies a
-    decidable row: POST /api/agent/approvals/{cid} works immediately."""
+    decidable row: POST /api/agent/approvals/{cid} works immediately.
+
+    The BEFORE is pinned deterministically: append_event is wrapped so that AT
+    the moment the proposed_run event is published, the row's existence is
+    captured — reversing the relay's create-row/publish order fails here, not
+    probabilistically."""
     url, state = wired
     cid = "confirm-spine-chip-1"
     state.scripts.append([
@@ -575,9 +580,20 @@ def test_proposed_run_relay_creates_decidable_approval_row(client, wired):
             "rationale": "user asked for a panel"}},
         {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
     ])
+    row_at_publication = {}
+    real_append = session_store.append_event
+
+    def _spy(session_id, turn_id, ev_type, data):
+        if ev_type == "proposed_run":
+            row_at_publication["exists"] = session_store.get_approval(cid) is not None
+        return real_append(session_id, turn_id, ev_type, data)
+
+    monkeypatch.setattr(session_store, "append_event", _spy)
     sess = _new_session()
     assert _post_text(client, sess, text="add a panel").status_code == 202
     _wait_terminal(sess["session_id"])
+    assert row_at_publication.get("exists") is True, (
+        "approvals row must exist BEFORE the proposed_run event is published")
 
     row = session_store.get_approval(cid)
     assert row is not None, "relay must materialize the approvals row"

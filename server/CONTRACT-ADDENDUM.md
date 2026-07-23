@@ -821,6 +821,13 @@ Two ground rules frame everything below:
 > are LIVE (shapes as documented); `GET /api/sessions` (list) and
 > `DELETE /api/sessions/{id}` (archive) are PARKED — not served — until spine
 > unification. The normative wire spec is `leaf-backend-gaps.md` §2.1.
+> **Wire correction (census #12 chip 2, 2026-07-23):** the messages row's "app
+> assembles the ContextPacket and forwards it" sentence is the superseded
+> §18-era proxy design. The live wire forwards the frozen §2.1
+> `ConverseTurnInput` — `{tenant_id, session_id, turn_id, drawing_id, messages,
+> text|confirm}` — with NO ContextPacket field; `server/context_packet.py` has
+> no live caller. Pinned by `server/tests/test_sessions_router.py`
+> (no-packet body assertion); chip 5 freezes it.
 
 All `/api/*` routes resolve the tenant via the existing `require_tenant` dependency
 (`server/deps.py:251–277`; off-auth header stub, live-auth verified JWT — unchanged).

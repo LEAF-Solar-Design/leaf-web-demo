@@ -253,16 +253,22 @@ def _write_pending(record: Dict[str, Any]) -> None:
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
     tmp.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
     last_attempt = 19  # ~100ms total: far beyond any real reader's open window
-    for attempt in range(last_attempt + 1):
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == last_attempt:
-                with contextlib.suppress(OSError):
-                    tmp.unlink()
-                raise
-            time.sleep(0.005)
+    try:
+        for attempt in range(last_attempt + 1):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == last_attempt:
+                    raise
+                time.sleep(0.005)
+    except OSError:
+        # any terminal replace failure (not just retry exhaustion) must not
+        # leave a .tmp-* orphan behind; the error still propagates so the
+        # decision route answers 503 retryable (nothing was recorded).
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _is_expired(record: Dict[str, Any], *, now: Optional[datetime] = None) -> bool:

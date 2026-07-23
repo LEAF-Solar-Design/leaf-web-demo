@@ -299,7 +299,7 @@ def build_suites() -> List[Suite]:
 # env hygiene: strip cross-contaminating toggles so each suite sees defaults
 # --------------------------------------------------------------------------- #
 _ENV_DENYLIST = (
-    "LEAF_AUTH_LIVE", "APS_LIVE", "APS_CRED", "JOBS_DB", "JOB_MAX_S",
+    "LEAF_AUTH_LIVE", "APS_LIVE", "APS_CRED", "JOBS_DB", "SESSIONS_DB", "JOB_MAX_S",
     "LEAF_STORE_DIR", "LEAF_ENTITLEMENTS_FILE", "LEAF_AUTHOR_HARNESS_URL",
     "LEAF_CONVERSE_HARNESS_URL",
     "LEAF_AUTHOR_LLM", "LEAF_TENANTS_DIR", "LEAF_TENANT_REPO", "BROKER_URL",
