@@ -220,6 +220,11 @@ def _conform_ledger_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     entry["tool"] = tool if isinstance(tool, str) else None
     engine_op = entry.get("engine_op")
     entry["engine_op"] = engine_op if isinstance(engine_op, str) else ""
+    # A tool envelope is unchecked input too: `error: {error_code: null}` would
+    # otherwise flow through .get("error_code", "error") as None (the default
+    # only covers a MISSING key) and append a non-string status.
+    status = entry.get("status")
+    entry["status"] = status if isinstance(status, str) else "error"
     for key in ("engine_seconds", "usd_est"):
         val = entry.get(key)
         entry[key] = float(val) if isinstance(val, (int, float)) and not isinstance(val, bool) else None

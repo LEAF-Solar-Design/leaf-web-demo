@@ -76,12 +76,17 @@ contain no `da` import and the app runs correctly with
 `APS_CRED=/nonexistent` (dynamic test). `server/broker.py` is a separate
 process (default `:8140`, env `BROKER_PORT`; its own container via
 `deploy/Dockerfile.broker`, non-root, unpublished on the host network) and is
-the ONLY code that loads `da/client.py` on the tool-execution path. ONE
-app-side seam exists and is documented, not waived: the §11 legacy store-read
-loader `deps.get_da_client()` (drawing reads at `APS_LIVE=1` via
-`OSSBackend`), which every call-site must use APS_LIVE-gated verbatim
-(`deps.get_da_client() if deps.APS_LIVE else None`); promoting those live
-reads through the broker is the documented §11 follow-up. The static half of
+the ONLY code that loads `da/client.py` on the tool-execution path. TWO
+app-side seams exist and are documented, not waived — both §11 store-read
+paths, both credential-free at `APS_LIVE=0`: (a) the legacy loader
+`deps.get_da_client()` (drawing reads at `APS_LIVE=1` via `OSSBackend`),
+which every call-site must use APS_LIVE-gated verbatim
+(`deps.get_da_client() if deps.APS_LIVE else None`); (b) `write_loop.py`'s
+lazy `import store` (`da/store.py` via a `sys.path` append), where
+`store.py` imports `da/client` as a MODULE but the credential file is read
+only on a live token fetch (the `APS_CRED=/nonexistent` dynamic test proves
+`APS_LIVE=0` stays credential-free). Promoting the live reads through the
+broker is the documented §11 follow-up. The static half of
 the invariant is its own gate — `server/tests/test_no_da_imports_static.py`
 sweeps the whole app-side surface (app, jobs, deps, broker_client, every
 router, and every app-loaded subpackage, recursively) for `da` imports —

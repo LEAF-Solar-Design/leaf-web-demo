@@ -90,6 +90,24 @@ def test_non_string_name_and_engine_op_append_schema_valid_lines(ledgered_client
         assert line["engine_op"] == ""   # non-string engine_op -> ''
 
 
+def test_malformed_error_envelope_still_appends_string_status(ledgered_client, monkeypatch):
+    """A tool envelope is unchecked input: `{"ok": false, "error":
+    {"error_code": null}}` would flow through .get("error_code", "error") as
+    None (the default only covers a MISSING key) — the appended line must
+    still carry a STRING status."""
+    client, ledger = ledgered_client
+    monkeypatch.setattr(broker, "run_tool_dynamic", lambda *_a, **_k: {
+        "ok": False, "tool": "t", "version": "1.0.0", "result": {}, "overlay": None,
+        "timing_ms": 1, "cost": None, "error": {"error_code": None}, "degraded_mode": False})
+    client.post("/broker/run", json={
+        "tenant_id": "t1",
+        "tool": {"name": "t", "engine_op": "op", "params_schema": {"type": "object"}},
+        "params": {}, "dwg": "rooftop_demo", "aps_live": False})
+    line = _lines(ledger)[-1]
+    jsonschema.validate(line, SCHEMA)
+    assert line["status"] == "error"
+
+
 def test_ok_line_validates_and_keeps_real_values(ledgered_client):
     client, ledger = ledgered_client
     r = client.post("/broker/run", json={

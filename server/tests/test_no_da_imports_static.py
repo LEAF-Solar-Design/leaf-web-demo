@@ -34,7 +34,9 @@ from pathlib import Path
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 
-# Files that legitimately live on the credential side of the boundary.
+# Files that legitimately live on the credential side of the boundary —
+# matched by path RELATIVE to server/, so only these two top-level files are
+# exempt (a nested broker.py would still be swept).
 CREDENTIAL_SIDE = {"broker.py", "write_loop_live.py"}
 
 GET_DA_CLIENT_RE = re.compile(r"deps\.get_da_client\(\)")
@@ -54,7 +56,7 @@ def _app_side_files() -> list[Path]:
     files = [p for p in sorted(SERVER_DIR.rglob("*.py"))
              if "__pycache__" not in p.parts
              and "tests" not in p.parts
-             and p.name not in CREDENTIAL_SIDE]
+             and p.relative_to(SERVER_DIR).as_posix() not in CREDENTIAL_SIDE]
     assert len(files) > 30, "app-side sweep found suspiciously few files"
     return files
 
@@ -104,15 +106,31 @@ def test_no_app_side_file_imports_bare_client_module():
     assert not offenders, "app-side bare client import(s): " + "; ".join(offenders)
 
 
+def _dynamic_import_offenders(src: str, rel: str) -> list[str]:
+    """Full-text scan (NOT per-line): `import_module(\n"da")` split across
+    lines must still match — \\s* in the pattern spans newlines when the whole
+    source is searched at once."""
+    return [f"{rel}:{src.count(chr(10), 0, m.start()) + 1}: {m.group(0)!r}"
+            for m in DYNAMIC_IMPORT_RE.finditer(src)]
+
+
 def test_no_app_side_dynamic_da_imports():
     """importlib.import_module / __import__ with a "da"/"client" literal —
     the dynamic spelling of the same boundary breach."""
-    offenders = []
-    for p in _app_side_files():
-        for i, line in enumerate(_src(p).splitlines(), 1):
-            if DYNAMIC_IMPORT_RE.search(line):
-                offenders.append(f"{_rel(p)}:{i}: {line.strip()}")
+    offenders = [o for p in _app_side_files()
+                 for o in _dynamic_import_offenders(_src(p), _rel(p))]
     assert not offenders, "app-side dynamic da/client import(s): " + "; ".join(offenders)
+
+
+def test_dynamic_import_scanner_catches_multiline_calls():
+    """Self-test: the scanner must see calls split across lines and both
+    quote styles; a per-line scan would miss every one of these."""
+    smuggled = 'x = import_module(\n    "da.client")\ny = __import__(\n"client")\n'
+    hits = _dynamic_import_offenders(smuggled, "synthetic.py")
+    assert len(hits) == 2, hits
+    assert hits[0].startswith("synthetic.py:1:")
+    assert hits[1].startswith("synthetic.py:3:")
+    assert not _dynamic_import_offenders('import_module("engine_selfcheck")\n', "ok.py")
 
 
 def test_app_and_jobs_never_reference_da_client():

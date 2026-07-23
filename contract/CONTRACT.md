@@ -167,10 +167,12 @@ degraded_mode`.
 APS credential at `APS_LIVE=0` — the tested condition. `server/broker.py` is a
 separate process (default `:8140`, env `BROKER_PORT`; its own non-root
 container, unpublished on the host network) and is the ONLY code that loads
-`da/client.py` on the tool-execution path; the ONE documented app-side seam is
-the §11 legacy store-read loader `deps.get_da_client()` (drawing reads at
-`APS_LIVE=1`), every call-site APS_LIVE-gated, promotion through the broker a
-documented follow-up. `app.py`/`jobs.py` contain no `da` import (static gate
+`da/client.py` on the tool-execution path; the TWO documented app-side seams
+are the §11 store-read paths — the legacy loader `deps.get_da_client()`
+(drawing reads at `APS_LIVE=1`), every call-site APS_LIVE-gated, and
+`write_loop.py`'s lazy `import store`, whose `da/store.py` imports `da/client`
+as a module but reads the credential file only on a live token fetch —
+promotion through the broker a documented follow-up. `app.py`/`jobs.py` contain no `da` import (static gate
 `server/tests/test_no_da_imports_static.py`, whole app-side sweep, AST-level +
 recursive) and run correctly with `APS_CRED=/nonexistent` (dynamic test). The
 app reaches tool execution ONLY via `server/broker_client.py` → HTTP
