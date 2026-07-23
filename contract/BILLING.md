@@ -37,15 +37,16 @@ parity test then names the exact JS constant the operator must re-paste.**
 ## 2. Plan vocabulary → tier
 
 Keys are leaf_website `app_metadata.leaf.plan` values. Today's Stripe glue
-(`leaf_website/lib/stripe.ts` `getPlanFromPriceId`) emits `monthly` / `yearly`;
-the remaining names are the agreed forward vocabulary for named products, so a
+(`leaf_website/lib/stripe.ts` `getPlanFromPriceId`) emits `monthly` / `yearly`.
+Existing production metadata can also carry `single_*` and `team_*` names.
+The remaining names are the agreed forward vocabulary for named products, so a
 product rename ships here (and in the re-pasted Action) BEFORE marketing uses
 it:
 
 | plan (case-insensitive) | tier |
 |---|---|
 | `free`, `starter`, `basic`, `trial` | `hosted_starter` |
-| `pro`, `monthly`, `yearly`, `team`, `business` | `hosted_pro` |
+| `pro`, `monthly`, `yearly`, `single_monthly`, `single_yearly`, `team`, `team_monthly`, `team_yearly`, `business` | `hosted_pro` |
 | `enterprise`, `self_hosted` | `self_hosted` |
 | *unknown / absent* | `hosted_starter` (`DEFAULT_TIER`) |
 
