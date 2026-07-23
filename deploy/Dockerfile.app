@@ -9,6 +9,8 @@
 # harness over LEAF_AUTHOR_HARNESS_URL.
 FROM python:3.12-slim AS app
 
+ARG LEAF_SOURCE_SHA=unknown
+
 WORKDIR /app
 
 # --- Python deps: server + platform + da (the three the app imports). ---------
@@ -50,6 +52,7 @@ ENV APS_LIVE=0 \
     LEAF_GUEST_CAP_STORE=memory \
     LEAF_DRAWING_STORE=legacy \
     LEAF_UPLOAD_STORE=legacy \
+    LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA} \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

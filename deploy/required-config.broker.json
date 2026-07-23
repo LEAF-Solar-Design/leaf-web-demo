@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "container": "leaf-platform-broker",
+  "required": {
+    "environment": [
+      "APS_LIVE",
+      "APS_MAX_CONCURRENCY",
+      "BROKER_LEDGER",
+      "BROKER_TENANTS",
+      "LEAF_AUTHORED_EXECUTION",
+      "LEAF_CUSTOMIZATION_R5_MODE",
+      "LEAF_CUSTOMIZATION_R6_MODE",
+      "LEAF_DAILY_RUN_QUOTA",
+      "LEAF_EFFECTIVE_TENANTS_DIR",
+      "LEAF_SANDBOX",
+      "LEAF_STORE_DIR",
+      "LEAF_TENANTS_DIR",
+      "LEAF_TENANT_GIT_DIR"
+    ],
+    "mountPaths": [
+      "/data/drawings",
+      "/data/effective",
+      "/data/state",
+      "/data/tenant-git",
+      "/data/tenants"
+    ],
+    "secrets": [
+      "APS_CREDENTIALS_JSON"
+    ]
+  }
+}

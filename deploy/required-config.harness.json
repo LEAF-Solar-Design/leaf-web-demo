@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "container": "leaf-platform-harness",
+  "required": {
+    "environment": [
+      "BROKER_URL",
+      "LEAF_APP_URL",
+      "LEAF_GRANTS_DIR",
+      "LEAF_HARNESS_AUTH",
+      "LEAF_SANDBOX",
+      "LEAF_TENANTS_DIR",
+      "LEAF_TENANT_FIXTURE",
+      "LEAF_TENANT_GIT_DIR"
+    ],
+    "mountPaths": [
+      "/data/grants",
+      "/data/tenant-git",
+      "/data/tenants"
+    ],
+    "secrets": [
+      "LEAF_APP_DISPATCH_SECRET",
+      "LEAF_HARNESS_SECRET"
+    ]
+  }
+}

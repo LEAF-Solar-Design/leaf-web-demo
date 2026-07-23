@@ -168,6 +168,7 @@ def health() -> Dict[str, Any]:
         "da_client_present": (deps.DA_DIR / "client.py").exists(),
         "n_tools": len(deps.all_tools()),
         "n_authored": len(deps._AUTHORED),
+        "source_sha": os.environ.get("LEAF_SOURCE_SHA", "unknown"),
     })
 
 

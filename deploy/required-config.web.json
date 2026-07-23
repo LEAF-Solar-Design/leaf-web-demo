@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "container": "leaf-platform-web",
+  "required": {
+    "environment": [],
+    "mountPaths": [],
+    "secrets": []
+  }
+}

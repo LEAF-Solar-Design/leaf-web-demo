@@ -354,7 +354,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 256),
+              [_npm(), "test"], 258),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
