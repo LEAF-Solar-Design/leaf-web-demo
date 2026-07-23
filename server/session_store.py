@@ -98,8 +98,10 @@ Store API v1 (signatures FROZEN — downstream lanes S3/S4 call these exactly):
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -568,3 +570,664 @@ def consume_approval(confirmation_id: str, session_id: str, tenant_id: str) -> D
         result = _row_to_approval(row)
         result["consumed"] = True
         return result
+
+
+# --------------------------------------------------------------------------- #
+# PostgreSQL authority seam
+# --------------------------------------------------------------------------- #
+# Keep the SQLite implementation above intact. These aliases let the public
+# wrappers below select a backend at call time, so operators can change the
+# mode without rebuilding the image and existing tests can keep redirecting
+# SESSIONS_DB exactly as before.
+_legacy_ensure_started = ensure_started
+_legacy_get_or_create_session = get_or_create_session
+_legacy_get_session = get_session
+_legacy_append_event = append_event
+_legacy_events_after = events_after
+_legacy_recent_events = recent_events
+_legacy_try_begin_turn = try_begin_turn
+_legacy_active_turn_tier = active_turn_tier
+_legacy_end_turn = end_turn
+_legacy_create_approval = create_approval
+_legacy_get_approval = get_approval
+_legacy_decide_approval = decide_approval
+_legacy_consume_approval = consume_approval
+
+_STORE_MODES = {
+    "legacy", "dual_write", "dual_write_shadow", "shadow", "postgres",
+}
+_DUAL_WRITE_MODES = {"dual_write", "dual_write_shadow"}
+_SHADOW_READ_MODES = {"shadow", "dual_write_shadow"}
+_PROJECT_ROOT = SERVER_DIR.parent
+
+
+def _store_mode() -> str:
+    """Return the call-time session authority mode, rejecting unsafe typos.
+
+    ``legacy`` uses SQLite only. ``dual_write`` mirrors writes while reads stay
+    on SQLite. ``dual_write_shadow`` also compares reads. ``shadow`` compares
+    reads but never writes PostgreSQL. ``postgres`` is PostgreSQL authority.
+    Turn-fence dual writes are valid only during the single-task migration
+    phase because SQLite and PostgreSQL cannot share one atomic transaction.
+    """
+    value = os.environ.get("LEAF_SESSIONS_STORE", "legacy").strip().lower()
+    if value not in _STORE_MODES:
+        supported = ", ".join(sorted(_STORE_MODES))
+        raise RuntimeError(
+            f"invalid LEAF_SESSIONS_STORE {value!r}; expected one of: {supported}"
+        )
+    return value
+
+
+def _platform_db():
+    """Load the local platform database package without shadowing stdlib platform."""
+    loaded = sys.modules.get("leaf_platform")
+    if loaded is None:
+        pkg_dir = _PROJECT_ROOT / "platform"
+        spec = importlib.util.spec_from_file_location(
+            "leaf_platform", pkg_dir / "__init__.py",
+            submodule_search_locations=[str(pkg_dir)],
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError("could not load the Leaf platform database package")
+        loaded = importlib.util.module_from_spec(spec)
+        sys.modules["leaf_platform"] = loaded
+        spec.loader.exec_module(loaded)
+    from leaf_platform import db
+    return db
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (dict, list, int, float, bool)):
+        return value
+    return json.loads(value)
+
+
+def _pg_session(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "session_id": row["session_id"],
+        "tenant_id": row["tenant_id"],
+        "drawing_id": row["drawing_id"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "last_seq": row["last_seq"],
+        "active_turn_id": row["active_turn_id"],
+        "turn_started_at": row["turn_started_at"],
+    }
+
+
+def _pg_envelope(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "v": 1,
+        "session_id": row["session_id"],
+        "turn_id": row["turn_id"],
+        "seq": row["seq"],
+        "type": row["type"],
+        "data": _json_value(row["data_json"]) or {},
+    }
+
+
+def _pg_approval(row: Dict[str, Any]) -> Dict[str, Any]:
+    expires_at = row["expires_at"]
+    return {
+        "confirmation_id": row["confirmation_id"],
+        "session_id": row["session_id"],
+        "tenant_id": row["tenant_id"],
+        "turn_id": row["turn_id"],
+        "tool": row["tool"],
+        "params": _json_value(row["params_json"]),
+        "capability": row["capability"],
+        "rationale": row["rationale"],
+        "kind": row["kind"],
+        "payload": _json_value(row["payload_json"]),
+        "decided": bool(row["decided"]),
+        "approved": (bool(row["approved"]) if row["approved"] is not None else None),
+        "decided_by": row["decided_by"],
+        "created_at": row["created_at"],
+        "expires_at": expires_at,
+        "expired": bool(expires_at is not None and time.time() > expires_at),
+        "consumed": bool(row["consumed"]),
+    }
+
+
+def _pg_ensure_started() -> None:
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT to_regclass('app_sessions') AS sessions,"
+            " to_regclass('app_session_events') AS events,"
+            " to_regclass('app_approvals') AS approvals"
+        )
+        row = cur.fetchone()
+    if not row or not all(row.values()):
+        raise RuntimeError(
+            "PostgreSQL session schema is unavailable; apply 0012_sessions.sql"
+        )
+
+
+def _pg_get_or_create_session(
+    tenant_id: str, drawing_id: str, *,
+    session_id: Optional[str] = None, created_at: Optional[float] = None,
+) -> Dict[str, Any]:
+    candidate_id = session_id or str(uuid.uuid4())
+    now = created_at if created_at is not None else time.time()
+    db = _platform_db()
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_sessions"
+            " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq)"
+            " VALUES (%s,%s,%s,'active',%s,%s,0)"
+            " ON CONFLICT (tenant_id, drawing_id) DO NOTHING",
+            (candidate_id, tenant_id, drawing_id, now, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM app_sessions WHERE tenant_id = %s AND drawing_id = %s",
+            (tenant_id, drawing_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("PostgreSQL session insert did not return a row")
+    return _pg_session(row)
+
+
+def _pg_get_session(session_id: str) -> Optional[Dict[str, Any]]:
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute("SELECT * FROM app_sessions WHERE session_id = %s", (session_id,))
+        row = cur.fetchone()
+    return _pg_session(row) if row else None
+
+
+def _legacy_turn_fence(session_id: str) -> Optional[tuple]:
+    rows = _query(
+        "SELECT active_turn_id, turn_started_at, active_turn_tier"
+        " FROM sessions WHERE session_id = ?",
+        (session_id,),
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    return (
+        row["active_turn_id"], row["turn_started_at"], row["active_turn_tier"],
+    )
+
+
+def _pg_turn_fence(session_id: str) -> Optional[tuple]:
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT active_turn_id, turn_started_at, active_turn_tier"
+            " FROM app_sessions WHERE session_id = %s",
+            (session_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return (
+        row["active_turn_id"], row["turn_started_at"], row["active_turn_tier"],
+    )
+
+
+def _pg_append_event(
+    session_id: str, turn_id: Optional[str], type: str, data: Dict[str, Any],
+    *, expected_seq: Optional[int] = None, updated_at: Optional[float] = None,
+) -> int:
+    now = updated_at if updated_at is not None else time.time()
+    db = _platform_db()
+    with db.transaction() as conn:
+        row = conn.execute(
+            "UPDATE app_sessions SET last_seq = last_seq + 1, updated_at = %s"
+            " WHERE session_id = %s RETURNING last_seq",
+            (now, session_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown session_id {session_id!r}")
+        seq = int(row["last_seq"])
+        if expected_seq is not None and seq != expected_seq:
+            raise RuntimeError(
+                f"session event sequence mismatch: legacy={expected_seq}, postgres={seq}"
+            )
+        conn.execute(
+            "INSERT INTO app_session_events"
+            " (session_id, seq, turn_id, type, data_json, created_at)"
+            " VALUES (%s,%s,%s,%s,%s::jsonb,%s)",
+            (session_id, seq, turn_id, type,
+             json.dumps(data if data is not None else {}), now),
+        )
+    return seq
+
+
+def _pg_events_after(
+    session_id: str, after_seq: int, limit: int = 500,
+) -> List[Dict[str, Any]]:
+    limit = max(1, min(int(limit), 10000))
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM app_session_events WHERE session_id = %s AND seq > %s"
+            " ORDER BY seq ASC LIMIT %s",
+            (session_id, int(after_seq), limit),
+        )
+        rows = cur.fetchall()
+    return [_pg_envelope(row) for row in rows]
+
+
+def _pg_recent_events(session_id: str, limit: int) -> List[Dict[str, Any]]:
+    limit = max(1, min(int(limit), 10000))
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM app_session_events WHERE session_id = %s"
+            " ORDER BY seq DESC LIMIT %s",
+            (session_id, limit),
+        )
+        rows = cur.fetchall()
+    return [_pg_envelope(row) for row in reversed(rows)]
+
+
+def _pg_try_begin_turn(
+    session_id: str, turn_id: str, stale_after_s: float,
+    tier: Optional[str] = None, *, started_at: Optional[float] = None,
+) -> bool:
+    now = started_at if started_at is not None else time.time()
+    stale_before = now - stale_after_s
+    db = _platform_db()
+    with db.transaction() as conn:
+        row = conn.execute(
+            "UPDATE app_sessions SET active_turn_id = %s, turn_started_at = %s,"
+            " active_turn_tier = %s, updated_at = %s"
+            " WHERE session_id = %s AND (active_turn_id IS NULL"
+            " OR turn_started_at IS NULL OR turn_started_at < %s)"
+            " RETURNING session_id",
+            (turn_id, now, tier, now, session_id, stale_before),
+        ).fetchone()
+    return row is not None
+
+
+def _pg_active_turn_tier(
+    session_id: str, turn_id: str, tenant_id: str,
+) -> Optional[str]:
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT active_turn_tier FROM app_sessions"
+            " WHERE session_id = %s AND active_turn_id = %s AND tenant_id = %s",
+            (session_id, turn_id, tenant_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    value = row["active_turn_tier"]
+    return str(value) if value is not None else None
+
+
+def _pg_end_turn(
+    session_id: str, turn_id: str, *, updated_at: Optional[float] = None,
+) -> bool:
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE app_sessions SET active_turn_id = NULL, turn_started_at = NULL,"
+            " active_turn_tier = NULL, updated_at = %s"
+            " WHERE session_id = %s AND active_turn_id = %s"
+            " RETURNING session_id",
+            (updated_at if updated_at is not None else time.time(), session_id, turn_id),
+        )
+        row = cur.fetchone()
+    return row is not None
+
+
+def _pg_create_approval(
+    confirmation_id: str, session_id: str, tenant_id: str,
+    turn_id: Optional[str], tool: Optional[str],
+    params: Optional[Dict[str, Any]], capability: Optional[str],
+    rationale: Optional[str], kind: Optional[str],
+    payload: Optional[Dict[str, Any]], ttl_s: float, *,
+    created_at: Optional[float] = None,
+) -> None:
+    now = created_at if created_at is not None else time.time()
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO app_approvals"
+            " (confirmation_id, session_id, tenant_id, turn_id, tool, params_json,"
+            " capability, rationale, kind, payload_json, decided, approved,"
+            " decided_by, created_at, expires_at, consumed)"
+            " VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s::jsonb,"
+            " FALSE,NULL,NULL,%s,%s,FALSE)",
+            (confirmation_id, session_id, tenant_id, turn_id, tool,
+             json.dumps(params) if params is not None else None,
+             capability, rationale, kind,
+             json.dumps(payload) if payload is not None else None,
+             now, now + float(ttl_s)),
+        )
+
+
+def _pg_get_approval(confirmation_id: str) -> Optional[Dict[str, Any]]:
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM app_approvals WHERE confirmation_id = %s",
+            (confirmation_id,),
+        )
+        row = cur.fetchone()
+    return _pg_approval(row) if row else None
+
+
+def _pg_decide_approval(
+    confirmation_id: str, approved: bool, by: Optional[str] = None,
+) -> str:
+    db = _platform_db()
+    with db.transaction() as conn:
+        row = conn.execute(
+            "UPDATE app_approvals SET decided = TRUE, approved = %s, decided_by = %s"
+            " WHERE confirmation_id = %s AND decided = FALSE"
+            " RETURNING confirmation_id",
+            (approved, by, confirmation_id),
+        ).fetchone()
+        if row is not None:
+            return "recorded"
+        exists = conn.execute(
+            "SELECT 1 FROM app_approvals WHERE confirmation_id = %s",
+            (confirmation_id,),
+        ).fetchone()
+    return "already_decided" if exists else "not_found"
+
+
+def _pg_consume_approval(
+    confirmation_id: str, session_id: str, tenant_id: str,
+) -> Dict[str, Any]:
+    now = time.time()
+    db = _platform_db()
+    with db.transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM app_approvals WHERE confirmation_id = %s FOR UPDATE",
+            (confirmation_id,),
+        ).fetchone()
+        if row is None:
+            raise ApprovalConsumeError("not_found")
+        if str(row["session_id"]) != str(session_id) or str(row["tenant_id"]) != str(tenant_id):
+            raise ApprovalConsumeError("not_found")
+        if not row["decided"]:
+            raise ApprovalConsumeError("undecided")
+        if row["consumed"]:
+            raise ApprovalConsumeError("already_consumed")
+        expires_at = row["expires_at"]
+        if expires_at is not None and now > expires_at:
+            raise ApprovalConsumeError("expired")
+        conn.execute(
+            "UPDATE app_approvals SET consumed = TRUE WHERE confirmation_id = %s",
+            (confirmation_id,),
+        )
+    result = _pg_approval(row)
+    result["consumed"] = True
+    return result
+
+
+def _shadow_equal(label: str, legacy: Any, postgres: Any) -> None:
+    """Fail closed when a shadow read disagrees with the legacy authority."""
+    if legacy != postgres:
+        raise RuntimeError(f"{label} shadow mismatch")
+
+
+def ensure_started() -> None:
+    mode = _store_mode()
+    if mode != "postgres":
+        _legacy_ensure_started()
+    if mode != "legacy":
+        _pg_ensure_started()
+
+
+def get_or_create_session(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_get_or_create_session(tenant_id, drawing_id)
+    if mode in _DUAL_WRITE_MODES:
+        # Do not mutate the legacy authority when its required mirror is
+        # already known to be unavailable.
+        _pg_ensure_started()
+    legacy = _legacy_get_or_create_session(tenant_id, drawing_id)
+    if mode in _DUAL_WRITE_MODES:
+        postgres = _pg_get_or_create_session(
+            tenant_id, drawing_id,
+            session_id=legacy["session_id"], created_at=legacy["created_at"],
+        )
+        _shadow_equal("session identity", legacy["session_id"], postgres["session_id"])
+        if mode in _SHADOW_READ_MODES:
+            _shadow_equal("session", legacy, postgres)
+    elif mode == "shadow":
+        _shadow_equal("session", legacy, _pg_get_session(legacy["session_id"]))
+    return legacy
+
+
+def get_session(session_id: str) -> Optional[Dict[str, Any]]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_get_session(session_id)
+    legacy = _legacy_get_session(session_id)
+    if mode in _SHADOW_READ_MODES:
+        _shadow_equal("session", legacy, _pg_get_session(session_id))
+    return legacy
+
+
+def append_event(
+    session_id: str, turn_id: Optional[str], type: str, data: Dict[str, Any],
+) -> int:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_append_event(session_id, turn_id, type, data)
+    if mode in _DUAL_WRITE_MODES:
+        postgres_before = _pg_get_session(session_id)
+        if postgres_before is None:
+            raise RuntimeError("PostgreSQL session mirror is missing")
+    seq = _legacy_append_event(session_id, turn_id, type, data)
+    if mode in _DUAL_WRITE_MODES:
+        mirrored = _legacy_get_session(session_id)
+        _pg_append_event(
+            session_id, turn_id, type, data, expected_seq=seq,
+            updated_at=mirrored["updated_at"] if mirrored else None,
+        )
+    return seq
+
+
+def events_after(
+    session_id: str, after_seq: int, limit: int = 500,
+) -> List[Dict[str, Any]]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_events_after(session_id, after_seq, limit)
+    legacy = _legacy_events_after(session_id, after_seq, limit)
+    if mode in _SHADOW_READ_MODES:
+        _shadow_equal(
+            "session events", legacy, _pg_events_after(session_id, after_seq, limit),
+        )
+    return legacy
+
+
+def recent_events(session_id: str, limit: int) -> List[Dict[str, Any]]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_recent_events(session_id, limit)
+    legacy = _legacy_recent_events(session_id, limit)
+    if mode in _SHADOW_READ_MODES:
+        _shadow_equal("recent session events", legacy, _pg_recent_events(session_id, limit))
+    return legacy
+
+
+def try_begin_turn(
+    session_id: str, turn_id: str, stale_after_s: float,
+    tier: Optional[str] = None,
+) -> bool:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_try_begin_turn(session_id, turn_id, stale_after_s, tier)
+    if mode in _DUAL_WRITE_MODES or mode == "shadow":
+        # Cross-store turn mirroring is a migration aid for the single-task
+        # phase only. No transaction can atomically fence SQLite and Postgres.
+        legacy_before = _legacy_turn_fence(session_id)
+        postgres_before = _pg_turn_fence(session_id)
+        _shadow_equal("turn fence before acquisition", legacy_before, postgres_before)
+    legacy = _legacy_try_begin_turn(session_id, turn_id, stale_after_s, tier)
+    if mode in _DUAL_WRITE_MODES:
+        legacy_after = _legacy_turn_fence(session_id)
+        if legacy:
+            if legacy_after is None:
+                raise RuntimeError("legacy turn fence disappeared after acquisition")
+            postgres = _pg_try_begin_turn(
+                session_id, turn_id, stale_after_s, tier,
+                started_at=legacy_after[1],
+            )
+            if not postgres:
+                raise RuntimeError("PostgreSQL turn acquisition mirror failed")
+        # A legacy no-op must never trigger a mutating PostgreSQL CAS.
+        postgres_after = _pg_turn_fence(session_id)
+        _shadow_equal("turn fence after acquisition", legacy_after, postgres_after)
+    elif mode == "shadow":
+        _shadow_equal(
+            "turn fence after acquisition",
+            _legacy_turn_fence(session_id), _pg_turn_fence(session_id),
+        )
+    return legacy
+
+
+def active_turn_tier(
+    session_id: str, turn_id: str, tenant_id: str,
+) -> Optional[str]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_active_turn_tier(session_id, turn_id, tenant_id)
+    legacy = _legacy_active_turn_tier(session_id, turn_id, tenant_id)
+    if mode in _SHADOW_READ_MODES:
+        _shadow_equal(
+            "active turn tier", legacy,
+            _pg_active_turn_tier(session_id, turn_id, tenant_id),
+        )
+    return legacy
+
+
+def end_turn(session_id: str, turn_id: str) -> None:
+    mode = _store_mode()
+    if mode == "postgres":
+        _pg_end_turn(session_id, turn_id)
+        return
+    if mode in _DUAL_WRITE_MODES or mode == "shadow":
+        legacy_before = _legacy_turn_fence(session_id)
+        postgres_before = _pg_turn_fence(session_id)
+        _shadow_equal("turn fence before release", legacy_before, postgres_before)
+    if mode in _DUAL_WRITE_MODES:
+        should_clear = bool(legacy_before and legacy_before[0] == turn_id)
+    _legacy_end_turn(session_id, turn_id)
+    if mode in _DUAL_WRITE_MODES:
+        mirrored = _legacy_get_session(session_id)
+        if should_clear:
+            cleared = _pg_end_turn(
+                session_id, turn_id,
+                updated_at=mirrored["updated_at"] if mirrored else None,
+            )
+            if not cleared:
+                raise RuntimeError("PostgreSQL turn release mirror failed")
+        # A legacy no-op must never clear a PostgreSQL turn.
+        _shadow_equal(
+            "turn fence after release",
+            _legacy_turn_fence(session_id), _pg_turn_fence(session_id),
+        )
+    elif mode == "shadow":
+        _shadow_equal(
+            "turn fence after release",
+            _legacy_turn_fence(session_id), _pg_turn_fence(session_id),
+        )
+
+
+def create_approval(
+    confirmation_id: str, session_id: str, tenant_id: str,
+    turn_id: Optional[str], tool: Optional[str],
+    params: Optional[Dict[str, Any]], capability: Optional[str],
+    rationale: Optional[str], kind: Optional[str],
+    payload: Optional[Dict[str, Any]], ttl_s: float,
+) -> None:
+    mode = _store_mode()
+    if mode == "postgres":
+        _pg_create_approval(
+            confirmation_id, session_id, tenant_id, turn_id, tool, params,
+            capability, rationale, kind, payload, ttl_s,
+        )
+        return
+    if mode in _DUAL_WRITE_MODES:
+        _pg_ensure_started()
+        if _pg_get_approval(confirmation_id) is not None:
+            raise RuntimeError("PostgreSQL approval mirror already exists")
+    _legacy_create_approval(
+        confirmation_id, session_id, tenant_id, turn_id, tool, params,
+        capability, rationale, kind, payload, ttl_s,
+    )
+    if mode in _DUAL_WRITE_MODES:
+        legacy = _legacy_get_approval(confirmation_id)
+        if legacy is None:
+            raise RuntimeError("legacy approval disappeared before PostgreSQL mirror")
+        _pg_create_approval(
+            confirmation_id, session_id, tenant_id, turn_id, tool, params,
+            capability, rationale, kind, payload, ttl_s,
+            created_at=legacy["created_at"],
+        )
+
+
+def get_approval(confirmation_id: str) -> Optional[Dict[str, Any]]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_get_approval(confirmation_id)
+    legacy = _legacy_get_approval(confirmation_id)
+    if mode in _SHADOW_READ_MODES:
+        postgres = _pg_get_approval(confirmation_id)
+        # `expired` is computed from the wall clock independently. Exclude it
+        # from parity because a row may cross its expiry boundary between reads.
+        left = dict(legacy) if legacy else None
+        right = dict(postgres) if postgres else None
+        if left is not None:
+            left.pop("expired", None)
+        if right is not None:
+            right.pop("expired", None)
+        _shadow_equal("approval", left, right)
+    return legacy
+
+
+def decide_approval(
+    confirmation_id: str, approved: bool, by: Optional[str] = None,
+) -> str:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_decide_approval(confirmation_id, approved, by)
+    if mode in _DUAL_WRITE_MODES:
+        postgres_before = _pg_get_approval(confirmation_id)
+        legacy_before = _legacy_get_approval(confirmation_id)
+        _shadow_equal(
+            "approval presence",
+            legacy_before is not None, postgres_before is not None,
+        )
+    legacy = _legacy_decide_approval(confirmation_id, approved, by)
+    if mode in _DUAL_WRITE_MODES:
+        postgres = _pg_decide_approval(confirmation_id, approved, by)
+        _shadow_equal("approval decision", legacy, postgres)
+    return legacy
+
+
+def consume_approval(
+    confirmation_id: str, session_id: str, tenant_id: str,
+) -> Dict[str, Any]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_consume_approval(confirmation_id, session_id, tenant_id)
+    if mode in _DUAL_WRITE_MODES:
+        postgres_before = _pg_get_approval(confirmation_id)
+        legacy_before = _legacy_get_approval(confirmation_id)
+        _shadow_equal(
+            "approval presence",
+            legacy_before is not None, postgres_before is not None,
+        )
+    legacy = _legacy_consume_approval(confirmation_id, session_id, tenant_id)
+    if mode in _DUAL_WRITE_MODES:
+        postgres = _pg_consume_approval(confirmation_id, session_id, tenant_id)
+        left, right = dict(legacy), dict(postgres)
+        left.pop("expired", None)
+        right.pop("expired", None)
+        _shadow_equal("approval consumption", left, right)
+    return legacy

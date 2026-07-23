@@ -358,11 +358,17 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         # marker; anything non-.dwg (a DXF's intake-JSON mock blob) must refuse
         # honestly here rather than hand APS a mislabeled file.
         if backend.exists(upload_marker_key(tenant_id, drawing_id)):
-            try:
-                marker = json.loads(backend.get(
-                    upload_marker_key(tenant_id, drawing_id)).decode("utf-8"))
-            except (KeyError, ValueError):
-                marker = {}
+            import guest_uploads
+            if guest_uploads.upload_store_mode() == "postgres":
+                marker = guest_uploads.read_marker(
+                    backend, tenant_id, drawing_id) or {}
+            else:
+                try:
+                    marker = json.loads(backend.get(
+                        upload_marker_key(
+                            tenant_id, drawing_id)).decode("utf-8"))
+                except (KeyError, ValueError):
+                    marker = {}
             source_ext = str(marker.get("source_ext") or "")
             if not source_ext:
                 # Pre-round-4 markers (schema 1, no source_ext field): fall

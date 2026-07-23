@@ -10,16 +10,12 @@ ADDENDUM §8) into a calm, proactive spend surface for the frontend. §10-envelo
       updated_at,
       error, degraded_mode }
 
-Source of truth is `da/usage.py`:
-  * `aggregate_usage(tenant, ledger)` — runs + spend, today vs total (denied
-    pre-flight lines never count; missing/empty ledger -> zeros, never an error);
-  * `cap_for(tenant)` — the configured USD cap (None => caps OFF => enabled:false
-    with nulls; the demo default).
-
-Reading the ledger file app-side is deliberate and safe: the ledger holds NO
-credential — it IS the metering surface (CONTRACT-ADDENDUM §13). The ledger path
-is resolved at request time: `LEAF_USAGE_LEDGER` > `BROKER_LEDGER` (share the
-broker's file) > default `server/broker_ledger.jsonl`.
+The selected broker authority is the source of truth. Legacy mode aggregates
+the JSONL ledger through `da/usage.py`. PostgreSQL mode reads the immutable
+broker ledger table and never falls back to the stale file. `da/usage.py`
+continues to resolve the configured cap in both modes. The legacy ledger path
+resolves at request time: `LEAF_USAGE_LEDGER` > `BROKER_LEDGER` > default
+`server/broker_ledger.jsonl`.
 
 Tenant identity is the usual `X-Tenant-Id` stub (default `demo-tenant`), or the
 verified JWT `TenantContext` when `LEAF_AUTH_LIVE=1` — `require_tenant` like the
@@ -54,16 +50,37 @@ def _ledger_path() -> Path:
     return Path(override) if override else (deps.SERVER_DIR / "broker_ledger.jsonl")
 
 
+def _postgres_store():
+    from broker_pg_store import get_store
+
+    return get_store()
+
+
+def _broker_store_mode() -> str:
+    mode = os.environ.get("LEAF_BROKER_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_BROKER_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def _aggregate_usage(tenant_id: str, um: Any) -> Dict[str, Any]:
+    """Select one authority. PostgreSQL mode never falls back to stale JSONL."""
+    if _broker_store_mode() == "postgres":
+        return _postgres_store().aggregate_usage(tenant_id)
+    if um is None:
+        return {
+            "today": {"runs": 0, "usd_est": 0.0},
+            "total": {"runs": 0, "usd_est": 0.0},
+        }
+    return um.aggregate_usage(tenant_id, _ledger_path())
+
+
 @router.get("/api/usage")
 def usage(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     tenant_id = str(tenant)
     um = _usage_mod()
-    if um is None:  # da/usage.py somehow unavailable -> honest zeros, never a 500
-        agg = {"today": {"runs": 0, "usd_est": 0.0}, "total": {"runs": 0, "usd_est": 0.0}}
-        cap: Optional[float] = None
-    else:
-        agg = um.aggregate_usage(tenant_id, _ledger_path())
-        cap = um.cap_for(tenant_id)
+    agg = _aggregate_usage(tenant_id, um)
+    cap: Optional[float] = um.cap_for(tenant_id) if um is not None else None
 
     enabled = cap is not None
     remaining = round(max(0.0, float(cap) - agg["total"]["usd_est"]), 6) if enabled else None

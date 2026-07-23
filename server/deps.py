@@ -366,6 +366,19 @@ def backedge_tier(tenant_id: str) -> Optional[str]:
     back-edge caller could forge it. Read at call time. Returns None when the
     tenant has no provisioned tier at all; returns the raw (possibly empty) string
     when it does, so `entitlements.resolve_tier` applies its own fail-closed rule."""
+    store_mode = os.environ.get("LEAF_BROKER_STORE", "legacy").strip().lower()
+    if store_mode not in {"legacy", "postgres"}:
+        return None
+    if store_mode == "postgres":
+        try:
+            from broker_pg_store import get_store
+
+            rec = get_store().tenant(tenant_id)
+        except Exception:
+            return None
+        if rec is not None and rec.get("tier") is not None:
+            return str(rec.get("tier") or "")
+        return None
     path = Path(os.environ.get("BROKER_TENANTS") or (SERVER_DIR / "broker_tenants.json"))
     # ABSENT primary -> the operator has not provisioned this source, so the env
     # map is a legitimate fallback. PRESENT-but-corrupt is NOT the same fact:

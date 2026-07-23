@@ -13,15 +13,28 @@ Risks: approval binding is security-sensitive; catalog changes must not hide val
 
 # PostgreSQL concurrency execution
 
+- [x] Record the operator boundary: keep both production domains pinned to the
+  current deployment and treat all rollout work as staging-only.
 - [x] Wave 0: add shared PostgreSQL transaction and counter primitives.
 - [x] Wave 0: add a PostgreSQL `SessionStore` implementation and contract tests.
-- [ ] Wave 0: produce a create-only Aurora and RDS Proxy Terraform design.
+- [x] Wave 0: produce a create-only Aurora and RDS Proxy Terraform design.
 - [x] Wave 0: refresh read-only ECS, EFS, target-group, and traffic facts.
-- [ ] Integrate Wave 0 and rerun platform, focused server, and harness checks.
-- [ ] Before wiring `PgSessionStore`, make `ConverseLoop` fail closed when a
+- [x] Integrate Wave 0 and rerun platform, focused server, and harness checks.
+- [x] Before wiring `PgSessionStore`, make `ConverseLoop` fail closed when a
   concurrent opposite confirmation decision wins the atomic update.
-- [ ] Implement each remaining mutable authority behind a legacy-default feature flag.
-- [ ] Prove empty and upgraded schema behavior against real PostgreSQL.
+- [x] Add legacy-default PostgreSQL seams for app sessions and approvals.
+- [x] Add a legacy-default PostgreSQL seam for agent gate state.
+- [x] Add a production-safe legacy-default PostgreSQL seam for broker state.
+- [x] Add a legacy-default PostgreSQL seam for jobs and callback replay nonces.
+- [x] Add a legacy-default PostgreSQL seam for guest caps.
+- [x] Add a legacy-default PostgreSQL seam for agent metering and tenant ops.
+- [x] Add legacy-default PostgreSQL seams for drawing, upload, extraction, and purge authority.
+- [x] Add fleet-wide PostgreSQL APS admission and concurrency slots.
+- [x] Add explicit PostgreSQL selection for the harness session store.
+- [x] Add fenced PostgreSQL harness repo leases and default-disabled authoring.
+- [x] Prove empty and upgraded schema behavior against real PostgreSQL.
+- [x] Add fail-closed app, broker, and harness schema readiness before health.
+- [x] Build all three final runtime images.
 - [ ] Run dual-write, shadow-read, restore, canary, and two-writer gates.
 
 Risks:

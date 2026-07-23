@@ -264,8 +264,9 @@ def test_submit_job_threads_dwg_version_to_broker_client(monkeypatch, tmp_path):
     captured = {}
 
     def fake_run_via_broker(tenant_id, tool, params, dwg, aps_live, timeout_s=None,
-                            dwg_version=None):
+                            dwg_version=None, ledger_event_key=None):
         captured["dwg_version"] = dwg_version
+        captured["ledger_event_key"] = ledger_event_key
         return {"ok": True, "tool": tool["name"], "version": "1.0.0", "result": {},
                 "overlay": None, "timing_ms": 1, "cost": None, "error": None,
                 "degraded_mode": False}
@@ -277,6 +278,7 @@ def test_submit_job_threads_dwg_version_to_broker_client(monkeypatch, tmp_path):
     rec = jobs_mod.wait_for_terminal(job_id, timeout_s=10)
     assert rec is not None and rec["status"] == "complete", rec
     assert captured["dwg_version"] == 42
+    assert captured["ledger_event_key"] == f"{job_id}:broker-run"
 
 
 # =========================================================================== #
@@ -535,8 +537,17 @@ def test_dwg_version_survives_local_fallback(monkeypatch, tmp_path):
 
     def broker_stub(_tenant, _tool, _params, _dwg, aps_live, **kwargs):
         if aps_live:
-            raise broker_client.BrokerUnreachable("cloud down")
+            captured["cloud_event_key"] = kwargs.get("ledger_event_key")
+            return {
+                "ok": False,
+                "error": {
+                    "error_code": "WORKITEM_FAILED",
+                    "message": "known terminal cloud failure",
+                    "retryable": False,
+                },
+            }
         captured["dwg_version"] = kwargs.get("dwg_version")
+        captured["fallback_event_key"] = kwargs.get("ledger_event_key")
         return {"ok": True, "result": {"source": "local"}}
 
     monkeypatch.setattr(broker_client, "run_via_broker", broker_stub)
@@ -546,6 +557,9 @@ def test_dwg_version_survives_local_fallback(monkeypatch, tmp_path):
                              dwg_version=5)
     jobs._run_job(job_id, "pin-tenant", tool, {}, "rooftop_demo", True, dwg_version=5)
     assert captured["dwg_version"] == 5
+    assert captured["cloud_event_key"] == f"{job_id}:broker-run"
+    assert captured["fallback_event_key"] == f"{job_id}:broker-fallback"
+    assert captured["cloud_event_key"] != captured["fallback_event_key"]
     if jobs._conn is not None:
         jobs._conn.close()
 

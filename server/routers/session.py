@@ -28,7 +28,12 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_tenant)):
         try:
             response = requests.post(
                 f"{broker_client.broker_url()}/broker/extract",
-                json={"tenant_id": str(tenant), "dwg": dwg},
+                json={
+                    "tenant_id": str(tenant),
+                    "dwg": dwg,
+                    "ledger_event_key": broker_client.extract_event_key(
+                        str(tenant), dwg),
+                },
                 headers=broker_client.broker_headers(),
                 timeout=600,
             )

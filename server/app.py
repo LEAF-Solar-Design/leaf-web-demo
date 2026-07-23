@@ -106,6 +106,10 @@ app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api
 # logs and retries; it never kills the app.
 import guest_uploads  # noqa: E402
 
+# Validate an explicit shared upload authority before serving traffic. The
+# database connection remains lazy, but an invalid or unsafe selector cannot
+# degrade to per-process state.
+guest_uploads.upload_store_mode()
 guest_uploads.start_purge_daemon()
 
 
@@ -125,6 +129,7 @@ def _mount_platform_router() -> None:
         import platform_link
 
         platform_link.validate_postgres_startup()
+        jobs.validate_store_startup()
         if "leaf_platform" not in sys.modules:
             spec = importlib.util.spec_from_file_location(
                 "leaf_platform", pkg_dir / "__init__.py",
@@ -136,9 +141,7 @@ def _mount_platform_router() -> None:
         app.include_router(platform_router)
         print("[leaf-demo] platform router mounted (/api/projects, /api/orgs)")
     except Exception as exc:  # pragma: no cover - env-dependent
-        if os.environ.get("LEAF_PLATFORM_POSTGRES_REQUIRED", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }:
+        if platform_link.postgres_startup_required():
             raise RuntimeError("required platform PostgreSQL startup check failed") from exc
         print(f"[leaf-demo] platform router NOT mounted: {exc}", file=sys.stderr)
 

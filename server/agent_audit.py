@@ -36,6 +36,18 @@ _MAX_VERBATIM_STR = 120
 _write_lock = threading.Lock()
 
 
+def _using_postgres() -> bool:
+    mode = os.environ.get("LEAF_AGENT_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_AGENT_STORE must be 'legacy' or 'postgres'")
+    return mode == "postgres"
+
+
+def _pg_store():
+    import agent_pg_store
+    return agent_pg_store
+
+
 def audit_path() -> Path:
     """Resolved at call time so subprocess/test env overrides apply."""
     override = os.environ.get("LEAF_AGENT_AUDIT")
@@ -73,6 +85,12 @@ def project_args(args: Optional[Dict[str, Any]], audit_extra: Iterable[str]) -> 
 def append(event: Dict[str, Any], *, path: Optional[Path] = None) -> None:
     """Append one audit event. Adds `ts` if missing. Never raises — logs the
     failure to stderr and returns (audit is best-effort by contract)."""
+    if path is None and _using_postgres():
+        try:
+            _pg_store().append_audit(event)
+        except Exception as exc:  # noqa: BLE001 - preserve never-raise write contract
+            print(f"[leaf-agent] audit append failed: {exc}", file=sys.stderr, flush=True)
+        return
     target = path or audit_path()
     record = dict(event)
     record.setdefault("ts", _now_iso())
@@ -131,8 +149,12 @@ def _filtered(match: Dict[str, Any], limit: int, path: Optional[Path]) -> List[D
 
 def for_tenant(tenant_id: str, limit: int = 100, *, path: Optional[Path] = None) -> List[Dict[str, Any]]:
     """A tenant's own records (already audit_extra-projected at write time)."""
+    if path is None and _using_postgres():
+        return _pg_store().audit_for_tenant(str(tenant_id), limit)
     return _filtered({"tenant_id": str(tenant_id)}, limit, path)
 
 
 def for_session(session_id: str, limit: int = 100, *, path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    if path is None and _using_postgres():
+        return _pg_store().audit_for_session(str(session_id), limit)
     return _filtered({"session_id": str(session_id)}, limit, path)

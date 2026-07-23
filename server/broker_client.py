@@ -6,6 +6,8 @@ HTTP call to the broker process. No da.* import, no APS credential, ever.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from typing import Any, Dict, Optional
 
@@ -40,20 +42,39 @@ class BrokerUnreachable(Exception):
     """The broker process could not be reached (connection/timeout)."""
 
 
+def extract_event_key(tenant_id: str, dwg: str, *, upload: bool = False) -> str:
+    """Stable identity for retries of one immutable drawing extraction."""
+    canonical = json.dumps(
+        {
+            "tenant_id": str(tenant_id),
+            "dwg": str(dwg),
+            "upload": bool(upload),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"extract:{digest}"
+
+
 def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                    dwg: str, aps_live: bool, timeout_s: Optional[float] = None,
-                   dwg_version: Optional[int] = None) -> Dict[str, Any]:
+                   dwg_version: Optional[int] = None,
+                   ledger_event_key: Optional[str] = None) -> Dict[str, Any]:
     """POST /broker/run -> extended section-3 envelope (ok true OR false).
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
     immutable drawing version; carried straight through as an extra JSON field so
     an older broker (that ignores unknown fields) stays compatible.
+    ``ledger_event_key`` is the durable job-execution identity used by a
+    PostgreSQL broker to prevent duplicate paid execution across task retries.
     """
     try:
         resp = requests.post(
             f"{broker_url()}/broker/run",
             json={"tenant_id": tenant_id, "tool": tool, "params": params,
-                  "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version},
+                  "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
+                  "ledger_event_key": ledger_event_key},
             headers=broker_headers(),
             timeout=timeout_s or 600,
         )

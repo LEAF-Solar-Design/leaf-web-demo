@@ -16,6 +16,8 @@ Env:
   BROKER_PORT     (default 8140)
   BROKER_LEDGER   (default server/broker_ledger.jsonl)
   BROKER_TENANTS  (default server/broker_tenants.json)
+  LEAF_BROKER_STORE (legacy default; postgres enables the shared authority)
+  LEAF_BROKER_RECONCILE_SECRET (required for operator reconciliation routes)
   APS_CRED        (passed through to da/client.py; only read on live runs)
   LEAF_RUNTIME_ENV (set to production for the fail-closed deployment posture)
   LEAF_AUTHORED_EXECUTION (production default 0; 1 requires LEAF_SANDBOX)
@@ -33,6 +35,7 @@ import platform as _stdlib_platform  # noqa: F401  (cache stdlib before the
 #   PROJECT_ROOT sys.path insert below makes the local platform/ package shadow it;
 #   requests/urllib3 import `platform` lazily inside request handlers)
 
+import hashlib
 import hmac
 import json
 import math
@@ -43,6 +46,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -80,6 +84,32 @@ QA_SLEEP_CAP_S = 30.0
 
 _ledger_lock = threading.Lock()
 _tenants_lock = threading.Lock()
+_pg_store = None
+
+
+def _broker_store_mode() -> str:
+    mode = os.environ.get("LEAF_BROKER_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise BrokerStateError(
+            "LEAF_BROKER_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def _drawing_store_mode() -> str:
+    mode = os.environ.get("LEAF_DRAWING_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise BrokerStateError(
+            "LEAF_DRAWING_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def _postgres_store():
+    global _pg_store
+    if _pg_store is None:
+        from broker_pg_store import get_store
+
+        _pg_store = get_store()
+    return _pg_store
 
 
 # --------------------------------------------------------------------------- #
@@ -134,6 +164,25 @@ class BrokerStateError(RuntimeError):
     The broker is the sole credential holder and the home of the tenant kill
     switch, so refusing to start beats starting with every kill flag disarmed.
     """
+
+
+class ApsCapacityUnavailable(RuntimeError):
+    """Fleet-wide APS slot ceiling is full before any WorkItem submission."""
+
+
+def _aps_max_concurrency() -> int:
+    value = int(os.environ.get("APS_MAX_CONCURRENCY", "1"))
+    if value < 1 or value > 100:
+        raise BrokerStateError("APS_MAX_CONCURRENCY must be between 1 and 100")
+    return value
+
+
+def _aps_slot_lease_seconds() -> int:
+    value = int(os.environ.get("APS_SLOT_LEASE_SECONDS", "900"))
+    if value < 60 or value > 86400:
+        raise BrokerStateError(
+            "APS_SLOT_LEASE_SECONDS must be between 60 and 86400")
+    return value
 
 
 def _load_tenants() -> Dict[str, Any]:
@@ -200,6 +249,9 @@ def tenant_disabled(tid: str) -> bool:
     disables, because "I cannot tell whether this tenant is killed" has one safe
     answer.
     """
+    if _broker_store_mode() == "postgres":
+        rec = _postgres_store().tenant(tid)
+        return bool(rec["disabled"]) if rec is not None else False
     with _tenants_lock:
         rec = _tenants.get(tid, _MISSING_TENANT)
     if rec is _MISSING_TENANT:
@@ -216,6 +268,9 @@ def tenant_disabled(tid: str) -> bool:
 
 def set_tenant_disabled(tid: str, disabled: bool) -> None:
     global _tenants
+    if _broker_store_mode() == "postgres":
+        _postgres_store().set_tenant_disabled(tid, disabled)
+        return
     with _tenants_lock:
         existing = _tenants.get(tid, _MISSING_TENANT)
         if existing is _MISSING_TENANT:
@@ -276,10 +331,30 @@ def _conform_ledger_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     return entry
 
 
-def _ledger_append(entry: Dict[str, Any]) -> None:
+def _validate_terminal_ledger_numbers(entry: Dict[str, Any]) -> None:
+    """Reject accounting values that could erase or corrupt recorded spend."""
+    for field in ("engine_seconds", "usd_est"):
+        value = entry.get(field)
+        if value is None:
+            continue
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            raise BrokerStateError(
+                f"broker ledger {field} must be finite and nonnegative")
+
+
+def _ledger_append(entry: Dict[str, Any], event_key: Optional[str] = None) -> None:
     # allow_nan=False: if a future unconformed field ever carries a non-finite
     # number, fail LOUD here rather than write an unparseable ledger line.
-    line = json.dumps(_conform_ledger_entry(entry), separators=(",", ":"), allow_nan=False)
+    conformed = _conform_ledger_entry(entry)
+    if _broker_store_mode() == "postgres":
+        raise BrokerStateError(
+            "PostgreSQL ledger completion must use the admission state machine")
+    line = json.dumps(conformed, separators=(",", ":"), allow_nan=False)
     with _ledger_lock:
         with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
@@ -426,7 +501,10 @@ def _cap_preflight(tenant_id: str, tool: Dict[str, Any]):
     cap = usage.cap_for(tenant_id)
     if cap is None:
         return None  # uncapped -> proceed (no ledger read)
-    spent = usage.spent_from_broker_ledger(tenant_id, LEDGER_PATH)
+    if _broker_store_mode() == "postgres":
+        spent = _postgres_store().spent_usd(tenant_id)
+    else:
+        spent = usage.spent_from_broker_ledger(tenant_id, LEDGER_PATH)
     decision = usage.check_cap(tenant_id, cap=cap, spent=spent, tool=tool.get("name"))
     if decision.get("ok"):
         return None
@@ -453,7 +531,27 @@ def _run_quota_preflight(tenant_id: str, tier: str, tool: Dict[str, Any]):
     usage = _get_usage()
     if usage is None:
         return None
-    decision = usage.daily_run_quota_check(tenant_id, tier, LEDGER_PATH)
+    if _broker_store_mode() == "postgres":
+        limit = usage.daily_run_limit_for(tier)
+        used = _postgres_store().daily_live_run_count(tenant_id)
+        if limit is None:
+            decision = {
+                "ok": True, "metered": False, "tier": tier,
+                "limit": None, "used": used,
+            }
+        elif used >= limit:
+            decision = usage.daily_quota_envelope(
+                tenant_id, tier, limit, used, tool=tool.get("name"))
+            decision.update({
+                "metered": True, "tier": tier, "limit": limit, "used": used,
+            })
+        else:
+            decision = {
+                "ok": True, "metered": True, "tier": tier,
+                "limit": limit, "used": used,
+            }
+    else:
+        decision = usage.daily_run_quota_check(tenant_id, tier, LEDGER_PATH)
     if decision.get("ok"):
         return None
     # reject: coerce degraded_mode to a boolean for the schema-valid wire body
@@ -507,6 +605,15 @@ def validate_runtime_safety() -> None:
 async def _broker_lifespan(_app: FastAPI):
     """Run deployment safety checks on supported FastAPI and Starlette releases."""
     validate_runtime_safety()
+    if _drawing_store_mode() == "postgres":
+        _postgres_store().validate_drawing_schema()
+    if _broker_store_mode() == "postgres":
+        _postgres_store().validate_schema()
+    callbacks = _get_callbacks()
+    if callbacks is not None:
+        callbacks.validate_replay_store_startup()
+    import jobs
+    jobs.validate_store_startup()
     yield
 
 
@@ -533,6 +640,7 @@ install_error_handlers(app)
 # body with the correct status (401 wrong/absent, 503 unconfigured).
 # --------------------------------------------------------------------------- #
 BROKER_SECRET_ENV = "LEAF_BROKER_SECRET"
+BROKER_RECONCILE_SECRET_ENV = "LEAF_BROKER_RECONCILE_SECRET"
 
 
 def _broker_secret() -> Optional[str]:
@@ -581,6 +689,27 @@ def require_broker_auth(x_broker_secret: Optional[str] = Header(default=None)) -
         raise HTTPException(status_code=401, detail="invalid or missing X-Broker-Secret")
 
 
+def require_broker_reconcile_auth(
+    x_broker_secret: Optional[str] = Header(default=None),
+    x_broker_reconcile_secret: Optional[str] = Header(default=None),
+) -> None:
+    """Stronger operator-only gate for irreversible admission resolution."""
+    require_broker_auth(x_broker_secret)
+    secret = os.environ.get(BROKER_RECONCILE_SECRET_ENV, "").strip()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="broker reconciliation is not configured",
+        )
+    presented = (x_broker_reconcile_secret or "").strip()
+    if not hmac.compare_digest(
+            presented.encode("utf-8"), secret.encode("utf-8")):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid or missing X-Broker-Reconcile-Secret",
+        )
+
+
 # --------------------------------------------------------------------------- #
 # F10: broker-side tier ENTITLEMENT re-check (defense-in-depth) — a DIRECT broker
 # call must not bypass the app-side tier gate. The tier is resolved from a
@@ -601,6 +730,11 @@ class _TenantTier:
 
 
 def _provisioned_tier(tenant_id: str) -> Optional[str]:
+    if _broker_store_mode() == "postgres":
+        rec = _postgres_store().tenant(tenant_id)
+        if rec is not None and rec.get("tier") is not None:
+            return str(rec.get("tier") or "")
+        return None
     with _tenants_lock:
         rec = _tenants.get(tenant_id, _MISSING_TENANT)
     if rec is not _MISSING_TENANT and not isinstance(rec, dict):
@@ -634,8 +768,22 @@ class BrokerRunRequest(BaseModel):
     params: Dict[str, Any] = {}
     dwg: str = "rooftop_demo"
     aps_live: bool = False
-    dwg_version: Optional[int] = None  # None -> head (unchanged); pin to a specific
-    # immutable drawing version (da/store.py resolve_version) otherwise.
+    # None -> head (unchanged); otherwise pin to an immutable drawing version.
+    dwg_version: Optional[int] = None
+    # Required in PostgreSQL mode. Use one durable key across job redeliveries.
+    ledger_event_key: Optional[str] = None
+
+
+def _broker_request_fingerprint(req: BrokerRunRequest) -> str:
+    canonical = json.dumps({
+        "tenant_id": req.tenant_id,
+        "tool": req.tool,
+        "params": req.params,
+        "dwg": req.dwg,
+        "aps_live": bool(req.aps_live),
+        "dwg_version": req.dwg_version,
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class BrokerExtractRequest(BaseModel):
@@ -646,6 +794,18 @@ class BrokerExtractRequest(BaseModel):
     # curated library — via _resolve_upload_dwg, which applies the IDENTICAL
     # strictness. The two namespaces never cross-resolve.
     upload: bool = False
+    # Required for live extraction under the PostgreSQL broker authority.
+    ledger_event_key: Optional[str] = None
+
+
+def _broker_extract_fingerprint(req: BrokerExtractRequest) -> str:
+    canonical = json.dumps({
+        "tenant_id": req.tenant_id,
+        "dwg": req.dwg,
+        "upload": bool(req.upload),
+        "operation": "extract",
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 _DWG_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
@@ -762,7 +922,11 @@ def health() -> Dict[str, Any]:
         # Through the authoritative reader, not a second truthiness/`.get` scan:
         # v.get("disabled") reported a null flag as ENABLED and crashed on a
         # non-dict record, disagreeing with the very kill switch it reports.
-        "tenants_disabled": sorted(t for t in _tenants if tenant_disabled(t)),
+        "tenants_disabled": (
+            _postgres_store().disabled_tenant_ids()
+            if _broker_store_mode() == "postgres"
+            else sorted(t for t in _tenants if tenant_disabled(t))
+        ),
     })
 
 
@@ -776,6 +940,263 @@ def disable_tenant(tid: str) -> Dict[str, Any]:
 def enable_tenant(tid: str) -> Dict[str, Any]:
     set_tenant_disabled(tid, False)
     return with_envelope_fields({"ok": True, "tenant_id": tid, "disabled": False})
+
+
+class BrokerAdmissionResolution(BaseModel):
+    tenant_id: str
+    resolution: str
+    operator_id: str
+    reason: str
+    evidence_ref: str
+    confirmation: str
+    result: Optional[Dict[str, Any]] = None
+    http_status: Optional[int] = None
+    ledger_entry: Optional[Dict[str, Any]] = None
+
+
+_FROZEN_LEDGER_KEYS = {
+    "ts", "tenant_id", "tool", "engine_op", "aps_endpoint", "aps_live",
+    "engine_seconds", "usd_est", "status",
+}
+
+
+def _validated_reconciliation_ledger(
+    raw: Dict[str, Any], *, tenant_id: str, aps_live: bool,
+) -> Dict[str, Any]:
+    if set(raw) != _FROZEN_LEDGER_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail="verified terminal ledger_entry must contain the frozen nine keys",
+        )
+    if raw.get("tenant_id") != tenant_id or raw.get("aps_live") is not aps_live:
+        raise HTTPException(
+            status_code=400,
+            detail="verified terminal ledger tenant/live identity does not match admission",
+        )
+    if (
+        not isinstance(raw.get("ts"), (int, float))
+        or isinstance(raw.get("ts"), bool)
+        or not math.isfinite(float(raw["ts"]))
+    ):
+        raise HTTPException(status_code=400, detail="ledger ts must be numeric")
+    if not isinstance(raw.get("aps_endpoint"), str) or not raw["aps_endpoint"]:
+        raise HTTPException(status_code=400, detail="ledger aps_endpoint must be a string")
+    for field in ("engine_seconds", "usd_est"):
+        value = raw.get(field)
+        if value is not None and (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"verified terminal {field} must be finite and nonnegative"
+                ),
+            )
+    entry = _conform_ledger_entry(dict(raw))
+    if entry["status"] == "error" and raw.get("status") != "error":
+        raise HTTPException(status_code=400, detail="ledger status must be a string")
+    return entry
+
+
+_RECONCILIATION_COST_TOLERANCE = 1e-9
+
+
+def _crosscheck_reconciliation_cost(
+    result: Dict[str, Any], entry: Dict[str, Any],
+) -> None:
+    """Require result cost evidence to agree with the immutable ledger."""
+    if "cost" not in result:
+        raise HTTPException(
+            status_code=400,
+            detail="verified terminal result requires a cost field",
+        )
+    cost = result["cost"]
+    if cost is None:
+        if any(entry[field] is not None for field in ("engine_seconds", "usd_est")):
+            raise HTTPException(
+                status_code=400,
+                detail="ledger cost must be null when verified result cost is null",
+            )
+        return
+    if not isinstance(cost, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="verified terminal result cost must be an object or null",
+        )
+    for field in ("engine_seconds", "usd_est"):
+        value = cost.get(field)
+        if (
+            field not in cost
+            or not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"verified terminal result cost {field} must be finite "
+                    "and nonnegative"
+                ),
+            )
+        ledger_value = entry[field]
+        if ledger_value is None or not math.isclose(
+            float(value),
+            float(ledger_value),
+            rel_tol=_RECONCILIATION_COST_TOLERANCE,
+            abs_tol=_RECONCILIATION_COST_TOLERANCE,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"verified terminal result cost {field} does not match "
+                    "the ledger"
+                ),
+            )
+
+
+def _require_postgres_reconciliation_store():
+    if _broker_store_mode() != "postgres":
+        raise HTTPException(
+            status_code=409,
+            detail="broker admission reconciliation requires PostgreSQL authority",
+        )
+    return _postgres_store()
+
+
+@app.get(
+    "/broker/admin/admissions/executing",
+    dependencies=[Depends(require_broker_reconcile_auth)],
+)
+def list_executing_admissions(limit: int = 100) -> Dict[str, Any]:
+    rows = _require_postgres_reconciliation_store().list_executing(limit)
+    return with_envelope_fields({"ok": True, "admissions": rows})
+
+
+@app.get(
+    "/broker/admin/admissions/{event_key}",
+    dependencies=[Depends(require_broker_reconcile_auth)],
+)
+def broker_admission_status(event_key: str, tenant_id: str) -> Dict[str, Any]:
+    status = _require_postgres_reconciliation_store().admission_status(
+        event_key, tenant_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="broker admission not found")
+    return with_envelope_fields({"ok": True, "admission": status})
+
+
+@app.post(
+    "/broker/admin/admissions/{event_key}/resolve",
+    dependencies=[Depends(require_broker_reconcile_auth)],
+)
+def resolve_executing_admission(
+    event_key: str, request: BrokerAdmissionResolution,
+) -> Dict[str, Any]:
+    allowed = {"confirmed_failed_no_charge", "verified_terminal"}
+    if request.resolution not in allowed:
+        raise HTTPException(status_code=400, detail="unsupported admission resolution")
+    if len(request.operator_id.strip()) < 3:
+        raise HTTPException(status_code=400, detail="operator_id is required")
+    if len(request.reason.strip()) < 16:
+        raise HTTPException(status_code=400, detail="resolution reason is too short")
+    if len(request.evidence_ref.strip()) < 8:
+        raise HTTPException(status_code=400, detail="APS evidence_ref is required")
+    expected = (
+        f"RESOLVE {request.tenant_id} {event_key} {request.resolution}"
+    )
+    if not hmac.compare_digest(
+            request.confirmation.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(
+            status_code=400,
+            detail="operator confirmation phrase does not match this resolution",
+        )
+    store = _require_postgres_reconciliation_store()
+    status = store.admission_status(event_key, request.tenant_id)
+    if status is None or status.get("state") != "executing":
+        raise HTTPException(
+            status_code=409,
+            detail="only an executing admission can be reconciled",
+        )
+    if request.resolution == "confirmed_failed_no_charge":
+        result = err_envelope(
+            ErrorCode.WORKITEM_FAILED,
+            "operator verified that APS accepted no paid work for this admission",
+            retryable=False,
+        )
+        http_status = DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED]
+        entry = {
+            "ts": time.time(),
+            "tenant_id": request.tenant_id,
+            "tool": None,
+            "engine_op": "",
+            "aps_endpoint": APS_ENDPOINT,
+            "aps_live": bool(status["aps_live"]),
+            "engine_seconds": None,
+            "usd_est": None,
+            "status": "RECONCILED_FAILED_NO_CHARGE",
+        }
+    else:
+        if request.result is None or request.ledger_entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail="verified_terminal requires result and ledger_entry",
+            )
+        if not isinstance(request.result.get("ok"), bool):
+            raise HTTPException(
+                status_code=400, detail="verified terminal result requires boolean ok")
+        if not isinstance(request.result.get("degraded_mode"), bool):
+            raise HTTPException(
+                status_code=400,
+                detail="verified terminal result requires boolean degraded_mode",
+            )
+        if request.http_status is None or not 100 <= request.http_status <= 599:
+            raise HTTPException(
+                status_code=400, detail="verified terminal http_status is invalid")
+        result = request.result
+        http_status = request.http_status
+        entry = _validated_reconciliation_ledger(
+            request.ledger_entry,
+            tenant_id=request.tenant_id,
+            aps_live=bool(status["aps_live"]),
+        )
+        _crosscheck_reconciliation_cost(result, entry)
+        if result["ok"]:
+            if not 200 <= http_status < 300 or entry["status"] != "ok":
+                raise HTTPException(
+                    status_code=400,
+                    detail="successful verified result requires 2xx HTTP and ledger status ok",
+                )
+        else:
+            error = result.get("error")
+            error_code = error.get("error_code") if isinstance(error, dict) else None
+            if (
+                not isinstance(error_code, str)
+                or not 400 <= http_status <= 599
+                or entry["status"] != error_code
+                or error_code in {ErrorCode.QUOTA_EXCEEDED, ErrorCode.TENANT_DISABLED}
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "failed verified result requires matching non-quota error "
+                        "status and 4xx/5xx HTTP"
+                    ),
+                )
+    outcome = store.reconcile_executing(
+        event_key,
+        request.tenant_id,
+        resolution=request.resolution,
+        operator_id=request.operator_id.strip(),
+        reason=request.reason.strip(),
+        evidence_ref=request.evidence_ref.strip(),
+        entry=_conform_ledger_entry(entry),
+        result=result,
+        http_status=http_status,
+    )
+    return with_envelope_fields({"ok": True, "resolution": outcome})
 
 
 class BrokerReapRequest(BaseModel):
@@ -902,30 +1323,185 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
                 retryable=False,
             ),
         )
-    try:
+    if _broker_store_mode() != "postgres":
+        try:
+            return JSONResponse(
+                status_code=200,
+                content=with_envelope_fields({"intake": da.extract(str(local))}),
+            )
+        except EgressBlocked as exc:
+            return JSONResponse(
+                status_code=500,
+                content=err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False),
+            )
+        except FileNotFoundError as exc:
+            return JSONResponse(
+                status_code=DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE],
+                content=err_envelope(
+                    ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED],
+                content=err_envelope(
+                    ErrorCode.WORKITEM_FAILED,
+                    f"{type(exc).__name__}: {exc}",
+                    retryable=True,
+                ),
+            )
+
+    if not req.ledger_event_key:
         return JSONResponse(
-            status_code=200,
-            content=with_envelope_fields({"intake": da.extract(str(local))}),
-        )
-    except EgressBlocked as exc:
-        return JSONResponse(
-            status_code=500,
-            content=err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False),
-        )
-    except FileNotFoundError as exc:
-        return JSONResponse(
-            status_code=DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE],
-            content=err_envelope(ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse(
-            status_code=DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED],
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS],
             content=err_envelope(
-                ErrorCode.WORKITEM_FAILED,
-                f"{type(exc).__name__}: {exc}",
-                retryable=True,
+                ErrorCode.BAD_PARAMS,
+                "ledger_event_key is required for PostgreSQL broker extraction",
+                retryable=False,
             ),
         )
+
+    usage = _get_usage()
+    tier = _tenant_tier(req.tenant_id)
+    estimate = float(getattr(usage, "DEFAULT_EST_USD", 0.0)) if usage else 0.0
+    spend_cap = usage.cap_for(req.tenant_id) if usage else None
+    daily_limit = usage.daily_run_limit_for(tier) if usage is not None else None
+    admission = _postgres_store().admit_run(
+        req.ledger_event_key,
+        req.tenant_id,
+        aps_live=True,
+        estimated_usd=estimate,
+        spend_cap=spend_cap,
+        daily_limit=daily_limit,
+        request_fingerprint=_broker_extract_fingerprint(req),
+    )
+    decision = admission["status"]
+    if decision == "replay":
+        return JSONResponse(
+            status_code=admission["http_status"], content=admission["result"])
+    if decision in {"collision", "mismatch"}:
+        return JSONResponse(
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS],
+            content=err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "broker extraction event key is not valid for this request",
+                retryable=False,
+            ),
+        )
+    if decision in {"leased", "executing"}:
+        retryable = decision == "leased"
+        detail = (
+            "broker extraction event is already leased"
+            if retryable
+            else (
+                "broker extraction started; automatic retry is unsafe and "
+                "operator reconciliation may be required"
+            )
+        )
+        return JSONResponse(
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.TURN_IN_PROGRESS],
+            content=err_envelope(
+                ErrorCode.TURN_IN_PROGRESS, detail, retryable=retryable),
+        )
+
+    entry: Dict[str, Any] = {
+        "ts": time.time(),
+        "tenant_id": req.tenant_id,
+        "tool": "__extract__",
+        "engine_op": "extract",
+        "aps_endpoint": APS_ENDPOINT,
+        "aps_live": True,
+        "engine_seconds": None,
+        "usd_est": None,
+        "status": "unknown",
+    }
+    terminal_env: Optional[Dict[str, Any]] = None
+    terminal_status: Optional[int] = None
+    capacity_wait = False
+    try:
+        if decision == "spend_quota":
+            assert usage is not None
+            terminal_env = usage.quota_envelope(
+                req.tenant_id,
+                admission["spent"] + admission["reserved"],
+                admission["estimated_usd"],
+                admission["cap"],
+                tool="__extract__",
+            )
+            terminal_env["degraded_mode"] = False
+            terminal_status = 402
+            entry["status"] = ErrorCode.QUOTA_EXCEEDED
+        elif decision == "daily_quota":
+            assert usage is not None
+            terminal_env = usage.daily_quota_envelope(
+                req.tenant_id,
+                tier,
+                admission["limit"],
+                admission["used"],
+                tool="__extract__",
+            )
+            terminal_env["degraded_mode"] = False
+            terminal_status = 429
+            entry["status"] = ErrorCode.QUOTA_EXCEEDED
+        elif decision == "acquired":
+            started = _postgres_store().mark_execution_started(
+                req.ledger_event_key,
+                req.tenant_id,
+                admission["lease_token"],
+                aps_live=True,
+                max_concurrency=_aps_max_concurrency(),
+                slot_lease_seconds=_aps_slot_lease_seconds(),
+            )
+            if not started:
+                capacity_wait = True
+                terminal_env = err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "APS fleet concurrency limit is currently full",
+                    retryable=True,
+                )
+                terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE]
+            else:
+                terminal_env = with_envelope_fields(
+                    {"intake": da.extract(str(local))})
+                terminal_status = 200
+                entry["usd_est"] = estimate
+                entry["status"] = "ok"
+        else:
+            raise BrokerStateError(
+                f"unknown broker extraction admission result {decision!r}")
+    except EgressBlocked as exc:
+        terminal_env = err_envelope(
+            ErrorCode.INTERNAL, str(exc), retryable=False)
+        terminal_status = 500
+        entry["status"] = ErrorCode.INTERNAL
+    except FileNotFoundError as exc:
+        terminal_env = err_envelope(
+            ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False)
+        terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE]
+        entry["status"] = ErrorCode.APS_UNAVAILABLE
+    except Exception as exc:  # noqa: BLE001
+        terminal_env = err_envelope(
+            ErrorCode.WORKITEM_FAILED,
+            f"{type(exc).__name__}: {exc}",
+            retryable=True,
+        )
+        terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED]
+        entry["status"] = ErrorCode.WORKITEM_FAILED
+    finally:
+        if not capacity_wait:
+            if terminal_env is None or terminal_status is None:
+                raise BrokerStateError(
+                    "admitted broker extraction has no terminal result")
+            _validate_terminal_ledger_numbers(entry)
+            _postgres_store().complete_run(
+                req.ledger_event_key,
+                req.tenant_id,
+                admission["lease_token"],
+                _conform_ledger_entry(entry),
+                terminal_env,
+                terminal_status,
+            )
+    assert terminal_env is not None and terminal_status is not None
+    return JSONResponse(status_code=terminal_status, content=terminal_env)
 
 
 @app.post("/broker/run", dependencies=[Depends(require_broker_auth)])
@@ -945,30 +1521,192 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         "usd_est": None,
         "status": "unknown",
     }
+    postgres_mode = _broker_store_mode() == "postgres"
+    ledger_event_key = req.ledger_event_key or str(uuid.uuid4())
+    admission: Optional[Dict[str, Any]] = None
+    terminal_env: Optional[Dict[str, Any]] = None
+    terminal_status: Optional[int] = None
     try:
-        env, status_code = _execute(req, tool, engine_op, t0, entry)
-        entry["status"] = "ok" if env.get("ok") else (env.get("error") or {}).get("error_code", "error")
-        return JSONResponse(status_code=status_code, content=env)
+        if postgres_mode and not req.ledger_event_key:
+            entry["status"] = ErrorCode.BAD_PARAMS
+            env = err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "ledger_event_key is required when LEAF_BROKER_STORE=postgres",
+                retryable=False,
+                tool=tool.get("name"),
+            )
+            return JSONResponse(
+                status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS], content=env)
+        if postgres_mode:
+            usage = _get_usage()
+            tier = _tenant_tier(req.tenant_id)
+            estimate = float(getattr(usage, "DEFAULT_EST_USD", 0.0)) if usage else 0.0
+            spend_cap = usage.cap_for(req.tenant_id) if usage else None
+            daily_limit = (
+                usage.daily_run_limit_for(tier)
+                if usage is not None and req.aps_live else None
+            )
+            admission = _postgres_store().admit_run(
+                ledger_event_key,
+                req.tenant_id,
+                aps_live=bool(req.aps_live),
+                estimated_usd=estimate,
+                spend_cap=spend_cap,
+                daily_limit=daily_limit,
+                request_fingerprint=_broker_request_fingerprint(req),
+            )
+            decision = admission["status"]
+            if decision == "replay":
+                return JSONResponse(
+                    status_code=admission["http_status"],
+                    content=admission["result"],
+                )
+            if decision in {"collision", "mismatch"}:
+                admission = None
+                env = err_envelope(
+                    ErrorCode.BAD_PARAMS,
+                    "broker run event key is not valid for this request",
+                    retryable=False,
+                    tool=tool.get("name"),
+                )
+                return JSONResponse(
+                    status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS],
+                    content=env,
+                )
+            if decision in {"leased", "executing"}:
+                admission = None
+                retryable = decision == "leased"
+                detail = (
+                    "broker run event is already leased"
+                    if retryable
+                    else "broker run execution started; automatic retry is unsafe"
+                )
+                env = err_envelope(
+                    ErrorCode.TURN_IN_PROGRESS,
+                    detail,
+                    retryable=retryable,
+                    tool=tool.get("name"),
+                )
+                return JSONResponse(
+                    status_code=DEFAULT_HTTP_STATUS[ErrorCode.TURN_IN_PROGRESS],
+                    content=env,
+                )
+            if decision == "spend_quota":
+                assert usage is not None
+                terminal_env = usage.quota_envelope(
+                    req.tenant_id,
+                    admission["spent"] + admission["reserved"],
+                    admission["estimated_usd"],
+                    admission["cap"],
+                    tool=tool.get("name"),
+                )
+                terminal_env["degraded_mode"] = False
+                terminal_status = 402
+                entry["status"] = ErrorCode.QUOTA_EXCEEDED
+                return JSONResponse(status_code=terminal_status, content=terminal_env)
+            if decision == "daily_quota":
+                assert usage is not None
+                terminal_env = usage.daily_quota_envelope(
+                    req.tenant_id,
+                    tier,
+                    admission["limit"],
+                    admission["used"],
+                    tool=tool.get("name"),
+                )
+                terminal_env["degraded_mode"] = False
+                terminal_status = 429
+                entry["status"] = ErrorCode.QUOTA_EXCEEDED
+                return JSONResponse(status_code=terminal_status, content=terminal_env)
+            if decision != "acquired":
+                raise BrokerStateError(f"unknown broker admission result {decision!r}")
+
+        terminal_env, terminal_status = _execute(
+            req, tool, engine_op, t0, entry,
+            quota_reserved=postgres_mode,
+            admission=admission,
+        )
+        entry["status"] = (
+            "ok" if terminal_env.get("ok")
+            else (terminal_env.get("error") or {}).get("error_code", "error")
+        )
+        return JSONResponse(status_code=terminal_status, content=terminal_env)
     except CallbackPrimaryConfigurationError as exc:
         entry["status"] = "INTERNAL"
-        env = err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False, tool=tool.get("name"))
-        return JSONResponse(status_code=DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL], content=env)
+        terminal_env = err_envelope(
+            ErrorCode.INTERNAL, str(exc), retryable=False, tool=tool.get("name"))
+        terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+        return JSONResponse(status_code=terminal_status, content=terminal_env)
+    except ApsCapacityUnavailable:
+        if admission is not None:
+            admission["capacity_wait"] = True
+        terminal_env = err_envelope(
+            ErrorCode.APS_UNAVAILABLE,
+            "APS fleet concurrency limit is currently full",
+            retryable=True,
+            tool=tool.get("name"),
+        )
+        terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE]
+        return JSONResponse(status_code=terminal_status, content=terminal_env)
     except entitlements.EntitlementsError:
         entry["status"] = "INTERNAL"
         required = entitlements.tool_required_capability(tool)
         tier = _tenant_tier(req.tenant_id)
-        return entitlements.policy_unavailable_response(required, tier)
+        response = entitlements.policy_unavailable_response(required, tier)
+        terminal_env = json.loads(response.body)
+        terminal_status = response.status_code
+        return response
     except Exception as exc:  # noqa: BLE001
         entry["status"] = "INTERNAL"
-        env = err_envelope(ErrorCode.INTERNAL, f"{type(exc).__name__}: {exc}", retryable=False,
-                           tool=tool.get("name"))
-        return JSONResponse(status_code=DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL], content=env)
+        terminal_env = err_envelope(
+            ErrorCode.INTERNAL, f"{type(exc).__name__}: {exc}", retryable=False,
+            tool=tool.get("name"))
+        terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+        return JSONResponse(status_code=terminal_status, content=terminal_env)
     finally:
-        _ledger_append(entry)
+        if (
+            postgres_mode and admission is not None
+            and admission.get("lease_token") and not admission.get("capacity_wait")
+        ):
+            if terminal_env is None or terminal_status is None:
+                raise BrokerStateError("admitted broker run has no terminal result")
+            _validate_terminal_ledger_numbers(entry)
+            _postgres_store().complete_run(
+                ledger_event_key,
+                req.tenant_id,
+                admission["lease_token"],
+                _conform_ledger_entry(entry),
+                terminal_env,
+                terminal_status,
+            )
+        elif not postgres_mode:
+            _ledger_append(entry, ledger_event_key)
+
+
+def _start_admitted_execution(
+    req: BrokerRunRequest, admission: Optional[Dict[str, Any]], *,
+    aps_submission: Optional[bool] = None,
+) -> None:
+    """Persist the irreversible boundary immediately before tool execution."""
+    if admission is None or admission.get("execution_started"):
+        return
+    live_slot = bool(req.aps_live) if aps_submission is None else bool(aps_submission)
+    acquired = _postgres_store().mark_execution_started(
+        req.ledger_event_key,
+        req.tenant_id,
+        admission["lease_token"],
+        aps_live=live_slot,
+        max_concurrency=_aps_max_concurrency() if live_slot else 1,
+        slot_lease_seconds=_aps_slot_lease_seconds() if live_slot else 900,
+    )
+    if not acquired:
+        admission["capacity_wait"] = True
+        raise ApsCapacityUnavailable()
+    admission["execution_started"] = True
 
 
 def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: float,
-             entry: Dict[str, Any]):
+             entry: Dict[str, Any], *, quota_reserved: bool = False,
+             admission: Optional[Dict[str, Any]] = None):
     # 1) kill-switch FIRST — a disabled tenant never touches APS
     if tenant_disabled(req.tenant_id):
         env = err_envelope(ErrorCode.TENANT_DISABLED,
@@ -978,9 +1716,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
 
     # 1a) HARD pre-flight cost cap — a tenant over its spend cap is rejected
     #     BEFORE any APS call (off unless a cap is configured for the tenant).
-    capped = _cap_preflight(req.tenant_id, tool)
-    if capped is not None:
-        return capped  # (quota_exceeded envelope, HTTP 402)
+    if not quota_reserved:
+        capped = _cap_preflight(req.tenant_id, tool)
+        if capped is not None:
+            return capped  # (quota_exceeded envelope, HTTP 402)
 
     if not tool.get("name"):
         return (err_envelope(ErrorCode.BAD_PARAMS, "tool package missing 'name'", retryable=False),
@@ -1020,7 +1759,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     #     and is checked HERE — before the WorkItem is dispatched. Over-cap -> the §10
     #     quota_exceeded envelope (HTTP 429). Reuses the F10-resolved `tier`; a DIFFERENT
     #     tenant under its own cap is unaffected.
-    if req.aps_live:
+    if req.aps_live and not quota_reserved:
         capped_runs = _run_quota_preflight(req.tenant_id, tier, tool)
         if capped_runs is not None:
             return capped_runs  # (quota_exceeded envelope, HTTP 429)
@@ -1069,15 +1808,18 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             da = _get_da()
             if da is not None and hasattr(da, "run_tool"):
                 backend = write_loop.default_backend(aps_live=True, da=da)
+                _start_admitted_execution(req, admission, aps_submission=True)
                 return write_loop.run_write_live(tool, params, req.tenant_id,
                                                  backend=backend, da=da, t0=t0,
                                                  ledger_entry=entry, version=base_version)
             # requested live but no da client -> degraded pure-python write
             backend = write_loop.default_backend(aps_live=False)
+            _start_admitted_execution(req, admission, aps_submission=False)
             return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
                                              t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
                                              degraded=True, version=base_version)
         backend = write_loop.default_backend(aps_live=False)
+        _start_admitted_execution(req, admission, aps_submission=False)
         return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
                                          t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
                                          version=base_version)
@@ -1127,7 +1869,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 # already exists) so a newly authored tool's LeafTool_<op> exists
                 # before the WorkItem is submitted.
                 if hasattr(da, "ensure_tool_activity"):
+                    _start_admitted_execution(req, admission, aps_submission=True)
                     da.ensure_tool_activity(tool)
+                else:
+                    _start_admitted_execution(req, admission, aps_submission=True)
                 env = dict(_run_live_tool(da, local, tool, params) or {})
                 env.setdefault("ok", True)
                 env.setdefault("tool", tool.get("name"))
@@ -1205,6 +1950,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # runs that body OUT of this credential-holding broker PID, in a locked-down sandbox with
     # no APS credential / token reachability and no egress (tool_loader._run_in_sandbox). With
     # LEAF_SANDBOX unset this is the unchanged in-process path.
+    _start_admitted_execution(req, admission, aps_submission=False)
     env = run_tool_dynamic(tool, intake, params, aps_live=False, da=None, t0=t0,
                            tenant_id=req.tenant_id)
     if not env.get("ok"):

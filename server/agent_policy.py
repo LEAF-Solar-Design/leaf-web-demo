@@ -66,6 +66,18 @@ class PolicyError(ValueError):
     """Raised when the agent policy file is malformed or violates schema."""
 
 
+def _using_postgres() -> bool:
+    mode = os.environ.get("LEAF_AGENT_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_AGENT_STORE must be 'legacy' or 'postgres'")
+    return mode == "postgres"
+
+
+def _pg_store():
+    import agent_pg_store
+    return agent_pg_store
+
+
 def security_bool(value: Any, *, field: str, default: bool = False) -> bool:
     """`entitlements.security_flag` in this module's error currency.
 
@@ -541,7 +553,9 @@ def effective_action(pol: AgentPolicy, action_name: str, *, tier: Optional[str] 
 # per-tenant agent state (agent_disabled flag + overlay) — small JSON beside
 # the policy file; written only by the ops surface.
 # --------------------------------------------------------------------------- #
-def load_tenant_state(tenant_id: str) -> Dict[str, Any]:
+def load_tenant_state(
+    tenant_id: str, *, pg_store: Optional[Any] = None,
+) -> Dict[str, Any]:
     """{agent_disabled: bool, overlay: {action -> fields}} for a tenant.
 
     A MISSING file -> permissive-empty state (this layer was never configured;
@@ -550,6 +564,21 @@ def load_tenant_state(tenant_id: str) -> Dict[str, Any]:
     the unparseable kill flag below already follows, because every value this
     file carries is a TIGHTENING (kill flag, tighten-only overlay) and an I/O
     error must never silently lift one."""
+    if _using_postgres():
+        state = (pg_store or _pg_store()).tenant_state(str(tenant_id))
+        disabled = security_bool(
+            state.get("agent_disabled", MISSING),
+            field=f"agent_tenants.{tenant_id}.agent_disabled",
+        )
+        overlay = state.get("overlay")
+        if not isinstance(overlay, dict):
+            raise PolicyError(f"agent_tenants.{tenant_id}.overlay must be a mapping")
+        return {
+            "agent_disabled": disabled,
+            "overlay": overlay,
+            "revision": security_int(
+                state.get("revision"), field=f"agent_tenants.{tenant_id}.revision"),
+        }
     path = tenants_file()
     if not path.exists():
         return {"agent_disabled": False, "overlay": {}}
@@ -585,8 +614,22 @@ def load_tenant_state(tenant_id: str) -> Dict[str, Any]:
     return {"agent_disabled": disabled, "overlay": overlay}
 
 
-def set_tenant_agent_disabled(tenant_id: str, disabled: bool) -> Dict[str, Any]:
+def set_tenant_agent_disabled(
+    tenant_id: str, disabled: bool, *, expected_revision: Optional[int] = None,
+    audit_event: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Persist the per-tenant agent kill flag (ops surface). Returns the entry."""
+    parsed = security_bool(disabled, field="agent_disabled")
+    if _using_postgres():
+        if not parsed and expected_revision is None:
+            raise PolicyError(
+                "enabling an agent tenant requires its current revision")
+        entry = _pg_store().set_tenant_state(
+            str(tenant_id), disabled=parsed, expected_revision=expected_revision,
+            audit_event=audit_event)
+        if entry is None:
+            raise PolicyError("stale agent tenant state revision")
+        return entry
     path = tenants_file()
     raw: Dict[str, Any]
     try:
@@ -618,10 +661,37 @@ def set_tenant_agent_disabled(tenant_id: str, disabled: bool) -> Dict[str, Any]:
                 f"{type(entry).__name__} — refusing to overwrite corrupt state")
     # Not bool(): this WRITES the kill flag, and bool("") would persist a
     # not-killed tenant from a caller that meant nothing of the sort.
-    entry["agent_disabled"] = security_bool(disabled, field="agent_disabled")
+    entry["agent_disabled"] = parsed
     raw[str(tenant_id)] = entry
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+    return entry
+
+
+def set_tenant_overlay(
+    tenant_id: str, overlay: Dict[str, Any], *,
+    expected_revision: Optional[int] = None,
+    audit_event: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Persist a validated tighten-only overlay in PostgreSQL mode."""
+    if not _using_postgres():
+        raise PolicyError("tenant overlay writes require PostgreSQL authority")
+    if expected_revision is None:
+        raise PolicyError(
+            "replacing an agent tenant overlay requires its current revision")
+    if not isinstance(overlay, dict):
+        raise PolicyError("tenant overlay must be a mapping")
+    policy = load_policy()
+    for action_name, action_overlay in overlay.items():
+        action = policy.actions.get(str(action_name))
+        if action is None:
+            raise PolicyError(f"tenant overlay names unknown action {action_name!r}")
+        apply_tenant_overlay(action, {str(action_name): action_overlay})
+    entry = _pg_store().set_tenant_state(
+        str(tenant_id), overlay=overlay, expected_revision=expected_revision,
+        audit_event=audit_event)
+    if entry is None:
+        raise PolicyError("stale agent tenant state revision")
     return entry

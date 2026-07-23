@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional
 import broker_client
 import platform_link
 from envelopes import ErrorCode, err_envelope, error_obj
+from job_pg_store import PostgresJobStore
 
 SERVER_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
@@ -75,6 +76,21 @@ _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
 _executors: Dict[str, ThreadPoolExecutor] = {}
 _reaper_started = False
+_pg_store = PostgresJobStore()
+
+
+def job_store_mode() -> str:
+    """Return the async-job authority, rejecting typos and implicit fallback."""
+    mode = os.environ.get("LEAF_JOBS_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_JOBS_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def validate_store_startup() -> None:
+    """Fail before serving when the selected job authority is not ready."""
+    if job_store_mode() == "postgres":
+        _pg_store.ensure_ready()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -310,42 +326,61 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     ensure_started()
     job_id = str(uuid.uuid4())
     now = time.time()
-    with _lock:
-        conn = _db()
-        if project_id and idempotency_key:
-            existing = conn.execute(
-                "SELECT job_id, submission_fingerprint FROM jobs "
-                "WHERE tenant_id = ? AND project_id = ? AND idempotency_key = ?",
-                (str(tenant_id), str(project_id), idempotency_key),
-            ).fetchone()
-            if existing is not None:
-                if existing["submission_fingerprint"] != submission_fingerprint:
+    execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version}
+    created = True
+    if job_store_mode() == "postgres":
+        job_id, created = _pg_store.submit({
+            "job_id": job_id,
+            "tenant_id": str(tenant_id),
+            "tool": tool["name"],
+            "params": json.dumps(params),
+            "dwg": dwg,
+            "created_at": now,
+            "execution": json.dumps(execution),
+            "org_id": str(org_id) if org_id is not None else None,
+            "project_id": str(project_id) if project_id is not None else None,
+            "authority_mode": authority_mode,
+            "idempotency_key": idempotency_key,
+            "submission_fingerprint": submission_fingerprint,
+            "dwg_version": dwg_version,
+        })
+    else:
+        with _lock:
+            conn = _db()
+            if project_id and idempotency_key:
+                existing = conn.execute(
+                    "SELECT job_id, submission_fingerprint FROM jobs "
+                    "WHERE tenant_id = ? AND project_id = ? AND idempotency_key = ?",
+                    (str(tenant_id), str(project_id), idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["submission_fingerprint"] != submission_fingerprint:
+                        raise ValueError("idempotency key already exists with different run input")
+                    return str(existing["job_id"])
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (job_id, tenant_id, tool, params_json, dwg, status, progress, "
+                    "created_at, updated_at, execution_json, org_id, project_id, authority_mode, "
+                    "idempotency_key, submission_fingerprint, dwg_version) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (job_id, str(tenant_id), tool["name"], json.dumps(params), dwg, "submitted",
+                     "queued", now, now, json.dumps(execution),
+                     org_id, project_id, authority_mode, idempotency_key, submission_fingerprint,
+                     dwg_version),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                existing = conn.execute(
+                    "SELECT job_id, submission_fingerprint FROM jobs "
+                    "WHERE tenant_id = ? AND project_id = ? AND idempotency_key = ?",
+                    (str(tenant_id), str(project_id), idempotency_key),
+                ).fetchone()
+                if existing is None or existing["submission_fingerprint"] != submission_fingerprint:
                     raise ValueError("idempotency key already exists with different run input")
                 return str(existing["job_id"])
-        try:
-            conn.execute(
-                "INSERT INTO jobs (job_id, tenant_id, tool, params_json, dwg, status, progress, "
-                "created_at, updated_at, execution_json, org_id, project_id, authority_mode, "
-                "idempotency_key, submission_fingerprint, dwg_version) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (job_id, str(tenant_id), tool["name"], json.dumps(params), dwg, "submitted",
-                 "queued", now, now,
-                 json.dumps({"tool": tool, "aps_live": bool(aps_live),
-                             "dwg_version": dwg_version}),
-                 org_id, project_id, authority_mode, idempotency_key, submission_fingerprint,
-                 dwg_version),
-            )
-            conn.commit()
-        except sqlite3.IntegrityError:
-            conn.rollback()
-            existing = conn.execute(
-                "SELECT job_id, submission_fingerprint FROM jobs "
-                "WHERE tenant_id = ? AND project_id = ? AND idempotency_key = ?",
-                (str(tenant_id), str(project_id), idempotency_key),
-            ).fetchone()
-            if existing is None or existing["submission_fingerprint"] != submission_fingerprint:
-                raise ValueError("idempotency key already exists with different run input")
-            return str(existing["job_id"])
+    if not created:
+        return job_id
     # In legacy_sqlite this is a diagnostic mirror. postgres_canonical requests
     # are rejected by resolve_submission_context until the Postgres dispatcher is
     # connected, so this path can never silently become a second authority.
@@ -358,12 +393,16 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
 
 
 def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    if job_store_mode() == "postgres":
+        return _pg_store.get(job_id)
     rows = _query("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
     return _row_to_record(rows[0]) if rows else None
 
 
 def list_jobs(tenant_id: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
     limit = max(1, min(int(limit), 200))
+    if job_store_mode() == "postgres":
+        return _pg_store.list(tenant_id, limit)
     if tenant_id:
         rows = _query(
             "SELECT * FROM jobs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?",
@@ -404,6 +443,8 @@ def claim_lease(job_id: str, worker_id: str, now: Optional[float] = None) -> Opt
     """
     stamp = time.time() if now is None else now
     expires = stamp + lease_duration_s()
+    if job_store_mode() == "postgres":
+        return _pg_store.claim(job_id, worker_id, stamp, expires, max_attempts())
     with _lock:
         conn = _db()
         cur = conn.execute(
@@ -412,8 +453,11 @@ def claim_lease(job_id: str, worker_id: str, now: Optional[float] = None) -> Opt
             "attempt = attempt + 1, lease_owner = ?, lease_expires_at = ?, heartbeat_at = ? "
             "WHERE job_id = ? AND (status = 'submitted' OR "
             "(status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))) "
-            "AND attempt < ?",
-            (stamp, stamp, worker_id, expires, stamp, job_id, stamp, max_attempts()))
+            "AND progress <> ? AND attempt < ?",
+            (
+                stamp, stamp, worker_id, expires, stamp, job_id, stamp,
+                CLOSED_PROGRESS, max_attempts(),
+            ))
         conn.commit()
         if cur.rowcount != 1:
             return None
@@ -424,6 +468,9 @@ def claim_lease(job_id: str, worker_id: str, now: Optional[float] = None) -> Opt
 def heartbeat_lease(job_id: str, worker_id: str, progress: Optional[str] = None) -> bool:
     """Extend only the current holder's lease; a reclaimed worker cannot revive it."""
     now = time.time()
+    if job_store_mode() == "postgres":
+        return _pg_store.heartbeat(
+            job_id, worker_id, now, now + lease_duration_s(), progress)
     sets = "updated_at = ?, lease_expires_at = ?, heartbeat_at = ?"
     args: List[Any] = [now, now + lease_duration_s(), now]
     if progress is not None:
@@ -448,10 +495,58 @@ def _terminal_fingerprint(status: str, result_env: Optional[Dict[str, Any]],
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _validate_terminal_context(
+    status: str, result_env: Optional[Dict[str, Any]],
+    provenance: Optional[Dict[str, Any]], durable_attempt: int,
+    execution: Dict[str, Any],
+) -> None:
+    if status != "complete":
+        return
+    assert isinstance(provenance, dict)
+    attempt = provenance["attempt"]
+    execution_path = provenance["execution_path"]
+    if attempt != durable_attempt:
+        raise ValueError("successful terminal provenance attempt does not match durable attempt")
+    aps_live = bool(execution.get("aps_live", False))
+    fallback = provenance.get("fallback") is True
+    if aps_live and execution_path == "local" and not fallback:
+        raise ValueError("APS-live local success must declare fallback")
+    if aps_live and execution_path == "cloud" and fallback:
+        raise ValueError("cloud success cannot declare local fallback")
+    if not aps_live and (execution_path != "local" or fallback):
+        raise ValueError("non-APS success requires a non-fallback local execution_path")
+    if fallback:
+        fallback_reason = provenance.get("fallback_reason")
+        cloud_failure = provenance.get("cloud_failure")
+        failure = cloud_failure.get("failure") if isinstance(cloud_failure, dict) else None
+        cloud_attempt = (
+            cloud_failure.get("attempt") if isinstance(cloud_failure, dict) else None)
+        meaningful_failure = (
+            isinstance(failure, str) and bool(failure.strip())
+        ) or (
+            isinstance(failure, dict)
+            and isinstance(failure.get("code"), str)
+            and bool(failure["code"].strip())
+            and isinstance(failure.get("message"), str)
+            and bool(failure["message"].strip())
+        )
+        if (
+            not isinstance(fallback_reason, str) or not fallback_reason.strip()
+            or not isinstance(cloud_failure, dict) or not cloud_failure
+            or not isinstance(cloud_attempt, int) or isinstance(cloud_attempt, bool)
+            or cloud_attempt != durable_attempt
+            or cloud_failure.get("execution_path") != "cloud"
+            or not meaningful_failure
+        ):
+            raise ValueError(
+                "fallback success requires a reason and matching meaningful cloud_failure")
+
+
 def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str, Any]] = None,
                       error: Optional[Dict[str, Any]] = None,
                       worker_id: Optional[str] = None,
-                      provenance: Optional[Dict[str, Any]] = None) -> str:
+                      provenance: Optional[Dict[str, Any]] = None,
+                      _allow_closed: bool = False) -> str:
     """Apply one terminal callback exactly once.
 
     Returns ``applied``, ``duplicate``, ``conflict``, or ``not_owner``. A terminal
@@ -481,6 +576,21 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         ) != json.dumps(provenance, sort_keys=True, separators=(",", ":"), default=str):
             raise ValueError("result execution_provenance contradicts terminal provenance")
     now = time.time()
+    if job_store_mode() == "postgres":
+        durable = _pg_store.durable_context(job_id)
+        if durable is None:
+            return "missing"
+        durable_attempt = durable["attempt"]
+        _validate_terminal_context(
+            status, result_env, provenance, durable_attempt, durable["execution"])
+        fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
+        outcome = _pg_store.complete(
+            job_id, durable_attempt, status, result_env, error, provenance,
+            fingerprint, worker_id, now, allow_closed=_allow_closed,
+        )
+        if outcome == "applied":
+            platform_link.on_terminal(job_id, status, result_env, error)
+        return outcome
     applied = False
     with _lock:
         conn = _db()
@@ -490,43 +600,12 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         if durable is None:
             return "missing"
         durable_attempt = int(durable["attempt"] or 0)
-        if status == "complete":
-            if attempt != durable_attempt:
-                raise ValueError("successful terminal provenance attempt does not match durable attempt")
-            execution = json.loads(durable["execution_json"] or "{}")
-            aps_live = bool(execution.get("aps_live", False))
-            fallback = provenance.get("fallback") is True
-            if aps_live and execution_path == "local" and not fallback:
-                raise ValueError("APS-live local success must declare fallback")
-            if aps_live and execution_path == "cloud" and fallback:
-                raise ValueError("cloud success cannot declare local fallback")
-            if not aps_live and (execution_path != "local" or fallback):
-                raise ValueError("non-APS success requires a non-fallback local execution_path")
-            if fallback:
-                fallback_reason = provenance.get("fallback_reason")
-                cloud_failure = provenance.get("cloud_failure")
-                failure = cloud_failure.get("failure") if isinstance(cloud_failure, dict) else None
-                cloud_attempt = (cloud_failure.get("attempt")
-                                 if isinstance(cloud_failure, dict) else None)
-                meaningful_failure = (
-                    isinstance(failure, str) and bool(failure.strip())
-                ) or (
-                    isinstance(failure, dict)
-                    and isinstance(failure.get("code"), str)
-                    and bool(failure["code"].strip())
-                    and isinstance(failure.get("message"), str)
-                    and bool(failure["message"].strip())
-                )
-                if not isinstance(fallback_reason, str) or not fallback_reason.strip() \
-                        or not isinstance(cloud_failure, dict) or not cloud_failure \
-                        or not isinstance(cloud_attempt, int) or isinstance(cloud_attempt, bool) \
-                        or cloud_attempt != durable_attempt \
-                        or cloud_failure.get("execution_path") != "cloud" \
-                        or not meaningful_failure:
-                    raise ValueError(
-                        "fallback success requires a reason and matching meaningful cloud_failure")
+        _validate_terminal_context(
+            status, result_env, provenance, durable_attempt,
+            json.loads(durable["execution_json"] or "{}"),
+        )
         fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
-        owner_clause = ""
+        owner_clause = "" if _allow_closed else " AND progress <> ?"
         args: List[Any] = [
             status, "done" if status == "complete" else "error", now, now, now, now,
             json.dumps(result_env) if result_env is not None else None,
@@ -534,8 +613,10 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             json.dumps(provenance) if provenance is not None else None,
             fingerprint, job_id, durable_attempt,
         ]
+        if not _allow_closed:
+            args.append(CLOSED_PROGRESS)
         if worker_id is not None:
-            owner_clause = " AND lease_owner = ? AND lease_expires_at >= ?"
+            owner_clause += " AND lease_owner = ? AND lease_expires_at >= ?"
             args.extend([worker_id, now])
         cur = conn.execute(
             "UPDATE jobs SET status = ?, progress = ?, updated_at = ?, finished_at = ?, "
@@ -613,15 +694,25 @@ def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str
     if rec["lease"].get("expires_at") is None or float(rec["lease"]["expires_at"]) < now:
         return
     if error.get("retryable") and int(rec.get("attempt") or 0) < max_attempts():
-        with _lock:
-            cur = _db().execute(
-                "UPDATE jobs SET status = 'submitted', progress = 'retrying', updated_at = ?, "
-                "error_json = ?, provenance_json = ?, lease_owner = NULL, lease_expires_at = NULL "
-                "WHERE job_id = ? AND status = 'running' AND lease_owner = ? "
-                "AND lease_expires_at >= ?",
-                (now, json.dumps(error), json.dumps(provenance), job_id, worker_id, now))
-            _db().commit()
-        if cur.rowcount:
+        attempt = int(rec.get("attempt") or 0)
+        if job_store_mode() == "postgres":
+            released = _pg_store.release_for_retry(
+                job_id, worker_id, attempt, now, error, provenance)
+        else:
+            with _lock:
+                cur = _db().execute(
+                    "UPDATE jobs SET status = 'submitted', progress = 'retrying', "
+                    "updated_at = ?, error_json = ?, provenance_json = ?, "
+                    "lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL "
+                    "WHERE job_id = ? AND status = 'running' AND attempt = ? "
+                    "AND lease_owner = ? AND lease_expires_at >= ? AND progress <> ?",
+                    (
+                        now, json.dumps(error), json.dumps(provenance), job_id,
+                        attempt, worker_id, now, CLOSED_PROGRESS,
+                    ))
+                _db().commit()
+                released = cur.rowcount == 1
+        if released:
             executor = _executors.get(lane_for(tool, aps_live))
             if executor is not None:
                 # Thread the pin through the in-process retry: dropping it here
@@ -654,6 +745,10 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             holder["env"] = broker_client.run_via_broker(
                 tenant_id, tool, params, dwg, aps_live, timeout_s=max_s + 30,
                 dwg_version=dwg_version,
+                # Stable across delivery attempts. If a worker dies after APS
+                # accepts work, a later attempt must observe the existing
+                # executing admission, never buy the same run again.
+                ledger_event_key=f"{job_id}:broker-run",
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -684,9 +779,9 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             err = error_obj(ErrorCode.INTERNAL, f"{type(exc).__name__}: {exc}", retryable=False)
         cloud_failure = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
                          "failure": {"code": err["error_code"], "message": err["message"]}}
-        if aps_live and _allows_local_fallback(tool):
-            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, cloud_failure, dwg_version)
-            return
+        # A transport exception may be response loss after the broker crossed
+        # the irreversible execution boundary. Replay the stable cloud event
+        # key through retry handling. Never buy a separate local execution.
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, cloud_failure, dwg_version=dwg_version)
         return
 
@@ -702,7 +797,11 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                                             retryable=False)
         provenance = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
                       "failure": {"code": err.get("error_code"), "message": err.get("message")}}
-        if aps_live and _allows_local_fallback(tool):
+        if (
+            aps_live
+            and err.get("error_code") != ErrorCode.TURN_IN_PROGRESS
+            and _allows_local_fallback(tool)
+        ):
             _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance, dwg_version)
             return
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, provenance, dwg_version=dwg_version)
@@ -725,7 +824,11 @@ def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[
         try:
             holder["env"] = broker_client.run_via_broker(
                 tenant_id, tool, params, dwg, False, timeout_s=job_max_s() + 30,
-                dwg_version=dwg_version)
+                dwg_version=dwg_version,
+                # Distinct from the cloud fingerprint, stable across delivery
+                # retries of this job's one authorized fallback execution.
+                ledger_event_key=f"{job_id}:broker-fallback",
+            )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
 
@@ -785,16 +888,21 @@ def _reap_orphans_once() -> int:
     pre-existing close contract.
     """
     stale_before = time.time() - heartbeat_stale_s()
-    rows = _query(
-        "SELECT * FROM jobs WHERE status IN ('submitted','running') AND "
-        "(updated_at < ? OR progress = ? OR (lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
-        (stale_before, CLOSED_PROGRESS, time.time()))
+    if job_store_mode() == "postgres":
+        rows = _pg_store.reclaimable(stale_before, CLOSED_PROGRESS, time.time())
+    else:
+        rows = _query(
+            "SELECT * FROM jobs WHERE status IN ('submitted','running') AND "
+            "(updated_at < ? OR progress = ? OR "
+            "(lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
+            (stale_before, CLOSED_PROGRESS, time.time()))
     handled = 0
     for row in rows:
         if row["progress"] == CLOSED_PROGRESS:
             complete_callback(row["job_id"], "failed",
                               error=error_obj(ErrorCode.INTERNAL,
-                                              "orphaned: session closed (tab-close)", True))
+                                              "orphaned: session closed (tab-close)", True),
+                              _allow_closed=True)
             handled += 1
             continue
         if _redispatch_record(row["job_id"]):
@@ -815,9 +923,14 @@ def _redispatch_record(job_id: str) -> bool:
                         "execution_path": "unknown", "failure": "attempt limit exhausted"},
         )
         return True
-    rows = _query("SELECT execution_json FROM jobs WHERE job_id = ?", (job_id,))
     try:
-        execution = json.loads(rows[0]["execution_json"] or "{}")
+        if job_store_mode() == "postgres":
+            execution = _pg_store.execution(job_id)
+            if execution is None:
+                raise IndexError
+        else:
+            rows = _query("SELECT execution_json FROM jobs WHERE job_id = ?", (job_id,))
+            execution = json.loads(rows[0]["execution_json"] or "{}")
         tool = execution["tool"]
         aps_live = bool(execution.get("aps_live", False))
         # Recover the version pin from the durable execution context so a
@@ -847,10 +960,13 @@ def mark_job_closed(job_id: str) -> bool:
     """Flag ONE in-flight job's owner as gone (progress -> 'closed'). The orphan
     reaper fails it on its next sweep. No-op on terminal/unknown jobs. Returns
     True iff a live job was flagged."""
+    if job_store_mode() == "postgres":
+        return _pg_store.mark_closed(job_id, CLOSED_PROGRESS, time.time())
     rows = _query("SELECT status FROM jobs WHERE job_id = ?", (job_id,))
     if not rows or rows[0]["status"] in TERMINAL:
         return False
-    _exec("UPDATE jobs SET progress = ?, updated_at = ? WHERE job_id = ?"
+    _exec("UPDATE jobs SET progress = ?, updated_at = ?, lease_owner = NULL, "
+          "lease_expires_at = NULL, heartbeat_at = NULL WHERE job_id = ?"
           " AND status IN ('submitted','running')",
           (CLOSED_PROGRESS, time.time(), job_id))
     return True
@@ -858,11 +974,14 @@ def mark_job_closed(job_id: str) -> bool:
 
 def close_tenant_jobs(tenant_id: str) -> int:
     """Flag ALL of a tenant's in-flight jobs closed (session-end). Returns count."""
+    if job_store_mode() == "postgres":
+        return _pg_store.close_tenant(tenant_id, CLOSED_PROGRESS, time.time())
     rows = _query("SELECT job_id FROM jobs WHERE tenant_id = ?"
                   " AND status IN ('submitted','running')", (tenant_id,))
     now = time.time()
     for r in rows:
-        _exec("UPDATE jobs SET progress = ?, updated_at = ? WHERE job_id = ?",
+        _exec("UPDATE jobs SET progress = ?, updated_at = ?, lease_owner = NULL, "
+              "lease_expires_at = NULL, heartbeat_at = NULL WHERE job_id = ?",
               (CLOSED_PROGRESS, now, r["job_id"]))
     return len(rows)
 
@@ -872,6 +991,16 @@ def orphan_lease_records(tenant_id: Optional[str] = None) -> List[Dict[str, Any]
     payload the app POSTs to the broker's /broker/reap so their APS WorkItems get
     cancelled. workitem_id is broker-side (job_id is carried for correlation)."""
     stale_before = time.time() - heartbeat_stale_s()
+    if job_store_mode() == "postgres":
+        rows = _pg_store.orphan_leases(stale_before, CLOSED_PROGRESS, tenant_id)
+        return [
+            {
+                "job_id": row["job_id"], "tenant_id": row["tenant_id"],
+                "status": "inprogress", "workitem_id": None,
+                "session_closed": row["progress"] == CLOSED_PROGRESS,
+            }
+            for row in rows
+        ]
     sql = ("SELECT job_id, tenant_id, progress FROM jobs WHERE status IN ('submitted','running')"
            " AND (updated_at < ? OR progress = ?)")
     args: list = [stale_before, CLOSED_PROGRESS]
@@ -898,7 +1027,10 @@ def _reaper_loop() -> None:
 def ensure_started() -> None:
     """Idempotent: open the DB, start the lane executors + reaper daemon."""
     global _reaper_started
-    _db()
+    if job_store_mode() == "postgres":
+        _pg_store.ensure_ready()
+    else:
+        _db()
     executors_started = False
     if not _executors:
         for lane, workers in lane_workers().items():
@@ -913,5 +1045,12 @@ def ensure_started() -> None:
         # exactly once when this process creates its pools; scanning on every
         # submit would enqueue duplicate contenders (the lease would reject them,
         # but it would still waste executor capacity).
-        for row in _query("SELECT job_id FROM jobs WHERE status = 'submitted'"):
-            _redispatch_record(row["job_id"])
+        if job_store_mode() == "postgres":
+            submitted_ids = _pg_store.submitted_ids()
+        else:
+            submitted_ids = [
+                row["job_id"]
+                for row in _query("SELECT job_id FROM jobs WHERE status = 'submitted'")
+            ]
+        for job_id in submitted_ids:
+            _redispatch_record(job_id)

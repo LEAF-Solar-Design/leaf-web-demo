@@ -40,6 +40,7 @@
 
 import type { Server } from "node:http";
 import { join } from "node:path";
+import { Pool } from "pg";
 
 import { createHarness } from "../src/server.js";
 import { redactTokens } from "../src/redact.js";
@@ -54,7 +55,16 @@ import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
 import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
 import { HttpGateClient } from "../src/ports/impl/gateClient.js";
-import { FileSessionStore } from "../src/ports/impl/sessionStore.js";
+import {
+  assertHarnessCatalog,
+  type HarnessColumn,
+  type HarnessConstraint,
+  type HarnessIndex,
+} from "../src/ports/impl/harnessSchema.js";
+import {
+  createSessionStore,
+  type SessionStoreHandle,
+} from "../src/ports/impl/sessionStoreFactory.js";
 import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
@@ -73,6 +83,7 @@ const BROKER_URL = process.env.BROKER_URL ?? "http://127.0.0.1:8140";
 // compiled (dist/scripts/serve.js) and via strip-types (scripts/serve.ts).
 const TENANT_FIXTURE =
   process.env.LEAF_TENANT_FIXTURE ?? join(REPO_ROOT, "harness", "test", "fixtures", "tenant-repo");
+let sessionStoreHandle: SessionStoreHandle | null = null;
 
 // Defense in depth: redact any token-shaped value from anything we log. We never
 // read or print the grant ourselves, but a stray error string must never leak one.
@@ -121,14 +132,16 @@ function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefi
     );
     return undefined;
   }
-  // Durable loop-side store (sdk resume ids, transcript mirror, confirmation
-  // mirrors): $LEAF_SESSIONS_DIR, else ./sessions-data under the harness cwd.
-  const store = new FileSessionStore();
+  // Durable loop-side store (SDK resume ids, transcript mirror, confirmation
+  // mirrors). File remains the default. PostgreSQL is explicit and fails closed
+  // when its URL is absent; schema creation never happens at process startup.
+  sessionStoreHandle = createSessionStore();
+  log(`[harness] converse session authority: ${sessionStoreHandle.kind}`);
   return new SpineTurnAdapter({
     oauth,
     appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
     gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
-    store,
+    store: sessionStoreHandle.store,
     runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({ grant }),
   });
 }
@@ -180,7 +193,79 @@ function buildPorts(): HarnessPorts {
   };
 }
 
-function main(): void {
+async function validatePostgresStartup(): Promise<void> {
+  const kind = (process.env.LEAF_HARNESS_SESSION_STORE ?? "file").trim().toLowerCase();
+  if (kind === "file") return;
+  if (kind !== "postgres") {
+    throw new Error("LEAF_HARNESS_SESSION_STORE must be file or postgres");
+  }
+  const connectionString = (
+    process.env.LEAF_HARNESS_DATABASE_URL ??
+    process.env.DATABASE_URL ??
+    ""
+  ).trim();
+  if (!connectionString) {
+    throw new Error(
+      "LEAF_HARNESS_SESSION_STORE=postgres requires LEAF_HARNESS_DATABASE_URL or DATABASE_URL",
+    );
+  }
+  const pool = new Pool({
+    connectionString,
+    max: 1,
+    application_name: "leaf-platform-harness-startup",
+  });
+  try {
+    const tableNames = [
+      "harness_sessions",
+      "harness_turns",
+      "harness_events",
+      "harness_confirmations",
+      "harness_usage",
+      "harness_tenant_repo_leases",
+    ];
+    const columnRows = await pool.query<HarnessColumn>(
+      `SELECT table_name, column_name, data_type, is_nullable
+       FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND table_name = ANY($1::text[])`,
+      [tableNames],
+    );
+    const constraintRows = await pool.query<HarnessConstraint>(
+      `SELECT c.relname AS table_name, pg_get_constraintdef(pc.oid) AS definition
+       FROM pg_constraint pc
+       JOIN pg_class c ON c.oid = pc.conrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = current_schema()
+         AND c.relname = ANY($1::text[])`,
+      [tableNames],
+    );
+    const indexNames = [
+      "harness_one_active_session",
+      "harness_one_active_turn",
+      "idx_harness_events_turn",
+      "idx_harness_confirmations_session",
+      "idx_harness_usage_session",
+      "idx_harness_tenant_repo_leases_expiry",
+    ];
+    const indexRows = await pool.query<HarnessIndex>(
+      `SELECT indexname, indexdef
+       FROM pg_indexes
+       WHERE schemaname = current_schema()
+         AND indexname = ANY($1::text[])`,
+      [indexNames],
+    );
+    assertHarnessCatalog({
+      columns: columnRows.rows,
+      constraints: constraintRows.rows,
+      indexes: indexRows.rows,
+    });
+  } finally {
+    await pool.end();
+  }
+}
+
+async function main(): Promise<void> {
+  await validatePostgresStartup();
   const server: Server = createHarness(buildPorts()).listen(HARNESS_PORT);
   server.on("listening", () => {
     log(
@@ -196,7 +281,13 @@ function main(): void {
 
   const shutdown = (sig: string): void => {
     log(`[harness] ${sig} -> closing`);
-    server.close(() => process.exit(0));
+    server.close(() => {
+      void (sessionStoreHandle?.close() ?? Promise.resolve())
+        .catch((error: unknown) => {
+          log(`[harness] session store close failed: ${(error as Error).message}`);
+        })
+        .finally(() => process.exit(0));
+    });
     // hard-stop backstop if close() hangs on a live connection
     setTimeout(() => process.exit(0), 2000).unref();
   };
@@ -204,4 +295,7 @@ function main(): void {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-main();
+void main().catch((error: unknown) => {
+  log(`[harness] startup failed: ${(error as Error).message}`);
+  process.exit(1);
+});

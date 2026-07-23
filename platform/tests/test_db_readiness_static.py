@@ -38,8 +38,13 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
             (1, "project_job"), (2, "deletion_columns"),
             (3, "canonical_history_ledger"), (4, "canonical_job_worker"),
             (5, "project_share_grants"), (6, "snapshot_pins"),
-            (7, "compliance_waivers"), (8, "evidence_bundles"),
-            (9, "review_signatures"), (10, "drawing_artifacts"),
+                (7, "compliance_waivers"), (8, "evidence_bundles"),
+                (9, "review_signatures"), (10, "drawing_artifacts"),
+                (11, "jobs_callbacks"),
+                (12, "sessions"), (13, "agent_state"),
+                (14, "broker"), (15, "guest_caps"),
+                (16, "drawing_upload_authority"),
+                (17, "harness_sessions"),
         ]
     ]
     assert all(len(item["sha256"]) == 64 for item in manifest)

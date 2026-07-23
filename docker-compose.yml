@@ -27,6 +27,14 @@ services:
       BROKER_TENANTS: /data/state/broker_tenants.json  # persisted kill-switch
       LEAF_STORE_DIR: /data/drawings                   # shared with the app (write loop)
       LEAF_UPLOADS_DIR: /data/uploads                  # shared with the app (S19 upload staging: app writes, broker extracts)
+      # PostgreSQL broker authority is staged but OFF. Its connection string is
+      # separate from the app substitution so setting DATABASE_URL cannot move
+      # this secret-holding process to a new authority by accident.
+      LEAF_BROKER_STORE: ${LEAF_BROKER_STORE:-legacy}
+      LEAF_CALLBACK_REPLAY_STORE: ${LEAF_CALLBACK_REPLAY_STORE:-legacy}
+      LEAF_DRAWING_STORE: ${LEAF_DRAWING_STORE:-legacy}
+      LEAF_JOBS_STORE: ${LEAF_JOBS_STORE:-legacy}
+      DATABASE_URL: ${LEAF_BROKER_DATABASE_URL:-}
       # §8 F4 caller-auth hop: same env on broker + app + harness. Empty (the default)
       # keeps the friction-free off-live demo; set it and every protected
       # /broker/* call requires the constant-time X-Broker-Secret header.
@@ -78,6 +86,11 @@ services:
       LEAF_APP_URL: http://app:8130
       LEAF_APP_DISPATCH_SECRET: ${LEAF_APP_DISPATCH_SECRET:-}
       LEAF_SESSIONS_DIR: /data/sessions   # loop-side durable store (sdk resume ids, confirmation mirrors)
+      # PostgreSQL harness sessions are staged but OFF. Select postgres only
+      # after the one-shot migration preflight has completed.
+      LEAF_HARNESS_SESSION_STORE: ${LEAF_HARNESS_SESSION_STORE:-file}
+      LEAF_HARNESS_AUTHORING_MODE: ${LEAF_HARNESS_AUTHORING_MODE:-disabled}
+      LEAF_HARNESS_DATABASE_URL: ${LEAF_HARNESS_DATABASE_URL:-}
       # --- operator opt-ins (NEVER baked): ------------------------------------
       # LEAF_TENANT_REPO: /data/tenants/demo-tenant  # demo single-repo back-compat override
       # LEAF_GRANT_FILE: /run/secrets/claude-grant   # a demo-tenant grant token file
@@ -138,6 +151,15 @@ services:
       LEAF_AGENT_AUDIT: /data/state/agent_audit.jsonl            # append-only gate-decision audit
       LEAF_AGENT_LEDGER: /data/state/agent_ledger.jsonl          # append-only per-turn metering ledger
       LEAF_AGENT_TENANTS_FILE: /data/state/agent_tenants.json    # per-tenant kill flag + tighten-only overlay (ops surface writes)
+      # New shared authorities remain explicit opt-ins. Invalid values fail
+      # closed in the application instead of falling back to local files.
+      LEAF_SESSIONS_STORE: ${LEAF_SESSIONS_STORE:-legacy}
+      LEAF_JOBS_STORE: ${LEAF_JOBS_STORE:-legacy}
+      LEAF_AGENT_STORE: ${LEAF_AGENT_STORE:-legacy}
+      LEAF_GUEST_CAP_STORE: ${LEAF_GUEST_CAP_STORE:-memory}
+      LEAF_DRAWING_STORE: ${LEAF_DRAWING_STORE:-legacy}
+      LEAF_UPLOAD_STORE: ${LEAF_UPLOAD_STORE:-legacy}
+      LEAF_GUEST_CAP_HMAC_SECRET: ${LEAF_GUEST_CAP_HMAC_SECRET:-}
       # --- operator opt-in: platform Project/Job persistence (Neon/Postgres) ---
       DATABASE_URL: ${DATABASE_URL:-}                  # empty => platform DB endpoints stay dark (demo-safe)
     volumes:

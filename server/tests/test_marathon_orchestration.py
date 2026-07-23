@@ -307,7 +307,14 @@ def test_cloud_failure_with_explicit_local_fallback_records_provenance(monkeypat
 
     def broker(_tenant, _tool, _params, _dwg, aps_live, **_kwargs):
         if aps_live:
-            raise broker_client.BrokerUnreachable("cloud down")
+            return {
+                "ok": False,
+                "error": {
+                    "error_code": jobs.ErrorCode.WORKITEM_FAILED,
+                    "message": "cloud terminal failure",
+                    "retryable": False,
+                },
+            }
         return {"ok": True, "result": {"source": "local"}}
 
     monkeypatch.setattr(broker_client, "run_via_broker", broker)
@@ -318,6 +325,52 @@ def test_cloud_failure_with_explicit_local_fallback_records_provenance(monkeypat
     assert rec["provenance"]["fallback"] is True
     assert rec["provenance"]["cloud_failure"]["execution_path"] == "cloud"
     assert rec["result"]["execution_provenance"] == rec["provenance"]
+
+
+def test_response_loss_never_invokes_local_fallback(monkeypatch):
+    tool = dict(TOOL, allow_local_fallback=True)
+    job_id = _submit(aps_live=True, tool=tool)
+    monkeypatch.setattr(
+        broker_client, "run_via_broker",
+        lambda *a, **k: (_ for _ in ()).throw(
+            broker_client.BrokerUnreachable("response lost")),
+    )
+    monkeypatch.setattr(
+        jobs, "_run_local_fallback",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("uncertain cloud execution must not fall back")),
+    )
+
+    jobs._run_job(job_id, "tenant-marathon", tool, {}, "demo", True)
+    rec = jobs.get_job(job_id)
+    assert rec["status"] == "submitted"
+    assert rec["error"]["error_code"] == jobs.ErrorCode.BROKER_UNREACHABLE
+
+
+def test_turn_in_progress_never_invokes_local_fallback(monkeypatch):
+    tool = dict(TOOL, allow_local_fallback=True)
+    job_id = _submit(aps_live=True, tool=tool)
+    monkeypatch.setattr(
+        broker_client, "run_via_broker",
+        lambda *a, **k: {
+            "ok": False,
+            "error": {
+                "error_code": jobs.ErrorCode.TURN_IN_PROGRESS,
+                "message": "admission still executing",
+                "retryable": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        jobs, "_run_local_fallback",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("executing admission must not fall back")),
+    )
+
+    jobs._run_job(job_id, "tenant-marathon", tool, {}, "demo", True)
+    rec = jobs.get_job(job_id)
+    assert rec["status"] == "submitted"
+    assert rec["error"]["error_code"] == jobs.ErrorCode.TURN_IN_PROGRESS
 
 
 def test_cloud_failure_without_fallback_is_retryable_not_local(monkeypatch):

@@ -191,7 +191,7 @@ def upload_drawing(
                     # MAJOR); the fresh marker's attempt token fences out
                     # the old worker thread if it is still alive.
                     if not guest_uploads.wipe_failed_attempt_residue(
-                            str(tenant), derived):
+                            str(tenant), derived, existing.get("attempt")):
                         return error_response(
                             ErrorCode.INTERNAL,
                             "could not reset the failed attempt's residue; "
@@ -223,7 +223,7 @@ def upload_drawing(
                     # REFUNDED: no extraction started, no slot burned
                     # (round-7 review, MAJOR).
                     if not guest_uploads.wipe_failed_attempt_residue(
-                            str(tenant), derived):
+                            str(tenant), derived, existing.get("attempt")):
                         guest_uploads.refund_guest_upload(_client_ip(request))
                         return error_response(
                             ErrorCode.INTERNAL,
@@ -238,12 +238,31 @@ def upload_drawing(
                     marker = guest_uploads.new_marker(
                         filename=file.filename or f"upload{ext}",
                         data=data, tenant_kind=tenant_kind, source_ext=ext)
-                    guest_uploads.write_marker(backend, str(tenant),
-                                               drawing_id, marker)
-                    staged = guest_uploads.staged_path(str(tenant),
-                                                       drawing_id, ext)
-                    staged.parent.mkdir(parents=True, exist_ok=True)
-                    staged.write_bytes(data)
+                    try:
+                        guest_uploads.write_marker(
+                            backend, str(tenant), drawing_id, marker)
+                    except RuntimeError:
+                        # Another task reserved this content-derived upload
+                        # after our read. Refund this task's quota charge and
+                        # adopt the winning attempt without staging or
+                        # starting a second extraction.
+                        if guest_uploads.upload_store_mode() != "postgres":
+                            raise
+                        guest_uploads.refund_guest_upload(_client_ip(request))
+                        winner = guest_uploads.read_marker(
+                            backend, str(tenant), drawing_id)
+                        if winner is None:
+                            return error_response(
+                                ErrorCode.INTERNAL,
+                                "upload reservation changed; try again",
+                                retryable=True, status_code=503)
+                        marker = winner
+                        dedupe_marker = winner
+                    else:
+                        staged = guest_uploads.staged_path(
+                            str(tenant), drawing_id, ext)
+                        staged.parent.mkdir(parents=True, exist_ok=True)
+                        staged.write_bytes(data)
         if drawing_id is not None and dedupe_marker is None:
             guest_uploads.start_extraction_thread(str(tenant), drawing_id, ext)
 
