@@ -378,6 +378,10 @@ class CallbackPrimaryUnavailable(RuntimeError):
     """The flag selected callbacks but the DA adapter cannot submit them."""
 
 
+class CallbackPrimaryConfigurationError(RuntimeError):
+    """Callback-primary was selected without all required operator settings."""
+
+
 def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
     """Select the configured completion mechanism for one live run.
 
@@ -387,7 +391,12 @@ def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, 
     The existing reaper remains the fallback for abandoned callback work.
     """
     callbacks = _get_callbacks()
-    if callbacks is None or not callbacks.callback_primary_enabled():
+    if callbacks is None:
+        return da.run_tool(local, tool, params)
+    config_error = callbacks.callback_primary_configuration_error()
+    if config_error:
+        raise CallbackPrimaryConfigurationError(config_error)
+    if not callbacks.callback_primary_enabled():
         return da.run_tool(local, tool, params)
     callback_run = getattr(da, "run_tool_callback", None)
     if not callable(callback_run):
@@ -743,6 +752,30 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
     }))
 
 
+def _complete_callback_job(job_id: str, callback: Dict[str, Any]) -> str:
+    """Use the durable job spine's single terminal transition for APS callbacks."""
+    import jobs
+
+    record = jobs.get_job(job_id)
+    if record is None:
+        return "missing"
+    raw_status = str(callback.get("status", "")).strip().lower()
+    if raw_status in {"success", "complete"}:
+        result = callback.get("result")
+        result_env = dict(result) if isinstance(result, dict) else {"result": result}
+        result_env["ok"] = True
+        provenance = {"attempt": int(record.get("attempt") or 0), "execution_path": "cloud"}
+        result_env.setdefault("execution_provenance", provenance)
+        return jobs.complete_callback(job_id, "complete", result_env=result_env,
+                                      provenance=provenance)
+    if raw_status in {"failed", "failure", "cancelled", "canceled"}:
+        message = str(callback.get("message") or f"Design Automation callback status: {raw_status}")
+        return jobs.complete_callback(job_id, "failed", error={
+            "error_code": ErrorCode.WORKITEM_FAILED, "message": message, "retryable": False,
+        }, provenance={"execution_path": "cloud", "callback_status": raw_status})
+    raise ValueError("callback status must be a terminal Design Automation status")
+
+
 @app.post("/da/callback")
 async def da_callback(request: Request,
                       x_leaf_signature: Optional[str] = Header(default=None),
@@ -764,10 +797,22 @@ async def da_callback(request: Request,
         status_code = 503 if reason == "not_configured" else (409 if reason == "replay" else 401)
         return JSONResponse(status_code=status_code, content=err_envelope(
             ErrorCode.BAD_PARAMS, f"callback rejected: {reason}", retryable=False))
+    try:
+        completion = _complete_callback_job(outcome["job_id"], outcome["callback"])
+    except ValueError as exc:
+        return JSONResponse(status_code=409, content=err_envelope(
+            ErrorCode.BAD_PARAMS, f"callback completion rejected: {exc}", retryable=False))
+    if completion == "missing":
+        return JSONResponse(status_code=404, content=err_envelope(
+            ErrorCode.BAD_PARAMS, "callback completion rejected: unknown job_id", retryable=False))
+    if completion not in {"applied", "duplicate"}:
+        return JSONResponse(status_code=409, content=err_envelope(
+            ErrorCode.BAD_PARAMS, f"callback completion rejected: {completion}", retryable=False))
     return JSONResponse(status_code=200, content=with_envelope_fields({
         "ok": True,
         "job_id": outcome["job_id"],
         "completion_mode": "callback",
+        "completion": completion,
     }))
 
 
@@ -849,6 +894,10 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         env, status_code = _execute(req, tool, engine_op, t0, entry)
         entry["status"] = "ok" if env.get("ok") else (env.get("error") or {}).get("error_code", "error")
         return JSONResponse(status_code=status_code, content=env)
+    except CallbackPrimaryConfigurationError as exc:
+        entry["status"] = "INTERNAL"
+        env = err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False, tool=tool.get("name"))
+        return JSONResponse(status_code=DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL], content=env)
     except entitlements.EntitlementsError:
         entry["status"] = "INTERNAL"
         required = entitlements.tool_required_capability(tool)
