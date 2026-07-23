@@ -25,7 +25,8 @@
       "/data/tenants"
     ],
     "secrets": [
-      "APS_CREDENTIALS_JSON"
+      "APS_CREDENTIALS_JSON",
+      "LEAF_BROKER_SECRET"
     ]
   }
 }

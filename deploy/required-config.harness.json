@@ -19,6 +19,7 @@
     ],
     "secrets": [
       "LEAF_APP_DISPATCH_SECRET",
+      "LEAF_BROKER_SECRET",
       "LEAF_HARNESS_SECRET"
     ]
   }

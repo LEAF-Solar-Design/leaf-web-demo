@@ -36,6 +36,22 @@ def test_required_deployment_manifests_have_frozen_shape():
         )
 
 
+def test_required_deployment_manifests_include_runtime_auth_secrets():
+    expected = {
+        "app": {"LEAF_BROKER_SECRET", "LEAF_OPS_SECRET"},
+        "broker": {"LEAF_BROKER_SECRET"},
+        "harness": {"LEAF_BROKER_SECRET"},
+    }
+
+    for service, required_secrets in expected.items():
+        manifest = json.loads(
+            (ROOT / "deploy" / f"required-config.{service}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert required_secrets <= set(manifest["required"]["secrets"])
+
+
 def test_web_image_writes_source_identity_health_file():
     dockerfile = (ROOT / "deploy" / "Dockerfile.web").read_text(encoding="utf-8")
     assert "ARG LEAF_SOURCE_SHA=unknown" in dockerfile
