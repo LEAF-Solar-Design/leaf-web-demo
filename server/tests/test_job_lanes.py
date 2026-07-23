@@ -111,6 +111,17 @@ def test_ensure_started_builds_both_lane_executors(monkeypatch):
 # =========================================================================== #
 # submit-time routing (recording executors — no threads, no broker)
 # =========================================================================== #
+def test_jobs_db_creates_missing_parent_directory(monkeypatch, tmp_path):
+    db_path = tmp_path / "missing" / "nested" / "jobs.db"
+    monkeypatch.setattr(jobs, "DB_PATH", db_path)
+    monkeypatch.setattr(jobs, "_conn", None)
+
+    assert jobs.list_jobs("parent-create-test", limit=1) == []
+    assert db_path.is_file()
+
+    jobs._conn.close()
+
+
 class _RecordingExecutor:
     def __init__(self):
         self.submitted = []
