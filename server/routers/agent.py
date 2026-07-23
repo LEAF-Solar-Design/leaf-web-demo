@@ -106,7 +106,10 @@ def internal_gate(req: GateRequest,
     # tier check for converse/deploy/agent_write_autopilot: the broker's own
     # re-check (broker.py:588-595) covers run_read/run_write/build alone.
     tier = entitlements.resolve_tier(deps.backedge_tenant(req.tenant_id))
-    tier_caps = entitlements.entitlements_for(tier)
+    try:
+        tier_caps = entitlements.entitlements_for(tier)
+    except entitlements.EntitlementsError:
+        return entitlements.policy_unavailable_response("converse", tier)
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
                              req.action, req.args, tier_caps, tier=tier)
     return with_envelope_fields(result)

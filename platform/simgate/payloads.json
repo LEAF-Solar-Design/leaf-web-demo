@@ -1,0 +1,29 @@
+{
+  "canonical-order": {
+    "a": {
+      "first": null,
+      "second": false
+    },
+    "reference_m": 0.12345,
+    "z": [3, 2, 1]
+  },
+  "geometry-grid": {
+    "coordinates_m": [[0.000049, -0.000051, 1.23456], [12.30004, 0.0, -4.56785]],
+    "labels": ["north", "array-a"],
+    "metadata": {
+      "active": true,
+      "count": 2
+    }
+  },
+  "nested-configuration": {
+    "nested": {
+      "limits": {
+        "max_kw": 8.75,
+        "min_kw": 0.25
+      },
+      "mode": "optimize"
+    },
+    "string_count": 3,
+    "targets": [1.5, 2.00004, 2.00005]
+  }
+}
