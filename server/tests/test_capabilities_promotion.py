@@ -138,6 +138,8 @@ def test_locked_tool_returns_empty_evidence_even_with_matching_receipt(tmp_path,
     entry = promo.availability_for(promo.STRINGING_TOOL)
     assert entry["state"] == "locked"
     assert entry["evidence"] == []
+    assert entry["implementationState"] == "not_registered"
+    assert entry["reasonCode"] == "not_registered_in_catalog"
 
 
 def test_evidence_cites_a_real_receipt_with_matching_sha256(tmp_path, monkeypatch):
