@@ -33,6 +33,7 @@ export class BrokerApsClientHttp implements BrokerApsClient {
   }
 
   async runTool(req: BrokerRunRequest): Promise<ResultEnvelope> {
+    const brokerSecret = (process.env.LEAF_BROKER_SECRET ?? "").trim();
     const body = {
       tenant_id: req.tenantId,
       tool: req.tool,
@@ -47,7 +48,7 @@ export class BrokerApsClientHttp implements BrokerApsClient {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(process.env.LEAF_BROKER_SECRET ? { "X-Broker-Secret": process.env.LEAF_BROKER_SECRET } : {}),
+          ...(brokerSecret ? { "X-Broker-Secret": brokerSecret } : {}),
         },
         body: JSON.stringify(body),
         signal: ctrl.signal,

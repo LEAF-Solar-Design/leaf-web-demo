@@ -488,8 +488,16 @@ def _sandbox_configured() -> bool:
 
 
 def validate_runtime_safety() -> None:
-    """Reject a production boot that enables authored code without isolation."""
-    if _production_runtime() and _authored_execution_enabled() and not _sandbox_configured():
+    """Reject unsafe or ambiguous production broker configuration."""
+    if not _production_runtime():
+        return
+    if not os.environ.get(BROKER_SECRET_ENV, "").strip():
+        raise RuntimeError("production broker requires nonblank LEAF_BROKER_SECRET")
+    if not _auth_live():
+        raise RuntimeError("production broker requires LEAF_AUTH_LIVE=1")
+    if os.environ.get("LEAF_QA_HOOKS", "").strip() != "0":
+        raise RuntimeError("production broker requires explicit LEAF_QA_HOOKS=0")
+    if _authored_execution_enabled() and not _sandbox_configured():
         raise RuntimeError(
             "production authored execution requires LEAF_SANDBOX=e2b or e2b-microvm"
         )
@@ -528,7 +536,7 @@ BROKER_SECRET_ENV = "LEAF_BROKER_SECRET"
 
 
 def _broker_secret() -> Optional[str]:
-    val = os.environ.get(BROKER_SECRET_ENV)
+    val = os.environ.get(BROKER_SECRET_ENV, "").strip()
     return val if val else None
 
 

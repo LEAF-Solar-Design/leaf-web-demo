@@ -329,12 +329,26 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
       // — never the token. PUT body may carry an optional `kind` (else auto-detected).
       // 501 when no grantAdmin store is wired (the hermetic author tests).
       if (path.startsWith("/grants/")) {
-        const tenantId = decodeURIComponent(path.slice("/grants/".length));
+        const grantSuffix = path.slice("/grants/".length);
+        const diagnosticRequest = grantSuffix.endsWith("/diagnostic");
+        const encodedTenant = diagnosticRequest
+          ? grantSuffix.slice(0, -"/diagnostic".length)
+          : grantSuffix;
+        const tenantId = decodeURIComponent(encodedTenant);
         if (!tenantId) return send(res, 400, { error: { message: "tenant id required" } });
         if (!ports.grantAdmin) {
           return send(res, 501, { error: { message: "grant admin store not configured" } });
         }
         try {
+          if (diagnosticRequest) {
+            if (method !== "GET") {
+              return send(res, 405, { error: { message: `method ${method} not allowed on ${path}` } });
+            }
+            if (!ports.grantAdmin.diagnostic) {
+              return send(res, 501, { error: { message: "grant diagnostics not configured" } });
+            }
+            return send(res, 200, await ports.grantAdmin.diagnostic(tenantId));
+          }
           if (method === "PUT") {
             const gbody = await readJsonBody(req);
             const token = typeof gbody.token === "string" ? gbody.token : "";

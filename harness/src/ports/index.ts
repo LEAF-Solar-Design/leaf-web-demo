@@ -168,6 +168,25 @@ export interface GrantStatus {
   kind?: GrantKind;
 }
 
+/** Token-free operational facts about one tenant grant record. */
+export interface GrantDiagnostic {
+  schema: "leaf.grant-diagnostic.v1";
+  linked: boolean;
+  kind: GrantKind | "missing";
+  linked_at: string | null;
+  backend: "file";
+  path_class: "efs_access_point" | "local_file" | "environment";
+  record_format: "v1" | "legacy" | "environment" | "missing" | "invalid";
+  legacy_fallback_present: boolean;
+  owner: { uid: number | null; gid: number | null; mode: string | null };
+  persistence: {
+    atomic_publish: boolean;
+    file_fsync: boolean;
+    directory_fsync: boolean;
+  };
+  degraded: boolean;
+}
+
 /**
  * Admin surface for the per-tenant grant store (wave 4). Backs the harness
  * PUT/GET/DELETE /grants/{tenantId} endpoints so the app can link / check / unlink a
@@ -186,6 +205,8 @@ export interface TenantGrantAdminStore {
   status(tenantId: string): Promise<GrantStatus>;
   /** Remove the tenant's stored token (idempotent). */
   remove(tenantId: string): Promise<void>;
+  /** Report token-free storage and ownership facts for operator diagnosis. */
+  diagnostic?(tenantId: string): Promise<GrantDiagnostic>;
 }
 
 // --------------------------------------------------------------------------- //

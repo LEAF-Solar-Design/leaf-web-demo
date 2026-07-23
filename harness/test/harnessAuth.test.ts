@@ -143,6 +143,11 @@ describe("harness auth gate (enabled)", () => {
     expect(r.status).toBe(401);
   });
 
+  it("GET /grants/{tid}/diagnostic with NO secret -> 401", async () => {
+    const r = await fetch(`${baseUrl}/grants/acme/diagnostic`);
+    expect(r.status).toBe(401);
+  });
+
   it("PUT /grants/{tid} with NO secret -> 401 and the store is NOT mutated", async () => {
     const r = await fetch(`${baseUrl}/grants/acme`, {
       method: "PUT",
