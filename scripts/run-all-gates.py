@@ -73,6 +73,7 @@ REPO_PARENT = REPO.parent               # cwd the platform suite runs from (e.g.
 SERVER = REPO / "server"
 DA = REPO / "da"
 HARNESS = REPO / "harness"
+WEB = REPO / "web"
 AUTHORED_TOOLS = SERVER / "authored_tools.json"
 
 # Defensive: never let the repo root shadow the stdlib `platform` module inside
@@ -158,7 +159,7 @@ def build_suites() -> List[Suite]:
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 14),
         Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 11),
+              SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 12),
         # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
         # by hand — same gap this branch closed for its own suites.
         Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
@@ -299,6 +300,23 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_store.py"), 14),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
+        # --- tenant customization control plane (one process per file) --- #
+        Suite("server-customization-authority", "server customization authority", "pytest",
+              SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
+        Suite("server-customization-store", "server customization store", "pytest",
+              SERVER, _py_pytest("tests/test_customization_store.py"), 8),
+        Suite("server-customization-reconcile", "server customization reconcile", "pytest",
+              SERVER, _py_pytest("tests/test_customization_reconcile.py"), 8),
+        Suite("server-customization-contract", "server customization contract freeze", "pytest",
+              SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
+        Suite("server-customization-runtime", "server customization runtime", "pytest",
+              SERVER, _py_pytest("tests/test_customization_runtime.py"), 7),
+        Suite("server-customization-adversarial", "server customization adversarial", "pytest",
+              SERVER, _py_pytest("tests/test_customization_adversarial.py"), 5),
+        Suite("server-customization-publish-recovery", "server customization publish recovery", "pytest",
+              SERVER, _py_pytest("tests/test_customization_publish_recovery.py"), 1),
+        Suite("server-platform-release-policy", "server platform release policy", "pytest",
+              SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
         # Expected 118 = the full DB-configured collection, measured on this
         # tree 2026-07-22 via `DATABASE_URL=... pytest --collect-only -q
@@ -341,6 +359,12 @@ def build_suites() -> List[Suite]:
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
               [_npx(), "tsc", "-p", "tsconfig.build.json"], None),
+        Suite("harness-audit-high", "harness npm audit (high threshold)", "script", HARNESS,
+              [_npm(), "audit", "--audit-level=high"], None),
+        Suite("web-customization-check", "web customization static check", "script", WEB,
+              [_npm(), "run", "check:customization"], None),
+        Suite("web-build", "web production build", "script", WEB,
+              [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
         # Builds + boots the real compose stack (broker+harness+app, mock agent)
         # and proves the authed app->harness hop, durable grant/tenant volumes,

@@ -6,6 +6,8 @@ multiple workers and processes contend through SQLite's transactional CAS.
 """
 from __future__ import annotations
 
+import hmac
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -86,6 +88,34 @@ CREATE TABLE IF NOT EXISTS customization_audit_events (
 
 CREATE INDEX IF NOT EXISTS customization_recovery_idx
   ON customization_change_sets (state, tenant_id);
+
+CREATE TABLE IF NOT EXISTS customization_confirmations (
+  confirmation_id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  signature TEXT NOT NULL,
+  consumed INTEGER NOT NULL DEFAULT 0 CHECK (consumed IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS customization_deployment_snapshots (
+  snapshot_id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  effective_catalog_digest TEXT NOT NULL,
+  platform_release TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  UNIQUE (idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS customization_deployment_audit (
+  audit_id TEXT PRIMARY KEY,
+  snapshot_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('snapshot', 'verify', 'restore', 'restore_verify')),
+  result TEXT NOT NULL CHECK (result IN ('ok', 'failed')),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  FOREIGN KEY (snapshot_id) REFERENCES customization_deployment_snapshots(snapshot_id)
+);
 """
 
 _NEXT = {
@@ -204,6 +234,20 @@ class SQLiteCustomizationStore(CustomizationRepository):
         with self._connection() as conn:
             return self._find_change_set(conn, tenant_id, change_set_id)
 
+    def get_change_set_by_idempotency(
+        self, *, tenant_id: str, idempotency_key: str
+    ) -> ChangeSet:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_change_sets "
+                "WHERE tenant_id = ? AND idempotency_key = ?",
+                (tenant_id, idempotency_key),
+            ).fetchone()
+            if row is None:
+                raise ChangeSetNotFoundError("change set was not found")
+            return self._change_set(row)
+
     def transition(
         self,
         *,
@@ -294,6 +338,305 @@ class SQLiteCustomizationStore(CustomizationRepository):
     def get_effective_catalog(self, *, tenant_id: str) -> EffectiveCatalog:
         self.initialize()
         with self._connection() as conn:
+            return self._effective_catalog(conn, tenant_id)
+
+    # The confirmation rows are deliberately owned by this same SQLite file as
+    # state and audit. ``consume`` is a durable compare-and-set, not an
+    # in-process lock, so a retry or a second worker cannot reuse approval.
+    def put_confirmation(self, *, confirmation_id: str, payload: dict, signature: str) -> None:
+        with self._transaction() as conn:
+            try:
+                conn.execute("INSERT INTO customization_confirmations "
+                             "(confirmation_id, payload_json, signature) VALUES (?, ?, ?)",
+                             (confirmation_id, json.dumps(payload, sort_keys=True, separators=(",", ":")), signature))
+            except sqlite3.IntegrityError as exc:
+                raise IdempotencyReplayError("confirmation already exists") from exc
+
+    def get_confirmation(self, *, confirmation_id: str) -> dict | None:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute("SELECT payload_json, signature, consumed FROM customization_confirmations "
+                               "WHERE confirmation_id = ?", (confirmation_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return {"payload": payload, "signature": row["signature"], "consumed": bool(row["consumed"])}
+
+    def consume_confirmation(self, *, confirmation_id: str, signature: str) -> bool:
+        with self._transaction() as conn:
+            result = conn.execute("UPDATE customization_confirmations SET consumed = 1 "
+                                  "WHERE confirmation_id = ? AND signature = ? AND consumed = 0",
+                                  (confirmation_id, signature))
+            return result.rowcount == 1
+
+    def find_unconsumed_confirmation(
+        self, *, tenant_id: str, change_set_id: str
+    ) -> dict | None:
+        """Return an already-issued independent approval, never mint one."""
+        self.initialize()
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT confirmation_id, payload_json, signature, consumed "
+                "FROM customization_confirmations WHERE consumed = 0 ORDER BY created_at DESC"
+            ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (payload.get("tenant_id"), payload.get("change_set_id")) == (
+                tenant_id, change_set_id
+            ):
+                return {
+                    "confirmation_id": row["confirmation_id"],
+                    "payload": payload,
+                    "signature": row["signature"],
+                    "consumed": False,
+                }
+        return None
+
+    def prepare_publish(
+        self,
+        *,
+        tenant_id: str,
+        change_set_id: str,
+        confirmation_id: str,
+        confirmation_signature: str,
+        approver_subject: str,
+        idempotency_key: str,
+    ) -> ChangeSet:
+        """Consume approval and advance to ``publishing`` in one transaction."""
+        with self._transaction() as conn:
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            if row.state is ChangeState.PUBLISHING:
+                confirmation = conn.execute(
+                    "SELECT consumed, signature FROM customization_confirmations "
+                    "WHERE confirmation_id = ?",
+                    (confirmation_id,),
+                ).fetchone()
+                replay = conn.execute(
+                    "SELECT 1 FROM customization_audit_events "
+                    "WHERE tenant_id = ? AND change_set_id = ? AND idempotency_key = ? "
+                    "AND next_state = ?",
+                    (tenant_id, change_set_id, f"publishing:{idempotency_key}",
+                     ChangeState.PUBLISHING.value),
+                ).fetchone()
+                if (confirmation is not None and confirmation["consumed"] == 1
+                        and hmac.compare_digest(confirmation["signature"], confirmation_signature)
+                        and row.approver_subject == approver_subject
+                        and replay is not None):
+                    return row
+                raise ChangeSetConflictError("publishing state does not match this confirmation")
+            if row.state is not ChangeState.STAGED:
+                raise ChangeSetConflictError("change set is not ready for approval")
+            other_publish = conn.execute(
+                "SELECT change_set_id FROM customization_change_sets "
+                "WHERE tenant_id = ? AND state = ? AND change_set_id != ? LIMIT 1",
+                (tenant_id, ChangeState.PUBLISHING.value, change_set_id),
+            ).fetchone()
+            if other_publish is not None:
+                raise ChangeSetConflictError(
+                    "another publish for this tenant requires recovery first"
+                )
+            consumed = conn.execute(
+                "UPDATE customization_confirmations SET consumed = 1 "
+                "WHERE confirmation_id = ? AND signature = ? AND consumed = 0",
+                (confirmation_id, confirmation_signature),
+            )
+            if consumed.rowcount != 1:
+                raise IdempotencyReplayError("confirmation was already consumed")
+            awaiting = self._transition_row(
+                conn, row, ChangeState.AWAITING_APPROVAL, row.version,
+                f"awaiting:{idempotency_key}", expected_state=ChangeState.STAGED,
+            )
+            approved = self._transition_row(
+                conn, awaiting, ChangeState.APPROVED, awaiting.version,
+                f"approved:{idempotency_key}",
+                expected_state=ChangeState.AWAITING_APPROVAL,
+                approver_subject=approver_subject,
+            )
+            return self._transition_row(
+                conn, approved, ChangeState.PUBLISHING, approved.version,
+                f"publishing:{idempotency_key}", expected_state=ChangeState.APPROVED,
+            )
+
+    @staticmethod
+    def _catalog_snapshot(conn: sqlite3.Connection) -> tuple[list[dict], str]:
+        rows = conn.execute(
+            "SELECT tenant_id, change_set_id, catalog_commit, catalog_digest, "
+            "effective_platform_release, workspace_contract_digest "
+            "FROM effective_catalogs ORDER BY tenant_id"
+        ).fetchall()
+        payload = [dict(row) for row in rows]
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return payload, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _deployment_audit(
+        conn: sqlite3.Connection, *, snapshot_id: str, action: str,
+        result: str, idempotency_key: str,
+    ) -> str:
+        old = conn.execute(
+            "SELECT audit_id, snapshot_id, action, result "
+            "FROM customization_deployment_audit WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        if old is not None:
+            if (old["snapshot_id"], old["action"], old["result"]) != (
+                snapshot_id, action, result
+            ):
+                raise IdempotencyReplayError(
+                    "deployment audit idempotency key belongs to another action"
+                )
+            return old["audit_id"]
+        audit_id = str(uuid4())
+        conn.execute(
+            "INSERT INTO customization_deployment_audit "
+            "(audit_id, snapshot_id, action, result, idempotency_key) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (audit_id, snapshot_id, action, result, idempotency_key),
+        )
+        return audit_id
+
+    def capture_deployment_snapshot(
+        self, *, platform_release: str, idempotency_key: str
+    ) -> dict:
+        """Atomically capture every tenant's effective catalog pointer."""
+        with self._transaction() as conn:
+            old = conn.execute(
+                "SELECT * FROM customization_deployment_snapshots "
+                "WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+            if old is not None:
+                snapshot = dict(old)
+            else:
+                payload, digest = self._catalog_snapshot(conn)
+                snapshot_id = str(uuid4())
+                conn.execute(
+                    "INSERT INTO customization_deployment_snapshots "
+                    "(snapshot_id, payload_json, effective_catalog_digest, "
+                    "platform_release, idempotency_key) VALUES (?, ?, ?, ?, ?)",
+                    (snapshot_id, json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                     digest, platform_release, idempotency_key),
+                )
+                snapshot = dict(conn.execute(
+                    "SELECT * FROM customization_deployment_snapshots "
+                    "WHERE snapshot_id = ?", (snapshot_id,)
+                ).fetchone())
+            snapshot["audit_id"] = self._deployment_audit(
+                conn, snapshot_id=snapshot["snapshot_id"], action="snapshot",
+                result="ok", idempotency_key=f"audit:{idempotency_key}",
+            )
+            return snapshot
+
+    def get_deployment_snapshot(self, *, snapshot_id: str) -> dict:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_deployment_snapshots WHERE snapshot_id = ?",
+                (snapshot_id,),
+            ).fetchone()
+        if row is None:
+            raise ChangeSetNotFoundError("deployment snapshot was not found")
+        result = dict(row)
+        result["payload"] = json.loads(result.pop("payload_json"))
+        return result
+
+    def effective_catalog_snapshot(self) -> dict:
+        self.initialize()
+        with self._connection() as conn:
+            payload, digest = self._catalog_snapshot(conn)
+        return {"catalogs": payload, "digest": digest}
+
+    def verify_deployment_snapshot(
+        self, *, snapshot_id: str, action: str, idempotency_key: str
+    ) -> dict:
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_deployment_snapshots WHERE snapshot_id = ?",
+                (snapshot_id,),
+            ).fetchone()
+            if row is None:
+                raise ChangeSetNotFoundError("deployment snapshot was not found")
+            _, digest = self._catalog_snapshot(conn)
+            ok = hmac.compare_digest(digest, row["effective_catalog_digest"])
+            audit_id = self._deployment_audit(
+                conn, snapshot_id=snapshot_id, action=action,
+                result="ok" if ok else "failed", idempotency_key=idempotency_key,
+            )
+            return {
+                "snapshot_id": snapshot_id,
+                "effective_catalog_digest": digest,
+                "expected_effective_catalog_digest": row["effective_catalog_digest"],
+                "verified": ok,
+                "audit_id": audit_id,
+            }
+
+    def restore_deployment_snapshot(
+        self, *, snapshot_id: str, idempotency_key: str
+    ) -> dict:
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_deployment_snapshots WHERE snapshot_id = ?",
+                (snapshot_id,),
+            ).fetchone()
+            if row is None:
+                raise ChangeSetNotFoundError("deployment snapshot was not found")
+            payload = json.loads(row["payload_json"])
+            conn.execute("DELETE FROM effective_catalogs")
+            for item in payload:
+                conn.execute(
+                    "INSERT INTO effective_catalogs "
+                    "(tenant_id, change_set_id, catalog_commit, catalog_digest, "
+                    "effective_platform_release, workspace_contract_digest) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (item["tenant_id"], item["change_set_id"], item["catalog_commit"],
+                     item["catalog_digest"], item["effective_platform_release"],
+                     item["workspace_contract_digest"]),
+                )
+            _, digest = self._catalog_snapshot(conn)
+            if not hmac.compare_digest(digest, row["effective_catalog_digest"]):
+                raise ChangeSetConflictError("restored catalog digest does not match snapshot")
+            audit_id = self._deployment_audit(
+                conn, snapshot_id=snapshot_id, action="restore", result="ok",
+                idempotency_key=idempotency_key,
+            )
+            return {
+                "snapshot_id": snapshot_id,
+                "effective_catalog_digest": digest,
+                "platform_release": row["platform_release"],
+                "audit_id": audit_id,
+            }
+
+    def restore_effective_catalog(self, *, tenant_id: str, target_change_set_id: str,
+                                  prior_change_set_id: str, idempotency_key: str) -> EffectiveCatalog:
+        """Restore a published pin and append one idempotent rollback audit."""
+        with self._transaction() as conn:
+            existing = conn.execute("SELECT * FROM customization_audit_events WHERE tenant_id = ? AND idempotency_key = ?",
+                                    (tenant_id, idempotency_key)).fetchone()
+            if existing is not None:
+                event = event_from_row(existing)
+                if event.next_state is ChangeState.ROLLED_BACK:
+                    return self._effective_catalog(conn, tenant_id)
+                raise IdempotencyReplayError("idempotency key belongs to a different transition")
+            target = self._find_change_set(conn, tenant_id, target_change_set_id)
+            if target.state is not ChangeState.PUBLISHED or not target.staged_commit or not target.catalog_digest:
+                raise ChangeSetConflictError("rollback target must be published")
+            prior = self._find_change_set(conn, tenant_id, prior_change_set_id)
+            conn.execute("INSERT INTO effective_catalogs "
+                         "(tenant_id, change_set_id, catalog_commit, catalog_digest, effective_platform_release, workspace_contract_digest) "
+                         "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(tenant_id) DO UPDATE SET "
+                         "change_set_id=excluded.change_set_id, catalog_commit=excluded.catalog_commit, "
+                         "catalog_digest=excluded.catalog_digest, effective_platform_release=excluded.effective_platform_release, "
+                         "workspace_contract_digest=excluded.workspace_contract_digest, "
+                         "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                         (tenant_id, target.change_set_id, target.staged_commit, target.catalog_digest,
+                          target.desired_platform_release, target.workspace_contract_digest))
+            self._append_audit(conn, prior, prior.state, ChangeState.ROLLED_BACK, idempotency_key,
+                               reason_code="effective_catalog_restored")
             return self._effective_catalog(conn, tenant_id)
 
     def recovery_candidates(self, *, tenant_id: Optional[str] = None) -> list[ChangeSet]:

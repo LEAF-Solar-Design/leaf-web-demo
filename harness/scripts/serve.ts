@@ -69,6 +69,7 @@ import {
 import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import { CustomizationCoordinationClient } from "../src/ports/impl/customizationCoordinationClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeTurnRunner } from "../src/ports/fakes/fakeTurnRunner.js";
 
@@ -78,6 +79,9 @@ const gitWorkerUp = startGitWorker();
 console.log(`[harness] git worker: ${gitWorkerUp ? "started (clean spawn context)" : "UNAVAILABLE - in-process fallback"}`);
 const REPO_ROOT = process.env.LEAF_REPO_ROOT ?? "C:/tmp/leaf-web-demo";
 const TENANTS_DIR = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
+// Bare repositories are durable lifecycle authority, separate from effective
+// tenant worktrees. In production /data deployments this never falls back to OS temp.
+const TENANT_GIT_DIR = process.env.LEAF_TENANT_GIT_DIR ?? `${TENANTS_DIR.replace(/\/$/, "")}/tenant-git`;
 const SINGLE_REPO_OVERRIDE = (process.env.LEAF_TENANT_REPO ?? "").trim(); // demo back-compat
 const BROKER_URL = process.env.BROKER_URL ?? "http://127.0.0.1:8140";
 // Fixture used to auto-provision a brand-new tenant's repo. Absolute so it works both
@@ -173,6 +177,7 @@ function buildPorts(): HarnessPorts {
   const tenantRepo = new TenantRepoProviderImpl({
     locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
     inPlace: true,
+    bareBase: TENANT_GIT_DIR,
     autoProvisionFrom: TENANT_FIXTURE,
   });
   const broker = new BrokerApsClientHttp({ brokerUrl: BROKER_URL });
@@ -192,6 +197,14 @@ function buildPorts(): HarnessPorts {
           const spine = spineTurnRunner(oauth);
           return spine ? { converseRunner: spine } : {};
         })()),
+    ...((process.env.LEAF_APP_URL ?? "").trim() && (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim()
+      ? {
+          customizationCoordination: new CustomizationCoordinationClient({
+            baseUrl: (process.env.LEAF_APP_URL ?? "").trim(),
+            dispatchSecret: (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim(),
+          }),
+        }
+      : {}),
   };
 }
 
@@ -272,7 +285,7 @@ async function main(): Promise<void> {
   server.on("listening", () => {
     log(
       `[harness] listening on http://127.0.0.1:${HARNESS_PORT}` +
-        `  tenants_dir=${TENANTS_DIR}  demo_override=${SINGLE_REPO_OVERRIDE || "(none)"}  broker=${BROKER_URL}`,
+        `  tenants_dir=${TENANTS_DIR}  tenant_git_dir=${TENANT_GIT_DIR}  demo_override=${SINGLE_REPO_OVERRIDE || "(none)"}  broker=${BROKER_URL}`,
     );
     log(`[harness] per-tenant grant store active; grant admin at PUT/GET/DELETE /grants/{tenantId} (token never logged).`);
   });

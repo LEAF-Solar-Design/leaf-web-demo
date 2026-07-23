@@ -118,6 +118,42 @@ describe("customizationLifecycle", () => {
     expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
   });
 
+  it("resumes a staged private ref after the coordination callback fails", async () => {
+    const { agent, bare, coordination, loop } = await setup();
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    const originalRecord = coordination.recordStaged.bind(coordination);
+    let callbacks = 0;
+    coordination.recordStaged = async (receipt) => {
+      callbacks += 1;
+      if (callbacks === 1) throw new Error("coordination unavailable");
+      await originalRecord(receipt);
+    };
+    let authorRuns = 0;
+    const originalRun = agent.run.bind(agent);
+    agent.run = async (input) => {
+      authorRuns += 1;
+      return originalRun(input);
+    };
+
+    await expect(
+      loop.stage(TENANT, "count entities per layer", request(CHANGE_A, base)),
+    ).rejects.toThrow("coordination unavailable");
+    const stagedSha = git(bare.dir, [
+      "rev-parse",
+      `refs/leaf/changes/${CHANGE_A}`,
+    ]);
+
+    const recovered = await loop.stage(
+      TENANT,
+      "count entities per layer",
+      request(CHANGE_A, base),
+    );
+
+    expect(recovered.receipt.staged_commit).toBe(stagedSha);
+    expect(authorRuns).toBe(1);
+    expect(callbacks).toBe(2);
+  });
+
   it("rejects a stale main base during publish", async () => {
     const { bare, coordination, loop } = await setup();
     const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);

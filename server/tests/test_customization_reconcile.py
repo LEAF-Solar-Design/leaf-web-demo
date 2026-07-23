@@ -16,7 +16,7 @@ from platform_release_policy import load_policy
 
 RELEASE = "leaf-platform-2026.07.23"
 CONTRACT = "leaf.workspace.v1"
-CONTRACT_DIGEST = "bf90aa07095206821082a8445b37698c46cba5c9c0cac1eca287ab1de4c2a91e"
+CONTRACT_DIGEST = "fc5fdcb63704127f1c70a430632699e878f79bcea4d7fecdc60782fc210e6865"
 DESIRED = ValidatedWorkspaceRelease(RELEASE, CONTRACT, CONTRACT_DIGEST)
 
 

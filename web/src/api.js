@@ -721,3 +721,90 @@ export async function authorTool(mock, description) {
   }
   return body
 }
+
+function customizationError(method, path, status, body) {
+  const err = new Error(humanizeError(
+    (body && body.error && (body.error.message || body.error.code)) || `${method} ${path} -> ${status}`,
+  ))
+  err.status = status
+  err.body = body
+  err.grantRequired = isGrantRequired(body)
+  err.entitlementRequired = status === 403 && !!(body && body.entitlement_required)
+  return err
+}
+
+function requestId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  return `leaf-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+// R5: stage only. The server resolves base and policy fields, while this client
+// carries the public contract request and never treats staging as publication.
+export async function stageAuthorTool(mock, description) {
+  if (mock) {
+    await nap(700)
+    const authored = authorMock(description)
+    return {
+      ...authored,
+      demo: true,
+      receipt: { change_set_id: `demo-${requestId()}`, state: 'staged' },
+      diff_summary: 'Demo preview only. No live tenant catalog changed.',
+      validation: { status: 'demo' },
+    }
+  }
+  const path = '/api/author/stage'
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    body: JSON.stringify({ description, mode: 'build', idempotency_key: requestId() }),
+  })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw customizationError('POST', path, res.status, body)
+  return body
+}
+
+// Keep confirmation issuance isolated: a server lane may change this additive
+// endpoint without changing the frozen R6 register request below.
+async function issuePublishConfirmation(receipt) {
+  const path = '/api/author/confirmations'
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    body: JSON.stringify(receipt),
+  })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw customizationError('POST', path, res.status, body)
+  if (!body || typeof body.confirmation_id !== 'string' || !body.confirmation_id) {
+    throw new Error('The publish confirmation was unavailable. The staged tool was not published.')
+  }
+  return body.confirmation_id
+}
+
+// R6: obtain one server confirmation, then post exactly the receipt-bound fields.
+export async function publishStagedAuthor(mock, staged) {
+  if (!staged || !staged.receipt) throw new Error('A staged tool is required before publishing.')
+  if (mock) {
+    await nap(250)
+    return { ...staged, published: true, demo: true }
+  }
+  const receipt = staged.receipt
+  const confirmation_id = await issuePublishConfirmation(receipt)
+  const path = '/api/author/register'
+  const publish = {
+    change_set_id: receipt.change_set_id,
+    staged_commit: receipt.staged_commit,
+    catalog_digest: receipt.catalog_digest,
+    platform_release: receipt.platform_release,
+    workspace_contract_digest: receipt.workspace_contract_digest,
+    confirmation_id,
+    idempotency_key: requestId(),
+  }
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    body: JSON.stringify(publish),
+  })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw customizationError('POST', path, res.status, body)
+  return { ...staged, ...body, published: true }
+}

@@ -92,6 +92,10 @@ export class TenantChangeRepo {
     }
   }
 
+  readChangeRef(changeSetId: string): string | null {
+    return this.readRef(changeRef(changeSetId));
+  }
+
   private updateRef(ref: string, newSha: string, expectedOldSha: string | null): void {
     assertSha(newSha, "new SHA");
     if (expectedOldSha) assertSha(expectedOldSha, "expected SHA");
@@ -129,6 +133,34 @@ export class TenantChangeRepo {
       throw error;
     }
     return { id: changeSetId, ref, dir, expectedBaseSha, stagedSha: null };
+  }
+
+  /**
+   * Resume the deterministic ref left by an interrupted stage, or reserve it
+   * when this is the first attempt. A surviving ref must descend from the
+   * original base, so another writer cannot substitute unrelated content.
+   */
+  createOrResume(changeSetId: string, expectedBaseSha: string): TenantChangeSet {
+    assertSha(expectedBaseSha, "expected base SHA");
+    const ref = changeRef(changeSetId);
+    const observed = this.readRef(ref);
+    if (observed === null) return this.create(changeSetId, expectedBaseSha);
+    assertSha(observed, "observed change SHA");
+    const mergeBase = this.git(["merge-base", expectedBaseSha, observed]).trim();
+    if (mergeBase !== expectedBaseSha) {
+      throw new GitRefConflictError(ref, expectedBaseSha, observed);
+    }
+    const workBase = this.opts.workBase ?? tmpdir();
+    mkdirSync(workBase, { recursive: true });
+    const dir = mkdtempSync(join(workBase, `leaf-change-${changeSetId}-`));
+    this.git(["worktree", "add", "--detach", dir, observed]);
+    return {
+      id: changeSetId,
+      ref,
+      dir,
+      expectedBaseSha,
+      stagedSha: observed === expectedBaseSha ? null : observed,
+    };
   }
 
   /** Commit the isolated worktree and advance only its private change ref. */

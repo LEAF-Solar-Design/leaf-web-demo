@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 
 import dependency_health
 import deps
+from customization_service import CustomizationService
 from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
     agent,
@@ -68,6 +69,12 @@ def _cors_origins() -> list[str]:
 
 
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
+
+
+@app.on_event("startup")
+def initialize_customization_store() -> None:
+    """SQLite coordination is intentionally a single-process deployment."""
+    CustomizationService.configured()
 
 # §19: byte-counting wall on the upload route — bounds multipart pre-parse
 # disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.

@@ -65,6 +65,14 @@ def resolve_tenant_repo_dir(tenant_id: Optional[str]) -> Optional[Path]:
 
     A ``None``/empty tenant_id is treated as the demo tenant (legacy no-tenant calls).
     """
+    # An effective pin, when present, is the only runtime authority. The
+    # import is lazy to avoid a dependency cycle during startup. No pin keeps
+    # the legacy mutable-checkout behavior exactly as before.
+    from customization_service import effective_catalog_dir
+    pinned = effective_catalog_dir(str(tenant_id or DEFAULT_TENANT))
+    if pinned is not None:
+        return pinned
+
     single = os.environ.get("LEAF_TENANT_REPO", "").strip()
     base = os.environ.get("LEAF_TENANTS_DIR", "").strip()
 

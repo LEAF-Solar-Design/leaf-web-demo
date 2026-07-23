@@ -34,6 +34,14 @@ button.chip-act, button.chip-neutral { border: 0; font-family: inherit; }
 /* quiet note inside an X1 strip ("your description is preserved") */
 .err-note { font-size: 11px; color: var(--muted-2); }
 
+/* R5/R6 customization lifecycle: staged bytes are calm, explicit, and never
+   presented as runnable until the publish response succeeds. */
+.customization-state { display: flex; align-items: center; gap: 6px; margin: 8px 0; font-size: 12px; color: var(--muted); }
+.customization-state.error { color: var(--status-warning); }
+.customization-detail { margin: 8px 0; font-size: 11px; color: var(--muted); }
+.customization-detail > span { display: block; margin-bottom: 3px; }
+.customization-detail pre { margin: 0; max-height: 144px; overflow: auto; white-space: pre-wrap; }
+
 
 /* O2 resolver header inside the project menu: count sits right, muted */
 .proj-menu .resolver-header { display: flex; align-items: baseline; gap: 8px; }

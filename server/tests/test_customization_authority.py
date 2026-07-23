@@ -148,6 +148,32 @@ def test_confirmation_consume_is_atomic_under_a_race():
     assert sorted(outcomes) == ["confirmation_replayed", "ok"]
 
 
+def test_consumed_confirmation_remains_valid_for_exact_publish_recovery_after_expiry():
+    authority = service()
+    change = staged()
+    confirmation = authority.issue_publish_confirmation(
+        staged_change=change,
+        author_binding=binding(),
+        approver_binding=binding(subject="reviewer", role="reviewer"),
+        ttl=timedelta(seconds=1),
+    )
+    authority.consume_publish_confirmation(
+        tenant_id="tenant-a",
+        request=request(change),
+        confirmation_id=confirmation.confirmation_id,
+    )
+    authority._now = lambda: NOW + timedelta(minutes=30)
+
+    recovered, _ = authority.verify_publish_confirmation(
+        tenant_id="tenant-a",
+        request=request(change),
+        confirmation_id=confirmation.confirmation_id,
+        allow_consumed=True,
+    )
+
+    assert recovered.confirmation_id == confirmation.confirmation_id
+
+
 def test_confirmation_rejects_cross_tenant_and_tampered_or_expired_records_without_consuming():
     authority = service()
     change = staged()

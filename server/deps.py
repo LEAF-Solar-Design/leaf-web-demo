@@ -317,14 +317,17 @@ class TenantContext(str):
     org_id: Optional[str]
     tier: Optional[str]
     workspace: Optional[str]
+    subject: Optional[str]
 
     def __new__(cls, tenant_id: str, org_id: Optional[str] = None,
-                tier: Optional[str] = None, workspace: Optional[str] = None) -> "TenantContext":
+                tier: Optional[str] = None, workspace: Optional[str] = None,
+                subject: Optional[str] = None) -> "TenantContext":
         obj = super().__new__(cls, tenant_id)
         obj.tenant_id = str(tenant_id)
         obj.org_id = org_id
         obj.tier = tier
         obj.workspace = workspace
+        obj.subject = subject
         return obj
 
 
@@ -524,6 +527,7 @@ def require_tenant(
         org_id=claims.get("org_id"),
         tier=claims.get("tier"),
         workspace=ws.workspace_dir if ws is not None else None,
+        subject=payload.get("sub") if isinstance(payload.get("sub"), str) else None,
     )
 
 

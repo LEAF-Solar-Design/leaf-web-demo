@@ -265,6 +265,28 @@ class CustomizationAuthority:
         confirmation_id: str,
     ) -> PublishConfirmation:
         """Verify and consume the exact R6 approval once, before publication."""
+        confirmation, signature = self.verify_publish_confirmation(
+            tenant_id=tenant_id,
+            request=request,
+            confirmation_id=confirmation_id,
+        )
+        if not self._confirmations.consume(confirmation_id, signature):
+            raise AuthorityError("confirmation_replayed")
+        return confirmation
+
+    def verify_publish_confirmation(
+        self,
+        *,
+        tenant_id: str,
+        request: PublishRequest,
+        confirmation_id: str,
+        allow_consumed: bool = False,
+    ) -> tuple[PublishConfirmation, str]:
+        """Verify an exact R6 approval without consuming it.
+
+        Durable coordinators use this method before atomically consuming the
+        confirmation and advancing approval state in their own transaction.
+        """
         _required_text(tenant_id, "tenant_id", 200)
         _validated_request(request)
         if not isinstance(confirmation_id, str) or not confirmation_id:
@@ -275,10 +297,12 @@ class CustomizationAuthority:
         payload = record.payload
         if not self._signer.verify(_canonical_payload(payload), record.signature):
             raise AuthorityError("confirmation_tampered")
-        if record.consumed:
+        if record.consumed and not allow_consumed:
             raise AuthorityError("confirmation_replayed")
         expires_at = _parse_expiry(payload.get("expires_at"))
-        if _utc(self._now()) >= expires_at:
+        if _utc(self._now()) >= expires_at and not (
+            record.consumed and allow_consumed
+        ):
             raise AuthorityError("confirmation_expired")
         expected = {
             "tenant_id": tenant_id,
@@ -290,9 +314,7 @@ class CustomizationAuthority:
         }
         if any(payload.get(key) != value for key, value in expected.items()):
             raise AuthorityError("confirmation_binding_mismatch")
-        if not self._confirmations.consume(confirmation_id, record.signature):
-            raise AuthorityError("confirmation_replayed")
-        return _confirmation_from_payload(payload)
+        return _confirmation_from_payload(payload), record.signature
 
     def _authorize_approver(
         self,

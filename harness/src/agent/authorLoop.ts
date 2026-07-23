@@ -43,7 +43,7 @@ export interface StageCustomizationRequest {
   idempotencyKey: string;
 }
 
-export interface StageCustomizationResponse extends AuthorResponse {
+export interface StageCustomizationResponse extends Partial<AuthorResponse> {
   receipt: StagedCustomizationReceipt;
 }
 
@@ -196,11 +196,31 @@ export class AuthorLoop {
     const bareRepo = await bare.call(this.ports.tenantRepo, tenantId);
     const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
     const observedMainSha = changes.readRef("refs/heads/main");
-    if (observedMainSha !== request.expectedBaseSha) {
+    const existingChangeSha = changes.readChangeRef(request.changeSetId);
+    if (existingChangeSha === null && observedMainSha !== request.expectedBaseSha) {
       throw new AuthorLoopError("staging base no longer matches main", 409);
     }
-    const change = changes.create(request.changeSetId, request.expectedBaseSha);
+    const change = changes.createOrResume(request.changeSetId, request.expectedBaseSha);
     try {
+      if (change.stagedSha !== null) {
+        const catalogDigest = createHash("sha256")
+          .update(readFileSync(join(change.dir, REGISTRY_FILE)))
+          .digest("hex");
+        const receipt = Object.freeze({
+          contract: "leaf.customization.v1" as const,
+          tenant_id: tenantId,
+          change_set_id: request.changeSetId,
+          state: "staged" as const,
+          base_commit: request.expectedBaseSha,
+          staged_commit: change.stagedSha,
+          catalog_digest: catalogDigest,
+          platform_release: request.platformRelease,
+          workspace_contract_digest: request.workspaceContractDigest,
+          idempotency_key: request.idempotencyKey,
+        });
+        await coordination.recordStaged(receipt);
+        return { receipt };
+      }
       const run = await this.authorInRepo(tenantId, description, change.dir);
       registerTool(change.dir, run.tool);
       const stagedCommit = changes.stageCommit(change, `stage tool: ${run.tool.name}`);
@@ -247,6 +267,10 @@ export class AuthorLoop {
       throw new GitRefConflictError(ref, receipt.staged_commit, observedRef);
     }
     const observedMain = changes.readRef("refs/heads/main");
+    if (observedMain === receipt.staged_commit) {
+      await coordination.authorizePublish(receipt, expectedMainSha);
+      return { commit: receipt.staged_commit };
+    }
     if (observedMain !== expectedMainSha) {
       throw new GitRefConflictError("refs/heads/main", expectedMainSha, observedMain);
     }
