@@ -43,6 +43,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -462,13 +463,6 @@ def _run_quota_preflight(tenant_id: str, tier: str, tool: Dict[str, Any]):
 
 
 # --------------------------------------------------------------------------- #
-# app
-# --------------------------------------------------------------------------- #
-app = FastAPI(title="Leaf APS broker v1", version="1.0.0")
-install_error_handlers(app)
-
-
-# --------------------------------------------------------------------------- #
 # Production authored-execution containment.
 #
 # LEAF_RUNTIME_ENV is an explicit deployment posture. In production, authored
@@ -501,7 +495,22 @@ def validate_runtime_safety() -> None:
         )
 
 
-app.add_event_handler("startup", validate_runtime_safety)
+@asynccontextmanager
+async def _broker_lifespan(_app: FastAPI):
+    """Run deployment safety checks on supported FastAPI and Starlette releases."""
+    validate_runtime_safety()
+    yield
+
+
+# --------------------------------------------------------------------------- #
+# app
+# --------------------------------------------------------------------------- #
+app = FastAPI(
+    title="Leaf APS broker v1",
+    version="1.0.0",
+    lifespan=_broker_lifespan,
+)
+install_error_handlers(app)
 
 
 # --------------------------------------------------------------------------- #
