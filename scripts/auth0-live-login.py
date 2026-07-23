@@ -23,8 +23,18 @@ ISSUER = "https://leafautomation.us.auth0.com"
 AUDIENCE = "https://api.leafdesign.ai"
 CLIENT_ID = "zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O"
 REDIRECT_URI = os.environ.get("LEAF_AUTH0_REDIRECT_URI", "http://localhost:8080")
-TOKEN_PATH = Path(r"C:\tmp\leaf-grants\auth0-access-token.txt")
-RECEIPT_PATH = Path(r"C:\tmp\leaf-web-demo\docs\auth0-live-login-receipt.json")
+TOKEN_PATH = Path(
+    os.environ.get(
+        "LEAF_AUTH0_TOKEN_PATH",
+        r"C:\tmp\leaf-grants\auth0-access-token.txt",
+    )
+)
+RECEIPT_PATH = Path(
+    os.environ.get(
+        "LEAF_AUTH0_RECEIPT_PATH",
+        r"C:\tmp\leaf-web-demo\docs\auth0-live-login-receipt.json",
+    )
+)
 
 
 def b64url(raw: bytes) -> str:
