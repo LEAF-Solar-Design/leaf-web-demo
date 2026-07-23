@@ -74,7 +74,11 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant)) -> Dict[str,
     # Enforced FIRST — before the harness delegation or the templater — so a plan without
     # Build cannot author tools via either path. Off-auth/demo tier grants build.
     tier = entitlements.resolve_tier(tenant)
-    if not entitlements.entitlements_for(tier).get("build", False):
+    try:
+        allowed = entitlements.entitlements_for(tier).get("build", False)
+    except entitlements.EntitlementsError:
+        return entitlements.policy_unavailable_response("build", tier)
+    if not allowed:
         return entitlements.entitlement_denied_response("build", tier)
 
     use_llm = os.environ.get("LEAF_AUTHOR_LLM", "0") == "1"
