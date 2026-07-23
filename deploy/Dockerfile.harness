@@ -38,6 +38,8 @@ RUN npx tsc -p tsconfig.build.json \
   && npm prune --omit=dev
 
 ENV HARNESS_PORT=8150 \
+    LEAF_HARNESS_AUTHORING_MODE=disabled \
+    LEAF_HARNESS_SESSION_STORE=file \
     LEAF_REPO_ROOT=/app \
     LEAF_TENANT_FIXTURE=/app/test/fixtures/tenant-repo \
     LEAF_TENANTS_DIR=/data/tenants \

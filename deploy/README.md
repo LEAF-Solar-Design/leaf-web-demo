@@ -68,8 +68,8 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml run --rm --
   canonical-worker python /app/scripts/canonical-container-smoke.py
 ```
 
-The overlay adds PostgreSQL 16, an idempotent migration job that applies migrations
-`0001` through `0010`, and a non-root canonical worker with a database-heartbeat
+The overlay adds PostgreSQL 16, an idempotent migration job that applies every
+checked-in numbered migration, and a non-root canonical worker with a database-heartbeat
 healthcheck. The worker image receives `../autofill-solver` as a named BuildKit
 context; solver code is not duplicated into this repository, and the adapter hashes
 the exact source tree before and after every invocation. The local PostgreSQL password
@@ -79,6 +79,63 @@ Secrets Manager and a managed PostgreSQL endpoint instead of these local credent
 Stop without deleting PostgreSQL state using `down`. For a deliberate clean-room
 rehearsal, use `down -v`; that removes all local named volumes, including
 `leaf-postgres`.
+
+### Shared authority staging
+
+The three runtime images contain the code needed for PostgreSQL, but every new
+authority keeps its legacy default:
+
+| Process | Selector | Default | PostgreSQL connection |
+|---|---|---|---|
+| app sessions and approvals | `LEAF_SESSIONS_STORE` | `legacy` | `DATABASE_URL` |
+| app and broker async jobs | `LEAF_JOBS_STORE` | `legacy` | their service-specific `DATABASE_URL` |
+| app agent gate state | `LEAF_AGENT_STORE` | `legacy` | `DATABASE_URL` |
+| app guest upload caps | `LEAF_GUEST_CAP_STORE` | `memory` | `DATABASE_URL` |
+| app drawing manifests and leases | `LEAF_DRAWING_STORE` | `legacy` | `DATABASE_URL` |
+| app upload attempts and purge leases | `LEAF_UPLOAD_STORE` | `legacy` | `DATABASE_URL` |
+| broker tenant and ledger state | `LEAF_BROKER_STORE` | `legacy` | broker-only `DATABASE_URL` |
+| broker async job callback completion | `LEAF_JOBS_STORE` | `legacy` | broker-only `DATABASE_URL` |
+| broker drawing manifests and leases | `LEAF_DRAWING_STORE` | `legacy` | broker-only `DATABASE_URL` |
+| broker callback replay nonces | `LEAF_CALLBACK_REPLAY_STORE` | `legacy` | broker-only `DATABASE_URL` |
+| harness sessions | `LEAF_HARNESS_SESSION_STORE` | `file` | `LEAF_HARNESS_DATABASE_URL` |
+| harness build authoring | `LEAF_HARNESS_AUTHORING_MODE` | `disabled` | n/a |
+
+The base compose file maps the broker connection from
+`LEAF_BROKER_DATABASE_URL`. It does not reuse the app's `DATABASE_URL`. This
+keeps an app database setting from changing the secret-holding broker by
+accident. Production should inject the broker connection as a broker-only
+secret. The broker image still excludes the Anthropic SDK, Claude grants, and
+tenant grant storage.
+
+Run schema work as a separate one-shot stage. Do not call
+`apply_migration()` from an app, broker, or harness startup command.
+
+```bash
+# Local preflight. This starts PostgreSQL, applies all checked-in migrations,
+# checks the core schema, and exits before any authority is selected.
+docker compose -f docker-compose.yml -f docker-compose.canonical.yml \
+  run --rm migrate
+```
+
+For staging, run the same migration command in a one-shot task built from the
+release commit. Confirm that migrations `0011` through `0017` exist before
+changing any selector. Then enable and verify one authority at a time. Session
+migration may first use `dual_write`, `dual_write_shadow`, and `shadow`; the
+other selectors accept only their documented legacy and PostgreSQL values. Do
+not set all selectors in one deployment. The operator has pinned both production
+domains to the current deployment, so do not promote aliases or apply this
+rollout to production until staging is fully verified and a later operator
+directive permits it.
+
+The opt-in local overlay passes a database connection to each process but keeps
+all selectors at their legacy values. After the preflight and the lane-specific
+data checks, an operator can select one authority for a local rehearsal:
+
+```bash
+# Example only: rehearse broker authority after its data checks pass.
+LEAF_BROKER_STORE=postgres \
+docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
+```
 
 ## Env contract (wired by `docker-compose.yml`)
 
@@ -101,6 +158,20 @@ rehearsal, use `down -v`; that removes all local named volumes, including
 | `LEAF_SESSIONS_DIR` | harness | `/data/sessions` | converse loop store (sdk resume ids, confirmation mirrors) |
 | `SESSIONS_DB` | app | `/data/state/sessions.db` | conversational sessions/events/approvals (single-writer SQLite) |
 | `DATABASE_URL` | app | `${DATABASE_URL:-}` (empty) | **opt-in** platform Project/Job persistence; empty ⇒ platform DB endpoints stay dark, demo-safe |
+| `LEAF_SESSIONS_STORE` | app | `legacy` | app session authority selector; PostgreSQL remains opt-in |
+| `LEAF_JOBS_STORE` | app | `legacy` | async job and delivery lease authority selector; PostgreSQL remains opt-in |
+| `LEAF_AGENT_STORE` | app | `legacy` | agent gate authority selector; PostgreSQL remains opt-in |
+| `LEAF_GUEST_CAP_STORE` | app | `memory` | guest daily-cap authority selector; PostgreSQL remains opt-in |
+| `LEAF_DRAWING_STORE` | app, broker | `legacy` | drawing manifest, version, checkout, and extraction authority selector |
+| `LEAF_UPLOAD_STORE` | app | `legacy` | upload-attempt and purge authority selector |
+| `LEAF_GUEST_CAP_HMAC_SECRET` | app | empty | required keyed IP pseudonymization secret in PostgreSQL guest-cap mode |
+| `LEAF_BROKER_STORE` | broker | `legacy` | broker tenant and ledger authority selector |
+| `LEAF_BROKER_DATABASE_URL` | broker | empty | compose input mapped to the broker's `DATABASE_URL` only |
+| `LEAF_JOBS_STORE` | broker | `legacy` | broker callback completion uses the same async-job authority as the app |
+| `LEAF_CALLBACK_REPLAY_STORE` | broker | `legacy` | callback nonce replay authority selector; PostgreSQL remains opt-in |
+| `LEAF_HARNESS_SESSION_STORE` | harness | `file` | harness session authority selector |
+| `LEAF_HARNESS_AUTHORING_MODE` | harness | `disabled` | build authoring requires explicit `singleton`; `fleet` stays blocked until a real vault exists |
+| `LEAF_HARNESS_DATABASE_URL` | harness | empty | harness-only PostgreSQL connection |
 
 ### Named volumes
 

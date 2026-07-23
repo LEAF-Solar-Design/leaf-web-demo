@@ -24,13 +24,17 @@ FROM python:3.12-slim AS broker
 
 WORKDIR /app
 
-# --- Python deps: server (fastapi/uvicorn/pydantic/requests/jsonschema) + da
-#     (requests). No platform deps — the broker never imports the platform pkg. -
+# --- Python deps: server + da + the opt-in PostgreSQL authority runtime. -------
+# Legacy mode never imports platform. PostgreSQL mode loads it lazily, so the
+# image must contain psycopg and psycopg-pool before that flag can be enabled.
+# No database credential is baked into this image.
 COPY server/requirements.txt /app/server/requirements.txt
 COPY da/requirements.txt     /app/da/requirements.txt
+COPY platform/requirements.txt /app/platform/requirements.txt
 RUN pip install --no-cache-dir \
       -r /app/server/requirements.txt \
-      -r /app/da/requirements.txt
+      -r /app/da/requirements.txt \
+      -r /app/platform/requirements.txt
 
 # --- Broker source + the siblings it resolves via PROJECT_ROOT = /app --------
 # (broker.py: SERVER_DIR.parent; inserts /app + /app/server on sys.path, then
@@ -38,6 +42,7 @@ RUN pip install --no-cache-dir \
 COPY server/  /app/server/
 COPY da/      /app/da/
 COPY engine/  /app/engine/
+COPY platform/ /app/platform/
 COPY contract/ /app/contract/
 COPY data/    /app/data/
 
@@ -67,6 +72,10 @@ WORKDIR /app/server
 
 ENV APS_LIVE=0 \
     BROKER_PORT=8140 \
+    LEAF_CALLBACK_REPLAY_STORE=legacy \
+    LEAF_BROKER_STORE=legacy \
+    LEAF_DRAWING_STORE=legacy \
+    LEAF_JOBS_STORE=legacy \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

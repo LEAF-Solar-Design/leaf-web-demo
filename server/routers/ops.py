@@ -20,11 +20,10 @@ stays open (byte-identical to the local single-operator demo, mirroring
     POST /api/ops/tenants/{tid}/disable     -> proxy broker disable; broker's §-enveloped ack
     POST /api/ops/tenants/{tid}/enable      -> proxy broker enable;  broker's §-enveloped ack
 
-Spend/runs come from the broker attribution ledger (same app-side read as
-GET /api/usage — the ledger holds no credential), aggregated per tenant via
-``da/usage.py::aggregate_usage``. Kill-switch state comes from the broker
-(``GET /broker/health`` authoritative; ``broker_tenants.json`` fallback when the
-broker is unreachable). Disable/enable PROXY the broker over ``BROKER_URL`` — only
+Spend/runs come from the selected broker authority, matching GET /api/usage.
+PostgreSQL mode never falls back to JSONL. Kill-switch state comes from the
+broker health endpoint, with the selected authority as its fallback.
+Disable/enable PROXY the broker over ``BROKER_URL`` — only
 the broker persists the kill-switch — and return its ack verbatim; a broker that
 is unreachable yields a ``BROKER_UNREACHABLE`` envelope at HTTP 502.
 """
@@ -39,6 +38,7 @@ from typing import Any, Dict, Optional, Set
 import requests
 from fastapi import APIRouter, Header
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 import agent_audit
 import agent_ledger
@@ -108,6 +108,31 @@ def _ledger_path() -> Path:
     return Path(override) if override else (deps.SERVER_DIR / "broker_ledger.jsonl")
 
 
+def _postgres_store():
+    from broker_pg_store import get_store
+
+    return get_store()
+
+
+def _broker_store_mode() -> str:
+    mode = os.environ.get("LEAF_BROKER_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_BROKER_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def _agent_store_mode() -> str:
+    mode = os.environ.get("LEAF_AGENT_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_AGENT_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def _agent_pg_store():
+    import agent_pg_store
+    return agent_pg_store
+
+
 def _distinct_tenants(ledger_path: Path) -> Set[str]:
     """Every tenant_id that appears in the attribution ledger (any status)."""
     out: Set[str] = set()
@@ -134,8 +159,9 @@ def _disabled_set() -> Set[str]:
     GET /api/ops/tenants — there is NO cached /health. Authoritative source is a
     per-request GET /broker/health `tenants_disabled` (the broker updates its state
     synchronously before acking the disable, so the next health read sees it); a
-    Cache-Control: no-cache header defeats any intermediary cache. Fallback (broker
-    unreachable): read broker_tenants.json directly, also fresh per call. Never raises."""
+    Cache-Control: no-cache header defeats any intermediary cache. If the broker
+    is unreachable, PostgreSQL mode reads the shared store and legacy mode reads
+    broker_tenants.json. Never crosses authorities."""
     try:
         resp = requests.get(f"{broker_client.broker_url()}/broker/health", timeout=3,
                             headers={"Cache-Control": "no-cache"})
@@ -143,6 +169,9 @@ def _disabled_set() -> Set[str]:
         return {str(t) for t in (data.get("tenants_disabled") or [])}
     except Exception:  # noqa: BLE001
         pass
+    if _broker_store_mode() == "postgres":
+        # Never consult the stale legacy tenant file after authority flips.
+        return set(_postgres_store().disabled_tenant_ids())
     try:
         path = Path(os.environ.get("BROKER_TENANTS", str(deps.SERVER_DIR / "broker_tenants.json")))
         if path.exists():
@@ -179,13 +208,22 @@ def ops_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
     gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
-    ledger = _ledger_path()
     um = _usage_mod()
     disabled = _disabled_set()
-    tenant_ids = _distinct_tenants(ledger) | disabled
+    postgres_mode = _broker_store_mode() == "postgres"
+    if postgres_mode:
+        store = _postgres_store()
+        tenant_ids = set(store.usage_tenant_ids()) | disabled
+    else:
+        ledger = _ledger_path()
+        tenant_ids = _distinct_tenants(ledger) | disabled
     rows = []
     for tid in sorted(tenant_ids):
-        if um is not None:
+        if postgres_mode:
+            agg = store.aggregate_usage(tid)
+            runs = agg["total"]["runs"]
+            usd_est = agg["total"]["usd_est"]
+        elif um is not None:
             agg = um.aggregate_usage(tid, ledger)
             runs = agg["total"]["runs"]
             usd_est = agg["total"]["usd_est"]
@@ -223,11 +261,21 @@ def ops_agent_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any
     gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
+    usage_by_tenant = agent_ledger.tenants_seen()
+    states = (
+        _agent_pg_store().tenant_states()
+        if _agent_store_mode() == "postgres" else {}
+    )
     rows = []
-    for tid, agg in sorted(agent_ledger.tenants_seen().items()):
+    for tid in sorted(set(usage_by_tenant) | set(states)):
+        agg = usage_by_tenant.get(
+            tid, {"turns": 0, "cost_tokens": 0, "usd_est": 0.0})
+        state = states.get(tid) or agent_policy.load_tenant_state(tid)
         rows.append({"tenant_id": tid, "turns": agg["turns"],
                      "cost_tokens": agg["cost_tokens"], "usd_est": agg["usd_est"],
-                     "agent_disabled": bool(agent_policy.load_tenant_state(tid).get("agent_disabled"))})
+                     "agent_disabled": bool(state.get("agent_disabled")),
+                     **({"revision": int(state["revision"])}
+                        if "revision" in state else {})})
     return with_envelope_fields({"tenants": rows})
 
 
@@ -243,25 +291,99 @@ def ops_agent_session(session_id: str, limit: int = 100,
                                  "count": len(records)})
 
 
-def _ops_agent_flag(tid: str, disabled: bool) -> Any:
-    entry = agent_policy.set_tenant_agent_disabled(tid, disabled)
-    agent_audit.append({"kind": "kill_switch", "scope": "tenant", "tenant_id": tid,
-                        "agent_disabled": bool(entry.get("agent_disabled")), "via": "ops"})
-    return with_envelope_fields({"tenant_id": tid,
-                                 "agent_disabled": bool(entry.get("agent_disabled"))})
+def _ops_agent_flag(
+    tid: str, disabled: bool, expected_revision: Optional[int] = None,
+) -> Any:
+    audit_event = {
+        "kind": "kill_switch",
+        "scope": "tenant",
+        "tenant_id": tid,
+        "agent_disabled": bool(disabled),
+        "via": "ops",
+    }
+    try:
+        entry = agent_policy.set_tenant_agent_disabled(
+            tid, disabled, expected_revision=expected_revision,
+            audit_event=(audit_event if _agent_store_mode() == "postgres" else None))
+    except agent_policy.PolicyError as exc:
+        conflict = (
+            "stale agent tenant state revision",
+            "enabling an agent tenant requires its current revision",
+            "replacing an agent tenant overlay requires its current revision",
+        )
+        if not any(message in str(exc) for message in conflict):
+            raise
+        return error_response(
+            ErrorCode.BAD_PARAMS, str(exc), retryable=True, status_code=409)
+    if _agent_store_mode() != "postgres":
+        agent_audit.append(audit_event)
+    body = {"tenant_id": tid,
+            "agent_disabled": bool(entry.get("agent_disabled"))}
+    if "revision" in entry:
+        body["revision"] = int(entry["revision"])
+    return with_envelope_fields(body)
 
 
 @router.post("/api/ops/agent/tenants/{tid}/disable")
-def ops_agent_disable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+def ops_agent_disable(
+    tid: str, x_ops_secret: Optional[str] = Header(default=None),
+    x_agent_state_revision: Optional[int] = Header(default=None),
+) -> Any:
     gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
-    return _ops_agent_flag(tid, True)
+    return _ops_agent_flag(tid, True, x_agent_state_revision)
 
 
 @router.post("/api/ops/agent/tenants/{tid}/enable")
-def ops_agent_enable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+def ops_agent_enable(
+    tid: str, x_ops_secret: Optional[str] = Header(default=None),
+    x_agent_state_revision: Optional[int] = Header(default=None),
+) -> Any:
     gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
-    return _ops_agent_flag(tid, False)
+    return _ops_agent_flag(tid, False, x_agent_state_revision)
+
+
+class AgentOverlayRequest(BaseModel):
+    overlay: Dict[str, Any]
+
+
+@router.put("/api/ops/agent/tenants/{tid}/overlay")
+def ops_agent_overlay(
+    tid: str, req: AgentOverlayRequest,
+    x_ops_secret: Optional[str] = Header(default=None),
+    x_agent_state_revision: Optional[int] = Header(default=None),
+) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    audit_event = {
+        "kind": "policy_overlay",
+        "scope": "tenant",
+        "tenant_id": tid,
+        "via": "ops",
+    }
+    try:
+        entry = agent_policy.set_tenant_overlay(
+            tid, req.overlay,
+            expected_revision=x_agent_state_revision,
+            audit_event=audit_event,
+        )
+    except agent_policy.PolicyError as exc:
+        conflict = (
+            "stale agent tenant state revision",
+            "replacing an agent tenant overlay requires its current revision",
+        )
+        if any(message in str(exc) for message in conflict):
+            return error_response(
+                ErrorCode.BAD_PARAMS, str(exc), retryable=True, status_code=409)
+        return error_response(
+            ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
+    return with_envelope_fields({
+        "tenant_id": tid,
+        "agent_disabled": bool(entry["agent_disabled"]),
+        "overlay": entry["overlay"],
+        "revision": int(entry["revision"]),
+    })

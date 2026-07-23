@@ -16,13 +16,13 @@ Ordering is load-bearing (elevate exemplar semantics):
   * the policy tier runs last: auto allows, confirm-once consults per-session
     grants, always-confirm ALWAYS files a pending approval (never persisted).
 
-Approvals are durable JSON files under `data/agent_approvals/` (TTL from the
-policy's approval_ttl_s, 300s), bound to their own confirmation id and to the
-exact {session, action, canonical-json(args)} hash — the approved call IS the executed call, an args
-drift after approval denies, and a granted record redeems exactly once
-(consumed_at stamp; replays deny). Expired approvals auto-deny. The kill switch is FILE-PRESENCE
-(`LEAF_AGENT_KILL_FILE`) with deliberately NO API off-toggle — only someone
-with filesystem access can lift it.
+The default legacy authority uses durable JSON files. Setting
+`LEAF_AGENT_STORE=postgres` switches approvals, grants, rates, audit events,
+and the global kill state to fleet-visible PostgreSQL tables. Approvals are
+bound to their confirmation id and exact {session, action,
+canonical-json(args)} hash. The approved call is the executed call, args drift
+denies, and a granted record redeems exactly once. Expired approvals auto-deny.
+PostgreSQL is explicit and fail closed, with no fallback to files.
 
 Every decision is audited (agent_audit.py) with args projected through the
 action's audit_extra allowlist only. Denied reasons name the failing gate.
@@ -52,6 +52,28 @@ _state_lock = threading.Lock()
 
 
 # --------------------------------------------------------------------------- #
+# authority selection (resolved at call time for tests and staged rollout)
+# --------------------------------------------------------------------------- #
+def _using_postgres() -> bool:
+    mode = os.environ.get("LEAF_AGENT_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_AGENT_STORE must be 'legacy' or 'postgres'")
+    return mode == "postgres"
+
+
+def _pg_store():
+    import agent_pg_store
+    return agent_pg_store
+
+
+def _audit_append(event: Dict[str, Any]) -> None:
+    if _using_postgres():
+        _pg_store().append_audit(event)
+        return
+    agent_audit.append(event)
+
+
+# --------------------------------------------------------------------------- #
 # paths (resolved at call time so subprocess/test env overrides apply)
 # --------------------------------------------------------------------------- #
 def kill_file() -> Path:
@@ -78,10 +100,14 @@ def rate_file() -> Path:
 # kill switch — file presence, read-only surface, no API off-toggle
 # --------------------------------------------------------------------------- #
 def kill_switch_active() -> bool:
+    if _using_postgres():
+        return _pg_store().kill_switch_details()["active"] is True
     return kill_file().exists()
 
 
 def kill_switch_details() -> Dict[str, Any]:
+    if _using_postgres():
+        return _pg_store().kill_switch_details()
     target = kill_file()
     if not target.exists():
         return {"active": False}
@@ -131,11 +157,12 @@ def _approval_path(confirmation_id: str) -> Path:
     return approvals_dir() / f"{safe}.json"
 
 
-def create_pending(*, tenant_id: str, session_id: str, turn_id: str,
-                   action: AgentAction, args: Dict[str, Any], ttl_s: int) -> Dict[str, Any]:
+def _new_pending_record(*, tenant_id: str, session_id: str, turn_id: str,
+                        action: AgentAction, args: Dict[str, Any],
+                        ttl_s: int) -> Dict[str, Any]:
     confirmation_id = secrets.token_hex(8)
     now = _now()
-    record = {
+    return {
         "confirmation_id": confirmation_id,
         "tenant_id": str(tenant_id),
         "session_id": str(session_id),
@@ -153,7 +180,17 @@ def create_pending(*, tenant_id: str, session_id: str, turn_id: str,
         "decided_by": None,
         "reason": None,
     }
-    _approval_path(confirmation_id).parent.mkdir(parents=True, exist_ok=True)
+
+
+def create_pending(*, tenant_id: str, session_id: str, turn_id: str,
+                   action: AgentAction, args: Dict[str, Any], ttl_s: int) -> Dict[str, Any]:
+    record = _new_pending_record(
+        tenant_id=tenant_id, session_id=session_id, turn_id=turn_id,
+        action=action, args=args, ttl_s=ttl_s,
+    )
+    if _using_postgres():
+        return _pg_store().create_pending(record)
+    _approval_path(record["confirmation_id"]).parent.mkdir(parents=True, exist_ok=True)
     _write_pending(record)
     return record
 
@@ -217,6 +254,11 @@ def read_pending_strict(confirmation_id: str) -> tuple:
     callers that choose to: the gate chain itself will deny that record at
     resume, so proceeding session-only stays fail-safe.
     """
+    if _using_postgres():
+        record, status = _pg_store().read_pending_strict(confirmation_id)
+        if record is not None and not _record_is_wellformed(record, confirmation_id):
+            return None, "corrupt"
+        return record, status
     path = _approval_path(confirmation_id)
     if not path.exists():
         return None, "absent"
@@ -279,6 +321,11 @@ def _is_expired(record: Dict[str, Any], *, now: Optional[datetime] = None) -> bo
 
 
 def _decide(record: Dict[str, Any], *, granted: bool, by: str, reason: str) -> Dict[str, Any]:
+    if _using_postgres():
+        _ok, updated, _status = _pg_store().decide(
+            record["confirmation_id"], granted=granted, by=by, reason=reason,
+        )
+        return updated if updated is not None else record
     record["granted"] = granted
     record["denied"] = not granted
     record["decided_at"] = _iso(_now())
@@ -301,6 +348,10 @@ def grant_approval(confirmation_id: str, *, by: str = "tenant") -> Tuple[bool, O
     Same single-process posture as the redemption stamp below (multi-replica
     needs file locking — out of scope, same as SESSIONS_DB single-writer).
     """
+    if _using_postgres():
+        return _pg_store().decide(
+            confirmation_id, granted=True, by=by, reason="approved",
+        )
     with _state_lock:
         record = read_pending(confirmation_id)
         if record is None:
@@ -309,22 +360,26 @@ def grant_approval(confirmation_id: str, *, by: str = "tenant") -> Tuple[bool, O
             return False, record, "already_decided"
         if _is_expired(record):
             record = _decide(record, granted=False, by=by, reason="expired")
-            agent_audit.append({"kind": "approval_denied", "confirmation_id": confirmation_id,
-                                "tenant_id": record.get("tenant_id"),
-                                "session_id": record.get("session_id"),
-                                "action": record.get("action"), "reason": "expired"})
+            _audit_append({"kind": "approval_denied", "confirmation_id": confirmation_id,
+                           "tenant_id": record.get("tenant_id"),
+                           "session_id": record.get("session_id"),
+                           "action": record.get("action"), "reason": "expired"})
             return False, record, "expired"
         record = _decide(record, granted=True, by=by, reason="approved")
-        agent_audit.append({"kind": "approval_granted", "confirmation_id": confirmation_id,
-                            "tenant_id": record.get("tenant_id"),
-                            "session_id": record.get("session_id"),
-                            "action": record.get("action"), "decided_by": by})
+        _audit_append({"kind": "approval_granted", "confirmation_id": confirmation_id,
+                       "tenant_id": record.get("tenant_id"),
+                       "session_id": record.get("session_id"),
+                       "action": record.get("action"), "decided_by": by})
         return True, record, "granted"
 
 
 def deny_approval(confirmation_id: str, *, by: str = "tenant",
                   reason: str = "denied") -> Tuple[bool, Optional[Dict[str, Any]], str]:
     # Same atomicity contract as grant_approval (see its docstring).
+    if _using_postgres():
+        return _pg_store().decide(
+            confirmation_id, granted=False, by=by, reason=reason,
+        )
     with _state_lock:
         record = read_pending(confirmation_id)
         if record is None:
@@ -332,10 +387,10 @@ def deny_approval(confirmation_id: str, *, by: str = "tenant",
         if record.get("granted") or record.get("denied"):
             return False, record, "already_decided"
         record = _decide(record, granted=False, by=by, reason=reason)
-        agent_audit.append({"kind": "approval_denied", "confirmation_id": confirmation_id,
-                            "tenant_id": record.get("tenant_id"),
-                            "session_id": record.get("session_id"),
-                            "action": record.get("action"), "decided_by": by, "reason": reason})
+        _audit_append({"kind": "approval_denied", "confirmation_id": confirmation_id,
+                       "tenant_id": record.get("tenant_id"),
+                       "session_id": record.get("session_id"),
+                       "action": record.get("action"), "decided_by": by, "reason": reason})
         return True, record, "denied"
 
 
@@ -397,6 +452,9 @@ def _grant_key(tenant_id: str, session_id: str, action_name: str,
 
 def has_session_grant(tenant_id: str, session_id: str, action_name: str,
                       target: List[str]) -> bool:
+    if _using_postgres():
+        return _pg_store().has_session_grant(
+            tenant_id, session_id, action_name, target)
     # the VALUE authorizes, never the key's presence: a grant is the timestamp
     # record_session_grant stamped, and _load_grants has already rejected any
     # snapshot carrying something else.
@@ -406,6 +464,10 @@ def has_session_grant(tenant_id: str, session_id: str, action_name: str,
 
 def record_session_grant(tenant_id: str, session_id: str, action_name: str,
                          target: List[str]) -> None:
+    if _using_postgres():
+        _pg_store().record_session_grant(
+            tenant_id, session_id, action_name, target)
+        return
     path = grants_file()
     with _state_lock:
         # rebuilding from {} when _load_grants rejected the snapshot drops the
@@ -524,6 +586,8 @@ def _rate_check_and_record(tenant_id: str, category: str,
         # policy always carries all three, so this only fires on a bad edit.
         return False, {"category": category, "count": 0, "limit": 0,
                        "reason": f"rate_limit_exceeded: {category} (0/0)"}
+    if _using_postgres():
+        return _pg_store().consume_rate(tenant_id, category, limit)
     now = time.time()
     path = rate_file()
     unreadable = {"category": category, "count": 0, "limit": limit}
@@ -625,21 +689,23 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             event["args"] = agent_audit.project_args(args, act.audit_extra)
         if extra:
             event.update(extra)
-        agent_audit.append(event)
+        _audit_append(event)
         return _result("deny", reason=reason,
                        policy=act.policy if act else None,
                        rung=act.rung if act else None)
 
-    # 1. kill switch — beats everything, including catalog membership.
-    if kill_switch_active():
-        info = kill_switch_details()
+    # 1. kill switch — beats everything, including catalog membership. Read
+    # one snapshot so a toggle cannot split the active check from its reason.
+    info = kill_switch_details()
+    if info.get("active") is True:
         return _deny(f"kill_switch_active: {info.get('reason') or '(no reason)'}",
                      extra={"gate": "kill_switch"})
 
     # 1b. per-tenant agent kill flag (ops surface) — independent of the run
     # kill-switch chain; still ahead of any policy work.
     try:
-        tenant_state = agent_policy.load_tenant_state(tenant_id)
+        tenant_state = agent_policy.load_tenant_state(
+            tenant_id, pg_store=_pg_store() if _using_postgres() else None)
     except PolicyError as exc:
         return _deny(f"tenant_state_load_failed: {exc}", extra={"gate": "tenant_disabled"})
     # `is not False`: load_tenant_state resolves the flag through security_bool
@@ -694,36 +760,137 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                      act=act, extra={"gate": "revalidate"})
 
     # 6. rate limit — per-tenant per-hour by category.
-    allowed, info = _rate_check_and_record(tenant_id, act.rate_limit_category, pol.rate_limits)
-    if not allowed:
-        return _deny(info["reason"], act=act, extra={"gate": "rate_limit"})
+    postgres_store = _using_postgres()
+    rate_category = act.rate_limit_category
+    rate_limit = int(pol.rate_limits.get(rate_category, 0) or 0)
+    if rate_limit <= 0:
+        return _deny(
+            f"rate_limit_exceeded: {rate_category} (0/0)",
+            act=act, extra={"gate": "rate_limit"})
+    if not postgres_store:
+        allowed, info = _rate_check_and_record(
+            tenant_id, rate_category, pol.rate_limits)
+        if not allowed:
+            return _deny(info["reason"], act=act, extra={"gate": "rate_limit"})
 
     # 7. policy tier.
     projected = agent_audit.project_args(args, act.audit_extra)
 
-    def _allow(policy_outcome: str, confirmation_id: Optional[str] = None) -> Dict[str, Any]:
+    def _decision_event(kind: str, **fields: Any) -> Dict[str, Any]:
         event = dict(base_audit)
-        event.update({"kind": "allowed", "policy_outcome": policy_outcome,
-                      "policy": act.policy, "rung": act.rung, "args": projected})
+        event.update({"kind": kind, "policy": act.policy, "rung": act.rung,
+                      "args": projected})
+        event.update(fields)
+        return event
+
+    def _rate_rejected_event() -> Dict[str, Any]:
+        return _decision_event("denied", gate="rate_limit")
+
+    def _deny_result(reason: str) -> Dict[str, Any]:
+        return _result("deny", reason=reason, policy=act.policy, rung=act.rung)
+
+    def _allow(policy_outcome: str, confirmation_id: Optional[str] = None, *,
+               audit: bool = True) -> Dict[str, Any]:
+        event = _decision_event("allowed", policy_outcome=policy_outcome)
         if confirmation_id:
             event["confirmation_id"] = confirmation_id
-        agent_audit.append(event)
+        if audit:
+            if postgres_store:
+                accepted, info = _pg_store().consume_rate_and_audit(
+                    tenant_id, rate_category, rate_limit,
+                    accepted_event=event,
+                    rejected_event=_rate_rejected_event(),
+                )
+                if not accepted:
+                    return _deny_result(info["reason"])
+            else:
+                _audit_append(event)
         return _result("allow", reason=policy_outcome, policy=act.policy, rung=act.rung,
                        confirmation_id=confirmation_id)
 
-    def _awaiting(record: Dict[str, Any]) -> Dict[str, Any]:
-        event = dict(base_audit)
-        event.update({"kind": "approval_requested",
-                      "confirmation_id": record["confirmation_id"],
-                      "policy": act.policy, "rung": act.rung, "args": projected})
-        agent_audit.append(event)
+    def _awaiting(record: Dict[str, Any], *, audit: bool = True) -> Dict[str, Any]:
+        event = _decision_event(
+            "approval_requested", confirmation_id=record["confirmation_id"])
+        if audit:
+            if postgres_store:
+                accepted, info = _pg_store().consume_rate_and_audit(
+                    tenant_id, rate_category, rate_limit,
+                    accepted_event=event,
+                    rejected_event=_rate_rejected_event(),
+                )
+                if not accepted:
+                    return _deny_result(info["reason"])
+            else:
+                _audit_append(event)
         return _result("awaiting_approval", reason=f"action requires {act.policy} approval",
                        policy=act.policy, rung=act.rung,
                        confirmation_id=record["confirmation_id"])
 
+    def _create_and_await() -> Dict[str, Any]:
+        record = _new_pending_record(
+            tenant_id=tenant_id, session_id=session_id, turn_id=turn_id,
+            action=act, args=args, ttl_s=pol.approval_ttl_s,
+        )
+        if not postgres_store:
+            _approval_path(record["confirmation_id"]).parent.mkdir(
+                parents=True, exist_ok=True)
+            _write_pending(record)
+            return _awaiting(record)
+        event = _decision_event(
+            "approval_requested", confirmation_id=record["confirmation_id"])
+        accepted, stored, info = _pg_store().create_pending_with_rate(
+            record, category=rate_category, limit=rate_limit,
+            accepted_event=event,
+            rejected_event=_rate_rejected_event(),
+        )
+        if not accepted:
+            return _deny_result(info["reason"])
+        return _awaiting(stored, audit=False)
+
     # 7a. re-invoke path: the resumed call carries confirmation_id inside args.
     confirmation_id = args.get("confirmation_id")
     if confirmation_id:
+        if postgres_store:
+            allow_event = _decision_event(
+                "allowed",
+                policy_outcome="allow_via_approval",
+                confirmation_id=str(confirmation_id),
+            )
+            outcome_events = {
+                "approval_not_found": _decision_event(
+                    "denied", reason="approval_not_found", gate="policy"),
+                "args_mismatch": _decision_event(
+                    "denied", reason="args_mismatch", gate="policy"),
+                "approval_denied": _decision_event(
+                    "denied", reason="approval_denied", gate="policy"),
+                "approval_expired": _decision_event(
+                    "denied", reason="approval_expired", gate="policy"),
+                "approval_consumed": _decision_event(
+                    "denied", reason="approval_consumed", gate="policy"),
+                "awaiting_approval": _decision_event(
+                    "approval_requested", confirmation_id=str(confirmation_id)),
+            }
+            redeemed, record, redeem_reason = _pg_store().redeem(
+                str(confirmation_id),
+                tenant_id=tenant_id,
+                session_id=session_id,
+                action=act.name,
+                args_hash=canonical_args_hash(args),
+                audit_event=allow_event,
+                session_grant_target=(
+                    grant_target(args) if act.policy == "confirm-once" else None),
+                rate_category=rate_category,
+                rate_limit=rate_limit,
+                rate_rejected_event=_rate_rejected_event(),
+                outcome_events=outcome_events,
+            )
+            if redeemed:
+                return _allow(
+                    "allow_via_approval", confirmation_id=str(confirmation_id),
+                    audit=False)
+            if redeem_reason == "awaiting_approval" and record is not None:
+                return _awaiting(record, audit=False)
+            return _deny_result(redeem_reason)
         record = read_pending(str(confirmation_id))
         if record is None:
             return _deny("approval_not_found", act=act, extra={"gate": "policy"})
@@ -786,24 +953,28 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
     if act.policy == "auto":
         return _allow("allow")
 
-    ttl_s = pol.approval_ttl_s
     if act.policy == "confirm-once":
         if has_session_grant(tenant_id, session_id, act.name, grant_target(args)):
             return _allow("allow_via_session_grant")
-        record = create_pending(tenant_id=tenant_id, session_id=session_id,
-                                turn_id=turn_id, action=act, args=args, ttl_s=ttl_s)
-        return _awaiting(record)
+        return _create_and_await()
 
     if act.policy == "always-confirm":
-        record = create_pending(tenant_id=tenant_id, session_id=session_id,
-                                turn_id=turn_id, action=act, args=args, ttl_s=ttl_s)
-        return _awaiting(record)
+        return _create_and_await()
 
+    if postgres_store:
+        reason = f"unknown_policy: {act.policy}"
+        event = _decision_event("denied", reason=reason, gate="policy")
+        accepted, info = _pg_store().consume_rate_and_audit(
+            tenant_id, rate_category, rate_limit,
+            accepted_event=event, rejected_event=_rate_rejected_event())
+        return _deny_result(reason if accepted else info["reason"])
     return _deny(f"unknown_policy: {act.policy}", act=act, extra={"gate": "policy"})
 
 
 def list_pending(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Undecided + unexpired approvals, optionally filtered to one tenant."""
+    if _using_postgres():
+        return _pg_store().list_pending(tenant_id)
     root = approvals_dir()
     if not root.exists():
         return []

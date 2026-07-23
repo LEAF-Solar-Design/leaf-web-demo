@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import secrets
@@ -36,6 +37,7 @@ import shutil
 import sys
 import threading
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -208,13 +210,171 @@ def verify_guest_session(token: str) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 _RATE_LOCK = threading.Lock()
 _RATE_STATE: Dict[str, Any] = {"day": None, "per_ip": {}, "total": 0}
+_PG_COUNTER = None
+_PG_CHARGE_RECEIPT: ContextVar[Optional[Tuple[str, str]]] = ContextVar(
+    "guest_cap_charge_receipt", default=None)
+
+
+class _GuestCapExceeded(Exception):
+    def __init__(self, scope: str):
+        super().__init__(scope)
+        self.scope = scope
+
+
+def _guest_cap_store() -> str:
+    mode = os.environ.get("LEAF_GUEST_CAP_STORE", "memory").strip().lower()
+    if mode not in {"memory", "postgres"}:
+        raise RuntimeError(
+            "LEAF_GUEST_CAP_STORE must be either 'memory' or 'postgres'")
+    return mode
+
+
+def _load_platform_counters():
+    if "leaf_platform" not in sys.modules:
+        package_dir = PROJECT_ROOT / "platform"
+        spec = importlib.util.spec_from_file_location(
+            "leaf_platform", package_dir / "__init__.py",
+            submodule_search_locations=[str(package_dir)],
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError("platform package could not be loaded")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["leaf_platform"] = module
+        spec.loader.exec_module(module)
+    import leaf_platform.db as db  # noqa: PLC0415
+    from leaf_platform.counters import SharedCounterStore  # noqa: PLC0415
+    return db, SharedCounterStore
+
+
+def _postgres_counter():
+    global _PG_COUNTER
+    if _PG_COUNTER is None:
+        _db, counter_type = _load_platform_counters()
+        _PG_COUNTER = counter_type("guest_upload_counters")
+    return _PG_COUNTER
+
+
+def _rate_day() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _guest_cap_hmac_secret() -> str:
+    secret = (os.environ.get("LEAF_GUEST_CAP_HMAC_SECRET")
+              or guest_secret())
+    if not secret:
+        raise RuntimeError(
+            "PostgreSQL guest caps require LEAF_GUEST_CAP_HMAC_SECRET "
+            "or LEAF_GUEST_SECRET")
+    return secret
+
+
+def _guest_cap_retention_days() -> int:
+    raw = os.environ.get("LEAF_GUEST_CAP_RETENTION_DAYS", "8")
+    try:
+        days = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "LEAF_GUEST_CAP_RETENTION_DAYS must be an integer") from exc
+    if not 2 <= days <= 366:
+        raise RuntimeError(
+            "LEAF_GUEST_CAP_RETENTION_DAYS must be between 2 and 366")
+    return days
+
+
+def _postgres_counter_keys(client_ip: str) -> Tuple[str, str]:
+    day = _rate_day()
+    ip_digest = hmac.new(
+        _guest_cap_hmac_secret().encode("utf-8"),
+        str(client_ip or "unknown").encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return day, f"{day}:h1:{ip_digest}"
+
+
+def _cleanup_old_postgres_counters(conn) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=_guest_cap_retention_days())
+    conn.execute(
+        """
+        DELETE FROM guest_upload_counters
+        WHERE ctid IN (
+          SELECT ctid
+          FROM guest_upload_counters
+          WHERE updated_at < %(cutoff)s
+          ORDER BY updated_at
+          LIMIT 100
+        )
+        """,
+        {"cutoff": cutoff},
+    )
+
+
+def _postgres_check_and_count(client_ip: str) -> Optional[str]:
+    _PG_CHARGE_RECEIPT.set(None)
+    db, _counter_type = _load_platform_counters()
+    counter = _postgres_counter()
+    day, ip_key = _postgres_counter_keys(client_ip)
+
+    def consume(conn):
+        ip_result = counter.consume_in_transaction(
+            conn, namespace="guest_upload_ip", key=ip_key,
+            limit=per_ip_daily_cap(),
+        )
+        if not ip_result.accepted:
+            raise _GuestCapExceeded("ip")
+        global_result = counter.consume_in_transaction(
+            conn, namespace="guest_upload_global", key=day,
+            limit=global_daily_cap(),
+        )
+        if not global_result.accepted:
+            raise _GuestCapExceeded("global")
+        _cleanup_old_postgres_counters(conn)
+
+    try:
+        db.run_transaction(consume, isolation="serializable", max_attempts=3)
+    except _GuestCapExceeded as exc:
+        return exc.scope
+    _PG_CHARGE_RECEIPT.set((day, ip_key))
+    return None
+
+
+def _postgres_refund(client_ip: str) -> None:
+    db, _counter_type = _load_platform_counters()
+    receipt = _PG_CHARGE_RECEIPT.get()
+    if receipt is None:
+        raise RuntimeError(
+            "cannot refund PostgreSQL guest cap without its charge receipt")
+    day, ip_key = receipt
+
+    def refund(conn):
+        conn.execute(
+            """
+            UPDATE guest_upload_counters
+            SET value = GREATEST(value - 1, 0), updated_at = NOW()
+            WHERE namespace = %(namespace)s AND counter_key = %(key)s
+            """,
+            {"namespace": "guest_upload_ip", "key": ip_key},
+        )
+        conn.execute(
+            """
+            UPDATE guest_upload_counters
+            SET value = GREATEST(value - 1, 0), updated_at = NOW()
+            WHERE namespace = %(namespace)s AND counter_key = %(key)s
+            """,
+            {"namespace": "guest_upload_global", "key": day},
+        )
+
+    db.run_transaction(refund, isolation="serializable", max_attempts=3)
+    _PG_CHARGE_RECEIPT.set(None)
 
 
 def check_and_count_guest_upload(client_ip: str) -> Optional[str]:
     """Count one guest upload attempt. Returns None (allowed), "ip", or
-    "global" naming the exceeded cap. In-memory + per-process by design (the
-    demo topology is single-process; the GLOBAL cap is the cost backstop)."""
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    "global" naming the exceeded cap. Memory remains the legacy default.
+    PostgreSQL is an explicit fleet-wide authority and never falls back."""
+    if _guest_cap_store() == "postgres":
+        return _postgres_check_and_count(client_ip)
+    day = _rate_day()
     ip = str(client_ip or "unknown")
     with _RATE_LOCK:
         if _RATE_STATE["day"] != day:
@@ -237,8 +397,13 @@ def refund_guest_upload(client_ip: str) -> None:
     request never destroys readable data, and refunds if that wipe fails so
     the failure never burns a slot either). Floors at 0. A UTC-midnight
     rollover in the charge->refund microseconds can misdirect at most one
-    count into the fresh day: an accepted plus-or-minus-one on an in-memory
-    cost backstop, stated here so it is a decision, not a surprise."""
+    count into the fresh day in legacy memory mode. PostgreSQL mode carries
+    the exact charged day and HMAC key in a task-local receipt. A missing
+    receipt or refund database error fails closed and leaves the slot consumed
+    so a failed refund can never mint capacity."""
+    if _guest_cap_store() == "postgres":
+        _postgres_refund(client_ip)
+        return
     ip = str(client_ip or "unknown")
     with _RATE_LOCK:
         if _RATE_STATE["per_ip"].get(ip, 0) > 0:
@@ -265,7 +430,44 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def upload_store_mode() -> str:
+    mode = os.environ.get("LEAF_UPLOAD_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_UPLOAD_STORE must be 'legacy' or 'postgres'")
+    if (
+        mode == "postgres"
+        and os.environ.get("LEAF_DRAWING_STORE", "legacy").strip().lower()
+        != "postgres"
+    ):
+        raise RuntimeError(
+            "LEAF_UPLOAD_STORE=postgres requires LEAF_DRAWING_STORE=postgres")
+    return mode
+
+
+def _drawing_db():
+    import store  # write_loop installs da/ on sys.path
+    return store._db()  # one pool and transaction policy for all drawing state
+
+
+def _pg_marker_row(tenant_id: str, drawing_id: str):
+    db = _drawing_db()
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT marker, status FROM drawing_upload_attempts
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant_id, "drawing": drawing_id},
+        )
+        return cur.fetchone()
+
+
 def read_marker(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, Any]]:
+    if upload_store_mode() == "postgres":
+        row = _pg_marker_row(tenant_id, drawing_id)
+        if row is None or row["status"] == "purged":
+            return None
+        return dict(row["marker"])
     key = write_loop.upload_marker_key(tenant_id, drawing_id)
     if not backend.exists(key):
         return None
@@ -276,8 +478,163 @@ def read_marker(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, 
 
 
 def write_marker(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any]) -> None:
+    if upload_store_mode() == "postgres":
+        from psycopg.types.json import Jsonb
+        db = _drawing_db()
+
+        def operation(conn):
+            row = conn.execute(
+                """
+                INSERT INTO drawing_upload_attempts
+                  (tenant_id, drawing_id, attempt, marker, status,
+                   retention_expires_at)
+                VALUES
+                  (%(tenant)s, %(drawing)s, %(attempt)s, %(marker)s, %(status)s,
+                   %(retention)s)
+                ON CONFLICT (tenant_id, drawing_id) DO UPDATE
+                SET attempt = EXCLUDED.attempt, marker = EXCLUDED.marker,
+                    status = EXCLUDED.status,
+                    retention_expires_at = EXCLUDED.retention_expires_at,
+                    extraction_owner = NULL,
+                    extraction_expires_at = NULL, updated_at = NOW()
+                WHERE drawing_upload_attempts.attempt = EXCLUDED.attempt
+                   OR drawing_upload_attempts.status IN ('failed', 'purged')
+                RETURNING attempt
+                """,
+                {
+                    "tenant": tenant_id, "drawing": drawing_id,
+                    "attempt": str(marker["attempt"]),
+                    "marker": Jsonb(marker), "status": str(marker["status"]),
+                    "retention": marker.get("retention_expires_at"),
+                },
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("upload attempt was replaced or is being purged")
+
+        db.run_transaction(operation, isolation="serializable")
+        # Compatibility marker for the fail-closed bootstrap guard only.
+        backend.put(
+            write_loop.upload_marker_key(tenant_id, drawing_id),
+            b'{"authority":"postgres"}',
+        )
+        return
     backend.put(write_loop.upload_marker_key(tenant_id, drawing_id),
                 json.dumps(marker, separators=(",", ":")).encode("utf-8"))
+
+
+def _claim_extraction(
+    tenant_id: str, drawing_id: str,
+) -> Optional[Tuple[Dict[str, Any], str, int]]:
+    if upload_store_mode() != "postgres":
+        marker = read_marker(None, tenant_id, drawing_id)
+        return (marker, "", 0) if marker is not None else None
+    owner = f"{os.getpid()}-{threading.get_ident()}-{secrets.token_hex(4)}"
+    db = _drawing_db()
+
+    def operation(conn):
+        row = conn.execute(
+            """
+            UPDATE drawing_upload_attempts
+            SET extraction_owner = %(owner)s,
+                extraction_fence = extraction_fence + 1,
+                extraction_expires_at =
+                  NOW() + (%(ttl)s * INTERVAL '1 second'),
+                updated_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND status = 'extracting'
+              AND (extraction_expires_at IS NULL OR extraction_expires_at <= NOW())
+            RETURNING marker, extraction_fence
+            """,
+            {
+                "owner": owner, "ttl": extract_timeout_s(),
+                "tenant": tenant_id, "drawing": drawing_id,
+            },
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row["marker"]), owner, int(row["extraction_fence"])
+
+    return db.run_transaction(operation, isolation="serializable")
+
+
+def _finish_pg_attempt(
+    tenant_id: str, drawing_id: str, marker: Dict[str, Any],
+    owner: str, fence: int,
+) -> bool:
+    from psycopg.types.json import Jsonb
+    db = _drawing_db()
+    with db.connection() as conn:
+        row = conn.execute(
+            """
+            UPDATE drawing_upload_attempts
+            SET marker = %(marker)s, status = %(status)s,
+                extraction_owner = NULL, extraction_expires_at = NULL,
+                updated_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND attempt = %(attempt)s AND status = 'extracting'
+              AND extraction_owner = %(owner)s
+              AND extraction_fence = %(fence)s
+              AND extraction_expires_at > clock_timestamp()
+            RETURNING attempt
+            """,
+            {
+                "marker": Jsonb(marker), "status": str(marker["status"]),
+                "tenant": tenant_id, "drawing": drawing_id,
+                "attempt": str(marker["attempt"]), "owner": owner,
+                "fence": fence,
+            },
+        ).fetchone()
+    return row is not None
+
+
+def _put_intake_cache_fenced(
+    backend, tenant_id: str, drawing_id: str, key: str, data: bytes,
+    attempt: str, owner: str, fence: int,
+) -> None:
+    """Publish derived intake bytes while the extraction generation owns DB."""
+    db = _drawing_db()
+    params = {
+        "tenant": tenant_id, "drawing": drawing_id,
+        "attempt": attempt, "owner": owner, "fence": fence,
+    }
+
+    def operation(conn):
+        row = conn.execute(
+            """
+            SELECT 1 FROM drawing_upload_attempts
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND attempt = %(attempt)s AND status = 'extracting'
+              AND extraction_owner = %(owner)s
+              AND extraction_fence = %(fence)s
+              AND extraction_expires_at > clock_timestamp()
+            FOR UPDATE
+            """,
+            params,
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("upload extraction lease is stale")
+        if backend.exists(key):
+            existing = backend.get(key)
+            if hashlib.sha256(existing).digest() != hashlib.sha256(data).digest():
+                raise ValueError("intake cache artifact does not match reserved version")
+        else:
+            backend.put(key, data)
+        row = conn.execute(
+            """
+            SELECT 1 FROM drawing_upload_attempts
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND attempt = %(attempt)s AND status = 'extracting'
+              AND extraction_owner = %(owner)s
+              AND extraction_fence = %(fence)s
+              AND extraction_expires_at > clock_timestamp()
+            """,
+            params,
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "upload extraction lease expired during intake publication")
+
+    db.run_transaction(operation, isolation="serializable")
 
 
 def new_marker(*, filename: str, data: bytes, tenant_kind: str,
@@ -361,7 +718,9 @@ def guest_drawing_dir(tenant_id: str, drawing_id: str) -> Path:
             / "drawings" / drawing_id)
 
 
-def wipe_failed_attempt_residue(tenant_id: str, drawing_id: str) -> bool:
+def wipe_failed_attempt_residue(
+    tenant_id: str, drawing_id: str, attempt: Optional[str] = None,
+) -> bool:
     """Delete a failed attempt's ingest residue (manifest, version blobs,
     intake cache — everything under the drawing dir EXCEPT the upload
     marker), then VERIFY the deletion (round-6 review, MAJOR: an unchecked
@@ -371,6 +730,85 @@ def wipe_failed_attempt_residue(tenant_id: str, drawing_id: str) -> bool:
     it is what routes the next retry back into the replace path — the
     caller overwrites it after a True return, and never touches residue
     behind a False."""
+    if upload_store_mode() == "postgres":
+        if not attempt:
+            return False
+        db = _drawing_db()
+        owner = f"reset-{os.getpid()}-{threading.get_ident()}-{secrets.token_hex(4)}"
+
+        def claim(conn):
+            row = conn.execute(
+                """
+                UPDATE drawing_upload_attempts
+                SET status = 'purging', purge_owner = %(owner)s,
+                    purge_fence = purge_fence + 1,
+                    purge_expires_at = clock_timestamp() + INTERVAL '5 minutes',
+                    updated_at = NOW()
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND attempt = %(attempt)s
+                  AND (
+                    status = 'failed'
+                    OR (status = 'purging'
+                        AND purge_expires_at <= clock_timestamp())
+                  )
+                RETURNING purge_fence
+                """,
+                {
+                    "owner": owner, "tenant": tenant_id,
+                    "drawing": drawing_id, "attempt": attempt,
+                },
+            ).fetchone()
+            return int(row["purge_fence"]) if row is not None else None
+
+        fence = db.run_transaction(claim, isolation="serializable")
+        if fence is None:
+            return False
+        ok = _wipe_failed_attempt_files(tenant_id, drawing_id)
+
+        def finish(conn):
+            row = conn.execute(
+                """
+                SELECT 1 FROM drawing_upload_attempts
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND attempt = %(attempt)s AND status = 'purging'
+                  AND purge_owner = %(owner)s AND purge_fence = %(fence)s
+                FOR UPDATE
+                """,
+                {
+                    "tenant": tenant_id, "drawing": drawing_id,
+                    "attempt": attempt, "owner": owner, "fence": fence,
+                },
+            ).fetchone()
+            if row is None:
+                return False
+            if ok:
+                conn.execute(
+                    """
+                    DELETE FROM drawing_store_manifests
+                    WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                    """,
+                    {"tenant": tenant_id, "drawing": drawing_id},
+                )
+            conn.execute(
+                """
+                UPDATE drawing_upload_attempts
+                SET status = 'failed', purge_owner = NULL,
+                    purge_expires_at = NULL, updated_at = NOW()
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND attempt = %(attempt)s AND purge_fence = %(fence)s
+                """,
+                {
+                    "tenant": tenant_id, "drawing": drawing_id,
+                    "attempt": attempt, "fence": fence,
+                },
+            )
+            return ok
+
+        return bool(db.run_transaction(finish, isolation="serializable"))
+    return _wipe_failed_attempt_files(tenant_id, drawing_id)
+
+
+def _wipe_failed_attempt_files(tenant_id: str, drawing_id: str) -> bool:
     # NEVER raises: every filesystem error (enumeration included) is
     # contained to the False return, so False is the ONE unsuccessful
     # outcome and the caller's refund/500 handling cannot be skipped by an
@@ -394,7 +832,8 @@ def wipe_failed_attempt_residue(tenant_id: str, drawing_id: str) -> bool:
 
 
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
-                 error_code: str, message: str, retryable: bool) -> bool:
+                 error_code: str, message: str, retryable: bool,
+                 *, extraction_owner: str = "", extraction_fence: int = 0) -> bool:
     # Under the drawing's lock, and only onto a marker that still IS this
     # attempt AND is still non-terminal: a purged drawing must not get a
     # marker resurrected behind its deletion receipt; a failed-retry's
@@ -404,6 +843,38 @@ def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any
     # error or a caller holding a stale status snapshot (round-6 review,
     # MAJOR). Returns whether the failure record was actually written, so
     # callers reporting state can tell a persisted failure from a lost race.
+    if upload_store_mode() == "postgres":
+        failed = dict(marker)
+        failed["status"] = "failed"
+        failed["error"] = {
+            "error_code": error_code, "message": message,
+            "retryable": bool(retryable),
+        }
+        if extraction_owner:
+            return _finish_pg_attempt(
+                tenant_id, drawing_id, failed,
+                extraction_owner, extraction_fence)
+        from psycopg.types.json import Jsonb
+        db = _drawing_db()
+        with db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE drawing_upload_attempts
+                SET marker = %(marker)s, status = 'failed',
+                    extraction_owner = NULL, extraction_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND attempt = %(attempt)s AND status = 'extracting'
+                  AND (extraction_expires_at IS NULL
+                       OR extraction_expires_at <= NOW())
+                RETURNING attempt
+                """,
+                {
+                    "marker": Jsonb(failed), "tenant": tenant_id,
+                    "drawing": drawing_id, "attempt": str(marker["attempt"]),
+                },
+            ).fetchone()
+        return row is not None
     with drawing_lock(tenant_id, drawing_id):
         current = read_marker(backend, tenant_id, drawing_id)
         if current is None:
@@ -442,9 +913,16 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     backend = write_loop.backend_for_tenant(
         tenant_id, aps_live=deps.APS_LIVE,
         da=deps.get_da_client() if deps.APS_LIVE else None)
-    marker = read_marker(backend, tenant_id, drawing_id)
-    if marker is None:
-        return  # purged mid-flight; nothing to report against
+    extraction_owner, extraction_fence = "", 0
+    if upload_store_mode() == "postgres":
+        claim = _claim_extraction(tenant_id, drawing_id)
+        if claim is None:
+            return
+        marker, extraction_owner, extraction_fence = claim
+    else:
+        marker = read_marker(backend, tenant_id, drawing_id)
+        if marker is None:
+            return  # purged mid-flight; nothing to report against
 
     try:
         if deps.APS_LIVE:
@@ -456,15 +934,21 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         else:
             _mark_failed(backend, tenant_id, drawing_id, marker, "APS_UNAVAILABLE",
                          "DWG extraction requires the live APS path; "
-                         "upload a DXF to try the local demo", retryable=False)
+                         "upload a DXF to try the local demo", retryable=False,
+                         extraction_owner=extraction_owner,
+                         extraction_fence=extraction_fence)
             return
     except _ExtractError as exc:
         _mark_failed(backend, tenant_id, drawing_id, marker,
-                     exc.error_code, exc.message, exc.retryable)
+                     exc.error_code, exc.message, exc.retryable,
+                     extraction_owner=extraction_owner,
+                     extraction_fence=extraction_fence)
         return
     except Exception as exc:  # noqa: BLE001 — thread boundary, must not leak
         _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
-                     f"{type(exc).__name__}: {exc}", retryable=False)
+                     f"{type(exc).__name__}: {exc}", retryable=False,
+                     extraction_owner=extraction_owner,
+                     extraction_fence=extraction_fence)
         return
 
     # Ingest v1 in the FORMAT-CORRECT representation (review rounds 1+2):
@@ -488,7 +972,11 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     # (review round 3, MAJOR). A vanished marker means purged: abort, no
     # trace rewritten.
     import tempfile
-    with drawing_lock(tenant_id, drawing_id):
+    authority_lock = (
+        contextlib.nullcontext() if upload_store_mode() == "postgres"
+        else drawing_lock(tenant_id, drawing_id)
+    )
+    with authority_lock:
         current = read_marker(backend, tenant_id, drawing_id)
         if current is None:
             return  # purged while extracting; the receipt stands, nothing returns
@@ -505,32 +993,58 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             # destabilize the contract's persisted terminal state
         try:
             import store  # importable via write_loop's sys.path setup
+            authority_guard = None
+            if upload_store_mode() == "postgres":
+                authority_guard = {
+                    "attempt": marker["attempt"],
+                    "owner": extraction_owner,
+                    "fence": extraction_fence,
+                }
             if ext == ".dwg":
                 store.ingest_drawing(backend, tenant_id,
                                      str(staged_path(tenant_id, drawing_id, ext)),
-                                     drawing_id=drawing_id)
+                                     drawing_id=drawing_id,
+                                     authority_guard=authority_guard)
             else:
                 fd, tmp = tempfile.mkstemp(suffix=".intake.json")
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as fh:
                         json.dump(intake, fh)
-                    store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
+                    store.ingest_drawing(
+                        backend, tenant_id, tmp, drawing_id=drawing_id,
+                        authority_guard=authority_guard)
                 finally:
                     try:
                         os.remove(tmp)
                     except OSError:
                         pass
-            backend.put(write_loop.intake_cache_key(tenant_id, drawing_id, 1),
-                        json.dumps(intake, separators=(",", ":")).encode("utf-8"))
-        except (OSError, ValueError) as exc:
+            cache_key = write_loop.intake_cache_key(
+                tenant_id, drawing_id, 1)
+            cache_data = json.dumps(
+                intake, separators=(",", ":")).encode("utf-8")
+            if upload_store_mode() == "postgres":
+                _put_intake_cache_fenced(
+                    backend, tenant_id, drawing_id, cache_key, cache_data,
+                    str(marker["attempt"]), extraction_owner,
+                    extraction_fence)
+            else:
+                backend.put(cache_key, cache_data)
+        except (OSError, ValueError, RuntimeError) as exc:
             _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
-                         f"ingest failed: {exc}", retryable=False)
+                         f"ingest failed: {exc}", retryable=False,
+                         extraction_owner=extraction_owner,
+                         extraction_fence=extraction_fence)
             return
 
         marker = dict(marker)
         marker["status"] = "ready"
         marker["extracted_version"] = 1
-        write_marker(backend, tenant_id, drawing_id, marker)
+        if upload_store_mode() == "postgres":
+            _finish_pg_attempt(
+                tenant_id, drawing_id, marker,
+                extraction_owner, extraction_fence)
+        else:
+            write_marker(backend, tenant_id, drawing_id, marker)
 
 
 class _ExtractError(Exception):
@@ -547,7 +1061,13 @@ def _extract_via_broker(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
     try:
         resp = requests.post(
             f"{broker_client.broker_url()}/broker/extract",
-            json={"tenant_id": tenant_id, "dwg": drawing_id, "upload": True},
+            json={
+                "tenant_id": tenant_id,
+                "dwg": drawing_id,
+                "upload": True,
+                "ledger_event_key": broker_client.extract_event_key(
+                    tenant_id, drawing_id, upload=True),
+            },
             headers=broker_client.broker_headers(),
             timeout=extract_timeout_s(),
         )
@@ -633,6 +1153,201 @@ def _purge_log_path() -> Path:
     return Path(write_loop.guest_store_dir()) / "purge.log.jsonl"
 
 
+def _purge_expired_postgres(now: datetime) -> Dict[str, Any]:
+    """Lease each expired upload, delete its blobs, then persist one receipt."""
+    from psycopg.types.json import Jsonb
+    db = _drawing_db()
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT tenant_id, drawing_id
+            FROM drawing_upload_attempts
+            WHERE status <> 'purged'
+              AND (status <> 'purging'
+                   OR purge_expires_at <= clock_timestamp())
+              AND retention_expires_at IS NOT NULL
+              AND retention_expires_at <= %(now)s
+            ORDER BY tenant_id, drawing_id
+            """,
+            {"now": now},
+        )
+        candidates = [(row["tenant_id"], row["drawing_id"])
+                      for row in cur.fetchall()]
+    purged, freed = [], 0
+    owner = f"{os.getpid()}-{threading.get_ident()}-{secrets.token_hex(4)}"
+    for tenant_id, drawing_id in candidates:
+        def claim(conn):
+            locked = conn.execute(
+                """
+                SELECT attempt, marker
+                FROM drawing_upload_attempts
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                FOR UPDATE
+                """,
+                {
+                    "tenant": tenant_id, "drawing": drawing_id, "now": now,
+                },
+            ).fetchone()
+            if locked is None:
+                return None
+            state = conn.execute(
+                """
+                SELECT status,
+                       retention_expires_at <= %(now)s AS retention_due,
+                       purge_expires_at IS NULL
+                         OR purge_expires_at <= clock_timestamp()
+                         AS purge_available,
+                       extraction_expires_at IS NULL
+                         OR extraction_expires_at <= clock_timestamp()
+                         AS extraction_available
+                FROM drawing_upload_attempts
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                """,
+                {
+                    "tenant": tenant_id, "drawing": drawing_id, "now": now,
+                },
+            ).fetchone()
+            if (
+                state["status"] == "purged"
+                or state["retention_due"] is not True
+                or (
+                    state["status"] == "purging"
+                    and state["purge_available"] is not True
+                )
+                or (
+                    state["status"] == "extracting"
+                    and state["extraction_available"] is not True
+                )
+            ):
+                return None
+            row = conn.execute(
+                """
+                UPDATE drawing_upload_attempts
+                SET status = 'purging', purge_owner = %(owner)s,
+                    purge_fence = purge_fence + 1,
+                    purge_expires_at =
+                      clock_timestamp() + INTERVAL '5 minutes',
+                    updated_at = NOW()
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                RETURNING attempt, marker, purge_fence
+                """,
+                {
+                    "owner": owner, "tenant": tenant_id,
+                    "drawing": drawing_id,
+                },
+            ).fetchone()
+            return (
+                str(row["attempt"]), dict(row["marker"]),
+                int(row["purge_fence"]),
+            )
+
+        lease = db.run_transaction(claim, isolation="serializable")
+        if lease is None:
+            continue
+        attempt, marker, fence = lease
+        drawing_dir = guest_drawing_dir(tenant_id, drawing_id)
+        staged_files = [
+            staged_path(tenant_id, drawing_id, ext)
+            for ext in ACCEPTED_EXTENSIONS
+        ]
+        try:
+            staged_bytes = sum(
+                path.stat().st_size for path in staged_files if path.is_file())
+            drawing_bytes = sum(
+                path.stat().st_size for path in drawing_dir.rglob("*")
+                if path.is_file()) if drawing_dir.is_dir() else 0
+            for path in staged_files:
+                _unlink_quiet(path)
+            if not any(path.exists() for path in staged_files):
+                shutil.rmtree(drawing_dir, ignore_errors=True)
+            deleted = (
+                not drawing_dir.exists()
+                and not any(path.exists() for path in staged_files)
+            )
+        except OSError:
+            deleted, staged_bytes, drawing_bytes = False, 0, 0
+        freed_bytes = staged_bytes + drawing_bytes if deleted else 0
+
+        def finish(conn):
+            locked = conn.execute(
+                """
+                SELECT marker FROM drawing_upload_attempts
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND status = 'purging' AND purge_owner = %(owner)s
+                  AND purge_fence = %(fence)s
+                FOR UPDATE
+                """,
+                {
+                    "tenant": tenant_id, "drawing": drawing_id,
+                    "owner": owner, "fence": fence,
+                },
+            ).fetchone()
+            if locked is None:
+                return False
+            status = "deleted" if deleted else "failed"
+            conn.execute(
+                """
+                INSERT INTO drawing_purge_receipts
+                  (tenant_id, drawing_id, attempt, purge_fence, status,
+                   freed_bytes, detail)
+                VALUES
+                  (%(tenant)s, %(drawing)s, %(attempt)s, %(fence)s,
+                   %(status)s, %(freed)s, %(detail)s)
+                ON CONFLICT DO NOTHING
+                """,
+                {
+                    "tenant": tenant_id, "drawing": drawing_id,
+                    "attempt": attempt, "fence": fence, "status": status,
+                    "freed": freed_bytes, "detail": Jsonb({}),
+                },
+            )
+            if deleted:
+                conn.execute(
+                    """
+                    DELETE FROM drawing_store_manifests
+                    WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                    """,
+                    {"tenant": tenant_id, "drawing": drawing_id},
+                )
+                conn.execute(
+                    """
+                    UPDATE drawing_upload_attempts
+                    SET status = 'purged', purge_owner = NULL,
+                        purge_expires_at = NULL, updated_at = NOW()
+                    WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                    """,
+                    {"tenant": tenant_id, "drawing": drawing_id},
+                )
+            else:
+                old_status = str(dict(locked["marker"]).get("status", "failed"))
+                conn.execute(
+                    """
+                    UPDATE drawing_upload_attempts
+                    SET status = %(status)s, purge_owner = NULL,
+                        purge_expires_at = NULL, updated_at = NOW()
+                    WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                    """,
+                    {
+                        "status": old_status, "tenant": tenant_id,
+                        "drawing": drawing_id,
+                    },
+                )
+            return True
+
+        if not db.run_transaction(finish, isolation="serializable"):
+            continue
+        receipt = {
+            "ts": _iso(now), "status": "deleted" if deleted else "failed",
+            "tenant_id": tenant_id, "drawing_id": drawing_id,
+        }
+        if deleted:
+            receipt["freed_bytes"] = freed_bytes
+            purged.append({"tenant_id": tenant_id, "drawing_id": drawing_id})
+            freed += freed_bytes
+        _append_purge_log(receipt)
+    return {"count": len(purged), "freed_bytes": freed, "purged": purged}
+
+
 def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
     """Delete every guest drawing whose STAMPED retention_expires_at has passed
     (plus its staged upload file), drop empty tenant dirs, and append one
@@ -640,6 +1355,8 @@ def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
     with uploads (a drawing uploaded after the walk simply survives to the
     next sweep). Returns {count, freed_bytes, purged:[{tenant_id, drawing_id}]}."""
     now = now or _now()
+    if upload_store_mode() == "postgres":
+        return _purge_expired_postgres(now)
     root = Path(write_loop.guest_store_dir()) / "tenants"
     purged = []
     freed = 0

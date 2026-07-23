@@ -4,10 +4,10 @@
 Execution path: the SAME broker chokepoint as every other tool run —
 ``broker_client.run_via_broker`` POSTs /broker/run over HTTP (broker_client.py
 is HTTP-only; there is no in-process path), so the broker process must be up
-(``cd server && uvicorn broker:app --port 8140``). The broker appends exactly
-ONE attribution ledger line per /broker/run request (broker.py::broker_run,
-``finally: _ledger_append``) — receiving ANY §3 envelope back therefore proves
-a ledger line was appended, which is what ``receipt.ledger_line`` records.
+(``cd server && uvicorn broker:app --port 8140``). The broker appends one
+attribution ledger line per durable run identity. Receiving any section 3
+terminal envelope back therefore proves
+the durable ledger line exists, which is what ``receipt.ledger_line`` records.
 A broker that is down surfaces as ``broker_client.BrokerUnreachable``, which
 routers/site.py turns into a §10 BROKER_UNREACHABLE envelope (HTTP 502).
 
@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -176,12 +177,16 @@ def _write_file_cache(key: str, solve: Dict[str, Any]) -> None:
         pass
 
 
-def _compute_solve(sha: str) -> Dict[str, Any]:
+def _compute_solve(sha: str, run_id: str) -> Dict[str, Any]:
     """One REAL broker run -> assembled solve body with a real receipt.
     Raises broker_client.BrokerUnreachable (broker down) or SiteSolveError
     (broker answered with a failure envelope)."""
     env = broker_client.run_via_broker(
-        SITE_TENANT, SITE_TOOL, {}, SITE_DWG, aps_live=False)
+        SITE_TENANT, SITE_TOOL, {}, SITE_DWG, aps_live=False,
+        ledger_event_key=(
+            f"site-demo:{sha}:{SITE_TOOL['version']}:{run_id}"
+        ),
+    )
     if not env.get("ok"):
         raise SiteSolveError(env)
     result = env.get("result") or {}
@@ -201,28 +206,34 @@ def _compute_solve(sha: str) -> Dict[str, Any]:
             "computed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "timing_ms": env.get("timing_ms"),
             "path": "broker",
-            # broker.py appends exactly ONE ledger line per /broker/run request
-            # (finally-clause) — an envelope in hand proves the line was written.
+            # One durable ledger line per run identity. Replayed terminal
+            # envelopes point at that same line.
             "ledger_line": True,
             "degraded_mode": bool(env.get("degraded_mode")),
         },
     }
 
 
-def get_demo_solve() -> Dict[str, Any]:
+def get_demo_solve(refresh_id: Optional[str] = None) -> Dict[str, Any]:
     """The cached public demo solve. Recomputes only when the cache key
     (sha256(intake bytes), solver_version) misses in BOTH the in-process and
     the file cache. ``receipt.path`` reflects how this response was served."""
     sha = intake_sha256()
     key = _cache_key(sha)
     with _lock:
-        if _MEM["key"] == key and _MEM["solve"] is not None:
+        if refresh_id is None and _MEM["key"] == key and _MEM["solve"] is not None:
             return _served(_MEM["solve"], "memory-cache")
-        cached = _load_file_cache(key)
+        cached = _load_file_cache(key) if refresh_id is None else None
         if cached is not None:
             _MEM["key"], _MEM["solve"] = key, cached
             return _served(cached, "file-cache")
-        solve = _compute_solve(sha)
+        # The normal cache fill has one deterministic identity across process
+        # and transport retries. An explicit refresh_id authorizes a distinct
+        # intentional run without making ordinary retries buy new work.
+        run_id = refresh_id or "cache-fill"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", run_id):
+            raise ValueError("refresh_id must be a safe non-empty identifier")
+        solve = _compute_solve(sha, run_id)
         _MEM["key"], _MEM["solve"] = key, solve
         _write_file_cache(key, solve)
         return _served(solve, "broker")

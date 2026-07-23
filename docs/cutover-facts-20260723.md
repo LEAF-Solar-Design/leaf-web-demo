@@ -4,6 +4,14 @@ Captured read-only on 2026-07-23 from AWS account `807034087062`, production
 `us-east-1`. The local CLI identity resolved to the account root, so no AWS
 mutation was performed.
 
+## Operator traffic boundary
+
+The operator directed on 2026-07-23 that `www.leafautomation.ai` and
+`leafautomation.ai` must remain pinned to the current production deployment
+until staging is fully verified. This PostgreSQL and concurrency work is
+staging-only. Do not promote a production alias, change production traffic, or
+apply the production database and ECS changes as part of this delivery.
+
 ## ECS and load balancer
 
 - Service: `leaf-automation-production/leaf-platform`

@@ -156,7 +156,7 @@ def _client():
 
 
 def _fake_broker_ok(tenant_id, tool, params, dwg, aps_live, timeout_s=0,
-                    dwg_version=None):
+                    dwg_version=None, ledger_event_key=None):
     time.sleep(0.7)  # spans one 0.5s SSE tick so a pre-terminal event is observable
     return {"ok": True, "degraded_mode": False,
             "result": {"counts": {"Panels": 2345}}}

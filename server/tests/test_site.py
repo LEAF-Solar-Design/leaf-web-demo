@@ -74,14 +74,33 @@ def site_env(monkeypatch, tmp_path):
 
 def _fake_broker(monkeypatch, intake):
     """Replace the HTTP hop with the REAL tool execution (genuine §3 envelope)."""
-    calls = {"n": 0}
+    calls = {"n": 0, "event_keys": []}
 
-    def fake_run_via_broker(tenant_id, tool, params, dwg, aps_live, timeout_s=None):
+    def fake_run_via_broker(
+            tenant_id, tool, params, dwg, aps_live, timeout_s=None,
+            ledger_event_key=None):
         calls["n"] += 1
+        calls["event_keys"].append(ledger_event_key)
         return tool_loader.run_tool_dynamic(tool, intake, params, aps_live=False, da=None)
 
     monkeypatch.setattr(site_demo.broker_client, "run_via_broker", fake_run_via_broker)
     return calls
+
+
+def test_site_demo_run_identity_dedupes_cache_fill_and_allows_explicit_refresh(
+        monkeypatch, intake, site_env):
+    calls = _fake_broker(monkeypatch, intake)
+    sha = site_demo.intake_sha256()
+    first = site_demo.get_demo_solve()
+    second = site_demo.get_demo_solve()
+    assert first["solve_id"] == second["solve_id"]
+    assert calls["n"] == 1
+    prefix = f"site-demo:{sha}:{site_demo.SITE_TOOL['version']}:"
+    assert calls["event_keys"] == [prefix + "cache-fill"]
+
+    site_demo.get_demo_solve(refresh_id="operator-refresh-42")
+    assert calls["n"] == 2
+    assert calls["event_keys"][-1] == prefix + "operator-refresh-42"
 
 
 def _client():

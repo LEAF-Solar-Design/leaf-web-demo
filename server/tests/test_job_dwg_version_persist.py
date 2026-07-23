@@ -29,6 +29,7 @@ import tempfile  # noqa: E402
 import time  # noqa: E402
 import uuid  # noqa: E402
 from pathlib import Path  # noqa: E402
+import pytest  # noqa: E402
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 
@@ -96,6 +97,16 @@ import jobs  # noqa: E402
 
 READ_TOOL = {"name": "fake-read", "engine_op": "count_by_layer",
              "capabilities": ["drawing.read"], "params": {}}
+
+
+@pytest.fixture(autouse=True)
+def _use_predecessor_database(monkeypatch):
+    """Keep this module hermetic even when another test imported jobs first."""
+    monkeypatch.setattr(jobs, "DB_PATH", _DB_PATH)
+    monkeypatch.setattr(jobs, "_conn", None)
+    yield
+    if jobs._conn is not None:
+        jobs._conn.close()
 
 
 def _submit(monkeypatch, **kwargs) -> str:

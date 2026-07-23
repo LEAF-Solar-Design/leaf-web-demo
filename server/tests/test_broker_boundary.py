@@ -53,7 +53,12 @@ def test_live_session_extracts_through_broker_only(monkeypatch):
 
     assert body["intake"] == {"polylines": []}
     assert calls == [("http://broker:8140/broker/extract",
-                      {"tenant_id": "tenant-a", "dwg": "rooftop_demo"},
+                      {
+                          "tenant_id": "tenant-a",
+                          "dwg": "rooftop_demo",
+                          "ledger_event_key": broker_client.extract_event_key(
+                              "tenant-a", "rooftop_demo"),
+                      },
                       {"X-Broker-Secret": "test-secret"}, 600)]
     source = Path(session_router.__file__).read_text(encoding="utf-8")
     assert "get_da_client" not in source
@@ -309,12 +314,17 @@ def test_broker_client_sends_secret_header_from_env(monkeypatch):
 
     def fake_post(url, *, json, headers, timeout):
         seen["headers"] = headers
+        seen["json"] = json
         return _Response(200, {"ok": True})
 
     monkeypatch.setenv("LEAF_BROKER_SECRET", "shhh")
     monkeypatch.setattr(broker_client.requests, "post", fake_post)
-    broker_client.run_via_broker("t", {"name": "x"}, {}, "rooftop_demo", False)
+    broker_client.run_via_broker(
+        "t", {"name": "x"}, {}, "rooftop_demo", False,
+        ledger_event_key="job-1:attempt:1",
+    )
     assert seen["headers"] == {"X-Broker-Secret": "shhh"}
+    assert seen["json"]["ledger_event_key"] == "job-1:attempt:1"
 
 
 def test_internal_secret_headers_strip_secret_store_whitespace(monkeypatch):

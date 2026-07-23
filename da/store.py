@@ -27,6 +27,7 @@ da/client.py OSS helpers).
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -34,6 +35,8 @@ import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # da/ sibling imports (highest precedence)
 # The shared F13 tenant/opaque-id validator lives in server/; APPEND it (lowest
@@ -45,6 +48,40 @@ if _SERVER_DIR not in sys.path:
 import client  # noqa: E402  (OSSBackend delegates to client's OSS helpers)
 import requests  # noqa: E402  (only OSSBackend.exists references requests.HTTPError)
 import tenant_id_validator as _tid  # noqa: E402  (the ONE shared reject-don't-collapse rule)
+
+_platform_db = None
+
+
+def authority_mode() -> str:
+    """Return the explicit mutable drawing authority.
+
+    Legacy blob manifests remain the default. PostgreSQL never silently falls
+    back because two ECS tasks must make the same mutation decision.
+    """
+    mode = os.environ.get("LEAF_DRAWING_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_DRAWING_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def _db():
+    global _platform_db
+    if _platform_db is not None:
+        return _platform_db
+    if "leaf_platform" not in sys.modules:
+        package_dir = Path(__file__).resolve().parent.parent / "platform"
+        spec = importlib.util.spec_from_file_location(
+            "leaf_platform", package_dir / "__init__.py",
+            submodule_search_locations=[str(package_dir)],
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError("platform package could not be loaded")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["leaf_platform"] = module
+        spec.loader.exec_module(module)
+    import leaf_platform.db as db  # noqa: PLC0415
+    _platform_db = db
+    return db
 
 # --------------------------------------------------------------------------- #
 # Key scheme
@@ -226,7 +263,66 @@ def _read(local_path: str) -> bytes:
         return fh.read()
 
 
+def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
+    db = _db()
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT head, latest, checkout_holder, checkout_acquired_at,
+                   checkout_expires_at, checkout_fence
+            FROM drawing_store_manifests
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant_id, "drawing": drawing_id},
+        )
+        manifest_row = cur.fetchone()
+        if manifest_row is None or manifest_row["head"] is None:
+            raise KeyError(manifest_key(tenant_id, drawing_id))
+        cur.execute(
+            """
+            SELECT version, parent_version, created_at, byte_count,
+                   content_sha256, workitem_id, tool, note
+            FROM drawing_store_versions
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND state = 'ready'
+            ORDER BY version
+            """,
+            {"tenant": tenant_id, "drawing": drawing_id},
+        )
+        rows = cur.fetchall()
+    checkout = None
+    if manifest_row["checkout_holder"] is not None:
+        checkout = {
+            "holder": manifest_row["checkout_holder"],
+            "acquired": manifest_row["checkout_acquired_at"].isoformat(),
+            "expires": manifest_row["checkout_expires_at"].isoformat(),
+            "fence": int(manifest_row["checkout_fence"]),
+        }
+    ready_latest = max((int(row["version"]) for row in rows), default=0)
+    return {
+        "schema": 1,
+        "tenant_id": tenant_id,
+        "drawing_id": drawing_id,
+        "head": int(manifest_row["head"]),
+        "latest": ready_latest,
+        "versions": [{
+            "v": int(row["version"]),
+            "parent": (int(row["parent_version"])
+                       if row["parent_version"] is not None else None),
+            "created": row["created_at"].isoformat(),
+            "bytes": int(row["byte_count"]),
+            "sha256": row["content_sha256"],
+            "workitem_id": row["workitem_id"],
+            "tool": row["tool"],
+            "note": row["note"],
+        } for row in rows],
+        "checkout": checkout,
+    }
+
+
 def load_manifest(backend: StorageBackend, tenant_id: str, drawing_id: str) -> dict:
+    if authority_mode() == "postgres":
+        return _pg_manifest(sanitize_id(tenant_id), sanitize_id(drawing_id))
     raw = backend.get(manifest_key(tenant_id, drawing_id))
     return json.loads(raw.decode("utf-8"))
 
@@ -249,11 +345,449 @@ def _new_manifest(tenant_id: str, drawing_id: str) -> dict:
     }
 
 
+def _pg_mark_version_state(
+    tenant_id: str, drawing_id: str, version: int, state: str,
+) -> None:
+    db = _db()
+    with db.connection() as conn:
+        conn.execute(
+            """
+            UPDATE drawing_store_versions
+            SET state = %(state)s
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = %(version)s AND state = 'reserved'
+            """,
+            {
+                "state": state, "tenant": tenant_id,
+                "drawing": drawing_id, "version": version,
+            },
+        )
+
+
+def _put_or_verify_blob(
+    backend: StorageBackend, key: str, data: bytes, digest: str,
+) -> None:
+    """Publish one immutable blob, or adopt an exact crash-window artifact."""
+    if backend.exists(key):
+        existing = backend.get(key)
+        if len(existing) != len(data) or _sha256(existing) != digest:
+            raise ValueError(
+                f"reserved immutable version key {key} has mismatched content")
+        return
+    backend.put(key, data)
+
+
+def _locked_upload_guard(conn, guard: dict) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM drawing_upload_attempts
+        WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+          AND attempt = %(attempt)s AND status = 'extracting'
+          AND extraction_owner = %(owner)s
+          AND extraction_fence = %(fence)s
+          AND extraction_expires_at > clock_timestamp()
+        FOR UPDATE
+        """,
+        guard,
+    ).fetchone()
+    return row is not None
+
+
+def _pg_ingest_guarded(
+    backend: StorageBackend, tenant_id: str, drawing_id: str, data: bytes,
+    guard: dict,
+) -> dict:
+    """Ingest v1 while holding the upload authority row through publication."""
+    db = _db()
+    vkey = drawing_version_key(tenant_id, drawing_id, 1)
+    digest = _sha256(data)
+    params = {
+        "tenant": tenant_id, "drawing": drawing_id, "key": vkey,
+        "bytes": len(data), "sha": digest, "attempt": str(guard["attempt"]),
+        "owner": str(guard["owner"]), "fence": int(guard["fence"]),
+    }
+
+    def operation(conn):
+        if not _locked_upload_guard(conn, params):
+            raise RuntimeError("upload extraction lease is stale")
+        manifest = conn.execute(
+            """
+            SELECT head FROM drawing_store_manifests
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            FOR UPDATE
+            """,
+            params,
+        ).fetchone()
+        if manifest is not None and manifest["head"] is not None:
+            ready = conn.execute(
+                """
+                SELECT byte_count, content_sha256, object_key
+                FROM drawing_store_versions
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND version = 1 AND state = 'ready'
+                """,
+                params,
+            ).fetchone()
+            if (
+                ready is None or int(ready["byte_count"]) != len(data)
+                or ready["content_sha256"] != digest
+                or ready["object_key"] != vkey
+            ):
+                raise ValueError(
+                    f"drawing already exists with different content: "
+                    f"{tenant_id}/{drawing_id}")
+            return
+        if manifest is None:
+            conn.execute(
+                """
+                INSERT INTO drawing_store_manifests
+                  (tenant_id, drawing_id, head, latest)
+                VALUES (%(tenant)s, %(drawing)s, NULL, 1)
+                """,
+                params,
+            )
+            conn.execute(
+                """
+                INSERT INTO drawing_store_versions
+                  (tenant_id, drawing_id, version, parent_version, object_key,
+                   byte_count, content_sha256, note, state, reservation_token,
+                   reservation_expires_at)
+                VALUES
+                  (%(tenant)s, %(drawing)s, 1, NULL, %(key)s, %(bytes)s,
+                   %(sha)s, 'initial ingest', 'reserved', %(attempt)s,
+                   clock_timestamp() + INTERVAL '15 minutes')
+                """,
+                params,
+            )
+        else:
+            reserved = conn.execute(
+                """
+                SELECT byte_count, content_sha256, object_key, state
+                FROM drawing_store_versions
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND version = 1
+                FOR UPDATE
+                """,
+                params,
+            ).fetchone()
+            if (
+                reserved is None or reserved["state"] != "reserved"
+                or int(reserved["byte_count"]) != len(data)
+                or reserved["content_sha256"] != digest
+                or reserved["object_key"] != vkey
+            ):
+                raise ValueError("initial drawing reservation does not match content")
+            conn.execute(
+                """
+                UPDATE drawing_store_versions
+                SET reservation_token = %(attempt)s,
+                    reservation_expires_at =
+                      clock_timestamp() + INTERVAL '15 minutes'
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND version = 1
+                """,
+                params,
+            )
+        _put_or_verify_blob(backend, vkey, data, digest)
+        # clock_timestamp() is intentional. NOW() is fixed at transaction start.
+        if not _locked_upload_guard(conn, params):
+            raise RuntimeError("upload extraction lease expired during ingest")
+        updated = conn.execute(
+            """
+            UPDATE drawing_store_manifests m
+            SET head = 1, updated_at = NOW()
+            WHERE m.tenant_id = %(tenant)s AND m.drawing_id = %(drawing)s
+              AND m.head IS NULL AND EXISTS (
+                SELECT 1 FROM drawing_upload_attempts u
+                WHERE u.tenant_id = m.tenant_id
+                  AND u.drawing_id = m.drawing_id
+                  AND u.attempt = %(attempt)s
+                  AND u.status = 'extracting'
+                  AND u.extraction_owner = %(owner)s
+                  AND u.extraction_fence = %(fence)s
+                  AND u.extraction_expires_at > clock_timestamp()
+              )
+            RETURNING m.tenant_id
+            """,
+            params,
+        ).fetchone()
+        if updated is None:
+            raise RuntimeError("upload authority changed before manifest publish")
+        conn.execute(
+            """
+            UPDATE drawing_store_versions
+            SET state = 'ready', ready_at = NOW(),
+                reservation_token = NULL, reservation_expires_at = NULL
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = 1 AND state = 'reserved'
+            """,
+            params,
+        )
+        backend.put(
+            manifest_key(tenant_id, drawing_id),
+            b'{"authority":"postgres"}',
+        )
+        if not _locked_upload_guard(conn, params):
+            raise RuntimeError(
+                "upload extraction lease expired during manifest publication")
+
+    db.run_transaction(operation, isolation="serializable")
+    return {"drawing_id": drawing_id, "version": 1}
+
+
+def _pg_ingest(
+    backend: StorageBackend, tenant_id: str, drawing_id: str, data: bytes,
+    guard: Optional[dict] = None,
+) -> dict:
+    if guard is not None:
+        return _pg_ingest_guarded(
+            backend, tenant_id, drawing_id, data, guard)
+    db = _db()
+    vkey = drawing_version_key(tenant_id, drawing_id, 1)
+    digest = _sha256(data)
+    token = uuid.uuid4().hex
+    params = {
+        "tenant": tenant_id, "drawing": drawing_id, "key": vkey,
+        "bytes": len(data), "sha": digest, "token": token,
+    }
+
+    def reserve(conn):
+        manifest = conn.execute(
+            """
+            SELECT head FROM drawing_store_manifests
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            FOR UPDATE
+            """,
+            params,
+        ).fetchone()
+        if manifest is None:
+            conn.execute(
+                """
+                INSERT INTO drawing_store_manifests
+                  (tenant_id, drawing_id, head, latest)
+                VALUES (%(tenant)s, %(drawing)s, NULL, 1)
+                """,
+                params,
+            )
+            conn.execute(
+                """
+                INSERT INTO drawing_store_versions
+                  (tenant_id, drawing_id, version, parent_version, object_key,
+                   byte_count, content_sha256, note, state, reservation_token,
+                   reservation_expires_at)
+                VALUES
+                  (%(tenant)s, %(drawing)s, 1, NULL, %(key)s, %(bytes)s,
+                   %(sha)s, 'initial ingest', 'reserved', %(token)s,
+                   clock_timestamp() + INTERVAL '1 minute')
+                """,
+                params,
+            )
+            return
+        if manifest["head"] is not None:
+            raise ValueError(
+                f"drawing already exists: {tenant_id}/{drawing_id} "
+                "(use put_drawing to add versions)")
+        row = conn.execute(
+            """
+            SELECT byte_count, content_sha256, object_key, state,
+                   reservation_expires_at
+            FROM drawing_store_versions
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = 1
+            FOR UPDATE
+            """,
+            params,
+        ).fetchone()
+        if (
+            row is None or row["state"] != "reserved"
+            or int(row["byte_count"]) != len(data)
+            or row["content_sha256"] != digest or row["object_key"] != vkey
+        ):
+            raise ValueError("initial drawing reservation does not match content")
+        if row["reservation_expires_at"] > datetime.now(timezone.utc):
+            raise RuntimeError("initial drawing reservation is still active")
+        conn.execute(
+            """
+            UPDATE drawing_store_versions
+            SET reservation_token = %(token)s,
+                reservation_expires_at =
+                  clock_timestamp() + INTERVAL '1 minute'
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = 1
+            """,
+            params,
+        )
+
+    db.run_transaction(reserve, isolation="serializable")
+    _put_or_verify_blob(backend, vkey, data, digest)
+
+    def finalize(conn):
+        updated = conn.execute(
+            """
+            UPDATE drawing_store_manifests m
+            SET head = 1, updated_at = NOW()
+            WHERE m.tenant_id = %(tenant)s AND m.drawing_id = %(drawing)s
+              AND m.head IS NULL AND EXISTS (
+                SELECT 1 FROM drawing_store_versions v
+                WHERE v.tenant_id = m.tenant_id
+                  AND v.drawing_id = m.drawing_id AND v.version = 1
+                  AND v.state = 'reserved'
+                  AND v.reservation_token = %(token)s
+                  AND v.reservation_expires_at > clock_timestamp()
+              )
+            RETURNING m.tenant_id
+            """,
+            params,
+        ).fetchone()
+        if updated is None:
+            raise RuntimeError("initial drawing reservation was reclaimed")
+        conn.execute(
+            """
+            UPDATE drawing_store_versions
+            SET state = 'ready', ready_at = NOW(),
+                reservation_token = NULL, reservation_expires_at = NULL
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = 1 AND reservation_token = %(token)s
+            """,
+            params,
+        )
+
+    db.run_transaction(finalize, isolation="serializable")
+    backend.put(manifest_key(tenant_id, drawing_id), b'{"authority":"postgres"}')
+    return {"drawing_id": drawing_id, "version": 1}
+
+
+def _pg_put(
+    backend: StorageBackend, tenant_id: str, drawing_id: str, data: bytes,
+    parent_version: Optional[int], meta: dict,
+) -> int:
+    db = _db()
+    digest = _sha256(data)
+
+    def reserve(conn):
+        row = conn.execute(
+            """
+            SELECT head, latest, checkout_holder, checkout_fence,
+                   checkout_expires_at
+            FROM drawing_store_manifests
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            FOR UPDATE
+            """,
+            {"tenant": tenant_id, "drawing": drawing_id},
+        ).fetchone()
+        if row is None or row["head"] is None:
+            raise KeyError(manifest_key(tenant_id, drawing_id))
+        if (
+            row["checkout_holder"] is None
+            or row["checkout_expires_at"] <= datetime.now(timezone.utc)
+        ):
+            raise ValueError("an active checkout is required to publish a version")
+        expected = int(parent_version) if parent_version is not None else None
+        if int(row["head"]) != expected:
+            raise ValueError(
+                f"stale drawing head: expected {expected}, current {row['head']}")
+        version = int(row["latest"]) + 1
+        key = drawing_version_key(tenant_id, drawing_id, version)
+        conn.execute(
+            """
+            UPDATE drawing_store_manifests
+            SET latest = %(version)s, updated_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            """,
+            {
+                "tenant": tenant_id, "drawing": drawing_id,
+                "version": version,
+            },
+        )
+        conn.execute(
+            """
+            INSERT INTO drawing_store_versions
+              (tenant_id, drawing_id, version, parent_version, object_key,
+               byte_count, content_sha256, workitem_id, tool, note, state)
+            VALUES
+              (%(tenant)s, %(drawing)s, %(version)s, %(parent)s, %(key)s,
+               %(bytes)s, %(sha)s, %(workitem)s, %(tool)s, %(note)s,
+               'reserved')
+            """,
+            {
+                "tenant": tenant_id, "drawing": drawing_id,
+                "version": version, "parent": expected, "key": key,
+                "bytes": len(data), "sha": digest,
+                "workitem": meta.get("workitem_id"), "tool": meta.get("tool"),
+                "note": meta.get("note"),
+            },
+        )
+        return (
+            version, key, expected, str(row["checkout_holder"]),
+            int(row["checkout_fence"]),
+        )
+
+    version, vkey, expected, checkout_holder, checkout_fence = db.run_transaction(
+        reserve, isolation="serializable")
+    try:
+        if backend.exists(vkey):
+            raise ValueError(f"refuse to overwrite immutable version key {vkey}")
+        backend.put(vkey, data)
+    except Exception:
+        _pg_mark_version_state(tenant_id, drawing_id, version, "orphaned")
+        raise
+
+    def finalize(conn):
+        updated = conn.execute(
+            """
+            UPDATE drawing_store_manifests
+            SET head = %(version)s, updated_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND head = %(expected)s
+              AND checkout_holder = %(checkout_holder)s
+              AND checkout_fence = %(checkout_fence)s
+              AND checkout_expires_at > clock_timestamp()
+            RETURNING tenant_id
+            """,
+            {
+                "tenant": tenant_id, "drawing": drawing_id,
+                "version": version, "expected": expected,
+                "checkout_holder": checkout_holder,
+                "checkout_fence": checkout_fence,
+            },
+        ).fetchone()
+        if updated is None:
+            conn.execute(
+                """
+                UPDATE drawing_store_versions SET state = 'orphaned'
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND version = %(version)s AND state = 'reserved'
+                """,
+                {
+                    "tenant": tenant_id, "drawing": drawing_id,
+                    "version": version,
+                },
+            )
+            return False
+        conn.execute(
+            """
+            UPDATE drawing_store_versions SET state = 'ready', ready_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = %(version)s AND state = 'reserved'
+            """,
+            {
+                "tenant": tenant_id, "drawing": drawing_id,
+                "version": version,
+            },
+        )
+        return True
+
+    if not db.run_transaction(finalize, isolation="serializable"):
+        raise ValueError("drawing head changed while the immutable version was stored")
+    return version
+
+
 # --------------------------------------------------------------------------- #
 # Version primitives
 # --------------------------------------------------------------------------- #
 def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
-                   drawing_id: str | None = None) -> dict:
+                   drawing_id: str | None = None, *,
+                   authority_guard: Optional[dict] = None) -> dict:
     """PUT version 1 of a new drawing + write its initial manifest.
 
     Returns {"drawing_id": <id>, "version": 1}. Refuses to clobber an existing
@@ -261,6 +795,9 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id) if drawing_id else new_drawing_id()
+    if authority_mode() == "postgres":
+        return _pg_ingest(
+            backend, tid, did, _read(local_path), authority_guard)
 
     if backend.exists(manifest_key(tid, did)):
         raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
@@ -291,6 +828,12 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
+    if authority_mode() == "postgres":
+        return _pg_put(
+            backend, tid, did, _read(local_path),
+            int(parent_version) if parent_version is not None else None,
+            meta or {},
+        )
     m = load_manifest(backend, tid, did)
 
     new_v = int(m["latest"]) + 1
@@ -342,6 +885,46 @@ def undo(backend: StorageBackend, tenant_id: str, drawing_id: str) -> int:
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
+    if authority_mode() == "postgres":
+        db = _db()
+
+        def operation(conn):
+            row = conn.execute(
+                """
+                SELECT m.head, v.parent_version
+                FROM drawing_store_manifests m
+                JOIN drawing_store_versions v
+                  ON v.tenant_id = m.tenant_id
+                 AND v.drawing_id = m.drawing_id
+                 AND v.version = m.head AND v.state = 'ready'
+                WHERE m.tenant_id = %(tenant)s AND m.drawing_id = %(drawing)s
+                FOR UPDATE OF m
+                """,
+                {"tenant": tid, "drawing": did},
+            ).fetchone()
+            if row is None:
+                raise KeyError(manifest_key(tid, did))
+            if row["parent_version"] is None:
+                raise ValueError("nothing to undo: head is the root version")
+            parent = int(row["parent_version"])
+            updated = conn.execute(
+                """
+                UPDATE drawing_store_manifests
+                SET head = %(parent)s, updated_at = NOW()
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND head = %(old_head)s
+                RETURNING head
+                """,
+                {
+                    "parent": parent, "tenant": tid, "drawing": did,
+                    "old_head": int(row["head"]),
+                },
+            ).fetchone()
+            if updated is None:
+                raise ValueError("drawing head changed during undo")
+            return parent
+
+        return db.run_transaction(operation, isolation="serializable")
     m = load_manifest(backend, tid, did)
 
     cur = int(m["head"])
@@ -372,6 +955,75 @@ def redo(backend: StorageBackend, tenant_id: str, drawing_id: str) -> int:
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
+    if authority_mode() == "postgres":
+        db = _db()
+
+        def operation(conn):
+            manifest = conn.execute(
+                """
+                SELECT head FROM drawing_store_manifests
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                FOR UPDATE
+                """,
+                {"tenant": tid, "drawing": did},
+            ).fetchone()
+            if manifest is None or manifest["head"] is None:
+                raise KeyError(manifest_key(tid, did))
+            head = int(manifest["head"])
+            latest_row = conn.execute(
+                """
+                SELECT MAX(version) AS latest
+                FROM drawing_store_versions
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND state = 'ready'
+                """,
+                {"tenant": tid, "drawing": did},
+            ).fetchone()
+            latest = int(latest_row["latest"])
+            if head == latest:
+                raise ValueError(
+                    "nothing to redo: head is already the latest version")
+            rows = conn.execute(
+                """
+                SELECT version, parent_version
+                FROM drawing_store_versions
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND state = 'ready'
+                """,
+                {"tenant": tid, "drawing": did},
+            ).fetchall()
+            parent_of = {
+                int(row["version"]): (
+                    int(row["parent_version"])
+                    if row["parent_version"] is not None else None)
+                for row in rows
+            }
+            cur, target, seen = latest, None, set()
+            while cur is not None and cur not in seen:
+                seen.add(cur)
+                if parent_of.get(cur) == head:
+                    target = cur
+                    break
+                cur = parent_of.get(cur)
+            if target is None:
+                raise ValueError(
+                    f"nothing to redo: no child of head {head} "
+                    f"leads to latest {latest}")
+            conn.execute(
+                """
+                UPDATE drawing_store_manifests
+                SET head = %(target)s, updated_at = NOW()
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                  AND head = %(head)s
+                """,
+                {
+                    "target": target, "tenant": tid,
+                    "drawing": did, "head": head,
+                },
+            )
+            return target
+
+        return db.run_transaction(operation, isolation="serializable")
     m = load_manifest(backend, tid, did)
 
     head = int(m["head"])
@@ -423,6 +1075,48 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
+    if authority_mode() == "postgres":
+        if float(ttl_s) <= 0:
+            raise ValueError("checkout ttl must be positive")
+        db = _db()
+
+        def operation(conn):
+            row = conn.execute(
+                """
+                SELECT checkout_holder, checkout_expires_at
+                FROM drawing_store_manifests
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                FOR UPDATE
+                """,
+                {"tenant": tid, "drawing": did},
+            ).fetchone()
+            if row is None:
+                raise KeyError(manifest_key(tid, did))
+            if (
+                row["checkout_holder"] is not None
+                and row["checkout_expires_at"] > datetime.now(timezone.utc)
+                and row["checkout_holder"] != holder
+            ):
+                return False
+            conn.execute(
+                """
+                UPDATE drawing_store_manifests
+                SET checkout_holder = %(holder)s,
+                    checkout_fence = checkout_fence + 1,
+                    checkout_acquired_at = NOW(),
+                    checkout_expires_at =
+                      NOW() + (%(ttl)s * INTERVAL '1 second'),
+                    updated_at = NOW()
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                """,
+                {
+                    "holder": str(holder), "ttl": float(ttl_s),
+                    "tenant": tid, "drawing": did,
+                },
+            )
+            return True
+
+        return db.run_transaction(operation, isolation="serializable")
     m = load_manifest(backend, tid, did)
     now = datetime.now(timezone.utc)
     co = m.get("checkout")
@@ -446,6 +1140,41 @@ def release_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
+    if authority_mode() == "postgres":
+        db = _db()
+
+        def operation(conn):
+            row = conn.execute(
+                """
+                SELECT checkout_holder, checkout_expires_at
+                FROM drawing_store_manifests
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                FOR UPDATE
+                """,
+                {"tenant": tid, "drawing": did},
+            ).fetchone()
+            if row is None:
+                raise KeyError(manifest_key(tid, did))
+            if row["checkout_holder"] is None:
+                return False
+            if (
+                holder is not None
+                and row["checkout_holder"] != holder
+                and row["checkout_expires_at"] > datetime.now(timezone.utc)
+            ):
+                return False
+            conn.execute(
+                """
+                UPDATE drawing_store_manifests
+                SET checkout_holder = NULL, checkout_acquired_at = NULL,
+                    checkout_expires_at = NULL, updated_at = NOW()
+                WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                """,
+                {"tenant": tid, "drawing": did},
+            )
+            return True
+
+        return db.run_transaction(operation, isolation="serializable")
     m = load_manifest(backend, tid, did)
     co = m.get("checkout")
     if not co:
