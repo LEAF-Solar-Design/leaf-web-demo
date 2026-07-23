@@ -104,6 +104,28 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
     expect(runner.runs[0].userMessage).toContain("earlier question");
   });
 
+  it("a resumed turn keeps bounded visible history ready for stale-session recovery", async () => {
+    const { adapter, runner } = makeAdapter();
+    await drain(adapter.runTurn(turnInput({ text: "first turn" })));
+    await drain(
+      adapter.runTurn(
+        turnInput({
+          turn_id: "app-turn-2",
+          text: "current turn",
+          messages: [
+            { role: "user", text: "first turn" },
+            { role: "assistant", text: "visible answer" },
+          ],
+        }),
+      ),
+    );
+
+    expect(runner.runs[1]!.resumeSdkSessionId).toBe("fake-sdk-session-1");
+    expect(runner.runs[1]!.userMessage).not.toContain("visible answer");
+    expect(runner.runs[1]!.resumeFallbackUserMessage).toContain("visible answer");
+    expect(runner.runs[1]!.resumeFallbackUserMessage).toContain("current turn");
+  });
+
   it("write turn: proposed_run with the APP-minted id, mirror row persisted, no dispatch", async () => {
     const { adapter, appRun, gate, store } = makeAdapter();
     gate.nextConfirmationId = "app-cid-1";
