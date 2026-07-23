@@ -481,10 +481,7 @@ def _authored_execution_enabled() -> bool:
 
 
 def _sandbox_configured() -> bool:
-    return os.environ.get("LEAF_SANDBOX", "").strip().lower() in (
-        "e2b",
-        "e2b-microvm",
-    )
+    return os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER", "").strip().lower() == "e2b"
 
 
 def validate_runtime_safety() -> None:
@@ -499,7 +496,13 @@ def validate_runtime_safety() -> None:
         raise RuntimeError("production broker requires explicit LEAF_QA_HOOKS=0")
     if _authored_execution_enabled() and not _sandbox_configured():
         raise RuntimeError(
-            "production authored execution requires LEAF_SANDBOX=e2b or e2b-microvm"
+            "production authored execution requires LEAF_TOOL_SANDBOX_PROVIDER=e2b"
+        )
+    if _authored_execution_enabled() and not (
+            os.environ.get("E2B_API_KEY", "").strip()
+            or os.environ.get("E2B_API_KEY_FILE", "").strip()):
+        raise RuntimeError(
+            "production tool sandbox requires an E2B credential source"
         )
 
 

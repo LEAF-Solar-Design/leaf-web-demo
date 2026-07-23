@@ -25,6 +25,7 @@ Acceptance covered here:
 from __future__ import annotations
 
 import sys
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,31 @@ def _emit(obj):
     sys.stdout.buffer.write(json.dumps(obj).encode("utf-8"))
     sys.stdout.buffer.flush()
 
+def _canonical_bytes(value):
+    def encode(item):
+        if item is None:
+            return "null"
+        if isinstance(item, bool):
+            return "true" if item else "false"
+        if isinstance(item, str):
+            return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(item, (int, float)):
+            number = float(item)
+            if number == 0:
+                number = 0.0
+            mantissa, exponent = format(number, ".16e").split("e")
+            return f"{mantissa}e{int(exponent):+d}"
+        if isinstance(item, list):
+            return "[" + ",".join(encode(entry) for entry in item) + "]"
+        if isinstance(item, dict):
+            keys = sorted(item, key=lambda key: key.encode("utf-8"))
+            return "{" + ",".join(
+                f"{json.dumps(key, ensure_ascii=False)}:{encode(item[key])}"
+                for key in keys
+            ) + "}"
+        raise TypeError(type(item).__name__)
+    return encode(value).encode("utf-8")
+
 '''
 
 _FAKE_HELPER_BODIES = {
@@ -113,6 +139,32 @@ _emit({
     "schema": "leaf.e2b.tool-exec-result.v1",
     "receipt": {"passed": True},
     "result": {"ok": True, "ret": _encode_ret(ret)},
+    "helper_error": None,
+})
+''',
+    "strict_ok": '''
+blob = _read_job()
+job = blob.get("job") or {}
+audit = blob.get("audit") or {}
+import hashlib
+ns = {"__name__": "leaf_fake_helper_tool"}
+exec(compile(job.get("source") or "", job.get("filename") or "<fake>", "exec"), ns)
+ret = ns["run"](job.get("intake"), job.get("params"))
+result = {"ok": True, "ret": _encode_ret(ret)}
+_emit({
+    "schema": "leaf.e2b.tool-exec-result.v1",
+    "receipt": {
+        "passed": True,
+        "tenantHash": audit.get("tenant_hash"),
+        "sourceHash": audit.get("source_hash"),
+        "templateVersion": audit.get("template_version"),
+        "policyVersion": audit.get("policy_version"),
+        "startedAt": "2026-07-23T00:00:00Z",
+        "stoppedAt": "2026-07-23T00:00:01Z",
+        "resourceUse": {"wallMs": 1000},
+        "resultHash": hashlib.sha256(_canonical_bytes(result)).hexdigest(),
+    },
+    "result": result,
     "helper_error": None,
 })
 ''',
@@ -202,22 +254,64 @@ def test_sandbox_tier_tri_state_and_enabled_flag_backcompat(monkeypatch):
     assert tool_loader._sandbox_tier() == "subprocess"
     assert tool_loader._sandbox_enabled() is True
 
-    monkeypatch.setenv("LEAF_SANDBOX", "E2B")  # case-insensitive
+    monkeypatch.setenv("LEAF_SANDBOX", "E2B")
     assert tool_loader._sandbox_tier() == "subprocess"
     assert tool_loader._sandbox_enabled() is True
 
     monkeypatch.setenv("LEAF_SANDBOX", "e2b-microvm")
     assert tool_loader._sandbox_tier() == "microvm"
-    assert tool_loader._sandbox_enabled() is False  # NOT the v1 flag
-
-    monkeypatch.setenv("LEAF_SANDBOX", "E2B-MICROVM")  # case-insensitive
-    assert tool_loader._sandbox_tier() == "microvm"
     assert tool_loader._sandbox_enabled() is False
 
-    monkeypatch.setenv("LEAF_SANDBOX", "something-else")  # garbage -> off
+    monkeypatch.setenv("LEAF_SANDBOX", "something-else")
     assert tool_loader._sandbox_tier() == "off"
     assert tool_loader._sandbox_enabled() is False
 
+
+def test_tool_provider_is_separate_and_fail_closed(monkeypatch):
+    monkeypatch.setenv("LEAF_SANDBOX", "e2b")
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "e2b")
+    assert tool_loader._sandbox_tier() == "microvm"
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "unknown")
+    assert tool_loader._sandbox_tier() == "invalid"
+
+
+def test_canonical_json_bytes_matches_js_unicode_and_key_order():
+    first = {"z": "雪", "tiny": 1e-5, "a": {"β": 1, "a": "é"}, "n": 1.0}
+    reordered = {"n": 1, "a": {"a": "é", "β": 1}, "tiny": 1e-5, "z": "雪"}
+    expected = (
+        '{"a":{"a":"é","β":1.0000000000000000e+0},'
+        '"n":1.0000000000000000e+0,'
+        '"tiny":1.0000000000000001e-5,"z":"雪"}'
+    ).encode("utf-8")
+    assert tool_loader.canonical_json_bytes(first) == expected
+    assert tool_loader.canonical_json_bytes(reordered) == expected
+    assert hashlib.sha256(expected).hexdigest() == (
+        "937d081cc77301a198516f5a9e8d728d060a52ee3a748e0bd78a589280b574b3"
+    )
+
+
+def test_tool_provider_requires_complete_matching_audit_receipt(
+        tenant_repo, fake_helper, monkeypatch):
+    tool = tenant_repo("counter", BENIGN_SRC)
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "e2b")
+    monkeypatch.setattr(
+        tool_loader, "_microvm_cmd",
+        lambda: [sys.executable, str(fake_helper("strict_ok"))],
+    )
+    env = tool_loader.run_tool_dynamic(
+        tool, {"layers": ["A", "B", "C"]}, {}, aps_live=False, da=None,
+        tenant_id="tenant-a")
+    assert env["ok"] is True
+
+    monkeypatch.setattr(
+        tool_loader, "_microvm_cmd",
+        lambda: [sys.executable, str(fake_helper("ok"))],
+    )
+    refused = tool_loader.run_tool_dynamic(
+        tool, {"layers": ["A"]}, {}, aps_live=False, da=None,
+        tenant_id="tenant-a")
+    assert refused["ok"] is False
+    assert "audit receipt incomplete" in refused["error"]["message"]
 
 # --------------------------------------------------------------------------- #
 # (2) microvm ON + fake(ok) -> valid §3 envelope, parity with in-process

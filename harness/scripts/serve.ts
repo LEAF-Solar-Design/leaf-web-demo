@@ -43,7 +43,7 @@ import { join } from "node:path";
 
 import { createHarness } from "../src/server.js";
 import { redactTokens } from "../src/redact.js";
-import { validateProductionHarnessEnv } from "../src/runtimeSafety.js";
+import { authorSandboxProvider, validateProductionHarnessEnv } from "../src/runtimeSafety.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { AgentGrant, HarnessPorts } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
@@ -139,11 +139,12 @@ function buildPorts(): HarnessPorts {
   // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
   // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
   const grantStore = createTenantGrantStore();
-  // F2 (2A): when LEAF_SANDBOX=e2b, run the design-time author session INSIDE an
+  // F2 (2A): the author boundary has its own provider selector. It never follows
+  // the broker tool-execution selector.
   // egress-locked E2B sandbox instead of in-process. Default (unset/anything else) keeps
   // AgentSdkRunner so the proven demo + hermetic tests are unchanged. LEAF_SANDBOX_BROKER_HOST
   // sets the ONE allowlisted egress host (defaults to the proven public stand-in).
-  const useE2b = (process.env.LEAF_SANDBOX ?? "").trim().toLowerCase() === "e2b";
+  const useE2b = authorSandboxProvider() === "e2b";
   // LEAF_AGENT_MOCK=1: fully hermetic mode — scripted fakes for BOTH the design-time
   // author loop and the converse/turn loop. Never loads the Agent SDK, never touches
   // Anthropic, never spends LLM credit. Takes priority over LEAF_SANDBOX.
@@ -151,7 +152,7 @@ function buildPorts(): HarnessPorts {
   if (mockAgent) {
     log("[harness] LEAF_AGENT_MOCK=1 — agentRunner=FakeAgentRunner, converseRunner=FakeTurnRunner (scripted; no SDK, no network).");
   } else {
-    log(`[harness] author runner: ${useE2b ? "E2bAgentRunner (LEAF_SANDBOX=e2b, egress-locked sandbox)" : "AgentSdkRunner (in-process; default)"}`);
+    log(`[harness] author runner: ${useE2b ? "E2bAgentRunner (LEAF_AUTHOR_SANDBOX_PROVIDER=e2b)" : "AgentSdkRunner (provider off)"}`);
     log("[harness] converse runner: spine ConverseLoop via SpineTurnAdapter (gate-before-exec; SDK loads on first /turn).");
   }
   const oauth = new OAuthGrantProviderImpl({ store: grantStore });

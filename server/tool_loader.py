@@ -21,7 +21,9 @@ passed in by the broker (the only process allowed to hold it).
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -143,6 +145,14 @@ def _sandbox_tier() -> str:
     "microvm" (real E2B micro-VM via the Node helper -- `_run_in_sandbox_e2b`), anything
     else -> "off" (in-process, byte-identical to today). `_sandbox_enabled()` above keeps
     its exact v1 contract for its direct callers/tests."""
+    provider = os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER")
+    if provider is not None:
+        val = provider.strip().lower()
+        if not val or val == "off":
+            return "off"
+        if val == "e2b":
+            return "microvm"
+        return "invalid"
     val = os.environ.get("LEAF_SANDBOX", "").strip().lower()
     if val == "e2b":
         return "subprocess"
@@ -193,8 +203,59 @@ def _sandbox_env() -> Dict[str, str]:
 # Denied-egress probe targets the helper verifies from INSIDE the VM on every run
 # (the same three the proven vendor eval uses).
 _MICROVM_DENIED_TARGETS = [
+    "http://169.254.169.254/latest/meta-data/",
+    "http://127.0.0.1:8130/",
+    "http://10.0.0.1/",
+    "http://172.16.0.1/",
+    "http://192.168.0.1/",
     "https://example.com/", "https://api.github.com/", "https://1.1.1.1/",
 ]
+_SANDBOX_POLICY_VERSION = "leaf.sandbox-policy.v1"
+_SANDBOX_TEMPLATE_VERSION = "leaf-python-2026-07-23"
+_SANDBOX_LIMITS = {
+    "cpu_seconds": 30,
+    "memory_bytes": 512 * 1024 * 1024,
+    "processes": 32,
+    "disk_bytes": 128 * 1024 * 1024,
+    "files": 128,
+    "source_bytes": 512 * 1024,
+    "input_bytes": 8 * 1024 * 1024,
+    "params_bytes": 256 * 1024,
+    "output_bytes": 1024 * 1024,
+    "wall_seconds": 45,
+}
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Canonical UTF-8 JSON used by both launchers for evidence hashes."""
+    def encode(item: Any) -> str:
+        if item is None:
+            return "null"
+        if isinstance(item, bool):
+            return "true" if item else "false"
+        if isinstance(item, str):
+            return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(item, (int, float)):
+            number = float(item)
+            if not math.isfinite(number):
+                raise ValueError("canonical JSON rejects non-finite numbers")
+            if number == 0:
+                number = 0.0
+            mantissa, exponent = format(number, ".16e").split("e")
+            return f"{mantissa}e{int(exponent):+d}"
+        if isinstance(item, list):
+            return "[" + ",".join(encode(entry) for entry in item) + "]"
+        if isinstance(item, dict):
+            if any(not isinstance(key, str) for key in item):
+                raise TypeError("canonical JSON object keys must be strings")
+            keys = sorted(item, key=lambda key: key.encode("utf-8"))
+            return "{" + ",".join(
+                f"{json.dumps(key, ensure_ascii=False)}:{encode(item[key])}"
+                for key in keys
+            ) + "}"
+        raise TypeError(f"canonical JSON rejects {type(item).__name__}")
+
+    return encode(value).encode("utf-8")
 
 
 def _microvm_boot_budget_s() -> float:
@@ -240,9 +301,32 @@ def _microvm_cmd() -> Optional[List[str]]:
 _SANDBOX_RUNNER = r'''
 import sys, json, os
 
+_WIRE_OUT = sys.stdout
+_OUTPUT_LIMIT = 1048576
+
 def _emit(obj):
-    sys.stdout.buffer.write(json.dumps(obj).encode("utf-8"))
-    sys.stdout.buffer.flush()
+    encoded = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > _OUTPUT_LIMIT:
+        encoded = json.dumps({
+            "error": {
+                "type": "SandboxOutputLimit",
+                "msg": "sandbox output exceeded 1048576 bytes",
+            }
+        }, separators=(",", ":")).encode("utf-8")
+    _WIRE_OUT.buffer.write(encoded)
+    _WIRE_OUT.buffer.flush()
+
+class _BoundedText:
+    def __init__(self):
+        self.count = 0
+    def write(self, value):
+        size = len(str(value).encode("utf-8", "replace"))
+        self.count += size
+        if self.count > _OUTPUT_LIMIT:
+            raise RuntimeError("sandbox output exceeded 1048576 bytes")
+        return len(value)
+    def flush(self):
+        return None
 
 def _encode_ret(ret):
     if isinstance(ret, tuple) and len(ret) == 2:
@@ -262,6 +346,17 @@ def main():
     intake = job.get("intake")
     params = job.get("params")
     filename = job.get("filename") or "<tenant-tool>"
+    if job.get("require_limits"):
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
+            resource.setrlimit(resource.RLIMIT_AS, (536870912, 536870912))
+            resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (134217728, 134217728))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
+        except (ImportError, ValueError, OSError) as exc:
+            _emit({"error": {"type": "SandboxLimits", "msg": type(exc).__name__}})
+            return
 
     # Warm modules a benign tool commonly imports BEFORE the guard is installed, so a first-time
     # stdlib import (which reads a .py off disk) is never mistaken for a credential read.
@@ -297,6 +392,9 @@ def main():
     def _hook(event, args):
         if event == "open" or event == "os.open":
             path = args[0] if args else None
+            mode = str(args[1]) if len(args) > 1 else "r"
+            if any(flag in mode for flag in ("w", "a", "x", "+")):
+                raise PermissionError("sandbox: filesystem write denied")
             if path is not None and not isinstance(path, int) and _sensitive(path):
                 raise PermissionError("sandbox: read of sensitive path denied")
         elif event in _NET:
@@ -305,6 +403,13 @@ def main():
             raise PermissionError("sandbox: subprocess/exec denied")
 
     sys.addaudithook(_hook)
+    sys.stdout = _BoundedText()
+    sys.stderr = _BoundedText()
+    sys.__stdout__ = sys.stdout
+    sys.__stderr__ = sys.stderr
+    def _deny_os_write(*_args, **_kwargs):
+        raise PermissionError("sandbox: raw descriptor output denied")
+    os.write = _deny_os_write
 
     # ---- run the tenant tool body in this jailed process ----
     ns = {"__name__": "leaf_sandbox_tool", "__file__": filename}
@@ -330,6 +435,87 @@ def main():
 
 main()
 '''
+
+_SANDBOX_WRAPPER = r'''
+import json, os, subprocess, sys, threading
+
+_LIMIT = 1048576
+_CHILD = __CHILD_RUNNER__
+
+def _fixed_error():
+    payload = {
+        "error": {
+            "type": "SandboxOutputLimit",
+            "msg": "sandbox output exceeded 1048576 bytes",
+        }
+    }
+    sys.stdout.buffer.write(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+def _child_limits():
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_FSIZE, (_LIMIT, _LIMIT))
+    except ImportError:
+        pass
+
+def main():
+    job = sys.stdin.buffer.read()
+    stdout_path = os.path.abspath(".leaf-sandbox-stdout")
+    stderr_path = os.path.abspath(".leaf-sandbox-stderr")
+    preexec = _child_limits if os.name == "posix" else None
+    with open(stdout_path, "w+b", buffering=0) as child_out, \
+         open(stderr_path, "w+b", buffering=0) as child_err:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", _CHILD],
+            stdin=subprocess.PIPE,
+            stdout=child_out,
+            stderr=child_err,
+            preexec_fn=preexec,
+        )
+        breached = threading.Event()
+        stopped = threading.Event()
+
+        def monitor():
+            while not stopped.wait(0.002):
+                try:
+                    if (os.path.getsize(stdout_path) > _LIMIT or
+                            os.path.getsize(stderr_path) > _LIMIT):
+                        breached.set()
+                        proc.kill()
+                        return
+                except OSError:
+                    return
+
+        watcher = threading.Thread(target=monitor, daemon=True)
+        watcher.start()
+        proc.communicate(input=job)
+        stopped.set()
+        watcher.join(timeout=0.1)
+        stdout_size = os.path.getsize(stdout_path)
+        stderr_size = os.path.getsize(stderr_path)
+        if (breached.is_set() or proc.returncode != 0 or
+                stdout_size > _LIMIT or stderr_size > _LIMIT):
+            _fixed_error()
+            return
+        child_out.seek(0)
+        remaining = _LIMIT + 1
+        chunks = []
+        while remaining:
+            chunk = child_out.read(min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > _LIMIT:
+            _fixed_error()
+            return
+        sys.stdout.buffer.write(payload)
+        sys.stdout.buffer.flush()
+
+main()
+'''.replace("__CHILD_RUNNER__", repr(_SANDBOX_RUNNER))
 
 
 def _decode_ret(enc: Dict[str, Any]) -> Any:
@@ -366,7 +552,7 @@ def _run_in_sandbox(local: Path, intake: Dict[str, Any],
     try:
         with tempfile.TemporaryDirectory(prefix="leaf-sbx-") as jail:
             proc = subprocess.run(
-                [sys.executable, "-I", "-B", "-c", _SANDBOX_RUNNER],
+                [sys.executable, "-I", "-B", "-c", _SANDBOX_WRAPPER],
                 input=job,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -394,7 +580,8 @@ def _run_in_sandbox(local: Path, intake: Dict[str, Any],
 
 
 def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
-                        params: Dict[str, Any]) -> Tuple[str, Any]:
+                        params: Dict[str, Any],
+                        tenant_id: Optional[str] = None) -> Tuple[str, Any]:
     """Execute the tenant tool file inside a REAL egress-locked E2B micro-VM (tier v2).
 
     Same trust shape as `_run_in_sandbox`: the source is read HERE (trusted broker; ``local``
@@ -410,17 +597,37 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
         source = local.read_text(encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         return ("infra_error", f"could not read tool source {local.name}: {type(exc).__name__}: {exc}")
-    timeout = _sandbox_timeout_s()
+    source_bytes = len(source.encode("utf-8"))
+    intake_bytes = len(json.dumps(intake, separators=(",", ":")).encode("utf-8"))
+    params_bytes = len(json.dumps(params, separators=(",", ":")).encode("utf-8"))
+    if source_bytes > _SANDBOX_LIMITS["source_bytes"]:
+        return ("infra_error", "tool source exceeds fixed sandbox limit")
+    if intake_bytes > _SANDBOX_LIMITS["input_bytes"]:
+        return ("infra_error", "tool intake exceeds fixed sandbox limit")
+    if params_bytes > _SANDBOX_LIMITS["params_bytes"]:
+        return ("infra_error", "tool params exceed fixed sandbox limit")
+    timeout = min(_sandbox_timeout_s(), float(_SANDBOX_LIMITS["wall_seconds"]))
     blob = json.dumps({
         "schema": "leaf.e2b.tool-exec-job.v1",
         "job": {"source": source, "intake": intake, "params": params,
-                "filename": local.name},
-        "runner_py": _SANDBOX_RUNNER,
+                "filename": local.name, "require_limits": True},
+        "runner_py": _SANDBOX_WRAPPER,
         "timeout_s": timeout,
         "broker_host": (os.environ.get("LEAF_SANDBOX_BROKER_HOST", "").strip()
                         or "httpbingo.org"),
         "denied_targets": _MICROVM_DENIED_TARGETS,
         "probe_broker": False,
+        "audit": {
+            "tenant_hash": hashlib.sha256(
+                str(tenant_id or "demo-tenant").encode("utf-8")).hexdigest(),
+            "source_hash": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            "input_hash": hashlib.sha256(json.dumps(
+                {"intake": intake, "params": params}, sort_keys=True,
+                separators=(",", ":")).encode("utf-8")).hexdigest(),
+            "template_version": _SANDBOX_TEMPLATE_VERSION,
+            "policy_version": _SANDBOX_POLICY_VERSION,
+            "limits": _SANDBOX_LIMITS,
+        },
     }).encode("utf-8")
     outer = timeout + _microvm_boot_budget_s()
     try:
@@ -439,6 +646,8 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
     except Exception as exc:  # noqa: BLE001
         return ("infra_error", f"e2b-microvm helper failed to start: {type(exc).__name__}: {exc}")
     out = (proc.stdout or b"").decode("utf-8", "replace").strip()
+    if len(proc.stdout or b"") > _SANDBOX_LIMITS["output_bytes"]:
+        return ("infra_error", "e2b-microvm helper output exceeded fixed limit")
     if not out:
         return ("infra_error", f"e2b-microvm helper produced no output (rc={proc.returncode})")
     try:
@@ -455,9 +664,27 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
         # The security boundary: an unproven egress lock means the sandbox result is refused
         # by the HELPER (result:null) -- and re-refused here even if a result slipped through.
         return ("infra_error", "e2b-microvm egress receipt not passed; sandbox result refused")
+    if os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER", "").strip().lower() == "e2b":
+        required = (
+            "tenantHash", "sourceHash", "templateVersion", "policyVersion",
+            "startedAt", "stoppedAt", "resourceUse", "resultHash",
+        )
+        if any(key not in receipt for key in required):
+            return ("infra_error", "e2b-microvm audit receipt incomplete; result refused")
+        audit = json.loads(blob.decode("utf-8"))["audit"]
+        if (receipt.get("tenantHash") != audit["tenant_hash"]
+                or receipt.get("sourceHash") != audit["source_hash"]
+                or receipt.get("templateVersion") != audit["template_version"]
+                or receipt.get("policyVersion") != audit["policy_version"]):
+            return ("infra_error", "e2b-microvm audit receipt mismatch; result refused")
     result = parsed.get("result")
     if not isinstance(result, dict):
         return ("infra_error", "e2b-microvm helper returned no result")
+    if os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER", "").strip().lower() == "e2b":
+        computed_result_hash = hashlib.sha256(
+            canonical_json_bytes(result)).hexdigest()
+        if receipt.get("resultHash") != computed_result_hash:
+            return ("infra_error", "e2b-microvm result hash mismatch; result refused")
     if result.get("error"):
         e = result["error"]
         return ("tool_error", f"{e.get('type', 'Error')}: {e.get('msg', '')}")
@@ -685,9 +912,17 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     # this PID on either sandbox path. DEFAULT (unset) => the in-process `else` below runs
     # and is BYTE-IDENTICAL to today, so every in-process gate suite is unaffected.
     tier = _sandbox_tier()
+    if tier == "invalid":
+        return err_envelope(
+            ErrorCode.INTERNAL,
+            "unsupported LEAF_TOOL_SANDBOX_PROVIDER; execution refused",
+            retryable=False, tool=name, version=version, timing_ms=_ms())
     if tier != "off":
-        sandbox_fn = _run_in_sandbox_e2b if tier == "microvm" else _run_in_sandbox
-        kind, payload = sandbox_fn(local, intake, params)
+        if tier == "microvm":
+            kind, payload = _run_in_sandbox_e2b(
+                local, intake, params, tenant_id=tenant_id)
+        else:
+            kind, payload = _run_in_sandbox(local, intake, params)
         if kind == "tool_error":
             return err_envelope(ErrorCode.INTERNAL,
                                 f"tool {name!r} raised {payload}",

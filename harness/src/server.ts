@@ -48,6 +48,7 @@ import { GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import { DEFAULT_TENANT } from "./ports/index.js";
 import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent } from "./ports/index.js";
+import { authoredExecutionEnabled } from "./runtimeSafety.js";
 
 export { DEFAULT_TENANT };
 
@@ -378,6 +379,11 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
       }
 
       if (method === "POST" && path === "/author") {
+        if (!authoredExecutionEnabled()) {
+          return send(res, 403, {
+            error: { message: "tenant-authored execution is disabled" },
+          });
+        }
         const body = await readJsonBody(req);
         const tenant = tenantForRequest(req, body);
         const description = typeof body.description === "string" ? body.description : "";
