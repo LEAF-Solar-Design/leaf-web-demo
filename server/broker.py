@@ -229,10 +229,20 @@ def _conform_ledger_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     for key in ("engine_seconds", "usd_est"):
         val = entry.get(key)
         # Finite numbers only: NaN/Infinity would serialize as bare NaN/Infinity
-        # tokens — not valid JSON, so not a valid ledger line.
-        entry[key] = (float(val)
-                      if isinstance(val, (int, float)) and not isinstance(val, bool)
-                      and math.isfinite(val) else None)
+        # tokens — not valid JSON, so not a valid ledger line. float() (and
+        # math.isfinite) raise OverflowError on an int too large for a float
+        # (e.g. 10**400) — this runs in broker_run's `finally`, so it must
+        # NEVER raise: an oversized int conforms to null like any other
+        # unusable number.
+        num = None
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            try:
+                num = float(val)
+            except OverflowError:
+                num = None
+            if num is not None and not math.isfinite(num):
+                num = None
+        entry[key] = num
     return entry
 
 

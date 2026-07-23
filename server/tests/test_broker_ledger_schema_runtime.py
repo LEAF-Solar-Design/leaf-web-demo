@@ -108,25 +108,72 @@ def test_malformed_error_envelope_still_appends_string_status(ledgered_client, m
     assert line["status"] == "error"
 
 
-def test_non_finite_cost_numbers_are_nulled_not_serialized(ledgered_client, monkeypatch):
-    """A cost block carrying NaN/Infinity (e.g. APS_USD_PER_HR=nan upstream)
-    must never reach the ledger: bare NaN/Infinity tokens are not valid JSON.
-    Non-finite numbers conform to null; the line stays strictly parseable."""
+class _FakeLiveDa:
+    """Minimal stand-in satisfying broker's live-path guards: a real-looking
+    tool_activity_spec (non-empty script) and a run_tool returning an envelope
+    whose cost block carries unusable numbers."""
+
+    def __init__(self, cost):
+        self._cost = cost
+
+    def tool_activity_spec(self, _tool):
+        return {"settings": {"script": {"value": "(princ)"}}}
+
+    def run_tool(self, _local, tool, _params):
+        return {"ok": True, "tool": tool.get("name"), "version": "1.0.0",
+                "result": {}, "overlay": None, "timing_ms": 1, "error": None,
+                "degraded_mode": False, "cost": self._cost}
+
+
+def test_live_path_cost_copy_conforms_non_finite_and_oversized_numbers(
+        ledgered_client, monkeypatch, tmp_path):
+    """The LIVE branch is the only path that copies the envelope's cost block
+    into the ledger entry (mock runs are unmetered by design). Drive it with a
+    fake da whose cost carries 10**400 and NaN: float()/math.isfinite raise
+    OverflowError on the oversized int, and the append runs in broker_run's
+    `finally` — a raise there would replace the response AND drop the line.
+    Both numbers must conform to null and the line must stay strictly
+    parseable."""
     client, ledger = ledgered_client
-    monkeypatch.setattr(broker, "run_tool_dynamic", lambda *_a, **_k: {
-        "ok": True, "tool": "t", "version": "1.0.0", "result": {}, "overlay": None,
-        "timing_ms": 1, "error": None, "degraded_mode": False,
-        "cost": {"engine_seconds": float("inf"), "usd_est": float("nan")}})
+    store = tmp_path / "live-dwg"
+    store.mkdir()
+    (store / "rooftop_demo.dwg").write_bytes(b"dwg")
+    monkeypatch.setattr(broker, "DATA_DIR", store)
+    monkeypatch.setattr(broker, "_get_da", lambda: _FakeLiveDa(
+        {"engine_seconds": 10 ** 400, "usd_est": float("nan")}))
     client.post("/broker/run", json={
         "tenant_id": "t1",
         "tool": {"name": "t", "engine_op": "op", "params_schema": {"type": "object"}},
-        "params": {}, "dwg": "rooftop_demo", "aps_live": False})
+        "params": {}, "dwg": "rooftop_demo", "aps_live": True})
     raw = ledger.read_text(encoding="utf-8").splitlines()[-1]
     assert "NaN" not in raw and "Infinity" not in raw
     line = json.loads(raw)
     jsonschema.validate(line, SCHEMA)
     assert line["engine_seconds"] is None
     assert line["usd_est"] is None
+    # Not an early denial: the run must have reached the live execution branch
+    # (ok, or INTERNAL from strict response serialization of the bad cost) —
+    # otherwise the None fields above would be vacuously None.
+    assert line["status"] in ("ok", "INTERNAL")
+
+
+def test_ledger_append_chokepoint_never_raises_on_unusable_numbers(monkeypatch, tmp_path):
+    """_ledger_append runs in broker_run's `finally`: for 10**400 (OverflowError
+    from float()/isfinite), inf, and nan it must neither raise nor emit a bare
+    NaN/Infinity token — every unusable number conforms to null."""
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(broker, "LEDGER_PATH", ledger)
+    for bad in (10 ** 400, -(10 ** 400), float("inf"), float("nan")):
+        broker._ledger_append({
+            "ts": 1753222000.0, "tenant_id": "t1", "tool": "t", "engine_op": "op",
+            "aps_endpoint": "x", "aps_live": True,
+            "engine_seconds": bad, "usd_est": bad, "status": "ok"})
+    lines = [json.loads(raw) for raw in ledger.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 4
+    for line in lines:
+        jsonschema.validate(line, SCHEMA)
+        assert line["engine_seconds"] is None
+        assert line["usd_est"] is None
 
 
 def test_ok_line_validates_and_keeps_real_values(ledgered_client):
