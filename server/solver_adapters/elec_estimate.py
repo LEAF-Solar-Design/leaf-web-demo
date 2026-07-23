@@ -214,8 +214,18 @@ def _calculate(body: Dict[str, Any]) -> Dict[str, Any]:
     cold_voc = hot_vmp = continuous_current = ocpd_required = None
     if not _missing(module["voc"], coeff, inverter["design_min_temp_c"]):
         cold_voc = module["voc"] * (1.0 + coeff / 100.0 * (inverter["design_min_temp_c"] - 25.0))
+        # Fail closed on a non-physical correction: a real module's temperature-
+        # corrected Voc is always > 0. A pathological coefficient/temperature
+        # (e.g. an absurd beta magnitude, or a design "minimum" temperature that
+        # is not actually the coldest ambient) can drive the factor nonpositive,
+        # which would otherwise sail past a `<= max_dc_voltage` check as a false
+        # PASS. Drop it so the check reports insufficient_input instead.
+        if cold_voc <= 0:
+            cold_voc = None
     if not _missing(module["vmp"], coeff, inverter["design_max_temp_c"]):
         hot_vmp = module["vmp"] * (1.0 + coeff / 100.0 * (inverter["design_max_temp_c"] - 25.0))
+        if hot_vmp <= 0:
+            hot_vmp = None
     if module["isc"] is not None:
         continuous_current = module["isc"] * 1.25
         ocpd_required = module["isc"] * 1.25 * 1.25
