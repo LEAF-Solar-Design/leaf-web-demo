@@ -232,8 +232,14 @@ def test_confirmation_required_creates_approval_row_with_ttl(monkeypatch, turn_s
     assert approval["params"] == {"x": 1}
     assert approval["capability"] == "drawing.write"
     assert approval["rationale"] == "move a panel"
-    assert approval["kind"] == "run"
-    assert approval["payload"] == {"note": "confirm?"}
+    # Since the spine unification (census #12 chip 1) the row is created at
+    # proposed_run — race-free with the chip becoming client-visible — so its
+    # metadata comes from the PROPOSAL; confirmation_required's kind/payload
+    # stay on the transcript event (which is what UIs render), and its
+    # duplicate create is a swallowed no-op. No production code reads the
+    # row's kind/payload (consume uses tool/params/capability).
+    assert approval["kind"] == "run_capability"
+    assert approval["payload"] is None
     assert approval["decided"] is False
 
     ttl = approval["expires_at"] - approval["created_at"]

@@ -135,6 +135,32 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
         # existence leak to a caller who isn't the owning tenant.
         return _not_found(confirmation_id)
 
+    # Spine unification (census #12 chip 1): land the decision in the §18 gate
+    # store FIRST — the resume turn's gate consult redeems THAT args-bound
+    # record before any dispatch. Gate-first ordering is load-bearing: the
+    # session_store row below can only become decidable (and later consumable)
+    # AFTER the gate record is decided, so the stuck divergence "session row
+    # consumed / gate record still pending" (whose re-consult would re-propose
+    # the SAME already-consumed confirmation_id — an undeliverable chip) is
+    # unreachable. Outcomes tolerated: not_found (a pre-spine confirmation_id
+    # the gate never minted), already_decided (a retry after a partial earlier
+    # failure), expired (the gate auto-denied; the confirm path answers with
+    # its own expiry/deny downstream). A WRITE FAILURE aborts the request
+    # BEFORE anything is recorded — the click is safely retryable.
+    try:
+        if req.approved:
+            agent_gate.grant_approval(confirmation_id, by=str(tenant))
+        else:
+            agent_gate.deny_approval(confirmation_id, by=str(tenant))
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            ErrorCode.INTERNAL,
+            f"approval decision not recorded (gate store write failed: "
+            f"{type(exc).__name__}) — retry",
+            retryable=True,
+            status_code=503,
+        )
+
     outcome = session_store.decide_approval(confirmation_id, req.approved, by=str(tenant))
     if outcome == "not_found":
         return _not_found(confirmation_id)
@@ -147,19 +173,6 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
         )
 
     # outcome == "recorded"
-    # Spine unification (census #12 chip 1): land the decision in the §18 gate
-    # store too — the resume turn's gate consult redeems THAT args-bound record
-    # before any dispatch. not_found is normal (a pre-spine confirmation_id the
-    # gate never minted). A gate-store write failure leaves its record pending:
-    # the resume consult then answers awaiting_approval again (a fresh chip)
-    # instead of dispatching — degraded but fail-safe, never an unapproved run.
-    try:
-        if req.approved:
-            agent_gate.grant_approval(confirmation_id, by=str(tenant))
-        else:
-            agent_gate.deny_approval(confirmation_id, by=str(tenant))
-    except Exception:  # noqa: BLE001
-        pass
     session_store.append_event(
         approval["session_id"], approval["turn_id"], "confirmation_resolved",
         {"confirmation_id": confirmation_id, "approved": bool(req.approved), "by": str(tenant)},

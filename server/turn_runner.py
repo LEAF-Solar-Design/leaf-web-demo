@@ -317,6 +317,28 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                     cid = data.get("confirmation_id")
                     if cid:
                         proposals[cid] = data
+                        # Spine unification (census #12 chip 1): the mounted §18
+                        # engine proposes a write with proposed_run ONLY (no
+                        # confirmation_required follows), and the chip is
+                        # client-visible the moment the event above lands in the
+                        # store — so the tenant-facing approvals row is created
+                        # in the SAME iteration, before any click can race it.
+                        # Approval-row metadata comes from the proposal; the
+                        # legacy pair flow's confirmation_required (same cid)
+                        # keeps its kind/payload on the transcript EVENT, and
+                        # its duplicate create below stays a swallowed no-op.
+                        try:
+                            session_store.create_approval(
+                                confirmation_id=cid, session_id=session_id,
+                                tenant_id=tenant_id, turn_id=turn_id,
+                                tool=data.get("tool"), params=data.get("params"),
+                                capability=data.get("capability"),
+                                rationale=data.get("rationale"),
+                                kind="run_capability", payload=None,
+                                ttl_s=approval_ttl_s(),
+                            )
+                        except Exception:  # noqa: BLE001  duplicate confirmation_id etc.
+                            pass
                 elif ev_type == "confirmation_required":
                     cid = data.get("confirmation_id")
                     if cid:
@@ -333,36 +355,6 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                             pass
 
                 if ev_type in ("turn_complete", "error"):
-                    # Spine unification (census #12 chip 1): the mounted §18
-                    # engine proposes a write with proposed_run ONLY — no
-                    # confirmation_required follows (that event is for the
-                    # non-run confirmation kinds) — so any stashed proposal
-                    # without a row yet gets its tenant-facing approvals row
-                    # HERE, at the awaiting_approval turn end. The gate minted
-                    # the confirmation_id and holds its own args-bound pending
-                    # record; this row is what POST /api/agent/approvals/{id}
-                    # decides and /messages{confirm} consumes. Creating at the
-                    # terminal (not at proposed_run) keeps the legacy
-                    # proposed_run+confirmation_required pair flow byte-for-byte
-                    # (its row still carries confirmation_required's kind and
-                    # payload). The stream has ended before any human can click
-                    # the chip, so the row always exists before the decision.
-                    if ev_type == "turn_complete" and data.get("stop_reason") == "awaiting_approval":
-                        for cid, proposal in proposals.items():
-                            if session_store.get_approval(cid) is not None:
-                                continue
-                            try:
-                                session_store.create_approval(
-                                    confirmation_id=cid, session_id=session_id,
-                                    tenant_id=tenant_id, turn_id=turn_id,
-                                    tool=proposal.get("tool"), params=proposal.get("params"),
-                                    capability=proposal.get("capability"),
-                                    rationale=proposal.get("rationale"),
-                                    kind="run_capability", payload=None,
-                                    ttl_s=approval_ttl_s(),
-                                )
-                            except Exception:  # noqa: BLE001  race with a concurrent create
-                                pass
                     _end_once()  # already relayed above — just release the CAS
                     break
         except Exception as exc:  # noqa: BLE001  network drop / decode failure mid-stream

@@ -343,6 +343,39 @@ def test_decide_rejected_bridges_deny_into_gate_store(client, tmp_path, monkeypa
     assert gate_rec["denied"] is True
 
 
+def test_decide_gate_write_failure_aborts_before_recording_then_retry_succeeds(
+        client, tmp_path, monkeypatch):
+    """Gate-first ordering (review round 1 finding): a gate-store write failure
+    must abort the request BEFORE the session_store decision is recorded — the
+    click stays retryable and the stuck divergence 'session row consumed / gate
+    record pending' (which would re-propose an already-consumed id) can never
+    form."""
+    cid = _seed_both_stores(tmp_path, monkeypatch, "tenant-bridge-f")
+
+    def _boom(*_a, **_k):
+        raise OSError("gate store write failed")
+
+    orig = agent_gate.grant_approval
+    agent_gate.grant_approval = _boom
+    try:
+        r = client.post(f"/api/agent/approvals/{cid}",
+                        headers=_h("tenant-bridge-f"), json={"approved": True})
+    finally:
+        agent_gate.grant_approval = orig
+
+    assert r.status_code == 503, r.text
+    assert session_store.get_approval(cid)["decided"] is False  # nothing recorded
+    gate_rec = agent_gate.read_pending(cid)
+    assert gate_rec["granted"] is False and gate_rec["denied"] is False
+
+    # The retry lands both stores.
+    r2 = client.post(f"/api/agent/approvals/{cid}",
+                     headers=_h("tenant-bridge-f"), json={"approved": True})
+    assert r2.status_code == 200, r2.text
+    assert agent_gate.read_pending(cid)["granted"] is True
+    assert session_store.get_approval(cid)["decided"] is True
+
+
 def test_decide_without_gate_record_still_records(client, tmp_path, monkeypatch):
     """A sessions-wire-only confirmation_id (pre-spine turn) has no gate record:
     the bridge is a silent not_found and record-only behavior is unchanged."""
