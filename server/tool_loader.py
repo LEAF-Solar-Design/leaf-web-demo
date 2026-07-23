@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -37,6 +38,7 @@ from tool_validate import validate_envelope, validate_params
 SERVER_DIR = Path(__file__).resolve().parent
 AUTHORED_DIR = SERVER_DIR / "authored"
 BUILTIN_DIR = SERVER_DIR / "builtins"
+PLATFORM_PACKAGE_REGISTRY = SERVER_DIR.parent / "engine" / "registry.json"
 
 # Compat lookup used ONLY to resolve the pre-existing built-in ops to their
 # server/builtins/*.py file. This is NOT an authoritative dispatch table:
@@ -52,6 +54,36 @@ BUILTIN_OPS: Dict[str, str] = {
 }
 
 _MOD_CACHE: Dict[str, Any] = {}
+
+
+@lru_cache(maxsize=1)
+def _platform_builtin_package_ids() -> frozenset[Tuple[str, str, str]]:
+    """Execution identities owned by the immutable platform package registry.
+
+    A builtin-looking path is not provenance. Tenant and seed registries may
+    legitimately refer to ``server/builtins`` files, so production trust also
+    requires the package name and operation to come from the platform-owned
+    engine registry shipped in the image. Invalid or absent registry state
+    fails closed.
+    """
+    try:
+        raw = json.loads(PLATFORM_PACKAGE_REGISTRY.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return frozenset()
+    packages = raw.get("tools") if isinstance(raw, dict) else None
+    if not isinstance(packages, list):
+        return frozenset()
+
+    trusted = set()
+    for package in packages:
+        if not isinstance(package, dict):
+            continue
+        name = package.get("name")
+        engine_op = package.get("engine_op")
+        filename = BUILTIN_OPS.get(engine_op)
+        if isinstance(name, str) and isinstance(engine_op, str) and filename:
+            trusted.add((name, engine_op, filename))
+    return frozenset(trusted)
 
 
 def _load_module(path: Path):
@@ -546,10 +578,12 @@ def is_trusted_builtin_tool(tool: Dict[str, Any],
     """Return whether this run cannot load tenant-controlled Python in the broker.
 
     A tool with no local Python implementation uses APS or fails normally, so it
-    does not execute a file in this process. A local implementation is trusted
-    only when resolution lands inside the tracked ``server/builtins`` tree.
-    Resolution checks the requesting tenant first, so a tenant file that shadows
-    a builtin-looking path remains untrusted.
+    does not execute a file in this process. A local implementation is trusted only
+    when resolution lands inside ``server/builtins`` AND its execution identity is
+    declared by the platform-owned engine registry. Path location alone is not
+    package provenance: agent-authored or seed packages can point at that directory
+    without becoming platform builtins. Resolution checks the requesting tenant
+    first, so a tenant file that shadows a builtin-looking path remains untrusted.
     """
     local = resolve_local_file(tool, tenant_id)
     if local is None:
@@ -558,7 +592,11 @@ def is_trusted_builtin_tool(tool: Dict[str, Any],
         local.resolve().relative_to(BUILTIN_DIR.resolve())
     except (OSError, ValueError):
         return False
-    return True
+    name = tool.get("name")
+    engine_op = tool.get("engine_op")
+    if not isinstance(name, str) or not isinstance(engine_op, str):
+        return False
+    return (name, engine_op, local.name) in _platform_builtin_package_ids()
 
 
 def _needs_aps(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> bool:
