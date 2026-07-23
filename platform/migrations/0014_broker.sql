@@ -141,12 +141,11 @@ BEGIN
   RAISE EXCEPTION 'immutable broker usage ledger record'
     USING ERRCODE = '55000';
 END; $$ LANGUAGE plpgsql;
-DROP TRIGGER IF EXISTS broker_usage_ledger_immutable ON broker_usage_ledger;
-CREATE TRIGGER broker_usage_ledger_immutable
+-- CREATE OR REPLACE TRIGGER (PG14+) is idempotent without a DROP window in
+-- which the immutability guard is absent. The cluster is Aurora PG 16.8.
+CREATE OR REPLACE TRIGGER broker_usage_ledger_immutable
   BEFORE UPDATE OR DELETE ON broker_usage_ledger
   FOR EACH ROW EXECUTE FUNCTION leaf_reject_broker_ledger_mutation();
-DROP TRIGGER IF EXISTS broker_admission_resolution_audit_immutable
-  ON broker_admission_resolution_audit;
-CREATE TRIGGER broker_admission_resolution_audit_immutable
+CREATE OR REPLACE TRIGGER broker_admission_resolution_audit_immutable
   BEFORE UPDATE OR DELETE ON broker_admission_resolution_audit
   FOR EACH ROW EXECUTE FUNCTION leaf_reject_broker_ledger_mutation();
