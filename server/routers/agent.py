@@ -89,6 +89,8 @@ class GateRequest(BaseModel):
     tenant_id: str
     session_id: str
     turn_id: str
+    authority_session_id: Optional[str] = None
+    authority_turn_id: Optional[str] = None
     action: str
     args: Dict[str, Any] = {}
 
@@ -109,8 +111,10 @@ def internal_gate(req: GateRequest,
     # active turn before the harness can call this gate. This preserves
     # authority across the app-to-harness-to-app hop without trusting model
     # output. Non-session callers retain the broker-trusted fallback.
+    authority_session_id = req.authority_session_id or req.session_id
+    authority_turn_id = req.authority_turn_id or req.turn_id
     turn_tier = session_store.active_turn_tier(
-        req.session_id, req.turn_id, req.tenant_id)
+        authority_session_id, authority_turn_id, req.tenant_id)
     if turn_tier is not None:
         tier = entitlements.resolve_tier(
             deps.TenantContext(req.tenant_id, tier=turn_tier))

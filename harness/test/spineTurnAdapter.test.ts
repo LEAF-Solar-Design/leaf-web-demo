@@ -79,6 +79,11 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
     // Gate before the read, then the read through the back-edge client.
     expect(gate.checks.length).toBeGreaterThanOrEqual(1);
     expect(gate.checks[0].action).toBe("read_platform_state");
+    expect(gate.checks[0].ctx.authoritySessionId).toBe("app-session-1");
+    expect(gate.checks[0].ctx.authorityTurnId).toBe("app-turn-1");
+    // The harness loop retains its own ids for resume and confirmation binding.
+    expect(gate.checks[0].ctx.sessionId).not.toBe("app-session-1");
+    expect(gate.checks[0].ctx.turnId).not.toBe("app-turn-1");
     expect(appRun.methodLog).toContain("getDrawingState");
     expect(appRun.submitCalls.length).toBe(0);
 

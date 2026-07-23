@@ -120,7 +120,17 @@ export class SpineTurnAdapter implements ConverseRunner {
       {
         runner: this.ports.runnerFor(grant),
         appRun: this.ports.appRun,
-        gate: this.ports.gate,
+        // The loop owns separate durable session/turn ids for SDK resume and
+        // confirmation binding. Preserve the authenticated app wire ids as a
+        // second, explicit authority tuple for the app-side entitlement lookup.
+        gate: {
+          check: (action, args, ctx) =>
+            this.ports.gate.check(action, args, {
+              ...ctx,
+              authoritySessionId: input.session_id,
+              authorityTurnId: input.turn_id,
+            }),
+        },
         store: this.ports.store,
       },
       {

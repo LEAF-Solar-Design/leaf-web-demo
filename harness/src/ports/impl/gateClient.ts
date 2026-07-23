@@ -68,6 +68,12 @@ export class HttpGateClient implements GateClient {
           tenant_id: ctx.tenantId,
           session_id: ctx.sessionId,
           turn_id: ctx.turnId,
+          ...(ctx.authoritySessionId
+            ? { authority_session_id: ctx.authoritySessionId }
+            : {}),
+          ...(ctx.authorityTurnId
+            ? { authority_turn_id: ctx.authorityTurnId }
+            : {}),
           action,
           args,
         }),
