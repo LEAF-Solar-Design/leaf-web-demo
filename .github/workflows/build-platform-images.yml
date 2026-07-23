@@ -1,0 +1,97 @@
+name: Build platform images
+
+# ---------------------------------------------------------------------------
+# Builds the three leaf-platform production images (app / broker / harness)
+# from ONE commit and pushes all three to ECR at ONE tag: prod-<shortsha>.
+# The deploy workflow in LEAF-Solar-Design/leaf-automation-aws-terraform
+# refuses to deploy unless all three repos carry the tag, so a partial push
+# here can never reach production.
+#
+# Auto-build, MANUAL promote: every push to main builds and pushes images;
+# production deploys only happen when a human dispatches this workflow with
+# promote=true (or dispatches deploy-service-production.yml directly in the
+# terraform repo). Known gap, documented not skipped: leaf-platform has no
+# staging environment yet, so pre-promote validation = the merged commit's
+# gates plus the containerized smoke.
+#
+# Auth: OIDC via leaf-github-web-demo-ecr-push-role (AWS_ECR_PUSH_ROLE repo
+# secret). That role can push to exactly the three leaf-platform-* ECR
+# repositories and nothing else; it cannot touch ECS, IAM, or secrets.
+# TERRAFORM_REPO_TOKEN (PAT with actions:write on the terraform repo) is
+# only needed for the optional promote step.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      promote:
+        description: "Also trigger the production deploy in the terraform repo"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: build-platform-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-BuildPlatformImages-${{ github.run_id }}
+
+      - name: Login to ECR
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Build and push all three images at one tag
+        run: |
+          set -euo pipefail
+          TAG="prod-$(git rev-parse --short HEAD)"
+          echo "Building app/broker/harness at $TAG"
+          for n in app broker harness; do
+            docker build -f "deploy/Dockerfile.$n" -t "$ECR_REGISTRY/leaf-platform-$n:$TAG" .
+          done
+          for n in app broker harness; do
+            docker push "$ECR_REGISTRY/leaf-platform-$n:$TAG"
+          done
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          {
+            echo "## Platform images pushed"
+            echo ""
+            echo "Tag: \`$TAG\` (all three of leaf-platform-app / broker / harness)"
+            echo ""
+            echo "Deploy via the terraform repo: deploy-service-production.yml with service=leaf-platform, image_tag=$TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trigger production deploy (manual opt-in only)
+        if: github.event_name == 'workflow_dispatch' && inputs.promote
+        env:
+          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh workflow run deploy-service-production.yml \
+            -R LEAF-Solar-Design/leaf-automation-aws-terraform \
+            -f service=leaf-platform \
+            -f image_tag="$TAG"
+          echo "Dispatched deploy-service-production.yml for leaf-platform at $TAG"
