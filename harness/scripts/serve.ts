@@ -42,6 +42,7 @@ import type { Server } from "node:http";
 import { join } from "node:path";
 
 import { createHarness } from "../src/server.js";
+import { redactTokens } from "../src/redact.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { HarnessPorts } from "../src/ports/index.js";
 import type { ConverseRunner, ConverseTurnInput, HarnessTurnEvent } from "../src/ports/converse.js";
@@ -68,9 +69,9 @@ const TENANT_FIXTURE =
 
 // Defense in depth: redact any token-shaped value from anything we log. We never
 // read or print the grant ourselves, but a stray error string must never leak one.
-const TOKENISH = /\b(sk-ant-[A-Za-z0-9_-]{6,}|[A-Za-z0-9_-]{40,})\b/g;
+// One shared pattern for every harness logging site: src/redact.ts.
 function log(msg: string): void {
-  process.stderr.write(msg.replace(TOKENISH, "[REDACTED]") + "\n");
+  process.stderr.write(redactTokens(msg) + "\n");
 }
 
 /** Reject anything but a single, traversal-free path component (mirrors the Python

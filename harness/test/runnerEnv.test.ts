@@ -35,6 +35,12 @@ function pollutedBase(): NodeJS.ProcessEnv {
     LEAF_APP_DISPATCH_SECRET: "INTERNAL-dispatch-secret-should-be-removed",
     LEAF_BROKER_SECRET: "INTERNAL-broker-secret-should-be-removed",
     E2B_API_KEY: "INTERNAL-e2b-key-should-be-removed",
+    // R3: the sweep must be by key-name PATTERN, not a fixed list — these four
+    // were reachable under the first fix's denylist.
+    LEAF_OPS_SECRET: "INTERNAL-ops-secret-should-be-removed",
+    LEAF_GUEST_SECRET: "INTERNAL-guest-secret-should-be-removed",
+    LEAF_CALLBACK_SECRET: "INTERNAL-callback-secret-should-be-removed",
+    PLATFORM_ADMIN_TOKEN: "INTERNAL-admin-token-should-be-removed",
   };
 }
 
@@ -55,6 +61,11 @@ describe("buildScrubbedEnv — grant kind drives the injected credential var", (
     expect(env.LEAF_APP_DISPATCH_SECRET).toBeUndefined();
     expect(env.LEAF_BROKER_SECRET).toBeUndefined();
     expect(env.E2B_API_KEY).toBeUndefined();
+    // R3: pattern sweep catches secret-like keys NOT on any fixed list
+    expect(env.LEAF_OPS_SECRET).toBeUndefined();
+    expect(env.LEAF_GUEST_SECRET).toBeUndefined();
+    expect(env.LEAF_CALLBACK_SECRET).toBeUndefined();
+    expect(env.PLATFORM_ADMIN_TOKEN).toBeUndefined();
     // untouched, non-credential env survives
     expect(env.PATH).toBe("/usr/bin");
   });

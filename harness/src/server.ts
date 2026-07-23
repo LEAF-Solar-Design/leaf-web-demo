@@ -43,6 +43,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
+import { redactTokens } from "./redact.js";
 import { GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import { DEFAULT_TENANT } from "./ports/index.js";
@@ -134,13 +135,6 @@ function harnessAuthDenial(
     return { error: { message: "harness auth required", code: "harness_auth_required" } };
   }
   return null;
-}
-
-// Defense in depth (mirrors serve.ts): no token-shaped string ever reaches stderr,
-// even inside a stack trace thrown from arbitrary code (sol-critic F5, 2026-07-22).
-const TOKENISH = /\b(sk-ant-[A-Za-z0-9_-]{6,}|[A-Za-z0-9_-]{40,})\b/g;
-function redactTokens(s: string): string {
-  return s.replace(TOKENISH, "[REDACTED]");
 }
 
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {

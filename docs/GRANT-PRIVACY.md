@@ -49,11 +49,14 @@ containerized smoke `scripts/harness-container-smoke.py`).
 
 The credential is used only for your own tenant's work: authoring a tool at
 design time, or driving your conversational session. For each such request the
-harness builds a scrubbed child environment: every ambient Anthropic identity
-AND every platform-internal secret (including the app→harness hop secret) is
-removed, and exactly one credential variable is set (`CLAUDE_CODE_OAUTH_TOKEN`
-or `ANTHROPIC_API_KEY`). Non-secret process environment (paths, locale) passes
-through so the SDK can run (`buildScrubbedEnv`, pinned by `runnerEnv.test.ts`).
+harness builds a scrubbed child environment: the known ambient Anthropic
+identities are removed, every environment key whose NAME looks
+credential-bearing (secret / token / key / password / credential patterns) is
+removed wholesale, and exactly one credential variable is then set
+(`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`). The sweep is by key-name
+pattern, not a fixed list, so a newly added platform secret is stripped by
+default. Non-secret process environment (paths, locale) passes through so the
+SDK can run (`envScrub.ts` + `buildScrubbedEnv`, pinned by `runnerEnv.test.ts`).
 The only network egress on that path is Anthropic, through the official Agent
 SDK (`agentSdkRunner.ts`). Registered tools run with zero LLM involvement, so
 normal tool execution never touches the credential at all (HARNESS-CONTRACT
@@ -72,14 +75,19 @@ Anthropic agreement), not a member's personal OAuth token.
 ## What we log
 
 Nothing that contains the credential. No designed code path places a
-credential in a log or error message, and the two places that render arbitrary
-text — the serve status log (`serve.ts`) and the request-error line
-(`server.ts`) — redact token-shaped strings before writing, as defense in
-depth. The repo/git worker logs only repository diagnostics; the credential
-never enters its dataflow. The internal hop secret is env-only and never
-logged. The containerized smoke asserts this end to end: after a full link,
-author, restart, and unlink cycle, neither the credential nor the hop secret
-appears anywhere in the container logs.
+credential in a log or error message, and every harness logging site that
+renders arbitrary text — the serve status log, the request-error line, and the
+git-worker diagnostics — routes through one shared token redactor
+(`src/redact.ts`) before writing, as defense in depth. Git itself cannot see a
+credential either: both the boot-time git worker and the in-process git
+fallback run on the same scrubbed environment as the SDK child, and the author
+session's filesystem tool refuses any path under `.git/`, so model-authored
+repository content cannot install a git hook or filter that would run with
+access to secrets during the register commit (`fsTenantRepo.test.ts`). The
+internal hop secret is env-only and never logged. The containerized smoke
+asserts the end result: after a full link, author, restart, and unlink cycle,
+neither the credential nor the hop secret appears anywhere in the container
+logs.
 
 We do keep usage telemetry (token counts and estimated cost from each SDK
 response). Telemetry never includes credentials.

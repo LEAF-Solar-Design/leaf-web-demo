@@ -28,6 +28,13 @@ export class FsTenantRepo implements FsTenantRepoTool {
     if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
       throw new Error(`fsTenantRepo: path escapes the tenant repo (${relPath})`);
     }
+    // The .git directory is OFF-LIMITS to the author session (sol-critic R5): a
+    // writable .git/config or .git/hooks would let model-authored repo content
+    // install filters/hooks that run during the register commit with repo access.
+    // Reads are blocked too — the session has no business inside git internals.
+    if (rel.split(sep).some((seg) => seg.toLowerCase() === ".git")) {
+      throw new Error(`fsTenantRepo: the .git directory is off-limits (${relPath})`);
+    }
     return abs;
   }
 

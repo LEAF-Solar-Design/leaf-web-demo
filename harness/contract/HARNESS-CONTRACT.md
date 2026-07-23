@@ -48,11 +48,12 @@ timing-safe compare; FAIL-CLOSED when enabled with no secret configured).
 | GET | `/grants/{tenantId}` | — | `200 { linked, linked_at, kind? }` — never the token |
 | DELETE | `/grants/{tenantId}` | — | `200` = the store's post-remove `status()` (for the demo tenant a documented §16 env/file fallback can still report `linked:true`); never the token |
 
-- `POST /author` build response is **exactly** `{ tool, code, preview }` where
-  `tool` validates against **CONTRACT §2** (name kebab-case, version, description,
-  kind, engine_op, params JSON-Schema, returns, capabilities, provenance) and also
-  carries the hot-script **SPEC §7.1** `tool.json` fields (`entry`, `timeout_ms`,
-  `idempotent`, `review`).
+- `POST /author` build response is `{ tool, code, preview }` plus the ADDITIVE,
+  absent-safe `telemetry?` (A1 — present only when the runner metered the build;
+  see the route table above) where `tool` validates against **CONTRACT §2** (name
+  kebab-case, version, description, kind, engine_op, params JSON-Schema, returns,
+  capabilities, provenance) and also carries the hot-script **SPEC §7.1**
+  `tool.json` fields (`entry`, `timeout_ms`, `idempotent`, `review`).
 - Errors are JSON `{ error: { message, diagnostics? } }` with a sane HTTP status
   (400 bad request, 404 unknown tool, 422 tool failed validation, 500 internal).
 
