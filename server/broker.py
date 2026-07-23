@@ -17,6 +17,8 @@ Env:
   BROKER_LEDGER   (default server/broker_ledger.jsonl)
   BROKER_TENANTS  (default server/broker_tenants.json)
   APS_CRED        (passed through to da/client.py; only read on live runs)
+  LEAF_RUNTIME_ENV (set to production for the fail-closed deployment posture)
+  LEAF_AUTHORED_EXECUTION (production default 0; 1 requires LEAF_SANDBOX)
 """
 from __future__ import annotations
 
@@ -66,7 +68,7 @@ from envelopes import (  # noqa: E402
     ok_envelope,
     with_envelope_fields,
 )
-from tool_loader import run_tool_dynamic  # noqa: E402
+from tool_loader import is_trusted_builtin_tool, run_tool_dynamic  # noqa: E402
 from tool_validate import validate_params  # noqa: E402
 import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 
@@ -464,6 +466,42 @@ def _run_quota_preflight(tenant_id: str, tier: str, tool: Dict[str, Any]):
 # --------------------------------------------------------------------------- #
 app = FastAPI(title="Leaf APS broker v1", version="1.0.0")
 install_error_handlers(app)
+
+
+# --------------------------------------------------------------------------- #
+# Production authored-execution containment.
+#
+# LEAF_RUNTIME_ENV is an explicit deployment posture. In production, authored
+# execution defaults OFF and can turn on only when both the operator flag and
+# an approved sandbox tier are present. Local/demo behavior stays unchanged.
+# --------------------------------------------------------------------------- #
+def _production_runtime() -> bool:
+    return os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower() == "production"
+
+
+def _authored_execution_enabled() -> bool:
+    raw = os.environ.get("LEAF_AUTHORED_EXECUTION")
+    if raw is None:
+        return not _production_runtime()
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _sandbox_configured() -> bool:
+    return os.environ.get("LEAF_SANDBOX", "").strip().lower() in (
+        "e2b",
+        "e2b-microvm",
+    )
+
+
+def validate_runtime_safety() -> None:
+    """Reject a production boot that enables authored code without isolation."""
+    if _production_runtime() and _authored_execution_enabled() and not _sandbox_configured():
+        raise RuntimeError(
+            "production authored execution requires LEAF_SANDBOX=e2b or e2b-microvm"
+        )
+
+
+app.add_event_handler("startup", validate_runtime_safety)
 
 
 # --------------------------------------------------------------------------- #
@@ -930,6 +968,20 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     if not tool.get("name"):
         return (err_envelope(ErrorCode.BAD_PARAMS, "tool package missing 'name'", retryable=False),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+
+    # Phase 0 production gate: tracked builtins and APS-only tools remain
+    # available, but a tenant-controlled Python file cannot load in this
+    # credential-bearing process. Enabling authored execution without a
+    # sandbox is rejected here as defense in depth even if startup validation
+    # was bypassed by a direct function call.
+    if _production_runtime() and not is_trusted_builtin_tool(tool, req.tenant_id):
+        if not _authored_execution_enabled() or not _sandbox_configured():
+            return (err_envelope(
+                ErrorCode.TENANT_DISABLED,
+                "tenant-authored execution is disabled in production",
+                retryable=False,
+                tool=tool.get("name"),
+            ), DEFAULT_HTTP_STATUS[ErrorCode.TENANT_DISABLED])
 
     # 1b) F10: re-check the tenant's TIER entitlement at the broker (defense-in-depth).
     #     A direct broker call must not bypass the app-side tier gate — a write tool or

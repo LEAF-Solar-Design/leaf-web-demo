@@ -267,6 +267,9 @@ def build_suites() -> List[Suite]:
         # gates ride the same lane.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
               SERVER, _py_pytest("tests/test_broker_boundary.py"), 43),
+        Suite("server-authored-execution-live-gate",
+              "server tests/test_authored_execution_live_gate.py", "pytest",
+              SERVER, _py_pytest("tests/test_authored_execution_live_gate.py"), 9),
         Suite("server-no-da-imports", "server tests/test_no_da_imports_static.py", "pytest",
               SERVER, _py_pytest("tests/test_no_da_imports_static.py"), 8),
         Suite("server-broker-ledger-schema", "server tests/test_broker_ledger_schema_static.py",
