@@ -97,8 +97,12 @@ docker compose exec app sh -c 'test -f /data/state/agent.disabled && echo still-
 Re-run the `gate` call above: still `deny` / `kill_switch_active`. Lift it:
 
 ```bash
-docker compose exec app rm /data/state/agent.disabled
+docker compose exec app sh -c 'rm /data/state/agent.disabled'
 ```
+
+(The `sh -c` wrapper is deliberate on every in-container path in this runbook:
+a bare `/data/...` argument gets mangled by MSYS path conversion when the
+operator drives compose from Git Bash on Windows.)
 
 Re-run the `gate` call: `"decision":"allow"`. Done.
 
@@ -246,5 +250,5 @@ only; ledger = per-turn metering):
 
 ```bash
 docker compose exec app sh -c 'tail -n 5 /data/state/agent_audit.jsonl'
-docker compose exec app sh -c 'tail -n 5 /data/state/agent_ledger.jsonl'
+docker compose exec app sh -c 'tail -n 5 /data/state/agent_ledger.jsonl 2>/dev/null || echo "(no turns metered yet: the gate writes the audit; only completed turns write the ledger)"'
 ```
