@@ -31,16 +31,12 @@ def main() -> None:
     assert "fail-fast: false" in text
     assert "needs: [prepare, build]" in text
 
-    # Each matrix entry reads and publishes only its own ECR cache tag.
-    cache_ref = (
-        "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache"
-    )
-    assert f"cache-from: type=registry,ref={cache_ref}" in text
-    assert (
-        f"cache-to: type=registry,ref={cache_ref},mode=max,"
-        "image-manifest=true,oci-mediatypes=true"
-    ) in text
-    assert text.count(":buildcache") == 2
+    # Each matrix entry uses an isolated GitHub Actions cache scope. ECR tags
+    # are immutable, so a reusable registry `buildcache` tag is forbidden.
+    cache_scope = "leaf-platform-${{ matrix.image }}"
+    assert f"cache-from: type=gha,scope={cache_scope}" in text
+    assert f"cache-to: type=gha,scope={cache_scope},mode=max" in text
+    assert ":buildcache" not in text
 
     # Promotion depends on the final all-three ECR existence check, not merely
     # on one successful image push.
