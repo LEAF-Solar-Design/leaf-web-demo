@@ -1,4 +1,4 @@
-"""Every engine-registry tool must emit a non-empty live Activity script.
+"""Every live-Activity engine-registry tool must emit a non-empty script.
 
 Follow-up to the leaf-web-demo PR #14 (round-2) review finding (2026-07-22):
 engine/registry.json declared its `.lsp` `script` paths as `tools/<name>.lsp`
@@ -42,15 +42,28 @@ def _registry_tools():
     return tools
 
 
+def _live_activity_tools():
+    """Return registry tools that use the Design Automation Activity path.
+
+    ``canonical_only`` identifies a solver that runs through the canonical
+    worker rather than a live Activity. This preserves ADOPTION.md section 3's
+    distinct real-optimizer contract without requiring it to carry a LISP
+    script that it cannot use.
+    """
+    return [tool for tool in _registry_tools() if not tool.get("canonical_only")]
+
+
 def _emitted_script(da_mod, tool):
     spec = da_mod.tool_activity_spec(tool)
     script = ((spec or {}).get("settings") or {}).get("script") or {}
     return script.get("value")
 
 
-def test_every_engine_registry_tool_emits_a_nonempty_live_script():
+def test_every_live_activity_engine_registry_tool_emits_a_nonempty_script():
     da_mod = _load_real_da_client()
-    empty = [t.get("name") for t in _registry_tools()
+    live_tools = _live_activity_tools()
+    assert live_tools, "expected at least one engine-registry live Activity tool"
+    empty = [t.get("name") for t in live_tools
              if not str(_emitted_script(da_mod, t) or "").strip()]
     assert not empty, (
         f"engine-registry tools emitting an EMPTY live Activity script: {empty} "
