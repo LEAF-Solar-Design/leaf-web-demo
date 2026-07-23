@@ -57,30 +57,44 @@ def test_cold_voc_fails_against_max_dc_voltage_not_higher_mppt_maximum():
     assert _item(result, "MPPT-COLD-VOC")["status"] == "pass"
 
 
-def test_nonphysical_negative_cold_voc_from_garbage_coefficient_fails_closed_not_pass():
-    # A pathological coefficient/temperature that drives the correction factor
-    # nonpositive must NOT sail past a `<= max_dc_voltage` check as a false PASS.
+def test_garbage_large_coefficient_is_rejected_at_input_validation():
+    # A magnitude beyond ~1.0 %/degC is non-physical; reject before any calc so
+    # it cannot produce a small-positive garbage voltage that passes a limit.
     candidate = copy.deepcopy(VALID_INPUT)
-    candidate["module"]["temperature_coefficient_pct_per_c"] = -10.0
-    candidate["inverter"]["design_min_temp_c"] = 40.0  # not the coldest ambient; produces factor < 0
-    candidate["inverter"]["max_dc_voltage"] = 1000
-    result = elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
-    cold = _item(result, "NEC-690.7-COLD-VOC")
-    assert cold["status"] == "insufficient_input"  # fail closed, never "pass" on a negative voltage
-    assert cold["status"] != "pass"
+    candidate["module"]["temperature_coefficient_pct_per_c"] = -5.0
+    with pytest.raises(ValueError, match="non-physical"):
+        elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
 
 
-def test_solaredge_nonphysical_cold_voc_also_fails_closed():
+def test_design_min_temp_above_stc_is_rejected():
+    # A "minimum" temperature above STC under-estimates cold Voc -> false pass.
     candidate = copy.deepcopy(VALID_INPUT)
-    candidate["inverter"]["architecture"] = "solaredge"
-    candidate["inverter"]["topology"] = None  # solaredge uses per-optimizer limits, not central topology
-    candidate["inverter"]["optimizer_max_input_voltage"] = 60
-    candidate["module"]["temperature_coefficient_pct_per_c"] = -10.0
     candidate["inverter"]["design_min_temp_c"] = 40.0
+    with pytest.raises(ValueError, match="design_min_temp_c"):
+        elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
+
+
+def test_design_max_temp_below_stc_is_rejected():
+    candidate = copy.deepcopy(VALID_INPUT)
+    candidate["inverter"]["design_max_temp_c"] = 10.0
+    with pytest.raises(ValueError, match="design_max_temp_c"):
+        elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
+
+
+def test_negative_module_voc_is_rejected():
+    candidate = copy.deepcopy(VALID_INPUT)
+    candidate["module"]["voc"] = -50
+    with pytest.raises(ValueError):
+        elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
+
+
+def test_legitimate_extreme_cold_still_evaluates_not_rejected():
+    # A genuinely cold Tmin (-40C) with a real coefficient must evaluate to
+    # pass/fail, never be over-rejected by the new bounds.
+    candidate = copy.deepcopy(VALID_INPUT)
+    candidate["inverter"]["design_min_temp_c"] = -40.0
     result = elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
-    voc = _item(result, "NEC-690.7-VOC-COLD-OPTIMIZER")
-    assert voc["status"] in {"insufficient_input", "requires_engineer_review"}
-    assert voc["status"] != "pass"
+    assert _item(result, "NEC-690.7-COLD-VOC")["status"] in {"pass", "fail"}
 
 
 def test_hot_vmp_exact_mppt_minimum_is_a_pass_boundary():
