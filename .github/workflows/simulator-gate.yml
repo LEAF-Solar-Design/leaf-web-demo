@@ -1,0 +1,71 @@
+name: Simulator gate
+
+on:
+  pull_request:
+    paths:
+      - 'platform/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Replay committed gold set
+        id: replay
+        continue-on-error: true
+        run: python platform/simgate/run.py > simgate-report.json
+
+      - name: Post replay report
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        env:
+          REPORT_PATH: simgate-report.json
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- simulator-gate-report -->';
+            let report = { ok: false, error: 'runner did not emit a report' };
+            try {
+              report = JSON.parse(fs.readFileSync(process.env.REPORT_PATH, 'utf8'));
+            } catch (error) {
+              report.error = `could not read report: ${error.message}`;
+            }
+            const counts = ['total', 'matched', 'diverged', 'skipped']
+              .filter((name) => Number.isInteger(report[name]))
+              .map((name) => `${name}: ${report[name]}`)
+              .join(', ');
+            const result = report.ok ? 'PASS' : 'FAIL';
+            const body = `${marker}\n## Simulator gate: ${result}\n\n${counts || report.error}`;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+            });
+            const existing = comments.find((comment) => comment.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body,
+              });
+            }
+
+      - name: Enforce replay result
+        if: steps.replay.outcome == 'failure'
+        run: exit 1

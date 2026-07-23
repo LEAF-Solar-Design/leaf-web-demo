@@ -1,0 +1,63 @@
+[
+  {
+    "expected_digest": "db73ae3a2a79cd98afb3b8f1c58428d67b1dc4740a66f86f0124920108aa232f",
+    "id": "canonical-order",
+    "payload": {
+      "a": {
+        "first": null,
+        "second": false
+      },
+      "reference_m": 0.12345,
+      "z": [
+        3,
+        2,
+        1
+      ]
+    }
+  },
+  {
+    "expected_digest": "7218aefb08a4e956eea619f9c8773421e56378c726442ad797b26b45d66735ca",
+    "id": "geometry-grid",
+    "payload": {
+      "coordinates_m": [
+        [
+          4.9e-05,
+          -5.1e-05,
+          1.23456
+        ],
+        [
+          12.30004,
+          0.0,
+          -4.56785
+        ]
+      ],
+      "labels": [
+        "north",
+        "array-a"
+      ],
+      "metadata": {
+        "active": true,
+        "count": 2
+      }
+    }
+  },
+  {
+    "expected_digest": "9b3c787db88d632238e55b8cdb4e2a5c90667eb2a1efa6dc2c47706c6ab2347e",
+    "id": "nested-configuration",
+    "payload": {
+      "nested": {
+        "limits": {
+          "max_kw": 8.75,
+          "min_kw": 0.25
+        },
+        "mode": "optimize"
+      },
+      "string_count": 3,
+      "targets": [
+        1.5,
+        2.00004,
+        2.00005
+      ]
+    }
+  }
+]
