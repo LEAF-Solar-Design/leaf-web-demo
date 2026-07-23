@@ -36,8 +36,11 @@ const INTERNAL_FLAG_KEYS = ["LEAF_HARNESS_AUTH"];
  *  matches e.g. LEAF_AUTHOR_HARNESS_URL — intentionally accepted: no child this
  *  harness spawns has any use for those either (round-3 additions: AUTH, JWT,
  *  PASSWD — DOCKER_AUTH_CONFIG / NPM_CONFIG__AUTH / *_JWT survived the first
- *  pattern). */
-const SECRETLIKE_KEY_RE = /(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|APIKEY|API_KEY|_KEY$|AUTH|JWT)/i;
+ *  pattern). PAT is matched only as a whole underscore-delimited segment
+ *  (round-4: GITHUB_PAT / AZURE_DEVOPS_EXT_PAT survived) so PATH, PATTERN,
+ *  and *_PATH keys stay untouched. */
+const SECRETLIKE_KEY_RE =
+  /(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|APIKEY|API_KEY|_KEY$|AUTH|JWT|(^|_)PAT(_|$))/i;
 
 /** Scrubbed copy of `base`: known keys + every secret-like key removed. */
 export function scrubSecrets(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

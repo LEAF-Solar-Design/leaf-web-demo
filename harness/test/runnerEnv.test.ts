@@ -45,6 +45,11 @@ function pollutedBase(): NodeJS.ProcessEnv {
     DOCKER_AUTH_CONFIG: "CRED-docker-auth-should-be-removed",
     NPM_CONFIG__AUTH: "CRED-npm-auth-should-be-removed",
     LEAF_ADMIN_JWT: "CRED-admin-jwt-should-be-removed",
+    // Round-4: PAT (personal access token) as an underscore-delimited segment.
+    GITHUB_PAT: "CRED-github-pat-should-be-removed",
+    AZURE_DEVOPS_EXT_PAT: "CRED-azdo-pat-should-be-removed",
+    // PAT must NOT over-match PATH-like names (PATH itself is pinned below).
+    LEAF_DATA_PATH: "/var/leaf/data",
   };
 }
 
@@ -74,8 +79,12 @@ describe("buildScrubbedEnv — grant kind drives the injected credential var", (
     expect(env.DOCKER_AUTH_CONFIG).toBeUndefined();
     expect(env.NPM_CONFIG__AUTH).toBeUndefined();
     expect(env.LEAF_ADMIN_JWT).toBeUndefined();
-    // untouched, non-credential env survives
+    // Round-4: PAT-named carriers are swept as whole segments
+    expect(env.GITHUB_PAT).toBeUndefined();
+    expect(env.AZURE_DEVOPS_EXT_PAT).toBeUndefined();
+    // untouched, non-credential env survives — and PAT does not eat PATH-like keys
     expect(env.PATH).toBe("/usr/bin");
+    expect(env.LEAF_DATA_PATH).toBe("/var/leaf/data");
   });
 
   it("oauth grant -> CLAUDE_CODE_OAUTH_TOKEN set; ANTHROPIC_API_KEY absent", () => {
