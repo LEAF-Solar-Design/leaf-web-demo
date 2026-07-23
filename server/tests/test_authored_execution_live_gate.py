@@ -1,6 +1,7 @@
 """Wave 0 fail-closed gate for tenant-authored broker execution."""
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -8,6 +9,11 @@ from fastapi.testclient import TestClient
 
 import broker
 import tool_loader
+
+
+def _package(path, name: str) -> dict:
+    tools = json.loads(path.read_text(encoding="utf-8"))["tools"]
+    return next(tool for tool in tools if tool["name"] == name)
 
 
 def _request(tool: dict) -> broker.BrokerRunRequest:
@@ -66,16 +72,43 @@ def test_production_keeps_tracked_builtin_available(monkeypatch):
     monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "0")
     monkeypatch.delenv("LEAF_SANDBOX", raising=False)
 
-    env, status = _execute(monkeypatch, {
-        "name": "count-by-layer",
-        "engine_op": "count_by_layer",
-        "params": {"type": "object", "properties": {}},
-        "capabilities": ["drawing.read"],
-    })
+    tool = _package(
+        tool_loader.SERVER_DIR.parent / "engine" / "registry.json",
+        "measure-panel-area",
+    )
+    assert tool_loader.is_trusted_builtin_tool(tool, "wave0-tenant") is True
+    env, status = _execute(monkeypatch, tool)
 
     assert status == 200
     assert env["ok"] is True
-    assert env["result"]["counts"]["Panels"] == 2345
+    assert env["result"]["total_area"] == pytest.approx(7015420.07)
+
+
+def test_production_denies_agent_seed_that_only_resolves_to_builtins(
+        monkeypatch):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "0")
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+
+    tool = _package(tool_loader.SERVER_DIR / "write_tools.json", "delete-marked-panel")
+    assert tool_loader.resolve_local_file(tool, "wave0-tenant") == (
+        tool_loader.BUILTIN_DIR / "delete_marked_panel.py"
+    ).resolve()
+
+    called = False
+
+    def forbidden_write(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("untrusted write package reached execution")
+
+    monkeypatch.setattr(broker.write_loop, "run_write_mock", forbidden_write)
+    env, status = _execute(monkeypatch, tool)
+
+    assert tool_loader.is_trusted_builtin_tool(tool, "wave0-tenant") is False
+    assert status == 403
+    assert env["error"]["error_code"] == "TENANT_DISABLED"
+    assert called is False
 
 
 def test_local_demo_behavior_remains_enabled(monkeypatch):
