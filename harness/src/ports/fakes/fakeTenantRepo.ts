@@ -10,10 +10,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { HarnessIdentity, TenantRepo, TenantRepoProvider } from "../index.js";
+import type { HarnessIdentity, TenantBareRepo, TenantRepo, TenantRepoProvider } from "../index.js";
 
 const SEED_IDENTITY: HarnessIdentity = {
   name: "fixture-seed",
@@ -51,6 +51,7 @@ export class FakeTenantRepoProvider implements TenantRepoProvider {
   /** The most recent checkout (handy for post-POST assertions in tests). */
   lastCheckout: FakeTenantRepo | null = null;
   readonly checkouts: FakeTenantRepo[] = [];
+  private readonly bareRepos = new Map<string, TenantBareRepo>();
 
   constructor(private readonly fixtureDir: string) {
     this.fixtureDir = resolve(fixtureDir);
@@ -65,6 +66,27 @@ export class FakeTenantRepoProvider implements TenantRepoProvider {
     const repo = new FakeTenantRepo(dir);
     this.lastCheckout = repo;
     this.checkouts.push(repo);
+    return repo;
+  }
+
+  /** Materialize one real bare repository per tenant for lifecycle tests. */
+  async bare(tenantId: string): Promise<TenantBareRepo> {
+    const existing = this.bareRepos.get(tenantId);
+    if (existing) return existing;
+
+    const root = mkdtempSync(join(tmpdir(), `leaf-tenant-bare-${tenantId}-`));
+    const seed = join(root, "seed");
+    const dir = join(root, "tenant.git");
+    mkdirSync(seed, { recursive: true });
+    cpSync(this.fixtureDir, seed, { recursive: true });
+    git(seed, ["init", "-q"]);
+    git(seed, ["add", "-A"]);
+    git(seed, ["commit", "-q", "-m", "seed: pristine tenant fixture"]);
+    git(root, ["init", "--bare", dir]);
+    git(seed, ["remote", "add", "origin", dir]);
+    git(seed, ["push", "origin", "HEAD:refs/heads/main"]);
+    const repo = { dir };
+    this.bareRepos.set(tenantId, repo);
     return repo;
   }
 }

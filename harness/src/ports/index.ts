@@ -229,9 +229,43 @@ export interface TenantRepo {
   commit(message: string, identity: HarnessIdentity): Promise<{ commit: string }>;
 }
 
+/** A bare tenant repository used only for isolated customization change sets. */
+export interface TenantBareRepo {
+  /** Absolute path to a bare Git directory. Never a live checkout. */
+  readonly dir: string;
+}
+
 export interface TenantRepoProvider {
   /** Provide a checkout of the tenant's repo (git working copy + commit()). */
   checkout(tenantId: string): Promise<TenantRepo>;
+  /**
+   * Provide a bare repository for the staged customization lifecycle. Legacy
+   * providers may omit it, but live stage and publish fail closed without it.
+   */
+  bare?(tenantId: string): Promise<TenantBareRepo>;
+}
+
+/** Immutable fields bound into the leaf.customization.v1 staged receipt. */
+export interface StagedCustomizationReceipt {
+  readonly contract: "leaf.customization.v1";
+  readonly tenant_id: string;
+  readonly change_set_id: string;
+  readonly state: "staged";
+  readonly base_commit: string;
+  readonly staged_commit: string;
+  readonly catalog_digest: string;
+  readonly platform_release: string;
+  readonly workspace_contract_digest: string;
+  readonly idempotency_key: string;
+}
+
+/**
+ * Trusted durable coordination boundary. Implementations own change-set state,
+ * approval, idempotency, and audit. The model is never granted this port.
+ */
+export interface CustomizationCoordination {
+  recordStaged(receipt: StagedCustomizationReceipt): Promise<void>;
+  authorizePublish(receipt: StagedCustomizationReceipt, expectedMainSha: string): Promise<void>;
 }
 
 // --------------------------------------------------------------------------- //
@@ -670,6 +704,8 @@ export interface HarnessPorts {
   tenantRepo: TenantRepoProvider;
   broker: BrokerApsClient;
   agentRunner: AgentRunner;
+  /** Required by the live isolated customization stage/publish lifecycle. */
+  customizationCoordination?: CustomizationCoordination;
   /**
    * OPTIONAL per-tenant grant admin store (wave 4). When present, the harness serves
    * PUT/GET/DELETE /grants/{tenantId}; when absent those routes return 501. The

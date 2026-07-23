@@ -72,9 +72,9 @@ Baseline gate:
 
 ## Wave 2
 
-- [ ] Split authoring into stage and publish operations.
-- [ ] Add desired/effective platform reconciliation.
-- [ ] Add tenant approval and staff authority separation.
+- [x] Split authoring into stage and publish operations.
+- [x] Add desired/effective platform reconciliation.
+- [x] Add tenant approval and staff authority separation.
 
 ## Wave 3
 
