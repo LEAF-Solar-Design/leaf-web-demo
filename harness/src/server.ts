@@ -136,6 +136,13 @@ function harnessAuthDenial(
   return null;
 }
 
+// Defense in depth (mirrors serve.ts): no token-shaped string ever reaches stderr,
+// even inside a stack trace thrown from arbitrary code (sol-critic F5, 2026-07-22).
+const TOKENISH = /\b(sk-ant-[A-Za-z0-9_-]{6,}|[A-Za-z0-9_-]{40,})\b/g;
+function redactTokens(s: string): string {
+  return s.replace(TOKENISH, "[REDACTED]");
+}
+
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -350,7 +357,10 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
           }
           if (method === "DELETE") {
             await ports.grantAdmin.remove(tenantId);
-            return send(res, 200, { linked: false, linked_at: null });
+            // Honest post-remove state (sol-critic F2): the demo tenant's documented
+            // §16 env/file fallback can still be active after the per-tenant files are
+            // gone — report the store's actual status, never a hardcoded linked:false.
+            return send(res, 200, await ports.grantAdmin.status(tenantId));
           }
         } catch (e) {
           // e.g. a malformed/traversal tenant id — a client error, never a token leak.
@@ -411,8 +421,10 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
 
       return send(res, 404, { error: { message: `no route for ${method} ${path}` } });
     } catch (err) {
-      // Diagnostic: full stack to stderr (never contains the grant; see serve.ts note).
-      console.error("[harness] request error:", (err as Error).stack ?? String(err));
+      // Diagnostic: full stack to stderr, token-redacted (defense in depth — no
+      // designed path puts a grant in an error message, but a thrown string is
+      // arbitrary and this line must never be the leak).
+      console.error("[harness] request error:", redactTokens((err as Error).stack ?? String(err)));
       // Missing per-tenant grant -> a clean 401 with a machine-detectable marker the app
       // proxy maps to GRANT_REQUIRED (frontend prompts "sign in with Claude"). No token.
       if (err instanceof GrantRequiredError) {

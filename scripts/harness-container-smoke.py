@@ -117,6 +117,11 @@ s, raw = http("GET", APP + "/api/tenant/claude-grant")
 out["grant_get"] = {"status": s, "body": j(raw), "echoed": fake_token in raw}
 s, raw = http("DELETE", APP + "/api/tenant/claude-grant")
 out["grant_delete"] = {"status": s, "body": j(raw)}
+# sol-critic F6: DELETE alone is not proof — a fallback could resurrect the
+# grant. Read back the actual post-delete state (no env fallback is mounted in
+# this stack, so honest state is unlinked).
+s, raw = http("GET", APP + "/api/tenant/claude-grant")
+out["grant_get_after_delete"] = {"status": s, "body": j(raw), "echoed": fake_token in raw}
 print(json.dumps(out))
 """
 
@@ -200,13 +205,18 @@ def main() -> int:
                and r["author_no_secret"]["body"].get("error", {}).get("code")
                == "harness_auth_required",
                "POST /author with NO secret -> 401 harness_auth_required")
-        expect(r["author_wrong_secret"]["status"] == 401,
-               "POST /author with WRONG secret -> 401")
+        expect(r["author_wrong_secret"]["status"] == 401
+               and r["author_wrong_secret"]["body"].get("error", {}).get("code")
+               == "harness_auth_required",
+               "POST /author with WRONG secret -> 401 harness_auth_required")
 
         expect(r["grant_put"]["status"] == 200
                and r["grant_put"]["body"].get("linked") is True,
                "POST /api/tenant/claude-grant -> linked:true (app->harness hop authed)")
         expect(r["grant_put"]["echoed"] is False, "link response does not echo the token")
+        expect("token" not in r["grant_put"]["body"]
+               and "token" not in r["grant_get"]["body"],
+               "grant wire carries no 'token' key (only linked/linked_at/kind + envelope)")
         expect(r["grant_get"]["status"] == 200
                and r["grant_get"]["body"].get("linked") is True
                and r["grant_get"]["body"].get("kind") == "oauth",
@@ -235,7 +245,10 @@ def main() -> int:
         expect("registry.json" in ls.stdout, "tenant repo survives restart")
         expect(r2["grant_delete"]["status"] == 200
                and r2["grant_delete"]["body"].get("linked") is False,
-               "DELETE grant -> linked:false")
+               "DELETE grant -> linked:false (no fallback mounted in this stack)")
+        expect(r2["grant_get_after_delete"]["status"] == 200
+               and r2["grant_get_after_delete"]["body"].get("linked") is False,
+               "GET after DELETE -> still unlinked (deletion is real, not cosmetic)")
 
         print("== logs are secret-free ==", flush=True)
         logs = run(COMPOSE + ["logs", "harness", "app"], timeout=120)

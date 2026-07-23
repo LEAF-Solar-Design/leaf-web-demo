@@ -82,10 +82,22 @@ const AMBIENT_CRED_KEYS = [
   "CLAUDE_CODE_USE_FOUNDRY",
 ];
 
+/** Platform-INTERNAL secrets that must not reach the LLM-facing child either
+ *  (sol-critic F3, 2026-07-22): the SDK subprocess has no business holding any
+ *  service-to-service hop secret. Stripped alongside the ambient identities. */
+const INTERNAL_SECRET_KEYS = [
+  "LEAF_HARNESS_SECRET",
+  "LEAF_HARNESS_AUTH",
+  "LEAF_APP_DISPATCH_SECRET",
+  "LEAF_BROKER_SECRET",
+  "E2B_API_KEY",
+];
+
 /** Build a scrubbed env with EXACTLY this tenant's grant injected (nothing else). */
 export function buildScrubbedEnv(grant: AgentGrant, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   for (const k of AMBIENT_CRED_KEYS) delete env[k];
+  for (const k of INTERNAL_SECRET_KEYS) delete env[k];
   if (grant.kind === "oauth") {
     env.CLAUDE_CODE_OAUTH_TOKEN = grant.oauthToken;
   } else {

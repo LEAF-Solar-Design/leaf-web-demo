@@ -34,11 +34,19 @@ Tenant id arrives via the `X-Tenant-Id` header stub (default `demo-tenant`),
 matching the backbone. Concern 1 (Auth0 platform identity, `contract/AUTH.md`) is
 resolved upstream; this harness does not verify the platform JWT.
 
+Every route below except `GET /health` sits behind the F5 caller-auth gate when it
+is enabled (`LEAF_HARNESS_AUTH` + `X-Harness-Secret` from `LEAF_HARNESS_SECRET`;
+timing-safe compare; FAIL-CLOSED when enabled with no secret configured).
+
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/health` | — | `{ ok: true, service }` |
-| POST | `/author` | `{ description, mode? }` | **build** (default): `200 { tool, code, preview }` (CONTRACT §4). **one-off** (`mode:"one-off"`): `200 { tool, code, preview, run }` |
-| POST | `/run-registered` | `{ tool, params?, dwg?, aps_live? }` | `200` CONTRACT §3 result envelope |
+| GET | `/health` | — | `{ ok: true, service }` (no secret required) |
+| POST | `/author` | `{ description, mode?, tenant_id? }` | **build** (default): `200 { tool, code, preview, telemetry? }` (CONTRACT §4; `telemetry` additive + absent-safe). **one-off** (`mode:"one-off"`): `200 { tool, code, preview, run, telemetry? }`. Missing grant → `401 { grant_required: true, error }` |
+| POST | `/run-registered` | `{ tool, params?, dwg?, aps_live?, tenant_id? }` | `200` CONTRACT §3 result envelope; never constructs the SDK |
+| POST | `/turn` | `ConverseTurnInput` (`ports/converse.ts`, FROZEN) | `200 application/x-ndjson`, one `HarnessTurnEvent` per line, always terminated by `turn_complete` or `error`; pre-stream grant failure → non-stream `401 { grant_required: true }`; no runner wired → `501` |
+| PUT | `/grants/{tenantId}` | `{ token, kind? }` (§17: kind auto-detected when absent) | `200 { linked, linked_at, kind }` — the token is NEVER echoed |
+| GET | `/grants/{tenantId}` | — | `200 { linked, linked_at, kind? }` — never the token |
+| DELETE | `/grants/{tenantId}` | — | `200` = the store's post-remove `status()` (for the demo tenant a documented §16 env/file fallback can still report `linked:true`); never the token |
 
 - `POST /author` build response is **exactly** `{ tool, code, preview }` where
   `tool` validates against **CONTRACT §2** (name kebab-case, version, description,
@@ -87,6 +95,14 @@ Defined in `src/ports/index.ts`. Fakes in `src/ports/fakes/`, real stubs in
 | `TenantRepoProvider` | checkout of the tenant mushy-codebase git repo + `commit()` | `fakeTenantRepo.ts` | `impl/tenantRepoProvider.ts` | `project-job-schema` |
 | `BrokerApsClient` | run/test-run a tool on APS via the broker (never raw creds) | `fakeBrokerApsClient.ts` | `impl/brokerApsClient.ts` | `async-broker-catalog-envelopes` |
 | `AgentRunner` | the Agent SDK loop boundary (real = SDK, fake = scripted) | `fakeAgentRunner.ts` | `impl/agentSdkRunner.ts` | `agentsdk-usage-visibility` |
+
+Two later waves added live OPTIONAL ports on `HarnessPorts` (absent → their routes
+answer 501/404, everything else unchanged); they are part of the frozen surface:
+
+| Port | Supplies | Fake | Real impl | Wave |
+|---|---|---|---|---|
+| `grantAdmin: TenantGrantAdminStore` | `put/status/remove` backing `/grants/{tenantId}` (wire `{linked, linked_at, kind}`, never the token) | temp-dir store in tests | `FileTenantGrantStore` (same instance as the read side; F18 seam via `createTenantGrantStore`) | §16 wave 4 |
+| `converseRunner: ConverseRunner` | one converse turn as an async event stream backing `POST /turn` | `fakeTurnRunner.ts` | `impl/agentSdkTurnRunner.ts` (lazy-loaded) | §18 sessions wire |
 
 `BrokerApsClient` maps to **POST `{BROKER_URL}/broker/run`** with the snake_case
 body `{ tenant_id, tool, params, dwg, aps_live }` and returns the extended §3/§10

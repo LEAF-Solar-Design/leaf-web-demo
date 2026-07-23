@@ -49,26 +49,37 @@ containerized smoke `scripts/harness-container-smoke.py`).
 
 The credential is used only for your own tenant's work: authoring a tool at
 design time, or driving your conversational session. For each such request the
-harness injects it into a scrubbed child environment that carries only that
-one variable (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), and the only
-network egress on that path is Anthropic, through the official Agent SDK
-(`agentSdkRunner.ts`). Registered tools run with zero LLM involvement, so
+harness builds a scrubbed child environment: every ambient Anthropic identity
+AND every platform-internal secret (including the app→harness hop secret) is
+removed, and exactly one credential variable is set (`CLAUDE_CODE_OAUTH_TOKEN`
+or `ANTHROPIC_API_KEY`). Non-secret process environment (paths, locale) passes
+through so the SDK can run (`buildScrubbedEnv`, pinned by `runnerEnv.test.ts`).
+The only network egress on that path is Anthropic, through the official Agent
+SDK (`agentSdkRunner.ts`). Registered tools run with zero LLM involvement, so
 normal tool execution never touches the credential at all (HARNESS-CONTRACT
 section 4, enforced by `converseRuntimeSeparation.test.ts`).
 
-Credentials are individual-use. One credential serves one tenant. We never
-pool one credential across tenants, and the store is keyed by a validated
-tenant id that cannot escape its directory (`tenant_id_validator.py` mirrored
-in the TS store).
+Credential scope is the tenant workspace: the store keys one credential per
+validated tenant id (`tenant_id_validator.py` mirrored in the TS store; a
+crafted id cannot escape the directory), and one tenant's credential is never
+used for another tenant's work. Anthropic's rule for subscription OAuth tokens
+is one token per end user, never pooled — so an OAuth-linked workspace must
+correspond to exactly one end user. The platform does not itself enforce a
+per-user key inside a multi-user workspace; a workspace with many seats must
+use the enterprise lane (your organization's own API key under your own
+Anthropic agreement), not a member's personal OAuth token.
 
 ## What we log
 
-Nothing that contains the credential. The harness never prints a token; the
-serve path additionally redacts any token-shaped string from everything it
-emits (`serve.ts`). The internal hop secret is env-only and never logged. The
-containerized smoke asserts both: after a full link, author, restart, and
-unlink cycle, neither the credential nor the hop secret appears anywhere in
-the container logs.
+Nothing that contains the credential. No designed code path places a
+credential in a log or error message, and the two places that render arbitrary
+text — the serve status log (`serve.ts`) and the request-error line
+(`server.ts`) — redact token-shaped strings before writing, as defense in
+depth. The repo/git worker logs only repository diagnostics; the credential
+never enters its dataflow. The internal hop secret is env-only and never
+logged. The containerized smoke asserts this end to end: after a full link,
+author, restart, and unlink cycle, neither the credential nor the hop secret
+appears anywhere in the container logs.
 
 We do keep usage telemetry (token counts and estimated cost from each SDK
 response). Telemetry never includes credentials.
@@ -76,10 +87,16 @@ response). Telemetry never includes credentials.
 ## How you remove it
 
 `DELETE /api/tenant/claude-grant` deletes the token file and its kind sidecar
-immediately. There are no other copies, so deletion is complete. Destroying
-the `leaf-grants` volume (`docker compose down -v`) removes every stored
-credential at once. We make no backups of the grant volume; if your operators
-add volume backups, those backups inherit this document's obligations.
+immediately, and the response reports the store's actual post-delete state.
+For real tenants there are no other copies, so deletion is complete. The demo
+tenant is the one documented exception: local development can mount an
+operator fallback grant (`LEAF_GRANT_FILE` / `CLAUDE_CODE_OAUTH_TOKEN`, §16
+back-compat), which a delete does not remove — and the delete response then
+says `linked: true` honestly rather than pretending otherwise. Enterprise
+tenants never use that fallback. Destroying the `leaf-grants` volume
+(`docker compose down -v`) removes every stored credential at once. We make no
+backups of the grant volume; if your operators add volume backups, those
+backups inherit this document's obligations.
 
 ## Open policy question (not a code gap)
 

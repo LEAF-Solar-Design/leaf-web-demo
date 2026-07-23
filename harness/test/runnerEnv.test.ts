@@ -29,6 +29,12 @@ function pollutedBase(): NodeJS.ProcessEnv {
     CLAUDE_CODE_USE_BEDROCK: "1",
     CLAUDE_CODE_USE_VERTEX: "1",
     CLAUDE_CODE_USE_FOUNDRY: "1",
+    // Platform-internal secrets (sol-critic F3): must never reach the SDK child.
+    LEAF_HARNESS_SECRET: "INTERNAL-hop-secret-should-be-removed",
+    LEAF_HARNESS_AUTH: "1",
+    LEAF_APP_DISPATCH_SECRET: "INTERNAL-dispatch-secret-should-be-removed",
+    LEAF_BROKER_SECRET: "INTERNAL-broker-secret-should-be-removed",
+    E2B_API_KEY: "INTERNAL-e2b-key-should-be-removed",
   };
 }
 
@@ -43,6 +49,12 @@ describe("buildScrubbedEnv — grant kind drives the injected credential var", (
     expect(env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
     expect(env.CLAUDE_CODE_USE_VERTEX).toBeUndefined();
     expect(env.CLAUDE_CODE_USE_FOUNDRY).toBeUndefined();
+    // platform-internal secrets are stripped too (F3)
+    expect(env.LEAF_HARNESS_SECRET).toBeUndefined();
+    expect(env.LEAF_HARNESS_AUTH).toBeUndefined();
+    expect(env.LEAF_APP_DISPATCH_SECRET).toBeUndefined();
+    expect(env.LEAF_BROKER_SECRET).toBeUndefined();
+    expect(env.E2B_API_KEY).toBeUndefined();
     // untouched, non-credential env survives
     expect(env.PATH).toBe("/usr/bin");
   });
