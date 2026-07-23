@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from hashlib import sha256
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar
 from urllib.parse import urlsplit
 
 import psycopg
+from psycopg.errors import DeadlockDetected, SerializationFailure
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -25,6 +27,13 @@ _ENV_LOCAL = _PKG_DIR / ".env.local"
 
 _pool: Optional[ConnectionPool] = None
 _pool_lock = threading.Lock()
+_T = TypeVar("_T")
+
+_TRANSACTION_ISOLATION = {
+    "read committed": "READ COMMITTED",
+    "repeatable read": "REPEATABLE READ",
+    "serializable": "SERIALIZABLE",
+}
 
 # The minimum schema required by the API and canonical worker. This is a
 # compatibility contract, not a provider choice. Additions stay additive so an
@@ -135,6 +144,74 @@ def cursor() -> Iterator[psycopg.Cursor]:
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
             yield cur
+
+
+def _transaction_statement(
+    isolation: str, *, read_only: bool, deferrable: bool,
+) -> str:
+    """Build a SET TRANSACTION statement from a closed set of safe options."""
+    normalized = " ".join(isolation.lower().split())
+    try:
+        level = _TRANSACTION_ISOLATION[normalized]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_TRANSACTION_ISOLATION))
+        raise ValueError(f"unsupported transaction isolation; use one of: {supported}") from exc
+    if deferrable and (not read_only or normalized != "serializable"):
+        raise ValueError("deferrable transactions must be serializable and read-only")
+    access = "READ ONLY" if read_only else "READ WRITE"
+    suffix = " DEFERRABLE" if deferrable else ""
+    return f"SET TRANSACTION ISOLATION LEVEL {level} {access}{suffix}"
+
+
+@contextmanager
+def transaction(
+    *, isolation: str = "read committed", read_only: bool = False,
+    deferrable: bool = False,
+) -> Iterator[psycopg.Connection]:
+    """Yield one explicit database transaction from the shared pool.
+
+    The transaction-level settings do not leak to the next pool borrower.
+    Clean exit commits and an exception rolls back. Callers that need retry
+    semantics should use :func:`run_transaction`.
+    """
+    statement = _transaction_statement(
+        isolation, read_only=read_only, deferrable=deferrable,
+    )
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            conn.execute(statement)
+            yield conn
+
+
+def run_transaction(
+    operation: Callable[[psycopg.Connection], _T], *,
+    isolation: str = "read committed", read_only: bool = False,
+    deferrable: bool = False, max_attempts: int = 3,
+    retry_delay_seconds: float = 0.01,
+) -> _T:
+    """Run ``operation`` and retry only serialization/deadlock failures.
+
+    Each retry receives a new transaction. Therefore ``operation`` must keep
+    external side effects outside this callback or make them idempotent.
+    Other database and application errors are surfaced immediately.
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    if retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds must not be negative")
+
+    for attempt in range(max_attempts):
+        try:
+            with transaction(
+                isolation=isolation, read_only=read_only, deferrable=deferrable,
+            ) as conn:
+                return operation(conn)
+        except (SerializationFailure, DeadlockDetected):
+            if attempt + 1 >= max_attempts:
+                raise
+            if retry_delay_seconds:
+                time.sleep(min(retry_delay_seconds * (2 ** attempt), 0.25))
+    raise AssertionError("transaction retry loop exhausted without returning or raising")
 
 
 def _split_sql_statements(sql: str) -> List[str]:
