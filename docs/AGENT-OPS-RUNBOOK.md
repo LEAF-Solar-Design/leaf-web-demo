@@ -42,20 +42,24 @@ docker compose up -d --build --wait
 `docker compose up -d --build --wait`.)
 
 The demo stack runs with auth off, so any `tenant_id` string resolves to the
-full-access `demo` tier; the drills use `demo` and a throwaway `rate-drill`.
-Define one helper used throughout (a plain function wrapping `curl`):
+full-access `demo` tier. The gate's state is DURABLE: on a reused volume, a
+confirm-once grant or spent rate stamps from an earlier drill run would change
+this run's expected outputs. So every run mints fresh identifiers, and the
+throwaway rate tenant is unique per run:
 
 ```bash
 gate() { curl -s -X POST http://localhost:8130/internal/agent/gate \
   -H 'Content-Type: application/json' \
   -H "X-Dispatch-Secret: $LEAF_APP_DISPATCH_SECRET" \
   -d "$1"; echo; }
+SID="ops-drill-$(date +%s)"
+RT="rate-drill-$(date +%s)"
 ```
 
 Sanity check before any drill (expect `"decision":"allow"`):
 
 ```bash
-gate '{"tenant_id":"demo","session_id":"ops-drill","turn_id":"t0","action":"read_platform_state","args":{"what":"drill"}}'
+gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t0\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
 ```
 
 ## Drill 1: kill switch
@@ -67,6 +71,15 @@ the deny reason. There is deliberately NO API off-toggle at any privilege level
 (design §5; `GET /api/agent/killswitch` is read-only): only someone with
 filesystem access to the volume can lift it.
 
+FIRST, the guard. The switch is live durable state: if it is already engaged,
+someone meant it, and running the drill would overwrite their reason and later
+LIFT a real emergency stop. Investigate instead; only proceed on
+`clear-to-drill`:
+
+```bash
+docker compose exec app sh -c 'if [ -f /data/state/agent.disabled ]; then echo "ALREADY ENGAGED - do NOT drill. Reason:"; cat /data/state/agent.disabled; exit 1; else echo clear-to-drill; fi'
+```
+
 Engage (the reason line is what tenants' deny reasons will carry):
 
 ```bash
@@ -76,7 +89,7 @@ docker compose exec app sh -c 'printf "ops drill: paused by operator\n" > /data/
 Verify the gate denies with the kill-switch reason:
 
 ```bash
-gate '{"tenant_id":"demo","session_id":"ops-drill","turn_id":"t1","action":"read_platform_state","args":{"what":"drill"}}'
+gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t1\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
 ```
 
 Expect `"decision":"deny"` and `"reason":"kill_switch_active: ops drill: paused by operator"`.
@@ -100,31 +113,61 @@ Re-run the `gate` call above: still `deny` / `kill_switch_active`. Lift it:
 docker compose exec app sh -c 'rm /data/state/agent.disabled'
 ```
 
+Re-run the `gate` call: `"decision":"allow"`. Done.
+
 (The `sh -c` wrapper is deliberate on every in-container path in this runbook:
 a bare `/data/...` argument gets mangled by MSYS path conversion when the
 operator drives compose from Git Bash on Windows.)
 
-Re-run the `gate` call: `"decision":"allow"`. Done.
-
-Related but different: the PER-TENANT kill flag (`agent_tenants.json`) does have
-an ops API (`POST /api/ops/agent/tenants/{tid}/disable|enable`, gated by
-`LEAF_OPS_SECRET` in the `X-Ops-Secret` header), because its blast radius is one
-tenant. The global file switch stays file-only by design.
+Related but different: the PER-TENANT kill flag (`agent_tenants.json`) has an
+ops API (`POST /api/ops/agent/tenants/{tid}/disable|enable`) because its blast
+radius is one tenant. Its guard follows the platform ops-surface rule
+(`server/routers/ops.py`): with `LEAF_OPS_SECRET` set, every call must present
+it in `X-Ops-Secret` (constant-time compare); unset under LIVE auth the surface
+answers 503 (fail closed); unset in the auth-off demo compose the surface is
+OPEN like every other demo route, and `:8130` is published to the host. Do not
+treat the demo stack as a hardened boundary. The GLOBAL file switch stays
+file-only by design at every privilege level.
 
 ## Drill 2: policy edit + validation
 
 The catalog (`server/agent_policy.json`) is versioned config. Two rules:
 
-1. An edit is a CODE CHANGE: `server/agent_policy.py` carries hardcoded
-   fail-safe defaults that must stay equivalent to the JSON
-   (`test_hardcoded_defaults_mirror_shipped_json`), so every catalog edit lands
-   in BOTH files, goes through a PR, and ships by image rebuild.
+1. An edit is a CODE CHANGE landing in THREE places, because the test suite
+   deliberately pins the shipped catalog: the JSON itself, the hardcoded
+   fail-safe mirror `_HARDCODED_DEFAULTS` in `server/agent_policy.py` (kept
+   equivalent by `test_hardcoded_defaults_mirror_shipped_json`), and any
+   pinning assertions the edit touches (e.g.
+   `test_shipped_catalog_loads_with_v1_shape` asserts per-action policies,
+   rate limits and TTL). A one-file edit WILL fail the suite; that is the
+   design, not an accident. Ship via PR + image rebuild.
 2. Validation is STRICT and fail-closed: a present-but-invalid file makes every
    gate call deny `policy_load_failed` rather than fall back. Unknown fields,
    quoted booleans, and loosening overlays are load errors.
 
-Edit + validate (host, from the repo root; example: tighten `run_write_tool` to
-`always-confirm` by changing its `"policy"` value in both files):
+Validate a CANDIDATE edit before touching the repo (this writes only to the
+system temp dir; example tightening: `run_write_tool` to `always-confirm`).
+From the repo root:
+
+```bash
+cd server
+python - <<'EOF'
+import json, tempfile, agent_policy
+from pathlib import Path
+raw = json.loads(Path("agent_policy.json").read_text(encoding="utf-8"))
+raw["actions"]["run_write_tool"]["policy"] = "always-confirm"   # the candidate edit
+cand = Path(tempfile.gettempdir()) / "agent_policy.candidate.json"
+cand.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+pol = agent_policy.load_policy(cand)
+print("candidate valid:", len(pol.actions), "actions;",
+      "run_write_tool ->", pol.actions["run_write_tool"].policy)
+EOF
+cd ..
+```
+
+Expect `candidate valid: 9 actions; run_write_tool -> always-confirm`. An
+invalid candidate raises `PolicyError` naming the offending field instead. The
+shipped file's own validation plus the full pin/mirror discipline:
 
 ```bash
 cd server
@@ -133,8 +176,10 @@ python -m pytest tests/test_agent_policy.py tests/test_agent_gate.py -q
 cd ..
 ```
 
-The first command must print `valid: 9 actions; ttl 300 s; limits {'low': 120, 'medium': 60, 'high': 10}`
-(adjusted for your edit); the suites must be green. Ship it:
+On the UNEDITED tree the first command prints
+`valid: 9 actions; ttl 300 s; limits {'low': 120, 'medium': 60, 'high': 10}`
+and both suites are green. When you land a real edit, these same two commands
+are the acceptance gate AFTER the three-place change. Ship it:
 
 ```bash
 docker compose build app
@@ -150,7 +195,7 @@ bytes; a container recreate would too):
 
 ```bash
 docker compose exec app sh -c 'cp agent_policy.json /tmp/agent_policy.bak && printf "{broken" > agent_policy.json'
-gate '{"tenant_id":"demo","session_id":"ops-drill","turn_id":"t2","action":"read_platform_state","args":{"what":"drill"}}'
+gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t2\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
 docker compose exec app sh -c 'cp /tmp/agent_policy.bak agent_policy.json'
 ```
 
@@ -167,11 +212,15 @@ under `LEAF_AGENT_APPROVALS_DIR`, bound to the exact
 racing expiry records `expired`, and a redemption after expiry denies
 `approval_expired`. A granted record redeems exactly once (`consumed_at` stamp;
 replays deny). Changing the TTL is a drill-2 policy edit of `approval_ttl_s`.
+(The fresh `$SID` from the preconditions matters here: confirm-once grants are
+keyed by tenant + session + action + tool, so a session id reused from an
+earlier drill run that GRANTED could answer `allow_via_session_grant` instead
+of filing a new record.)
 
 File a pending approval (confirm-once action) and capture its confirmation id:
 
 ```bash
-CID=$(gate '{"tenant_id":"demo","session_id":"ops-drill","turn_id":"t3","action":"run_write_tool","args":{"tool":"noop_write","dwg":"drill"}}' \
+CID=$(gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t3\",\"action\":\"run_write_tool\",\"args\":{\"tool\":\"noop_write\",\"dwg\":\"drill\"}}" \
   | python -c "import json,sys; print(json.load(sys.stdin)['confirmation_id'])")
 echo "$CID"
 ```
@@ -193,7 +242,7 @@ tenant/session/action/args, `confirmation_id` inside args):
 
 ```bash
 sleep 310
-gate "{\"tenant_id\":\"demo\",\"session_id\":\"ops-drill\",\"turn_id\":\"t4\",\"action\":\"run_write_tool\",\"args\":{\"tool\":\"noop_write\",\"dwg\":\"drill\",\"confirmation_id\":\"$CID\"}}"
+gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t4\",\"action\":\"run_write_tool\",\"args\":{\"tool\":\"noop_write\",\"dwg\":\"drill\",\"confirmation_id\":\"$CID\"}}"
 ```
 
 Expect `"decision":"deny"`, `"reason":"approval_expired"`, and `list_pending`
@@ -206,16 +255,17 @@ durable trace beside the audit log; leave them (they are evidence, and
 Semantics: budgets are per-tenant per-hour by category (`rate_limits` in the
 catalog: low 120, medium 60, high 10). The snapshot file is the authority:
 every check re-reads it, spends the unit, and rewrites it under an OS file
-lock. A MISSING snapshot is a genuinely empty budget; a present-but-corrupt one
-DENIES every call (`rate_state_unreadable`) until reset. Never hand-edit it.
+lock held on the sibling `agent_rate_state.json.lock`. A MISSING snapshot is a
+genuinely empty budget; a present-but-corrupt one DENIES every call
+(`rate_state_unreadable`) until reset. Never hand-edit it.
 
-Exhaust the `medium` budget for a throwaway tenant (`run_read_tool` is an
-auto-policy medium-category action, so this is 61 pure gate decisions; calls
-1..60 allow, call 61 denies):
+Exhaust the `medium` budget for this run's throwaway tenant (`run_read_tool` is
+an auto-policy medium-category action, so this is 61 pure gate decisions; `$RT`
+is fresh, so calls 1..60 allow and call 61 denies):
 
 ```bash
 for i in $(seq 1 61); do
-  gate "{\"tenant_id\":\"rate-drill\",\"session_id\":\"ops-drill\",\"turn_id\":\"r$i\",\"action\":\"run_read_tool\",\"args\":{\"tool\":\"probe\"}}"
+  gate "{\"tenant_id\":\"$RT\",\"session_id\":\"$SID\",\"turn_id\":\"r$i\",\"action\":\"run_read_tool\",\"args\":{\"tool\":\"probe\"}}"
 done | tail -n 2
 ```
 
@@ -228,17 +278,29 @@ docker compose exec app sh -c 'cat /data/state/agent_rate_state.json; echo'
 
 Reset. WARNING: this hands the full budget back to EVERY tenant (there is no
 per-tenant reset tooling); do it deliberately, typically after a drill, a
-runaway-loop incident you have already stopped, or a corrupt-snapshot deny:
+runaway-loop incident you have already stopped, or a corrupt-snapshot deny.
+Two rules make the reset race-free:
+
+* QUIESCE FIRST with the kill switch (drill 1 guard applies). The kill check
+  runs before the rate step, so once engaged, no in-flight gate call is left
+  holding the rate lock or about to rewrite the snapshot; deleting it under
+  live traffic instead can lose the reset to a concurrent locked
+  read-modify-write that writes the pre-reset buckets straight back.
+* Delete ONLY the snapshot. The `.lock` sibling stays: lockers open it by
+  name, and removing it while a process holds it lets a later locker lock a
+  DIFFERENT inode, which un-serializes the read-check-write.
 
 ```bash
-docker compose exec app sh -c 'rm -f /data/state/agent_rate_state.json /data/state/agent_rate_state.json.lock'
+docker compose exec app sh -c 'printf "rate-state reset in progress\n" > /data/state/agent.disabled'
+docker compose exec app sh -c 'rm -f /data/state/agent_rate_state.json'
+docker compose exec app sh -c 'rm /data/state/agent.disabled'
 ```
 
 Verify recovery: the same call allows again and the fresh snapshot carries
 exactly one stamp:
 
 ```bash
-gate '{"tenant_id":"rate-drill","session_id":"ops-drill","turn_id":"r62","action":"run_read_tool","args":{"tool":"probe"}}'
+gate "{\"tenant_id\":\"$RT\",\"session_id\":\"$SID\",\"turn_id\":\"r62\",\"action\":\"run_read_tool\",\"args\":{\"tool\":\"probe\"}}"
 docker compose exec app sh -c 'cat /data/state/agent_rate_state.json; echo'
 ```
 
