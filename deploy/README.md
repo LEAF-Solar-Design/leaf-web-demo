@@ -215,13 +215,29 @@ All commented in `docker-compose.yml` — uncomment + provide the artifact:
 
 ---
 
-## Toward AWS/ECS (next deploy step)
+## AWS/ECS: the production deploy path (live since 2026-07-22)
 
-This compose stack is the local proof; an ECS/Fargate translation per the
-`leaf-dev-ops` skill would need: one task definition per service with the same
-health checks; the four named volumes → EFS access points (or the drawings/tenants
-stores → S3-backed) with the SAME shared-mount topology (app↔broker drawings +
-ledger, app↔harness tenants); secrets (`APS_CRED`, Claude grants, `DATABASE_URL`)
-via AWS Secrets Manager injected as mounted files / env, never baked; broker+harness
-kept off the public ALB (internal service discovery only, mirroring "not published
-to the host"); and `VITE_API_BASE` baked to the public app hostname at web-build time.
+The ECS/Fargate translation exists and serves `platform.leafdesign.ai`: one
+Fargate task (`leaf-automation-production-platform`) runs broker + harness +
+app with the same health checks as this compose stack, `/data` on EFS with the
+shared-mount topology preserved, secrets from AWS Secrets Manager
+(`leaf-platform/*`), and only the app container on the public ALB.
+
+THE deploy step is a two-workflow chain; nothing else deploys this platform:
+
+1. **Build (this repo)**: `.github/workflows/build-platform-images.yml` runs on
+   every push to `main`, builds `deploy/Dockerfile.{app,broker,harness}` from
+   one commit, and pushes all three images to ECR at one `prod-<shortsha>` tag
+   (all builds complete before any push; a partial push can never deploy).
+2. **Deploy (terraform repo)**: dispatch `deploy-service-production.yml` in
+   `LEAF-Solar-Design/leaf-automation-aws-terraform` with
+   `service=leaf-platform image_tag=prod-<shortsha>`. It refuses any tag not
+   present in all three ECR repos, pins every container to its digest, rolls
+   the single-writer service without old/new overlap, verifies ALB health, and
+   auto-rolls back on failure. Promotion is always manual (or the opt-in
+   `promote=true` input on the build workflow).
+
+The historical one-shot CLI provisioning script (`apply.sh` + `taskdef.json`,
+outside this repo) is RETIRED from deploy duty; it remains provisioning
+history only. Do not CLI-roll task definition revisions; use the workflow
+chain above so Terraform state, digests, and rollback baselines stay coherent.
