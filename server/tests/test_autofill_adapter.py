@@ -1,4 +1,42 @@
+import os
+from pathlib import Path
+
+import pytest
+
 from solver_adapters import autofill
+
+
+# The adapter's default assumes leaf-web-demo and autofill-solver are sibling
+# checkouts. AUTOFILL_SOLVER_ROOT overrides for isolated worktrees and must be
+# valid when set. The smoke is REQUIRED by default: an unresolvable solver
+# source fails the suite so a resolution bug can never skip-launder past the
+# gate floor. Hosts that genuinely lack the source opt out explicitly with
+# LEAF_AUTOFILL_SOLVER_ABSENT_OK=1, which produces a visible skip.
+def _resolve_solver_root():
+    env_root = os.environ.get("AUTOFILL_SOLVER_ROOT")
+    if env_root:
+        root = Path(env_root)
+        if not (root / "solver.py").is_file():
+            return None, f"AUTOFILL_SOLVER_ROOT is set but invalid: {env_root!r}"
+        return root, None
+    sibling = Path(__file__).resolve().parents[3] / "autofill-solver"
+    if (sibling / "solver.py").is_file():
+        return sibling, None
+    return None, None
+
+
+SOLVER_ROOT, _RESOLUTION_ERROR = _resolve_solver_root()
+_ABSENT_OK = os.environ.get("LEAF_AUTOFILL_SOLVER_ABSENT_OK") == "1"
+
+
+def test_solver_source_resolution_policy():
+    if _RESOLUTION_ERROR:
+        pytest.fail(_RESOLUTION_ERROR)
+    if SOLVER_ROOT is None and not _ABSENT_OK:
+        pytest.fail(
+            "autofill-solver source not found (no sibling checkout, no "
+            "AUTOFILL_SOLVER_ROOT). Set AUTOFILL_SOLVER_ROOT, or acknowledge "
+            "a source-less host explicitly with LEAF_AUTOFILL_SOLVER_ABSENT_OK=1.")
 
 
 SMOKE_INPUT = {
@@ -15,9 +53,13 @@ SMOKE_INPUT = {
 }
 
 
+@pytest.mark.skipif(
+    SOLVER_ROOT is None,
+    reason="autofill-solver source absent, acknowledged via LEAF_AUTOFILL_SOLVER_ABSENT_OK=1",
+)
 def test_real_autofill_solver_smoke_is_deterministic():
-    first = autofill.run(SMOKE_INPUT)
-    second = autofill.run(SMOKE_INPUT)
+    first = autofill.run(SMOKE_INPUT, solver_root=SOLVER_ROOT)
+    second = autofill.run(SMOKE_INPUT, solver_root=SOLVER_ROOT)
     assert first == second
     assert first["solver_result"] == {
         "clusters": [["A", "B"]], "diagnostics": [], "feasible": True,
