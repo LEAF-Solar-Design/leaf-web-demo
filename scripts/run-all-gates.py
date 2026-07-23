@@ -30,6 +30,11 @@ Special handling, all documented on the scoreboard:
   * the containerized harness smoke (census #13) is OPT-IN: it builds + boots
     the compose stack, so it runs only with LEAF_CONTAINER_SMOKE=1 and SKIPs
     (with reason) otherwise, or when Docker is unavailable (script exit 3).
+  * a child that fails to SPAWN (OSError) or dies with no output is a FAIL row
+    with an explicit note and retries like any red suite — never a runner
+    crash that loses the scoreboard. Drill it with
+    LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" (first attempt only; see
+    scripts/test_gate_runner.py, registered as gate-runner-selftest).
 
 USAGE
 -----
@@ -307,6 +312,9 @@ def build_suites() -> List[Suite]:
         Suite("build-platform-images-workflow",
               "scripts test_build_platform_images_workflow.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
+        # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
+        Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 3),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
               [_npm(), "test"], 63),
@@ -341,6 +349,9 @@ _ENV_DENYLIST = (
     # harness F5 caller-auth + agent-mock toggles: ambient values would 401 (or
     # fake out) the hermetic harness suites, which pin these per-test instead.
     "LEAF_HARNESS_AUTH", "LEAF_HARNESS_SECRET", "LEAF_AGENT_MOCK", "LEAF_GRANT_STORE",
+    # gate-runner fault injection (see run_suite) must never leak into nested
+    # runners or suite children.
+    "LEAF_GATE_FAULT_INJECT",
 )
 
 
@@ -511,12 +522,22 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         pre_note = reset_authored_tools(log_dir)
 
     t0 = time.perf_counter()
+    argv = [str(a) for a in suite.argv]
+    # Fault-injection drill: LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" points
+    # this suite's FIRST attempt at a nonexistent binary, exercising the real
+    # spawn-failure path end to end (attempt 2+ runs the real argv, so the
+    # drill proves a transient spawn failure survives as a retried PASS).
+    fault = os.environ.get("LEAF_GATE_FAULT_INJECT", "")
+    if fault and attempt == 1 and fault == f"{suite.id}:spawn":
+        argv = [argv[0] + ".fault-injected-missing.exe"] + argv[1:]
+    spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
-        logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(str(a) for a in suite.argv)}\n\n")
+        logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
+                   f"$ attempt {attempt} @ {time.strftime('%Y-%m-%dT%H:%M:%S')}\n\n")
         logf.flush()
         try:
             proc = subprocess.run(
-                [str(a) for a in suite.argv],
+                argv,
                 cwd=str(suite.cwd), env={**clean_env(), **db_env},
                 capture_output=True, text=True, timeout=suite.timeout_s,
                 # text=True without an explicit encoding decodes with the system
@@ -532,13 +553,34 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
             out = ((exc.stdout or "") + "\n" + (exc.stderr or "")
                    + f"\n[TIMEOUT >{suite.timeout_s}s]")
             rc = 124
+        except OSError as exc:
+            # Spawn failure (missing binary, AV/file lock, process pressure).
+            # This used to escape the try, kill the runner mid-gate, and lose
+            # the scoreboard; report it as a FAIL row so the normal retry
+            # applies to it exactly like a red suite.
+            spawn_err = f"{type(exc).__name__}: {str(exc)[:160]}"
+            out = f"[SPAWN FAILURE] {spawn_err}"
+            rc = 127
         logf.write(out)
     seconds = time.perf_counter() - t0
+
+    # Rows with no test output get an explicit hint so a bare nonzero exit is
+    # diagnosable from the scoreboard alone: a spawn failure names its OS
+    # error; an empty-output kill (observed 2026-07-23: an external sweeper
+    # Stop-Processing gate pythons, which Git Bash surfaces as exit 127) is
+    # called out as such instead of masquerading as a silent red suite.
+    fail_hint = ""
+    if spawn_err:
+        fail_hint = f"spawn failure: {spawn_err}"
+    elif rc != 0 and not out.strip():
+        fail_hint = f"no output (exit {rc}): child failed to start or was killed externally"
 
     if suite.kind == "pytest":
         c = parse_pytest(out)
         passed = rc == 0 and c["failed"] == 0 and c["errors"] == 0
         note = pre_note
+        if fail_hint and not passed:
+            note = (note + " " if note else "") + fail_hint
         if c["skipped"]:
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
         # Expected counts are a FLOOR: fewer tests than registered means the
@@ -558,6 +600,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         c = parse_vitest(out)
         passed = rc == 0 and c["failed"] == 0
         note = f"{c['skipped']} skipped" if c.get("skipped") else ""
+        if fail_hint and not passed:
+            note = (note + " " if note else "") + fail_hint
         # Same floor rule as pytest suites.
         if suite.expected is not None and passed and c["got"] < suite.expected:
             passed = False
@@ -576,15 +620,27 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                           log_path=log_path, counts={})
         return Result(suite, "PASS" if rc == 0 else "FAIL",
                       "ok" if rc == 0 else "err", seconds,
-                      note=("" if rc == 0 else f"exit {rc}"),
+                      note=("" if rc == 0 else (fail_hint or f"exit {rc}")),
                       log_path=log_path, counts={})
 
     # tsc: pass/fail on exit code only
     passed = rc == 0
     return Result(suite, "PASS" if passed else "FAIL",
                   "ok" if passed else "err", seconds,
-                  note=("" if passed else f"tsc exit {rc}"),
+                  note=("" if passed else (fail_hint or f"tsc exit {rc}")),
                   log_path=log_path, counts={})
+
+
+def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int) -> Result:
+    """One suite must never take down the whole gate: any unexpected
+    runner-side exception (parse bug, log-dir I/O, ...) becomes a FAIL row on
+    the scoreboard instead of an uncaught crash that loses every remaining
+    suite and the scoreboard itself."""
+    try:
+        return run_suite(suite, log_dir, attempt=attempt)
+    except Exception as exc:  # noqa: BLE001 — the scoreboard is the contract
+        return Result(suite, "FAIL", "err", 0.0,
+                      note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
 
 
 # --------------------------------------------------------------------------- #
@@ -679,16 +735,20 @@ def main() -> int:
     try:
       for suite in suites:
         print(f"  ... {suite.id:<22} ", end="", flush=True)
-        res = run_suite(suite, log_dir, attempt=1)
+        res = run_suite_guarded(suite, log_dir, attempt=1)
         attempts = 1
-        # Retry a FAILED integration suite (these boot real servers -> load flakes).
+        # Retry a FAILED integration suite (these boot real servers -> load
+        # flakes), including spawn failures — a child that never started is
+        # retried exactly like a red one.
         while (res.status == "FAIL" and attempts <= args.retry):
             attempts += 1
             prev_secs = res.seconds
-            res = run_suite(suite, log_dir, attempt=attempts)
+            prev_note = res.note
+            res = run_suite_guarded(suite, log_dir, attempt=attempts)
             res.seconds += prev_secs  # cumulative time spent on this row
             if res.status == "PASS":
                 res.note = (f"flaked; passed on attempt {attempts}/{args.retry + 1}"
+                            + (f" (prev: {prev_note})" if prev_note else "")
                             + (f" ({res.note})" if res.note else ""))
         if res.status == "FAIL" and attempts > 1:
             res.note = (f"FAIL after {attempts} attempts"
