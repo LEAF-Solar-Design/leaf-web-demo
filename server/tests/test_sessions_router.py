@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional  # noqa: E402
 import jsonschema  # noqa: E402
 import pytest  # noqa: E402
 
-pytestmark = pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): this exercises a section-18 surface replaced by the section-2.1 lane (approvals resolve against session_store; site.py serves the reviewed builtin-only catalog + canned artifact). Restore at spine unification.")
+pytestmark = pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): written against the section-18-era app internals (e.g. routers.sessions._SESSIONS) that the section-2.1 lane replaced with session_store. The ENGINE side was unified by census #12 chip-spine-harness-mount (spine engine live behind POST /turn); restoring THESE suites means rewriting their app-surface assertions against the unified 2.1 wire — census #12 chip-spine-sessions-routers.")
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
