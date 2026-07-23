@@ -295,6 +295,14 @@ def build_suites() -> List[Suite]:
         Suite("platform-simgate-self-test", "platform simulator-gate self-test", "script",
               REPO_PARENT,
               [sys.executable, f"{repo_name}/platform/simgate/run.py", "--self-test"], None),
+        # --- scripts (cwd=SCRIPTS_DIR) --- #
+        # cwd=SCRIPTS_DIR, not REPO: `python -m pytest` puts the cwd on
+        # sys.path, and the repo root would shadow the stdlib `platform`.
+        # Registered per the #29 fix-then-register rule (shipped without a
+        # gate entry; measured 1 passed on this tree 2026-07-23).
+        Suite("build-platform-images-workflow",
+              "scripts test_build_platform_images_workflow.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
               [_npm(), "test"], 63),

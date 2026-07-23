@@ -71,5 +71,11 @@ def main() -> None:
     print("build-platform-images workflow invariants: PASS")
 
 
+def test_build_platform_images_workflow_invariants() -> None:
+    # Pytest entry point: the gate runner counts collected tests, and a bare
+    # main() collects as zero.
+    main()
+
+
 if __name__ == "__main__":
     main()
