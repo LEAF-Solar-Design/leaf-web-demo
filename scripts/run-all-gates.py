@@ -247,10 +247,11 @@ def build_suites() -> List[Suite]:
         # same way as the platform suite so the skip is visible, not silent.
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
               SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
+        Suite("server-engine-registry-scripts", "server tests/test_engine_registry_scripts.py",
+              "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 4),
         # NOT registered (red at measurement 2026-07-22, one process per file,
         # pre-existing on main). Durable tracker with the fix-then-register
         # rule: https://github.com/Evan-Haug/leaf-web-demo/issues/29
-        # tests/test_engine_registry_scripts.py (1F/3P),
         # tests/test_sessions_e2e.py (7 errors/2P).
         Suite("server-capabilities-promotion", "server tests/test_capabilities_promotion.py",
               "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py"), 11),
