@@ -217,6 +217,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 16),
         Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_entitlements.py"), 26),
+        Suite("server-policy-unavailable-paths", "server tests/test_policy_unavailable_paths.py",
+              "pytest", SERVER, _py_pytest("tests/test_policy_unavailable_paths.py"), 2),
         Suite("server-entitlements-converse", "server tests/test_entitlements_converse.py",
               "pytest", SERVER, _py_pytest("tests/test_entitlements_converse.py"), 6),
         Suite("server-hardening-1c", "server tests/test_hardening_1c.py", "pytest", SERVER,

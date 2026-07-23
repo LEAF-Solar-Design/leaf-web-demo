@@ -167,7 +167,11 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
     # 3. entitlement gate (§17): mirrors routers/author.py:76-78 — the tenant's
     # tier must grant the `converse` capability. Off-auth/demo grants everything.
     tier = entitlements.resolve_tier(tenant)
-    if not entitlements.entitlements_for(tier).get("converse", False):
+    try:
+        allowed = entitlements.entitlements_for(tier).get("converse", False)
+    except entitlements.EntitlementsError:
+        return entitlements.policy_unavailable_response("converse", tier)
+    if not allowed:
         return entitlements.entitlement_denied_response("converse", tier)
 
     # 4. confirm path: atomically verify-and-consume the durable approval row

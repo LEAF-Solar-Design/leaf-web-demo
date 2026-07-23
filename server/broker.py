@@ -742,6 +742,11 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         env, status_code = _execute(req, tool, engine_op, t0, entry)
         entry["status"] = "ok" if env.get("ok") else (env.get("error") or {}).get("error_code", "error")
         return JSONResponse(status_code=status_code, content=env)
+    except entitlements.EntitlementsError:
+        entry["status"] = "INTERNAL"
+        required = entitlements.tool_required_capability(tool)
+        tier = _tenant_tier(req.tenant_id)
+        return entitlements.policy_unavailable_response(required, tier)
     except Exception as exc:  # noqa: BLE001
         entry["status"] = "INTERNAL"
         env = err_envelope(ErrorCode.INTERNAL, f"{type(exc).__name__}: {exc}", retryable=False,
