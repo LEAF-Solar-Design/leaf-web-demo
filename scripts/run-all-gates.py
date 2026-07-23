@@ -254,10 +254,14 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
         Suite("server-engine-registry-scripts", "server tests/test_engine_registry_scripts.py",
               "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 4),
-        # NOT registered (red at measurement 2026-07-22, one process per file,
-        # pre-existing on main). Durable tracker with the fix-then-register
-        # rule: https://github.com/Evan-Haug/leaf-web-demo/issues/29
-        # tests/test_sessions_e2e.py (7 errors/2P).
+        # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
+        # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
+        # were purely its module `harness` fixture failing `npm run build` in a
+        # worktree with no harness node_modules — NOT a code defect; it passes 9/9
+        # once the harness is installed (the same harness the harness-vitest/tsc
+        # suites require). It self-builds the harness on setup (~14s).
+        Suite("server-sessions-e2e", "server tests/test_sessions_e2e.py", "pytest", SERVER,
+              _py_pytest("tests/test_sessions_e2e.py"), 9),
         Suite("server-capabilities-promotion", "server tests/test_capabilities_promotion.py",
               "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py"), 11),
         # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
