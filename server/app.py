@@ -22,7 +22,9 @@ from typing import Any, Dict
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+import dependency_health
 import deps
 from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
@@ -157,6 +159,15 @@ def health() -> Dict[str, Any]:
         "n_tools": len(deps.all_tools()),
         "n_authored": len(deps._AUTHORED),
     })
+
+
+@app.get("/api/ready")
+def ready() -> JSONResponse:
+    report = dependency_health.readiness_report()
+    return JSONResponse(
+        status_code=200 if report["ready"] else 503,
+        content=with_envelope_fields(report, degraded_mode=report["status"] != "ready"),
+    )
 
 
 if __name__ == "__main__":

@@ -133,6 +133,8 @@ def build_suites() -> List[Suite]:
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 10),
+        Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
+              SERVER, _py_pytest("tests/test_dependency_health.py"), 13),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 11),
         Suite("server-dynamic-loader", "server test_dynamic_loader.py", "pytest", SERVER,
