@@ -17,7 +17,7 @@ def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     # One tag is derived once and passed to every image build and later job.
-    assert 'value=prod-$(git rev-parse --short HEAD)' in text
+    assert 'echo "value=prod-$current_short"' in text
     assert "IMAGE_TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert "TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert (
@@ -31,16 +31,31 @@ def main() -> None:
     assert "fail-fast: false" in text
     assert "needs: [prepare, build]" in text
 
-    # Each matrix entry reads and publishes only its own ECR cache tag.
-    cache_ref = (
-        "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache"
-    )
-    assert f"cache-from: type=registry,ref={cache_ref}" in text
-    assert (
-        f"cache-to: type=registry,ref={cache_ref},mode=max,"
-        "image-manifest=true,oci-mediatypes=true"
-    ) in text
-    assert text.count(":buildcache") == 2
+    # ECR tags are immutable. Current and previous commits have distinct cache
+    # tags, fixed buildcache is forbidden, and a rerun never overwrites cache.
+    assert 'current_cache_tag="buildcache-$current_short"' in text
+    assert 'previous_cache_tag="buildcache-$previous_short"' in text
+    assert '"$previous_cache_tag" == "$current_cache_tag"' in text
+    assert "Current and previous cache tags must differ" in text
+    assert "cache-to: ${{ steps.cache.outputs.to }}" in text
+    assert "cache-from: ${{ steps.cache.outputs.from }}" in text
+    assert re.search(r":buildcache(?:[\s,]|$)", text) is None
+    assert "cache $CURRENT_CACHE_TAG already exists" in text
+    assert "immutable tag will not be overwritten" in text
+    assert "skipping cache publication" in text
+
+    # Only push events may select the immediate prior commit. Dispatches and
+    # missing predecessor cache manifests leave cache-from empty.
+    assert '"$GITHUB_EVENT_NAME" == "push"' in text
+    assert "BEFORE_SHA: ${{ github.event.before }}" in text
+    assert 'cache_from=""' in text
+    assert 'echo "from=$cache_from"' in text
+    assert 'if [[ -n "$PREVIOUS_CACHE_TAG" ]]' in text
+    assert "has no predecessor cache; building without cache input" in text
+
+    # Cache growth has an explicit bounded-retention infrastructure contract.
+    assert "expire buildcache-* tags" in text
+    assert "after 14 days" in text
 
     # Promotion depends on the final all-three ECR existence check, not merely
     # on one successful image push.
@@ -50,6 +65,7 @@ def main() -> None:
     assert "for image in app broker harness; do" in verify_body
     assert "aws ecr batch-get-image" in verify_body
     assert '--image-ids "imageTag=$TAG"' in verify_body
+    assert 'if [[ "$TAG" != prod-* ]]' in verify_body
     assert 'if [[ -z "$digest" || "$digest" == "None" ]]' in verify_body
 
     print("build-platform-images workflow invariants: PASS")
