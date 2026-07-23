@@ -47,6 +47,7 @@ from routers import (
     uploads,
     usage,
 )
+from solver_adapters import elec_estimate  # A17: /api/elec estimation adapter
 
 def _cors_origins() -> list[str]:
     """CORS allow-list, ENV-driven and default-deny in live-auth mode (F17).
@@ -115,6 +116,7 @@ app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
 app.include_router(ops_metrics.router)  # APS observability read-API: fleet metrics + in-flight tail + ledger<->job drill-down (X-Ops-Secret)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
+app.include_router(elec_estimate.router)  # A17: adapter-first elec_calc estimation (POST /api/elec, DRAFT contract)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
 
