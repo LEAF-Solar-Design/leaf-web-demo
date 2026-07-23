@@ -57,6 +57,32 @@ def test_cold_voc_fails_against_max_dc_voltage_not_higher_mppt_maximum():
     assert _item(result, "MPPT-COLD-VOC")["status"] == "pass"
 
 
+def test_nonphysical_negative_cold_voc_from_garbage_coefficient_fails_closed_not_pass():
+    # A pathological coefficient/temperature that drives the correction factor
+    # nonpositive must NOT sail past a `<= max_dc_voltage` check as a false PASS.
+    candidate = copy.deepcopy(VALID_INPUT)
+    candidate["module"]["temperature_coefficient_pct_per_c"] = -10.0
+    candidate["inverter"]["design_min_temp_c"] = 40.0  # not the coldest ambient; produces factor < 0
+    candidate["inverter"]["max_dc_voltage"] = 1000
+    result = elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
+    cold = _item(result, "NEC-690.7-COLD-VOC")
+    assert cold["status"] == "insufficient_input"  # fail closed, never "pass" on a negative voltage
+    assert cold["status"] != "pass"
+
+
+def test_solaredge_nonphysical_cold_voc_also_fails_closed():
+    candidate = copy.deepcopy(VALID_INPUT)
+    candidate["inverter"]["architecture"] = "solaredge"
+    candidate["inverter"]["topology"] = None  # solaredge uses per-optimizer limits, not central topology
+    candidate["inverter"]["optimizer_max_input_voltage"] = 60
+    candidate["module"]["temperature_coefficient_pct_per_c"] = -10.0
+    candidate["inverter"]["design_min_temp_c"] = 40.0
+    result = elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
+    voc = _item(result, "NEC-690.7-VOC-COLD-OPTIMIZER")
+    assert voc["status"] in {"insufficient_input", "requires_engineer_review"}
+    assert voc["status"] != "pass"
+
+
 def test_hot_vmp_exact_mppt_minimum_is_a_pass_boundary():
     candidate = copy.deepcopy(VALID_INPUT)
     candidate["inverter"]["mppt_min_v"] = 42 * (1 - 0.003 * (70 - 25)) * 12
