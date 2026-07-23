@@ -35,7 +35,7 @@ services:
     command:
       - python
       - -c
-      - "import sys; sys.path.insert(0, '/app/platform'); import db; db.apply_migration()"
+      - "import sys; sys.path.insert(0, '/app/platform'); import db; db.apply_migration(); db.assert_schema_current()"
     depends_on:
       postgres:
         condition: service_healthy
