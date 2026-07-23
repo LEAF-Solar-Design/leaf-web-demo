@@ -38,9 +38,11 @@ const INTERNAL_FLAG_KEYS = ["LEAF_HARNESS_AUTH"];
  *  PASSWD — DOCKER_AUTH_CONFIG / NPM_CONFIG__AUTH / *_JWT survived the first
  *  pattern). PAT is matched only as a whole underscore-delimited segment
  *  (round-4: GITHUB_PAT / AZURE_DEVOPS_EXT_PAT survived) so PATH, PATTERN,
- *  and *_PATH keys stay untouched. */
+ *  and *_PATH keys stay untouched. ASKPASS (round-5: GIT_ASKPASS / SSH_ASKPASS)
+ *  covers the password-PROVIDER hooks: not credential values themselves, but a
+ *  child that honors one can be steered to a credential-emitting program. */
 const SECRETLIKE_KEY_RE =
-  /(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|APIKEY|API_KEY|_KEY$|AUTH|JWT|(^|_)PAT(_|$))/i;
+  /(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|APIKEY|API_KEY|_KEY$|AUTH|JWT|ASKPASS|(^|_)PAT(_|$))/i;
 
 /** Scrubbed copy of `base`: known keys + every secret-like key removed. */
 export function scrubSecrets(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

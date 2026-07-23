@@ -48,6 +48,10 @@ function pollutedBase(): NodeJS.ProcessEnv {
     // Round-4: PAT (personal access token) as an underscore-delimited segment.
     GITHUB_PAT: "CRED-github-pat-should-be-removed",
     AZURE_DEVOPS_EXT_PAT: "CRED-azdo-pat-should-be-removed",
+    // Round-5: password-provider hooks — a child honoring one can be steered
+    // to a credential-emitting program.
+    GIT_ASKPASS: "/usr/bin/evil-cred-provider",
+    SSH_ASKPASS: "/usr/bin/evil-cred-provider",
     // PAT must NOT over-match PATH-like names (PATH itself is pinned below).
     LEAF_DATA_PATH: "/var/leaf/data",
   };
@@ -82,6 +86,9 @@ describe("buildScrubbedEnv — grant kind drives the injected credential var", (
     // Round-4: PAT-named carriers are swept as whole segments
     expect(env.GITHUB_PAT).toBeUndefined();
     expect(env.AZURE_DEVOPS_EXT_PAT).toBeUndefined();
+    // Round-5: password-provider hooks are swept
+    expect(env.GIT_ASKPASS).toBeUndefined();
+    expect(env.SSH_ASKPASS).toBeUndefined();
     // untouched, non-credential env survives — and PAT does not eat PATH-like keys
     expect(env.PATH).toBe("/usr/bin");
     expect(env.LEAF_DATA_PATH).toBe("/var/leaf/data");
