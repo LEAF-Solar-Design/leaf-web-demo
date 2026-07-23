@@ -71,16 +71,31 @@ def build(blobs: Mapping[str, bytes], *, metadata: Mapping[str, Any]) -> Dict[st
 
 
 def verify(manifest: Mapping[str, Any], blobs: Mapping[str, bytes]) -> Dict[str, Any]:
+    """Offline verification enforcing the FULL frozen contract
+    (contract/EVIDENCE.md). verify() is the reference verifier for untrusted
+    manifests, so every build-time law is re-checked here — a manifest
+    build() could not have produced must not verify (sol-critic PR #48 R1:
+    forged manifests with an extra unhashed top-level key, empty metadata,
+    or a traversal path previously returned valid)."""
     errors = []
     if manifest.get("bundleVersion") != BUNDLE_VERSION or manifest.get("algorithm") != "sha256-merkle-v1":
         errors.append("unsupported_bundle_contract")
+    # Exact top-level key set: an unknown key is UNHASHED surface (the root
+    # covers header+entries only) — a smuggling channel, never tolerated.
+    if set(manifest.keys()) != {"bundleVersion", "algorithm", "metadata", "entries", "rootSha256"}:
+        errors.append("unexpected_manifest_keys")
     expected = manifest.get("entries")
     if not isinstance(expected, list) or not expected:
         errors.append("missing_entries")
         expected = []
     expected_paths = [item.get("path") for item in expected if isinstance(item, Mapping)]
-    if len(expected_paths) != len(set(expected_paths)) or expected_paths != sorted(expected_paths):
+    if len(expected_paths) != len(set(expected_paths)) or expected_paths != sorted(
+            p for p in expected_paths if isinstance(p, str)):
         errors.append("entries_not_unique_and_sorted")
+    for path in expected_paths:
+        # The build-time path law, re-enforced on the untrusted side.
+        if not isinstance(path, str) or not path or path.startswith("/") or ".." in path.split("/"):
+            errors.append(f"invalid_path:{path}")
     if set(expected_paths) != set(blobs):
         errors.append("entry_set_mismatch")
     rebuilt = []
@@ -99,9 +114,11 @@ def verify(manifest: Mapping[str, Any], blobs: Mapping[str, bytes]) -> Dict[str,
         rebuilt.append({"path": path, "size": len(value), "sha256": digest})
     if rebuilt:
         metadata = manifest.get("metadata")
-        if not isinstance(metadata, Mapping):
+        if not isinstance(metadata, Mapping) or not metadata:
+            # The build-time law: metadata is a NON-EMPTY object. An empty
+            # mapping is as invalid offline as it is at build time.
             errors.append("invalid_metadata")
-            metadata = {}
+            metadata = {"__invalid__": True}
         root = _root(rebuilt, metadata)
         if manifest.get("rootSha256") != root:
             errors.append("root_mismatch")

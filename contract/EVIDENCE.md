@@ -54,13 +54,16 @@ Domain-separated SHA-256, all digests over raw bytes:
 
 ### 1.4 Offline verification error vocabulary (closed set)
 
-`verify(manifest, blobs)` returns `{valid, errors, rootSha256}`; `errors`
-draws only from:
+`verify(manifest, blobs)` re-enforces EVERY build-time law on the untrusted
+side — a manifest `build()` could not have produced must not verify (an
+unknown top-level key is unhashed surface; a traversal path or empty
+metadata is invalid offline exactly as at build time). It returns
+`{valid, errors, rootSha256}`; `errors` draws only from:
 
-`unsupported_bundle_contract` · `missing_entries` ·
-`entries_not_unique_and_sorted` · `entry_set_mismatch` · `invalid_entry` ·
-`missing:<path>` · `digest_mismatch:<path>` · `invalid_metadata` ·
-`root_mismatch`
+`unsupported_bundle_contract` · `unexpected_manifest_keys` ·
+`missing_entries` · `entries_not_unique_and_sorted` · `invalid_path:<path>` ·
+`entry_set_mismatch` · `invalid_entry` · `missing:<path>` ·
+`digest_mismatch:<path>` · `invalid_metadata` · `root_mismatch`
 
 An empty error list is the ONLY success signal (`valid` is its derivation).
 
@@ -98,19 +101,31 @@ payload carries exactly: `signatureId`, `bundleId`, `rootSha256`,
 `signature_provider_unavailable` · `signature_provider_mismatch` · `null`
 (available)
 
-### 2.4 Countersign preconditions (all enforced server-side, in order)
+### 2.4 Countersign preconditions (all enforced server-side, in THIS order)
 
-1. The bundle passes §1.4 offline verification AND its stored `root_sha256`
+The code's actual sequence (`signing.py countersign()`); the order is
+deliberate (locks and idempotent returns precede expensive verification):
+
+1. A signature provider is configured — its ABSENCE fails even a request
+   whose record already exists (the idempotent return below never runs
+   provider-less).
+2. `Idempotency-Key` is present and non-empty.
+3. The project row is locked (`FOR UPDATE`) — the per-project serialization
+   point; unknown project fails here.
+4. Idempotent return: an existing record for the same key, or for the same
+   `(bundle_id, credential_id)` pair, returns AS-IS — before any bundle,
+   supersession, waiver, or credential check. The same key with different
+   countersign input errors.
+5. The bundle passes §1.4 offline verification AND its stored `root_sha256`
    matches — a bundle that cannot be re-verified cannot be signed.
-2. The bundle is not superseded: no later history operation other than
+6. The bundle is not superseded: no later history operation other than
    `review.bundle.countersigned` / `evidence.root.delivered` exists.
-3. Every failing compliance finding is waiver-approved — unresolved failures
+7. Every failing compliance finding is waiver-approved — unresolved failures
    block with the finding ids named.
-4. Active, unexpired credential owned by the acting binding; provider
-   algorithm matches the credential's `signature_algorithm`.
-5. Idempotency: the same `Idempotency-Key` (or the same
-   `(bundle_id, credential_id)` pair) returns the EXISTING record; the same
-   key with different countersign input errors.
+8. Active, unexpired credential owned by the acting binding; provider
+   algorithm matches the credential's `signature_algorithm`; a second
+   duplicate check runs after the credential lock (a competing request may
+   have committed while this one waited).
 
 ### 2.5 Provider seam (frozen interface, open deployment)
 

@@ -61,10 +61,14 @@ def test_bundle_version_algorithm_and_domains_match_doc():
 # --------------------------------------------------------------------------
 
 def test_merkle_root_reproducible_from_documented_algorithm():
+    # FOUR entries + the header pseudo-leaf = FIVE initial leaves: the odd-
+    # duplication rule is exercised at the first level (3 entries + header
+    # gave 4 — every level even, duplication dead; sol-critic PR #48 R1).
     blobs = {
         "records/a.json": b'{"x":1}',
         "records/b.json": b'{"y":2}',
-        "records/c.json": b'{"z":3}',  # 3 entries + header = odd level exercised
+        "records/c.json": b'{"z":3}',
+        "records/d.json": b'{"w":4}',
     }
     metadata = {"projectId": "p-1", "frozenAt": "2026-07-23T00:00:00+00:00"}
     manifest = evidence.build(blobs, metadata=metadata)
@@ -88,6 +92,11 @@ def test_merkle_root_reproducible_from_documented_algorithm():
     assert manifest["rootSha256"] == level[0].hex()
     assert evidence.verify(manifest, blobs) == {
         "valid": True, "errors": [], "rootSha256": manifest["rootSha256"]}
+    # The reimplementation's two structural choices are NORMATIVE doc text,
+    # pinned so a contract edit (not just a code edit) flips this test red.
+    assert "it enters the tree as leaf path `@manifest-metadata`" in DOC
+    assert "the header pseudo-leaf FIRST" in DOC
+    assert "duplicate the LAST node" in DOC
 
 
 # --------------------------------------------------------------------------
@@ -123,6 +132,30 @@ def test_verify_error_vocabulary_matches_doc():
     produced |= set(errors_of(lambda m: m.update(metadata=None)))
     produced |= set(errors_of(lambda m: m["entries"].append("bogus")))
     produced |= set(errors_of(mutate_blobs=lambda b: b.pop("b.json")))
+    # FORGED manifests verify() itself must refuse (R1: these previously
+    # returned valid:True — the build-time laws now hold offline too):
+    smuggled = errors_of(lambda m: m.update(smuggled="unhashed"))
+    assert "unexpected_manifest_keys" in smuggled
+    produced |= set(smuggled)
+    empty_meta = errors_of(lambda m: m.update(metadata={}))
+    assert "invalid_metadata" in empty_meta
+    produced |= set(empty_meta)
+    def traversal(m, b):
+        # a self-consistent forged pair: entry AND blob both use the
+        # traversal path, so only the path law can catch it
+        content = b.pop("a.json")
+        b["../escape"] = content
+        for entry in m["entries"]:
+            if entry["path"] == "a.json":
+                entry["path"] = "../escape"
+        m["entries"].sort(key=lambda e: e["path"] if isinstance(e, dict) else "")
+    forged = {**manifest, "entries": [dict(e) for e in manifest["entries"]]}
+    forged_blobs = dict(blobs)
+    traversal(forged, forged_blobs)
+    forged["rootSha256"] = "0" * 64  # root is irrelevant; the path law must fire first
+    traversal_errors = evidence.verify(forged, forged_blobs)["errors"]
+    assert any(e.startswith("invalid_path:") for e in traversal_errors)
+    produced |= set(traversal_errors)
 
     # every produced error is documented (parametrized ones by prefix)
     for error in produced:
@@ -131,6 +164,8 @@ def test_verify_error_vocabulary_matches_doc():
             token = "missing:<path>"
         elif error.startswith("digest_mismatch:"):
             token = "digest_mismatch:<path>"
+        elif error.startswith("invalid_path:"):
+            token = "invalid_path:<path>"
         assert token in documented, f"verify() produced undocumented error {error!r}"
     # and every documented code is provokable (nothing stale in the doc)
     fixed = {t for t in documented if ":" not in t}
@@ -151,6 +186,11 @@ def test_canonical_bytes_laws():
     # Decimal reaches the wire as "1.10" (quoted), never a float — offline
     # verifiers must reproduce exactly this.
     assert evidence.canonical_bytes(Decimal("1.10")) == b'"1.10"'
+    # date (not just datetime) is one of the three converted types
+    assert evidence.canonical_bytes(datetime(2026, 7, 23, tzinfo=timezone.utc).date()) == b'"2026-07-23"'
+    # allow_nan=False is a frozen law: NaN/Infinity raise, never serialize
+    with pytest.raises(ValueError):
+        evidence.canonical_bytes(float("nan"))
     with pytest.raises(TypeError):
         evidence.canonical_bytes({1, 2})
 
@@ -173,7 +213,13 @@ def test_build_input_laws():
 # --------------------------------------------------------------------------
 
 def _dict_literal_keys(anchor: str) -> list:
-    start = SIGNING_SOURCE.index(anchor)
+    # Anchors must be PROVEN unique before extraction — "payload = {" is a
+    # substring of "history_payload = {", so anchor on the full assignment
+    # with a non-word left boundary (sol-critic PR #48 R1).
+    pattern = re.compile(r"(?<![\w_])" + re.escape(anchor))
+    matches = pattern.findall(SIGNING_SOURCE)
+    assert len(matches) == 1, f"anchor {anchor!r} matched {len(matches)} times — extraction ambiguous"
+    start = pattern.search(SIGNING_SOURCE).start()
     block = SIGNING_SOURCE[start:SIGNING_SOURCE.index("}", start)]
     return re.findall(r'"(\w+)":', block)
 
@@ -197,16 +243,26 @@ def test_history_payload_field_set_frozen():
     code_keys = _dict_literal_keys("history_payload = {")
     assert code_keys == ["signatureId", "bundleId", "rootSha256", "credentialId",
                         "signatureContract", "signatureAlgorithm", "signatureSha256"]
-    for key in code_keys:
-        assert f"`{key}`" in DOC, f"history key {key} undocumented"
+    # Doc check is SECTION-LOCAL (whole-doc search false-passes when a key
+    # like bundleId also appears in §2.1 — sol-critic PR #48 R1): §2.2's own
+    # sentence must carry exactly the code's key list, in order.
+    start = DOC.index("### 2.2")
+    section = DOC[start:DOC.index("### 2.3", start)]
+    doc_keys = re.findall(r"`(\w+)`", section)
+    doc_keys = [k for k in doc_keys if k != "review"]  # operationType token handled below
+    assert doc_keys[:len(code_keys)] == code_keys, (doc_keys, code_keys)
     assert '"review.bundle.countersigned"' in SIGNING_SOURCE
-    assert "`review.bundle.countersigned`" in DOC
+    assert "`operationType: review.bundle.countersigned`" in section
 
 
 def test_readiness_reason_vocabulary_matches_doc():
-    documented = _doc_backticked("### 2.3", "### 2.4")
+    # Slice exactly the vocabulary list; require set EQUALITY so an added
+    # documented reason (a doc-side drift) fails too (PR #48 R1).
+    start = DOC.index("drawn only from:", DOC.index("### 2.3"))
+    stop = DOC.index("### 2.4", start)
+    documented = set(re.findall(r"`([\w-]+)`", DOC[start:stop])) - {"null"}
     code_reasons = set(re.findall(r'"reason": "(\w+)"', SIGNING_SOURCE))
     expected = {"active_credential_required", "credential_revoked", "credential_expired",
                 "signature_provider_unavailable", "signature_provider_mismatch"}
     assert code_reasons == expected, code_reasons
-    assert expected <= documented, f"undocumented reasons: {expected - documented}"
+    assert documented == expected, f"doc/code reason drift: doc-only={documented - expected} code-only={expected - documented}"
