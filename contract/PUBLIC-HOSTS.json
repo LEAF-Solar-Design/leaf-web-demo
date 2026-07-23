@@ -1,0 +1,29 @@
+{
+  "schema": "leaf.public-host-contract.v1",
+  "max_hops_to_https": 1,
+  "timeout_seconds": 3.0,
+  "max_body_bytes": 4096,
+  "hosts": [
+    {
+      "name": "apex",
+      "host": "leafautomation.ai",
+      "http_url": "http://leafautomation.ai/",
+      "status": 308,
+      "location": "https://leafautomation.ai/"
+    },
+    {
+      "name": "www",
+      "host": "www.leafautomation.ai",
+      "http_url": "http://www.leafautomation.ai/",
+      "status": 308,
+      "location": "https://www.leafautomation.ai/"
+    },
+    {
+      "name": "platform",
+      "host": "platform.leafautomation.ai",
+      "http_url": "http://platform.leafautomation.ai/",
+      "status": 308,
+      "location": "https://platform.leafautomation.ai/"
+    }
+  ]
+}

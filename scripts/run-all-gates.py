@@ -332,6 +332,8 @@ def build_suites() -> List[Suite]:
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 4),
+        Suite("public-host-contract", "scripts public host contract probe", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
               [_npm(), "test"], 253),
