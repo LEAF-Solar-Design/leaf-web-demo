@@ -200,14 +200,18 @@ def _free_closed_port() -> int:
     return port
 
 
-def test_grant_harness_unreachable_is_502(monkeypatch):
+def test_grant_harness_unreachable_is_502_without_logging_token(monkeypatch, caplog):
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", f"http://127.0.0.1:{_free_closed_port()}")
     c = _client()
-    r = c.post("/api/tenant/claude-grant", json={"token": FAKE_TOKEN}, headers=_h("acme"))
+    with caplog.at_level("WARNING", logger="routers.tenant"):
+        r = c.post("/api/tenant/claude-grant", json={"token": FAKE_TOKEN}, headers=_h("acme"))
     assert r.status_code == 502, r.text
     b = r.json()
     jsonschema.validate(b, ENVELOPE_SCHEMA)
     assert b["error"]["error_code"] == "BROKER_UNREACHABLE"
+    assert "Claude grant harness unreachable:" in caplog.text
+    assert "Connection" in caplog.text
+    assert FAKE_TOKEN not in caplog.text
 
 
 def test_grant_harness_not_configured_is_502(monkeypatch):

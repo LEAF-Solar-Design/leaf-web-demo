@@ -18,6 +18,7 @@ claim). Harness unreachable / not configured -> BROKER_UNREACHABLE envelope (HTT
 """
 from __future__ import annotations
 
+import logging
 import os
 import urllib.parse
 from typing import Any, Dict, Optional
@@ -30,6 +31,7 @@ import deps
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, err_envelope, with_envelope_fields
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class GrantLinkRequest(BaseModel):
@@ -45,6 +47,10 @@ def _harness_url() -> str:
 
 
 def _unreachable(detail: str) -> JSONResponse:
+    # Safe operational detail only. Callers never pass the request body or
+    # token here, so production logs can diagnose the app-to-harness hop
+    # without weakening the grant's write-only contract.
+    logger.warning("Claude grant harness unreachable: %s", detail)
     return JSONResponse(
         status_code=DEFAULT_HTTP_STATUS[ErrorCode.BROKER_UNREACHABLE],  # 502
         content=err_envelope(ErrorCode.BROKER_UNREACHABLE,
