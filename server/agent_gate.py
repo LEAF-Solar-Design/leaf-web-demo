@@ -201,14 +201,37 @@ def _record_is_wellformed(record: Any, confirmation_id: str) -> bool:
 
 
 def read_pending(confirmation_id: str) -> Optional[Dict[str, Any]]:
+    record, _status = read_pending_strict(confirmation_id)
+    return record
+
+
+def read_pending_strict(confirmation_id: str) -> tuple:
+    """(record, status) — status ∈ ok | absent | corrupt | io_error.
+
+    read_pending() collapses everything non-ok to None, which is the right
+    fail-closed read for the gate chain (an unreadable record must never
+    authorize). The tenant-facing DECISION route needs the distinction (review
+    round 2 finding): a transient IO failure must be a retryable error, not a
+    silent "no gate record here" that lets the session-store decision proceed
+    and later diverge from a recovered pending gate record. `corrupt` (bad
+    JSON / malformed record) deliberately reads as absent-equivalent for
+    callers that choose to: the gate chain itself will deny that record at
+    resume, so proceeding session-only stays fail-safe.
+    """
     path = _approval_path(confirmation_id)
     if not path.exists():
-        return None
+        return None, "absent"
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return record if _record_is_wellformed(record, confirmation_id) else None
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None, "io_error"
+    try:
+        record = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, "corrupt"
+    if not _record_is_wellformed(record, confirmation_id):
+        return None, "corrupt"
+    return record, "ok"
 
 
 def _write_pending(record: Dict[str, Any]) -> None:
