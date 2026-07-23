@@ -239,10 +239,22 @@ def build_suites() -> List[Suite]:
         # pre-existing on main). Durable tracker with the fix-then-register
         # rule: https://github.com/Evan-Haug/leaf-web-demo/issues/29
         # test_hardening_1f.py (3F/5P), tests/test_autofill_adapter.py (1F/1P),
-        # tests/test_broker_boundary.py (1F/41P),
         # tests/test_capabilities_promotion.py (4F/7P),
         # tests/test_engine_registry_scripts.py (1F/3P),
         # tests/test_sessions_e2e.py (7 errors/2P).
+        # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
+        # one red was a stale pre-§19 assertion (offline `dwg` no longer
+        # ignored) — fixed and registered per the #29 fix-then-register rule.
+        # The no-da-imports static invariant + §8 ledger-line schema freeze
+        # gates ride the same lane.
+        Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
+              SERVER, _py_pytest("tests/test_broker_boundary.py"), 43),
+        Suite("server-no-da-imports", "server tests/test_no_da_imports_static.py", "pytest",
+              SERVER, _py_pytest("tests/test_no_da_imports_static.py"), 8),
+        Suite("server-broker-ledger-schema", "server tests/test_broker_ledger_schema_static.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_static.py"), 9),
+        Suite("server-broker-ledger-runtime", "server tests/test_broker_ledger_schema_runtime.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_runtime.py"), 6),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 14),
@@ -337,7 +349,26 @@ except Exception as e:
 """
 
 
-def probe_platform_db() -> tuple[bool, str]:
+def _dsn_from_env_local() -> str:
+    """DATABASE_URL from platform/.env.local ('' when absent) — the SAME file,
+    key, and quoting rules the probe applies, so probe verdict and injected DSN
+    can never disagree."""
+    envf = REPO / "platform" / ".env.local"
+    if not envf.exists():
+        return ""
+    for line in envf.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("DATABASE_URL="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def probe_platform_db() -> tuple[bool, str, str]:
+    """(reachable, message, dsn). The dsn is returned so db_gated suites can
+    receive it as DATABASE_URL: the probe accepts a file-only DSN
+    (platform/.env.local), but suites that gate themselves on the ENV VAR
+    (server/tests/test_g1a_canonical_e2e.py's skipif) would then silently skip
+    inside a green suite — probe REACHABLE must mean the suite actually runs."""
     envf = REPO / "platform" / ".env.local"
     try:
         proc = subprocess.run(
@@ -346,10 +377,11 @@ def probe_platform_db() -> tuple[bool, str]:
             capture_output=True, text=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
-        return False, "probe timed out (>30s)"
+        return False, "probe timed out (>30s)", ""
     out = (proc.stdout + proc.stderr).strip().splitlines()
     msg = out[-1] if out else f"probe exit {proc.returncode}"
-    return proc.returncode == 0, msg
+    dsn = os.environ.get("DATABASE_URL") or _dsn_from_env_local()
+    return proc.returncode == 0, msg, dsn
 
 
 # --------------------------------------------------------------------------- #
@@ -420,12 +452,18 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     log_path = log_dir / (f"{suite.id}.log" if attempt == 1
                           else f"{suite.id}.retry{attempt - 1}.log")
 
-    # DB-gated suites: probe first, SKIP-with-reason when unreachable.
+    # DB-gated suites: probe first, SKIP-with-reason when unreachable. On
+    # REACHABLE, inject the resolved DSN as DATABASE_URL for the child: the
+    # probe accepts a file-only DSN (platform/.env.local), and a suite that
+    # skipif-gates on the env var must RUN in that case, not green-skip.
+    db_env: dict = {}
     if suite.db_gated:
-        ok, msg = probe_platform_db()
+        ok, msg, dsn = probe_platform_db()
         if not ok:
             return Result(suite, "SKIP", "skip", 0.0,
                           note=f"platform DB unreachable ({msg})", log_path=None)
+        if dsn:
+            db_env["DATABASE_URL"] = dsn
 
     # Opt-in suites: SKIP-with-reason unless their env flag is truthy.
     if suite.opt_in_env and os.environ.get(suite.opt_in_env, "").strip().lower() \
@@ -445,7 +483,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         try:
             proc = subprocess.run(
                 [str(a) for a in suite.argv],
-                cwd=str(suite.cwd), env=clean_env(),
+                cwd=str(suite.cwd), env={**clean_env(), **db_env},
                 capture_output=True, text=True, timeout=suite.timeout_s,
                 # text=True without an explicit encoding decodes with the system
                 # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and

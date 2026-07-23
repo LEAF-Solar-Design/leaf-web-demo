@@ -157,24 +157,48 @@ degraded_mode`.
 
 ## §8 APS broker boundary
 
+> Section 8 is FROZEN (2026-07-22, census #4 credential-broker keystone).
+> Full normative text: `server/CONTRACT-ADDENDUM.md` §8. The ledger line
+> schema is machine-frozen at `server/broker_ledger.schema.json`
+> (`leaf.broker-ledger-line.v1`) and gated by
+> `server/tests/test_broker_ledger_schema_static.py`.
+
 **Security property (tested):** the tenant-facing app process NEVER holds the
-APS credential. `server/broker.py` is a separate process (default `:8140`, env
-`BROKER_PORT`) and is the ONLY code that loads `da/client.py` / can read
-`~/.aps/credentials.json`. `app.py`/`jobs.py` contain no `da` import (static
-test) and run correctly with `APS_CRED=/nonexistent` (dynamic test). The app
-reaches execution ONLY via `server/broker_client.py` → HTTP (`BROKER_URL`,
-default `http://127.0.0.1:8140`); broker down → `BROKER_UNREACHABLE`.
+APS credential at `APS_LIVE=0` — the tested condition. `server/broker.py` is a
+separate process (default `:8140`, env `BROKER_PORT`; its own non-root
+container, unpublished on the host network) and is the ONLY code that loads
+`da/client.py` on the tool-execution path; the TWO documented app-side seams
+are the §11 store-read paths — the legacy loader `deps.get_da_client()`
+(drawing reads at `APS_LIVE=1`), every call-site APS_LIVE-gated, and
+`write_loop.py`'s lazy `import store`, whose `da/store.py` imports `da/client`
+as a module but reads the credential file only on a live token fetch —
+promotion through the broker a documented follow-up. `app.py`/`jobs.py` contain no `da` import (static gate
+`server/tests/test_no_da_imports_static.py`, whole app-side sweep, AST-level +
+recursive) and run correctly with `APS_CRED=/nonexistent` (dynamic test). The
+app reaches tool execution ONLY via `server/broker_client.py` → HTTP
+(`BROKER_URL`, default `http://127.0.0.1:8140`); broker down →
+`BROKER_UNREACHABLE`. Every protected
+`/broker/*` route requires the `X-Broker-Secret` hop (env
+`LEAF_BROKER_SECRET`, constant-time compare; 503 fail-closed when live and
+unset; `/broker/health` stays open for liveness).
 
 | Method | Path | Behaviour |
 |---|---|---|
-| POST | `/broker/run` | `{tenant_id, tool, params, dwg, aps_live}` → extended §3 envelope. `aps_live:false` → pure-python mock path; `true` → `da.client.run_tool` (live) |
-| POST | `/broker/tenants/{tid}/disable` / `.../enable` | per-tenant kill-switch, persisted to `broker_tenants.json` (env `BROKER_TENANTS`). Disabled tenant → `TENANT_DISABLED` (retryable:false), APS never touched |
-| GET | `/broker/health` | role, ledger path, disabled tenants |
+| POST | `/broker/run` | `{tenant_id, tool, params, dwg, aps_live, dwg_version?}` → extended §3 envelope. `aps_live:false` → pure-python mock path; `true` → `da.client.run_tool` (live) |
+| POST | `/broker/extract` | `{tenant_id, dwg, upload?}` → `{intake}`; the ONLY extraction path at `APS_LIVE=1` (`GET /api/session` relays through it) |
+| POST | `/broker/tenants/{tid}/disable` / `.../enable` | per-tenant kill-switch, persisted to `broker_tenants.json` (env `BROKER_TENANTS`). Disabled tenant → `TENANT_DISABLED` (retryable:false), APS never touched; corrupt state fails CLOSED (refuses boot rather than disarm) |
+| POST | `/broker/reap` | cancel orphaned WorkItems; credential holder only |
+| GET | `/broker/health` | open; role, ledger path, disabled tenants |
 
 **Attribution ledger** (metering/quota chokepoint other sessions read): every
-`/broker/run` — including kill-switch denials — appends exactly ONE JSONL line
-to `server/broker_ledger.jsonl` (env `BROKER_LEDGER`):
+`/broker/run` — including kill-switch and quota denials — appends exactly ONE
+JSONL line to `server/broker_ledger.jsonl` (env `BROKER_LEDGER`), frozen
+schema `leaf.broker-ledger-line.v1`:
 `{ts, tenant_id, tool, engine_op, aps_endpoint, aps_live, engine_seconds, usd_est, status}`.
+New keys only as additive optional fields; frozen keys never renamed, retyped,
+or dropped. Preflight order on `/broker/run` (tested): kill-switch → spend cap
+(402) → tool shape → tier entitlement re-check → daily run quota (429, live
+path only) → schema validation → execution.
 
 **Egress allowlist (v1, in-process):** every outbound HTTP request from the
 broker process passes a central guard (patched `requests` adapter). Allowed:
@@ -185,10 +209,9 @@ egress. Network-layer enforcement (container/proxy) is another session.
 
 **v1 assumptions:** the demo is single-process, so "tenant container" ==
 "the app process"; `tenant_id` arrives as an `X-Tenant-Id` header stub until
-the auth session lands. `GET /api/session` at `APS_LIVE=1` still extracts
-in-process via Lane A's client (legacy, pre-broker) — migrating extract
-through the broker belongs to the extract/provisioning session. The mock path
-honors `params._qa_sleep_s` (capped 30 s) as a QA latency-simulation hook.
+verified claims replace it (`LEAF_AUTH_LIVE=1`). The mock path honors
+`params._qa_sleep_s` (capped 30 s) as a QA latency-simulation hook. Operator
+kill-switch procedure: `docs/runbooks/broker-kill-switch.md`.
 
 ## §9 Capability catalog
 

@@ -33,6 +33,7 @@ import platform as _stdlib_platform  # noqa: F401  (cache stdlib before the
 
 import hmac
 import json
+import math
 import os
 import re
 import sys
@@ -210,8 +211,45 @@ def set_tenant_disabled(tid: str, disabled: bool) -> None:
 # --------------------------------------------------------------------------- #
 # attribution ledger — exactly ONE line per /broker/run
 # --------------------------------------------------------------------------- #
+def _conform_ledger_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Enforce the FROZEN leaf.broker-ledger-line.v1 types at the single append
+    chokepoint. The wire model accepts arbitrary JSON inside the tool package
+    (a non-string `name` or `engine_op` reaches the entry untyped), and cost
+    blocks come from tool envelopes; conforming HERE means every written line
+    — ok, denial, or garbage-input — is schema-valid."""
+    tool = entry.get("tool")
+    entry["tool"] = tool if isinstance(tool, str) else None
+    engine_op = entry.get("engine_op")
+    entry["engine_op"] = engine_op if isinstance(engine_op, str) else ""
+    # A tool envelope is unchecked input too: `error: {error_code: null}` would
+    # otherwise flow through .get("error_code", "error") as None (the default
+    # only covers a MISSING key) and append a non-string status.
+    status = entry.get("status")
+    entry["status"] = status if isinstance(status, str) else "error"
+    for key in ("engine_seconds", "usd_est"):
+        val = entry.get(key)
+        # Finite numbers only: NaN/Infinity would serialize as bare NaN/Infinity
+        # tokens — not valid JSON, so not a valid ledger line. float() (and
+        # math.isfinite) raise OverflowError on an int too large for a float
+        # (e.g. 10**400) — this runs in broker_run's `finally`, so it must
+        # NEVER raise: an oversized int conforms to null like any other
+        # unusable number.
+        num = None
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            try:
+                num = float(val)
+            except OverflowError:
+                num = None
+            if num is not None and not math.isfinite(num):
+                num = None
+        entry[key] = num
+    return entry
+
+
 def _ledger_append(entry: Dict[str, Any]) -> None:
-    line = json.dumps(entry, separators=(",", ":"))
+    # allow_nan=False: if a future unconformed field ever carries a non-finite
+    # number, fail LOUD here rather than write an unparseable ledger line.
+    line = json.dumps(_conform_ledger_entry(entry), separators=(",", ":"), allow_nan=False)
     with _ledger_lock:
         with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")

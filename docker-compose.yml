@@ -27,6 +27,10 @@ services:
       BROKER_TENANTS: /data/state/broker_tenants.json  # persisted kill-switch
       LEAF_STORE_DIR: /data/drawings                   # shared with the app (write loop)
       LEAF_UPLOADS_DIR: /data/uploads                  # shared with the app (S19 upload staging: app writes, broker extracts)
+      # §8 F4 caller-auth hop: same env on broker + app + harness. Empty (the default)
+      # keeps the friction-free off-live demo; set it and every protected
+      # /broker/* call requires the constant-time X-Broker-Secret header.
+      LEAF_BROKER_SECRET: ${LEAF_BROKER_SECRET:-}
       # --- operator opt-in for APS_LIVE=1 (NEVER baked into the image): -------
       # APS_CRED: /run/secrets/aps/credentials.json
     volumes:
@@ -51,6 +55,10 @@ services:
     environment:
       HARNESS_PORT: "8150"
       BROKER_URL: http://broker:8140
+      # §8 F4 hop — MUST match the broker's value. The harness's broker client
+      # (brokerApsClient.ts) sends X-Broker-Secret only when this is set; without
+      # it, enabling the secret would 401 every author/converse broker call.
+      LEAF_BROKER_SECRET: ${LEAF_BROKER_SECRET:-}
       LEAF_TENANTS_DIR: /data/tenants     # MUST match the app's LEAF_TENANTS_DIR (§16.H)
       LEAF_GRANTS_DIR: /data/grants       # per-tenant Claude token files (harness-only)
       LEAF_TENANT_FIXTURE: /app/test/fixtures/tenant-repo
@@ -108,6 +116,7 @@ services:
       LEAF_STORE_DIR: /data/drawings                   # shared with the broker (write loop)
       LEAF_UPLOADS_DIR: /data/uploads                  # shared with the broker (S19: staged uploads must be broker-resolvable)
       BROKER_LEDGER: /data/state/broker_ledger.jsonl   # app reads the broker's ledger for /api/usage
+      LEAF_BROKER_SECRET: ${LEAF_BROKER_SECRET:-}      # §8 F4 hop — MUST match the broker's value (same env, both sides)
       JOBS_DB: /data/state/jobs.db                     # durable async job records (restart-survivable)
       SESSIONS_DB: /data/state/sessions.db             # conversational sessions/events/approvals (same durability tier as jobs.db). SINGLE-WRITER: SQLite+WAL+threading.Lock assumes ONE app process — keep one replica/one uvicorn worker, and on network filesystems (EFS/NFS, where WAL is unsafe) point JOBS_DB/SESSIONS_DB at task-local storage instead (see the production task definition)
       # Converse back-edge (§18.5): SAME value as the harness's copy above.
