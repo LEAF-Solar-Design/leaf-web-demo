@@ -122,6 +122,9 @@ def _mount_platform_router() -> None:
 
     pkg_dir = Path(__file__).resolve().parent.parent / "platform"
     try:
+        import platform_link
+
+        platform_link.validate_postgres_startup()
         if "leaf_platform" not in sys.modules:
             spec = importlib.util.spec_from_file_location(
                 "leaf_platform", pkg_dir / "__init__.py",
@@ -133,6 +136,10 @@ def _mount_platform_router() -> None:
         app.include_router(platform_router)
         print("[leaf-demo] platform router mounted (/api/projects, /api/orgs)")
     except Exception as exc:  # pragma: no cover - env-dependent
+        if os.environ.get("LEAF_PLATFORM_POSTGRES_REQUIRED", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            raise RuntimeError("required platform PostgreSQL startup check failed") from exc
         print(f"[leaf-demo] platform router NOT mounted: {exc}", file=sys.stderr)
 
 

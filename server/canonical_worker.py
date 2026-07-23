@@ -132,6 +132,9 @@ def main() -> None:
     parser.add_argument("--lease-seconds", type=float, default=float(
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
     args = parser.parse_args()
+    # A process that can only heartbeat against part of the expected schema is
+    # not ready. Refuse to claim work until every required relation is present.
+    platform_link._load_platform()[1].assert_schema_current()
     stop = threading.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda _signum, _frame: stop.set())

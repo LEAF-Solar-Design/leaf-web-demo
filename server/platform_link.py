@@ -34,6 +34,7 @@ Imports the platform package under the ``leaf_platform`` alias, exactly as
 """
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import uuid
@@ -91,6 +92,27 @@ def _db_configured() -> bool:
         return True
     except Exception:
         return False
+
+
+def postgres_required() -> bool:
+    """Explicit production gate. Default false preserves the database-free demo."""
+    return os.environ.get("LEAF_PLATFORM_POSTGRES_REQUIRED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def validate_postgres_startup() -> Optional[Dict[str, Any]]:
+    """Fail closed only when the operator explicitly requires PostgreSQL."""
+    if not postgres_required():
+        return None
+    if os.environ.get("LEAF_AUTH_LIVE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise RuntimeError(
+            "LEAF_PLATFORM_POSTGRES_REQUIRED requires LEAF_AUTH_LIVE=1")
+    if not os.environ.get("DATABASE_URL", "").strip():
+        raise RuntimeError(
+            "LEAF_PLATFORM_POSTGRES_REQUIRED requires DATABASE_URL in the environment")
+    _store, db, _platform_deps = _load_platform()
+    return db.assert_schema_current()
 
 
 # --------------------------------------------------------------------------- #

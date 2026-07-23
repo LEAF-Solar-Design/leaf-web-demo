@@ -51,6 +51,9 @@ rebuild `web` with `--build-arg VITE_API_BASE=https://your-host:8130`.
 The default four-service demo remains database-optional. To run the production-shaped
 canonical job authority locally, add `docker-compose.canonical.yml`:
 
+The production cutover gates and the complete mutable-authority inventory are
+in [`docs/POSTGRES-CUTOVER.md`](../docs/POSTGRES-CUTOVER.md).
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml build app canonical-worker migrate
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d

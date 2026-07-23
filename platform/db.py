@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import os
 import threading
+from hashlib import sha256
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import urlsplit
 
 import psycopg
 from psycopg.rows import dict_row
@@ -23,6 +25,30 @@ _ENV_LOCAL = _PKG_DIR / ".env.local"
 
 _pool: Optional[ConnectionPool] = None
 _pool_lock = threading.Lock()
+
+# The minimum schema required by the API and canonical worker. This is a
+# compatibility contract, not a provider choice. Additions stay additive so an
+# older application can continue to read a database prepared by a newer image.
+_REQUIRED_COLUMNS = {
+    "orgs": {"org_id", "tier", "status"},
+    "projects": {"project_id", "org_id", "status"},
+    "drawing_versions": {"version_id", "project_id", "org_id", "drawing_id"},
+    "jobs": {
+        "job_id", "project_id", "org_id", "status", "request_tenant_id",
+        "attempt", "max_attempts", "lease_owner", "lease_expires_at",
+        "execution_context",
+    },
+    "tenant_authority_modes": {"org_id", "authority_mode"},
+    "project_authority_modes": {"org_id", "project_id", "authority_mode"},
+    "canonical_worker_heartbeats": {
+        "worker_id", "tool_name", "source_revision", "source_sha256", "observed_at",
+    },
+    "drawing_artifacts": {"drawing_id", "org_id", "project_id"},
+}
+_RECONCILIATION_TABLES = (
+    "orgs", "projects", "drawing_artifacts", "drawing_versions", "jobs",
+    "built_tools", "history_operations", "solve_records", "outbox_entries",
+)
 
 
 def _load_env_local() -> None:
@@ -50,6 +76,21 @@ def get_database_url() -> str:
     return url
 
 
+def validate_database_url(url: str) -> None:
+    """Reject malformed or non-PostgreSQL URLs without exposing credentials."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("DATABASE_URL is not a valid PostgreSQL URL") from exc
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise RuntimeError("DATABASE_URL must use the postgres or postgresql scheme")
+    if not parsed.hostname or not parsed.path.strip("/"):
+        raise RuntimeError("DATABASE_URL must include a host and database name")
+    if port is not None and not (1 <= port <= 65535):
+        raise RuntimeError("DATABASE_URL contains an invalid port")
+
+
 def _configure(conn: psycopg.Connection) -> None:
     # Disable client-side prepared statements: safe across pgbouncer transaction pooling.
     conn.prepare_threshold = None
@@ -60,8 +101,10 @@ def get_pool() -> ConnectionPool:
     if _pool is None:
         with _pool_lock:
             if _pool is None:
+                database_url = get_database_url()
+                validate_database_url(database_url)
                 _pool = ConnectionPool(
-                    conninfo=get_database_url(),
+                    conninfo=database_url,
                     min_size=1,
                     max_size=5,
                     configure=_configure,
@@ -179,3 +222,76 @@ def apply_migration(sql_path: Optional[Path] = None) -> None:
     mig_dir = _PKG_DIR / "migrations"
     for path in sorted(mig_dir.glob("[0-9][0-9][0-9][0-9]_*.sql")):
         _apply_one(path)
+
+
+def migration_manifest() -> List[Dict[str, str]]:
+    """Return a credential-free, deterministic manifest of shipped migrations."""
+    mig_dir = _PKG_DIR / "migrations"
+    return [
+        {"name": path.name, "sha256": sha256(path.read_bytes()).hexdigest()}
+        for path in sorted(mig_dir.glob("[0-9][0-9][0-9][0-9]_*.sql"))
+    ]
+
+
+def schema_status() -> Dict[str, Any]:
+    """Read-only readiness result for the API and canonical worker schema."""
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = ANY(%(tables)s)",
+                {"tables": list(_REQUIRED_COLUMNS)},
+            )
+            found: Dict[str, set[str]] = {}
+            for row in cur.fetchall():
+                found.setdefault(row["table_name"], set()).add(row["column_name"])
+            missing = {
+                table: sorted(columns - found.get(table, set()))
+                for table, columns in _REQUIRED_COLUMNS.items()
+                if columns - found.get(table, set())
+            }
+            cur.execute("SELECT current_database() AS database, current_schema() AS schema")
+            identity = cur.fetchone()
+    return {
+        "ok": not missing,
+        "database": identity["database"],
+        "schema": identity["schema"],
+        "migration_count": len(migration_manifest()),
+        "missing": missing,
+    }
+
+
+def assert_schema_current() -> Dict[str, Any]:
+    """Fail closed when a database is reachable but not ready for this image."""
+    status = schema_status()
+    if not status["ok"]:
+        detail = ", ".join(
+            f"{table}({','.join(columns)})" for table, columns in status["missing"].items())
+        raise RuntimeError(f"platform PostgreSQL schema is incomplete: {detail}")
+    return status
+
+
+def reconciliation_snapshot() -> Dict[str, Any]:
+    """Return counts for shadow/backfill comparison without returning tenant data."""
+    status = assert_schema_current()
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            counts: Dict[str, int] = {}
+            for table in _RECONCILIATION_TABLES:
+                cur.execute(f"SELECT COUNT(*) AS count FROM {table}")
+                counts[table] = int(cur.fetchone()["count"])
+            cur.execute(
+                "SELECT authority_mode, COUNT(*) AS count FROM tenant_authority_modes "
+                "GROUP BY authority_mode ORDER BY authority_mode")
+            tenant_modes = {
+                row["authority_mode"]: int(row["count"]) for row in cur.fetchall()}
+            cur.execute(
+                "SELECT authority_mode, COUNT(*) AS count FROM project_authority_modes "
+                "GROUP BY authority_mode ORDER BY authority_mode")
+            project_modes = {
+                row["authority_mode"]: int(row["count"]) for row in cur.fetchall()}
+    return {
+        "schema": status,
+        "record_counts": counts,
+        "authority_modes": {"tenant": tenant_modes, "project": project_modes},
+    }
