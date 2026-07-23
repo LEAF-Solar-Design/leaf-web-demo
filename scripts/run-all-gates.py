@@ -282,11 +282,12 @@ def build_suites() -> List[Suite]:
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout. Explicit file targets, not
-        # the dir, so the collected count (26) is invariant to DB presence.
+        # the dir, so the collected count (35) is invariant to DB presence.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
-                 f"{repo_name}/platform/tests/test_replay_static.py"], 26),
+                 f"{repo_name}/platform/tests/test_replay_static.py",
+                 f"{repo_name}/platform/tests/test_evidence_freeze_static.py"], 35),
         # The committed replay fixture is dependency-free and catches hash or
         # replay drift before a PR reaches the GitHub simulator-gate workflow.
         Suite("platform-simgate-self-test", "platform simulator-gate self-test", "script",

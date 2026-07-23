@@ -1,0 +1,337 @@
+"""Freeze validator: contract/EVIDENCE.md <-> code agreement (wave-3 L4).
+
+DB-free (_static suffix rides the conftest exemption + the platform-static
+suite): evidence.py imports clean; signing.py is checked by SOURCE parse
+(importing it pulls the db module). The doc is parsed for its frozen
+literals so drift in EITHER direction fails loud. The strongest check
+reimplements the DOCUMENTED merkle algorithm from EVIDENCE.md §1.3 and must
+reproduce build()'s root byte-for-byte.
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import re
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+# File-path load (the test_ledger_static.py pattern): the gate invokes pytest
+# from the repo parent, where platform/ is neither a package on sys.path nor
+# importable by name (and would shadow the stdlib `platform` if it were).
+_EVIDENCE_PATH = Path(__file__).resolve().parents[1] / "evidence.py"
+_spec = importlib.util.spec_from_file_location("leaf_evidence_freeze", _EVIDENCE_PATH)
+evidence = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(evidence)
+
+REPO = Path(__file__).resolve().parents[2]
+DOC = (REPO / "contract" / "EVIDENCE.md").read_text(encoding="utf-8")
+SIGNING_SOURCE = (REPO / "platform" / "signing.py").read_text(encoding="utf-8")
+
+
+def _doc_backticked(section_heading: str, stop_heading: str) -> set:
+    start = DOC.index(section_heading)
+    stop = DOC.index(stop_heading, start)
+    return set(re.findall(r"`([^`\n]+)`", DOC[start:stop]))
+
+
+# --------------------------------------------------------------------------
+# 1. Identifiers and domains
+# --------------------------------------------------------------------------
+
+def test_bundle_version_algorithm_and_domains_match_doc():
+    assert evidence.BUNDLE_VERSION == "leaf.evidence.v1"
+    assert "`leaf.evidence.v1`" in DOC
+    assert "`sha256-merkle-v1`" in DOC
+    assert evidence._LEAF_DOMAIN == b"leaf-evidence-leaf-v1\0"
+    assert evidence._NODE_DOMAIN == b"leaf-evidence-node-v1\0"
+    assert 'b"leaf-evidence-leaf-v1\\0"' in DOC
+    assert 'b"leaf-evidence-node-v1\\0"' in DOC
+    assert re.search(r"SIGNATURE_CONTRACT\s*=\s*\"leaf\.review-signature\.v1\"", SIGNING_SOURCE)
+    assert "`leaf.review-signature.v1`" in DOC
+
+
+# --------------------------------------------------------------------------
+# 2. The documented algorithm reproduces the code's root (independent
+#    reimplementation from EVIDENCE.md §1.3, including the odd-duplication
+#    and header pseudo-leaf rules)
+# --------------------------------------------------------------------------
+
+def test_merkle_root_reproducible_from_documented_algorithm():
+    # FOUR entries + the header pseudo-leaf = FIVE initial leaves: the odd-
+    # duplication rule is exercised at the first level (3 entries + header
+    # gave 4 — every level even, duplication dead; sol-critic PR #48 R1).
+    blobs = {
+        "records/a.json": b'{"x":1}',
+        "records/b.json": b'{"y":2}',
+        "records/c.json": b'{"z":3}',
+        "records/d.json": b'{"w":4}',
+    }
+    metadata = {"projectId": "p-1", "frozenAt": "2026-07-23T00:00:00+00:00"}
+    manifest = evidence.build(blobs, metadata=metadata)
+
+    # ---- doc §1.3, step by step, sharing NOTHING with evidence._root ----
+    header = {"bundleVersion": "leaf.evidence.v1", "algorithm": "sha256-merkle-v1",
+              "metadata": metadata}
+    header_sha = hashlib.sha256(evidence.canonical_bytes(header)).hexdigest()
+
+    def leaf(path, content_sha):
+        return hashlib.sha256(b"leaf-evidence-leaf-v1\0" + path.encode("utf-8")
+                              + b"\0" + bytes.fromhex(content_sha)).digest()
+
+    level = [leaf("@manifest-metadata", header_sha)] + [
+        leaf(path, hashlib.sha256(blobs[path]).hexdigest()) for path in sorted(blobs)]
+    while len(level) > 1:
+        if len(level) % 2:
+            level.append(level[-1])
+        level = [hashlib.sha256(b"leaf-evidence-node-v1\0" + level[i] + level[i + 1]).digest()
+                 for i in range(0, len(level), 2)]
+    assert manifest["rootSha256"] == level[0].hex()
+    assert evidence.verify(manifest, blobs) == {
+        "valid": True, "errors": [], "rootSha256": manifest["rootSha256"]}
+    # The reimplementation's two structural choices are NORMATIVE doc text,
+    # pinned so a contract edit (not just a code edit) flips this test red.
+    assert "it enters the tree as leaf path `@manifest-metadata`" in DOC
+    assert "the header pseudo-leaf FIRST" in DOC
+    assert "duplicate the LAST node" in DOC
+
+
+# --------------------------------------------------------------------------
+# 3. Verification error vocabulary is closed and documented
+# --------------------------------------------------------------------------
+
+def test_verify_error_vocabulary_matches_doc():
+    # Slice exactly the vocabulary list (between "draws only from:" and the
+    # closing sentence) — the section's surrounding prose backticks return
+    # shapes, not error codes.
+    start = DOC.index("draws only from:")
+    stop = DOC.index("An empty error list", start)
+    documented = set(re.findall(r"`([^`\n]+)`", DOC[start:stop]))
+    blobs = {"a.json": b"{}", "b.json": b"[]"}
+    manifest = evidence.build(blobs, metadata={"k": "v"})
+
+    def errors_of(mutate_manifest=None, mutate_blobs=None):
+        m = {**manifest, "entries": [dict(e) for e in manifest["entries"]]}
+        b = dict(blobs)
+        if mutate_manifest:
+            mutate_manifest(m)
+        if mutate_blobs:
+            mutate_blobs(b)
+        return evidence.verify(m, b)["errors"]
+
+    produced = set()
+    produced |= set(errors_of(lambda m: m.update(bundleVersion="leaf.evidence.v2")))
+    produced |= set(errors_of(lambda m: m.update(entries=[])))
+    produced |= set(errors_of(lambda m: m.update(entries=list(reversed(m["entries"])))))
+    produced |= set(errors_of(mutate_blobs=lambda b: b.update({"extra.json": b"1"})))
+    produced |= set(errors_of(mutate_blobs=lambda b: b.update({"a.json": b"{ }"})))
+    produced |= set(errors_of(lambda m: m.update(rootSha256="0" * 64)))
+    produced |= set(errors_of(lambda m: m.update(metadata=None)))
+    produced |= set(errors_of(lambda m: m["entries"].append("bogus")))
+    produced |= set(errors_of(mutate_blobs=lambda b: b.pop("b.json")))
+    # R2 forgery shapes: entry-level smuggling and loose-equality types
+    entry_extra = errors_of(lambda m: m["entries"][0].update(note="unhashed"))
+    assert "invalid_entry" in entry_extra
+    produced |= set(entry_extra)
+    bool_size = errors_of(lambda m: m["entries"][0].update(size=True))
+    assert "invalid_entry" in bool_size
+    produced |= set(bool_size)
+    float_size = errors_of(lambda m: m["entries"][0].update(size=float(m["entries"][0]["size"])))
+    assert "invalid_entry" in float_size
+    produced |= set(float_size)
+    # unhashable path types must return the documented error result, never
+    # raise out of the verifier
+    unhashable = errors_of(lambda m: m["entries"][0].update(path=[]))
+    assert unhashable, "verifier returned no errors for an unhashable path"
+    produced |= set(unhashable)
+    # Windows-separator traversal is refused at build AND verify
+    with pytest.raises(ValueError):
+        evidence.build({"..\\escape": b"x"}, metadata={"k": "v"})
+    with pytest.raises(ValueError):
+        evidence.build({"C:/abs": b"x"}, metadata={"k": "v"})
+    backslash = errors_of(lambda m: m["entries"][0].update(path="..\\escape"),
+                          lambda b: (b.pop("a.json"), b.update({"..\\escape": b"{}"})))
+    assert any(e.startswith("invalid_path:") for e in backslash)
+    produced |= set(backslash)
+    # FORGED manifests verify() itself must refuse (R1: these previously
+    # returned valid:True — the build-time laws now hold offline too):
+    smuggled = errors_of(lambda m: m.update(smuggled="unhashed"))
+    assert "unexpected_manifest_keys" in smuggled
+    produced |= set(smuggled)
+    empty_meta = errors_of(lambda m: m.update(metadata={}))
+    assert "invalid_metadata" in empty_meta
+    produced |= set(empty_meta)
+    def traversal(m, b):
+        # a self-consistent forged pair: entry AND blob both use the
+        # traversal path, so only the path law can catch it
+        content = b.pop("a.json")
+        b["../escape"] = content
+        for entry in m["entries"]:
+            if entry["path"] == "a.json":
+                entry["path"] = "../escape"
+        m["entries"].sort(key=lambda e: e["path"] if isinstance(e, dict) else "")
+    forged = {**manifest, "entries": [dict(e) for e in manifest["entries"]]}
+    forged_blobs = dict(blobs)
+    traversal(forged, forged_blobs)
+    forged["rootSha256"] = "0" * 64  # root is irrelevant; the path law must fire first
+    traversal_errors = evidence.verify(forged, forged_blobs)["errors"]
+    assert any(e.startswith("invalid_path:") for e in traversal_errors)
+    produced |= set(traversal_errors)
+
+    # every produced error is documented (parametrized ones by prefix)
+    for error in produced:
+        token = error
+        if error.startswith("missing:"):
+            token = "missing:<path>"
+        elif error.startswith("digest_mismatch:"):
+            token = "digest_mismatch:<path>"
+        elif error.startswith("invalid_path:"):
+            token = "invalid_path:<path>"
+        assert token in documented, f"verify() produced undocumented error {error!r}"
+    # and every documented code is provokable (nothing stale in the doc)
+    fixed = {t for t in documented if ":" not in t}
+    assert fixed <= produced, f"documented but not provoked: {fixed - produced}"
+
+
+# --------------------------------------------------------------------------
+# 4. Canonicalization laws (§1.2)
+# --------------------------------------------------------------------------
+
+def test_canonical_bytes_laws():
+    out = evidence.canonical_bytes({"b": 1, "a": [1, 2], "u": "é"})
+    assert out == '{"a":[1,2],"b":1,"u":"é"}'.encode("utf-8")  # sorted, compact, unicode kept
+    assert evidence.canonical_bytes(uuid.UUID(int=1)) == b'"00000000-0000-0000-0000-000000000001"'
+    stamp = datetime(2026, 7, 23, tzinfo=timezone.utc)
+    assert evidence.canonical_bytes(stamp) == b'"2026-07-23T00:00:00+00:00"'
+    # json.dumps serializes the default-hook's str RETURN as a JSON string:
+    # Decimal reaches the wire as "1.10" (quoted), never a float — offline
+    # verifiers must reproduce exactly this.
+    assert evidence.canonical_bytes(Decimal("1.10")) == b'"1.10"'
+    # date (not just datetime) is one of the three converted types
+    assert evidence.canonical_bytes(datetime(2026, 7, 23, tzinfo=timezone.utc).date()) == b'"2026-07-23"'
+    # allow_nan=False is a frozen law: NaN/Infinity raise, never serialize
+    with pytest.raises(ValueError):
+        evidence.canonical_bytes(float("nan"))
+    with pytest.raises(TypeError):
+        evidence.canonical_bytes({1, 2})
+
+
+def test_build_input_laws():
+    with pytest.raises(ValueError):
+        evidence.build({}, metadata={"k": "v"})            # empty bundle
+    with pytest.raises(ValueError):
+        evidence.build({"a": b"1"}, metadata={})           # empty metadata
+    with pytest.raises(ValueError):
+        evidence.build({"/abs": b"1"}, metadata={"k": "v"})  # absolute path
+    with pytest.raises(ValueError):
+        evidence.build({"a/../b": b"1"}, metadata={"k": "v"})  # traversal
+    with pytest.raises(ValueError):
+        evidence.build({"a": "not-bytes"}, metadata={"k": "v"})  # type
+
+
+# --------------------------------------------------------------------------
+# 5. Review-signature payloads (source-parsed; importing signing.py needs db)
+# --------------------------------------------------------------------------
+
+def _dict_literal_keys(anchor: str) -> list:
+    # Anchors must be PROVEN unique before extraction — "payload = {" is a
+    # substring of "history_payload = {", so anchor on the full assignment
+    # with a non-word left boundary (sol-critic PR #48 R1).
+    pattern = re.compile(r"(?<![\w_])" + re.escape(anchor))
+    matches = pattern.findall(SIGNING_SOURCE)
+    assert len(matches) == 1, f"anchor {anchor!r} matched {len(matches)} times — extraction ambiguous"
+    start = pattern.search(SIGNING_SOURCE).start()
+    block = SIGNING_SOURCE[start:SIGNING_SOURCE.index("}", start)]
+    return re.findall(r'"(\w+)":', block)
+
+def _doc_table_keys(section_heading: str, stop_heading: str) -> list:
+    start = DOC.index(section_heading)
+    stop = DOC.index(stop_heading, start)
+    return re.findall(r"^\| `(\w+)` \|", DOC[start:stop], re.M)
+
+
+def test_signed_payload_field_set_frozen():
+    code_keys = _dict_literal_keys("payload = {")
+    doc_keys = _doc_table_keys("### 2.1", "### 2.2")
+    assert code_keys == ["signatureContract", "bundleId", "rootSha256",
+                        "credentialId", "signedAt"]
+    assert doc_keys == code_keys, (doc_keys, code_keys)
+    # what gets signed is the canonical encoding of exactly that payload
+    assert "encoded = evidence.canonical_bytes(payload)" in SIGNING_SOURCE
+
+
+def test_history_payload_field_set_frozen():
+    code_keys = _dict_literal_keys("history_payload = {")
+    assert code_keys == ["signatureId", "bundleId", "rootSha256", "credentialId",
+                        "signatureContract", "signatureAlgorithm", "signatureSha256"]
+    # Doc check is SECTION-LOCAL (whole-doc search false-passes when a key
+    # like bundleId also appears in §2.1 — sol-critic PR #48 R1): §2.2's own
+    # sentence must carry exactly the code's key list, in order.
+    start = DOC.index("### 2.2")
+    section = DOC[start:DOC.index("### 2.3", start)]
+    doc_keys = re.findall(r"`(\w+)`", section)
+    doc_keys = [k for k in doc_keys if k != "review"]  # operationType token handled below
+    # EXACT equality: an appended documented key (doc-only drift) fails too
+    # (sol-critic PR #48 R2 — the prefix compare admitted it).
+    assert doc_keys == code_keys, (doc_keys, code_keys)
+    assert '"review.bundle.countersigned"' in SIGNING_SOURCE
+    assert "`operationType: review.bundle.countersigned`" in section
+
+
+def test_countersign_precondition_order_pinned():
+    """§2.4's numbered order is pinned BOTH ways (sol-critic PR #48 R2):
+    the code's anchors must appear in countersign() in the documented
+    sequence, and the doc's numbered steps must name them in that order —
+    reordering either side flips this red."""
+    start = SIGNING_SOURCE.index("def countersign(")
+    body = SIGNING_SOURCE[start:]
+    anchors = [
+        'if provider is None',                                # 1 provider
+        'if not idempotency_key',                             # 2 key
+        'signed_at = _now(now)',                              # 3 timestamp
+        'FOR UPDATE"',                                        # 4 project lock
+        'ORDER BY (idempotency_key = %(key)s) DESC LIMIT 1',  # 5 duplicate return
+        '_load_bundle_blobs',                                 # 6 verification
+        '_require_resolved_failures',                         # 8 waivers (7 supersession lives inside _load_bundle_blobs)
+        'FOR UPDATE OF c',                                    # 9 credential lock
+        'payload = {',                                        # signing follows all gates
+    ]
+    positions = []
+    cursor = 0
+    for anchor in anchors:
+        index = body.find(anchor, cursor)
+        assert index >= 0, f"countersign() anchor missing or out of order: {anchor!r}"
+        positions.append(index)
+        cursor = index + 1
+    assert positions == sorted(positions)
+    # supersession is enforced inside _load_bundle_blobs, before waivers
+    helper = SIGNING_SOURCE[SIGNING_SOURCE.index("def _load_bundle_blobs"):SIGNING_SOURCE.index("def _require_resolved_failures")]
+    assert "operation_type NOT IN ('review.bundle.countersigned', 'evidence.root.delivered')" in helper
+    # the doc's numbered steps carry the same order
+    doc_start = DOC.index("### 2.4")
+    doc_section = DOC[doc_start:DOC.index("### 2.5", doc_start)]
+    phrases = ["signature provider is configured", "`Idempotency-Key` is present",
+               "signing timestamp is stamped", "project row is locked",
+               "Idempotent return", "offline verification", "not superseded",
+               "waiver-approved", "credential owned by the acting binding"]
+    cursor = 0
+    for phrase in phrases:
+        index = doc_section.find(phrase, cursor)
+        assert index >= 0, f"doc 2.4 step missing or out of order: {phrase!r}"
+        cursor = index + 1
+
+
+def test_readiness_reason_vocabulary_matches_doc():
+    # Slice exactly the vocabulary list; require set EQUALITY so an added
+    # documented reason (a doc-side drift) fails too (PR #48 R1).
+    start = DOC.index("drawn only from:", DOC.index("### 2.3"))
+    stop = DOC.index("### 2.4", start)
+    documented = set(re.findall(r"`([\w-]+)`", DOC[start:stop])) - {"null"}
+    code_reasons = set(re.findall(r'"reason": "(\w+)"', SIGNING_SOURCE))
+    expected = {"active_credential_required", "credential_revoked", "credential_expired",
+                "signature_provider_unavailable", "signature_provider_mismatch"}
+    assert code_reasons == expected, code_reasons
+    assert documented == expected, f"doc/code reason drift: doc-only={documented - expected} code-only={expected - documented}"
