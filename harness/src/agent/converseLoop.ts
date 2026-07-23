@@ -8,11 +8,9 @@
  *
  * Invariant v2 (enforced by test/converseRuntimeSeparation.test.ts): this module
  * never imports the Agent SDK — the runner is an injected port. The six spine
- * tools execute here, and the ONLY side-effecting call is AppRunClient.submitRun
- * with payload {tool, params, dwg}: a registered tool NAME dispatched onto the
- * deterministic job spine — never code, never a drawing delta. A GateClient
- * check precedes EVERY tool execution; a deny becomes an isError tool result the
- * model can relay.
+ * tools execute here. Side effects are limited to registered job dispatch and
+ * approved authoring through the app back-edge. A GateClient check precedes
+ * every tool execution; a deny becomes an isError result the model can relay.
  */
 
 import { randomUUID } from "node:crypto";
@@ -114,9 +112,6 @@ export interface HandleMessageResult {
   /** Resolves when the turn fully completes (turn_complete persisted). */
   done: Promise<void>;
 }
-
-const PHASE1_AUTHOR_STUB_MESSAGE =
-  "Tool authoring via chat lands in Phase 2 — use the Author panel.";
 
 /** Per-turn mutable state the executor and the completion mapping share. */
 interface TurnState {
@@ -736,8 +731,10 @@ export class ConverseLoop {
       }
 
       case "author_tool": {
-        // Phase-1 stub (wire contract section 5) — mounted, honest, inert.
-        return ok(JSON.stringify({ available: false, message: PHASE1_AUTHOR_STUB_MESSAGE }));
+        const description = String(args.description ?? "").trim();
+        if (!description) return err("author_tool requires args.description");
+        const authored = await appRun.authorTool(tenantId, description);
+        return ok(JSON.stringify(authored));
       }
 
       case "request_confirmation": {
@@ -860,19 +857,23 @@ function rankCatalog(entries: CapabilityEntry[], query: string): CapabilityEntry
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((t) => t.length > 1);
-  const score = (e: CapabilityEntry): number => {
+  const score = (e: CapabilityEntry): { score: number; nameHits: number } => {
     const name = String(e.name).toLowerCase();
     const desc = String(e.description).toLowerCase();
     let s = 0;
+    let nameHits = 0;
     for (const t of tokens) {
-      if (name.includes(t)) s += 3;
+      if (name.includes(t)) {
+        s += 3;
+        nameHits += 1;
+      }
       if (desc.includes(t)) s += 1;
     }
-    return s;
+    return { score: s, nameHits };
   };
   return entries
-    .map((e) => ({ e, s: score(e) }))
-    .filter(({ s }) => s > 0 || tokens.length === 0)
-    .sort((a, b) => b.s - a.s)
+    .map((e) => ({ e, ...score(e) }))
+    .filter(({ nameHits }) => nameHits > 0)
+    .sort((a, b) => b.score - a.score)
     .map(({ e }) => e);
 }

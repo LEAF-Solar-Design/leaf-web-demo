@@ -116,6 +116,21 @@ def test_fresh_id_bootstraps_only_once(client):
     assert second["head"] == 1 and second["latest"] == 1 and len(second["versions"]) == 1
 
 
+def test_summary_is_bounded_and_omits_raw_geometry(client):
+    response = client.get(
+        "/api/drawings/rooftop_demo/summary",
+        headers=_h("bootstrap-summary"),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["entity_total"] == CACHED_POLYLINE_COUNT
+    assert body["version"] == body["head"] == body["latest"] == 1
+    assert isinstance(body["layers"], list)
+    assert "intake" not in body
+    assert "polylines" not in body
+    assert len(response.text) < 10_000
+
+
 # --------------------------------------------------------------------------- #
 # 2 + 3. `demo` stays byte-identical; a fresh id ingests the SAME bytes via the
 #         SAME store.ingest_drawing call demo has always taken

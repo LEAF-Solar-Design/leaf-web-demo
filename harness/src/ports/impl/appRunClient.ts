@@ -6,10 +6,8 @@
  * valid; with LEAF_APP_DISPATCH_SECRET unset the back-edge is disabled and the
  * app answers 401).
  *
- * This client is the ConverseLoop's ONLY side-effecting surface, and only via
- * submitRun: an opaque section-7 job submission `{tool, params, dwg}` — a
- * registered tool NAME, never code, never a drawing delta (invariant v2). The
- * other three methods are reads.
+ * Side effects are limited to registered tool dispatch and gate-approved
+ * authoring. This client never accepts executable code or drawing deltas.
  *
  * Secret discipline: the dispatch secret is env-injected at construction, sent
  * only as a header, never logged, never echoed into results.
@@ -104,13 +102,17 @@ export class HttpAppRunClient implements AppRunClient {
   ): Promise<Record<string, unknown>> {
     const id = encodeURIComponent(drawingId);
     if (what === "summary") {
-      // The intake digest is the drawing summary surface (routers/drawings.py).
-      return this.request(tenantId, "GET", `/api/drawings/${id}/intake`);
+      // The bounded digest omits raw geometry (routers/drawings.py).
+      return this.request(tenantId, "GET", `/api/drawings/${id}/summary`);
     }
     const versions = await this.request(tenantId, "GET", `/api/drawings/${id}/versions`);
     if (what === "versions") return versions;
     // checkout rides the versions view ({checkout: {...}|null}).
     return { drawing_id: drawingId, checkout: versions.checkout ?? null };
+  }
+
+  async authorTool(tenantId: string, description: string): Promise<Record<string, unknown>> {
+    return this.request(tenantId, "POST", "/api/author", { description });
   }
 
   /**

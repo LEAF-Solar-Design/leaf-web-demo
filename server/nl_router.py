@@ -48,6 +48,7 @@ LANE_BUILD = "build"
 
 # confidence below which a future LLM classifier (if injected) is consulted.
 LLM_ESCALATION_CONF = 0.55
+MIN_RUN_MATCH_CONF = 0.55
 
 # --------------------------------------------------------------------------- #
 # normalisation vocabulary
@@ -455,7 +456,7 @@ def _decide(
         )
 
     # 3. RUN lane — a catalog match (possibly low confidence).
-    if best is not None:
+    if best is not None and _confidence(best) >= MIN_RUN_MATCH_CONF:
         tool_name = str(best.doc.tool.get("name"))
         params = _extract_params(best.doc.tool, text)
         conf = _confidence(best)

@@ -7,7 +7,7 @@
  *   - env scrubbing: the child env carries EXACTLY the tenant grant, ambient
  *     Anthropic identities are stripped (buildScrubbedEnv discipline);
  *   - options wiring: resume, model, includePartialMessages (true streaming),
- *     allowedTools = the six mcp__spine__ names, in-process MCP server;
+ *     no bare allowedTools auto-approval, in-process MCP server;
  *   - tool bridging: MCP handlers delegate to the loop's ToolExecutor (the loop
  *     owns semantics; the runner only transports), isError passes through;
  *   - canUseTool bridging: the SDK's 3-arg hook delegates to the loop's hook;
@@ -22,7 +22,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ConverseSdkRunner,
   QUOTA_HORIZON_S,
-  SPINE_MCP_TOOL_NAMES,
   classifyRateLimit,
 } from "../src/ports/impl/converseSdkRunner.js";
 import type { ConverseSdkRunnerOptions } from "../src/ports/impl/converseSdkRunner.js";
@@ -338,7 +337,7 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     const opts = mock.queries[0]!.options;
     expect(opts.includePartialMessages).toBe(true);
     expect(opts.tools).toEqual([]); // built-in tools disabled
-    expect(opts.allowedTools).toEqual(SPINE_MCP_TOOL_NAMES);
+    expect(opts.allowedTools).toBeUndefined();
     expect(opts.systemPrompt).toBe("SPINE SYSTEM PROMPT");
     expect((opts.mcpServers as AnyRec).spine).toBeDefined();
     expect(mock.servers[0]!.name).toBe("spine");
@@ -392,6 +391,20 @@ describe("ConverseSdkRunner — bridging to the loop", () => {
     const errRes = await job.handler({ job_id: "j1" }, undefined);
     expect(errRes.isError).toBe(true);
     expect(errRes.content[0]!.text).toBe("boom");
+
+    const author = mock.tools.find((t) => t.name === "author_tool")!;
+    await author.handler(
+      { description: "arrange panels as text", mode: "build", confirmation_id: "cid-author-1" },
+      undefined,
+    );
+    expect(executor.calls).toContainEqual({
+      tool: "author_tool",
+      args: {
+        description: "arrange panels as text",
+        mode: "build",
+        confirmation_id: "cid-author-1",
+      },
+    });
   });
 
   it("the SDK canUseTool hook delegates to the loop's CanUseTool (gate chain upstream)", async () => {
