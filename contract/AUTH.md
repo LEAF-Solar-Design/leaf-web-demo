@@ -84,23 +84,20 @@ proven path, `aws-ai-manager/app/api/deps.py`):
 
 | Condition | HTTP | Meaning |
 |---|---|---|
-| No / malformed `Authorization` header | **401** | unauthenticated |
-| Bad signature / expired / wrong aud / wrong iss | **401** | invalid token |
-| Verified token **but no** `…/tenant_id` claim | **403** | authenticated, **not provisioned** for a workspace |
+| No / malformed `Authorization` header | **401** / `UNAUTHENTICATED` | unauthenticated |
+| Bad signature / expired / wrong aud / wrong iss | **401** / `UNAUTHENTICATED` | invalid token |
+| Verified token **but no** `…/tenant_id` claim | **403** / `FORBIDDEN` | authenticated, **not provisioned** for a workspace |
 | Verified token **with** tenant claim | **200** | resolves to a workspace |
 
 The 401-vs-403 split is deliberate: *bad token* (retry auth) is distinct from
 *good token, no workspace* (needs provisioning).
 
-> **Envelope note (frozen-enum constraint):** the shared error envelope
-> (`server/envelopes.py` §10) has a **frozen** `error_code` enum with no AUTH
-> code, and this lane does not edit it. Auth rejections therefore surface via the
-> app-wide `HTTPException` handler as HTTP **401/403** with the enveloped body
-> `{"error":{"error_code":"INTERNAL","message":"<reason>", "retryable":false},
-> "degraded_mode":false}`. The **HTTP status** is the machine-readable signal;
-> the human-readable reason is in `error.message`. Adding a dedicated
-> `UNAUTHENTICATED` / `FORBIDDEN` code to the frozen enum is a follow-up
-> OPERATOR action (promote alongside §7–§10).
+> **Envelope vocabulary (frozen):** the shared error envelope maps every bare
+> HTTP 401 to `UNAUTHENTICATED` and every bare HTTP 403 to `FORBIDDEN`.
+> `GRANT_REQUIRED` remains the distinct HTTP 401 for an authenticated tenant
+> that has not linked Claude credit. `ENTITLEMENT_REQUIRED` remains the
+> distinct HTTP 403 for a verified tenant whose plan lacks a capability.
+> Error bodies and logs never echo the bearer token or raw Authorization value.
 
 ---
 

@@ -137,6 +137,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_dependency_health.py"), 13),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 11),
+        Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
+              _py_pytest("tests/test_auth_envelope.py"), 7),
         Suite("server-dynamic-loader", "server test_dynamic_loader.py", "pytest", SERVER,
               _py_pytest("test_dynamic_loader.py"), 4),
         Suite("server-write-loop", "server tests/test_write_loop.py", "pytest", SERVER,

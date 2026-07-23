@@ -29,6 +29,8 @@ class ErrorCode:
     WORKITEM_FAILED = "WORKITEM_FAILED"
     TIMEOUT = "TIMEOUT"
     TENANT_DISABLED = "TENANT_DISABLED"
+    UNAUTHENTICATED = "UNAUTHENTICATED"    # identity absent or invalid (HTTP 401)
+    FORBIDDEN = "FORBIDDEN"                # identity valid, authority insufficient (HTTP 403)
     GRANT_REQUIRED = "GRANT_REQUIRED"      # per-tenant Claude grant absent (HTTP 401)
     ENTITLEMENT_REQUIRED = "ENTITLEMENT_REQUIRED"  # tier lacks the capability (HTTP 403)
     QUOTA_EXCEEDED = "quota_exceeded"  # promoted 2026-07-17 (broker hard cap, HTTP 402)
@@ -50,6 +52,8 @@ class ErrorCode:
         WORKITEM_FAILED,
         TIMEOUT,
         TENANT_DISABLED,
+        UNAUTHENTICATED,
+        FORBIDDEN,
         GRANT_REQUIRED,
         ENTITLEMENT_REQUIRED,
         QUOTA_EXCEEDED,
@@ -72,6 +76,8 @@ DEFAULT_HTTP_STATUS: Dict[str, int] = {
     ErrorCode.WORKITEM_FAILED: 502,
     ErrorCode.TIMEOUT: 504,
     ErrorCode.TENANT_DISABLED: 403,
+    ErrorCode.UNAUTHENTICATED: 401,
+    ErrorCode.FORBIDDEN: 403,
     ErrorCode.GRANT_REQUIRED: 401,
     ErrorCode.ENTITLEMENT_REQUIRED: 403,
     ErrorCode.INTERNAL: 500,
@@ -176,16 +182,15 @@ def install_error_handlers(app) -> None:
         # shape. Other routers construct error_response(...) directly and never
         # reach here, so this mapping is additive and does not touch them.
         status_code = exc.status_code
-        if status_code in (400, 404, 422):
+        if status_code == 401:
+            error_code, retryable = ErrorCode.UNAUTHENTICATED, False
+        elif status_code in (400, 404, 422):
             # 400/404: bad or unresolvable caller input (missing/invalid header,
             # unknown resource id under 404-not-403 isolation). 422: pydantic/
             # explicit body-validation failure — same "fix your request" family.
             error_code, retryable = ErrorCode.BAD_PARAMS, False
         elif status_code == 403:
-            # No more specific existing code fits a bare 403 (admin-token gate,
-            # verified-but-unprovisioned session); ENTITLEMENT_REQUIRED is the
-            # closest machine-readable "you're not allowed to do this" code.
-            error_code, retryable = ErrorCode.ENTITLEMENT_REQUIRED, False
+            error_code, retryable = ErrorCode.FORBIDDEN, False
         elif status_code == 503:
             # Fail-closed-when-unconfigured (e.g. offboard with no admin token
             # set): retryable once an operator fixes the deployment config.
