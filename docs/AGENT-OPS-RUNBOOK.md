@@ -48,14 +48,16 @@ tenant: rate buckets are keyed by tenant, confirm-once grants by
 tenant + session + action + tool. So the drills run under a FRESH tenant per
 run, never `demo`: old `demo` stamps (real traffic or an earlier drill inside
 the same hour) would otherwise eat the budget the drill expectations assume.
-The `$$` suffix defuses same-second collisions between concurrent runs:
+The `${BASHPID:-$$}-$RANDOM` suffix defuses collisions: subshells inherit
+`$$` from the parent shell (only `BASHPID` tells them apart), and `$RANDOM`
+covers two initializations in the same shell within the same second:
 
 ```bash
 gate() { curl -s -X POST http://localhost:8130/internal/agent/gate \
   -H 'Content-Type: application/json' \
   -H "X-Dispatch-Secret: $LEAF_APP_DISPATCH_SECRET" \
   -d "$1"; echo; }
-RUN_TAG="$(date +%s)-$$"
+RUN_TAG="$(date +%s)-${BASHPID:-$$}-$RANDOM"
 DT="ops-drill-$RUN_TAG"       # drill tenant: fresh rate/grant/approval namespace
 SID="ops-session-$RUN_TAG"
 RT="rate-drill-$RUN_TAG"      # separate tenant drill 4 exhausts on purpose
@@ -88,10 +90,14 @@ sees.)
 docker compose exec app sh -c 'if [ -e /data/state/agent.disabled ]; then echo "ALREADY ENGAGED - do NOT drill. Reason:"; cat /data/state/agent.disabled 2>/dev/null; exit 1; else echo clear-to-drill; fi'
 ```
 
-Engage (the reason line is what tenants' deny reasons will carry):
+Engage. The claim is ATOMIC: `set -C` (noclobber) makes the redirect an
+`O_EXCL` create, so detecting a switch someone engaged after the guard and
+claiming the path are one step, never a look-then-write race. The marker
+carries `$RUN_TAG` so the lift below can prove the switch is still this
+run's (the reason line is what tenants' deny reasons will carry):
 
 ```bash
-docker compose exec app sh -c 'printf "ops drill: paused by operator\n" > /data/state/agent.disabled'
+docker compose exec app sh -c 'set -C; { printf "%s\n" "$0" > /data/state/agent.disabled; } 2>/dev/null && echo engaged || { echo "ALREADY ENGAGED - do NOT drill. Reason:"; cat /data/state/agent.disabled 2>/dev/null; exit 1; }' "ops drill: paused by operator $RUN_TAG"
 ```
 
 Verify the gate denies with the kill-switch reason:
@@ -100,7 +106,8 @@ Verify the gate denies with the kill-switch reason:
 gate "{\"tenant_id\":\"$DT\",\"session_id\":\"$SID\",\"turn_id\":\"t1\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
 ```
 
-Expect `"decision":"deny"` and `"reason":"kill_switch_active: ops drill: paused by operator"`.
+Expect `"decision":"deny"` and a `"reason"` of
+`kill_switch_active: ops drill: paused by operator <your RUN_TAG>`.
 The tenant-visible status route agrees:
 
 ```bash
@@ -115,10 +122,12 @@ docker compose restart app
 docker compose exec app sh -c 'test -e /data/state/agent.disabled && echo still-engaged'
 ```
 
-Re-run the `gate` call above: still `deny` / `kill_switch_active`. Lift it:
+Re-run the `gate` call above: still `deny` / `kill_switch_active`. Lift it —
+only if the switch still carries THIS run's marker (a real emergency stop
+engaged meanwhile must never be lifted by a drill):
 
 ```bash
-docker compose exec app sh -c 'rm /data/state/agent.disabled'
+docker compose exec app sh -c '[ "$(cat /data/state/agent.disabled 2>/dev/null)" = "$0" ] && rm /data/state/agent.disabled && echo lifted || { echo "switch is not this run marker - NOT lifting"; exit 1; }' "ops drill: paused by operator $RUN_TAG"
 ```
 
 Re-run the `gate` call: `"decision":"allow"`. Done.
@@ -299,31 +308,42 @@ corrupt-snapshot deny. Two rules make the reset race-free:
   neither property. The `.lock` sibling itself is never deleted: lockers open
   it by name, and removing it would let a later locker lock a different
   inode, un-serializing the read-check-write.
-* QUIESCE with the kill switch around it, GUARDED. The kill check precedes
-  the rate step, so engaging stops new calls from spending mid-reset and
-  keeps the one-stamp verification below deterministic. The guard is part of
-  the sequence, not a reference to drill 1: run standalone during a real
-  emergency stop, an unguarded engage would overwrite the operator's reason
-  and the final lift would END the real stop.
+* QUIESCE with the kill switch around it, ATOMICALLY CLAIMED and chained on
+  the HOST. `set -C` (noclobber) makes the engage an `O_EXCL` create:
+  claiming the path and detecting an emergency stop someone else engaged are
+  one atomic step, never a look-then-write race. The three commands are one
+  `&&` chain in the operator's own shell, so a failed claim stops the whole
+  sequence (a container-side `exit 1` alone stops nothing an operator pastes
+  next). The lift removes the switch only after proving the file still
+  carries THIS run's marker: a real emergency stop engaged meanwhile is
+  never overwritten or lifted. Scope honestly: engaging stops NEW calls at
+  the kill check; a call already past the kill check can still spend one
+  stamp on the fresh snapshot after the reset (the lock only guarantees old
+  buckets never come back). Quiet stack: the verification below shows
+  exactly one stamp. Live traffic: a straggler's stamp may sit beside it.
 
 ```bash
-docker compose exec app sh -c 'if [ -e /data/state/agent.disabled ]; then echo "kill switch ALREADY ENGAGED - resolve that first, no reset. Reason:"; cat /data/state/agent.disabled 2>/dev/null; exit 1; else printf "rate-state reset in progress\n" > /data/state/agent.disabled && echo quiesced; fi'
-docker compose exec app python -c "
+RESET_MARK="rate-state reset in progress $RUN_TAG"
+docker compose exec app sh -c 'set -C; { printf "%s\n" "$0" > /data/state/agent.disabled; } 2>/dev/null && echo quiesced || { echo "kill switch ALREADY ENGAGED - resolve that first, no reset. Reason:"; cat /data/state/agent.disabled 2>/dev/null; exit 1; }' "$RESET_MARK" \
+&& docker compose exec app python -c "
 import agent_gate
 p = agent_gate.rate_file()
 with agent_gate._snapshot_lock(p):
     p.unlink(missing_ok=True)
 print('rate snapshot reset under lock:', p)
-"
-docker compose exec app sh -c 'rm /data/state/agent.disabled'
+" \
+&& docker compose exec app sh -c '[ "$(cat /data/state/agent.disabled 2>/dev/null)" = "$0" ] && rm /data/state/agent.disabled && echo lifted || { echo "switch is not this reset marker - NOT lifting"; exit 1; }' "$RESET_MARK"
 ```
 
 (`_snapshot_lock` is agent_gate's own lock helper; the runbook reuses it
 inside the app container, so the command is always version-matched to the
-code it serializes against.)
+code it serializes against. If the middle step fails, the chain stops with
+the switch still engaged under this run's marker: investigate, then lift
+with the last command alone — it refuses unless the marker is still this
+run's.)
 
 Verify recovery: the same call allows again and the fresh snapshot carries
-exactly one stamp:
+the verification call's stamp (exactly one on the quiet drill stack):
 
 ```bash
 gate "{\"tenant_id\":\"$RT\",\"session_id\":\"$SID\",\"turn_id\":\"r62\",\"action\":\"run_read_tool\",\"args\":{\"tool\":\"probe\"}}"
