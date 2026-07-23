@@ -41,25 +41,30 @@ docker compose up -d --build --wait
 (PowerShell: `$env:LEAF_APP_DISPATCH_SECRET = 'ops-drill-secret'` before
 `docker compose up -d --build --wait`.)
 
-The demo stack runs with auth off, so any `tenant_id` string resolves to the
-full-access `demo` tier. The gate's state is DURABLE: on a reused volume, a
-confirm-once grant or spent rate stamps from an earlier drill run would change
-this run's expected outputs. So every run mints fresh identifiers, and the
-throwaway rate tenant is unique per run:
+The demo stack runs with auth off, so ANY `tenant_id` string resolves to the
+full-access `demo` tier (`server/deps.py` `backedge_tenant` off-auth +
+`entitlements.resolve_tier`). The gate's state is DURABLE and namespaced by
+tenant: rate buckets are keyed by tenant, confirm-once grants by
+tenant + session + action + tool. So the drills run under a FRESH tenant per
+run, never `demo`: old `demo` stamps (real traffic or an earlier drill inside
+the same hour) would otherwise eat the budget the drill expectations assume.
+The `$$` suffix defuses same-second collisions between concurrent runs:
 
 ```bash
 gate() { curl -s -X POST http://localhost:8130/internal/agent/gate \
   -H 'Content-Type: application/json' \
   -H "X-Dispatch-Secret: $LEAF_APP_DISPATCH_SECRET" \
   -d "$1"; echo; }
-SID="ops-drill-$(date +%s)"
-RT="rate-drill-$(date +%s)"
+RUN_TAG="$(date +%s)-$$"
+DT="ops-drill-$RUN_TAG"       # drill tenant: fresh rate/grant/approval namespace
+SID="ops-session-$RUN_TAG"
+RT="rate-drill-$RUN_TAG"      # separate tenant drill 4 exhausts on purpose
 ```
 
 Sanity check before any drill (expect `"decision":"allow"`):
 
 ```bash
-gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t0\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
+gate "{\"tenant_id\":\"$DT\",\"session_id\":\"$SID\",\"turn_id\":\"t0\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
 ```
 
 ## Drill 1: kill switch
@@ -74,10 +79,13 @@ filesystem access to the volume can lift it.
 FIRST, the guard. The switch is live durable state: if it is already engaged,
 someone meant it, and running the drill would overwrite their reason and later
 LIFT a real emergency stop. Investigate instead; only proceed on
-`clear-to-drill`:
+`clear-to-drill`. (`-e`, not `-f`, deliberately: `kill_switch_active()` is
+`Path.exists()`, so ANY filesystem entry at the path — a stray directory
+included — keeps the gate killed, and the guard must see exactly what the gate
+sees.)
 
 ```bash
-docker compose exec app sh -c 'if [ -f /data/state/agent.disabled ]; then echo "ALREADY ENGAGED - do NOT drill. Reason:"; cat /data/state/agent.disabled; exit 1; else echo clear-to-drill; fi'
+docker compose exec app sh -c 'if [ -e /data/state/agent.disabled ]; then echo "ALREADY ENGAGED - do NOT drill. Reason:"; cat /data/state/agent.disabled 2>/dev/null; exit 1; else echo clear-to-drill; fi'
 ```
 
 Engage (the reason line is what tenants' deny reasons will carry):
@@ -89,7 +97,7 @@ docker compose exec app sh -c 'printf "ops drill: paused by operator\n" > /data/
 Verify the gate denies with the kill-switch reason:
 
 ```bash
-gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t1\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
+gate "{\"tenant_id\":\"$DT\",\"session_id\":\"$SID\",\"turn_id\":\"t1\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
 ```
 
 Expect `"decision":"deny"` and `"reason":"kill_switch_active: ops drill: paused by operator"`.
@@ -104,7 +112,7 @@ volume, not in the container):
 
 ```bash
 docker compose restart app
-docker compose exec app sh -c 'test -f /data/state/agent.disabled && echo still-engaged'
+docker compose exec app sh -c 'test -e /data/state/agent.disabled && echo still-engaged'
 ```
 
 Re-run the `gate` call above: still `deny` / `kill_switch_active`. Lift it:
@@ -195,7 +203,7 @@ bytes; a container recreate would too):
 
 ```bash
 docker compose exec app sh -c 'cp agent_policy.json /tmp/agent_policy.bak && printf "{broken" > agent_policy.json'
-gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t2\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
+gate "{\"tenant_id\":\"$DT\",\"session_id\":\"$SID\",\"turn_id\":\"t2\",\"action\":\"read_platform_state\",\"args\":{\"what\":\"drill\"}}"
 docker compose exec app sh -c 'cp /tmp/agent_policy.bak agent_policy.json'
 ```
 
@@ -212,15 +220,16 @@ under `LEAF_AGENT_APPROVALS_DIR`, bound to the exact
 racing expiry records `expired`, and a redemption after expiry denies
 `approval_expired`. A granted record redeems exactly once (`consumed_at` stamp;
 replays deny). Changing the TTL is a drill-2 policy edit of `approval_ttl_s`.
-(The fresh `$SID` from the preconditions matters here: confirm-once grants are
-keyed by tenant + session + action + tool, so a session id reused from an
+(The fresh `$DT`/`$SID` from the preconditions matter here: confirm-once grants
+are keyed by tenant + session + action + tool, so identifiers reused from an
 earlier drill run that GRANTED could answer `allow_via_session_grant` instead
-of filing a new record.)
+of filing a new record, and prior `demo`-tenant rate stamps could deny this
+proposal outright.)
 
 File a pending approval (confirm-once action) and capture its confirmation id:
 
 ```bash
-CID=$(gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t3\",\"action\":\"run_write_tool\",\"args\":{\"tool\":\"noop_write\",\"dwg\":\"drill\"}}" \
+CID=$(gate "{\"tenant_id\":\"$DT\",\"session_id\":\"$SID\",\"turn_id\":\"t3\",\"action\":\"run_write_tool\",\"args\":{\"tool\":\"noop_write\",\"dwg\":\"drill\"}}" \
   | python -c "import json,sys; print(json.load(sys.stdin)['confirmation_id'])")
 echo "$CID"
 ```
@@ -242,7 +251,7 @@ tenant/session/action/args, `confirmation_id` inside args):
 
 ```bash
 sleep 310
-gate "{\"tenant_id\":\"demo\",\"session_id\":\"$SID\",\"turn_id\":\"t4\",\"action\":\"run_write_tool\",\"args\":{\"tool\":\"noop_write\",\"dwg\":\"drill\",\"confirmation_id\":\"$CID\"}}"
+gate "{\"tenant_id\":\"$DT\",\"session_id\":\"$SID\",\"turn_id\":\"t4\",\"action\":\"run_write_tool\",\"args\":{\"tool\":\"noop_write\",\"dwg\":\"drill\",\"confirmation_id\":\"$CID\"}}"
 ```
 
 Expect `"decision":"deny"`, `"reason":"approval_expired"`, and `list_pending`
@@ -277,24 +286,41 @@ docker compose exec app sh -c 'cat /data/state/agent_rate_state.json; echo'
 ```
 
 Reset. WARNING: this hands the full budget back to EVERY tenant (there is no
-per-tenant reset tooling); do it deliberately, typically after a drill, a
-runaway-loop incident you have already stopped, or a corrupt-snapshot deny.
-Two rules make the reset race-free:
+per-tenant reset tooling; Phase-2 gap); do it deliberately, typically after a
+drill, a runaway-loop incident you have already stopped, or a
+corrupt-snapshot deny. Two rules make the reset race-free:
 
-* QUIESCE FIRST with the kill switch (drill 1 guard applies). The kill check
-  runs before the rate step, so once engaged, no in-flight gate call is left
-  holding the rate lock or about to rewrite the snapshot; deleting it under
-  live traffic instead can lose the reset to a concurrent locked
-  read-modify-write that writes the pre-reset buckets straight back.
-* Delete ONLY the snapshot. The `.lock` sibling stays: lockers open it by
-  name, and removing it while a process holds it lets a later locker lock a
-  DIFFERENT inode, which un-serializes the read-check-write.
+* Delete the snapshot UNDER THE MODULE'S OWN LOCK. The gate's entire
+  read-check-write is atomic inside `_snapshot_lock`
+  (`server/agent_gate.py`), so a lock-held unlink serializes with every
+  concurrent budget write: nothing can restore pre-reset buckets after the
+  reset, and a request that queues behind it simply re-spends from the fresh
+  empty budget (by design: a reset hands budget back). A bare `rm` has
+  neither property. The `.lock` sibling itself is never deleted: lockers open
+  it by name, and removing it would let a later locker lock a different
+  inode, un-serializing the read-check-write.
+* QUIESCE with the kill switch around it, GUARDED. The kill check precedes
+  the rate step, so engaging stops new calls from spending mid-reset and
+  keeps the one-stamp verification below deterministic. The guard is part of
+  the sequence, not a reference to drill 1: run standalone during a real
+  emergency stop, an unguarded engage would overwrite the operator's reason
+  and the final lift would END the real stop.
 
 ```bash
-docker compose exec app sh -c 'printf "rate-state reset in progress\n" > /data/state/agent.disabled'
-docker compose exec app sh -c 'rm -f /data/state/agent_rate_state.json'
+docker compose exec app sh -c 'if [ -e /data/state/agent.disabled ]; then echo "kill switch ALREADY ENGAGED - resolve that first, no reset. Reason:"; cat /data/state/agent.disabled 2>/dev/null; exit 1; else printf "rate-state reset in progress\n" > /data/state/agent.disabled && echo quiesced; fi'
+docker compose exec app python -c "
+import agent_gate
+p = agent_gate.rate_file()
+with agent_gate._snapshot_lock(p):
+    p.unlink(missing_ok=True)
+print('rate snapshot reset under lock:', p)
+"
 docker compose exec app sh -c 'rm /data/state/agent.disabled'
 ```
+
+(`_snapshot_lock` is agent_gate's own lock helper; the runbook reuses it
+inside the app container, so the command is always version-matched to the
+code it serializes against.)
 
 Verify recovery: the same call allows again and the fresh snapshot carries
 exactly one stamp:
