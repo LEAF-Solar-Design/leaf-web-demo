@@ -14,6 +14,18 @@ READ-ONLY references. This document is the harness's own contract; it honors —
 does not re-freeze — `contract/CONTRACT.md` (§1–§6), `server/CONTRACT-ADDENDUM.md`
 (§7–§10), and `contract/AUTH.md`.
 
+> **STATUS: FROZEN (census #13, NL-build lane, 2026-07-22).** The contract
+> surfaces this document defines — the HTTP API (§1, including the F5
+> `X-Harness-Secret` caller-auth gate), the four ports (§2), the routing rule
+> (§3), the runtime/LLM separation invariant v2 (§4), the forbidden legacy paths
+> (§5), the two-concern separation (§6), and the tool-package layout (§7) — are
+> change-controlled: a breaking change is stop-the-line and needs an operator
+> ruling plus a versioned supersession note (the §4 v1→v2 pattern), never a
+> silent in-place edit. Additive absent-safe fields follow the ADDENDUM §10
+> additive rule. The PARKED `/converse/*` spec in §1 stays parked, not frozen —
+> the live conversational surface is `POST /turn`. Sibling freeze: ADDENDUM
+> §15/§16/§17 (same date).
+
 ---
 
 ## 1. HTTP API
@@ -22,17 +34,26 @@ Tenant id arrives via the `X-Tenant-Id` header stub (default `demo-tenant`),
 matching the backbone. Concern 1 (Auth0 platform identity, `contract/AUTH.md`) is
 resolved upstream; this harness does not verify the platform JWT.
 
+Every route below except `GET /health` sits behind the F5 caller-auth gate when it
+is enabled (`LEAF_HARNESS_AUTH` + `X-Harness-Secret` from `LEAF_HARNESS_SECRET`;
+timing-safe compare; FAIL-CLOSED when enabled with no secret configured).
+
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/health` | — | `{ ok: true, service }` |
-| POST | `/author` | `{ description, mode? }` | **build** (default): `200 { tool, code, preview }` (CONTRACT §4). **one-off** (`mode:"one-off"`): `200 { tool, code, preview, run }` |
-| POST | `/run-registered` | `{ tool, params?, dwg?, aps_live? }` | `200` CONTRACT §3 result envelope |
+| GET | `/health` | — | `{ ok: true, service }` (no secret required) |
+| POST | `/author` | `{ description, mode?, tenant_id? }` | **build** (default): `200 { tool, code, preview, telemetry? }` (CONTRACT §4; `telemetry` additive + absent-safe). **one-off** (`mode:"one-off"`): `200 { tool, code, preview, run, telemetry? }`. Missing grant → `401 { grant_required: true, error }` |
+| POST | `/run-registered` | `{ tool, params?, dwg?, aps_live?, tenant_id? }` | `200` CONTRACT §3 result envelope; never constructs the SDK |
+| POST | `/turn` | `ConverseTurnInput` (`ports/converse.ts`, FROZEN) | `200 application/x-ndjson`, one `HarnessTurnEvent` per line, always terminated by `turn_complete` or `error`; pre-stream grant failure → non-stream `401 { grant_required: true }`; no runner wired → `501` |
+| PUT | `/grants/{tenantId}` | `{ token, kind? }` (§17: kind auto-detected when absent) | `200 { linked, linked_at, kind }` — the token is NEVER echoed |
+| GET | `/grants/{tenantId}` | — | `200 { linked, linked_at, kind? }` — never the token |
+| DELETE | `/grants/{tenantId}` | — | `200` = the store's post-remove `status()` (for the demo tenant a documented §16 env/file fallback can still report `linked:true`); never the token |
 
-- `POST /author` build response is **exactly** `{ tool, code, preview }` where
-  `tool` validates against **CONTRACT §2** (name kebab-case, version, description,
-  kind, engine_op, params JSON-Schema, returns, capabilities, provenance) and also
-  carries the hot-script **SPEC §7.1** `tool.json` fields (`entry`, `timeout_ms`,
-  `idempotent`, `review`).
+- `POST /author` build response is `{ tool, code, preview }` plus the ADDITIVE,
+  absent-safe `telemetry?` (A1 — present only when the runner metered the build;
+  see the route table above) where `tool` validates against **CONTRACT §2** (name
+  kebab-case, version, description, kind, engine_op, params JSON-Schema, returns,
+  capabilities, provenance) and also carries the hot-script **SPEC §7.1**
+  `tool.json` fields (`entry`, `timeout_ms`, `idempotent`, `review`).
 - Errors are JSON `{ error: { message, diagnostics? } }` with a sane HTTP status
   (400 bad request, 404 unknown tool, 422 tool failed validation, 500 internal).
 
@@ -75,6 +96,14 @@ Defined in `src/ports/index.ts`. Fakes in `src/ports/fakes/`, real stubs in
 | `TenantRepoProvider` | checkout of the tenant mushy-codebase git repo + `commit()` | `fakeTenantRepo.ts` | `impl/tenantRepoProvider.ts` | `project-job-schema` |
 | `BrokerApsClient` | run/test-run a tool on APS via the broker (never raw creds) | `fakeBrokerApsClient.ts` | `impl/brokerApsClient.ts` | `async-broker-catalog-envelopes` |
 | `AgentRunner` | the Agent SDK loop boundary (real = SDK, fake = scripted) | `fakeAgentRunner.ts` | `impl/agentSdkRunner.ts` | `agentsdk-usage-visibility` |
+
+Two later waves added live OPTIONAL ports on `HarnessPorts` (absent → their routes
+answer 501/404, everything else unchanged); they are part of the frozen surface:
+
+| Port | Supplies | Fake | Real impl | Wave |
+|---|---|---|---|---|
+| `grantAdmin: TenantGrantAdminStore` | `put/status/remove` backing `/grants/{tenantId}` (wire `{linked, linked_at, kind}`, never the token) | temp-dir store in tests | `FileTenantGrantStore` (same instance as the read side; F18 seam via `createTenantGrantStore`) | §16 wave 4 |
+| `converseRunner: ConverseRunner` | one converse turn as an async event stream backing `POST /turn` | `fakeTurnRunner.ts` | `impl/agentSdkTurnRunner.ts` (lazy-loaded) | §18 sessions wire |
 
 `BrokerApsClient` maps to **POST `{BROKER_URL}/broker/run`** with the snake_case
 body `{ tenant_id, tool, params, dwg, aps_live }` and returns the extended §3/§10
@@ -242,3 +271,30 @@ installed, a broker is running on `BROKER_URL`, and the per-tenant grant store +
 repo locator exist. The sibling `C:/tmp/hosted-oauth-spike/` is READY-FOR-CLICK and
 demonstrates the clean-env single-turn pattern this harness's `agentSdkRunner.ts`
 mirrors. Rollback = delete `harness/`.
+
+The CONTAINERIZED smoke is NOT deferred: `scripts/harness-container-smoke.py`
+boots the real compose stack (broker + harness + app, `LEAF_AGENT_MOCK=1` so no
+Anthropic egress) and proves the authed app→harness hop, durable grant/tenant
+volumes across a container restart, the §16.H shared-volume catalog fold, and
+secret-free logs. Opt-in gate entry: `LEAF_CONTAINER_SMOKE=1` in
+`scripts/run-all-gates.py`.
+
+## 11. Manifest-v1 adoption (tool-package intake; census #13)
+
+The cross-host CAD tool-package contract ("manifest v1":
+`LEAF-Solar-Design/cad-tool-package` → `contract/CONTRACT.md` +
+`contract/tool.schema.json`) is FROZEN as of 2026-07-22, with a recorded
+round-trip gate PASS on both legs (C# in-process host + hosted Linux runner).
+This lane adopts it:
+
+- The §7 layout above (`tool.json` SPEC §7.1 + `registry.json` CONTRACT §2
+  entry) is the platform's OWN registry shape and is unchanged by this adoption.
+- Any NL-build-lane container that accepts EXTERNALLY-authored tool packages as
+  intake (a future surface — today the harness only authors packages itself)
+  MUST reuse the manifest-v1 Linux runner (`runner-linux/runner.py`: validate +
+  introspect + re-emit) rather than re-implement package validation, and MUST
+  keep its report honesty floor: `cad_execution: not-attempted` — a validation
+  container never fakes CAD execution.
+- Any change to the package format re-runs the manifest-v1 gate
+  (`gate/run_gate.py --all` in that repo) on both legs before merge; a breaking
+  change to a frozen field is stop-the-line.

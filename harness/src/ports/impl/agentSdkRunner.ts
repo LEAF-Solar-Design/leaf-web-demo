@@ -37,6 +37,7 @@ import type {
   ToolPackage,
 } from "../index.js";
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
+import { scrubSecrets } from "./envScrub.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -72,20 +73,12 @@ function dynImport(parts: string[]): Promise<unknown> {
 // --------------------------------------------------------------------------- //
 // Secret discipline
 // --------------------------------------------------------------------------- //
-/** Env vars that must NOT leak an ambient Anthropic identity into the session. */
-const AMBIENT_CRED_KEYS = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CODE_USE_FOUNDRY",
-];
-
-/** Build a scrubbed env with EXACTLY this tenant's grant injected (nothing else). */
+/** Build a scrubbed env with EXACTLY this tenant's grant injected (nothing else).
+ *  Scrubbing = envScrub.ts's two-layer discipline (known ambient identities +
+ *  wholesale secret-like key-name sweep, sol-critic F3/R3); the ONE selected
+ *  credential variable is injected AFTER the sweep. */
 export function buildScrubbedEnv(grant: AgentGrant, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base };
-  for (const k of AMBIENT_CRED_KEYS) delete env[k];
+  const env = scrubSecrets(base);
   if (grant.kind === "oauth") {
     env.CLAUDE_CODE_OAUTH_TOKEN = grant.oauthToken;
   } else {

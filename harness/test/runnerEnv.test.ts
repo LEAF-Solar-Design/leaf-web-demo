@@ -29,6 +29,31 @@ function pollutedBase(): NodeJS.ProcessEnv {
     CLAUDE_CODE_USE_BEDROCK: "1",
     CLAUDE_CODE_USE_VERTEX: "1",
     CLAUDE_CODE_USE_FOUNDRY: "1",
+    // Platform-internal secrets (sol-critic F3): must never reach the SDK child.
+    LEAF_HARNESS_SECRET: "INTERNAL-hop-secret-should-be-removed",
+    LEAF_HARNESS_AUTH: "1",
+    LEAF_APP_DISPATCH_SECRET: "INTERNAL-dispatch-secret-should-be-removed",
+    LEAF_BROKER_SECRET: "INTERNAL-broker-secret-should-be-removed",
+    E2B_API_KEY: "INTERNAL-e2b-key-should-be-removed",
+    // R3: the sweep must be by key-name PATTERN, not a fixed list — these four
+    // were reachable under the first fix's denylist.
+    LEAF_OPS_SECRET: "INTERNAL-ops-secret-should-be-removed",
+    LEAF_GUEST_SECRET: "INTERNAL-guest-secret-should-be-removed",
+    LEAF_CALLBACK_SECRET: "INTERNAL-callback-secret-should-be-removed",
+    PLATFORM_ADMIN_TOKEN: "INTERNAL-admin-token-should-be-removed",
+    // Round-3: AUTH/JWT-named credential carriers dodge a SECRET/TOKEN-only pattern.
+    DOCKER_AUTH_CONFIG: "CRED-docker-auth-should-be-removed",
+    NPM_CONFIG__AUTH: "CRED-npm-auth-should-be-removed",
+    LEAF_ADMIN_JWT: "CRED-admin-jwt-should-be-removed",
+    // Round-4: PAT (personal access token) as an underscore-delimited segment.
+    GITHUB_PAT: "CRED-github-pat-should-be-removed",
+    AZURE_DEVOPS_EXT_PAT: "CRED-azdo-pat-should-be-removed",
+    // Round-5: password-provider hooks — a child honoring one can be steered
+    // to a credential-emitting program.
+    GIT_ASKPASS: "/usr/bin/evil-cred-provider",
+    SSH_ASKPASS: "/usr/bin/evil-cred-provider",
+    // PAT must NOT over-match PATH-like names (PATH itself is pinned below).
+    LEAF_DATA_PATH: "/var/leaf/data",
   };
 }
 
@@ -43,8 +68,30 @@ describe("buildScrubbedEnv — grant kind drives the injected credential var", (
     expect(env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
     expect(env.CLAUDE_CODE_USE_VERTEX).toBeUndefined();
     expect(env.CLAUDE_CODE_USE_FOUNDRY).toBeUndefined();
-    // untouched, non-credential env survives
+    // platform-internal secrets are stripped too (F3)
+    expect(env.LEAF_HARNESS_SECRET).toBeUndefined();
+    expect(env.LEAF_HARNESS_AUTH).toBeUndefined();
+    expect(env.LEAF_APP_DISPATCH_SECRET).toBeUndefined();
+    expect(env.LEAF_BROKER_SECRET).toBeUndefined();
+    expect(env.E2B_API_KEY).toBeUndefined();
+    // R3: pattern sweep catches secret-like keys NOT on any fixed list
+    expect(env.LEAF_OPS_SECRET).toBeUndefined();
+    expect(env.LEAF_GUEST_SECRET).toBeUndefined();
+    expect(env.LEAF_CALLBACK_SECRET).toBeUndefined();
+    expect(env.PLATFORM_ADMIN_TOKEN).toBeUndefined();
+    // Round-3: AUTH/JWT-named carriers are swept too
+    expect(env.DOCKER_AUTH_CONFIG).toBeUndefined();
+    expect(env.NPM_CONFIG__AUTH).toBeUndefined();
+    expect(env.LEAF_ADMIN_JWT).toBeUndefined();
+    // Round-4: PAT-named carriers are swept as whole segments
+    expect(env.GITHUB_PAT).toBeUndefined();
+    expect(env.AZURE_DEVOPS_EXT_PAT).toBeUndefined();
+    // Round-5: password-provider hooks are swept
+    expect(env.GIT_ASKPASS).toBeUndefined();
+    expect(env.SSH_ASKPASS).toBeUndefined();
+    // untouched, non-credential env survives — and PAT does not eat PATH-like keys
     expect(env.PATH).toBe("/usr/bin");
+    expect(env.LEAF_DATA_PATH).toBe("/var/leaf/data");
   });
 
   it("oauth grant -> CLAUDE_CODE_OAUTH_TOKEN set; ANTHROPIC_API_KEY absent", () => {

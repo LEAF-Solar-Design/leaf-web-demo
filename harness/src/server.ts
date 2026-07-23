@@ -43,6 +43,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
+import { redactTokens } from "./redact.js";
 import { GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import { DEFAULT_TENANT } from "./ports/index.js";
@@ -350,7 +351,10 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
           }
           if (method === "DELETE") {
             await ports.grantAdmin.remove(tenantId);
-            return send(res, 200, { linked: false, linked_at: null });
+            // Honest post-remove state (sol-critic F2): the demo tenant's documented
+            // §16 env/file fallback can still be active after the per-tenant files are
+            // gone — report the store's actual status, never a hardcoded linked:false.
+            return send(res, 200, await ports.grantAdmin.status(tenantId));
           }
         } catch (e) {
           // e.g. a malformed/traversal tenant id — a client error, never a token leak.
@@ -411,8 +415,10 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
 
       return send(res, 404, { error: { message: `no route for ${method} ${path}` } });
     } catch (err) {
-      // Diagnostic: full stack to stderr (never contains the grant; see serve.ts note).
-      console.error("[harness] request error:", (err as Error).stack ?? String(err));
+      // Diagnostic: full stack to stderr, token-redacted (defense in depth — no
+      // designed path puts a grant in an error message, but a thrown string is
+      // arbitrary and this line must never be the leak).
+      console.error("[harness] request error:", redactTokens((err as Error).stack ?? String(err)));
       // Missing per-tenant grant -> a clean 401 with a machine-detectable marker the app
       // proxy maps to GRANT_REQUIRED (frontend prompts "sign in with Claude"). No token.
       if (err instanceof GrantRequiredError) {
@@ -453,11 +459,12 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
 export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
-  const { FileTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
+  const { createTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
-  const grantStore = new FileTenantGrantStore(); // per-tenant grant + admin (one store)
+  // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
+  const grantStore = createTenantGrantStore();
 
   const ports: HarnessPorts = {
     agentRunner: new AgentSdkRunner(),

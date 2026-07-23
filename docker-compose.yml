@@ -2,8 +2,11 @@
 #
 # The first deploy-readiness artifact: containerize app + broker + harness + web
 # and prove the env contract (RUN.md, server/README.md, CONTRACT-ADDENDUM §7-§16)
-# wires up under `docker compose`. Everything runs at APS_LIVE=0 with NO secrets;
-# operator opt-ins (APS creds, a Claude grant, DATABASE_URL) are commented below.
+# wires up under `docker compose`. Everything runs at APS_LIVE=0 with NO
+# third-party secrets; operator opt-ins (APS creds, a Claude grant, DATABASE_URL)
+# are commented below. The one internal credential — the app→harness hop secret
+# (LEAF_HARNESS_SECRET, §15/§16) — defaults to a DEV-ONLY value so one-command
+# boot keeps working; override it via `.env`/environment for any shared host.
 #
 #   docker compose build          # build all four images
 #   docker compose up -d          # start; wait for healthchecks
@@ -51,6 +54,13 @@ services:
       LEAF_TENANTS_DIR: /data/tenants     # MUST match the app's LEAF_TENANTS_DIR (§16.H)
       LEAF_GRANTS_DIR: /data/grants       # per-tenant Claude token files (harness-only)
       LEAF_TENANT_FIXTURE: /app/test/fixtures/tenant-repo
+      # F5 caller auth (harness/src/server.ts): the gate is ON in the container
+      # stack, so every non-/health route requires X-Harness-Secret. The harness
+      # port is NOT published to the host (compose-network only); the default
+      # secret is a dev-only placeholder that keeps `docker compose up` one
+      # command. Override for anything shared: LEAF_HARNESS_SECRET=<random>.
+      LEAF_HARNESS_AUTH: "1"
+      LEAF_HARNESS_SECRET: ${LEAF_HARNESS_SECRET:-leaf-compose-dev-secret}
       # --- Converse lane (§18 spine mount, census #12 chip 1) -----------------
       # BOTH must be non-empty or the lane stays dark FAIL-CLOSED (POST /turn
       # answers 501; author/Build lane unaffected). The secret is the harness->
@@ -91,6 +101,9 @@ services:
       APS_LIVE: "0"
       BROKER_URL: http://broker:8140
       LEAF_AUTHOR_HARNESS_URL: http://harness:8150
+      # Same value as the harness service: broker_client.harness_headers() forwards
+      # it as X-Harness-Secret on every app→harness call (author/tenant/turn).
+      LEAF_HARNESS_SECRET: ${LEAF_HARNESS_SECRET:-leaf-compose-dev-secret}
       LEAF_TENANTS_DIR: /data/tenants                  # MUST match the harness (§16.H)
       LEAF_STORE_DIR: /data/drawings                   # shared with the broker (write loop)
       LEAF_UPLOADS_DIR: /data/uploads                  # shared with the broker (S19: staged uploads must be broker-resolvable)

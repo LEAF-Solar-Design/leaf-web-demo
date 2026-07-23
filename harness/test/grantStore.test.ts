@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { FileTenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
+import { createTenantGrantStore, FileTenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
 import type { AgentGrant } from "../src/ports/index.js";
 import type { TenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
 
@@ -148,5 +148,36 @@ describe("FileTenantGrantStore", () => {
     writeFileSync(join(dir, "legacy.token"), FAKE_API, "utf8");
     expect(await store.get("legacy")).toEqual({ kind: "api_key", apiKey: FAKE_API });
     expect((await store.status("legacy")).kind).toBe("api_key");
+  });
+});
+
+/**
+ * F18 grant-store seam (security-audit 2026-07-18): the live serve path selects the
+ * backend via createTenantGrantStore(). `vault` requested-but-unwired must throw —
+ * never silently fall back to on-disk token files.
+ */
+describe("createTenantGrantStore (F18 seam)", () => {
+  const saved = process.env.LEAF_GRANT_STORE;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.LEAF_GRANT_STORE;
+    else process.env.LEAF_GRANT_STORE = saved;
+  });
+
+  it("default / file backend yields a working FileTenantGrantStore", async () => {
+    delete process.env.LEAF_GRANT_STORE;
+    const dir = mkdtempSync(join(tmpdir(), "leaf-grants-seam-"));
+    try {
+      const store = createTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+      expect(store).toBeInstanceOf(FileTenantGrantStore);
+      await store.put("seam", FAKE);
+      expect(await store.get("seam")).toEqual({ kind: "oauth", oauthToken: FAKE });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("LEAF_GRANT_STORE=vault fails LOUDLY (unwired seam, no silent disk fallback)", () => {
+    process.env.LEAF_GRANT_STORE = "vault";
+    expect(() => createTenantGrantStore()).toThrowError(/vault/);
   });
 });

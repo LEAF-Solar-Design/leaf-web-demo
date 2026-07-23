@@ -13,6 +13,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { scrubSecrets } from "./envScrub.js";
 
 export interface GitCommitRequest {
   dir: string;
@@ -35,9 +36,13 @@ export function startGitWorker(): boolean {
   // dist/src/ports/impl -> repo harness root is four levels up
   const script = join(here, "..", "..", "..", "..", "scripts", "git-worker.cjs");
   try {
+    // Scrubbed env (sol-critic R5): the worker — and every git.exe it spawns,
+    // which inherits the worker's env — must never hold a credential or hop
+    // secret. Git needs PATH/HOME/system vars only, all of which survive the scrub.
     const child = spawn(process.execPath, [script], {
       stdio: ["pipe", "pipe", "inherit"],
       windowsHide: true,
+      env: scrubSecrets(process.env),
     });
     const rl = createInterface({ input: child.stdout! });
     rl.on("line", (line) => {

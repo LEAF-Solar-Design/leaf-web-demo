@@ -7,7 +7,15 @@
  * (bound to the checkout dir) as the ONLY filesystem the session can touch.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { FsTenantRepoTool } from "../../ports/index.js";
 
@@ -15,7 +23,10 @@ export class FsTenantRepo implements FsTenantRepoTool {
   readonly root: string;
 
   constructor(rootDir: string) {
-    this.root = resolve(rootDir);
+    // Realpath so containment compares against the true directory even when the
+    // configured root itself arrives through a symlink (macOS /tmp and friends).
+    const abs = resolve(rootDir);
+    this.root = existsSync(abs) ? realpathSync(abs) : abs;
   }
 
   /** Resolve a caller-supplied relative path and hard-reject any escape. */
@@ -27,6 +38,33 @@ export class FsTenantRepo implements FsTenantRepoTool {
     const rel = relative(this.root, abs);
     if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
       throw new Error(`fsTenantRepo: path escapes the tenant repo (${relPath})`);
+    }
+    // The .git directory is OFF-LIMITS to the author session (sol-critic R5): a
+    // writable .git/config or .git/hooks would let model-authored repo content
+    // install filters/hooks that run during the register commit with repo access.
+    // Reads are blocked too — the session has no business inside git internals.
+    if (rel.split(sep).some((seg) => seg.toLowerCase() === ".git")) {
+      throw new Error(`fsTenantRepo: the .git directory is off-limits (${relPath})`);
+    }
+    // The lexical checks above are spoofable by a link committed in the checkout
+    // (sol-critic round 3: `alias -> .git` lets `alias/config` reach `.git/config`,
+    // and a link targeting outside the root escapes entirely) — writeFileSync
+    // follows links. Links only enter via the checkout itself (this tool writes
+    // regular files), and the author session has no legitimate use for traversing
+    // one, so reject any symlink/junction component outright.
+    let probe = this.root;
+    for (const seg of rel.split(sep)) {
+      if (seg === "") continue;
+      probe = resolve(probe, seg);
+      let stat;
+      try {
+        stat = lstatSync(probe);
+      } catch {
+        break; // deepest existing ancestor passed; missing components can't be links
+      }
+      if (stat.isSymbolicLink()) {
+        throw new Error(`fsTenantRepo: symlinked paths are off-limits (${relPath})`);
+      }
     }
     return abs;
   }

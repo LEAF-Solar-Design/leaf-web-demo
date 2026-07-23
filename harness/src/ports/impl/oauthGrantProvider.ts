@@ -18,7 +18,7 @@
  * secret store (same interface).
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_TENANT } from "../index.js";
 import type {
@@ -224,6 +224,11 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     // 0600 where the platform honors it; content is the raw token and is NEVER logged.
     writeFileSync(this.file(tenantId), t, { encoding: "utf8", mode: 0o600 });
     writeFileSync(this.kindFile(tenantId), k, { encoding: "utf8", mode: 0o600 });
+    // `mode:` applies only at CREATION — an overwrite keeps the file's old bits
+    // (sol-critic F7). Tighten explicitly on every write; no-op on Windows,
+    // load-bearing on the Linux container volume.
+    chmodSync(this.file(tenantId), 0o600);
+    chmodSync(this.kindFile(tenantId), 0o600);
     return this.status(tenantId);
   }
 

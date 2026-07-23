@@ -9,7 +9,9 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { scrubSecrets } from "./envScrub.js";
 import { gitWorkerAvailable, workerCommit } from "./gitWorker.js";
+import { redactTokens } from "../../redact.js";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,7 +53,9 @@ function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
     ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`]
     : [];
   try {
-    return execFileSync("git", [...cfg, ...args], { cwd, encoding: "utf8" });
+    // Scrubbed env (sol-critic R5, same rule as the git worker): git and anything
+    // it runs (filters, hooks) must never inherit a credential or hop secret.
+    return execFileSync("git", [...cfg, ...args], { cwd, encoding: "utf8", env: scrubSecrets(process.env) });
   } catch (e) {
     const err = e as { status?: number; signal?: string; code?: string; stderr?: string; stdout?: string; message: string };
     throw new Error(
@@ -72,7 +76,8 @@ class GitTenantRepo implements TenantRepo {
         dir: this.dir, message, name: identity.name, email: identity.email,
       });
       if (r.ok && r.commit) return { commit: r.commit };
-      console.error('[harness] git worker commit failed, falling back in-process:', r.error);
+      console.error('[harness] git worker commit failed, falling back in-process:',
+        redactTokens(String(r.error ?? "")));
       // fall through to the in-process retry path on worker failure
     }
     // Windows spawn-pressure: the Agent SDK turn spawns a large `claude` process

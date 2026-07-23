@@ -42,6 +42,7 @@ import type { Server } from "node:http";
 import { join } from "node:path";
 
 import { createHarness } from "../src/server.js";
+import { redactTokens } from "../src/redact.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { AgentGrant, HarnessPorts } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
@@ -53,7 +54,7 @@ import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
 import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
 import { HttpGateClient } from "../src/ports/impl/gateClient.js";
 import { FileSessionStore } from "../src/ports/impl/sessionStore.js";
-import { FileTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
+import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
@@ -73,9 +74,9 @@ const TENANT_FIXTURE =
 
 // Defense in depth: redact any token-shaped value from anything we log. We never
 // read or print the grant ourselves, but a stray error string must never leak one.
-const TOKENISH = /\b(sk-ant-[A-Za-z0-9_-]{6,}|[A-Za-z0-9_-]{40,})\b/g;
+// One shared pattern for every harness logging site: src/redact.ts.
 function log(msg: string): void {
-  process.stderr.write(msg.replace(TOKENISH, "[REDACTED]") + "\n");
+  process.stderr.write(redactTokens(msg) + "\n");
 }
 
 /** Reject anything but a single, traversal-free path component (mirrors the Python
@@ -132,7 +133,10 @@ function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefi
 
 /** Compose the real multi-tenant ports. */
 function buildPorts(): HarnessPorts {
-  const grantStore = new FileTenantGrantStore(); // reads $LEAF_GRANTS_DIR (default C:/tmp/leaf-grants)
+  // F18 seam: the backend is selected by $LEAF_GRANT_STORE (default `file` →
+  // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
+  // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
+  const grantStore = createTenantGrantStore();
   // F2 (2A): when LEAF_SANDBOX=e2b, run the design-time author session INSIDE an
   // egress-locked E2B sandbox instead of in-process. Default (unset/anything else) keeps
   // AgentSdkRunner so the proven demo + hermetic tests are unchanged. LEAF_SANDBOX_BROKER_HOST
