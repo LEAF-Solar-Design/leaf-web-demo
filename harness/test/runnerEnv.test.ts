@@ -41,6 +41,10 @@ function pollutedBase(): NodeJS.ProcessEnv {
     LEAF_GUEST_SECRET: "INTERNAL-guest-secret-should-be-removed",
     LEAF_CALLBACK_SECRET: "INTERNAL-callback-secret-should-be-removed",
     PLATFORM_ADMIN_TOKEN: "INTERNAL-admin-token-should-be-removed",
+    // Round-3: AUTH/JWT-named credential carriers dodge a SECRET/TOKEN-only pattern.
+    DOCKER_AUTH_CONFIG: "CRED-docker-auth-should-be-removed",
+    NPM_CONFIG__AUTH: "CRED-npm-auth-should-be-removed",
+    LEAF_ADMIN_JWT: "CRED-admin-jwt-should-be-removed",
   };
 }
 
@@ -66,6 +70,10 @@ describe("buildScrubbedEnv — grant kind drives the injected credential var", (
     expect(env.LEAF_GUEST_SECRET).toBeUndefined();
     expect(env.LEAF_CALLBACK_SECRET).toBeUndefined();
     expect(env.PLATFORM_ADMIN_TOKEN).toBeUndefined();
+    // Round-3: AUTH/JWT-named carriers are swept too
+    expect(env.DOCKER_AUTH_CONFIG).toBeUndefined();
+    expect(env.NPM_CONFIG__AUTH).toBeUndefined();
+    expect(env.LEAF_ADMIN_JWT).toBeUndefined();
     // untouched, non-credential env survives
     expect(env.PATH).toBe("/usr/bin");
   });

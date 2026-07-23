@@ -81,9 +81,11 @@ git-worker diagnostics — routes through one shared token redactor
 (`src/redact.ts`) before writing, as defense in depth. Git itself cannot see a
 credential either: both the boot-time git worker and the in-process git
 fallback run on the same scrubbed environment as the SDK child, and the author
-session's filesystem tool refuses any path under `.git/`, so model-authored
-repository content cannot install a git hook or filter that would run with
-access to secrets during the register commit (`fsTenantRepo.test.ts`). The
+session's filesystem tool refuses any path under `.git/` — including paths
+that reach it through a symlink or junction committed in the checkout, which
+are rejected outright — so model-authored repository content cannot install a
+git hook or filter that would run with access to secrets during the register
+commit (`fsTenantRepo.test.ts`). The
 internal hop secret is env-only and never logged. The containerized smoke
 asserts the end result: after a full link, author, restart, and unlink cycle,
 neither the credential nor the hop secret appears anywhere in the container

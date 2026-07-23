@@ -5,12 +5,16 @@
  *   1. any path that escapes the checkout root is rejected;
  *   2. the .git directory is off-limits in BOTH directions (sol-critic R5:
  *      a writable .git/config or .git/hooks would let model-authored content
- *      install filters/hooks that run during the register commit).
+ *      install filters/hooks that run during the register commit);
+ *   3. links committed in the checkout cannot bypass 1 or 2 (sol-critic
+ *      round 3: `alias -> .git` would let `alias/config` reach `.git/config`
+ *      past a lexical-only check) — any symlink/junction component is rejected.
  *
- * Hermetic: temp dir only; no git, no network.
+ * Hermetic: temp dir only; no git, no network. Link tests self-skip on
+ * platforms that refuse link creation.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -50,6 +54,35 @@ describe("FsTenantRepo containment", () => {
     expect(() => repo.readFile(".git/config")).toThrow(/off-limits/);
     expect(() => repo.listDir(".git")).toThrow(/off-limits/);
     expect(() => repo.exists(".git/config")).toThrow(/off-limits/);
+  });
+
+  /** Junction on Windows (no privilege needed), dir symlink elsewhere. */
+  function makeDirLink(target: string, linkPath: string): boolean {
+    try {
+      symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  it("a link inside the checkout cannot smuggle access into .git (round-3 finding)", (ctx) => {
+    mkdirSync(join(root, ".git"));
+    if (!makeDirLink(join(root, ".git"), join(root, "alias"))) ctx.skip();
+    expect(() => repo.writeFile("alias/config", "[core]")).toThrow(/off-limits/);
+    expect(() => repo.readFile("alias/config")).toThrow(/off-limits/);
+    expect(() => repo.listDir("alias")).toThrow(/off-limits/);
+  });
+
+  it("a link targeting OUTSIDE the checkout is rejected", (ctx) => {
+    const outside = mkdtempSync(join(tmpdir(), "leaf-fsrepo-out-"));
+    try {
+      if (!makeDirLink(outside, join(root, "exit"))) ctx.skip();
+      expect(() => repo.writeFile("exit/pwned.txt", "x")).toThrow(/off-limits/);
+      expect(() => repo.exists("exit/pwned.txt")).toThrow(/off-limits/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("dotfiles that merely RESEMBLE .git stay writable (.gitignore, .gitattributes)", () => {

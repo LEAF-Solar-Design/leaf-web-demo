@@ -32,8 +32,12 @@ export const AMBIENT_CRED_KEYS = [
 const INTERNAL_FLAG_KEYS = ["LEAF_HARNESS_AUTH"];
 
 /** Key-NAME pattern for the wholesale sweep. Deliberately broad: over-stripping
- *  env from a child is safe by default; under-stripping is the bug. */
-const SECRETLIKE_KEY_RE = /(SECRET|TOKEN|PASSWORD|CREDENTIAL|APIKEY|API_KEY|_KEY$)/i;
+ *  env from a child is safe by default; under-stripping is the bug. AUTH also
+ *  matches e.g. LEAF_AUTHOR_HARNESS_URL — intentionally accepted: no child this
+ *  harness spawns has any use for those either (round-3 additions: AUTH, JWT,
+ *  PASSWD — DOCKER_AUTH_CONFIG / NPM_CONFIG__AUTH / *_JWT survived the first
+ *  pattern). */
+const SECRETLIKE_KEY_RE = /(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|APIKEY|API_KEY|_KEY$|AUTH|JWT)/i;
 
 /** Scrubbed copy of `base`: known keys + every secret-like key removed. */
 export function scrubSecrets(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
