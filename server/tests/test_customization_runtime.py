@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import app
 import customization_service
 from customization_flags import enabled
 from customization_models import ChangeSetConflictError, ChangeState
@@ -88,6 +89,17 @@ def test_rollout_flags_are_strict_and_r6_depends_on_r5(monkeypatch):
     assert enabled(6, "tenant-a") is True
     assert enabled(6, "tenant-b") is False
     assert enabled(7, "tenant-a") is False
+
+
+def test_off_rollout_flags_do_not_initialize_customization_sqlite(tmp_path, monkeypatch):
+    database = tmp_path / "customization.db"
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+
+    app.initialize_customization_store()
+
+    assert not database.exists()
 
 
 def test_durable_confirmation_is_single_use(tmp_path):

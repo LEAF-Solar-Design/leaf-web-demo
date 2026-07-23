@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 
 import dependency_health
 import deps
+from customization_flags import RolloutMode, mode as customization_mode
 from customization_service import CustomizationService
 from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
@@ -74,6 +75,11 @@ app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 @app.on_event("startup")
 def initialize_customization_store() -> None:
     """SQLite coordination is intentionally a single-process deployment."""
+    if (
+        customization_mode("LEAF_CUSTOMIZATION_R5_MODE") is RolloutMode.OFF
+        and customization_mode("LEAF_CUSTOMIZATION_R6_MODE") is RolloutMode.OFF
+    ):
+        return
     CustomizationService.configured()
 
 # §19: byte-counting wall on the upload route — bounds multipart pre-parse
