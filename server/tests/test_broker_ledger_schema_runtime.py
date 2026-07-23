@@ -108,6 +108,27 @@ def test_malformed_error_envelope_still_appends_string_status(ledgered_client, m
     assert line["status"] == "error"
 
 
+def test_non_finite_cost_numbers_are_nulled_not_serialized(ledgered_client, monkeypatch):
+    """A cost block carrying NaN/Infinity (e.g. APS_USD_PER_HR=nan upstream)
+    must never reach the ledger: bare NaN/Infinity tokens are not valid JSON.
+    Non-finite numbers conform to null; the line stays strictly parseable."""
+    client, ledger = ledgered_client
+    monkeypatch.setattr(broker, "run_tool_dynamic", lambda *_a, **_k: {
+        "ok": True, "tool": "t", "version": "1.0.0", "result": {}, "overlay": None,
+        "timing_ms": 1, "error": None, "degraded_mode": False,
+        "cost": {"engine_seconds": float("inf"), "usd_est": float("nan")}})
+    client.post("/broker/run", json={
+        "tenant_id": "t1",
+        "tool": {"name": "t", "engine_op": "op", "params_schema": {"type": "object"}},
+        "params": {}, "dwg": "rooftop_demo", "aps_live": False})
+    raw = ledger.read_text(encoding="utf-8").splitlines()[-1]
+    assert "NaN" not in raw and "Infinity" not in raw
+    line = json.loads(raw)
+    jsonschema.validate(line, SCHEMA)
+    assert line["engine_seconds"] is None
+    assert line["usd_est"] is None
+
+
 def test_ok_line_validates_and_keeps_real_values(ledgered_client):
     client, ledger = ledgered_client
     r = client.post("/broker/run", json={

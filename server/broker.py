@@ -33,6 +33,7 @@ import platform as _stdlib_platform  # noqa: F401  (cache stdlib before the
 
 import hmac
 import json
+import math
 import os
 import re
 import sys
@@ -227,12 +228,18 @@ def _conform_ledger_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     entry["status"] = status if isinstance(status, str) else "error"
     for key in ("engine_seconds", "usd_est"):
         val = entry.get(key)
-        entry[key] = float(val) if isinstance(val, (int, float)) and not isinstance(val, bool) else None
+        # Finite numbers only: NaN/Infinity would serialize as bare NaN/Infinity
+        # tokens — not valid JSON, so not a valid ledger line.
+        entry[key] = (float(val)
+                      if isinstance(val, (int, float)) and not isinstance(val, bool)
+                      and math.isfinite(val) else None)
     return entry
 
 
 def _ledger_append(entry: Dict[str, Any]) -> None:
-    line = json.dumps(_conform_ledger_entry(entry), separators=(",", ":"))
+    # allow_nan=False: if a future unconformed field ever carries a non-finite
+    # number, fail LOUD here rather than write an unparseable ledger line.
+    line = json.dumps(_conform_ledger_entry(entry), separators=(",", ":"), allow_nan=False)
     with _ledger_lock:
         with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
