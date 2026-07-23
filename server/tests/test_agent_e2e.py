@@ -1,21 +1,29 @@
 """
-End-to-end agent-spine journey at the APP boundary (wire contract §§1-8),
-against the PRODUCTION mount (`app.py` — this suite is what proves the agent
-router is actually wired in, unlike test_agent_router.py's local mount).
+End-to-end agent-spine journey at the APP boundary on the UNIFIED §2.1 wire
+(census #12 chip-spine-sessions-routers rewrite), against the PRODUCTION mount
+(`app.py` — this suite is what proves the sessions + agent routers are actually
+wired in, unlike the local-mount suites).
 
-Harness HTTP is monkeypatched (no network, no real harness). The split-turn
-journey under test:
+The harness is a stub HTTP server speaking real chunked `application/x-ndjson`
+on POST /turn (no network egress beyond localhost, zero Anthropic). The
+split-turn journey under test — the sequencing the spine mount (census #12
+chip 1) unified:
 
-    create session (converse tier)
-    -> post text message      (ContextPacket assembled; forwarded body carries
-                               contextPacket + classifierHint)
-    -> harness gate call      (POST /internal/agent/gate, run_capability on a
-                               write tool -> awaiting_approval + durable pending)
-    -> cross-tenant approval  (other tenant -> 404, no existence oracle)
-    -> owner approves         (POST /api/agent/approvals/{id})
-    -> confirm resume message (POST /api/sessions/{id}/messages {confirm})
-    -> gate re-check          (confirmation_id in args -> allow, args-exact)
-    -> audit trail            (audit_extra projection ONLY — raw params never)
+    create session (converse tier)     POST /api/sessions
+    -> post text message               POST .../messages -> 202, frozen
+                                       ConverseTurnInput on the wire (no packet)
+    -> mid-turn gate consult           POST /internal/agent/gate, run_write_tool
+                                       -> awaiting_approval + durable GATE pending
+    -> harness emits proposed_run      relay materializes the decidable
+       {confirmation_id} + ends turn   session-store approvals row
+    -> cross-tenant approval           other tenant -> 404, BOTH stores untouched
+    -> owner approves                  POST /api/agent/approvals/{id} -> the
+                                       decision BRIDGES into the gate store
+                                       (grant_approval) — chip-1 unification
+    -> confirm resume message          POST .../messages {confirm} -> consume,
+                                       wire carries the DURABLE proposal
+    -> gate re-check                   confirmation_id in args -> allow, args-exact
+    -> audit trail                     audit_extra projection ONLY — raw params never
 
 Plus the two hard denies: kill-switch file present, and rate-limit category
 exhaustion (denied reason names the failing gate).
@@ -29,28 +37,31 @@ from __future__ import annotations
 import platform as _stdlib_platform  # noqa: E402
 _stdlib_platform.python_implementation()
 
+import http.server  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any, Dict, List, Optional  # noqa: E402
+from typing import Any, Dict, List, Optional, Tuple  # noqa: E402
 
 import pytest  # noqa: E402
-
-pytestmark = pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): written against the section-18-era app internals (e.g. routers.sessions._SESSIONS) that the section-2.1 lane replaced with session_store. The ENGINE side was unified by census #12 chip-spine-harness-mount (spine engine live behind POST /turn); restoring THESE suites means rewriting their app-surface assertions against the unified 2.1 wire — census #12 chip-spine-sessions-routers.")
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-# route the jobs SQLite DB to a throwaway dir BEFORE `jobs`/`app` import anywhere.
+# route BOTH SQLite DBs to throwaway dirs BEFORE `jobs`/`session_store`/`app`
+# import anywhere (each module reads its env once, at import time).
 os.environ.setdefault("JOBS_DB", str(Path(tempfile.mkdtemp(prefix="e2e-jobs-")) / "jobs.db"))
+os.environ.setdefault(
+    "SESSIONS_DB", str(Path(tempfile.mkdtemp(prefix="e2e-sessions-")) / "sessions.db"))
 
 import agent_gate  # noqa: E402
-from routers import sessions as sessions_router  # noqa: E402
+import session_store  # noqa: E402
 
-HARNESS = "http://harness.test"
 DISPATCH_SECRET = "e2e-dispatch-secret-1234"
 
 
@@ -66,38 +77,62 @@ def _h(tenant: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# fake harness HTTP layer (monkeypatches requests.request — no network)
+# stub harness — real HTTP/1.1 chunked application/x-ndjson on POST /turn.
+# The stream is GATED on `release` so the test can consult the gate MID-TURN
+# (the real sequencing: the loop calls the gate while the turn is open, then
+# emits proposed_run with the gate-minted confirmation_id).
 # --------------------------------------------------------------------------- #
-class FakeResponse:
-    def __init__(self, status_code: int, body: Optional[Dict[str, Any]] = None):
-        self.status_code = status_code
-        self._body = body
-        self.headers: Dict[str, str] = {}
-
-    def json(self):
-        if self._body is None:
-            raise ValueError("no JSON body")
-        return self._body
-
-    def close(self):
-        return None
+class _StubState:
+    def __init__(self) -> None:
+        self.bodies: List[Dict[str, Any]] = []
+        self.hits = 0
+        self.scripts: List[List[Dict[str, Any]]] = []  # per-call scripts (FIFO)
+        self.release = threading.Event()
+        self.release.set()
 
 
-class FakeHarness:
-    """Programmable stand-in for requests.request. Records every forwarded call."""
+DEFAULT_SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
 
-    def __init__(self):
-        self.calls: List[Dict[str, Any]] = []
 
-    def __call__(self, method, url, **kwargs):
-        self.calls.append({"method": method, "url": url, **kwargs})
-        if method == "POST" and url.endswith("/converse/sessions"):
-            drawing = kwargs["json"]["drawingId"]
-            return FakeResponse(200, {"sessionId": f"sess-{drawing}", "status": "idle",
-                                      "createdAt": "2026-07-20T00:00:00+00:00"})
-        if method == "POST" and "/messages" in url:
-            return FakeResponse(202, {"turnId": f"turn-{len(self.calls)}"})
-        return FakeResponse(404, {"error": "session_not_found"})
+class _StubServer(http.server.ThreadingHTTPServer):
+    def __init__(self, state: _StubState):
+        super().__init__(("127.0.0.1", 0), _StubHandler)
+        self.state = state
+
+
+class _StubHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def handle(self):
+        # the app side aborts keep-alive sockets freely; expected, not noise.
+        try:
+            super().handle()
+        except (ConnectionError, OSError):
+            pass
+
+    def do_POST(self):  # noqa: N802
+        state: _StubState = self.server.state  # type: ignore[attr-defined]
+        state.hits += 1
+        length = int(self.headers.get("content-length", 0) or 0)
+        try:
+            state.bodies.append(json.loads(self.rfile.read(length) or b"{}"))
+        except Exception:  # noqa: BLE001
+            state.bodies.append({})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        state.release.wait(timeout=30)
+        script = state.scripts.pop(0) if state.scripts else list(DEFAULT_SCRIPT)
+        for ev in script:
+            raw = (json.dumps(ev) + "\n").encode("utf-8")
+            self.wfile.write(f"{len(raw):x}\r\n".encode("ascii") + raw + b"\r\n")
+            self.wfile.flush()
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+    def log_message(self, *a):  # silence
+        return
 
 
 @pytest.fixture(autouse=True)
@@ -114,25 +149,32 @@ def agent_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LEAF_AGENT_AUDIT", str(tmp_path / "audit.jsonl"))
     monkeypatch.setenv("LEAF_AGENT_LEDGER", str(tmp_path / "ledger.jsonl"))
     monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(tmp_path / "agent_tenants.json"))
+    monkeypatch.setenv("TURN_MAX_S", "20")  # keep relay watchdogs bounded
     yield tmp_path
 
 
 @pytest.fixture
 def fake_harness(monkeypatch, tmp_path):
-    """Converse harness URL set, requests.request faked, throwaway drawing store,
-    grant-store read degrades instantly (requests.get refuses — no network)."""
-    fh = FakeHarness()
-    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", HARNESS)
+    """Converse harness env -> the stub (the §2.1 preference var; author var
+    cleared to prove the preferred path), throwaway drawing store, and
+    requests.get refused so nothing in the journey can leave the process."""
+    state = _StubState()
+    srv = _StubServer(state)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL",
+                       f"http://127.0.0.1:{srv.server_address[1]}")
     monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
     monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
-    monkeypatch.setattr("requests.request", fh)
 
     def _refuse_get(*args, **kwargs):
         import requests
         raise requests.ConnectionError("no network in tests")
     monkeypatch.setattr("requests.get", _refuse_get)
-    monkeypatch.setattr(sessions_router, "_SESSIONS", {})
-    yield fh
+    try:
+        yield state
+    finally:
+        state.release.set()
+        srv.shutdown()
 
 
 def _gate_call(client, action, args=None, *, tenant="t-alpha", session="sess-demo",
@@ -151,55 +193,74 @@ def _custom_policy(tmp_path, monkeypatch, mutate):
     monkeypatch.setenv("LEAF_AGENT_POLICY_FILE", str(p))
 
 
+def _wait_until(predicate, timeout_s: float = 5.0, poll_s: float = 0.02):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(poll_s)
+    return predicate()
+
+
+def _terminal_count(session_id: str) -> int:
+    events = session_store.recent_events(session_id, 200)
+    return sum(1 for ev in events if ev["type"] in ("turn_complete", "error"))
+
+
 # --------------------------------------------------------------------------- #
-# production mount — the router this lane wired into app.py is actually there
+# production mount — the routers this lane wired into app.py are actually there
 # --------------------------------------------------------------------------- #
-def test_agent_router_mounted_on_production_app(fake_harness):
-    """/api/agent/killswitch answers on the REAL app (a local-mount suite can
-    never prove this — regression guard for the app.py include)."""
+def test_agent_and_sessions_routers_mounted_on_production_app(fake_harness):
+    """/api/agent/killswitch AND /api/sessions answer on the REAL app (a
+    local-mount suite can never prove this — regression guard for the app.py
+    includes of both spine-facing routers)."""
     c = _client()
     r = c.get("/api/agent/killswitch", headers=_h("t-alpha"))
     assert r.status_code == 200, r.text
     assert r.json()["active"] is False
+
+    r = c.post("/api/sessions", json={"drawing_id": "mount-probe"}, headers=_h("t-alpha"))
+    assert r.status_code == 200, r.text
+    assert r.json()["session_id"]
 
 
 # --------------------------------------------------------------------------- #
 # the full split-turn journey
 # --------------------------------------------------------------------------- #
 def test_full_split_turn_journey(fake_harness):
+    state = fake_harness
     c = _client()
     write_args = {"tool": "add-panel", "dwg": "demo",
                   "params": {"secret_payload": "never-log-me"}}
 
     # 1. create session — demo tier carries `converse`, so this passes the
-    #    entitlement gate and reaches the (fake) harness.
+    #    entitlement gate. Idempotent per (tenant, drawing).
     r = c.post("/api/sessions", json={"drawing_id": "demo"}, headers=_h("t-alpha"))
     assert r.status_code == 200, r.text
     sid = r.json()["session_id"]
-    assert sid == "sess-demo"
+    assert c.post("/api/sessions", json={"drawing_id": "demo"},
+                  headers=_h("t-alpha")).json()["session_id"] == sid
 
-    # 2. post the user text — the app assembles the §4 ContextPacket and the
-    #    forwarded harness body carries contextPacket + classifierHint.
+    # 2. post the user text with the stream GATED open — the frozen
+    #    ConverseTurnInput rides the wire (no ContextPacket: deliberate
+    #    census #12 contract decision — the frozen shape has no packet field).
+    state.release.clear()
     hint = {"lane": "run", "tool": "add-panel", "confidence": 0.61, "rationale": "match"}
     r = c.post(f"/api/sessions/{sid}/messages",
                json={"text": "add a panel on the roof", "classifier_hint": hint},
                headers=_h("t-alpha"))
     assert r.status_code == 202, r.text
     turn_id = r.json()["turn_id"]
-    fwd = fake_harness.calls[-1]
-    assert fwd["url"] == f"{HARNESS}/converse/sessions/{sid}/messages"
-    payload = fwd["json"]
-    assert payload["tenantId"] == "t-alpha"
-    assert payload["classifierHint"] == hint
-    packet = payload["contextPacket"]
-    for key in ("catalog", "catalog_hash", "drawing", "versions", "checkout",
-                "entitlements", "active_jobs", "grant", "classifier_hint"):
-        assert key in packet, f"ContextPacket missing {key!r}"
-    assert packet["classifier_hint"] == hint
-    assert packet["entitlements"]["converse"] is True
+    assert _wait_until(lambda: state.bodies), "harness never saw POST /turn"
+    body = state.bodies[0]
+    assert set(body) == {"tenant_id", "session_id", "turn_id", "drawing_id",
+                        "messages", "text"}
+    assert body["tenant_id"] == "t-alpha" and body["session_id"] == sid
+    assert body["turn_id"] == turn_id and body["drawing_id"] == "demo"
+    assert body["text"] == "add a panel on the roof"
 
-    # 3. the harness's canUseTool consults the gate for run_capability on a
-    #    WRITE tool -> confirm-once policy -> awaiting_approval + durable pending.
+    # 3. MID-TURN: the loop's canUseTool consults the gate for run_write_tool
+    #    (confirm-once policy) -> awaiting_approval + durable GATE pending.
     g = _gate_call(c, "run_write_tool", write_args, session=sid, turn=turn_id)
     assert g.status_code == 200, g.text
     gb = g.json()
@@ -213,32 +274,63 @@ def test_full_split_turn_journey(fake_harness):
     assert pending["action"] == "run_write_tool"
     assert pending["granted"] is False and pending["denied"] is False
 
-    # 4. approvals are tenant-isolated: another tenant sees 404 (no oracle)
-    #    and the record stays undecided.
+    # 4. the harness emits proposed_run with the GATE-MINTED confirmation_id and
+    #    ends the split turn; the relay materializes the decidable session row.
+    state.scripts.append([
+        {"type": "proposed_run", "data": {
+            "confirmation_id": cid, "tool": "add-panel",
+            "params": {"secret_payload": "never-log-me"},
+            "capability": "run_write", "rationale": "user asked for a panel"}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
+    ])
+    state.release.set()
+    assert _wait_until(lambda: session_store.get_approval(cid) is not None), (
+        "relay never materialized the approvals row")
+    assert _wait_until(lambda: _terminal_count(sid) >= 1)
+    row = session_store.get_approval(cid)
+    assert row["decided"] is False and row["consumed"] is False
+    assert row["tool"] == "add-panel" and row["kind"] == "run_capability"
+
+    # 5. approvals are tenant-isolated: another tenant sees 404 (no oracle)
+    #    and BOTH stores stay undecided.
     r = c.post(f"/api/agent/approvals/{cid}", json={"approved": True},
                headers=_h("t-beta"))
     assert r.status_code == 404, r.text
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"
     assert agent_gate.read_pending(cid)["granted"] is False
+    assert session_store.get_approval(cid)["decided"] is False
 
-    # 5. the owner approves.
+    # 6. the owner approves — ONE call lands the decision in BOTH stores:
+    #    session row decided AND the gate record granted (the chip-1 bridge the
+    #    resume consult redeems).
     r = c.post(f"/api/agent/approvals/{cid}", json={"approved": True},
                headers=_h("t-alpha"))
     assert r.status_code == 200, r.text
     assert r.json()["resolved"] is True and r.json()["approved"] is True
+    assert agent_gate.read_pending(cid)["granted"] is True   # bridged
+    assert session_store.get_approval(cid)["decided"] is True
+    resolved = [ev for ev in session_store.recent_events(sid, 100)
+                if ev["type"] == "confirmation_resolved"]
+    assert resolved and resolved[-1]["data"]["approved"] is True
 
-    # 6. the client posts the confirm resume message (split-turn step b) — the
-    #    forwarded body carries confirm (not text) plus a fresh ContextPacket.
+    # 7. the client posts the confirm resume message (split-turn step b) — the
+    #    wire carries the DURABLE proposal from the consumed row, never text.
     r = c.post(f"/api/sessions/{sid}/messages",
                json={"confirm": {"confirmationId": cid, "approved": True}},
                headers=_h("t-alpha"))
     assert r.status_code == 202, r.text
-    resume_payload = fake_harness.calls[-1]["json"]
-    assert resume_payload["confirm"] == {"confirmationId": cid, "approved": True}
-    assert "text" not in resume_payload
-    assert "contextPacket" in resume_payload
+    assert _wait_until(lambda: len(state.bodies) >= 2)
+    resume_body = state.bodies[1]
+    assert "text" not in resume_body
+    assert resume_body["confirm"] == {
+        "confirmation_id": cid, "approved": True,
+        "proposal": {"tool": "add-panel",
+                     "params": {"secret_payload": "never-log-me"},
+                     "capability": "run_write"},
+    }
+    assert _wait_until(lambda: _terminal_count(sid) >= 2)
 
-    # 7. the re-invoked tool call carries confirmation_id in args — the gate
+    # 8. the re-invoked tool call carries confirmation_id in args — the gate
     #    re-check is args-exact against the approval binding and now allows.
     resume_args = dict(write_args, confirmation_id=cid)
     gb = _gate_call(c, "run_write_tool", resume_args, session=sid,
@@ -247,13 +339,13 @@ def test_full_split_turn_journey(fake_harness):
     assert gb["reason"] == "allow_via_approval"
     assert gb["confirmation_id"] == cid
 
-    # 7b. args drift after approval denies (the approved call IS the call).
+    # 8b. args drift after approval denies (the approved call IS the call).
     drifted = dict(resume_args, dwg="OTHER")
     gb = _gate_call(c, "run_write_tool", drifted, session=sid,
                     turn="turn-resume").json()
     assert gb["decision"] == "deny" and gb["reason"] == "args_mismatch"
 
-    # 8. audit trail: request/grant/allow all recorded, args projected through
+    # 9. audit trail: request/grant/allow all recorded, args projected through
     #    the action's audit_extra allowlist ONLY — raw params never appear.
     body = c.get("/api/agent/audit", headers=_h("t-alpha")).json()
     kinds = [rec["kind"] for rec in body["records"]]

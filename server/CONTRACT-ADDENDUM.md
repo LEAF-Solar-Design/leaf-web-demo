@@ -860,6 +860,25 @@ same no-existence-oracle rule the job routes already enforce
 > harness through `POST /turn` (`application/x-ndjson`). This spec is retained
 > verbatim for the spine-unification follow-up; do not build against it.
 
+> **DECISION (census #12 chip 2, chip-spine-sessions-routers, 2026-07-23).** Spine
+> unification landed (chip 1 mounted ConverseLoop behind `POST /turn`) and this
+> mirror surface stays parked **by decision, not circumstance**: the app owns every
+> client-facing route — the §2.1 wire is the one client contract
+> (`console/converse.js` and `web/src/converse.js` both speak it) — and `/converse/*`
+> stays dormant until a harness-direct client exists (none today; un-parking would
+> stand up a second public turn surface with zero consumers).
+> `harness/test/converseRoutes.test.parked.ts` records the same decision in its
+> header. The §18.1 `GET /api/sessions` (list) and `DELETE /api/sessions/{id}`
+> (archive) rows likewise remain unserved on the same grounds: no live client calls
+> them.
+>
+> **Phase-2 debt (ledgered here so the lane keeps it).** The live SSE relay
+> (`server/routers/sessions.py` `stream_session`) serves each browser client its own
+> connection + store-poll loop over the durable event log; §18.1's "one upstream
+> connection per session, fan-out to N clients" is NOT what is built. Per-client
+> polling is correct and cheap at current fan-out; the shared per-session fan-out is
+> deferred to Phase 2.
+
 All `/converse/*` routes sit behind the existing F5 shared-secret gate — header
 `X-Harness-Secret`, checked by `harnessAuthDenial` (`harness/src/server.ts:114–130`;
 timing-safe compare, fail-closed when the gate is enabled with no secret configured).
@@ -905,9 +924,12 @@ sessions.db, which is what makes `after_seq` replay (reconnect, second tab) exac
 
 ### 18.4 New ErrorCode values (`server/envelopes.py`, additive)
 
-Four codes (added for §18 — now shipped source: `server/envelopes.py:37–40`, in the
-ErrorCode enum block at :22–58) plus their `DEFAULT_HTTP_STATUS` entries (map starts
-:62). Wire values are lowercase, following the `quota_exceeded` precedent (:34).
+Four codes (added for §18 — shipped source: `server/envelopes.py:39–42`, in the
+ErrorCode enum block at :22–62) plus their `DEFAULT_HTTP_STATUS` entries (map starts
+:66). Wire values are lowercase, following the `quota_exceeded` precedent (:34).
+Verified shipped + pinned by test (census #12 chip 2):
+`server/tests/test_sessions_router.py` asserts the four wire values, their
+`DEFAULT_HTTP_STATUS` rows, and the additive `confirmation_expired` (410) sibling.
 
 | Enum name | Wire value | HTTP | retryable | degraded_mode | Meaning |
 |---|---|---|---|---|---|

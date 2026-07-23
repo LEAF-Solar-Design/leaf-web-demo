@@ -24,7 +24,8 @@ Semantics (frozen order):
       -> try_begin_turn CAS                              (raise TurnBusy on loss)
       -> append_event(..., 'turn_started', {text|confirm, classifier_hint})
       -> build bounded prior-context `messages[]` from the event log
-      -> POST {LEAF_AUTHOR_HARNESS_URL}/turn, stream=True, timeout=(5, TURN_MAX_S)
+      -> POST {LEAF_CONVERSE_HARNESS_URL|LEAF_AUTHOR_HARNESS_URL}/turn,
+         stream=True, timeout=(5, TURN_MAX_S)   (converse var preferred)
            immediate 401              -> TurnRejected(401, GRANT_REQUIRED, extra={grant_required:True})
            immediate 429              -> TurnRejected(429, llm_quota_exhausted|llm_rate_limited)
            immediate connection error -> TurnRejected(502, BROKER_UNREACHABLE)
@@ -80,7 +81,12 @@ def approval_ttl_s() -> float:
 
 
 def _harness_url() -> str:
-    return os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
+    """§2.1 env contract (census #12 chip 2): prefer LEAF_CONVERSE_HARNESS_URL
+    (scripts/start-leaf.py exports both vars to the app), fall back to
+    LEAF_AUTHOR_HARNESS_URL so single-var deploys (docker-compose today) keep
+    working. An empty-string value falls through to the fallback."""
+    return (os.environ.get("LEAF_CONVERSE_HARNESS_URL")
+            or os.environ.get("LEAF_AUTHOR_HARNESS_URL") or "").rstrip("/")
 
 
 # bounded prior-context window (§2.1.2 "messages ... bounded, built by the
@@ -210,7 +216,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     if not harness_url:
         session_store.end_turn(session_id, turn_id)
         raise TurnRejected(502, ErrorCode.BROKER_UNREACHABLE,
-                           "LEAF_AUTHOR_HARNESS_URL not configured")
+                           "neither LEAF_CONVERSE_HARNESS_URL nor "
+                           "LEAF_AUTHOR_HARNESS_URL is configured")
 
     payload: Dict[str, Any] = {
         "tenant_id": tenant_id,

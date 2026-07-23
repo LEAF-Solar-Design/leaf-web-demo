@@ -2,9 +2,20 @@
  * PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): this file
  * tests the §18 /converse/* server surface, which is UNWIRED while the §2.1
  * sessions wire (POST /turn) owns the live turn path. Renamed *.test.parked.ts
- * so vitest skips it; restore the name when spine unification re-wires the
- * routes. The spine's module-level suites (converseLoop, converseSdkRunner,
- * sessionStore, converseRuntimeSeparation) still run.
+ * so vitest skips it. The spine's module-level suites (converseLoop,
+ * converseSdkRunner, sessionStore, converseRuntimeSeparation) still run.
+ *
+ * DECISION (census #12 chip 2, chip-spine-sessions-routers, 2026-07-23):
+ * stays parked BY DECISION, not circumstance. Spine unification landed (chip 1
+ * mounted ConverseLoop behind POST /turn) and the /converse/* mirror was
+ * deliberately NOT re-wired: the app owns every client-facing route (the §2.1
+ * wire is the one client contract — console/converse.js and web/src/converse.js
+ * both speak it), so this §18.2 mirror surface is dormant until a
+ * harness-direct client exists. None does today; un-parking would stand up a
+ * second public turn surface with zero consumers. Ledgered in
+ * server/CONTRACT-ADDENDUM.md §18.2 (same decision, same date). If a
+ * harness-direct client ever appears: restore the *.test.ts name, retype
+ * against the current HarnessPorts, and wire the routes in harness/src/server.ts.
  */
 // @ts-nocheck -- parked: written against the spine's HarnessPorts.converseRunner
 // typing, which the sessions wire now owns; un-park + retype at unification.
