@@ -795,9 +795,17 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 
 Session: `agent-spine-phase1`, 2026-07-20. The contract for the conversational spine:
 durable per-drawing agent sessions, streamed turns, and gated dispatch into the existing
-deterministic job chain. Proposed (not yet frozen), same promotion discipline as
-§11–§17; design rationale lives in `docs/AGENT-SPINE-DESIGN.md`. Verification: Phase-1
-implementation + tests in this change set.
+deterministic job chain. **FROZEN (2026-07-23, census #12 chip 5)** — promoted
+proposed→frozen under the same discipline as §11–§17, AS THE LIVE WIRE IS: 18.1 app
+routes with their implementation notes (the §2.1 sessions wire, `ConverseTurnInput`
+with NO ContextPacket field), 18.2 parked by decision, 18.3 event vocabulary, 18.4
+codes, 18.5 back edge. The ContextPacket module (`server/context_packet.py`) is frozen
+as a PARKED schema: no live caller today, and its field set + `MAX_PACKET_CHARS`
+size discipline are pinned by `server/tests/test_contract_freeze.py` so the parked
+module cannot drift while it awaits spine unification. Design rationale lives in
+`docs/AGENT-SPINE-DESIGN.md`. Verification: Phase-1 implementation + tests in this
+change set; freeze gate: `tests/test_contract_freeze.py` (registered suite
+`server-contract-freeze`).
 
 Two ground rules frame everything below:
 
@@ -827,7 +835,9 @@ Two ground rules frame everything below:
 > `ConverseTurnInput` — `{tenant_id, session_id, turn_id, drawing_id, messages,
 > text|confirm}` — with NO ContextPacket field; `server/context_packet.py` has
 > no live caller. Pinned by `server/tests/test_sessions_router.py`
-> (no-packet body assertion); chip 5 freezes it.
+> (no-packet body assertion); FROZEN by chip 5 (2026-07-23) —
+> `tests/test_contract_freeze.py` pins the port field set and the parked
+> packet schema.
 
 All `/api/*` routes resolve the tenant via the existing `require_tenant` dependency
 (`server/deps.py:251–277`; off-auth header stub, live-auth verified JWT — unchanged).
@@ -902,21 +912,36 @@ Every route verifies the supplied `tenantId` matches the session's tenant; a mis
 returns 404 `{error:"session_not_found"}` — the harness-side twin of the app's
 no-existence-oracle rule.
 
-### 18.3 SSE event vocabulary (both hops)
+### 18.3 SSE event vocabulary (the stream vocabulary, and who emits what)
 
-Identical on the harness→app and app→browser hops. One JSON object per SSE `data:`
-line; the SSE event name equals `type`. Envelope:
+> **FROZEN AS THE LIVE WIRE IS (chip 5, 2026-07-23).** The 12-type table below
+> is the full STREAM vocabulary. The two hops are NOT identical (the original
+> "identical on both hops" claim was the §18-era proxy design): the
+> harness→app NDJSON hop (`POST /turn`) emits exactly the 9-member
+> `HarnessTurnEvent` union (`harness/src/ports/converse.ts`). The three
+> app-side types, precisely: `turn_started` is appended by the turn engine
+> when a turn starts (`server/turn_runner.py:213`, live payload
+> `{text? | confirm?, classifier_hint?}` — the table row's `model` value was
+> the §18-era design; the live wire carries the user input);
+> `confirmation_resolved` is appended by the approvals route
+> (`server/routers/agent.py:217–220`); `session_state` is RESERVED vocabulary
+> with NO live emitter today — frozen so spine unification can surface
+> session lifecycle without a contract change. `seq` is a per-session
+> monotonically increasing integer persisted in the APP's session store
+> (`server/session_store.py` `session_events` — NOT the harness sessions.db,
+> which serves only the parked 18.2 mirror); that is what makes `after_seq`
+> replay (reconnect, second tab) exact. Pinned by
+> `tests/test_contract_freeze.py`.
+
+One JSON object per SSE `data:` line; the SSE event name equals `type`. Envelope:
 
 ```json
 {"v": 1, "session_id": "…", "turn_id": "…", "seq": 42, "type": "…", "data": { }}
 ```
 
-`seq` is a per-session monotonically increasing integer persisted in the harness
-sessions.db, which is what makes `after_seq` replay (reconnect, second tab) exact.
-
 | type | data payload | Notes |
 |---|---|---|
-| `turn_started` | `{model, classifier_hint?}` | First event of every turn. |
+| `turn_started` | `{text? \| confirm?, classifier_hint?}` (live; the §18-era design said `{model, classifier_hint?}`) | First event of every turn; app-side (`turn_runner.py:213`). |
 | `text_delta` | `{text}` | Streamed assistant prose. |
 | `tool_call` | `{tool, args_summary}` | `args_summary` is a short human string — never full params. |
 | `tool_result` | `{tool, ok, summary}` | |
