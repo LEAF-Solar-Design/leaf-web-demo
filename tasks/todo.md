@@ -48,13 +48,13 @@ Risks:
 
 # Customization delivery waves
 
-Source baseline: `origin/main` at `6fbc2c1d8029aaeec5ace8d258a6f7ede0fb1e3d`.
+Source baseline: `origin/main` at `4b8771bd351f17526d69ba498136f91b79b161e1`.
 
 Baseline gate:
 
 - `LEAF_AUTOFILL_SOLVER_ABSENT_OK=1 python scripts/run-all-gates.py`
-- 68 suites passed, 0 failed, 3 environment skips
-- 1,098 tests passed
+- 80 suites passed, 0 failed, 3 environment skips
+- 1,178 tests passed
 
 ## Wave 0
 
@@ -78,32 +78,34 @@ Baseline gate:
 
 ## Wave 3
 
-- [ ] Add canonical R6 server route and close live direct-publish fallbacks.
-- [ ] Connect in-app R5 staging and R6 publish confirmation.
-- [ ] Extend deployment rollback to include effective catalog state.
+- [x] Add canonical R6 server route and close live direct-publish fallbacks when R5 is enabled.
+- [x] Connect in-app R5 staging and R6 publish confirmation.
+- [x] Extend deployment rollback to include effective catalog state.
 
 ## Wave 4
 
-- [ ] Frozen-path, self-approval, expiry, and prompt-injection falsification.
-- [ ] Git/SQLite crash, replay, and concurrent publication falsification.
-- [ ] Reconcile, deploy, and idempotent rollback falsification.
+- [x] Frozen-path, self-approval, expiry, and prompt-injection falsification.
+- [x] Git/SQLite crash, replay, and concurrent publication falsification.
+- [x] Reconcile, deploy, and idempotent rollback falsification.
 
 ## Wave 5
 
-- [ ] Dark deploy with R5, R6, and R7 disabled.
+- [ ] Merge and verify the staging-only code and infrastructure PRs.
+- [ ] Build immutable images without production promotion.
 - [ ] Internal-tenant R5 activation and evidence.
 - [ ] Independent-approval R6 activation and rollback evidence.
 - [ ] Controlled tenant expansion.
 - [ ] Keep R7 disabled until the platform-admin path is separately proven.
+- [ ] Keep `leafautomation.ai` and `www.leafautomation.ai` pinned until staging is 100% verified.
 
-## Risks
+## Operator gates
 
-- Existing `POST /api/author` publishes directly through both harness and template paths.
-- Existing `AuthorLoop.build()` registers and commits in one call.
-- Tenant Git in-place mode has no isolated change ref or compare-and-swap update.
-- Git and SQLite cannot share one transaction, so recovery must be explicit.
-- Existing ECS rollback restores images but not the effective tenant catalog.
-- The harness dependency tree currently reports nine audit findings. Review them before activation without bulk upgrading unrelated packages.
+- Provision a dedicated platform Postgres database and populate verified identity bindings before R5 activation.
+- Select and enforce an independent required reviewer before R6 activation.
+- Provision E2B credentials and prove the authored execution path before R6 execution.
+- Keep the production aliases and production backend unchanged until the staging sign-off.
+- Keep R7 absent until the platform-admin path is separately proven.
+- Track the three moderate transitive Agent SDK audit findings. The exposed Hono/MCP server code is not imported or mounted by this harness.
 
 ## Adopted main repairs
 
