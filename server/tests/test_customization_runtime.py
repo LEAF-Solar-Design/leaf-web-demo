@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -234,6 +235,108 @@ def test_independent_confirmation_rejects_the_harness_dispatch_secret(
     assert denied.status_code == 403
     assert approved == {"confirmation_id": "ok"}
     assert calls == [{"tenant_id": "tenant-a", "change_set_id": "change"}]
+
+
+def test_live_author_fails_closed_when_r5_is_disabled(monkeypatch):
+    legacy_calls = []
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: False)
+    monkeypatch.setattr(
+        author_router,
+        "_legacy_author",
+        lambda *_: legacy_calls.append(True),
+    )
+
+    response = author_router.author(
+        author_router.AuthorRequest(description="make a tool"),
+        tenant="tenant-a",
+        idempotency_key="request-a",
+    )
+
+    assert response.status_code == 404
+    assert json.loads(response.body)["reason_code"] == "customization_stage_disabled"
+    assert legacy_calls == []
+
+
+def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
+    tmp_path, monkeypatch
+):
+    store = SQLiteCustomizationStore(tmp_path / "customization.db")
+    service = CustomizationService(store)
+    release = SimpleNamespace(
+        release_id="release-a", workspace_contract_sha256=WORKSPACE
+    )
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setattr(
+        customization_service,
+        "_binding",
+        lambda tenant: TenantBinding(str(tenant), "auth0|author", "owner", True),
+    )
+    monkeypatch.setattr(
+        customization_service.entitlements, "resolve_tier", lambda tenant: "pro"
+    )
+    monkeypatch.setattr(
+        customization_service.entitlements,
+        "entitlements_for",
+        lambda tier: {"build": True},
+    )
+    monkeypatch.setattr(customization_service, "_bare_repo", lambda tenant: Path("."))
+    monkeypatch.setattr(customization_service, "_git", lambda *args: BASE)
+    monkeypatch.setattr(service, "_release", lambda: release)
+    monkeypatch.setattr(
+        service,
+        "_authority",
+        lambda: SimpleNamespace(authorize_stage=lambda **kwargs: None),
+    )
+    monkeypatch.setattr(service, "_verify_catalog", lambda *args: None)
+    policy_calls = []
+    monkeypatch.setattr(
+        service,
+        "_verify_stage_policy",
+        lambda change, body=None: policy_calls.append((change.state, body)),
+    )
+
+    def callback_completed(change_tenant, description, change):
+        receipt = {
+            "contract": "leaf.customization.v1",
+            "tenant_id": change_tenant,
+            "change_set_id": change.change_set_id,
+            "state": "staged",
+            "base_commit": change.base_commit,
+            "staged_commit": STAGED,
+            "catalog_digest": DIGEST,
+            "platform_release": change.desired_platform_release,
+            "workspace_contract_digest": change.workspace_contract_digest,
+            "idempotency_key": change.idempotency_key,
+        }
+        current = store.get_change_set(
+            tenant_id=change_tenant, change_set_id=change.change_set_id
+        )
+        store.record_staged(
+            tenant_id=change_tenant,
+            change_set_id=change.change_set_id,
+            expected_version=current.version,
+            idempotency_key=f"staged:{change.idempotency_key}",
+            staged_commit=STAGED,
+            catalog_digest=DIGEST,
+            platform_release=change.desired_platform_release,
+            workspace_contract_digest=change.workspace_contract_digest,
+        )
+        return {"receipt": receipt}
+
+    monkeypatch.setattr(service, "_harness_stage", callback_completed)
+
+    result = service.stage(
+        tenant="tenant-a",
+        description="make a tool",
+        mode="build",
+        idempotency_key="request-a",
+    )
+
+    assert result["receipt"]["state"] == "staged"
+    assert result["receipt"]["staged_commit"] == STAGED
+    assert "tool" not in result
+    assert policy_calls == [(ChangeState.STAGED, None)]
 
 
 def test_rollback_requires_r6_and_owner_or_editor(tmp_path, monkeypatch):

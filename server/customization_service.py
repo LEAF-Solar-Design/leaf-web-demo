@@ -231,8 +231,20 @@ class CustomizationService:
             staged_commit=receipt["staged_commit"],
             catalog_digest=receipt["catalog_digest"],
         )
+        durable = self.store.get_change_set(
+            tenant_id=tenant_id, change_set_id=change.change_set_id
+        )
+        if durable.state is ChangeState.STAGED:
+            if self._raw_receipt(durable) != receipt:
+                raise CustomizationServiceError("staged_receipt_mismatch")
+            # The authenticated callback validates policy before it records
+            # STAGED. A retry may therefore receive only the durable receipt
+            # after the first response was lost. Revalidate the committed tree
+            # and return that durable result in the same retry.
+            self._verify_stage_policy(durable)
+            return self._receipt(durable)
         self._verify_stage_policy(proposed, body)
-        change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change.change_set_id)
+        change = durable
         if change.state is ChangeState.STAGING:
             change = self.store.record_staged(
                 tenant_id=tenant_id, change_set_id=change.change_set_id, expected_version=change.version,

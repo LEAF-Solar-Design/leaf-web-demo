@@ -308,31 +308,29 @@ def test_entitlements_get_matrix(live_auth):
         assert b["source"] == "policy"
 
 
-def test_author_build_denied_for_hosted_starter(live_auth):
-    """hosted_starter lacks `build` -> POST /api/author is a 403 entitlement rejection
-    (before any harness/template work)."""
+def test_author_build_disabled_for_hosted_starter_before_r5(live_auth):
+    """Live authoring stays closed for every tier until R5 is enabled."""
     c = _client()
     r = c.post("/api/author", json={"description": "tally panels per layer"},
                headers=bearer("hosted_starter"))
-    assert r.status_code == 403, r.text
+    assert r.status_code == 404, r.text
     b = r.json()
     jsonschema.validate(b, ENVELOPE_SCHEMA)
-    assert b["entitlement_required"] is True
-    assert b["required"] == "build"
-    assert b["tier"] == "hosted_starter"
-    assert b["error"]["error_code"] == "ENTITLEMENT_REQUIRED" and b["error"]["retryable"] is False
+    assert "entitlement_required" not in b
+    assert b["reason_code"] == "customization_stage_disabled"
+    assert b["error"]["retryable"] is False
     assert b["degraded_mode"] is False
 
 
-def test_author_build_allowed_for_hosted_pro(live_auth, isolate_authored):
-    """hosted_pro has `build` -> POST /api/author proceeds (templated 200, NOT a 403)."""
+def test_author_build_fails_closed_until_r5_is_enabled(live_auth, isolate_authored):
+    """Live authoring never falls back to the direct legacy code writer."""
     c = _client()
     r = c.post("/api/author", json={"description": "tally panels per layer"},
                headers=bearer("hosted_pro"))
-    assert r.status_code == 200, r.text
+    assert r.status_code == 404, r.text
     b = r.json()
     assert "entitlement_required" not in b
-    assert b["tool"] is not None and isinstance(b["code"], str)
+    assert b["reason_code"] == "customization_stage_disabled"
 
 
 def test_run_write_allowed_for_hosted_starter(live_auth):

@@ -245,8 +245,12 @@ def _customization_error(exc: CustomizationServiceError) -> JSONResponse:
 def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
            idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> Dict[str, Any]:
     """Use the controlled R5 path only after that tenant's rollout is enabled."""
-    if not deps.auth_live() or not customization_enabled(5, str(tenant)):
+    if not deps.auth_live():
         return _legacy_author(req, tenant)
+    if not customization_enabled(5, str(tenant)):
+        return _customization_error(
+            CustomizationServiceError("customization_stage_disabled", 404)
+        )
     try:
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode="build",

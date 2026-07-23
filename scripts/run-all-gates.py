@@ -310,7 +310,7 @@ def build_suites() -> List[Suite]:
         Suite("server-customization-contract", "server customization contract freeze", "pytest",
               SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
         Suite("server-customization-runtime", "server customization runtime", "pytest",
-              SERVER, _py_pytest("tests/test_customization_runtime.py"), 7),
+              SERVER, _py_pytest("tests/test_customization_runtime.py"), 9),
         Suite("server-customization-adversarial", "server customization adversarial", "pytest",
               SERVER, _py_pytest("tests/test_customization_adversarial.py"), 5),
         Suite("server-customization-publish-recovery", "server customization publish recovery", "pytest",
