@@ -1,6 +1,6 @@
 # Agent Spine - Conversational Platform Design
 
-**Status:** Draft accepted 2026-07-20 · Phase-1 implementation in flight (branch `agent-spine-phase1`).
+**Status:** Draft accepted 2026-07-20 · Phase-1 shipped (census #12 chips 1–5) · Contract §18 **FROZEN 2026-07-23** (chip 5; freeze gate `server/tests/test_contract_freeze.py`, suite `server-contract-freeze`).
 
 - Wire/contract surface (normative): [`../server/CONTRACT-ADDENDUM.md`](../server/CONTRACT-ADDENDUM.md) §18 — mirrored in section 3 below.
 - Mission canon: the operator's mission file (MISSION canon, ratified 2026-07-17) — referenced by name only; positioning statements in this document must not drift from it.

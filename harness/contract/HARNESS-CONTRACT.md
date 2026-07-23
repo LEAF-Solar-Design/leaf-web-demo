@@ -24,7 +24,10 @@ does not re-freeze — `contract/CONTRACT.md` (§1–§6), `server/CONTRACT-ADDE
 > silent in-place edit. Additive absent-safe fields follow the ADDENDUM §10
 > additive rule. The PARKED `/converse/*` spec in §1 stays parked, not frozen —
 > the live conversational surface is `POST /turn`. Sibling freeze: ADDENDUM
-> §15/§16/§17 (same date).
+> §15/§16/§17 (same date); ADDENDUM §18 FROZEN 2026-07-23 (census #12 chip 5):
+> the `ConverseTurnInput` field set (no packet field), the `HarnessTurnEvent`
+> union, `StopReason`, and the parked ContextPacket schema are pinned by
+> `server/tests/test_contract_freeze.py`.
 
 ---
 

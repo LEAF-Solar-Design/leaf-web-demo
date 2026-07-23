@@ -795,9 +795,17 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 
 Session: `agent-spine-phase1`, 2026-07-20. The contract for the conversational spine:
 durable per-drawing agent sessions, streamed turns, and gated dispatch into the existing
-deterministic job chain. Proposed (not yet frozen), same promotion discipline as
-§11–§17; design rationale lives in `docs/AGENT-SPINE-DESIGN.md`. Verification: Phase-1
-implementation + tests in this change set.
+deterministic job chain. **FROZEN (2026-07-23, census #12 chip 5)** — promoted
+proposed→frozen under the same discipline as §11–§17, AS THE LIVE WIRE IS: 18.1 app
+routes with their implementation notes (the §2.1 sessions wire, `ConverseTurnInput`
+with NO ContextPacket field), 18.2 parked by decision, 18.3 event vocabulary, 18.4
+codes, 18.5 back edge. The ContextPacket module (`server/context_packet.py`) is frozen
+as a PARKED schema: no live caller today, and its field set + `MAX_PACKET_CHARS`
+size discipline are pinned by `server/tests/test_contract_freeze.py` so the parked
+module cannot drift while it awaits spine unification. Design rationale lives in
+`docs/AGENT-SPINE-DESIGN.md`. Verification: Phase-1 implementation + tests in this
+change set; freeze gate: `tests/test_contract_freeze.py` (registered suite
+`server-contract-freeze`).
 
 Two ground rules frame everything below:
 
@@ -827,7 +835,9 @@ Two ground rules frame everything below:
 > `ConverseTurnInput` — `{tenant_id, session_id, turn_id, drawing_id, messages,
 > text|confirm}` — with NO ContextPacket field; `server/context_packet.py` has
 > no live caller. Pinned by `server/tests/test_sessions_router.py`
-> (no-packet body assertion); chip 5 freezes it.
+> (no-packet body assertion); FROZEN by chip 5 (2026-07-23) —
+> `tests/test_contract_freeze.py` pins the port field set and the parked
+> packet schema.
 
 All `/api/*` routes resolve the tenant via the existing `require_tenant` dependency
 (`server/deps.py:251–277`; off-auth header stub, live-auth verified JWT — unchanged).

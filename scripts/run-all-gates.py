@@ -169,7 +169,7 @@ def build_suites() -> List[Suite]:
         Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
               _py_pytest("tests/test_context_packet.py"), 16),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
-              _py_pytest("tests/test_contract_freeze.py"), 4),
+              _py_pytest("tests/test_contract_freeze.py"), 8),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
               _py_pytest("tests/test_job_lanes.py"), 11),
         Suite("server-agent-e2e", "server tests/test_agent_e2e.py", "pytest", SERVER,
