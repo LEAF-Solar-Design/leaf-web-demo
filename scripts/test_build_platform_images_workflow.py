@@ -17,13 +17,33 @@ def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     # One tag is derived once and passed to every image build and later job.
-    assert 'echo "value=prod-$current_short"' in text
+    assert 'image_tag="prod-$current_short"' in text
+    assert 'image_tag="sha-$current_sha"' in text
+    assert 'echo "value=$image_tag"' in text
     assert "IMAGE_TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert "TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert (
         "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:"
         "${{ env.IMAGE_TAG }}"
     ) in text
+
+    # A trusted main workflow may build an exact reviewed source without
+    # granting draft branches their own AWS OIDC subject.
+    assert "source_sha:" in text
+    assert "source_sha: ${{ steps.source.outputs.sha }}" in text
+    assert "source_mode: ${{ steps.source.outputs.mode }}" in text
+    assert "ref: ${{ inputs.source_sha || github.sha }}" in text
+    assert "ref: ${{ needs.prepare.outputs.source_sha }}" in text
+    assert "pull-requests: read" in text
+    assert "source_sha must be a full 40-character lowercase hexadecimal commit" in text
+    assert '.state == "open"' in text
+    assert ".draft == true" in text
+    assert '.base.ref == "main"' in text
+    assert "(.head.sha | ascii_downcase) == $sha" in text
+    assert "Build source must be on main or the exact head of an open draft PR" in text
+    assert "Only a source commit on main may request production promotion" in text
+    assert "needs.prepare.outputs.source_mode == 'main'" in text
+    assert text.count("id-token: write") == 2
 
     # The matrix isolates all three images and does not cancel siblings after
     # one failure. A failed matrix entry still blocks the verification job.
@@ -65,7 +85,7 @@ def main() -> None:
     assert "for image in app broker harness; do" in verify_body
     assert "aws ecr batch-get-image" in verify_body
     assert '--image-ids "imageTag=$TAG"' in verify_body
-    assert 'if [[ "$TAG" != prod-* ]]' in verify_body
+    assert "prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40}" in verify_body
     assert 'if [[ -z "$digest" || "$digest" == "None" ]]' in verify_body
 
     print("build-platform-images workflow invariants: PASS")
