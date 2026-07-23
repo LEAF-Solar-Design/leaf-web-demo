@@ -1,15 +1,22 @@
 // REAL entitlement state (replaces the old "PLACEHOLDER — NOT ENFORCED" demo).
 // Driven by GET /api/entitlements -> {tier, entitlements:{run_read, run_write,
-// build}, source}. These gates are ENFORCED server-side now — POST /api/run
-// (write tools) and POST /api/author return HTTP 403 {entitlement_required} on a
+// build, converse}, source}. These gates are ENFORCED server-side now — POST
+// /api/run (write tools), POST /api/author, and the converse lane's POST
+// /api/sessions/{id}/messages return HTTP 403 {entitlement_required} on a
 // disallowed tier — so this panel states the real plan and never makes a fake
 // enforcement claim. In mock / off-auth (entitlements null) it shows the honest
 // "demo tier · full access" line. Calm vocabulary: square mono tags, no pills.
+//
+// The tier itself is upstream truth: leaf_website FU-1 derives the Auth0 claim
+// from the ORGANIZATION AGGREGATE (any active/trialing subscription in the org
+// entitles every member), so this panel must only ever reflect the server
+// payload — never infer entitlement from anything client-side.
 
 const ROWS = [
   { key: 'run_read', label: 'Run read-only tools', hint: 'drawing.read' },
   { key: 'run_write', label: 'Run editing tools', hint: 'drawing.write' },
   { key: 'build', label: 'Author new tools', hint: 'build lane' },
+  { key: 'converse', label: 'Chat with the assistant', hint: 'converse lane' },
 ]
 
 // Unknown/absent capability -> permissive (the off-auth demo grants everything).

@@ -150,7 +150,14 @@ export default function ConversePanel({
           rationale: data.rationale || '',
         })
       } else if (type === 'confirmation_required') {
-        t.feed.push({ kind: 'confirm', id: data.confirmation_id, confirmKind: data.kind || null, payload: data.payload || null })
+        // Legacy pair flow (proposed_run + confirmation_required, same id):
+        // the proposal card already carries the server-truth tool/params/
+        // capability, so the paired confirmation adds no second decision card.
+        // Spine turns emit proposed_run alone (census #12 chip 1) — with this
+        // fold the two flows render identically. A confirmation with no
+        // proposal twin (a non-tool confirm) still gets its own card.
+        const paired = t.feed.some((f) => f.kind === 'proposal' && f.id === data.confirmation_id)
+        if (!paired) t.feed.push({ kind: 'confirm', id: data.confirmation_id, confirmKind: data.kind || null, payload: data.payload || null })
       } else if (type === 'turn_usage') {
         t.usage = data
       } else if (type === 'turn_complete') {
