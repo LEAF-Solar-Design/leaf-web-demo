@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafautomation.ai/contracts/customization.v1.schema.json",
+  "title": "Leaf customization v1",
+  "type": "object",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "state": {
+      "enum": [
+        "created",
+        "staging",
+        "staged",
+        "awaiting_approval",
+        "approved",
+        "publishing",
+        "published",
+        "rejected",
+        "conflicted",
+        "failed",
+        "superseded",
+        "rolled_back"
+      ]
+    },
+    "workspaceReference": {
+      "type": "object",
+      "required": [
+        "contract",
+        "workspace_contract",
+        "desired_platform_release"
+      ],
+      "properties": {
+        "contract": {
+          "const": "leaf.workspace.v1"
+        },
+        "workspace_contract": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "desired_platform_release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false
+    },
+    "stagedReceipt": {
+      "type": "object",
+      "required": [
+        "contract",
+        "tenant_id",
+        "change_set_id",
+        "state",
+        "base_commit",
+        "staged_commit",
+        "catalog_digest",
+        "platform_release",
+        "workspace_contract_digest",
+        "idempotency_key"
+      ],
+      "properties": {
+        "contract": {
+          "const": "leaf.customization.v1"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "change_set_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "state": {
+          "const": "staged"
+        },
+        "base_commit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "staged_commit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "catalog_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "platform_release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "workspace_contract_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false
+    },
+    "publishRequest": {
+      "type": "object",
+      "required": [
+        "change_set_id",
+        "staged_commit",
+        "catalog_digest",
+        "platform_release",
+        "workspace_contract_digest",
+        "confirmation_id",
+        "idempotency_key"
+      ],
+      "properties": {
+        "change_set_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "staged_commit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "catalog_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "platform_release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "workspace_contract_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "confirmation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false
+    },
+    "auditReceipt": {
+      "type": "object",
+      "required": [
+        "contract",
+        "event_id",
+        "ts",
+        "tenant_id",
+        "change_set_id",
+        "prior_state",
+        "next_state",
+        "idempotency_key",
+        "result"
+      ],
+      "properties": {
+        "contract": {
+          "const": "leaf.customization.audit.v1"
+        },
+        "event_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "change_set_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "prior_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/state"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_state": {
+          "$ref": "#/$defs/state"
+        },
+        "author_subject": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 300
+        },
+        "approver_subject": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 300
+        },
+        "base_commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/gitSha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "staged_commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/gitSha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "catalog_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "platform_release": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "workspace_contract_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "result": {
+          "enum": [
+            "ok",
+            "denied",
+            "failed"
+          ]
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/workspaceReference"
+    },
+    {
+      "$ref": "#/$defs/stagedReceipt"
+    },
+    {
+      "$ref": "#/$defs/publishRequest"
+    },
+    {
+      "$ref": "#/$defs/auditReceipt"
+    }
+  ]
+}

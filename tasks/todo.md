@@ -45,3 +45,67 @@ Risks:
 - The full server suite has unrelated baseline failures. Use the recorded
   focused 107-test baseline plus subsystem tests added by each lane.
 - Migration numbers are centrally allocated from `0011` through `0017`.
+
+# Customization delivery waves
+
+Source baseline: `origin/main` at `6fbc2c1d8029aaeec5ace8d258a6f7ede0fb1e3d`.
+
+Baseline gate:
+
+- `LEAF_AUTOFILL_SOLVER_ABSENT_OK=1 python scripts/run-all-gates.py`
+- 68 suites passed, 0 failed, 3 environment skips
+- 1,098 tests passed
+
+## Wave 0
+
+- [x] Freeze `leaf.customization.v1` wire and storage contract.
+- [x] Freeze `/api/author/register` as the only R6 publish route.
+- [x] Freeze state transitions, approval binding, audit receipts, and feature flags.
+- [x] Freeze platform-owned mutability and desired/effective release authority.
+- [x] Add contract-freeze tests.
+
+## Wave 1
+
+- [ ] Tenant Git change-set adapter with isolated refs and compare-and-swap updates.
+- [ ] SQLite coordination store with idempotency and recovery.
+- [ ] Platform release policy loader with strict path normalization.
+
+## Wave 2
+
+- [ ] Split authoring into stage and publish operations.
+- [ ] Add desired/effective platform reconciliation.
+- [ ] Add tenant approval and staff authority separation.
+
+## Wave 3
+
+- [ ] Add canonical R6 server route and close live direct-publish fallbacks.
+- [ ] Connect in-app R5 staging and R6 publish confirmation.
+- [ ] Extend deployment rollback to include effective catalog state.
+
+## Wave 4
+
+- [ ] Frozen-path, self-approval, expiry, and prompt-injection falsification.
+- [ ] Git/SQLite crash, replay, and concurrent publication falsification.
+- [ ] Reconcile, deploy, and idempotent rollback falsification.
+
+## Wave 5
+
+- [ ] Dark deploy with R5, R6, and R7 disabled.
+- [ ] Internal-tenant R5 activation and evidence.
+- [ ] Independent-approval R6 activation and rollback evidence.
+- [ ] Controlled tenant expansion.
+- [ ] Keep R7 disabled until the platform-admin path is separately proven.
+
+## Risks
+
+- Existing `POST /api/author` publishes directly through both harness and template paths.
+- Existing `AuthorLoop.build()` registers and commits in one call.
+- Tenant Git in-place mode has no isolated change ref or compare-and-swap update.
+- Git and SQLite cannot share one transaction, so recovery must be explicit.
+- Existing ECS rollback restores images but not the effective tenant catalog.
+- The harness dependency tree currently reports nine audit findings. Review them before activation without bulk upgrading unrelated packages.
+
+## Adopted main repairs
+
+- [x] Preserve the completed live edge-contract repair from `origin/main`.
+- [x] Preserve authored-execution containment from `origin/main`.
