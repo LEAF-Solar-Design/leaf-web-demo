@@ -210,8 +210,24 @@ def set_tenant_disabled(tid: str, disabled: bool) -> None:
 # --------------------------------------------------------------------------- #
 # attribution ledger — exactly ONE line per /broker/run
 # --------------------------------------------------------------------------- #
+def _conform_ledger_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Enforce the FROZEN leaf.broker-ledger-line.v1 types at the single append
+    chokepoint. The wire model accepts arbitrary JSON inside the tool package
+    (a non-string `name` or `engine_op` reaches the entry untyped), and cost
+    blocks come from tool envelopes; conforming HERE means every written line
+    — ok, denial, or garbage-input — is schema-valid."""
+    tool = entry.get("tool")
+    entry["tool"] = tool if isinstance(tool, str) else None
+    engine_op = entry.get("engine_op")
+    entry["engine_op"] = engine_op if isinstance(engine_op, str) else ""
+    for key in ("engine_seconds", "usd_est"):
+        val = entry.get(key)
+        entry[key] = float(val) if isinstance(val, (int, float)) and not isinstance(val, bool) else None
+    return entry
+
+
 def _ledger_append(entry: Dict[str, Any]) -> None:
-    line = json.dumps(entry, separators=(",", ":"))
+    line = json.dumps(_conform_ledger_entry(entry), separators=(",", ":"))
     with _ledger_lock:
         with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")

@@ -164,14 +164,18 @@ degraded_mode`.
 > `server/tests/test_broker_ledger_schema_static.py`.
 
 **Security property (tested):** the tenant-facing app process NEVER holds the
-APS credential. `server/broker.py` is a separate process (default `:8140`, env
-`BROKER_PORT`; its own non-root container, unpublished on the host network)
-and is the ONLY code that loads `da/client.py` / can read
-`~/.aps/credentials.json`. `app.py`/`jobs.py` contain no `da` import (static
-gate `server/tests/test_no_da_imports_static.py`, whole app-side sweep) and
-run correctly with `APS_CRED=/nonexistent` (dynamic test). The app reaches
-execution ONLY via `server/broker_client.py` → HTTP (`BROKER_URL`, default
-`http://127.0.0.1:8140`); broker down → `BROKER_UNREACHABLE`. Every protected
+APS credential at `APS_LIVE=0` — the tested condition. `server/broker.py` is a
+separate process (default `:8140`, env `BROKER_PORT`; its own non-root
+container, unpublished on the host network) and is the ONLY code that loads
+`da/client.py` on the tool-execution path; the ONE documented app-side seam is
+the §11 legacy store-read loader `deps.get_da_client()` (drawing reads at
+`APS_LIVE=1`), every call-site APS_LIVE-gated, promotion through the broker a
+documented follow-up. `app.py`/`jobs.py` contain no `da` import (static gate
+`server/tests/test_no_da_imports_static.py`, whole app-side sweep, AST-level +
+recursive) and run correctly with `APS_CRED=/nonexistent` (dynamic test). The
+app reaches tool execution ONLY via `server/broker_client.py` → HTTP
+(`BROKER_URL`, default `http://127.0.0.1:8140`); broker down →
+`BROKER_UNREACHABLE`. Every protected
 `/broker/*` route requires the `X-Broker-Secret` hop (env
 `LEAF_BROKER_SECRET`, constant-time compare; 503 fail-closed when live and
 unset; `/broker/health` stays open for liveness).

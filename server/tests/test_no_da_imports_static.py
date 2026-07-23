@@ -4,8 +4,11 @@ CONTRACT-ADDENDUM §8 (FROZEN): the tenant-facing app process NEVER holds the
 APS credential; server/broker.py is the only process that loads da/client.py.
 Until now the static half of that property lived inside test_backbone.py's
 booted-stack e2e (app.py/jobs.py only). This suite is the standalone,
-dependency-free version covering the WHOLE app-side surface, so CI fails the
-moment any app-side file grows a da/ import — no server boot required.
+dependency-free version covering the WHOLE app-side surface — recursively
+(builtins/, solver_adapters/, routers/, authored modules), at the AST level
+(conditional / semicolon-joined / function-local imports all count), plus the
+dynamic import_module/__import__ spellings — so CI fails the moment any
+app-side file grows a da/ import, however it is written. No server boot.
 
 The documented, allowed seams (checked here, not waived silently):
   * broker.py            — IS the broker process (loads da/client.py by path).
@@ -25,6 +28,7 @@ The documented, allowed seams (checked here, not waived silently):
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -33,63 +37,99 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 # Files that legitimately live on the credential side of the boundary.
 CREDENTIAL_SIDE = {"broker.py", "write_loop_live.py"}
 
-IMPORT_DA_RE = re.compile(r"^\s*(import|from)\s+da\b")
-IMPORT_CLIENT_RE = re.compile(r"^\s*(import|from)\s+client\b")
 GET_DA_CLIENT_RE = re.compile(r"deps\.get_da_client\(\)")
 # The §11 idiom every app-side call-site must use, verbatim:
 GATED_IDIOM = "deps.get_da_client() if deps.APS_LIVE else None"
 DA_PATH_LOAD_RE = re.compile(r"""DA_DIR\s*/\s*["']([\w.]+)["']""")
+# importlib.import_module("da...") / __import__("da") / ...("client") — the
+# dynamic spellings a line-regex import check cannot see.
+DYNAMIC_IMPORT_RE = re.compile(
+    r"""(?:import_module|__import__)\s*\(\s*['"](?:da(?:[.'"])|client['"])""")
 
 
 def _app_side_files() -> list[Path]:
-    files = [p for p in sorted(SERVER_DIR.glob("*.py"))
-             if p.name not in CREDENTIAL_SIDE and not p.name.startswith("test_")]
-    files += sorted((SERVER_DIR / "routers").glob("*.py"))
-    assert len(files) > 20, "app-side sweep found suspiciously few files"
+    """EVERY .py under server/ the app process could import — RECURSIVE, so
+    app-loaded subpackages (builtins/, solver_adapters/, routers/, authored
+    tool modules) are inside the net, not just the top level."""
+    files = [p for p in sorted(SERVER_DIR.rglob("*.py"))
+             if "__pycache__" not in p.parts
+             and "tests" not in p.parts
+             and p.name not in CREDENTIAL_SIDE]
+    assert len(files) > 30, "app-side sweep found suspiciously few files"
     return files
+
+
+def _rel(p: Path) -> str:
+    return p.relative_to(SERVER_DIR).as_posix()
 
 
 def _src(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _import_offenders(p: Path, roots: frozenset[str]) -> list[str]:
+    """AST-walk every Import/ImportFrom whose root module is in `roots` —
+    catches `if live: import da`, semicolon-joined statements, and
+    function-local lazy imports that a line-anchored regex misses. An
+    unparseable file is itself an offence (the sweep must see everything)."""
+    try:
+        tree = ast.parse(_src(p))
+    except SyntaxError as exc:
+        return [f"{_rel(p)}: unparseable app-side file ({exc})"]
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in roots:
+                    out.append(f"{_rel(p)}:{node.lineno}: import {alias.name}")
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            if (node.module or "").split(".")[0] in roots:
+                out.append(f"{_rel(p)}:{node.lineno}: from {node.module} import ...")
+    return out
+
+
 def test_no_app_side_file_imports_da_package():
-    """No `import da` / `from da import` anywhere the app process can import."""
-    offenders = []
-    for p in _app_side_files():
-        for i, line in enumerate(_src(p).splitlines(), 1):
-            if IMPORT_DA_RE.match(line):
-                offenders.append(f"{p.name}:{i}: {line.strip()}")
+    """No `import da` / `from da import` anywhere the app process can import —
+    at any nesting, conditional or not (AST-level, not line-regex)."""
+    offenders = [o for p in _app_side_files()
+                 for o in _import_offenders(p, frozenset({"da"}))]
     assert not offenders, "app-side da import(s): " + "; ".join(offenders)
 
 
 def test_no_app_side_file_imports_bare_client_module():
     """`import client` (da/client.py via the store seam's sys.path append) is
     credential-side only — write_loop_live.py and da/ itself, never the app."""
+    offenders = [o for p in _app_side_files()
+                 for o in _import_offenders(p, frozenset({"client"}))]
+    assert not offenders, "app-side bare client import(s): " + "; ".join(offenders)
+
+
+def test_no_app_side_dynamic_da_imports():
+    """importlib.import_module / __import__ with a "da"/"client" literal —
+    the dynamic spelling of the same boundary breach."""
     offenders = []
     for p in _app_side_files():
         for i, line in enumerate(_src(p).splitlines(), 1):
-            if IMPORT_CLIENT_RE.match(line):
-                offenders.append(f"{p.name}:{i}: {line.strip()}")
-    assert not offenders, "app-side bare client import(s): " + "; ".join(offenders)
+            if DYNAMIC_IMPORT_RE.search(line):
+                offenders.append(f"{_rel(p)}:{i}: {line.strip()}")
+    assert not offenders, "app-side dynamic da/client import(s): " + "; ".join(offenders)
 
 
 def test_app_and_jobs_never_reference_da_client():
     """The frozen §8 wording, verbatim, as its own gate: app.py/jobs.py contain
     no da import and no `da.client` reference (mirrors test_backbone check 4)."""
     for fname in ("app.py", "jobs.py"):
-        src = _src(SERVER_DIR / fname)
-        for i, line in enumerate(src.splitlines(), 1):
-            assert not IMPORT_DA_RE.match(line), f"{fname}:{i}: {line.strip()!r}"
-        assert "da.client" not in src, f"{fname} references da.client"
+        offenders = _import_offenders(SERVER_DIR / fname, frozenset({"da"}))
+        assert not offenders, "; ".join(offenders)
+        assert "da.client" not in _src(SERVER_DIR / fname), f"{fname} references da.client"
 
 
 def test_broker_client_reaches_execution_over_http_only():
     """broker_client.py is the app's ONLY road to APS-capable execution — it
     must stay a pure HTTP client: no da import, no path-based module loading."""
     src = _src(SERVER_DIR / "broker_client.py")
-    for i, line in enumerate(src.splitlines(), 1):
-        assert not IMPORT_DA_RE.match(line), f"broker_client.py:{i}: {line.strip()!r}"
+    offenders = _import_offenders(SERVER_DIR / "broker_client.py", frozenset({"da"}))
+    assert not offenders, "; ".join(offenders)
     assert "spec_from_file_location" not in src
     assert "_load_module_from" not in src
     assert "DA_DIR" not in src
@@ -105,7 +145,7 @@ def test_every_get_da_client_call_site_is_aps_live_gated():
             continue
         for i, line in enumerate(_src(p).splitlines(), 1):
             if GET_DA_CLIENT_RE.search(line) and GATED_IDIOM not in line:
-                offenders.append(f"{p.name}:{i}: {line.strip()}")
+                offenders.append(f"{_rel(p)}:{i}: {line.strip()}")
     assert not offenders, "ungated get_da_client call(s): " + "; ".join(offenders)
 
 
@@ -124,7 +164,7 @@ def test_da_path_loads_target_only_documented_pure_modules():
                     continue
                 if target == "client.py" and p.name in client_allowed_in:
                     if p.name == "app.py" and ".exists()" not in line:
-                        offenders.append(f"{p.name}:{i}: {line.strip()}")
+                        offenders.append(f"{_rel(p)}:{i}: {line.strip()}")
                     continue
-                offenders.append(f"{p.name}:{i}: {line.strip()}")
+                offenders.append(f"{_rel(p)}:{i}: {line.strip()}")
     assert not offenders, "undocumented DA_DIR load(s): " + "; ".join(offenders)

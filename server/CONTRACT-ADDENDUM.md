@@ -64,20 +64,32 @@ degraded_mode`.
 > ledger line schema below change only through the operator-promotion ritual.
 > The ledger line schema is additionally machine-frozen at
 > `server/broker_ledger.schema.json` (`leaf.broker-ledger-line.v1`) and gated
-> by `server/tests/test_broker_ledger_schema_static.py`.
+> by `server/tests/test_broker_ledger_schema_static.py` (file/literal/reader
+> agreement) plus `server/tests/test_broker_ledger_schema_runtime.py` (every
+> line broker_run actually appends — including denial and garbage-input
+> lines — validates; `broker.py::_conform_ledger_entry` enforces the frozen
+> types at the single append chokepoint).
 
 **Security property (tested):** the tenant-facing app process NEVER holds the
-APS credential. `server/broker.py` is a separate process (default `:8140`, env
-`BROKER_PORT`; its own container via `deploy/Dockerfile.broker`, non-root,
-unpublished on the host network) and is the ONLY code that loads
-`da/client.py` / can read `~/.aps/credentials.json`. `app.py`/`jobs.py`
-contain no `da` import and run correctly with `APS_CRED=/nonexistent`
-(dynamic test). The static half of the invariant is its own gate —
-`server/tests/test_no_da_imports_static.py` sweeps the whole app-side surface
-(app, jobs, deps, broker_client, every router) for `da` imports, ungated
-`deps.get_da_client()` call-sites, and undocumented `DA_DIR` loads. The app
-reaches execution ONLY via `server/broker_client.py` → HTTP (`BROKER_URL`,
-default `http://127.0.0.1:8140`); broker down → `BROKER_UNREACHABLE`.
+APS credential at `APS_LIVE=0` — the tested condition: `app.py`/`jobs.py`
+contain no `da` import and the app runs correctly with
+`APS_CRED=/nonexistent` (dynamic test). `server/broker.py` is a separate
+process (default `:8140`, env `BROKER_PORT`; its own container via
+`deploy/Dockerfile.broker`, non-root, unpublished on the host network) and is
+the ONLY code that loads `da/client.py` on the tool-execution path. ONE
+app-side seam exists and is documented, not waived: the §11 legacy store-read
+loader `deps.get_da_client()` (drawing reads at `APS_LIVE=1` via
+`OSSBackend`), which every call-site must use APS_LIVE-gated verbatim
+(`deps.get_da_client() if deps.APS_LIVE else None`); promoting those live
+reads through the broker is the documented §11 follow-up. The static half of
+the invariant is its own gate — `server/tests/test_no_da_imports_static.py`
+sweeps the whole app-side surface (app, jobs, deps, broker_client, every
+router, and every app-loaded subpackage, recursively) for `da` imports —
+AST-level, so conditional/inline imports count — plus dynamic-import calls,
+ungated `deps.get_da_client()` call-sites, and undocumented `DA_DIR` loads.
+The app reaches tool execution ONLY via `server/broker_client.py` → HTTP
+(`BROKER_URL`, default `http://127.0.0.1:8140`); broker down →
+`BROKER_UNREACHABLE`.
 
 **Caller-auth hop (F4):** every protected `/broker/*` route (everything except
 `/broker/health`) requires header `X-Broker-Secret`, verified constant-time
