@@ -211,6 +211,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_inverter_placement_adapter.py"), 3),
         Suite("server-adapter-combiner", "server tests/test_combiner_placement_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_combiner_placement_adapter.py"), 3),
+        Suite("server-adapter-autofill", "server tests/test_autofill_adapter.py", "pytest",
+              SERVER, _py_pytest("tests/test_autofill_adapter.py"), 2),
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 10),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
@@ -248,7 +250,6 @@ def build_suites() -> List[Suite]:
         # NOT registered (red at measurement 2026-07-22, one process per file,
         # pre-existing on main). Durable tracker with the fix-then-register
         # rule: https://github.com/Evan-Haug/leaf-web-demo/issues/29
-        # tests/test_autofill_adapter.py (1F/1P),
         # tests/test_capabilities_promotion.py (4F/7P),
         # tests/test_engine_registry_scripts.py (1F/3P),
         # tests/test_sessions_e2e.py (7 errors/2P).

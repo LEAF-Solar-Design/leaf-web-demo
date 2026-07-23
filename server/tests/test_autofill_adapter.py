@@ -1,4 +1,21 @@
+import os
+from pathlib import Path
+
+import pytest
+
 from solver_adapters import autofill
+
+
+# The adapter's default assumes leaf-web-demo and autofill-solver are sibling
+# checkouts. Support an explicit checkout for isolated worktrees, then skip the
+# external smoke when the real solver source is not available.
+_CANDIDATES = [
+    os.environ.get("AUTOFILL_SOLVER_ROOT"),
+    str(Path(__file__).resolve().parents[3] / "autofill-solver"),
+    r"C:\Users\ehaug\OneDrive\Documents\GitHub\autofill-solver",
+]
+SOLVER_ROOT = next((Path(candidate) for candidate in _CANDIDATES
+                    if candidate and (Path(candidate) / "solver.py").is_file()), None)
 
 
 SMOKE_INPUT = {
@@ -15,9 +32,13 @@ SMOKE_INPUT = {
 }
 
 
+@pytest.mark.skipif(
+    SOLVER_ROOT is None,
+    reason="autofill-solver checkout is unavailable; adapter needs the real solver source",
+)
 def test_real_autofill_solver_smoke_is_deterministic():
-    first = autofill.run(SMOKE_INPUT)
-    second = autofill.run(SMOKE_INPUT)
+    first = autofill.run(SMOKE_INPUT, solver_root=SOLVER_ROOT)
+    second = autofill.run(SMOKE_INPUT, solver_root=SOLVER_ROOT)
     assert first == second
     assert first["solver_result"] == {
         "clusters": [["A", "B"]], "diagnostics": [], "feasible": True,
