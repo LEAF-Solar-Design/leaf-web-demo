@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -63,6 +64,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+import agent_ledger
 import broker_client
 import session_store
 from envelopes import ErrorCode
@@ -287,6 +289,8 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
     terminal_flag = threading.Event()
     finished = threading.Event()
     proposals: Dict[str, Dict[str, Any]] = {}
+    turn_usage: Dict[str, Any] = {}
+    tools_called: List[str] = []
 
     def _end_once(event_type: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> None:
         """Append (at most once, across BOTH threads) the terminal event — if
@@ -296,15 +300,53 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
             if terminal_flag.is_set():
                 return
             terminal_flag.set()
-            if event_type is not None:
-                try:
-                    session_store.append_event(session_id, turn_id, event_type, data or {})
-                except Exception:  # noqa: BLE001  best-effort — CAS release below is what matters
-                    pass
+        terminal_data = data or {}
+        if event_type is not None:
             try:
-                session_store.end_turn(session_id, turn_id)
-            except Exception:  # noqa: BLE001
+                session_store.append_event(
+                    session_id, turn_id, event_type, terminal_data)
+            except Exception:  # noqa: BLE001  best-effort; CAS release below matters
                 pass
+        stop_reason = terminal_data.get("stop_reason")
+        if not isinstance(stop_reason, str) or not stop_reason:
+            stop_reason = "error"
+        usage = dict(turn_usage)
+        record: Dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "cost_tokens": usage.get("cost_tokens", 0),
+            "usd_est": usage.get("total_cost_usd", usage.get("usd_est", 0.0)),
+            "tools_called": list(tools_called),
+            "stop_reason": stop_reason,
+        }
+        for source, target in (
+            ("input_tokens", "tokens_in"),
+            ("output_tokens", "tokens_out"),
+            ("cache_creation_input_tokens", "cache_creation_tokens"),
+            ("cache_read_input_tokens", "cache_read_tokens"),
+            ("model", "model"),
+            ("grant_kind", "grant_kind"),
+            ("degraded_mode", "degraded_mode"),
+        ):
+            if source in usage:
+                record[target] = usage[source]
+        # Best-effort by the existing agent_ledger contract. PostgreSQL mode
+        # logs failures, never falls back to JSONL, and deduplicates this stable
+        # tenant/session/turn identity.
+        try:
+            agent_ledger.append(record)
+        except Exception as exc:  # noqa: BLE001
+            # Defense in depth for injected/custom ledger implementations.
+            # Never strand the active-turn CAS because metering failed.
+            print(
+                f"[leaf-agent] terminal metering failed: {type(exc).__name__}",
+                file=sys.stderr, flush=True,
+            )
+        try:
+            session_store.end_turn(session_id, turn_id)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _drain() -> None:
         try:
@@ -321,6 +363,13 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                 data = (ev.get("data") if isinstance(ev, dict) else None) or {}
                 if not ev_type:
                     continue
+                if ev_type == "turn_usage" and isinstance(data, dict):
+                    turn_usage.clear()
+                    turn_usage.update(data)
+                elif ev_type == "tool_call":
+                    tool = data.get("tool") if isinstance(data, dict) else None
+                    if isinstance(tool, str) and tool and tool not in tools_called:
+                        tools_called.append(tool)
 
                 # Approval rows are created BEFORE the event that renders their
                 # chip is published (`append_event` below IS publication — the
@@ -370,7 +419,11 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                 session_store.append_event(session_id, turn_id, ev_type, data)
 
                 if ev_type in ("turn_complete", "error"):
-                    _end_once()  # already relayed above — just release the CAS
+                    terminal_data = (
+                        data if ev_type == "turn_complete"
+                        else dict(data, stop_reason="error")
+                    )
+                    _end_once(data=terminal_data)
                     break
         except Exception as exc:  # noqa: BLE001  network drop / decode failure mid-stream
             _end_once("error", {"error": {"error_code": ErrorCode.INTERNAL,

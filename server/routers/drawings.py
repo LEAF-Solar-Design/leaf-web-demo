@@ -136,8 +136,11 @@ def _checkout_view(co: Any) -> Any:
     the POST/DELETE .../checkout routes below let the holder TAKE and RELEASE it."""
     if not co:
         return None
-    return {"holder": co.get("holder"), "acquired": co.get("acquired"),
+    view = {"holder": co.get("holder"), "acquired": co.get("acquired"),
             "expires": co.get("expires")}
+    if co.get("fence") is not None:
+        view["fence"] = int(co["fence"])
+    return view
 
 
 def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:

@@ -29,6 +29,8 @@ import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
+import type { TenantRepo } from "../src/ports/index.js";
+import { AuthorLoop } from "../src/agent/authorLoop.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = join(HERE, "fixtures", "tenant-repo");
@@ -37,13 +39,51 @@ function git(dir: string, args: string[]): string {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
 }
 
+class LeaseAwareFakeTenantRepoProvider extends FakeTenantRepoProvider {
+  leaseActive = false;
+  leaseCalls = 0;
+  readLeaseActive = false;
+  readLeaseCalls = 0;
+
+  async withTenantLease<T>(_tenantId: string, action: () => Promise<T>): Promise<T> {
+    this.leaseCalls += 1;
+    this.leaseActive = true;
+    try {
+      return await action();
+    } finally {
+      this.leaseActive = false;
+    }
+  }
+
+  async withTenantReadLease<T>(_tenantId: string, action: () => Promise<T>): Promise<T> {
+    this.readLeaseCalls += 1;
+    this.readLeaseActive = true;
+    try {
+      return await action();
+    } finally {
+      this.readLeaseActive = false;
+    }
+  }
+
+  override async checkout(tenantId: string): Promise<TenantRepo> {
+    expect(this.leaseActive || this.readLeaseActive).toBe(true);
+    const repo = await super.checkout(tenantId);
+    const commit = repo.commit.bind(repo);
+    repo.commit = async (message, identity) => {
+      expect(this.leaseActive).toBe(true);
+      return commit(message, identity);
+    };
+    return repo;
+  }
+}
+
 describe("POST /author (build route) - hermetic e2e", () => {
   let server: Server;
   let baseUrl: string;
-  let tenantRepo: FakeTenantRepoProvider;
+  let tenantRepo: LeaseAwareFakeTenantRepoProvider;
 
   beforeEach(() => {
-    tenantRepo = new FakeTenantRepoProvider(FIXTURE);
+    tenantRepo = new LeaseAwareFakeTenantRepoProvider(FIXTURE);
     const ports: HarnessPorts = {
       oauth: new FakeOAuthGrantProvider(),
       tenantRepo,
@@ -113,6 +153,8 @@ describe("POST /author (build route) - hermetic e2e", () => {
       .split("\n")
       .filter((l) => l.trim().length > 0);
     expect(harnessLog).toHaveLength(1);
+    expect(tenantRepo.leaseCalls).toBe(1);
+    expect(tenantRepo.leaseActive).toBe(false);
     const subject = git(repoDir, ["log", "-1", `--author=${HARNESS_IDENTITY.email}`, "--format=%s"]).trim();
     expect(subject).toContain(tool.name);
   });
@@ -141,5 +183,17 @@ describe("POST /author (build route) - hermetic e2e", () => {
       if (previous === undefined) delete process.env.LEAF_AUTHORED_EXECUTION;
       else process.env.LEAF_AUTHORED_EXECUTION = previous;
     }
+  });
+
+  it("holds the tenant read lease through registered-tool lookup and execution", async () => {
+    const loop = new AuthorLoop({
+      oauth: new FakeOAuthGrantProvider(),
+      tenantRepo,
+      broker: new FakeBrokerApsClient(),
+      agentRunner: new FakeAgentRunner(),
+    });
+    await loop.run("tenant-read", "count-by-layer");
+    expect(tenantRepo.readLeaseCalls).toBe(1);
+    expect(tenantRepo.readLeaseActive).toBe(false);
   });
 });

@@ -39,6 +39,53 @@ export class AuthorLoopError extends Error {
 export class AuthorLoop {
   constructor(private readonly ports: HarnessPorts) {}
 
+  private withTenantRepoLease<T>(
+    tenantId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const provider = this.ports.tenantRepo as HarnessPorts["tenantRepo"] & {
+      withTenantLease?<R>(tenant: string, operation: () => Promise<R>): Promise<R>;
+    };
+    return provider.withTenantLease
+      ? provider.withTenantLease(tenantId, action)
+      : action();
+  }
+
+  private withTenantRepoReadLease<T>(
+    tenantId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const provider = this.ports.tenantRepo as HarnessPorts["tenantRepo"] & {
+      withTenantReadLease?<R>(tenant: string, operation: () => Promise<R>): Promise<R>;
+    };
+    return provider.withTenantReadLease
+      ? provider.withTenantReadLease(tenantId, action)
+      : action();
+  }
+
+  private persistTool(
+    repo: Awaited<ReturnType<HarnessPorts["tenantRepo"]["checkout"]>>,
+    tool: ToolPackage,
+  ): Promise<{ commit: string }> {
+    const leaseAwareRepo = repo as typeof repo & {
+      mutateAndCommit?(
+        mutation: () => void,
+        message: string,
+        identity: typeof HARNESS_IDENTITY,
+      ): Promise<{ commit: string }>;
+    };
+    const message = `author tool: ${tool.name}`;
+    if (leaseAwareRepo.mutateAndCommit) {
+      return leaseAwareRepo.mutateAndCommit(
+        () => registerTool(repo.dir, tool),
+        message,
+        HARNESS_IDENTITY,
+      );
+    }
+    registerTool(repo.dir, tool);
+    return repo.commit(message, HARNESS_IDENTITY);
+  }
+
   /** Build the exactly-three-tool toolset the author session is granted. */
   private toolsetFor(repoDir: string, tenantId: string): AuthorToolset {
     return {
@@ -80,18 +127,18 @@ export class AuthorLoop {
 
   /** build route: author + register + exactly one harness commit. */
   async build(tenantId: string, description: string): Promise<AuthorResponse> {
-    const { repo, run } = await this.author(tenantId, description);
-    registerTool(repo.dir, run.tool);
-    await repo.commit(`author tool: ${run.tool.name}`, HARNESS_IDENTITY);
-    // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
-    // to /author, ADDITIVELY. A runner that did not meter (the fake) leaves it undefined,
-    // so the response stays exactly {tool, code, preview} — the frozen shape is preserved.
-    return {
-      tool: run.tool,
-      code: run.code,
-      preview: run.preview,
-      ...(run.telemetry ? { telemetry: run.telemetry } : {}),
-    };
+    return this.withTenantRepoLease(tenantId, async () => {
+      const { repo, run } = await this.author(tenantId, description);
+      await this.persistTool(repo, run.tool);
+      // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
+      // to /author, ADDITIVELY. A runner that did not meter leaves it undefined.
+      return {
+        tool: run.tool,
+        code: run.code,
+        preview: run.preview,
+        ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+      };
+    });
   }
 
   /** one-off route: author + (optionally) test-run once, but DO NOT persist. */
@@ -99,22 +146,24 @@ export class AuthorLoop {
     tenantId: string,
     description: string,
   ): Promise<AuthorResponse & { run: ResultEnvelope }> {
-    const { run } = await this.author(tenantId, description);
-    const envelope = await this.ports.broker.runTool({
-      tenantId,
-      tool: run.tool,
-      params: {},
-      dwg: "rooftop_demo",
-      apsLive: false,
+    return this.withTenantRepoLease(tenantId, async () => {
+      const { run } = await this.author(tenantId, description);
+      const envelope = await this.ports.broker.runTool({
+        tenantId,
+        tool: run.tool,
+        params: {},
+        dwg: "rooftop_demo",
+        apsLive: false,
+      });
+      // A1: same additive, absent-safe telemetry threading as build().
+      return {
+        tool: run.tool,
+        code: run.code,
+        preview: run.preview,
+        run: envelope,
+        ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+      };
     });
-    // A1: same additive, absent-safe telemetry threading as build().
-    return {
-      tool: run.tool,
-      code: run.code,
-      preview: run.preview,
-      run: envelope,
-      ...(run.telemetry ? { telemetry: run.telemetry } : {}),
-    };
   }
 
   /**
@@ -128,11 +177,13 @@ export class AuthorLoop {
     dwg = "rooftop_demo",
     apsLive = false,
   ): Promise<ResultEnvelope> {
-    const repo = await this.ports.tenantRepo.checkout(tenantId);
-    const tool: ToolPackage | undefined = findTool(repo.dir, toolName);
-    if (!tool) {
-      throw new AuthorLoopError(`unknown registered tool: ${toolName}`, 404);
-    }
-    return this.ports.broker.runTool({ tenantId, tool, params, dwg, apsLive });
+    return this.withTenantRepoReadLease(tenantId, async () => {
+      const repo = await this.ports.tenantRepo.checkout(tenantId);
+      const tool: ToolPackage | undefined = findTool(repo.dir, toolName);
+      if (!tool) {
+        throw new AuthorLoopError(`unknown registered tool: ${toolName}`, 404);
+      }
+      return this.ports.broker.runTool({ tenantId, tool, params, dwg, apsLive });
+    });
   }
 }

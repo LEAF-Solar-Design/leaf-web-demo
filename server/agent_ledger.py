@@ -34,6 +34,18 @@ PROJECT_ROOT = SERVER_DIR.parent
 _write_lock = threading.Lock()
 
 
+def _using_postgres() -> bool:
+    mode = os.environ.get("LEAF_AGENT_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_AGENT_STORE must be 'legacy' or 'postgres'")
+    return mode == "postgres"
+
+
+def _pg_store():
+    import agent_pg_store
+    return agent_pg_store
+
+
 def ledger_path() -> Path:
     """Resolved at call time so subprocess/test env overrides apply."""
     override = os.environ.get("LEAF_AGENT_LEDGER")
@@ -47,6 +59,12 @@ def _now_iso() -> str:
 def append(record: Dict[str, Any], *, path: Optional[Path] = None) -> None:
     """Append one ledger line. Fills `kind`/`ts` defaults. Never raises — a
     metering write failure is logged to stderr, not surfaced to the tenant."""
+    if path is None and _using_postgres():
+        try:
+            _pg_store().append_usage(record)
+        except Exception as exc:  # noqa: BLE001 - preserve best-effort metering
+            print(f"[leaf-agent] ledger append failed: {exc}", file=sys.stderr, flush=True)
+        return
     target = path or ledger_path()
     entry = dict(record)
     entry.setdefault("kind", "turn")
@@ -82,6 +100,8 @@ def aggregate(tenant_id: str, *, path: Optional[Path] = None) -> Dict[str, Any]:
     (current UTC calendar month) turn counts, cost-tokens, and USD estimate.
     Missing/empty ledger -> zeros, never an error. `estimate_basis` is always
     "self_metered" — there is no balance API to reconcile against."""
+    if path is None and _using_postgres():
+        return _pg_store().aggregate_usage(str(tenant_id))
     target = path or ledger_path()
     now = datetime.now(timezone.utc)
     today_prefix = now.strftime("%Y-%m-%d")
@@ -114,6 +134,8 @@ def aggregate(tenant_id: str, *, path: Optional[Path] = None) -> Dict[str, Any]:
 def tenants_seen(*, path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
     """Every tenant with at least one turn line -> lifetime {turns, cost_tokens,
     usd_est}. Ops-surface aggregation; tolerant of malformed lines."""
+    if path is None and _using_postgres():
+        return _pg_store().usage_tenants()
     target = path or ledger_path()
     out: Dict[str, Dict[str, Any]] = {}
     if not target.exists():

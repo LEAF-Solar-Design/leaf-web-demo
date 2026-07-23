@@ -261,6 +261,13 @@ export class ConverseLoop {
         "expired",
       );
     }
+    const expectedStatus = confirm.approved ? "approved" : "denied";
+    if (resolved.status !== expectedStatus) {
+      throw new ConfirmationInvalidError(
+        `confirmation ${confirm.confirmationId} already ${resolved.status}`,
+        "already_decided",
+      );
+    }
     return resolved;
   }
 

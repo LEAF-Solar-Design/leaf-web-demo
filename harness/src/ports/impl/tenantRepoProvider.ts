@@ -9,12 +9,16 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { scrubSecrets } from "./envScrub.js";
 import { gitWorkerAvailable, workerCommit } from "./gitWorker.js";
 import { redactTokens } from "../../redact.js";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Pool } from "pg";
+import type { PoolClient, PoolConfig } from "pg";
 import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
 import type { HarnessIdentity, TenantRepo, TenantRepoProvider } from "../index.js";
 
@@ -46,6 +50,211 @@ export interface TenantRepoProviderOptions {
   autoProvisionFrom?: string;
   /** Git identity for the seed commit (default HARNESS_IDENTITY). */
   seedIdentity?: HarnessIdentity;
+  /** PostgreSQL lease authority. False keeps the legacy single-process mode. */
+  lease?: PgTenantRepoLeaseCoordinator | false;
+  /** Explicit live authoring mode. Defaults to LEAF_HARNESS_AUTHORING_MODE, then disabled. */
+  authoringMode?: "disabled" | "singleton" | "fleet";
+}
+
+export function resolveAuthoringMode(
+  env: NodeJS.ProcessEnv = process.env,
+): "disabled" | "singleton" | "fleet" {
+  const mode = (env.LEAF_HARNESS_AUTHORING_MODE ?? "disabled").trim().toLowerCase();
+  if (mode !== "disabled" && mode !== "singleton" && mode !== "fleet") {
+    throw new Error("LEAF_HARNESS_AUTHORING_MODE must be disabled, singleton, or fleet");
+  }
+  return mode;
+}
+
+export function assertAuthoringModeSafe(
+  mode: "disabled" | "singleton" | "fleet",
+): void {
+  if (mode === "disabled") {
+    throw new Error(
+      "build authoring is disabled; set LEAF_HARNESS_AUTHORING_MODE=singleton explicitly",
+    );
+  }
+  if (mode === "fleet") {
+    throw new Error(
+      "multi-task build authoring is disabled until LEAF_GRANT_STORE=vault has a real Secrets Manager backend",
+    );
+  }
+}
+
+export class TenantRepoLeaseHeldError extends Error {
+  constructor(readonly tenantId: string) {
+    super(`tenant repo lease is held: ${tenantId}`);
+    this.name = "TenantRepoLeaseHeldError";
+  }
+}
+
+export class TenantRepoLeaseLostError extends Error {
+  constructor(readonly tenantId: string) {
+    super(`tenant repo lease was lost: ${tenantId}`);
+    this.name = "TenantRepoLeaseLostError";
+  }
+}
+
+interface RepoLease {
+  tenantId: string;
+  ownerToken: string;
+  generation: string;
+  lost: boolean;
+  timer?: NodeJS.Timeout;
+  repoDirs: Set<string>;
+}
+
+export interface PgTenantRepoLeaseCoordinatorOptions {
+  pool?: Pool;
+  poolConfig?: PoolConfig;
+  ttlMs?: number;
+  tableName?: string;
+}
+
+function quoteIdentifier(value: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(value)) {
+    throw new Error(`invalid PostgreSQL identifier: ${JSON.stringify(value)}`);
+  }
+  return `"${value}"`;
+}
+
+/**
+ * Fleet-wide, per-tenant authoring lease. Advisory transaction locks serialize
+ * transitions. Owner token plus generation fences stale workers.
+ */
+export class PgTenantRepoLeaseCoordinator {
+  private readonly pool: Pool;
+  private readonly ownsPool: boolean;
+  private readonly ttlMs: number;
+  private readonly table: string;
+
+  constructor(opts: PgTenantRepoLeaseCoordinatorOptions) {
+    if (!opts.pool && !opts.poolConfig) {
+      throw new Error("PgTenantRepoLeaseCoordinator requires an explicit pool or poolConfig");
+    }
+    this.pool = opts.pool ?? new Pool(opts.poolConfig);
+    this.ownsPool = !opts.pool;
+    this.ttlMs = opts.ttlMs ?? 120_000;
+    if (!Number.isFinite(this.ttlMs) || this.ttlMs < 250) {
+      throw new Error("tenant repo lease ttlMs must be finite and at least 250");
+    }
+    this.table = quoteIdentifier(opts.tableName ?? "harness_tenant_repo_leases");
+  }
+
+  async close(): Promise<void> {
+    if (this.ownsPool) await this.pool.end();
+  }
+
+  private async transaction<T>(
+    tenantId: string,
+    fn: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [tenantId]);
+      const result = await fn(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async acquire(tenantId: string): Promise<RepoLease> {
+    const ownerToken = randomUUID();
+    const row = await this.transaction(tenantId, async (client) => {
+      const result = await client.query<{ owner_token: string; generation: string }>(
+        `INSERT INTO ${this.table}
+           (tenant_id, owner_token, generation, acquired_at, heartbeat_at, expires_at)
+         VALUES ($1, $2, 1, clock_timestamp(), clock_timestamp(),
+                 clock_timestamp() + ($3 * interval '1 millisecond'))
+         ON CONFLICT (tenant_id) DO UPDATE
+           SET owner_token = EXCLUDED.owner_token,
+               generation = ${this.table}.generation + 1,
+               acquired_at = clock_timestamp(),
+               heartbeat_at = clock_timestamp(),
+               expires_at = clock_timestamp() + ($3 * interval '1 millisecond')
+         WHERE ${this.table}.expires_at <= clock_timestamp()
+         RETURNING owner_token, generation::text`,
+        [tenantId, ownerToken, this.ttlMs],
+      );
+      return result.rows[0];
+    });
+    if (!row) throw new TenantRepoLeaseHeldError(tenantId);
+    return {
+      tenantId,
+      ownerToken: row.owner_token,
+      generation: row.generation,
+      lost: false,
+      repoDirs: new Set(),
+    };
+  }
+
+  private async heartbeat(lease: RepoLease): Promise<void> {
+    if (lease.lost) return;
+    const result = await this.pool.query(
+      `UPDATE ${this.table}
+          SET heartbeat_at = clock_timestamp(),
+              expires_at = clock_timestamp() + ($4 * interval '1 millisecond')
+        WHERE tenant_id = $1 AND owner_token = $2 AND generation = $3
+          AND expires_at > clock_timestamp()`,
+      [lease.tenantId, lease.ownerToken, lease.generation, this.ttlMs],
+    );
+    if (result.rowCount !== 1) lease.lost = true;
+  }
+
+  async runFenced<T>(lease: RepoLease, action: () => Promise<T>): Promise<T> {
+    if (lease.lost) throw new TenantRepoLeaseLostError(lease.tenantId);
+    return this.transaction(lease.tenantId, async (client) => {
+      const current = await client.query(
+        `SELECT 1 FROM ${this.table}
+          WHERE tenant_id = $1 AND owner_token = $2 AND generation = $3
+            AND expires_at > clock_timestamp()
+          FOR UPDATE`,
+        [lease.tenantId, lease.ownerToken, lease.generation],
+      );
+      if (current.rowCount !== 1) {
+        lease.lost = true;
+        throw new TenantRepoLeaseLostError(lease.tenantId);
+      }
+      const result = await action();
+      await client.query(
+        `UPDATE ${this.table}
+            SET heartbeat_at = clock_timestamp(),
+                expires_at = clock_timestamp() + ($4 * interval '1 millisecond')
+          WHERE tenant_id = $1 AND owner_token = $2 AND generation = $3`,
+        [lease.tenantId, lease.ownerToken, lease.generation, this.ttlMs],
+      );
+      return result;
+    });
+  }
+
+  async withLease<T>(tenantId: string, action: (lease: RepoLease) => Promise<T>): Promise<T> {
+    const lease = await this.acquire(tenantId);
+    lease.timer = setInterval(() => {
+      void this.heartbeat(lease).catch(() => {
+        lease.lost = true;
+      });
+    }, Math.max(100, Math.floor(this.ttlMs / 3)));
+    lease.timer.unref();
+    try {
+      return await action(lease);
+    } finally {
+      clearInterval(lease.timer);
+      await this.transaction(tenantId, async (client) => {
+        await client.query(
+          `UPDATE ${this.table}
+              SET heartbeat_at = clock_timestamp(), expires_at = clock_timestamp()
+            WHERE tenant_id = $1 AND owner_token = $2 AND generation = $3`,
+          [tenantId, lease.ownerToken, lease.generation],
+        );
+      }).catch(() => undefined);
+    }
+  }
 }
 
 function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
@@ -66,9 +275,35 @@ function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
 }
 
 class GitTenantRepo implements TenantRepo {
-  constructor(readonly dir: string) {}
+  constructor(
+    readonly dir: string,
+    private readonly fence?: <T>(action: () => Promise<T>) => Promise<T>,
+  ) {}
 
   async commit(message: string, identity: HarnessIdentity): Promise<{ commit: string }> {
+    if (this.fence) {
+      return this.fence(() => this.commitUnfenced(message, identity));
+    }
+    return this.commitUnfenced(message, identity);
+  }
+
+  /** Keep the registry mutation and its Git commit in one fenced transaction. */
+  async mutateAndCommit(
+    mutation: () => void,
+    message: string,
+    identity: HarnessIdentity,
+  ): Promise<{ commit: string }> {
+    const action = async () => {
+      mutation();
+      return this.commitUnfenced(message, identity);
+    };
+    return this.fence ? this.fence(action) : action();
+  }
+
+  private async commitUnfenced(
+    message: string,
+    identity: HarnessIdentity,
+  ): Promise<{ commit: string }> {
     // Preferred path: the boot-time git worker (clean spawn context, immune to the
     // 0xC0000142 spawn failures this process suffers after hosting an SDK tree).
     if (gitWorkerAvailable()) {
@@ -113,8 +348,71 @@ function repoExists(dir: string): boolean {
   return existsSync(join(dir, "registry.json"));
 }
 
+function resetWorkingTree(dir: string): void {
+  git(dir, ["reset", "--hard", "HEAD"]);
+  git(dir, ["clean", "-fd"]);
+}
+
 export class TenantRepoProviderImpl implements TenantRepoProvider {
-  constructor(private readonly opts: TenantRepoProviderOptions) {}
+  private readonly lease?: PgTenantRepoLeaseCoordinator;
+  private readonly leaseContext = new AsyncLocalStorage<RepoLease>();
+  private readonly authoringMode: "disabled" | "singleton" | "fleet";
+
+  constructor(private readonly opts: TenantRepoProviderOptions) {
+    this.authoringMode = opts.authoringMode ?? resolveAuthoringMode();
+    if (opts.lease === false) return;
+    if (opts.lease) {
+      this.lease = opts.lease;
+      return;
+    }
+    if (
+      (process.env.LEAF_HARNESS_SESSION_STORE ?? "file").trim().toLowerCase() ===
+      "postgres"
+    ) {
+      const connectionString = (
+        process.env.LEAF_HARNESS_DATABASE_URL ??
+        process.env.DATABASE_URL ??
+        ""
+      ).trim();
+      if (!connectionString) {
+        throw new Error(
+          "PostgreSQL harness mode requires LEAF_HARNESS_DATABASE_URL or DATABASE_URL for tenant repo leases",
+        );
+      }
+      this.lease = new PgTenantRepoLeaseCoordinator({
+        poolConfig: {
+          connectionString,
+          max: 5,
+          application_name: "leaf-platform-harness-repo-lease",
+        },
+      });
+    }
+  }
+
+  /** Hold one tenant lease across checkout, Agent SDK edits, registry update, and commit. */
+  async withTenantLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
+    assertAuthoringModeSafe(this.authoringMode);
+    if (!this.lease) return action();
+    return this.lease.withLease(tenantId, (lease) =>
+      this.leaseContext.run(lease, async () => {
+        try {
+          return await action();
+        } finally {
+          for (const dir of lease.repoDirs) {
+            await this.lease!.runFenced(lease, async () => resetWorkingTree(dir));
+          }
+        }
+      }),
+    );
+  }
+
+  /** Read a committed snapshot while excluding authoring for this tenant. */
+  async withTenantReadLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
+    if (!this.lease) return action();
+    return this.lease.withLease(tenantId, (lease) =>
+      this.leaseContext.run(lease, action),
+    );
+  }
 
   /**
    * Materialize a brand-new tenant repo from the pristine fixture: copy + ensure the
@@ -143,18 +441,49 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   async checkout(tenantId: string): Promise<TenantRepo> {
+    const lease = this.leaseContext.getStore();
+    if (lease && lease.tenantId !== tenantId) {
+      throw new TenantRepoLeaseLostError(tenantId);
+    }
     const ref = await this.opts.locator.repoRef(tenantId);
     if (this.opts.inPlace) {
       // ref IS the local working dir; operate on it directly (no temp clone).
       // Wave 4: auto-provision a brand-new tenant's repo from the fixture on first use.
       if (this.opts.autoProvisionFrom && !repoExists(ref)) {
-        this.provision(ref);
+        if (this.lease && lease) {
+          await this.lease.runFenced(lease, async () => this.provision(ref));
+        } else if (this.lease) {
+          throw new TenantRepoLeaseLostError(tenantId);
+        } else {
+          this.provision(ref);
+        }
       }
-      return new GitTenantRepo(ref);
+      if (this.lease && lease) {
+        await this.lease.runFenced(lease, async () => resetWorkingTree(ref));
+        lease.repoDirs.add(ref);
+      }
+      const fence =
+        this.lease && lease
+          ? <T>(action: () => Promise<T>) => this.lease!.runFenced(lease, action)
+          : this.lease
+            ? async <T>(_action: () => Promise<T>): Promise<T> => {
+                throw new TenantRepoLeaseLostError(tenantId);
+              }
+          : undefined;
+      return new GitTenantRepo(ref, fence);
     }
     const base = this.opts.workBase ?? tmpdir();
     const dir = mkdtempSync(join(base, `mushy-${tenantId}-`));
     git(dir, ["clone", "--depth", "1", ref, "."]);
-    return new GitTenantRepo(dir);
+    if (this.lease && lease) lease.repoDirs.add(dir);
+    const fence =
+      this.lease && lease
+        ? <T>(action: () => Promise<T>) => this.lease!.runFenced(lease, action)
+        : this.lease
+          ? async <T>(_action: () => Promise<T>): Promise<T> => {
+              throw new TenantRepoLeaseLostError(tenantId);
+            }
+          : undefined;
+    return new GitTenantRepo(dir, fence);
   }
 }

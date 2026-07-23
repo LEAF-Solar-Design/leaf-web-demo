@@ -101,11 +101,46 @@ def postgres_required() -> bool:
     }
 
 
+_AUTHORITY_SELECTORS = {
+    "LEAF_JOBS_STORE": ({"legacy", "postgres"}, {"postgres"}),
+    "LEAF_SESSIONS_STORE": (
+        {"legacy", "dual_write", "dual_write_shadow", "shadow", "postgres"},
+        {"dual_write", "dual_write_shadow", "shadow", "postgres"},
+    ),
+    "LEAF_AGENT_STORE": ({"legacy", "postgres"}, {"postgres"}),
+    "LEAF_GUEST_CAP_STORE": ({"memory", "postgres"}, {"postgres"}),
+    "LEAF_DRAWING_STORE": ({"legacy", "postgres"}, {"postgres"}),
+    "LEAF_UPLOAD_STORE": ({"legacy", "postgres"}, {"postgres"}),
+}
+
+
+def postgres_authorities_selected() -> bool:
+    """Validate app authority selectors and report whether any needs PostgreSQL."""
+    selected = False
+    for name, (allowed, postgres_values) in _AUTHORITY_SELECTORS.items():
+        default = "memory" if name == "LEAF_GUEST_CAP_STORE" else "legacy"
+        value = os.environ.get(name, default).strip().lower()
+        if value not in allowed:
+            choices = ", ".join(sorted(allowed))
+            raise RuntimeError(f"{name} must be one of: {choices}")
+        selected = selected or value in postgres_values
+    return selected
+
+
+def postgres_startup_required() -> bool:
+    """True when the explicit gate or any selected authority requires PostgreSQL."""
+    return postgres_required() or postgres_authorities_selected()
+
+
 def validate_postgres_startup() -> Optional[Dict[str, Any]]:
-    """Fail closed only when the operator explicitly requires PostgreSQL."""
-    if not postgres_required():
+    """Fail closed before serving when any selected authority needs PostgreSQL."""
+    if not postgres_startup_required():
         return None
-    if os.environ.get("LEAF_AUTH_LIVE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+    if (
+        postgres_required()
+        and os.environ.get("LEAF_AUTH_LIVE", "").strip().lower()
+        not in {"1", "true", "yes", "on"}
+    ):
         raise RuntimeError(
             "LEAF_PLATFORM_POSTGRES_REQUIRED requires LEAF_AUTH_LIVE=1")
     if not os.environ.get("DATABASE_URL", "").strip():

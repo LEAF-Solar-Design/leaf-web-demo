@@ -17,6 +17,7 @@ import json
 import math
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -31,6 +32,23 @@ TIMESTAMP_HEADER = "X-Leaf-Timestamp"
 NONCE_HEADER = "X-Leaf-Nonce"
 DEFAULT_MAX_AGE_S = 300.0
 SERVER_DIR = Path(__file__).resolve().parent.parent
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
+
+
+def callback_replay_store_mode() -> str:
+    mode = os.environ.get("LEAF_CALLBACK_REPLAY_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError(
+            "LEAF_CALLBACK_REPLAY_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def validate_replay_store_startup() -> None:
+    """Fail before serving when the selected replay authority is not ready."""
+    if callback_replay_store_mode() == "postgres":
+        from job_pg_store import PostgresCallbackReplayStore
+        PostgresCallbackReplayStore().ensure_ready()
 
 
 class CallbackReplayStore:
@@ -38,8 +56,15 @@ class CallbackReplayStore:
 
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
+        self._postgres = None
+        if db_path is None and callback_replay_store_mode() == "postgres":
+            from job_pg_store import PostgresCallbackReplayStore
+            self._postgres = PostgresCallbackReplayStore()
+            self._postgres.ensure_ready()
 
     def consume(self, job_id: str, nonce: str, expires_at: float, now: float) -> bool:
+        if self._postgres is not None:
+            return self._postgres.consume(job_id, nonce, expires_at, now)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=5.0)
         try:

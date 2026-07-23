@@ -41,6 +41,28 @@ services:
         condition: service_healthy
     restart: "no"
 
+  broker:
+    environment:
+      # Supplying a connection is not an authority cutover. The legacy default
+      # remains active until the operator explicitly selects postgres.
+      DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
+      LEAF_BROKER_STORE: ${LEAF_BROKER_STORE:-legacy}
+      LEAF_CALLBACK_REPLAY_STORE: ${LEAF_CALLBACK_REPLAY_STORE:-legacy}
+      LEAF_DRAWING_STORE: ${LEAF_DRAWING_STORE:-legacy}
+      LEAF_JOBS_STORE: ${LEAF_JOBS_STORE:-legacy}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  harness:
+    environment:
+      LEAF_HARNESS_DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
+      LEAF_HARNESS_SESSION_STORE: ${LEAF_HARNESS_SESSION_STORE:-file}
+      LEAF_HARNESS_AUTHORING_MODE: ${LEAF_HARNESS_AUTHORING_MODE:-disabled}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   canonical-worker:
     image: leaf-canonical-worker:local
     build:
@@ -58,6 +80,12 @@ services:
   app:
     environment:
       DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
+      LEAF_JOBS_STORE: ${LEAF_JOBS_STORE:-legacy}
+      LEAF_SESSIONS_STORE: ${LEAF_SESSIONS_STORE:-legacy}
+      LEAF_AGENT_STORE: ${LEAF_AGENT_STORE:-legacy}
+      LEAF_GUEST_CAP_STORE: ${LEAF_GUEST_CAP_STORE:-memory}
+      LEAF_DRAWING_STORE: ${LEAF_DRAWING_STORE:-legacy}
+      LEAF_UPLOAD_STORE: ${LEAF_UPLOAD_STORE:-legacy}
     depends_on:
       migrate:
         condition: service_completed_successfully
