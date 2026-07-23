@@ -148,7 +148,19 @@ def test_new_codes_default_http_status():
 # --------------------------------------------------------------------------- #
 REPO_ROOT = SERVER_DIR.parent
 ADDENDUM = (SERVER_DIR / "CONTRACT-ADDENDUM.md").read_text(encoding="utf-8")
-CONVERSE_TS = (REPO_ROOT / "harness" / "src" / "ports" / "converse.ts").read_text(encoding="utf-8")
+
+
+def _strip_ts_comments(source: str) -> str:
+    """Remove /* */ blocks and // line comments BEFORE any structural parsing,
+    so comment-embedded delimiters ('// =', '// }') cannot steer the
+    freeze-gate parsers."""
+    import re as _re_mod
+    source = _re_mod.sub(r"/\*.*?\*/", "", source, flags=_re_mod.S)
+    return _re_mod.sub(r"//[^\n]*", "", source)
+
+
+CONVERSE_TS = _strip_ts_comments(
+    (REPO_ROOT / "harness" / "src" / "ports" / "converse.ts").read_text(encoding="utf-8"))
 
 # The full §18.3 stream vocabulary (both hops), frozen.
 S18_STREAM_TYPES = {
@@ -201,23 +213,34 @@ def _ts_union_literals(source: str, anchor: str) -> set:
 
 
 def _ts_field_names(block: str) -> set:
-    """Field names declared at depth 1 of a brace-balanced interface block —
-    nested object-literal fields don't count, and any ADDED field shows up."""
+    """Field names declared at depth 1 of a brace-balanced, comment-stripped
+    interface block. WHITELIST parsing, fail-loud: every depth-1 line must be
+    a plain identifier field or pure structure — an index signature
+    ([key: string]: ...), a quoted key ("rogue"?: ...), a computed key, or
+    any construct this parser does not recognize FAILS the freeze instead of
+    being silently ignored."""
     names = set()
     depth = 0
     for raw in block.splitlines():
-        if depth == 1:
-            match = _re.match(r"(\w+)\??\s*:", raw.strip())
-            if match:
-                names.add(match.group(1))
+        line = raw.strip()
+        if depth == 1 and line:
+            field = _re.match(r"(\w+)\??\s*:", line)
+            structural = _re.fullmatch(r"[{}\[\];,)>]*", line) or line.endswith("{") \
+                or _re.fullmatch(r"export interface \w+ \{", line)
+            if field:
+                names.add(field.group(1))
+            elif not structural:
+                raise AssertionError(
+                    f"unrecognized construct at interface depth 1 (freeze "
+                    f"parser whitelist): {line[:60]!r}")
         depth += raw.count("{") - raw.count("}")
     return names
 
 
 def _s183_table_types() -> list:
-    """Every §18.3 table row's event type. ANY data row whose first cell does
-    not contain exactly one backticked lowercase name fails loudly — a
-    decorated rogue row (`| **`x`** |`) cannot hide from the freeze."""
+    """Every §18.3 table row's event type. Each data row's first cell must
+    contain EXACTLY ONE backticked lowercase name — a decorated rogue row and
+    a two-names-in-one-cell row both fail loudly."""
     s183 = ADDENDUM[ADDENDUM.index("### 18.3"):ADDENDUM.index("### 18.4")]
     types = []
     for line in s183.splitlines():
@@ -227,9 +250,11 @@ def _s183_table_types() -> list:
         first_cell = stripped.split("|")[1].strip()
         if first_cell in ("type", "") or set(first_cell) <= {"-"}:
             continue  # header / separator rows
-        match = _re.search(r"`([a-z_]+)`", first_cell)
-        assert match, f"§18.3 row with an unparseable type cell: {stripped[:60]!r}"
-        types.append(match.group(1))
+        found = _re.findall(r"`([a-z_]+)`", first_cell)
+        assert len(found) == 1, (
+            f"§18.3 type cell must carry exactly one backticked name, "
+            f"got {found}: {stripped[:60]!r}")
+        types.append(found[0])
     return types
 
 
@@ -303,13 +328,30 @@ def test_context_packet_schema_frozen(monkeypatch, tmp_path):
         "agent_write_autopilot", "deploy", "platform_customize", "upload",
     }, "entitlement capability key set drifted from the §11.3 freeze"
     assert packet["classifier_hint"] is None
+    # Catalog cap semantics + the {"more": N} marker, exercised DIRECTLY:
+    entries = context_packet._catalog_entries([
+        {"name": f"t{i}", "description": "d", "capabilities": []} for i in range(3)])
+    capped = context_packet._capped_catalog(entries, 2)
+    assert capped[:2] == entries[:2] and capped[2] == {"more": 1}
+    assert [set(row) for row in capped[:2]] == [{"name", "description", "capabilities"}] * 2
     # versions/layer row shapes have no hermetic manifest to build from —
-    # frozen as source pins on the projection literals instead.
+    # frozen by parsing the EXACT key set out of each projection literal
+    # (an added key inside either dict literal fails; substring pins alone
+    # would not catch an addition).
     src = (SERVER_DIR / "context_packet.py").read_text(encoding="utf-8")
-    assert '"version": int(e["v"])' in src and '"ts": e.get("created")' in src \
-        and '"tool": e.get("tool")' in src, "versions row projection drifted"
-    assert '{"name": n, "count": c}' in src \
-        and '{"more": len(ranked) - LAYERS_CAP}' in src, "layer row projection drifted"
+    versions_lit = src[src.index('out["versions"] = [{'):]
+    versions_lit = versions_lit[:versions_lit.index("} for e in")]
+    assert set(_re.findall(r'"(\w+)":', versions_lit)) == {"version", "ts", "tool"}, (
+        "versions row projection key set drifted")
+    lr_start = src.index("layer_rows: List[Dict[str, Any]] = [{")
+    layer_row_lit = src[src.index("= [{", lr_start):]
+    layer_row_lit = layer_row_lit[:layer_row_lit.index("for n, c")]
+    assert set(_re.findall(r'"(\w+)":', layer_row_lit)) == {"name", "count"}, (
+        "layer row projection key set drifted")
+    more_lit = src[src.index("layer_rows.append({"):]
+    more_lit = more_lit[:more_lit.index("})")]
+    assert set(_re.findall(r'"(\w+)":', more_lit)) == {"more"}, (
+        "layer more-marker key set drifted")
     assert context_packet.MAX_PACKET_CHARS == 8000
     assert context_packet.CATALOG_CAP == 60
     assert context_packet.VERSIONS_TAIL == 3

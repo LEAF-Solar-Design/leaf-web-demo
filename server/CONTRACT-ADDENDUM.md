@@ -915,17 +915,23 @@ no-existence-oracle rule.
 ### 18.3 SSE event vocabulary (the stream vocabulary, and who emits what)
 
 > **FROZEN AS THE LIVE WIRE IS (chip 5, 2026-07-23).** The 12-type table below
-> is the full STREAM vocabulary a browser client can observe. The two hops are
-> NOT identical (the original "identical on both hops" claim was the §18-era
-> proxy design): the harness→app NDJSON hop (`POST /turn`) emits exactly the
-> 9-member `HarnessTurnEvent` union (`harness/src/ports/converse.ts`) —
-> `turn_started`, `confirmation_resolved`, and `session_state` are synthesized
-> APP-SIDE by the turn engine/store (`server/turn_runner.py`,
-> `server/session_store.py`). `seq` is a per-session monotonically increasing
-> integer persisted in the APP's session store (`server/session_store.py`,
-> `session_events` — NOT the harness sessions.db, which serves only the parked
-> 18.2 mirror), and that is what makes `after_seq` replay (reconnect, second
-> tab) exact. Pinned by `tests/test_contract_freeze.py`.
+> is the full STREAM vocabulary. The two hops are NOT identical (the original
+> "identical on both hops" claim was the §18-era proxy design): the
+> harness→app NDJSON hop (`POST /turn`) emits exactly the 9-member
+> `HarnessTurnEvent` union (`harness/src/ports/converse.ts`). The three
+> app-side types, precisely: `turn_started` is appended by the turn engine
+> when a turn starts (`server/turn_runner.py:213`, live payload
+> `{text? | confirm?, classifier_hint?}` — the table row's `model` value was
+> the §18-era design; the live wire carries the user input);
+> `confirmation_resolved` is appended by the approvals route
+> (`server/routers/agent.py:217–220`); `session_state` is RESERVED vocabulary
+> with NO live emitter today — frozen so spine unification can surface
+> session lifecycle without a contract change. `seq` is a per-session
+> monotonically increasing integer persisted in the APP's session store
+> (`server/session_store.py` `session_events` — NOT the harness sessions.db,
+> which serves only the parked 18.2 mirror); that is what makes `after_seq`
+> replay (reconnect, second tab) exact. Pinned by
+> `tests/test_contract_freeze.py`.
 
 One JSON object per SSE `data:` line; the SSE event name equals `type`. Envelope:
 
@@ -935,7 +941,7 @@ One JSON object per SSE `data:` line; the SSE event name equals `type`. Envelope
 
 | type | data payload | Notes |
 |---|---|---|
-| `turn_started` | `{model, classifier_hint?}` | First event of every turn. |
+| `turn_started` | `{text? \| confirm?, classifier_hint?}` (live; the §18-era design said `{model, classifier_hint?}`) | First event of every turn; app-side (`turn_runner.py:213`). |
 | `text_delta` | `{text}` | Streamed assistant prose. |
 | `tool_call` | `{tool, args_summary}` | `args_summary` is a short human string — never full params. |
 | `tool_result` | `{tool, ok, summary}` | |

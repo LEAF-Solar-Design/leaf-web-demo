@@ -374,8 +374,10 @@ Consequences worth stating plainly: a session can tell the user "someone else ho
 
 This section is the contract for the conversational spine: durable per-drawing agent
 sessions, streamed turns, and gated dispatch into the existing deterministic job chain.
-The normative copy is appended to `../server/CONTRACT-ADDENDUM.md` as §18 (proposed, not
-yet frozen, same promotion discipline as §11–§17); this section mirrors it.
+The normative copy is appended to `../server/CONTRACT-ADDENDUM.md` as §18 — **FROZEN
+2026-07-23 (chip 5)**, promoted under the same discipline as §11–§17. This section
+mirrors the ORIGINAL design cut; where the mirror and the ADDENDUM's frozen
+implementation notes disagree, the ADDENDUM wins (see the status clause at the top).
 
 Two ground rules frame everything below:
 
@@ -439,17 +441,16 @@ Every route verifies the supplied `tenantId` matches the session's tenant; a mis
 returns 404 `{error:"session_not_found"}` — the harness-side twin of the app's
 no-existence-oracle rule.
 
-### 18.3 SSE event vocabulary (both hops)
+### 18.3 SSE event vocabulary
 
-Identical on the harness→app and app→browser hops. One JSON object per SSE `data:`
-line; the SSE event name equals `type`. Envelope:
+*(Design-cut mirror. The FROZEN live-wire account — which hop emits which
+type, `seq` persisted in the APP session store, the live `turn_started`
+payload — is ADDENDUM 18.3 and wins over this mirror.)* One JSON object per
+SSE `data:` line; the SSE event name equals `type`. Envelope:
 
 ```json
 {"v": 1, "session_id": "…", "turn_id": "…", "seq": 42, "type": "…", "data": { }}
 ```
-
-`seq` is a per-session monotonically increasing integer persisted in the harness
-sessions.db, which is what makes `after_seq` replay (reconnect, second tab) exact.
 
 | type | data payload | Notes |
 |---|---|---|
