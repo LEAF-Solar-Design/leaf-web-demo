@@ -266,6 +266,10 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_static.py"), 9),
         Suite("server-broker-ledger-runtime", "server tests/test_broker_ledger_schema_runtime.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_runtime.py"), 6),
+        # Callback-primary is isolated: it changes completion selection and holds
+        # an in-memory replay ledger, so it must not share another broker suite.
+        Suite("server-da-callback", "server tests/test_da_callback.py", "pytest",
+              SERVER, _py_pytest("tests/test_da_callback.py"), 4),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 14),
