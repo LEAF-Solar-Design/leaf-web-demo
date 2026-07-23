@@ -416,6 +416,8 @@ export type ConverseRunnerEvent =
       stopReason: ConverseStopReason;
       /** SDK session id to resume the next turn with (null when the runner has none). */
       sdkSessionId: string | null;
+      /** True when a missing resume target forced a fresh SDK conversation. */
+      sdkSessionReset?: boolean;
       /** Present when stopReason is error/llm_* — relayed on the wire error event. */
       error?: { error_code: string; message: string; retryable: boolean };
     };
@@ -426,6 +428,8 @@ export interface ConverseRunInput {
   userMessage: string;
   /** Resume the SDK conversation from a prior turn (undefined = fresh session). */
   resumeSdkSessionId?: string;
+  /** Fresh-session prompt with bounded visible history, used only if resume is missing. */
+  resumeFallbackUserMessage?: string;
   /** Model id (e.g. LEAF_SPINE_MODEL). undefined => runner/account default. */
   model?: string;
   tools: ToolExecutor;

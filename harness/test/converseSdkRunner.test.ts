@@ -56,9 +56,9 @@ interface CapturedTool {
 }
 
 /** Script entries: either a message object, or "HANG" (wait for abort). */
-type ScriptEntry = AnyRec | "HANG";
+type ScriptEntry = AnyRec | Error | "HANG";
 
-function makeMockSdk(script: ScriptEntry[]) {
+function makeMockSdk(script: ScriptEntry[] | ScriptEntry[][]) {
   const queries: CapturedQuery[] = [];
   const tools: CapturedTool[] = [];
   const servers: AnyRec[] = [];
@@ -75,8 +75,12 @@ function makeMockSdk(script: ScriptEntry[]) {
     },
     query({ prompt, options }: { prompt: string; options: AnyRec }) {
       queries.push({ prompt, options });
+      const queryIndex = queries.length - 1;
+      const entries = Array.isArray(script[0])
+        ? (script as ScriptEntry[][])[queryIndex] ?? []
+        : (script as ScriptEntry[]);
       async function* gen(): AsyncGenerator<unknown> {
-        for (const entry of script) {
+        for (const entry of entries) {
           if (entry === "HANG") {
             const abort = options.abortController as AbortController;
             await new Promise<void>((resolve) => {
@@ -86,6 +90,7 @@ function makeMockSdk(script: ScriptEntry[]) {
             // A real aborted SDK stream throws out of the iterator.
             throw new Error("aborted by AbortController");
           }
+          if (entry instanceof Error) throw entry;
           yield entry;
         }
       }
@@ -276,6 +281,54 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     const fresh = makeMockSdk([resultSuccess()]);
     await collect(runnerWith(fresh), makeInput());
     expect("resume" in fresh.queries[0]!.options).toBe(false);
+  });
+
+  it("restarts once without resume when the SDK transcript is missing", async () => {
+    const missing = new Error(
+      "Claude Code returned an error result: No conversation found with session ID: 8b1f10e2-38f2-4293-a035-23a0a2cc5e96",
+    );
+    const mock = makeMockSdk([[missing], [streamDelta("Recovered"), resultSuccess()]]);
+    const events = await collect(
+      runnerWith(mock),
+      makeInput({
+        resumeSdkSessionId: "8b1f10e2-38f2-4293-a035-23a0a2cc5e96",
+        resumeFallbackUserMessage: "bounded prior history plus current turn",
+      }),
+    );
+
+    expect(mock.queries).toHaveLength(2);
+    expect(mock.queries[0]!.options.resume).toBe(
+      "8b1f10e2-38f2-4293-a035-23a0a2cc5e96",
+    );
+    expect("resume" in mock.queries[1]!.options).toBe(false);
+    expect(mock.queries[1]!.prompt).toBe("bounded prior history plus current turn");
+    expect(events).toContainEqual({ type: "text_delta", text: "Recovered" });
+    expect(doneOf(events)).toMatchObject({
+      stopReason: "end_turn",
+      sdkSessionId: SDK_SESSION,
+      sdkSessionReset: true,
+    });
+  });
+
+  it("does not retry unrelated errors or a missing-session fault after output", async () => {
+    const unrelated = makeMockSdk([[new Error("network failed")], [resultSuccess()]]);
+    const unrelatedEvents = await collect(
+      runnerWith(unrelated),
+      makeInput({ resumeSdkSessionId: "prior-session" }),
+    );
+    expect(unrelated.queries).toHaveLength(1);
+    expect(doneOf(unrelatedEvents).error?.message).toBe("network failed");
+
+    const afterOutput = makeMockSdk([
+      [streamDelta("partial"), new Error("No conversation found with session ID: stale-id")],
+      [resultSuccess()],
+    ]);
+    const afterOutputEvents = await collect(
+      runnerWith(afterOutput),
+      makeInput({ resumeSdkSessionId: "stale-id" }),
+    );
+    expect(afterOutput.queries).toHaveLength(1);
+    expect(doneOf(afterOutputEvents).stopReason).toBe("error");
   });
 
   it("wires true streaming + the fixed six-tool MCP surface (no built-ins)", async () => {

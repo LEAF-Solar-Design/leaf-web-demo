@@ -31,6 +31,8 @@
  * server/context_packet.py has no live caller yet — recorded chip-2/5 work). The
  * adapter builds a packet-lite from wire fields only: {drawing_id} plus, when the
  * loop has no SDK session to resume, the wire's bounded prior `messages` as data.
+ * On resume, it keeps those messages out of the normal prompt and supplies them
+ * only to the runner's missing-session recovery prompt.
  *
  * Known debt (recorded in the mount plan): `opts.signal` stops YIELDS immediately
  * on client disconnect, but does not abort the in-flight SDK call — the loop
@@ -173,6 +175,7 @@ export class SpineTurnAdapter implements ConverseRunner {
           }
         : {}),
       contextPacket,
+      priorMessages: input.messages,
       onEvent,
     });
     void done.finally(() => {

@@ -131,6 +131,11 @@ export function classifyRateLimit(
     : "llm_rate_limited";
 }
 
+/** The SDK cannot resume sessions whose local transcript disappeared on redeploy. */
+function isMissingResumeSessionError(message: string): boolean {
+  return /\bNo conversation found with session ID:\s*[0-9a-z-]+\b/i.test(message);
+}
+
 /** Normalize an SDK resetsAt (epoch seconds OR milliseconds) to epoch seconds. */
 function toEpochS(resetsAt: number): number {
   return resetsAt > 1e12 ? resetsAt / 1000 : resetsAt;
@@ -227,26 +232,27 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     }, this.turnTimeoutS * 1000);
 
     const model = input.model ?? this.model;
-    const q = sdk.query({
-      prompt: input.userMessage,
-      options: {
-        env: childEnv,
-        model,
-        systemPrompt: input.systemPrompt,
-        maxTurns: this.maxTurns,
-        settingSources: [],
-        permissionMode: "default",
-        abortController: abort,
-        includePartialMessages: true,
-        tools: [], // no built-in tools: the spine MCP server is the whole surface
-        mcpServers: { spine: server },
-        allowedTools: SPINE_MCP_TOOL_NAMES,
-        ...(input.resumeSdkSessionId ? { resume: input.resumeSdkSessionId } : {}),
-        canUseTool: async (toolName: string, inp: Record<string, unknown>) =>
-          // Bridge to the loop's hook (allow spine tools / deny everything else).
-          input.canUseTool(toolName, inp),
-      },
-    });
+    const query = (prompt: string, resume?: string): AsyncIterable<unknown> =>
+      sdk.query({
+        prompt,
+        options: {
+          env: childEnv,
+          model,
+          systemPrompt: input.systemPrompt,
+          maxTurns: this.maxTurns,
+          settingSources: [],
+          permissionMode: "default",
+          abortController: abort,
+          includePartialMessages: true,
+          tools: [], // no built-in tools: the spine MCP server is the whole surface
+          mcpServers: { spine: server },
+          allowedTools: SPINE_MCP_TOOL_NAMES,
+          ...(resume ? { resume } : {}),
+          canUseTool: async (toolName: string, inp: Record<string, unknown>) =>
+            // Bridge to the loop's hook (allow spine tools / deny everything else).
+            input.canUseTool(toolName, inp),
+        },
+      });
 
     // Per-RUN accumulators (never instance state).
     let turns = 0;
@@ -258,51 +264,72 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     let rateResetsAtS: number | null = null;
     let retryDelayMs: number | null = null;
     let streamFault: string | null = null;
+    let sdkSessionReset = false;
+    let attemptProducedOutput = false;
 
     try {
-      for await (const raw of q) {
-        const msg = raw as Record<string, unknown>;
-        if (typeof msg.session_id === "string" && msg.session_id) {
-          sdkSessionId = msg.session_id;
-        }
+      let prompt = input.userMessage;
+      let resume = input.resumeSdkSessionId;
+      while (true) {
+        try {
+          for await (const raw of query(prompt, resume)) {
+            const msg = raw as Record<string, unknown>;
+            if (typeof msg.session_id === "string" && msg.session_id) {
+              sdkSessionId = msg.session_id;
+            }
 
-        if (msg.type === "stream_event") {
-          // TRUE streaming (see U1 header): only content_block_delta text_delta
-          // becomes wire text - assistant messages are metering-only.
-          const ev = (msg.event ?? {}) as Record<string, unknown>;
-          if (ev.type === "content_block_delta") {
-            const delta = (ev.delta ?? {}) as Record<string, unknown>;
-            if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text) {
-              yield { type: "text_delta", text: delta.text };
+            if (msg.type === "stream_event") {
+              // TRUE streaming (see U1 header): only content_block_delta text_delta
+              // becomes wire text - assistant messages are metering-only.
+              const ev = (msg.event ?? {}) as Record<string, unknown>;
+              if (ev.type === "content_block_delta") {
+                const delta = (ev.delta ?? {}) as Record<string, unknown>;
+                if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text) {
+                  attemptProducedOutput = true;
+                  yield { type: "text_delta", text: delta.text };
+                }
+              }
+            } else if (msg.type === "assistant") {
+              attemptProducedOutput = true;
+              turns += 1;
+              const message = (msg.message ?? {}) as Record<string, unknown>;
+              const u = (message.usage ?? {}) as Record<string, number>;
+              sums.input_tokens += u.input_tokens ?? 0;
+              sums.output_tokens += u.output_tokens ?? 0;
+              sums.cache_creation_tokens += u.cache_creation_input_tokens ?? 0;
+              sums.cache_read_tokens += u.cache_read_input_tokens ?? 0;
+              if (typeof message.model === "string") models.add(message.model);
+              const err = msg.error;
+              if (
+                typeof err === "string" &&
+                ["rate_limit", "authentication_failed", "oauth_org_not_allowed", "billing_error"].includes(err)
+              ) {
+                terminalError = err;
+                abort.abort();
+                break;
+              }
+            } else if (msg.type === "rate_limit_event") {
+              const info = (msg.rate_limit_info ?? {}) as Record<string, unknown>;
+              if (typeof info.resetsAt === "number") rateResetsAtS = toEpochS(info.resetsAt);
+            } else if (msg.type === "system") {
+              if (msg.subtype === "api_retry" && typeof msg.retry_delay_ms === "number") {
+                retryDelayMs = msg.retry_delay_ms;
+              }
+            } else if (msg.type === "result") {
+              result = msg;
             }
           }
-        } else if (msg.type === "assistant") {
-          turns += 1;
-          const message = (msg.message ?? {}) as Record<string, unknown>;
-          const u = (message.usage ?? {}) as Record<string, number>;
-          sums.input_tokens += u.input_tokens ?? 0;
-          sums.output_tokens += u.output_tokens ?? 0;
-          sums.cache_creation_tokens += u.cache_creation_input_tokens ?? 0;
-          sums.cache_read_tokens += u.cache_read_input_tokens ?? 0;
-          if (typeof message.model === "string") models.add(message.model);
-          const err = msg.error;
-          if (
-            typeof err === "string" &&
-            ["rate_limit", "authentication_failed", "oauth_org_not_allowed", "billing_error"].includes(err)
-          ) {
-            terminalError = err;
-            abort.abort();
-            break;
+          break;
+        } catch (e) {
+          const message = (e as Error).message;
+          if (resume && !attemptProducedOutput && isMissingResumeSessionError(message)) {
+            sdkSessionReset = true;
+            sdkSessionId = null;
+            resume = undefined;
+            prompt = input.resumeFallbackUserMessage ?? input.userMessage;
+            continue;
           }
-        } else if (msg.type === "rate_limit_event") {
-          const info = (msg.rate_limit_info ?? {}) as Record<string, unknown>;
-          if (typeof info.resetsAt === "number") rateResetsAtS = toEpochS(info.resetsAt);
-        } else if (msg.type === "system") {
-          if (msg.subtype === "api_retry" && typeof msg.retry_delay_ms === "number") {
-            retryDelayMs = msg.retry_delay_ms;
-          }
-        } else if (msg.type === "result") {
-          result = msg;
+          throw e;
         }
       }
     } catch (e) {
@@ -390,6 +417,12 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       };
     }
 
-    yield { type: "done", stopReason, sdkSessionId, ...(error ? { error } : {}) };
+    yield {
+      type: "done",
+      stopReason,
+      sdkSessionId,
+      ...(sdkSessionReset ? { sdkSessionReset: true } : {}),
+      ...(error ? { error } : {}),
+    };
   }
 }

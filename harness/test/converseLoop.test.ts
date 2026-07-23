@@ -22,6 +22,7 @@ import type {
   GateCheckContext,
   GateCheckResult,
   SessionRecord,
+  SpineConverseRunner,
   StoredEvent,
 } from "../src/ports/index.js";
 
@@ -127,6 +128,30 @@ describe("ConverseLoop — sessions", () => {
         contextPacket: PACKET,
       }),
     ).rejects.toBeInstanceOf(BadMessageError);
+  });
+
+  it("clears a stale SDK resume id when the fresh recovery also fails", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const runner: SpineConverseRunner = {
+      async *run() {
+        yield {
+          type: "done",
+          stopReason: "error",
+          sdkSessionId: null,
+          sdkSessionReset: true,
+          error: { error_code: "internal", message: "fresh query failed", retryable: false },
+        };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await store.updateSession(session.session_id, { sdk_session_id: "stale-sdk-session" });
+
+    await sendText(loop, session, "hello");
+
+    expect((await store.getSession(session.session_id))!.sdk_session_id).toBeNull();
   });
 });
 
