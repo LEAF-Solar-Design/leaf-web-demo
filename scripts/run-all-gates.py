@@ -170,6 +170,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_context_packet.py"), 16),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
               _py_pytest("tests/test_contract_freeze.py"), 8),
+        Suite("server-auth-vocab-freeze", "server tests/test_auth_vocab_freeze.py", "pytest",
+              SERVER, _py_pytest("tests/test_auth_vocab_freeze.py"), 8),
+        Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
+              _py_pytest("tests/test_billing_tiers.py"), 26),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
               _py_pytest("tests/test_job_lanes.py"), 11),
         Suite("server-agent-e2e", "server tests/test_agent_e2e.py", "pytest", SERVER,
@@ -267,7 +271,7 @@ def build_suites() -> List[Suite]:
         # DATABASE_URL is set, so with a DB every module collects, not just the
         # *_static.py proofs).
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 118, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 145, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout. Explicit file targets, not

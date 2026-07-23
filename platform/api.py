@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import entitlements, store
+from . import billing, entitlements, store
 from .db import cursor
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
@@ -467,4 +467,75 @@ def offboard(org_id: uuid.UUID, x_admin_token: str | None = Header(default=None)
         "purge_completed_at": (
             result.purge_completed_at.isoformat() if result.purge_completed_at else None
         ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# billing tier sync (flag-gated skeleton, DARK by default — contract/BILLING.md §3)
+# --------------------------------------------------------------------------- #
+class BillingTierSyncBody(BaseModel):
+    """Subscription facts as leaf_website's Stripe webhook knows them —
+    the SAME fields the Post-Login Action reads from app_metadata.leaf, so
+    both legs derive the tier from identical inputs. Never carries a
+    Claude/Anthropic credential (contract/AUTH.md §0) and never carries a
+    literal tier (single derivation path — the mapping table decides)."""
+    plan: Optional[str] = None
+    subscription_active: Optional[bool] = None
+    subscription_status: Optional[str] = None
+    # audit echoes only — recorded in the response for the caller's log line;
+    # deliberately NOT persisted (no Stripe identifiers in the platform DB
+    # until the spec's deferred audit-table decision is taken).
+    stripe_subscription_id: Optional[str] = None
+    stripe_event_id: Optional[str] = None
+
+
+@router.post("/orgs/{org_id}/billing/tier-sync")
+def billing_tier_sync(org_id: uuid.UUID, body: BillingTierSyncBody,
+                      x_billing_sync_secret: str | None = Header(default=None)):
+    """Update the org's STORED tier from subscription facts (idempotent).
+
+    Operator-gated and fail-closed at every step: flag off -> 503, secret
+    unconfigured -> 503, wrong secret -> 403 (constant-time compare, F16),
+    unknown org -> 404, non-active org -> 409 (billing must never resurrect
+    an offboarding/deleted org). The derived tier is validated against the
+    frozen claim-mintable subset before the write.
+    """
+    if not billing.sync_enabled():
+        raise HTTPException(status_code=503,
+                            detail="billing tier sync is not enabled (LEAF_BILLING_SYNC_LIVE)")
+    secret = billing.sync_secret()
+    if not secret:
+        raise HTTPException(status_code=503,
+                            detail="billing tier sync not configured (no sync secret)")
+    if x_billing_sync_secret is None or not hmac.compare_digest(
+        x_billing_sync_secret.encode("utf-8"), secret.encode("utf-8")
+    ):
+        raise HTTPException(status_code=403, detail="billing sync secret required")
+
+    org = store.get_org(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    if org.status != "active":
+        raise HTTPException(status_code=409,
+                            detail=f"organization is not active (status={org.status}); "
+                                   "tier not updated")
+
+    bt = billing.server_billing_tiers()
+    tier = bt.derive_tier(body.plan, body.subscription_active, body.subscription_status)
+    if tier not in bt.CLAIM_TIERS:  # unreachable by construction; belt over the write
+        raise HTTPException(status_code=503, detail="derived tier outside frozen vocabulary")
+
+    updated = store.set_org_tier(org_id, tier)
+    if updated is None:
+        # active-guarded UPDATE matched nothing: the org flipped state between
+        # the read above and the write — refuse rather than guess (TOCTOU).
+        raise HTTPException(status_code=409,
+                            detail="organization state changed during sync; tier not updated")
+    return {
+        "org_id": str(org_id),
+        "previous_tier": org.tier,
+        "tier": updated.tier,
+        "applied": updated.tier != org.tier,
+        "stripe_subscription_id": body.stripe_subscription_id,
+        "stripe_event_id": body.stripe_event_id,
     }
