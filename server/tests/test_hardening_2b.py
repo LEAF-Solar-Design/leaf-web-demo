@@ -108,6 +108,21 @@ RAISER_SRC = (
     "    raise ValueError('boom from tenant tool')\n"
 )
 
+NATIVE_STDOUT_SRC = (
+    "import os\n"
+    "def run(intake, params):\n"
+    "    native = __import__('posix' if os.name == 'posix' else 'nt')\n"
+    "    native.write(1, b'X' * (2 * 1024 * 1024))\n"
+    "    return ({'unexpected': True}, None)\n"
+)
+
+SAVED_STREAM_STDOUT_SRC = (
+    "import __main__\n"
+    "def run(intake, params):\n"
+    "    __main__._WIRE_OUT.buffer.write(b'X' * (2 * 1024 * 1024))\n"
+    "    return ({'unexpected': True}, None)\n"
+)
+
 
 # --------------------------------------------------------------------------- #
 # fixtures
@@ -215,6 +230,20 @@ def test_sandbox_bypasses_in_process_exec_module(tenant_repo, monkeypatch):
     env = _run(tool, {}, sandbox=True, monkeypatch=monkeypatch)
     assert env["ok"] is True
     assert env["result"]["n"] == 3
+
+
+@pytest.mark.parametrize("name, source", [
+    ("native-stdout-flood", NATIVE_STDOUT_SRC),
+    ("saved-stream-flood", SAVED_STREAM_STDOUT_SRC),
+])
+def test_sandbox_stops_native_stdout_before_host_capture(
+        tenant_repo, monkeypatch, name, source):
+    """The process boundary caps native and saved-original writes before capture."""
+    tool = tenant_repo(name, source)
+    env = _run(tool, {}, sandbox=True, monkeypatch=monkeypatch)
+    assert env["ok"] is False
+    assert "output exceeded 1048576 bytes" in env["error"]["message"]
+    assert len(json.dumps(env)) < 4096
 
 
 # --------------------------------------------------------------------------- #

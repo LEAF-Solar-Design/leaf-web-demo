@@ -35,14 +35,39 @@
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 
 const SCHEMA_RESULT = "leaf.e2b.tool-exec-result.v1";
 const DEFAULT_KEY_FILE = "C:\\tmp\\leaf-grants\\e2b-api-key.txt";
 const JOB_DIR = "/home/user/leaf-job";
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+
+function canonicalText(value) {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("canonical JSON rejects non-finite numbers");
+    return value.toExponential(16).replace(/e([+-])0*(\d+)$/, "e$1$2");
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalText).join(",")}]`;
+  if (typeof value === "object") {
+    const keys = Object.keys(value).sort(
+      (left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")),
+    );
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalText(value[key])}`).join(",")}}`;
+  }
+  throw new Error(`canonical JSON rejects ${typeof value}`);
+}
+
+export function canonicalJsonBytes(value) {
+  return Buffer.from(canonicalText(value), "utf8");
+}
 
 export async function defaultSandboxFactory(opts) {
   const mod = await import("e2b"); // dynamic: hermetic callers never load the SDK
-  return mod.Sandbox.create(opts);
+  const { template, ...createOpts } = opts;
+  if (!template) throw new Error("E2B tool sandbox template is required");
+  return mod.Sandbox.create(template, createOpts);
 }
 
 async function resolveApiKey() {
@@ -106,6 +131,16 @@ export async function runJob(envelope, factory = defaultSandboxFactory) {
       ? envelope.denied_targets
       : ["https://example.com/", "https://api.github.com/", "https://1.1.1.1/"];
   const probeBroker = envelope.probe_broker === true;
+  const audit = envelope.audit && typeof envelope.audit === "object" ? envelope.audit : null;
+  const limits = audit?.limits ?? {};
+  const outputLimit = Number(limits.output_bytes) > 0 ? Number(limits.output_bytes) : 1024 * 1024;
+  const payloadBytes = Buffer.byteLength(JSON.stringify(job), "utf8");
+  if (audit && payloadBytes >
+      Number(limits.source_bytes ?? 0) + Number(limits.input_bytes ?? 0) +
+      Number(limits.params_bytes ?? 0) + 4096) {
+    return fail("limits", "PayloadTooLarge", "job payload exceeded fixed sandbox limits");
+  }
+  const allowOut = audit && !probeBroker ? [] : [brokerHost];
 
   const apiKey = await resolveApiKey();
   if (!apiKey) {
@@ -121,9 +156,13 @@ export async function runJob(envelope, factory = defaultSandboxFactory) {
         apiKey,
         timeoutMs: Math.round((timeoutS + 60) * 1000),
         secure: true,
-        metadata: { purpose: "leaf-tool-exec" },
+        template: audit?.template_version ?? "base",
+        metadata: {
+          purpose: "leaf-tool-exec",
+          policy: audit?.policy_version ?? "legacy",
+        },
         network: {
-          allowOut: [brokerHost],
+          allowOut,
           denyOut: ["0.0.0.0/0"],
           allowPublicTraffic: false,
         },
@@ -153,12 +192,13 @@ export async function runJob(envelope, factory = defaultSandboxFactory) {
     } catch (e) {
       return fail("probe", e?.name ?? "ProbeError", e?.message ?? e);
     }
-    const blockedEntries = Object.values(probe?.blocked ?? {});
     const configuredDenyAll = info?.network?.denyOut?.includes("0.0.0.0/0") === true;
-    const configuredBrokerOnly =
-      info?.network?.allowOut?.length === 1 && info.network.allowOut[0] === brokerHost;
+    const configuredBrokerOnly = audit && !probeBroker
+      ? info?.network?.allowOut?.length === 0
+      : info?.network?.allowOut?.length === 1 && info.network.allowOut[0] === brokerHost;
     const everyDeniedProbeBlocked =
-      blockedEntries.length > 0 && blockedEntries.every((entry) => entry.blocked === true);
+      deniedTargets.length > 0 &&
+      deniedTargets.every((target) => probe?.blocked?.[target]?.blocked === true);
     const brokerReached = probeBroker ? probe?.broker_ok === true : null;
     const passed =
       configuredDenyAll && configuredBrokerOnly && everyDeniedProbeBlocked &&
@@ -176,6 +216,12 @@ export async function runJob(envelope, factory = defaultSandboxFactory) {
       configuredBrokerOnly,
       everyDeniedProbeBlocked,
       brokerReached,
+      boundary: "tool",
+      tenantHash: audit?.tenant_hash ?? null,
+      sourceHash: audit?.source_hash ?? null,
+      templateVersion: audit?.template_version ?? null,
+      policyVersion: audit?.policy_version ?? null,
+      startedAt: new Date(Date.now() - coldBootMs).toISOString(),
       passed,
     };
 
@@ -197,19 +243,42 @@ export async function runJob(envelope, factory = defaultSandboxFactory) {
       return fail("exec", e?.name ?? "ExecError", e?.message ?? e);
     }
     const stdout = (execRes?.stdout ?? "").trim();
+    if (Buffer.byteLength(stdout, "utf8") > outputLimit) {
+      return fail("limits", "OutputTooLarge", "runner output exceeded fixed sandbox limit");
+    }
     if (!stdout) {
       return fail("exec", "NoOutput",
         `runner produced no output (exit=${execRes?.exitCode})`);
     }
     try {
       out.result = JSON.parse(stdout); // relay the runner's JSON VERBATIM
+      if (audit) {
+        const stoppedAt = new Date().toISOString();
+        out.receipt.stoppedAt = stoppedAt;
+        out.receipt.stopReason = "completed";
+        out.receipt.resourceUse = {
+          wallMs: Math.max(0, Date.parse(stoppedAt) - Date.parse(out.receipt.startedAt)),
+          inputBytes: payloadBytes,
+          outputBytes: Buffer.byteLength(stdout, "utf8"),
+          limits,
+          cpuSeconds: null,
+          peakMemoryBytes: null,
+          processes: null,
+          diskBytes: null,
+          files: null,
+        };
+        out.receipt.resultHash = sha256(canonicalJsonBytes(out.result));
+      }
     } catch (e) {
       return fail("parse", "BadRunnerOutput",
         `runner stdout was not JSON: ${e?.message ?? e}`);
     }
     return out;
   } finally {
-    if (sandbox) await sandbox.kill().catch(() => false);
+    if (sandbox) {
+      await sandbox.kill().catch(() => false);
+      if (out.receipt) out.receipt.teardownAt = new Date().toISOString();
+    }
   }
 }
 

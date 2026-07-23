@@ -125,4 +125,21 @@ describe("POST /author (build route) - hermetic e2e", () => {
     expect(registry.tools.map((t) => t.name)).toEqual(["count-by-layer"]);
     expect(existsSync(join(FIXTURE, "tools"))).toBe(false);
   });
+
+  it("kill switch refuses authoring before any tenant checkout", async () => {
+    const previous = process.env.LEAF_AUTHORED_EXECUTION;
+    process.env.LEAF_AUTHORED_EXECUTION = "0";
+    try {
+      const res = await fetch(`${baseUrl}/author`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ description: "count entities per layer" }),
+      });
+      expect(res.status).toBe(403);
+      expect(tenantRepo.lastCheckout).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env.LEAF_AUTHORED_EXECUTION;
+      else process.env.LEAF_AUTHORED_EXECUTION = previous;
+    }
+  });
 });

@@ -131,28 +131,29 @@ def test_production_startup_rejects_enabled_authored_execution_without_sandbox(
         monkeypatch):
     _safe_production(monkeypatch)
     monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
-    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
 
-    with pytest.raises(RuntimeError, match="requires LEAF_SANDBOX"):
+    with pytest.raises(RuntimeError, match="LEAF_TOOL_SANDBOX_PROVIDER=e2b"):
         broker.validate_runtime_safety()
 
 
 def test_fastapi_startup_runs_the_production_safety_check(monkeypatch):
     _safe_production(monkeypatch)
     monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
-    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
 
-    with pytest.raises(RuntimeError, match="requires LEAF_SANDBOX"):
+    with pytest.raises(RuntimeError, match="LEAF_TOOL_SANDBOX_PROVIDER=e2b"):
         with TestClient(broker.app):
             pass
 
 
-@pytest.mark.parametrize("tier", ["e2b", "E2B-MICROVM"])
+@pytest.mark.parametrize("provider", ["e2b", "E2B"])
 def test_production_startup_accepts_enabled_execution_with_approved_sandbox(
-        monkeypatch, tier):
+        monkeypatch, provider):
     _safe_production(monkeypatch)
     monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
-    monkeypatch.setenv("LEAF_SANDBOX", tier)
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", provider)
+    monkeypatch.setenv("E2B_API_KEY", "test-key")
 
     assert broker.validate_runtime_safety() is None
 

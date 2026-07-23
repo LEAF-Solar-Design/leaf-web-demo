@@ -152,7 +152,7 @@ def build_suites() -> List[Suite]:
         Suite("server-wave5", "server tests/test_wave5.py", "pytest", SERVER,
               _py_pytest("tests/test_wave5.py"), 14),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_2c_microvm.py"), 11),
+              _py_pytest("tests/test_hardening_2c_microvm.py"), 14),
         Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
               SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 11),
         # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
@@ -235,7 +235,10 @@ def build_suites() -> List[Suite]:
         Suite("server-hardening-1f", "server test_hardening_1f.py", "pytest", SERVER,
               _py_pytest("test_hardening_1f.py"), 8),
         Suite("server-hardening-2b", "server tests/test_hardening_2b.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_2b.py"), 13),
+              _py_pytest("tests/test_hardening_2b.py"), 15),
+        Suite("server-hardening-2c-microvm",
+              "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
+              _py_pytest("tests/test_hardening_2c_microvm.py"), 14),
         Suite("server-hardening-3b", "server tests/test_hardening_3b.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_3b.py"), 9),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
@@ -324,10 +327,10 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 3),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 4),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 246),
+              [_npm(), "test"], 253),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
@@ -356,6 +359,8 @@ _ENV_DENYLIST = (
     "LEAF_CALLBACK_SECRET", "LEAF_CALLBACK_URL", "LEAF_CALLBACK_PRIMARY",
     "LEAF_CALLBACK_MAX_AGE_S",
     "LEAF_SANDBOX", "LEAF_SANDBOX_TIMEOUT_S", "LEAF_E2B_HELPER", "E2B_API_KEY",
+    "LEAF_AUTHOR_SANDBOX_PROVIDER", "LEAF_TOOL_SANDBOX_PROVIDER",
+    "LEAF_AUTHORED_EXECUTION", "E2B_API_KEY_FILE", "LEAF_SANDBOX_BROKER_HOST",
     # harness F5 caller-auth + agent-mock toggles: ambient values would 401 (or
     # fake out) the hermetic harness suites, which pin these per-test instead.
     "LEAF_HARNESS_AUTH", "LEAF_HARNESS_SECRET", "LEAF_AGENT_MOCK", "LEAF_GRANT_STORE",

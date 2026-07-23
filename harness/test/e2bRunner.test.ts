@@ -12,7 +12,10 @@
 
 import { describe, expect, it } from "vitest";
 
-import { E2bAgentRunner } from "../src/ports/impl/e2bAgentRunner.js";
+import {
+  canonicalJsonBytes,
+  E2bAgentRunner,
+} from "../src/ports/impl/e2bAgentRunner.js";
 import type {
   SandboxCommandResult,
   SandboxCreateOptions,
@@ -49,6 +52,11 @@ function cannedStdout(over: {
   return JSON.stringify({
     broker: { reached: over.brokerReached ?? true, status: over.brokerReached === false ? null : 200 },
     blocked: over.blocked ?? {
+      "http://169.254.169.254/latest/meta-data/": { blocked: true, error_type: "URLError" },
+      "http://127.0.0.1:8130/": { blocked: true, error_type: "URLError" },
+      "http://10.0.0.1/": { blocked: true, error_type: "URLError" },
+      "http://172.16.0.1/": { blocked: true, error_type: "URLError" },
+      "http://192.168.0.1/": { blocked: true, error_type: "URLError" },
       "https://example.com/": { blocked: true, error_type: "URLError" },
       "https://api.github.com/": { blocked: true, error_type: "URLError" },
       "https://1.1.1.1/": { blocked: true, error_type: "URLError" },
@@ -139,6 +147,16 @@ function makeInput(toolset: AuthorToolset, description = "count entities per lay
 }
 
 describe("E2bAgentRunner — egress-locked author session (hermetic, fake sandbox)", () => {
+  it("shares the canonical Unicode and key-order representation", () => {
+    const bytes = canonicalJsonBytes({
+      z: "雪", tiny: 1e-5, a: { β: 1, a: "é" }, n: 1.0,
+    });
+    expect(bytes.toString("utf8")).toBe(
+      '{"a":{"a":"é","β":1.0000000000000000e+0},' +
+      '"n":1.0000000000000000e+0,"tiny":1.0000000000000001e-5,"z":"雪"}',
+    );
+  });
+
   it("boots ONE egress-locked sandbox and returns a valid CONTRACT §2 tool package", async () => {
     const { factory, captured } = makeFactory({ network: lockedNetwork(), stdout: cannedStdout() });
     const { toolset, files, apsTestCalls } = makeToolset();
@@ -153,6 +171,8 @@ describe("E2bAgentRunner — egress-locked author session (hermetic, fake sandbo
     expect(net?.allowPublicTraffic).toBe(false);
     expect(captured.createOpts?.secure).toBe(true);
     expect(captured.createOpts?.apiKey).toBe(E2B_KEY); // key read + passed to the factory
+    expect(captured.createOpts?.template).toBe("leaf-python-2026-07-23");
+    expect(captured.createOpts?.metadata?.policy).toBe("leaf.sandbox-policy.v1");
 
     // The returned package is real + valid; the source round-tripped from the sandbox.
     expect(validateToolPackage(res.tool)).toEqual([]);
@@ -174,6 +194,18 @@ describe("E2bAgentRunner — egress-locked author session (hermetic, fake sandbo
     expect(r?.configuredDenyAll).toBe(true);
     expect(r?.configuredBrokerOnly).toBe(true);
     expect(r?.authored).toEqual({ name: "count-entities-per-layer", engine_op: "count_by_layer" });
+    expect(r?.boundary).toBe("author");
+    expect(r?.tenantHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(r?.sourceHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(r?.resultHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(r?.policyVersion).toBe("leaf.sandbox-policy.v1");
+    expect(r?.resourceUse).toMatchObject({
+      cpuSecondsLimit: 30,
+      memoryBytesLimit: 512 * 1024 * 1024,
+      processLimit: 32,
+      diskBytesLimit: 128 * 1024 * 1024,
+      outputBytesLimit: 1024 * 1024,
+    });
   });
 
   it("embeds the tenant description into the in-sandbox program (safely, base64) — not run in this PID", async () => {
@@ -193,6 +225,8 @@ describe("E2bAgentRunner — egress-locked author session (hermetic, fake sandbo
     expect(program).toContain(`DESCRIPTION = ${JSON.stringify(description)}`);
     // The runner itself never executes the authored tool.py — it only writes it to the repo.
     expect(program).toContain("def to_kebab");
+    expect(program).toContain("169.254.169.254");
+    expect(cmd).toContain("ulimit -t 30");
   });
 
   it("ENFORCES the lock: an off-allowlist target that gets through THROWS and writes nothing", async () => {
@@ -253,5 +287,19 @@ describe("E2bAgentRunner — egress-locked author session (hermetic, fake sandbo
     const serialized = JSON.stringify(res) + JSON.stringify(runner.lastSandbox);
     expect(serialized).not.toContain(E2B_KEY);
     expect(serialized).not.toContain(GRANT_TOKEN);
+  });
+
+  it("fails closed before parsing sandbox output above the fixed cap", async () => {
+    const { factory } = makeFactory({
+      network: lockedNetwork(),
+      stdout: "x".repeat(1024 * 1024 + 1),
+    });
+    const { toolset } = makeToolset();
+    const runner = new E2bAgentRunner({
+      brokerHost: BROKER_HOST,
+      apiKey: E2B_KEY,
+      sandboxFactory: factory,
+    });
+    await expect(runner.run(makeInput(toolset))).rejects.toThrow(/output exceeded/i);
   });
 });

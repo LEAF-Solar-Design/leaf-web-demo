@@ -71,3 +71,19 @@ def test_end_to_end_injected_spawn_127_survives_as_retry(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "flaked; passed on attempt 2" in proc.stdout
     assert "1 PASS  0 FAIL" in proc.stdout
+
+
+def test_clean_env_scrubs_sandbox_activation_and_credentials(monkeypatch):
+    g = _load_runner()
+    names = (
+        "LEAF_AUTHOR_SANDBOX_PROVIDER",
+        "LEAF_TOOL_SANDBOX_PROVIDER",
+        "LEAF_AUTHORED_EXECUTION",
+        "E2B_API_KEY_FILE",
+        "LEAF_SANDBOX_BROKER_HOST",
+    )
+    for name in names:
+        monkeypatch.setenv(name, f"ambient-{name}")
+    cleaned = g.clean_env()
+    for name in names:
+        assert name not in cleaned

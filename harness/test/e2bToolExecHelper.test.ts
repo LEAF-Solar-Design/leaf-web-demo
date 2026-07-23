@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // @ts-expect-error — hermetic subject-under-test is a plain .mjs script (no type decls);
 // runtime resolution works fine under vitest's esbuild/vite transform.
-import { runJob } from "../scripts/e2b-tool-exec.mjs";
+import { canonicalJsonBytes, runJob } from "../scripts/e2b-tool-exec.mjs";
 
 type NetworkInfo = { allowOut: string[]; denyOut: string[]; allowPublicTraffic: boolean };
 type RunCall = { cmd: string; opts: any };
@@ -135,6 +135,17 @@ afterEach(() => {
 });
 
 describe("e2b-tool-exec.mjs runJob — hermetic (fake sandbox factory)", () => {
+  it("uses the cross-language canonical UTF-8 JSON representation", () => {
+    const first = { z: "雪", tiny: 1e-5, a: { β: 1, a: "é" }, n: 1.0 };
+    const reordered = { n: 1, a: { a: "é", β: 1 }, tiny: 1e-5, z: "雪" };
+    expect(canonicalJsonBytes(first).toString("utf8"))
+      .toBe(
+        '{"a":{"a":"é","β":1.0000000000000000e+0},' +
+        '"n":1.0000000000000000e+0,"tiny":1.0000000000000001e-5,"z":"雪"}',
+      );
+    expect(canonicalJsonBytes(reordered)).toEqual(canonicalJsonBytes(first));
+  });
+
   it("uploads the job payload + runner via files.write, never via argv (>1MB intake)", async () => {
     const filler = "Q".repeat(1024 * 1024 + 17); // >1MB synthetic filler, distinctive char
     const envelope = baseJob();
@@ -265,5 +276,42 @@ describe("e2b-tool-exec.mjs runJob — hermetic (fake sandbox factory)", () => {
     expect(result.receipt?.passed).toBe(true);
     expect(result.receipt?.sandboxId).toBe(captured.sandbox!.sandboxId);
     expect(captured.sandbox!.killCount).toBe(1);
+  });
+
+  it("enforces the no-network tool policy and emits the complete audit receipt", async () => {
+    const envelope: any = baseJob();
+    envelope.audit = {
+      tenant_hash: "tenant-hash",
+      source_hash: "source-hash",
+      input_hash: "input-hash",
+      template_version: "leaf-python-2026-07-23",
+      policy_version: "leaf.sandbox-policy.v1",
+      limits: {
+        source_bytes: 524288,
+        input_bytes: 8388608,
+        params_bytes: 262144,
+        output_bytes: 1048576,
+      },
+    };
+    const { factory, captured } = makeFactory({
+      network: { allowOut: [], denyOut: ["0.0.0.0/0"], allowPublicTraffic: false },
+    });
+
+    const result: any = await runJob(envelope, factory);
+
+    expect(captured.opts?.network.allowOut).toEqual([]);
+    expect(captured.opts?.template).toBe("leaf-python-2026-07-23");
+    expect(result.helper_error).toBeNull();
+    expect(result.receipt).toMatchObject({
+      passed: true,
+      boundary: "tool",
+      tenantHash: "tenant-hash",
+      sourceHash: "source-hash",
+      templateVersion: "leaf-python-2026-07-23",
+      policyVersion: "leaf.sandbox-policy.v1",
+      stopReason: "completed",
+    });
+    expect(result.receipt.resultHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.receipt.resourceUse.outputBytes).toBeGreaterThan(0);
   });
 });

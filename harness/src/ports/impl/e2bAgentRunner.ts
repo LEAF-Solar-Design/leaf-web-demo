@@ -53,6 +53,7 @@ import type {
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
+import { createHash } from "node:crypto";
 
 // --------------------------------------------------------------------------- //
 // Minimal local view of the E2B Sandbox surface we rely on (documented, not
@@ -83,6 +84,7 @@ export interface SandboxCreateOptions {
   timeoutMs?: number;
   secure?: boolean;
   metadata?: Record<string, string>;
+  template?: string;
   network?: { allowOut?: string[]; denyOut?: string[]; allowPublicTraffic?: boolean };
 }
 /** Factory for one egress-locked sandbox. Real = e2b's Sandbox.create; test = a fake. */
@@ -96,9 +98,13 @@ function dynImport(parts: string[]): Promise<unknown> {
 /** Default factory: boot a REAL e2b sandbox (operator-gated; requires a live E2B key). */
 const defaultSandboxFactory: SandboxFactory = async (opts) => {
   const mod = (await dynImport(["e2b"])) as {
-    Sandbox: { create(o: SandboxCreateOptions): Promise<SandboxLike> };
+    Sandbox: {
+      create(template: string, o: Omit<SandboxCreateOptions, "template">): Promise<SandboxLike>;
+    };
   };
-  return mod.Sandbox.create(opts);
+  const { template, ...createOpts } = opts;
+  if (!template) throw new Error("E2B author sandbox template is required");
+  return mod.Sandbox.create(template, createOpts);
 };
 
 // --------------------------------------------------------------------------- //
@@ -128,6 +134,7 @@ export interface EgressReceipt {
   schema: "leaf.e2b.author-runner.v1";
   startedAt: string;
   completedAt: string;
+  stoppedAt: string;
   sandboxId: string;
   coldBootMs: number;
   brokerHost: string;
@@ -140,11 +147,80 @@ export interface EgressReceipt {
   passed: boolean;
   /** When run() authored a tool, a tiny summary (never the source). */
   authored: { name: string; engine_op: string } | null;
+  boundary: "author";
+  tenantHash: string;
+  sourceHash: string | null;
+  resultHash: string | null;
+  templateVersion: string;
+  policyVersion: string;
+  stopReason: "completed";
+  resourceUse: {
+    wallMs: number;
+    inputBytes: number;
+    outputBytes: number;
+    cpuSecondsLimit: number;
+    memoryBytesLimit: number;
+    processLimit: number;
+    diskBytesLimit: number;
+    fileLimit: number;
+    outputBytesLimit: number;
+    cpuSeconds: null;
+    peakMemoryBytes: null;
+    processes: null;
+    diskBytes: null;
+    files: null;
+  };
 }
 
 const DEFAULT_BROKER_HOST = "httpbingo.org"; // proven public stand-in (see vendor-eval receipt)
-const DEFAULT_DENIED_TARGETS = ["https://example.com/", "https://api.github.com/", "https://1.1.1.1/"];
+const DEFAULT_DENIED_TARGETS = [
+  "http://169.254.169.254/latest/meta-data/",
+  "http://127.0.0.1:8130/",
+  "http://10.0.0.1/",
+  "http://172.16.0.1/",
+  "http://192.168.0.1/",
+  "https://example.com/",
+  "https://api.github.com/",
+  "https://1.1.1.1/",
+];
 const DEFAULT_KEY_FILE = "C:\\tmp\\leaf-grants\\e2b-api-key.txt";
+const POLICY_VERSION = "leaf.sandbox-policy.v1";
+const TEMPLATE_VERSION = "leaf-python-2026-07-23";
+const LIMITS = Object.freeze({
+  cpuSeconds: 30,
+  memoryBytes: 512 * 1024 * 1024,
+  processes: 32,
+  diskBytes: 128 * 1024 * 1024,
+  files: 128,
+  outputBytes: 1024 * 1024,
+  inputBytes: 512 * 1024,
+});
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function canonicalText(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("canonical JSON rejects non-finite numbers");
+    return value.toExponential(16).replace(/e([+-])0*(\d+)$/, "e$1$2");
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalText).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort(
+      (left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")),
+    );
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalText(record[key])}`).join(",")}}`;
+  }
+  throw new Error(`canonical JSON rejects ${typeof value}`);
+}
+
+export function canonicalJsonBytes(value: unknown): Buffer {
+  return Buffer.from(canonicalText(value), "utf8");
+}
 
 // --------------------------------------------------------------------------- //
 // Structured author family (mirrors the proven demo's count/list/measure family).
@@ -301,7 +377,9 @@ print(json.dumps(out, sort_keys=True))
 /** Base64-wrap the program so no quoting/escaping survives the shell. */
 function b64Command(program: string): string {
   const encoded = Buffer.from(program, "utf8").toString("base64");
-  return `python3 -c "import base64; exec(base64.b64decode('${encoded}'))"`;
+  return `set -e; ulimit -t ${LIMITS.cpuSeconds}; ulimit -v ${LIMITS.memoryBytes / 1024}; ` +
+    `ulimit -u ${LIMITS.processes}; ulimit -f ${LIMITS.diskBytes / 512}; ` +
+    `ulimit -n ${LIMITS.files}; python3 -c "import base64; exec(base64.b64decode('${encoded}'))"`;
 }
 
 // --------------------------------------------------------------------------- //
@@ -345,7 +423,8 @@ export class E2bAgentRunner implements AgentRunner {
       apiKey,
       timeoutMs: this.timeoutMs,
       secure: true,
-      metadata: { purpose: "leaf-author-session" },
+      template: TEMPLATE_VERSION,
+      metadata: { purpose: "leaf-author-session", policy: POLICY_VERSION },
       network: {
         allowOut: [this.brokerHost],
         denyOut: ["0.0.0.0/0"],
@@ -359,20 +438,31 @@ export class E2bAgentRunner implements AgentRunner {
   private buildReceipt(
     info: SandboxInfo,
     probe: ProbeOutput,
-    ctx: { sandboxId: string; coldBootMs: number; startedAt: string; authored: boolean },
+    ctx: {
+      sandboxId: string;
+      coldBootMs: number;
+      startedAt: string;
+      authored: boolean;
+      tenantHash?: string;
+      inputBytes?: number;
+    },
   ): EgressReceipt {
     const allowOut = info.network?.allowOut ?? [];
     const denyOut = info.network?.denyOut ?? [];
     const configuredDenyAll = denyOut.includes("0.0.0.0/0");
     const configuredBrokerOnly = allowOut.length === 1 && allowOut[0] === this.brokerHost;
     const everyDeniedProbeBlocked =
-      Object.keys(probe.blocked).length > 0 && Object.values(probe.blocked).every((e) => e.blocked === true);
+      this.deniedTargets.length > 0 &&
+      this.deniedTargets.every((target) => probe.blocked[target]?.blocked === true);
     const passed =
       probe.broker.reached === true && everyDeniedProbeBlocked && configuredDenyAll && configuredBrokerOnly;
+    const completedAt = new Date().toISOString();
+    const outputBytes = Buffer.byteLength(JSON.stringify(probe), "utf8");
     return {
       schema: "leaf.e2b.author-runner.v1",
       startedAt: ctx.startedAt,
-      completedAt: new Date().toISOString(),
+      completedAt,
+      stoppedAt: completedAt,
       sandboxId: ctx.sandboxId,
       coldBootMs: ctx.coldBootMs,
       brokerHost: this.brokerHost,
@@ -384,12 +474,40 @@ export class E2bAgentRunner implements AgentRunner {
       everyDeniedProbeBlocked,
       passed,
       authored: ctx.authored ? { name: probe.author.name, engine_op: probe.author.engine_op } : null,
+      boundary: "author",
+      tenantHash: ctx.tenantHash ?? sha256("probe"),
+      sourceHash: ctx.authored ? sha256(probe.author.code) : null,
+      resultHash: ctx.authored
+        ? createHash("sha256").update(canonicalJsonBytes(probe.author)).digest("hex")
+        : null,
+      templateVersion: TEMPLATE_VERSION,
+      policyVersion: POLICY_VERSION,
+      stopReason: "completed",
+      resourceUse: {
+        wallMs: Date.parse(completedAt) - Date.parse(ctx.startedAt),
+        inputBytes: ctx.inputBytes ?? 0,
+        outputBytes,
+        cpuSecondsLimit: LIMITS.cpuSeconds,
+        memoryBytesLimit: LIMITS.memoryBytes,
+        processLimit: LIMITS.processes,
+        diskBytesLimit: LIMITS.diskBytes,
+        fileLimit: LIMITS.files,
+        outputBytesLimit: LIMITS.outputBytes,
+        cpuSeconds: null,
+        peakMemoryBytes: null,
+        processes: null,
+        diskBytes: null,
+        files: null,
+      },
     };
   }
 
   private parseProbe(result: SandboxCommandResult): ProbeOutput {
     if (result.exitCode !== 0) {
       throw new Error(`E2B in-sandbox program exited ${result.exitCode} (stderr redacted for secret-safety)`);
+    }
+    if (Buffer.byteLength(result.stdout, "utf8") > LIMITS.outputBytes) {
+      throw new Error("E2B in-sandbox output exceeded the fixed limit");
     }
     const parsed = JSON.parse(result.stdout.trim()) as ProbeOutput;
     if (!parsed || typeof parsed !== "object" || !parsed.author || !parsed.broker || !parsed.blocked) {
@@ -433,6 +551,10 @@ export class E2bAgentRunner implements AgentRunner {
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     this.lastSandbox = null;
     const startedAt = new Date().toISOString();
+    const inputBytes = Buffer.byteLength(input.description, "utf8");
+    if (inputBytes > LIMITS.inputBytes) {
+      throw new Error("author request exceeded the fixed input limit");
+    }
     // NOTE: input.grant is intentionally NOT read/injected in v1 (no live SDK in-sandbox
     // yet). The full SDK-in-sandbox variant would inject it into a SCRUBBED sandbox env,
     // never logged. This runner never touches the grant value.
@@ -449,6 +571,8 @@ export class E2bAgentRunner implements AgentRunner {
         coldBootMs,
         startedAt,
         authored: true,
+        tenantHash: sha256(input.repoDir),
+        inputBytes,
       });
       this.lastSandbox = receipt;
     } finally {
