@@ -154,6 +154,9 @@ def build_suites() -> List[Suite]:
         # by hand — same gap this branch closed for its own suites.
         Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
               _py_pytest("tests/test_site.py"), 8),
+        # --- frozen evidence contracts (contract/EVIDENCE.md) --- #
+        Suite("server-evidence-contract-freeze", "server tests/test_evidence_contract_freeze.py", "pytest",
+              SERVER, _py_pytest("tests/test_evidence_contract_freeze.py"), 7),
         # --- conversational agent spine (CONTRACT-ADDENDUM section 18) --- #
         # Separate suites for the same reason as the waves above: the gate/ledger
         # suites share on-disk approval + audit state and the router suites toggle
