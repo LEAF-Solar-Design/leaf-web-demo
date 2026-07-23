@@ -29,9 +29,9 @@ import time
 import uuid
 from pathlib import Path
 
-import requests
-
 REPO = Path(__file__).resolve().parents[1]
+# In-container base URL (every HTTP leg runs via `compose exec app` — see
+# app_json's docstring for why the host's published port is not used).
 APP = "http://localhost:8130"
 FROZEN_KEYS = {"ts", "tenant_id", "tool", "engine_op", "aps_endpoint",
                "aps_live", "engine_seconds", "usd_est", "status"}
@@ -85,10 +85,27 @@ def ledger_lines() -> list[dict]:
     return out
 
 
+def app_json(code: str, timeout: int = 200) -> dict:
+    """Run python inside the app container and parse its LAST stdout line as
+    JSON. The HTTP legs of this smoke run IN-NETWORK deliberately: every §8
+    property under test is a compose-network property, and Windows hosts with
+    WSL mirrored networking (`.wslconfig networkingMode=mirrored`) may not
+    expose Docker-published ports on host loopback at all — that would fail
+    the smoke for a reason §8 doesn't care about."""
+    proc = compose("exec", "-T", "app", "python", "-c", code,
+                   check=False, timeout=timeout)
+    lines = [l for l in proc.stdout.splitlines() if l.strip().startswith(("{", "["))]
+    if not lines:
+        fail(f"in-container call returned no JSON: rc={proc.returncode} "
+             f"out={proc.stdout[-200:]!r} err={proc.stderr[-200:]!r}")
+    return json.loads(lines[-1])
+
+
 def pick_tool() -> dict:
-    r = requests.get(f"{APP}/api/tools", timeout=30)
-    r.raise_for_status()
-    tools = r.json().get("tools") or []
+    body = app_json(
+        "import requests,json;"
+        f"print(json.dumps(requests.get('{APP}/api/tools',timeout=30).json()))")
+    tools = body.get("tools") or []
     if not tools:
         fail("no tools in catalog")
     for t in tools:
@@ -99,21 +116,25 @@ def pick_tool() -> dict:
 
 
 def run_job(tenant: str, tool_name: str) -> dict:
-    """POST /api/run (§7 202+job) and poll to terminal; returns the job record."""
-    r = requests.post(f"{APP}/api/run", json={"tool": tool_name, "params": {}},
-                      headers={"X-Tenant-Id": tenant}, timeout=60)
-    if r.status_code != 202:
-        fail(f"POST /api/run expected 202, got {r.status_code}: {r.text[:200]}")
-    job_id = r.json().get("job_id") or fail("202 body missing job_id")
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        jr = requests.get(f"{APP}/api/jobs/{job_id}",
-                          headers={"X-Tenant-Id": tenant}, timeout=30)
-        job = jr.json()
-        if job.get("status") in ("complete", "failed"):
-            return job
-        time.sleep(1.0)
-    fail(f"job {job_id} not terminal within 120s")
+    """POST /api/run (§7 202+job) in-container and poll to terminal."""
+    code = (
+        "import requests,json,time\n"
+        f"r=requests.post('{APP}/api/run',json={{'tool':{tool_name!r},'params':{{}}}},"
+        f"headers={{'X-Tenant-Id':{tenant!r}}},timeout=60)\n"
+        "assert r.status_code==202, (r.status_code, r.text[:200])\n"
+        "jid=r.json()['job_id']\n"
+        "t0=time.time()\n"
+        "while time.time()-t0<150:\n"
+        f"    j=requests.get('{APP}/api/jobs/'+jid,headers={{'X-Tenant-Id':{tenant!r}}},timeout=30).json()\n"
+        "    if j.get('status') in ('complete','failed'):\n"
+        "        print(json.dumps(j)); break\n"
+        "    time.sleep(1)\n"
+        "else:\n"
+        "    print(json.dumps({'status':'poll-timeout','job_id':jid}))\n")
+    job = app_json(code)
+    if job.get("status") == "poll-timeout":
+        fail(f"job {job.get('job_id')} not terminal within 150s")
+    return job
 
 
 def main() -> None:
@@ -138,10 +159,21 @@ def main() -> None:
         compose("up", "-d")
         wait_all_healthy()
 
-        # 1) broker port truly unpublished on the live stack
+        # 1) broker port truly unpublished on the live stack. compose v2 prints
+        # ":0" / "0.0.0.0:0" for an UNpublished port, so parse the port number
+        # instead of testing for any output, and cross-check via inspect.
         port = compose("port", "broker", "8140", check=False)
-        if port.stdout.strip():
-            fail(f"broker 8140 is published on the host: {port.stdout.strip()}")
+        bound = port.stdout.strip()
+        if bound and not bound.endswith(":0"):
+            fail(f"broker 8140 is published on the host: {bound}")
+        insp = compose("ps", "--format", "json", check=False)
+        for line in insp.stdout.splitlines():
+            if line.strip().startswith("{"):
+                row = json.loads(line)
+                if row.get("Service") == "broker" and row.get("Publishers"):
+                    pubs = [p for p in row["Publishers"] if p.get("PublishedPort")]
+                    if pubs:
+                        fail(f"broker has host publishers: {pubs}")
 
         # 2) secret hop enforced: wrong secret -> 401, health stays open
         probe = broker_exec_py(
