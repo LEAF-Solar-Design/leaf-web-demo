@@ -432,6 +432,47 @@ def test_decide_corrupt_gate_record_proceeds_session_only(client, tmp_path, monk
     assert agent_gate.read_pending(cid) is None
 
 
+def test_concurrent_opposite_decisions_never_diverge_stores(client, tmp_path, monkeypatch):
+    """Round-3 review: two OPPOSITE clicks racing must end with the gate file
+    and the session row in agreement — grant/deny are atomic under
+    agent_gate._state_lock, so exactly one decision wins and the loser observes
+    already_decided (409 on contradiction, session untouched)."""
+    import threading as _threading
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from envelopes import install_error_handlers
+
+    app2 = FastAPI()
+    install_error_handlers(app2)
+    app2.include_router(agent_router.router)
+    client2 = TestClient(app2, raise_server_exceptions=False)
+
+    for i in range(12):
+        tenant = f"tenant-race-{i}"
+        cid = _seed_both_stores(tmp_path, monkeypatch, tenant)
+        barrier = _threading.Barrier(2)
+        status = {}
+
+        def _hit(c, approved, key, _cid=cid, _tenant=tenant):
+            barrier.wait()
+            r = c.post(f"/api/agent/approvals/{_cid}",
+                       headers=_h(_tenant), json={"approved": approved})
+            status[key] = r.status_code
+
+        t_a = _threading.Thread(target=_hit, args=(client, True, "approve"))
+        t_d = _threading.Thread(target=_hit, args=(client2, False, "deny"))
+        t_a.start(); t_d.start()
+        t_a.join(10); t_d.join(10)
+
+        gate_rec = agent_gate.read_pending(cid)
+        row = session_store.get_approval(cid)
+        assert gate_rec is not None
+        assert gate_rec["granted"] or gate_rec["denied"], (status, gate_rec)
+        assert row["decided"] is True, (status, row)
+        assert bool(row["approved"]) == bool(gate_rec["granted"]), (status, gate_rec, row)
+
+
 def test_decide_without_gate_record_still_records(client, tmp_path, monkeypatch):
     """A sessions-wire-only confirmation_id (pre-spine turn) has no gate record:
     the bridge is a silent not_found and record-only behavior is unchanged."""

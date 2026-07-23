@@ -258,40 +258,53 @@ def _decide(record: Dict[str, Any], *, granted: bool, by: str, reason: str) -> D
 
 def grant_approval(confirmation_id: str, *, by: str = "tenant") -> Tuple[bool, Optional[Dict[str, Any]], str]:
     """Mark a pending approval granted. Returns (ok, record, reason). Refuses
-    an already-decided or expired record (expiry racing the click auto-denies)."""
-    record = read_pending(confirmation_id)
-    if record is None:
-        return False, None, "not_found"
-    if record.get("granted") or record.get("denied"):
-        return False, record, "already_decided"
-    if _is_expired(record):
-        record = _decide(record, granted=False, by=by, reason="expired")
-        agent_audit.append({"kind": "approval_denied", "confirmation_id": confirmation_id,
+    an already-decided or expired record (expiry racing the click auto-denies).
+
+    ATOMIC under _state_lock (review round 3): the read-check-write must be one
+    unit or two concurrent OPPOSITE clicks both read "pending" and the second
+    write silently overwrites the first — the gate file and the (atomic,
+    first-wins) session store could then record opposite decisions. With the
+    lock, exactly one decision wins here and the loser observes
+    already_decided, which the decision route refuses on contradiction.
+    Same single-process posture as the redemption stamp below (multi-replica
+    needs file locking — out of scope, same as SESSIONS_DB single-writer).
+    """
+    with _state_lock:
+        record = read_pending(confirmation_id)
+        if record is None:
+            return False, None, "not_found"
+        if record.get("granted") or record.get("denied"):
+            return False, record, "already_decided"
+        if _is_expired(record):
+            record = _decide(record, granted=False, by=by, reason="expired")
+            agent_audit.append({"kind": "approval_denied", "confirmation_id": confirmation_id,
+                                "tenant_id": record.get("tenant_id"),
+                                "session_id": record.get("session_id"),
+                                "action": record.get("action"), "reason": "expired"})
+            return False, record, "expired"
+        record = _decide(record, granted=True, by=by, reason="approved")
+        agent_audit.append({"kind": "approval_granted", "confirmation_id": confirmation_id,
                             "tenant_id": record.get("tenant_id"),
                             "session_id": record.get("session_id"),
-                            "action": record.get("action"), "reason": "expired"})
-        return False, record, "expired"
-    record = _decide(record, granted=True, by=by, reason="approved")
-    agent_audit.append({"kind": "approval_granted", "confirmation_id": confirmation_id,
-                        "tenant_id": record.get("tenant_id"),
-                        "session_id": record.get("session_id"),
-                        "action": record.get("action"), "decided_by": by})
-    return True, record, "granted"
+                            "action": record.get("action"), "decided_by": by})
+        return True, record, "granted"
 
 
 def deny_approval(confirmation_id: str, *, by: str = "tenant",
                   reason: str = "denied") -> Tuple[bool, Optional[Dict[str, Any]], str]:
-    record = read_pending(confirmation_id)
-    if record is None:
-        return False, None, "not_found"
-    if record.get("granted") or record.get("denied"):
-        return False, record, "already_decided"
-    record = _decide(record, granted=False, by=by, reason=reason)
-    agent_audit.append({"kind": "approval_denied", "confirmation_id": confirmation_id,
-                        "tenant_id": record.get("tenant_id"),
-                        "session_id": record.get("session_id"),
-                        "action": record.get("action"), "decided_by": by, "reason": reason})
-    return True, record, "denied"
+    # Same atomicity contract as grant_approval (see its docstring).
+    with _state_lock:
+        record = read_pending(confirmation_id)
+        if record is None:
+            return False, None, "not_found"
+        if record.get("granted") or record.get("denied"):
+            return False, record, "already_decided"
+        record = _decide(record, granted=False, by=by, reason=reason)
+        agent_audit.append({"kind": "approval_denied", "confirmation_id": confirmation_id,
+                            "tenant_id": record.get("tenant_id"),
+                            "session_id": record.get("session_id"),
+                            "action": record.get("action"), "decided_by": by, "reason": reason})
+        return True, record, "denied"
 
 
 # --------------------------------------------------------------------------- #
