@@ -153,9 +153,8 @@ def create_pending(*, tenant_id: str, session_id: str, turn_id: str,
         "decided_by": None,
         "reason": None,
     }
-    path = _approval_path(confirmation_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    _approval_path(confirmation_id).parent.mkdir(parents=True, exist_ok=True)
+    _write_pending(record)
     return record
 
 
@@ -235,8 +234,41 @@ def read_pending_strict(confirmation_id: str) -> tuple:
 
 
 def _write_pending(record: Dict[str, Any]) -> None:
+    """Atomic publish (tmp file + os.replace), never an in-place rewrite.
+
+    The decision route's pre-bridge probe (routers/agent.py
+    read_pending_strict) deliberately runs OUTSIDE _state_lock; with an
+    in-place write_text it can observe the truncate-write window of a
+    concurrent locked decide, classify the record `corrupt`, and — since
+    corrupt reads as absent-equivalent there — skip the gate bridge entirely,
+    letting the two approval stores record OPPOSITE decisions
+    (test_agent_approvals.py::test_concurrent_opposite_decisions_never_diverge_stores
+    is the pin; measured ~3k torn reads/6s under contention on Windows).
+    os.replace makes every reader see the old record or the new one, never a
+    torn one. Windows needs the short retry: a reader holding the destination
+    open for the instant of the swap fails the rename with a sharing violation;
+    on exhaustion the error propagates and the decision route answers 503
+    retryable, which is honest (nothing was recorded)."""
     path = _approval_path(record["confirmation_id"])
-    path.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
+    tmp.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    last_attempt = 19  # ~100ms total: far beyond any real reader's open window
+    try:
+        for attempt in range(last_attempt + 1):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == last_attempt:
+                    raise
+                time.sleep(0.005)
+    except OSError:
+        # any terminal replace failure (not just retry exhaustion) must not
+        # leave a .tmp-* orphan behind; the error still propagates so the
+        # decision route answers 503 retryable (nothing was recorded).
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _is_expired(record: Dict[str, Any], *, now: Optional[datetime] = None) -> bool:

@@ -1,58 +1,228 @@
 """
-Binary acceptance for server/routers/sessions.py (agent spine §18 app surface).
+Binary acceptance for the app<->harness integration on the UNIFIED §2.1 wire
+(census #12 chip-spine-sessions-routers rewrite — the §18-era proxy suite this
+file replaced monkeypatched internals that no longer exist, e.g.
+routers.sessions._SESSIONS).
 
-Pins the wire-contract §2 behaviours against a MONKEYPATCHED harness HTTP layer
-(no network, no real harness):
+What makes this suite distinct from its two live siblings:
 
-  * POST /api/sessions requires the `converse` entitlement (403 shape) and is an
-    idempotent create/attach passthrough ({tenantId, drawingId} forwarded);
-  * POST /api/sessions/{id}/messages: 202 happy path with an assembled
-    ContextPacket; exactly-one-of text/confirm; and the outcome mappings
-    409 -> turn_in_progress · 401 -> GRANT_REQUIRED · 429 short -> llm_rate_limited ·
-    429 long -> llm_quota_exhausted (degraded) · connection refused ->
-    BROKER_UNREACHABLE 502 (degraded);
-  * cross-tenant access -> 404 session_not_found (no existence oracle);
-  * SSE relay passes bytes + after_seq through.
+  * tests/test_sessions_routes.py pins the CLIENT-facing byte shapes with
+    turn_runner.start_turn monkeypatched — it never crosses the app->harness
+    hop.
+  * tests/test_turn_runner.py pins the engine alone — no router in front.
+  * THIS suite drives the real router -> real turn_runner -> a stub harness
+    speaking actual HTTP/1.1 chunked `application/x-ndjson` on POST /turn, so
+    the assertions that need BOTH layers live here:
+
+      - env preference order: `LEAF_CONVERSE_HARNESS_URL` wins,
+        `LEAF_AUTHOR_HARNESS_URL` is the fallback (both exported by
+        scripts/start-leaf.py; single-var deploys keep working);
+      - the frozen ConverseTurnInput body on the wire: {tenant_id, session_id,
+        turn_id, drawing_id, messages, text|confirm} and NOTHING else — no
+        ContextPacket/packet field (deliberate contract decision, census #12:
+        ContextPacket has no live caller; chip 5 freezes this), no
+        classifier_hint (durable-log-only);
+      - the confirm resume carries the DURABLE approval row's proposal and
+        stored `approved`, never the client's claim;
+      - the NDJSON relay lands events durably (transcript/stream serve them),
+        creates decidable approval rows from `proposed_run`, and releases the
+        one-turn-per-session CAS on every terminal path;
+      - immediate harness rejections (401/429/5xx/refused) map to the §18.4
+        ErrorCode values, which are themselves pinned here verbatim.
 
 Run:  cd server && python -m pytest tests/test_sessions_router.py -q
 """
 from __future__ import annotations
 
-# Cache the STDLIB `platform` module BEFORE PROJECT_ROOT lands on sys.path (mirrors wave4/5).
+# Cache the STDLIB `platform` module BEFORE SERVER_DIR lands on sys.path
+# (repo-root platform/ package shadows it; mirrors test_wave4/5).
 import platform as _stdlib_platform  # noqa: E402
 _stdlib_platform.python_implementation()
 
+import http.server  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
+import socket  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any, Dict, List, Optional  # noqa: E402
+from typing import Any, Dict, List, Optional, Tuple  # noqa: E402
 
-import jsonschema  # noqa: E402
 import pytest  # noqa: E402
-
-pytestmark = pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): written against the section-18-era app internals (e.g. routers.sessions._SESSIONS) that the section-2.1 lane replaced with session_store. The ENGINE side was unified by census #12 chip-spine-harness-mount (spine engine live behind POST /turn); restoring THESE suites means rewriting their app-surface assertions against the unified 2.1 wire — census #12 chip-spine-sessions-routers.")
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-# route the jobs SQLite DB to a throwaway dir BEFORE `jobs`/`app` import anywhere.
-os.environ.setdefault("JOBS_DB", str(Path(tempfile.mkdtemp(prefix="sess-jobs-")) / "jobs.db"))
-
-ENVELOPE_SCHEMA = json.loads((SERVER_DIR / "envelope_schema.json").read_text(encoding="utf-8"))
+# route the sessions SQLite DB to a throwaway dir BEFORE session_store is
+# imported anywhere (module reads SESSIONS_DB once, at import time — same
+# posture as tests/test_turn_runner.py / tests/test_sessions_routes.py).
+os.environ.setdefault(
+    "SESSIONS_DB",
+    str(Path(tempfile.mkdtemp(prefix="sessrouter-sessions-")) / "sessions.db"),
+)
 
 import entitlements  # noqa: E402
+import session_store  # noqa: E402
+from envelopes import DEFAULT_HTTP_STATUS, ErrorCode  # noqa: E402
+from routers import agent as agent_router  # noqa: E402
 from routers import sessions as sessions_router  # noqa: E402
 
-HARNESS = "http://harness.test"
+
+# =========================================================================== #
+# stub harness — real HTTP/1.1 chunked application/x-ndjson on POST /turn.
+# Per-SERVER state (not class-level like test_turn_runner's stub) so the env-
+# preference tests can run TWO independent stubs in one test.
+# =========================================================================== #
+class _StubState:
+    def __init__(self) -> None:
+        self.bodies: List[Dict[str, Any]] = []   # every POST /turn body, in order
+        self.hits = 0
+        self.immediate: Optional[Tuple[int, Dict[str, Any]]] = None
+        self.scripts: List[List[Dict[str, Any]]] = []  # per-call event scripts (FIFO)
+        self.release = threading.Event()         # stream is gated on this
+        self.release.set()                       # default: stream immediately
 
 
-def _client():
+DEFAULT_SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+
+
+class _StubServer(http.server.ThreadingHTTPServer):
+    def __init__(self, state: _StubState):
+        super().__init__(("127.0.0.1", 0), _StubHandler)
+        self.state = state
+
+
+class _StubHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def handle(self):
+        # the app side aborts keep-alive sockets freely (immediate-rejection
+        # paths call resp.close()); that's expected, not per-test stderr noise.
+        try:
+            super().handle()
+        except (ConnectionError, OSError):
+            pass
+
+    def do_POST(self):  # noqa: N802
+        state: _StubState = self.server.state  # type: ignore[attr-defined]
+        state.hits += 1
+        length = int(self.headers.get("content-length", 0) or 0)
+        try:
+            state.bodies.append(json.loads(self.rfile.read(length) or b"{}"))
+        except Exception:  # noqa: BLE001
+            state.bodies.append({})
+
+        if state.immediate is not None:
+            status, body = state.immediate
+            raw = json.dumps(body).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        state.release.wait(timeout=30)
+        script = state.scripts.pop(0) if state.scripts else list(DEFAULT_SCRIPT)
+        for ev in script:
+            raw = (json.dumps(ev) + "\n").encode("utf-8")
+            self.wfile.write(f"{len(raw):x}\r\n".encode("ascii") + raw + b"\r\n")
+            self.wfile.flush()
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+    def log_message(self, *a):  # silence
+        return
+
+
+def _spawn_stub() -> Tuple[str, _StubState, _StubServer]:
+    state = _StubState()
+    srv = _StubServer(state)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{srv.server_address[1]}", state, srv
+
+
+@pytest.fixture
+def stub():
+    url, state, srv = _spawn_stub()
+    try:
+        yield url, state
+    finally:
+        state.release.set()  # never leave a handler blocked on teardown
+        srv.shutdown()
+
+
+@pytest.fixture
+def second_stub():
+    url, state, srv = _spawn_stub()
+    try:
+        yield url, state
+    finally:
+        state.release.set()
+        srv.shutdown()
+
+
+def _free_closed_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+# =========================================================================== #
+# fixtures — hermetic agent state + a local mount of the two routers under test
+# =========================================================================== #
+@pytest.fixture(autouse=True)
+def agent_env(tmp_path, monkeypatch):
+    """Hermetic agent/gate state (the approvals endpoint's gate-bridge probe
+    reads LEAF_AGENT_APPROVALS_DIR) + a clean harness-env slate so ambient
+    dev-machine vars can never leak into the preference-order tests."""
+    monkeypatch.delenv("LEAF_CONVERSE_HARNESS_URL", raising=False)
+    monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
+    monkeypatch.delenv("LEAF_AGENT_POLICY_FILE", raising=False)
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    monkeypatch.delenv("SESSIONS_APPROVAL_TTL_S", raising=False)
+    monkeypatch.setenv("LEAF_AGENT_KILL_FILE", str(tmp_path / "agent.disabled"))
+    monkeypatch.setenv("LEAF_AGENT_APPROVALS_DIR", str(tmp_path / "approvals"))
+    monkeypatch.setenv("LEAF_AGENT_GRANTS_FILE", str(tmp_path / "grants.json"))
+    monkeypatch.setenv("LEAF_AGENT_RATE_FILE", str(tmp_path / "rate.json"))
+    monkeypatch.setenv("LEAF_AGENT_AUDIT", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("LEAF_AGENT_LEDGER", str(tmp_path / "ledger.jsonl"))
+    monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(tmp_path / "agent_tenants.json"))
+    monkeypatch.setenv("TURN_MAX_S", "20")  # keep watchdog threads bounded
+    yield tmp_path
+
+
+@pytest.fixture
+def wired(stub, monkeypatch):
+    """The standard config: LEAF_CONVERSE_HARNESS_URL -> the stub, author var
+    unset — the exact env start-leaf.py exports for the app."""
+    url, state = stub
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", url)
+    return url, state
+
+
+@pytest.fixture
+def client():
+    """Local mount of the two routers this suite owns assertions for
+    (sessions wire + the approvals sibling). The PRODUCTION mount is proven by
+    tests/test_agent_e2e.py."""
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient
+    from envelopes import install_error_handlers
 
-    from app import app
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(sessions_router.router)
+    app.include_router(agent_router.router)
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -60,501 +230,524 @@ def _h(tenant: str) -> dict:
     return {"X-Tenant-Id": tenant}
 
 
-# --------------------------------------------------------------------------- #
-# fake harness HTTP layer (monkeypatches requests.request — no network)
-# --------------------------------------------------------------------------- #
-class FakeResponse:
-    def __init__(self, status_code: int, body: Optional[Dict[str, Any]] = None,
-                 headers: Optional[Dict[str, str]] = None,
-                 chunks: Optional[List[bytes]] = None):
-        self.status_code = status_code
-        self._body = body
-        self.headers = headers or {}
-        self._chunks = chunks or []
-
-    def json(self):
-        if self._body is None:
-            raise ValueError("no JSON body")
-        return self._body
-
-    def iter_content(self, chunk_size=None):
-        yield from self._chunks
-
-    def close(self):
-        return None
+_counter = [0]
 
 
-class FakeHarness:
-    """Programmable stand-in for requests.request. Records every forwarded call."""
-
-    def __init__(self):
-        self.calls: List[Dict[str, Any]] = []
-        self.responder = None  # (method, url, kwargs) -> FakeResponse | raise
-
-    def __call__(self, method, url, **kwargs):
-        self.calls.append({"method": method, "url": url, **kwargs})
-        if self.responder is not None:
-            return self.responder(method, url, kwargs)
-        # default: idempotent create + accepted message
-        if method == "POST" and url.endswith("/converse/sessions"):
-            drawing = kwargs["json"]["drawingId"]
-            return FakeResponse(200, {"sessionId": f"sess-{drawing}", "status": "idle",
-                                      "createdAt": "2026-07-20T00:00:00+00:00"})
-        if method == "POST" and "/messages" in url:
-            return FakeResponse(202, {"turnId": "turn-1"})
-        return FakeResponse(404, {"error": "session_not_found"})
+def _new_session(tenant_id: str = "tenant-a") -> Dict[str, Any]:
+    _counter[0] += 1
+    return session_store.get_or_create_session(tenant_id, f"dwg-router-{_counter[0]}")
 
 
-@pytest.fixture
-def fake_harness(monkeypatch, tmp_path):
-    """Hermetic env: converse harness URL set, requests.request faked, throwaway
-    drawing store, no grant-store env (grant read degrades without network)."""
-    fh = FakeHarness()
-    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", HARNESS)
-    monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
-    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
-    monkeypatch.setattr("requests.request", fh)
-    monkeypatch.setattr(sessions_router, "_SESSIONS", {})
-    yield fh
+def _post_text(client, sess, text="hi", hint=None):
+    body: Dict[str, Any] = {"text": text}
+    if hint is not None:
+        body["classifier_hint"] = hint
+    return client.post(f"/api/sessions/{sess['session_id']}/messages",
+                       json=body, headers=_h(sess["tenant_id"]))
 
 
-def _create(c, tenant="t-alpha", drawing="demo"):
-    r = c.post("/api/sessions", json={"drawing_id": drawing}, headers=_h(tenant))
+def _wait_until(predicate, timeout_s: float = 5.0, poll_s: float = 0.02):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(poll_s)
+    return predicate()
+
+
+def _terminal_count(session_id: str) -> int:
+    events = session_store.recent_events(session_id, 200)
+    return sum(1 for ev in events if ev["type"] in ("turn_complete", "error"))
+
+
+def _wait_terminal(session_id: str, n: int = 1) -> None:
+    assert _wait_until(lambda: _terminal_count(session_id) >= n), (
+        f"relay never landed terminal event #{n} for {session_id}"
+    )
+
+
+# =========================================================================== #
+# §18.4 ErrorCode values (CONTRACT-ADDENDUM §18.4) — shipped verbatim
+# =========================================================================== #
+def test_section_18_4_error_codes_shipped_verbatim():
+    """The four §18.4 codes ship with their exact lowercase wire values (the
+    frozen client-side errorCode strings converse.js switches on) and are
+    members of the frozen enum's ALL tuple."""
+    assert ErrorCode.TURN_IN_PROGRESS == "turn_in_progress"
+    assert ErrorCode.SESSION_NOT_FOUND == "session_not_found"
+    assert ErrorCode.LLM_QUOTA_EXHAUSTED == "llm_quota_exhausted"
+    assert ErrorCode.LLM_RATE_LIMITED == "llm_rate_limited"
+    for code in (ErrorCode.TURN_IN_PROGRESS, ErrorCode.SESSION_NOT_FOUND,
+                 ErrorCode.LLM_QUOTA_EXHAUSTED, ErrorCode.LLM_RATE_LIMITED):
+        assert code in ErrorCode.ALL
+
+
+def test_section_18_4_default_http_statuses():
+    """§18.4's HTTP column, plus the additive sessions-wire sibling
+    confirmation_expired (410) that shipped in the same block."""
+    assert DEFAULT_HTTP_STATUS[ErrorCode.TURN_IN_PROGRESS] == 409
+    assert DEFAULT_HTTP_STATUS[ErrorCode.SESSION_NOT_FOUND] == 404
+    assert DEFAULT_HTTP_STATUS[ErrorCode.LLM_QUOTA_EXHAUSTED] == 429
+    assert DEFAULT_HTTP_STATUS[ErrorCode.LLM_RATE_LIMITED] == 429
+    assert ErrorCode.CONFIRMATION_EXPIRED == "confirmation_expired"
+    assert DEFAULT_HTTP_STATUS[ErrorCode.CONFIRMATION_EXPIRED] == 410
+
+
+# =========================================================================== #
+# env preference order — LEAF_CONVERSE_HARNESS_URL wins, author is fallback
+# =========================================================================== #
+def test_harness_url_prefers_leaf_converse_harness_url(client, stub, second_stub, monkeypatch):
+    """Both vars set -> the turn goes to LEAF_CONVERSE_HARNESS_URL and the
+    author sidecar sees ZERO traffic (start-leaf.py exports both; the turn
+    engine must pick the converse one)."""
+    converse_url, converse_state = stub
+    author_url, author_state = second_stub
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", converse_url)
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", author_url)
+
+    sess = _new_session()
+    r = _post_text(client, sess)
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+    assert converse_state.hits == 1
+    assert author_state.hits == 0
+
+
+def test_harness_url_falls_back_to_leaf_author_harness_url(client, stub, monkeypatch):
+    """Only the author var set (single-sidecar deploys, docker-compose today)
+    -> the turn still dispatches there. The fallback must survive."""
+    url, state = stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+
+    sess = _new_session()
+    r = _post_text(client, sess)
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+    assert state.hits == 1
+
+
+def test_neither_env_configured_502_names_the_env_pair(client, stub, monkeypatch):
+    """Both vars unset (the autouse fixture's clean slate) -> immediate 502
+    BROKER_UNREACHABLE whose message names BOTH env vars (operator-actionable),
+    and the turn CAS is released — the next message, once wired, dispatches
+    instead of 409ing."""
+    url, state = stub
+    sess = _new_session()
+    r = _post_text(client, sess)
+    assert r.status_code == 502, r.text
+    body = r.json()
+    assert body["error"]["error_code"] == "BROKER_UNREACHABLE"
+    assert "LEAF_CONVERSE_HARNESS_URL" in body["error"]["message"]
+    assert "LEAF_AUTHOR_HARNESS_URL" in body["error"]["message"]
+    assert body["error"]["retryable"] is True
+
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", url)
+    r2 = _post_text(client, sess)
+    assert r2.status_code == 202, r2.text  # CAS was released, not leaked
+    _wait_terminal(sess["session_id"])
+
+
+# =========================================================================== #
+# the frozen ConverseTurnInput body on the wire
+# =========================================================================== #
+def test_forwarded_turn_body_is_frozen_shape_no_packet(client, wired):
+    """POST /turn carries EXACTLY the frozen ConverseTurnInput fields for a
+    text turn. Pins the deliberate census #12 contract decision: NO
+    ContextPacket rides this wire (ContextPacket has no live caller; the
+    frozen shape has no packet field — chip 5 freezes this)."""
+    url, state = wired
+    sess = _new_session()
+    r = _post_text(client, sess, text="add a panel")
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    body = state.bodies[0]
+    assert set(body) == {"tenant_id", "session_id", "turn_id", "drawing_id",
+                        "messages", "text"}
+    assert body["tenant_id"] == sess["tenant_id"]
+    assert body["session_id"] == sess["session_id"]
+    assert body["turn_id"] == r.json()["turn_id"]
+    assert body["drawing_id"] == sess["drawing_id"]
+    assert body["text"] == "add a panel"
+    assert body["messages"] == []  # first turn: no prior context
+
+
+def test_classifier_hint_durable_in_turn_started_but_never_on_the_wire(client, wired):
+    """classifier_hint is recorded on the durable turn_started event (the
+    transcript source) but is NOT part of the frozen ConverseTurnInput — it
+    must never reach the harness body."""
+    url, state = wired
+    sess = _new_session()
+    hint = {"lane": "run", "tool": "count-by-layer", "confidence": 0.62}
+    r = _post_text(client, sess, text="how many panels?", hint=hint)
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    assert "classifier_hint" not in state.bodies[0]
+    assert "classifierHint" not in state.bodies[0]
+    started = [ev for ev in session_store.recent_events(sess["session_id"], 50)
+               if ev["type"] == "turn_started"]
+    assert started and started[0]["data"]["classifier_hint"] == hint
+    assert started[0]["data"]["text"] == "how many panels?"
+
+
+def _seed_decided_approval(sess, *, approved: bool, tool="write_home_run",
+                           params=None, capability="drawing.write") -> str:
+    _counter[0] += 1
+    cid = f"confirm-router-{_counter[0]}"
+    session_store.create_approval(
+        cid, sess["session_id"], sess["tenant_id"], turn_id=f"turn-{_counter[0]}",
+        tool=tool, params=params if params is not None else {"length_ft": 12},
+        capability=capability, rationale="adds a home-run", kind="run_capability",
+        payload=None, ttl_s=300,
+    )
+    session_store.decide_approval(cid, approved, by=sess["tenant_id"])
+    return cid
+
+
+def test_confirm_forwards_durable_proposal_not_client_shape(client, wired):
+    """The confirm resume body carries the frozen snake_case confirm built from
+    the DURABLE approval row ({confirmation_id, approved, proposal{tool,
+    params, capability}}) — never the client's camelCase shape, and no text."""
+    url, state = wired
+    sess = _new_session()
+    cid = _seed_decided_approval(sess, approved=True)
+
+    r = client.post(f"/api/sessions/{sess['session_id']}/messages",
+                    json={"confirm": {"confirmationId": cid, "approved": True}},
+                    headers=_h(sess["tenant_id"]))
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    body = state.bodies[0]
+    assert "text" not in body
+    assert body["confirm"] == {
+        "confirmation_id": cid,
+        "approved": True,
+        "proposal": {"tool": "write_home_run", "params": {"length_ft": 12},
+                     "capability": "drawing.write"},
+    }
+    assert "confirmationId" not in json.dumps(body)  # client shape never leaks
+
+
+def test_confirm_forwarded_approved_is_stored_value_not_clients(client, wired):
+    """Row decided approved=False; the client lies with approved=True on the
+    confirm message — the WIRE must carry the stored False."""
+    url, state = wired
+    sess = _new_session()
+    cid = _seed_decided_approval(sess, approved=False)
+
+    r = client.post(f"/api/sessions/{sess['session_id']}/messages",
+                    json={"confirm": {"confirmationId": cid, "approved": True}},
+                    headers=_h(sess["tenant_id"]))
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+    assert state.bodies[0]["confirm"]["approved"] is False
+
+
+def test_prior_turn_context_folded_into_messages(client, wired):
+    """Turn 2's body.messages folds turn 1 into a bounded {user, assistant}
+    pair (assistant = concatenated text_delta of the COMPLETED turn); the
+    current turn's own text is excluded from its prior context."""
+    url, state = wired
+    state.scripts.append([
+        {"type": "text_delta", "data": {"text": "Twelve "}},
+        {"type": "text_delta", "data": {"text": "panels."}},
+        {"type": "turn_complete", "data": {"stop_reason": "end_turn"}},
+    ])
+    sess = _new_session()
+    r1 = _post_text(client, sess, text="how many panels?")
+    assert r1.status_code == 202, r1.text
+    _wait_terminal(sess["session_id"], 1)
+
+    r2 = _post_text(client, sess, text="add one more")
+    assert r2.status_code == 202, r2.text
+    _wait_terminal(sess["session_id"], 2)
+
+    body2 = state.bodies[1]
+    assert body2["text"] == "add one more"
+    assert body2["messages"] == [
+        {"role": "user", "text": "how many panels?"},
+        {"role": "assistant", "text": "Twelve panels."},
+    ]
+
+
+# =========================================================================== #
+# NDJSON relay -> durable store -> transcript/stream, CAS lifecycle
+# =========================================================================== #
+def test_relay_lands_stream_events_durably_ascending(client, wired):
+    url, state = wired
+    state.scripts.append([
+        {"type": "text_delta", "data": {"text": "On it."}},
+        {"type": "tool_call", "data": {"tool": "count-by-layer", "args_summary": "layer=PV"}},
+        {"type": "turn_complete", "data": {"stop_reason": "end_turn"}},
+    ])
+    sess = _new_session()
+    r = _post_text(client, sess)
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    tr = client.get(f"/api/sessions/{sess['session_id']}/transcript?limit=50",
+                    headers=_h(sess["tenant_id"]))
+    assert tr.status_code == 200, tr.text
+    events = tr.json()["events"]
+    assert [ev["type"] for ev in events] == \
+        ["turn_started", "text_delta", "tool_call", "turn_complete"]
+    seqs = [ev["seq"] for ev in events]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert events[1]["data"] == {"text": "On it."}  # relayed verbatim
+    assert events[2]["data"] == {"tool": "count-by-layer", "args_summary": "layer=PV"}
+
+
+def test_stream_route_replays_relayed_events_after_seq(client, wired, monkeypatch):
+    monkeypatch.setattr(sessions_router, "STREAM_POLL_S", 0.01)
+    monkeypatch.setattr(sessions_router, "STREAM_DEADLINE_S", 5.0)
+    url, state = wired
+    state.scripts.append([
+        {"type": "text_delta", "data": {"text": "hello"}},
+        {"type": "turn_complete", "data": {"stop_reason": "end_turn"}},
+    ])
+    sess = _new_session()
+    sid = sess["session_id"]
+    assert _post_text(client, sess).status_code == 202
+    _wait_terminal(sid)
+
+    started_seq = next(ev["seq"] for ev in session_store.recent_events(sid, 50)
+                       if ev["type"] == "turn_started")
+    seen = []
+    with client.stream("GET", f"/api/sessions/{sid}/stream?after_seq={started_seq}",
+                       headers=_h(sess["tenant_id"])) as resp:
+        assert resp.status_code == 200
+        for line in resp.iter_lines():
+            if line.startswith("data: "):
+                seen.append(json.loads(line[len("data: "):]))
+                if len(seen) >= 2:
+                    break
+    assert [ev["type"] for ev in seen] == ["text_delta", "turn_complete"]
+    assert all(ev["seq"] > started_seq for ev in seen)
+
+
+def test_second_turn_allowed_after_terminal(client, wired):
+    """turn_complete releases the CAS — the next message dispatches (202)."""
+    url, state = wired
+    sess = _new_session()
+    assert _post_text(client, sess).status_code == 202
+    _wait_terminal(sess["session_id"], 1)
+    assert _post_text(client, sess).status_code == 202
+    _wait_terminal(sess["session_id"], 2)
+    assert state.hits == 2
+
+
+def test_concurrent_message_409_turn_in_progress(client, wired):
+    """While a turn's stream is open, a second message is rejected-not-queued
+    with 409 turn_in_progress (retryable); after the turn completes, the
+    session accepts messages again."""
+    url, state = wired
+    state.release.clear()  # gate the stream open
+    sess = _new_session()
+    r1 = _post_text(client, sess, text="first")
+    assert r1.status_code == 202, r1.text
+
+    r2 = _post_text(client, sess, text="second while busy")
+    assert r2.status_code == 409, r2.text
+    body = r2.json()
+    assert body["error"]["error_code"] == "turn_in_progress"
+    assert body["error"]["retryable"] is True
+
+    state.release.set()
+    _wait_terminal(sess["session_id"], 1)
+    r3 = _post_text(client, sess, text="third after done")
+    assert r3.status_code == 202, r3.text
+    _wait_terminal(sess["session_id"], 2)
+
+
+def test_proposed_run_relay_creates_decidable_approval_row(client, wired, monkeypatch):
+    """A spine turn emits proposed_run ALONE (no confirmation_required pair) —
+    the relay must create the approvals row with the proposal metadata BEFORE
+    the chip event is published, so the visible chip structurally implies a
+    decidable row: POST /api/agent/approvals/{cid} works immediately.
+
+    The BEFORE is pinned deterministically: append_event is wrapped so that AT
+    the moment the proposed_run event is published, the row's existence is
+    captured — reversing the relay's create-row/publish order fails here, not
+    probabilistically."""
+    url, state = wired
+    cid = "confirm-spine-chip-1"
+    state.scripts.append([
+        {"type": "proposed_run", "data": {
+            "confirmation_id": cid, "tool": "add-panel",
+            "params": {"roof": "south"}, "capability": "drawing.write",
+            "rationale": "user asked for a panel"}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
+    ])
+    row_at_publication = {}
+    real_append = session_store.append_event
+
+    def _spy(session_id, turn_id, ev_type, data):
+        if ev_type == "proposed_run":
+            row_at_publication["exists"] = session_store.get_approval(cid) is not None
+        return real_append(session_id, turn_id, ev_type, data)
+
+    monkeypatch.setattr(session_store, "append_event", _spy)
+    sess = _new_session()
+    assert _post_text(client, sess, text="add a panel").status_code == 202
+    _wait_terminal(sess["session_id"])
+    assert row_at_publication.get("exists") is True, (
+        "approvals row must exist BEFORE the proposed_run event is published")
+
+    row = session_store.get_approval(cid)
+    assert row is not None, "relay must materialize the approvals row"
+    assert row["decided"] is False and row["consumed"] is False
+    assert row["tool"] == "add-panel" and row["params"] == {"roof": "south"}
+    assert row["capability"] == "drawing.write" and row["kind"] == "run_capability"
+
+    r = client.post(f"/api/agent/approvals/{cid}", json={"approved": True},
+                    headers=_h(sess["tenant_id"]))
     assert r.status_code == 200, r.text
-    return r.json()["session_id"]
+    assert r.json()["resolved"] is True and r.json()["approved"] is True
+    assert session_store.get_approval(cid)["decided"] is True
+
+    resolved = [ev for ev in session_store.recent_events(sess["session_id"], 50)
+                if ev["type"] == "confirmation_resolved"]
+    assert resolved and resolved[0]["data"]["confirmation_id"] == cid
 
 
-# --------------------------------------------------------------------------- #
-# create: entitlement gate + idempotent passthrough
-# --------------------------------------------------------------------------- #
-def test_create_denied_for_restricted_tier(fake_harness, monkeypatch):
-    """The restricted tier lacks `converse` (§9 policy) -> 403 entitlement shape,
-    and the harness is never contacted."""
-    monkeypatch.setattr(entitlements, "resolve_tier", lambda tenant: "restricted")
-    c = _client()
-    r = c.post("/api/sessions", json={"drawing_id": "demo"}, headers=_h("t-restricted"))
-    assert r.status_code == 403, r.text
-    b = r.json()
-    jsonschema.validate(b, ENVELOPE_SCHEMA)
-    assert b["entitlement_required"] is True
-    assert b["required"] == "converse" and b["tier"] == "restricted"
-    assert b["error"]["error_code"] == "ENTITLEMENT_REQUIRED"
-    assert fake_harness.calls == []  # gate fires BEFORE any harness traffic
+def test_approval_row_ttl_follows_sessions_approval_ttl_s(client, wired, monkeypatch):
+    monkeypatch.setenv("SESSIONS_APPROVAL_TTL_S", "123")
+    url, state = wired
+    cid = "confirm-ttl-probe"
+    state.scripts.append([
+        {"type": "proposed_run", "data": {"confirmation_id": cid, "tool": "t",
+                                          "params": {}, "capability": "drawing.write",
+                                          "rationale": "r"}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
+    ])
+    sess = _new_session()
+    assert _post_text(client, sess).status_code == 202
+    _wait_terminal(sess["session_id"])
+
+    row = session_store.get_approval(cid)
+    assert row is not None
+    ttl = row["expires_at"] - row["created_at"]
+    assert 122.0 <= ttl <= 125.0
 
 
-def test_create_idempotent_passthrough(fake_harness):
-    c = _client()
-    r1 = c.post("/api/sessions", json={"drawing_id": "demo"}, headers=_h("t-alpha"))
-    r2 = c.post("/api/sessions", json={"drawing_id": "demo"}, headers=_h("t-alpha"))
-    assert r1.status_code == 200 and r2.status_code == 200
-    b1, b2 = r1.json(), r2.json()
-    jsonschema.validate(b1, ENVELOPE_SCHEMA)
-    assert b1["session_id"] == b2["session_id"] == "sess-demo"  # harness keys (tenant, drawing)
-    assert b1["status"] == "idle" and isinstance(b1["created_at"], str)
-    # forwarded body per wire §1: {tenantId, drawingId} to POST /converse/sessions
-    call = fake_harness.calls[0]
-    assert call["method"] == "POST" and call["url"] == f"{HARNESS}/converse/sessions"
-    assert call["json"] == {"tenantId": "t-alpha", "drawingId": "demo"}
-
-
-def test_create_unconfigured_harness_is_502_degraded(fake_harness, monkeypatch):
-    monkeypatch.delenv("LEAF_CONVERSE_HARNESS_URL", raising=False)
-    c = _client()
-    r = c.post("/api/sessions", json={"drawing_id": "demo"}, headers=_h("t-alpha"))
-    assert r.status_code == 502
-    b = r.json()
-    assert b["error"]["error_code"] == "BROKER_UNREACHABLE" and b["degraded_mode"] is True
-
-
-def test_list_sessions_own_tenant_only(fake_harness):
-    c = _client()
-    _create(c, tenant="t-alpha", drawing="demo")
-    _create(c, tenant="t-beta", drawing="other")
-    r = c.get("/api/sessions", headers=_h("t-alpha"))
-    assert r.status_code == 200
-    rows = r.json()["sessions"]
-    assert [s["session_id"] for s in rows] == ["sess-demo"]
-    assert rows[0]["drawing_id"] == "demo"
-
-
-# --------------------------------------------------------------------------- #
-# messages: happy path + validation
-# --------------------------------------------------------------------------- #
-def test_message_202_happy_path_with_context_packet(fake_harness):
-    c = _client()
-    sid = _create(c)
-    hint = {"lane": "run", "tool": "count-by-layer", "confidence": 0.62, "rationale": "match"}
-    r = c.post(f"/api/sessions/{sid}/messages",
-               json={"text": "how many panels?", "classifier_hint": hint},
-               headers=_h("t-alpha"))
-    assert r.status_code == 202, r.text
-    b = r.json()
-    jsonschema.validate(b, ENVELOPE_SCHEMA)
-    assert b["turn_id"] == "turn-1" and b["status"] == "started"
-
-    fwd = fake_harness.calls[-1]
-    assert fwd["url"] == f"{HARNESS}/converse/sessions/{sid}/messages"
-    payload = fwd["json"]
-    assert payload["tenantId"] == "t-alpha"
-    assert payload["text"] == "how many panels?"
-    assert payload["classifierHint"] == hint
-    packet = payload["contextPacket"]  # assembled §4 ContextPacket rides along
-    for key in ("catalog", "catalog_hash", "drawing", "versions", "checkout",
-                "entitlements", "active_jobs", "grant", "classifier_hint"):
-        assert key in packet, f"ContextPacket missing {key!r}"
-    assert packet["classifier_hint"] == hint
-    assert len(json.dumps(packet, separators=(",", ":"))) < 8000
-
-
-def test_message_confirm_variant_forwarded(fake_harness):
-    c = _client()
-    sid = _create(c)
-    confirm = {"confirmationId": "conf-9", "approved": True}
-    r = c.post(f"/api/sessions/{sid}/messages", json={"confirm": confirm},
-               headers=_h("t-alpha"))
-    assert r.status_code == 202, r.text
-    payload = fake_harness.calls[-1]["json"]
-    assert payload["confirm"] == confirm and "text" not in payload
-
-
-def test_message_requires_exactly_one_of_text_confirm(fake_harness):
-    c = _client()
-    sid = _create(c)
-    n_calls = len(fake_harness.calls)
-    both = c.post(f"/api/sessions/{sid}/messages",
-                  json={"text": "hi", "confirm": {"confirmationId": "x", "approved": True}},
-                  headers=_h("t-alpha"))
-    neither = c.post(f"/api/sessions/{sid}/messages", json={}, headers=_h("t-alpha"))
-    assert both.status_code == 400 and neither.status_code == 400
-    assert both.json()["error"]["error_code"] == "BAD_PARAMS"
-    assert len(fake_harness.calls) == n_calls  # nothing forwarded
-
-
-# --------------------------------------------------------------------------- #
-# messages: harness outcome mappings
-# --------------------------------------------------------------------------- #
-def _respond_with(fake_harness, factory):
-    """Route ONLY the /messages POST through `factory`; defaults elsewhere."""
-    default = FakeHarness()
-
-    def responder(method, url, kwargs):
-        if method == "POST" and "/messages" in url:
-            return factory()
-        return default(method, url)
-    fake_harness.responder = responder
-
-
-def test_message_409_maps_turn_in_progress(fake_harness):
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness,
-                  lambda: FakeResponse(409, {"error": "turn_in_progress", "turnId": "turn-busy"}))
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
-    assert r.status_code == 409, r.text
-    b = r.json()
-    # NOTE: envelope_schema.json's error_code enum predates the §18 codes (see
-    # final-report conflict note) — shape-assert manually here.
-    assert set(b["error"]) == {"error_code", "message", "retryable"}
-    assert b["error"]["error_code"] == "turn_in_progress"
-    assert b["error"]["retryable"] is True
-    assert b["turn_id"] == "turn-busy"  # additive: the blocking turn
-
-
-def test_message_401_maps_grant_required(fake_harness):
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness, lambda: FakeResponse(401, {"error": "grant_required"}))
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
+# =========================================================================== #
+# immediate harness rejections -> §18.4 mappings through the router
+# =========================================================================== #
+def test_immediate_401_maps_grant_required_with_top_level_flag(client, wired):
+    url, state = wired
+    state.immediate = (401, {"message": "tenant has no linked Claude grant"})
+    sess = _new_session()
+    r = _post_text(client, sess)
     assert r.status_code == 401, r.text
-    b = r.json()
-    assert b["error"]["error_code"] == "GRANT_REQUIRED"
-    assert b["grant_required"] is True
+    body = r.json()
+    assert body["error"]["error_code"] == "GRANT_REQUIRED"
+    assert body["grant_required"] is True
+    assert "linked Claude grant" in body["error"]["message"]
+
+    state.immediate = None  # CAS released: the next message dispatches
+    assert _post_text(client, sess).status_code == 202
+    _wait_terminal(sess["session_id"])
 
 
-def test_message_429_short_horizon_maps_rate_limited(fake_harness):
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness,
-                  lambda: FakeResponse(429, {"error": "rate_limited"}, headers={"Retry-After": "30"}))
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
+def test_immediate_429_quota_exhausted_code_passes_through(client, wired):
+    url, state = wired
+    state.immediate = (429, {"errorCode": "llm_quota_exhausted", "message": "hard cap"})
+    sess = _new_session()
+    r = _post_text(client, sess)
     assert r.status_code == 429, r.text
-    b = r.json()
-    assert set(b["error"]) == {"error_code", "message", "retryable"}
-    assert b["error"]["error_code"] == "llm_rate_limited"
-    assert b["error"]["retryable"] is True
-    assert b["degraded_mode"] is False  # short horizon: retry through it
+    assert r.json()["error"]["error_code"] == "llm_quota_exhausted"
 
 
-def test_message_429_long_horizon_maps_quota_exhausted(fake_harness):
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness,
-                  lambda: FakeResponse(429, {"error": "rate_limited"}, headers={"Retry-After": "3600"}))
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
+def test_immediate_429_rate_limited_code_passes_through(client, wired):
+    url, state = wired
+    state.immediate = (429, {"errorCode": "llm_rate_limited", "message": "slow down"})
+    sess = _new_session()
+    r = _post_text(client, sess)
     assert r.status_code == 429, r.text
-    b = r.json()
-    assert b["error"]["error_code"] == "llm_quota_exhausted"
-    assert b["error"]["retryable"] is True
-    assert b["degraded_mode"] is True  # conversational lane down; §12 floor is the product
-
-
-def test_message_429_exact_horizon_boundary_is_rate_limited(fake_harness):
-    """The quota horizon is `horizon > QUOTA_HORIZON_S` (300.0) — EXACTLY 300
-    stays llm_rate_limited (a `>=` drift must fail here), 301 tips over to
-    llm_quota_exhausted. Pins the same 300/301 split the harness
-    classifyRateLimit uses, so the two layers cannot silently disagree."""
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness,
-                  lambda: FakeResponse(429, {"error": "rate_limited"}, headers={"Retry-After": "300"}))
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
-    assert r.status_code == 429, r.text
-    b = r.json()
-    assert b["error"]["error_code"] == "llm_rate_limited"
-    assert b["degraded_mode"] is False
-
-    _respond_with(fake_harness,
-                  lambda: FakeResponse(429, {"error": "rate_limited"}, headers={"Retry-After": "301"}))
-    r2 = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
-    assert r2.status_code == 429, r2.text
-    b2 = r2.json()
-    assert b2["error"]["error_code"] == "llm_quota_exhausted"
-    assert b2["degraded_mode"] is True
-
-
-def test_message_429_non_numeric_retry_after_defaults_short(fake_harness):
-    """An HTTP-date Retry-After is unparseable as seconds — parse failure
-    defaults to the SHORT horizon (rate-limited), never quota-exhausted."""
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness,
-                  lambda: FakeResponse(429, {"error": "rate_limited"},
-                                       headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}))
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
-    assert r.status_code == 429, r.text
-    b = r.json()
-    assert b["error"]["error_code"] == "llm_rate_limited"
-    assert b["degraded_mode"] is False
-
-
-def test_message_429_no_horizon_defaults_to_rate_limited(fake_harness):
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness, lambda: FakeResponse(429, {"error": "rate_limited"}))
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
     assert r.json()["error"]["error_code"] == "llm_rate_limited"
 
 
-def test_message_connection_refused_maps_broker_unreachable(fake_harness):
-    c = _client()
-    sid = _create(c)
+def test_immediate_429_unknown_code_defaults_to_rate_limited(client, wired):
+    """A 429 whose body carries no recognizable errorCode must default to the
+    SHORT horizon (llm_rate_limited), never quota-exhausted."""
+    url, state = wired
+    state.immediate = (429, {"error": "too_many_requests"})
+    sess = _new_session()
+    r = _post_text(client, sess)
+    assert r.status_code == 429, r.text
+    assert r.json()["error"]["error_code"] == "llm_rate_limited"
 
-    def _refuse():
-        import requests
-        raise requests.ConnectionError("connection refused")
-    _respond_with(fake_harness, _refuse)
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
+
+def test_connection_refused_maps_broker_unreachable(client, monkeypatch):
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL",
+                       f"http://127.0.0.1:{_free_closed_port()}")
+    sess = _new_session()
+    r = _post_text(client, sess)
     assert r.status_code == 502, r.text
-    b = r.json()
-    jsonschema.validate(b, ENVELOPE_SCHEMA)
-    assert b["error"]["error_code"] == "BROKER_UNREACHABLE"
-    assert b["error"]["retryable"] is True
-    assert b["degraded_mode"] is True
+    body = r.json()
+    assert body["error"]["error_code"] == "BROKER_UNREACHABLE"
+    assert body["error"]["retryable"] is True
 
 
-def test_message_harness_400_maps_bad_params_not_outage(fake_harness):
-    """A harness 400 (BadMessageError) is the CALLER's problem — it must map to
-    BAD_PARAMS with the harness detail, never 502 BROKER_UNREACHABLE with the
-    degraded banner."""
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness,
-                  lambda: FakeResponse(400, {"error": "bad_message",
-                                             "message": "malformed confirm payload"}))
-    r = c.post(f"/api/sessions/{sid}/messages",
-               json={"confirm": {"confirmationId": "x", "approved": True}},
-               headers=_h("t-alpha"))
-    assert r.status_code == 400, r.text
-    b = r.json()
-    jsonschema.validate(b, ENVELOPE_SCHEMA)
-    assert b["error"]["error_code"] == "BAD_PARAMS"
-    assert "malformed confirm payload" in b["error"]["message"]
-    assert b["degraded_mode"] is False
+def test_unexpected_harness_5xx_maps_broker_unreachable_502(client, wired):
+    url, state = wired
+    state.immediate = (500, {"message": "harness exploded"})
+    sess = _new_session()
+    r = _post_text(client, sess)
+    assert r.status_code == 502, r.text
+    body = r.json()
+    assert body["error"]["error_code"] == "BROKER_UNREACHABLE"
+    assert "harness exploded" in body["error"]["message"]
 
 
-def test_message_harness_410_maps_confirmation_expired(fake_harness):
-    """A harness 410 (ConfirmationInvalidError) means the approval chip is
-    stale — actionable BAD_PARAMS ('re-propose'), not a fake outage."""
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness, lambda: FakeResponse(410, {"error": "confirmation_invalid"}))
-    r = c.post(f"/api/sessions/{sid}/messages",
-               json={"confirm": {"confirmationId": "stale", "approved": True}},
-               headers=_h("t-alpha"))
-    assert r.status_code == 410, r.text
-    b = r.json()
-    jsonschema.validate(b, ENVELOPE_SCHEMA)
-    assert b["error"]["error_code"] == "BAD_PARAMS"
-    assert "expired" in b["error"]["message"]
-    assert b["degraded_mode"] is False
-
-
-def test_message_oversized_classifier_hint_is_400(fake_harness):
-    """classifier_hint is client-supplied and otherwise unbounded — an oversized
-    dict is rejected app-side (BAD_PARAMS) before any packet assembly, so it can
-    never blow the ContextPacket budget on its own."""
-    c = _client()
-    sid = _create(c)
-    n_calls = len(fake_harness.calls)
-    hint = {"lane": "run", "rationale": "y" * 4000}
-    r = c.post(f"/api/sessions/{sid}/messages",
-               json={"text": "hi", "classifier_hint": hint}, headers=_h("t-alpha"))
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
-    assert len(fake_harness.calls) == n_calls  # nothing forwarded
-
-
-def test_message_harness_404_maps_session_not_found(fake_harness):
-    c = _client()
-    sid = _create(c)
-    _respond_with(fake_harness, lambda: FakeResponse(404, {"error": "session_not_found"}))
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-alpha"))
-    assert r.status_code == 404
-    assert r.json()["error"]["error_code"] == "session_not_found"
-
-
-def test_cross_tenant_message_is_404_no_oracle(fake_harness):
-    """Tenant B posting to tenant A's session gets the SAME 404 an unknown
-    session would — never a 403 that confirms existence."""
-    c = _client()
-    sid = _create(c, tenant="t-alpha")
-    n_calls = len(fake_harness.calls)
-    r = c.post(f"/api/sessions/{sid}/messages", json={"text": "hi"}, headers=_h("t-beta"))
-    assert r.status_code == 404
-    assert r.json()["error"]["error_code"] == "session_not_found"
-    assert len(fake_harness.calls) == n_calls  # short-circuited app-side
-
-
-# --------------------------------------------------------------------------- #
-# stream / transcript / archive passthrough
-# --------------------------------------------------------------------------- #
-def test_stream_relays_bytes_and_passes_after_seq(fake_harness):
-    c = _client()
-    sid = _create(c)
-    chunks = [b'data: {"seq":7,"type":"turn_started"}\n\n',
-              b'data: {"seq":8,"type":"turn_complete"}\n\n']
-
-    def responder(method, url, kwargs):
-        assert method == "GET" and url.endswith(f"/converse/sessions/{sid}/stream")
-        assert kwargs["params"] == {"afterSeq": 6, "tenantId": "t-alpha"}
-        return FakeResponse(200, chunks=chunks)
-    fake_harness.responder = responder
-
-    r = c.get(f"/api/sessions/{sid}/stream?after_seq=6", headers=_h("t-alpha"))
-    assert r.status_code == 200, r.text
-    assert r.headers["content-type"].startswith("text/event-stream")
-    assert r.content == b"".join(chunks)  # verbatim byte relay
-
-
-def test_cross_tenant_stream_transcript_archive_short_circuit_app_side(fake_harness):
-    """The ownership 404s on stream/transcript/archive must fire APP-SIDE:
-    same session_not_found shape as /messages, and NOTHING forwarded to the
-    harness (deleting the short-circuits would leak the request + tenant
-    header upstream while the FakeHarness default 404 masked it)."""
-    c = _client()
-    sid = _create(c, tenant="t-alpha")
-    n = len(fake_harness.calls)
-    r_stream = c.get(f"/api/sessions/{sid}/stream", headers=_h("t-beta"))
-    r_transcript = c.get(f"/api/sessions/{sid}/transcript", headers=_h("t-beta"))
-    r_archive = c.request("DELETE", f"/api/sessions/{sid}", headers=_h("t-beta"))
-    for r in (r_stream, r_transcript, r_archive):
+# =========================================================================== #
+# router guards fire BEFORE any harness traffic
+# =========================================================================== #
+def test_unknown_and_cross_tenant_404_identical_no_stub_traffic(client, wired):
+    url, state = wired
+    sess = _new_session(tenant_id="tenant-owner")
+    r_unknown = client.post("/api/sessions/no-such-session/messages",
+                            json={"text": "hi"}, headers=_h("tenant-owner"))
+    r_foreign = client.post(f"/api/sessions/{sess['session_id']}/messages",
+                            json={"text": "hi"}, headers=_h("tenant-intruder"))
+    for r in (r_unknown, r_foreign):
         assert r.status_code == 404, r.text
         assert r.json()["error"]["error_code"] == "session_not_found"
-    assert len(fake_harness.calls) == n  # short-circuited app-side, zero forwarded
+        assert r.json()["error"]["retryable"] is False
+    assert state.hits == 0  # guard fired app-side; nothing forwarded
 
 
-def test_stream_meters_completed_turns_into_agent_ledger(fake_harness, monkeypatch, tmp_path):
-    """The relay's metering observer appends ONE agent_ledger line per completed
-    turn (turn_usage joined with turn_complete) — and a replayed reconnect of
-    the same events does not double-count."""
-    ledger = tmp_path / "agent_ledger.jsonl"
-    monkeypatch.setenv("LEAF_AGENT_LEDGER", str(ledger))
-    monkeypatch.setattr(sessions_router, "_METERED_TURNS", set())
-    c = _client()
-    sid = _create(c)
-    events = [
-        {"v": 1, "session_id": sid, "turn_id": "turn-9", "seq": 1,
-         "type": "turn_started", "data": {"model": "m"}},
-        {"v": 1, "session_id": sid, "turn_id": "turn-9", "seq": 2,
-         "type": "turn_usage",
-         "data": {"turns": 1, "input_tokens": 10, "output_tokens": 5,
-                  "cost_tokens": 1500, "total_cost_usd": 0.03}},
-        {"v": 1, "session_id": sid, "turn_id": "turn-9", "seq": 3,
-         "type": "turn_complete", "data": {"stop_reason": "end_turn"}},
-    ]
-    chunks = [f"data: {json.dumps(ev)}\n\n".encode("utf-8") for ev in events]
-    fake_harness.responder = lambda m, u, k: FakeResponse(200, chunks=list(chunks))
-
-    r = c.get(f"/api/sessions/{sid}/stream", headers=_h("t-alpha"))
-    assert r.status_code == 200, r.text
-    assert r.content == b"".join(chunks)  # observer never touches the relay bytes
-
-    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["kind"] == "turn"
-    assert row["tenant_id"] == "t-alpha" and row["session_id"] == sid
-    assert row["turn_id"] == "turn-9" and row["cost_tokens"] == 1500
-    assert row["usd_est"] == 0.03 and row["stop_reason"] == "end_turn"
-
-    # reconnect replays the same events (after_seq semantics) — no double line
-    r2 = c.get(f"/api/sessions/{sid}/stream", headers=_h("t-alpha"))
-    assert r2.status_code == 200
-    assert len(ledger.read_text(encoding="utf-8").splitlines()) == 1
+def test_exactly_one_of_text_confirm_409_no_stub_traffic(client, wired):
+    url, state = wired
+    sess = _new_session()
+    both = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "confirm": {"confirmationId": "x", "approved": True}},
+        headers=_h(sess["tenant_id"]))
+    neither = client.post(f"/api/sessions/{sess['session_id']}/messages",
+                          json={}, headers=_h(sess["tenant_id"]))
+    assert both.status_code == 409 and neither.status_code == 409
+    assert both.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert state.hits == 0
 
 
-def test_transcript_passthrough(fake_harness):
-    c = _client()
-    sid = _create(c)
-    events = [{"seq": 1, "type": "turn_started", "data": {}}]
-    fake_harness.responder = lambda m, u, k: FakeResponse(200, {"events": events})
-    r = c.get(f"/api/sessions/{sid}/transcript?limit=50", headers=_h("t-alpha"))
-    assert r.status_code == 200, r.text
-    b = r.json()
-    jsonschema.validate(b, ENVELOPE_SCHEMA)
-    assert b["events"] == events
-    assert fake_harness.calls[-1]["params"] == {"limit": 50, "tenantId": "t-alpha"}
-
-
-def test_archive_passthrough_and_forgets_session(fake_harness):
-    c = _client()
-    sid = _create(c)
-    fake_harness.responder = lambda m, u, k: FakeResponse(200, {"archived": True})
-    r = c.request("DELETE", f"/api/sessions/{sid}", headers=_h("t-alpha"))
-    assert r.status_code == 200, r.text
-    assert r.json()["archived"] is True
-    assert sid not in sessions_router._SESSIONS
-    assert fake_harness.calls[-1]["method"] == "DELETE"
-
-
-def test_unexpected_harness_4xx_is_an_error_not_a_fake_success(fake_harness):
-    """A harness-secret mismatch (401) on create/transcript/archive must surface as
-    an upstream failure — never 200 {session_id: null} / an empty transcript / a
-    falsely archived session."""
-    c = _client()
-    sid = _create(c)
-    fake_harness.responder = lambda m, u, k: FakeResponse(401, {"error": "unauthorized"})
-
-    r_create = c.post("/api/sessions", json={"drawing_id": "demo"}, headers=_h("t-alpha"))
-    r_transcript = c.get(f"/api/sessions/{sid}/transcript", headers=_h("t-alpha"))
-    r_archive = c.request("DELETE", f"/api/sessions/{sid}", headers=_h("t-alpha"))
-    for r in (r_create, r_transcript, r_archive):
-        assert r.status_code == 502, r.text
-        b = r.json()
-        jsonschema.validate(b, ENVELOPE_SCHEMA)
-        assert b["error"]["error_code"] == "BROKER_UNREACHABLE"
-        assert b["degraded_mode"] is True
-    assert sid in sessions_router._SESSIONS  # a failed archive must not forget it
+def test_entitlement_denied_403_before_any_harness_traffic_or_events(client, wired, monkeypatch):
+    """The converse entitlement gate fires before dispatch: standard 403 shape,
+    zero harness traffic, and NO turn_started event ever recorded (the denied
+    message must not pollute the durable transcript)."""
+    url, state = wired
+    sess = _new_session(tenant_id="tenant-restricted")
+    monkeypatch.setattr(entitlements, "resolve_tier", lambda tenant: "restricted")
+    r = _post_text(client, sess)
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["entitlement_required"] is True
+    assert body["required"] == "converse"
+    assert body["error"]["error_code"] == "ENTITLEMENT_REQUIRED"
+    assert state.hits == 0
+    assert session_store.recent_events(sess["session_id"], 10) == []
 
 
 # --------------------------------------------------------------------------- #
