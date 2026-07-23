@@ -528,7 +528,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     # spawn-failure path end to end (attempt 2+ runs the real argv, so the
     # drill proves a transient spawn failure survives as a retried PASS).
     fault = os.environ.get("LEAF_GATE_FAULT_INJECT", "")
-    if fault and attempt == 1 and fault.split(":", 1)[0] == suite.id:
+    if fault and attempt == 1 and fault == f"{suite.id}:spawn":
         argv = [argv[0] + ".fault-injected-missing.exe"] + argv[1:]
     spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
