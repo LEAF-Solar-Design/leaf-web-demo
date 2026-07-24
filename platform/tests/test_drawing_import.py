@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
+from pathlib import Path
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -17,8 +20,8 @@ def _binding(org_id, *, role="owner"):
 
 
 def _ready_upload(org_id, *, tenant_kind="account", version=1,
-                  marker_intake_sha256=None):
-    drawing_id = uuid.uuid4()
+                  marker_intake_sha256=None, drawing_id=None):
+    drawing_id = drawing_id or str(uuid.uuid4())
     tenant_id = str(org_id)
     object_key = (
         f"tenants/{tenant_id}/drawings/{drawing_id}/v/{version:08d}.dwg"
@@ -103,7 +106,7 @@ def test_ready_account_upload_import_and_exact_api_replay(client, make_org):
     first_body = first.json()
     assert first_body["replayed"] is False
     version = first_body["drawing_version"]
-    assert version["drawing_id"] == str(drawing_id)
+    assert version["drawing_id"] == drawing_id
     assert version["seq"] == 1
     assert version["oss_object"] == object_key
     assert version["intake_ref"] == object_key[:-4] + ".intake.json"
@@ -188,7 +191,8 @@ def test_foreign_and_guest_sources_share_one_not_found_shape(client, make_org):
             headers=_headers(org.org_id, binding.binding_id, f"hidden-{index}"),
             json=_body(drawing_id),
         )
-        for index, drawing_id in enumerate((guest_drawing, foreign_drawing, uuid.uuid4()))
+        for index, drawing_id in enumerate(
+            (guest_drawing, foreign_drawing, "u-0000000000"))
     ]
     assert [response.status_code for response in responses] == [404, 404, 404]
     assert len({response.text for response in responses}) == 1
@@ -251,6 +255,138 @@ def test_import_requires_mutating_role_and_canonical_authority(client, make_org)
         headers={"X-Org-Id": str(org.org_id), "Idempotency-Key": "missing-actor"},
         json=_body(drawing_id),
     ).status_code == 400
+
+
+def test_import_rejects_malformed_account_upload_id(client, make_org):
+    org, project = _canonical_project(make_org, "Drawing import id syntax")
+    binding = _binding(org.org_id)
+    path = f"/api/projects/{project.project_id}/drawing-versions/import"
+
+    canonical = str(uuid.uuid4())
+    for index, drawing_id in enumerate((
+        canonical.upper(), canonical.replace("-", ""), "u-short",
+        "u-ABCDEF0123", "u-01234567890", "u-012345678g",
+        "../u-0123456789",
+    )):
+        response = client.post(
+            path,
+            headers=_headers(org.org_id, binding.binding_id, f"bad-id-{index}"),
+            json=_body(drawing_id),
+        )
+        assert response.status_code == 422
+
+
+def test_legacy_account_upload_id_maps_to_stable_canonical_uuid(client, make_org):
+    org, project = _canonical_project(make_org, "Legacy drawing import")
+    binding = _binding(org.org_id)
+    legacy_id = "u-0123456789"
+    _ready_upload(org.org_id, drawing_id=legacy_id)
+    path = f"/api/projects/{project.project_id}/drawing-versions/import"
+
+    imported = client.post(
+        path,
+        headers=_headers(org.org_id, binding.binding_id, "legacy-source-first"),
+        json=_body(legacy_id),
+    )
+    assert imported.status_code == 201, imported.text
+    expected = uuid.uuid5(org.org_id, f"account_upload:{legacy_id}")
+    assert imported.json()["drawing_version"]["drawing_id"] == str(expected)
+    assert imported.json()["drawing_version"]["provenance"]["source"][
+        "drawing_id"] == legacy_id
+
+
+def test_source_upload_cannot_be_attached_to_another_project(client, make_org):
+    org, first_project = _canonical_project(make_org, "Drawing source owner")
+    second_project = store.create_project(org.org_id, "Other drawing project")
+    store.set_project_authority_mode(
+        org.org_id, second_project.project_id, "postgres_canonical")
+    binding = _binding(org.org_id)
+    drawing_id, *_ = _ready_upload(org.org_id)
+
+    first = client.post(
+        f"/api/projects/{first_project.project_id}/drawing-versions/import",
+        headers=_headers(org.org_id, binding.binding_id, "source-owner-first"),
+        json=_body(drawing_id),
+    )
+    assert first.status_code == 201, first.text
+
+    second = client.post(
+        f"/api/projects/{second_project.project_id}/drawing-versions/import",
+        headers=_headers(org.org_id, binding.binding_id, "source-owner-second"),
+        json=_body(drawing_id),
+    )
+    assert second.status_code == 404
+
+
+def test_account_upload_receipt_imports_exact_ready_source(
+        monkeypatch, tmp_path, make_org):
+    """The real upload receipt is valid input to the canonical import API."""
+    org, project = _canonical_project(make_org, "Upload receipt import")
+    binding = _binding(org.org_id)
+    server_dir = str(Path(__file__).parents[2] / "server")
+    sys.path.insert(0, server_dir)
+    try:
+        monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
+        monkeypatch.setenv("LEAF_UPLOAD_STORE", "postgres")
+        monkeypatch.setenv("LEAF_UPLOADS_DIR", str(tmp_path / "uploads"))
+        monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+
+        import guest_uploads
+        from routers import uploads as uploads_router
+
+        monkeypatch.setattr(
+            guest_uploads, "start_extraction_thread",
+            lambda tenant_id, drawing_id, ext: guest_uploads.run_extraction(
+                tenant_id, drawing_id, ext),
+        )
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from leaf_platform.api import router as platform_router
+
+        test_app = FastAPI()
+        test_app.include_router(uploads_router.router)
+        test_app.include_router(platform_router)
+        test_client = TestClient(test_app)
+        dxf = (
+            "0\nSECTION\n2\nENTITIES\n"
+            "0\nLWPOLYLINE\n5\nABCD\n8\nPanels\n70\n1\n"
+            "10\n1\n20\n2\n10\n3\n20\n4\n10\n5\n20\n6\n"
+            "0\nENDSEC\n0\nEOF\n"
+        ).encode()
+        upload = test_client.post(
+            "/api/drawings/upload",
+            files={"file": ("receipt.dxf", io.BytesIO(dxf))},
+            headers={"X-Tenant-Id": str(org.org_id)},
+        )
+        assert upload.status_code == 202, upload.text
+        receipt = upload.json()
+        assert str(uuid.UUID(receipt["drawing_id"])) == receipt["drawing_id"]
+
+        status = test_client.get(
+            f"/api/drawings/{receipt['drawing_id']}/upload-status",
+            headers={"X-Tenant-Id": str(org.org_id)},
+        )
+        assert status.status_code == 200, status.text
+        assert status.json()["status"] == "ready"
+        extracted_version = status.json()["extracted_version"]
+        assert extracted_version == 1
+
+        imported = test_client.post(
+            f"/api/projects/{project.project_id}/drawing-versions/import",
+            headers=_headers(
+                org.org_id, binding.binding_id, "real-upload-receipt-import"),
+            json=_body(receipt["drawing_id"], version=extracted_version),
+        )
+        assert imported.status_code == 201, imported.text
+        body = imported.json()
+        assert body["replayed"] is False
+        assert body["drawing_version"]["provenance"]["source"]["drawing_id"] == (
+            receipt["drawing_id"])
+        assert uuid.UUID(body["drawing_version"]["drawing_id"])
+        assert uuid.UUID(body["drawing_version"]["version_id"])
+    finally:
+        sys.path.remove(server_dir)
 
 
 def test_concurrent_exact_replay_creates_one_version(make_org):

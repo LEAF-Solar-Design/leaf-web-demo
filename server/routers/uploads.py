@@ -5,7 +5,7 @@
          status: "extracting"}   (envelope-wrapped per §10)
     GET  /api/drawings/{drawing_id}/upload-status
          -> {status: extracting|ready|failed, error|null, filename, uploaded_at,
-             retention_expires_at|null}
+             retention_expires_at|null, extracted_version:int|null}
 
 AUTH IS OPTIONAL here — deliberately not `Depends(deps.require_tenant)`,
 because a signed-out visitor is this endpoint's primary caller:
@@ -39,7 +39,7 @@ from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
 
-_MINT_ATTEMPTS = 4  # 40 random bits per attempt; collision is cosmic-ray territory
+_MINT_ATTEMPTS = 4  # UUIDv4 per attempt; collision is cosmic-ray territory
 
 
 def _client_ip(request: Request) -> str:
@@ -270,17 +270,21 @@ def upload_drawing(
             guest_uploads.start_extraction_thread(str(tenant), drawing_id, ext)
 
     if drawing_id is None:
-        # Account uploads (random ids: two intentional copies of one file
+        # Account uploads (random UUIDs: two intentional copies of one file
         # stay two drawings) — plus the astronomically unlikely guest case of
         # a foreign manifest squatting the derived id (quota already charged
         # above in that case).
         for _ in range(_MINT_ATTEMPTS):
-            candidate = guest_uploads.new_upload_drawing_id()
+            candidate = (
+                guest_uploads.new_account_upload_drawing_id()
+                if tenant_kind == "account"
+                else guest_uploads.new_upload_drawing_id()
+            )
             if (not backend.exists(store.manifest_key(str(tenant), candidate))
                     and guest_uploads.read_marker(backend, str(tenant), candidate) is None):
                 drawing_id = candidate
                 break
-        if drawing_id is None:  # pragma: no cover - 4 consecutive 40-bit collisions
+        if drawing_id is None:  # pragma: no cover - 4 consecutive random collisions
             return error_response(ErrorCode.INTERNAL, "could not mint a drawing id",
                                   retryable=True, status_code=500)
 

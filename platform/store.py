@@ -46,6 +46,19 @@ OrgId = uuid.UUID
 ProjectId = uuid.UUID
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ACCOUNT_UPLOAD_ID_RE = re.compile(r"^u-[0-9a-f]{10}$")
+
+
+def is_account_upload_source_id(value: object) -> bool:
+    """Accept only current canonical UUID receipts or the legacy upload form."""
+    if not isinstance(value, str):
+        return False
+    if _ACCOUNT_UPLOAD_ID_RE.fullmatch(value) is not None:
+        return True
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
 
 
 class DrawingImportUnavailable(ValueError):
@@ -527,7 +540,7 @@ def import_ready_account_upload(
     org_id: uuid.UUID,
     project_id: uuid.UUID,
     *,
-    source_drawing_id: uuid.UUID,
+    source_drawing_id: str,
     source_version: int,
     name: str,
     idempotency_key: str,
@@ -549,6 +562,18 @@ def import_ready_account_upload(
         raise DrawingImportConflict("drawing name must contain 1 to 200 characters")
     if isinstance(source_version, bool) or source_version < 1:
         raise DrawingImportConflict("source version must be a positive integer")
+    if not is_account_upload_source_id(source_drawing_id):
+        raise DrawingImportUnavailable(
+            "project or source account upload is unavailable")
+
+    # New account upload receipts are already canonical UUIDs. Legacy account
+    # receipts used the external ``u-<10 hex>`` namespace, so map those to one
+    # stable tenant-scoped canonical UUID without changing their source lookup.
+    canonical_drawing_id = (
+        uuid.uuid5(org_id, f"account_upload:{source_drawing_id}")
+        if _ACCOUNT_UPLOAD_ID_RE.fullmatch(source_drawing_id)
+        else uuid.UUID(source_drawing_id)
+    )
 
     fingerprint_input = {
         "actor_binding_id": str(actor_binding_id),
@@ -688,21 +713,20 @@ def import_ready_account_upload(
                 "imported_by_binding_id": str(actor_binding_id),
             }
 
-            # A source drawing keeps one stable UUID across both stores. This
-            # also prevents the same immutable source from being attached to a
-            # different project.
+            # The deterministic canonical UUID prevents the same immutable
+            # source upload from being attached to a different project.
             cur.execute(
                 "INSERT INTO drawing_artifacts "
                 "(drawing_id, project_id, org_id, name) "
                 "VALUES (%(drawing_id)s, %(project_id)s, %(org_id)s, %(name)s) "
                 "ON CONFLICT (drawing_id) DO NOTHING",
-                {"drawing_id": source_drawing_id, "project_id": project_id,
+                {"drawing_id": canonical_drawing_id, "project_id": project_id,
                  "org_id": org_id, "name": name},
             )
             cur.execute(
                 "SELECT drawing_id, project_id, name FROM drawing_artifacts "
                 "WHERE org_id = %(org_id)s AND drawing_id = %(drawing_id)s FOR UPDATE",
-                {"org_id": org_id, "drawing_id": source_drawing_id},
+                {"org_id": org_id, "drawing_id": canonical_drawing_id},
             )
             artifact = cur.fetchone()
             if artifact is None or artifact["project_id"] != project_id or artifact["name"] != name:
@@ -717,7 +741,7 @@ def import_ready_account_upload(
                     "VALUES (%(version_id)s, %(drawing_id)s, %(project_id)s, %(org_id)s, "
                     "%(seq)s, %(oss_object)s, %(intake_ref)s, %(created_by)s, %(provenance)s, "
                     "%(key)s, %(fingerprint)s) RETURNING " + columns,
-                    {"version_id": new_uuid(), "drawing_id": source_drawing_id,
+                    {"version_id": new_uuid(), "drawing_id": canonical_drawing_id,
                      "project_id": project_id, "org_id": org_id, "seq": source_version,
                      "oss_object": object_key, "intake_ref": intake_ref,
                      "created_by": str(actor_binding_id), "provenance": Jsonb(provenance),
