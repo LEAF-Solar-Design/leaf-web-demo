@@ -1,0 +1,45 @@
+{
+  "schema": "leaf.cat-oracle.fixtures.v1",
+  "templates": [
+    "sitting-v1",
+    "standing-v1",
+    "curled-v1"
+  ],
+  "regions": [
+    "head",
+    "ear_left",
+    "ear_right",
+    "body",
+    "leg_left",
+    "leg_right",
+    "tail"
+  ],
+  "sha256": {
+    "calibration.json": "a7111dc71076701aef3c38689824604f67caccaddce65019eb3b4803771d1726",
+    "curled-v1.body.pbm": "e84c8bc1a14e9e88a9fbb4b8f56ff5382402a14b794e1713dae98c0555555bce",
+    "curled-v1.ear_left.pbm": "a2755e134c81b553057302e0fe5cbf26ddc396a863d2933e59c9f1e1577613ae",
+    "curled-v1.ear_right.pbm": "97ca8fcf6a29566cf719cc6dab994d967f335d71b4b5647315ab7c8a87fc7e71",
+    "curled-v1.head.pbm": "88ad0d9a6afc6088b326fad831e094f77d4114c61d1d105bcbeb8589f0e5129a",
+    "curled-v1.leg_left.pbm": "6e6ef2fc926123c89d169a0ead71a737f5fb7ab6043f119eae48d616156532cc",
+    "curled-v1.leg_right.pbm": "7472480235100dd6e28616c39263daaac285feb0dbb1b1e424c0ef3754bcbf60",
+    "curled-v1.pbm": "389bf1048b36c0e8aebe9354d186912b0bb40c3375a18d408a2ae375be700a82",
+    "curled-v1.tail.pbm": "f3816490dde84e94ca164ce18bfb3d289b70dcc9da4e9430f58d41c32445ffb6",
+    "sitting-v1.body.pbm": "7abe19b89f551856cedbc767fc338e840f1c86267c64c2f1b9b7e71e00a95ae1",
+    "sitting-v1.ear_left.pbm": "82b54e1dd1e25e2126e4e4751aa738c7abb1194f012dd06640b57408f97150ba",
+    "sitting-v1.ear_right.pbm": "a89752486ec4048a8390c0aab506272f78dbeecd8fd2766864c0382d90cdc68a",
+    "sitting-v1.head.pbm": "abdae994eb7b828d1c55c5c0be4b4acabf8a9ef18a12ae51e8c591cf76ca7f29",
+    "sitting-v1.leg_left.pbm": "e34f9e208777b18029eb7901ab9872458fb4785c4613ff06953c9d2759db686e",
+    "sitting-v1.leg_right.pbm": "be3674f228ea99c9077df62ac92fef6f1e599030477c71727915b5696933a178",
+    "sitting-v1.pbm": "d31fa2b01da141d15b10a8d9e979015a4456d3d83659522d8538c8d52297995a",
+    "sitting-v1.tail.pbm": "30669b2315e6c644d25a3dafc0643d22e7812792c4faf3cfdeef1c840d9066f3",
+    "standing-v1.body.pbm": "3115a673a685ac54a6640ed3ab745591971b4a0cc64d476c202322c17c9db462",
+    "standing-v1.ear_left.pbm": "97757c196d88899edef602a5b9af4b4b1964d2e3e9bdaa7e9c8260482b87d284",
+    "standing-v1.ear_right.pbm": "1ec4c6f30cf524e29a9ef1857c645413b2aea6641a6e0f6575133dc7c37189db",
+    "standing-v1.head.pbm": "80d0701b6e9ea23d97fc2934c4f76bfb8dee4807617d3f0669a85352ecc57171",
+    "standing-v1.leg_left.pbm": "360d49307d4d92330d34b75c802d99077aca71fa3370038c2ff1b9b4f0eb43ea",
+    "standing-v1.leg_right.pbm": "abcf1b1291d5f49a6aaa13bfa79ebe0e815e93bfd0118f712d38dd8b60da8143",
+    "standing-v1.pbm": "d0a2c323e23ca52d630676746ab340cf9cd8cb0a958f8454d3d96f28fd763da4",
+    "standing-v1.tail.pbm": "4b1abb60c819cecf398a70391aafd3a7103df09358a7df987ce0ece69c0ffeed",
+    "thresholds.json": "89998108007f6b471aca6962dbadd3fa29ad859a55f1423ff4bb863756a1c79e"
+  }
+}

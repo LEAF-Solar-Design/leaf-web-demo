@@ -1,0 +1,8 @@
+{
+  "schema": "leaf.cat-oracle.thresholds.v1",
+  "min_iou": 0.985,
+  "max_chamfer_px": 0.15,
+  "min_region_recall": 0.98,
+  "max_overlap_pixels": 0
+}
+
