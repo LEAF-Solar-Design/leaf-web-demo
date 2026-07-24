@@ -180,3 +180,107 @@ describe("mount your LLM — bring-your-own credential", () => {
     expect(serializedState(store)).toContain("claude-sonnet-5");
   });
 });
+
+describe("mount your LLM — a credential pasted into the prompt", () => {
+  // A 26-char credential: clears the >=24 floor, but is deliberately invisible to
+  // TOKENISH (not sk-ant-*, under 40 chars), so these tests prove VALUE-based
+  // scrubbing rather than passing by accident on the pattern.
+  const PASTED = "BYO-credential-value-1234!";
+
+  function build() {
+    const runner = new FakeConverseRunner();
+    const store = new FakeSessionStore();
+    const gate = new FakeGateClient();
+    const adapter = new SpineTurnAdapter({
+      oauth: new UnusedOAuthProvider(),
+      appRun: new FakeAppRunClient(),
+      gate,
+      store,
+      runnerFor: () => runner,
+    });
+    return { adapter, runner, store, gate };
+  }
+
+  it("never reaches the model, so it cannot be echoed back", async () => {
+    const { adapter, runner } = build();
+    await drain(
+      adapter.runTurn(
+        turnInput({
+          text: `please use ${PASTED} for me`,
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+
+    // The runner is what talks to the SDK. If the prompt is clean, the model
+    // never sees the value and cannot emit it in a text_delta or a tool param.
+    expect(JSON.stringify(runner.runs)).not.toContain(PASTED);
+    expect(JSON.stringify(runner.runs)).toContain("[REDACTED]");
+  });
+
+  it("is scrubbed out of prior messages too, not just this turn's text", async () => {
+    const { adapter, runner } = build();
+    await drain(
+      adapter.runTurn(
+        turnInput({
+          text: "carry on",
+          messages: [{ role: "user", text: `earlier I said ${PASTED}` }],
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+
+    expect(JSON.stringify(runner.runs)).not.toContain(PASTED);
+  });
+
+  it("never reaches the durable transcript or the wire", async () => {
+    const { adapter, store } = build();
+    const events = await drain(
+      adapter.runTurn(
+        turnInput({
+          text: `key is ${PASTED}`,
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+
+    expect(serializedState(store)).not.toContain(PASTED);
+    expect(JSON.stringify(events)).not.toContain(PASTED);
+  });
+
+  it("keeps every downstream copy IDENTICAL, so approval hashes cannot mismatch", async () => {
+    // This is the property the round-3/4 sink-scrubbing approach could not hold:
+    // it scrubbed the harness copy while the app gate kept the raw one, so the
+    // two args hashes disagreed and approval replay failed as args_mismatch.
+    // Scrubbing the source means every copy derives from the same scrubbed text.
+    const { adapter, runner, store, gate } = build();
+    await drain(
+      adapter.runTurn(
+        turnInput({
+          text: `use ${PASTED} now`,
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+
+    for (const view of [
+      JSON.stringify(runner.runs),
+      JSON.stringify(gate.checks ?? []),
+      serializedState(store),
+    ]) {
+      expect(view).not.toContain(PASTED);
+    }
+  });
+
+  it("leaves content alone when no wire credential is supplied", async () => {
+    // No wire credential, so the tenant's linked grant is resolved instead. Its
+    // value here is below the redaction floor, so nothing is rewritten — the
+    // point being that ordinary prose is never touched.
+    const { adapter, runner } = makeAdapter(new RecordingOAuthProvider());
+    const text = "a perfectly ordinary message with no secrets";
+    await drain(adapter.runTurn(turnInput({ text })));
+
+    expect(JSON.stringify(runner.runs)).toContain(text);
+    expect(JSON.stringify(runner.runs)).not.toContain("[REDACTED]");
+  });
+});

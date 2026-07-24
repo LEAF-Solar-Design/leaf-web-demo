@@ -45,6 +45,7 @@
 
 import { ConverseLoop } from "./converseLoop.js";
 import { wireGrantToAgentGrant } from "../ports/wireGrant.js";
+import { grantSecrets, isRedactableSecret, redactSecrets } from "../redact.js";
 import type {
   AgentGrant,
   AppRunClient,
@@ -112,12 +113,39 @@ export class SpineTurnAdapter implements ConverseRunner {
       ? wireGrantToAgentGrant(input.credential_grant)
       : await this.ports.oauth.getGrant(input.tenant_id);
 
-    // The grant goes to the runner's env and NOWHERE else — it is never written
-    // to this store, the wire, or a log. See the scope note in ../redact.ts for
-    // why the adapter does NOT additionally scrub the credential out of turn
-    // content: doing so broke the approval flow (the app gate keeps its own raw
-    // copy, so the two hashes disagreed) and corrupted event data, without
-    // being the property this system actually owes.
+    // Scrub the credential out of the INBOUND CONTENT, exactly once, here.
+    //
+    // A user who pastes their own key into the prompt would otherwise have it
+    // copied into the transcript, the app gate's pending record, confirmation
+    // args_json, and the wire. Rounds 3-5 of the PR #117 review tried to scrub
+    // each of those SINKS and that approach fails structurally:
+    //   - the app gate keeps its own raw copy, so scrubbing the harness copy
+    //     made the two args hashes disagree and approval replay died as
+    //     args_mismatch;
+    //   - walking event objects to redact keys dropped fields on collision and
+    //     let `__proto__` mutate the rebuilt object's prototype.
+    //
+    // Scrubbing the SOURCE has neither failure mode. Every downstream copy is
+    // derived from this one scrubbed input, so they all agree by construction
+    // and no hash can mismatch. It touches only `text` strings — never a key,
+    // never a structure — so it cannot drop a field or pollute a prototype. And
+    // because the model never receives the credential, it cannot echo it back
+    // into a text_delta or propose a tool parameter containing it.
+    //
+    // Only long, whitespace-free values are eligible (isRedactableSecret), so a
+    // short or common string can never shred ordinary prose.
+    const secrets = grantSecrets(grant).filter(isRedactableSecret);
+    if (secrets.length) {
+      input = {
+        ...input,
+        ...(input.text !== undefined ? { text: redactSecrets(input.text, secrets) } : {}),
+        messages: input.messages.map((m) => ({ ...m, text: redactSecrets(m.text, secrets) })),
+      };
+    }
+
+    // The grant itself goes to the runner's env and NOWHERE else — never to this
+    // store, the wire, or a log. Content is handled above, at the input, which is
+    // why nothing downstream of here needs a scrubbing wrapper.
     const store = this.ports.store;
 
     // 2. The loop's own session row (idempotent per tenant+drawing).
