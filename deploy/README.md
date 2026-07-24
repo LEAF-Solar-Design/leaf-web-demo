@@ -168,6 +168,7 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 | `LEAF_DRAWING_STORE` | app, broker | `legacy` | drawing manifest, version, checkout, and extraction authority selector |
 | `LEAF_UPLOAD_STORE` | app | `legacy` | upload-attempt and purge authority selector |
 | `LEAF_GUEST_CAP_HMAC_SECRET` | app | empty | required keyed IP pseudonymization secret in PostgreSQL guest-cap mode |
+| `LEAF_GUEST_SECRET` | app | empty | required guest-upload session signing secret; staging generates it in Secrets Manager and injects it into the app task |
 | `LEAF_BROKER_STORE` | broker | `legacy` | broker tenant and ledger authority selector |
 | `LEAF_BROKER_DATABASE_URL` | broker | empty | compose input mapped to the broker's `DATABASE_URL` only |
 | `LEAF_JOBS_STORE` | broker | `legacy` | broker callback completion uses the same async-job authority as the app |
