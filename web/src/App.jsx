@@ -45,7 +45,7 @@ import DemoTour from './demo/DemoTour.jsx'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
 import { THRESHOLDS, classifyAgentError } from './converse.js'
-import useConverseSessionController from './controllers/useConverseSessionController.js'
+import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -291,12 +291,13 @@ export default function App() {
   // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
   const [agentMode, setAgentMode] = useState(null)  // null | 'race' (chip primary) | 'primary' (panel primary)
   const [agentBanner, setAgentBanner] = useState(null) // {kind, message} calm degraded note
+  const { converse } = useWorkspaceControllers()
   const {
     sessionId: agentSessionId,
     turns: agentTurns,
     startTurn: startAgentTurn,
     clear: clearAgentSession,
-  } = useConverseSessionController({ drawingId: DEFAULT_DRAWING_ID, retryNotFound: true })
+  } = converse
 
   const viewerRef = useRef(null)
   const authorSectionRef = useRef(null)

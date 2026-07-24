@@ -12,6 +12,7 @@ import { useRoute, navigate } from './router.js'
 import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
+import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import './landing.css'
 
 const App = React.lazy(() => import('../App.jsx'))
@@ -79,9 +80,11 @@ export default function SiteRoot() {
   if (scene === 'app') {
     // The console ALONE — no stage mounted; App owns its own Viewer.
     return (
-      <Suspense fallback={null}>
-        <App />
-      </Suspense>
+      <WorkspaceControllerProvider drawingId="rooftop_demo" retryNotFound>
+        <Suspense fallback={null}>
+          <App />
+        </Suspense>
+      </WorkspaceControllerProvider>
     )
   }
 
@@ -94,10 +97,15 @@ export default function SiteRoot() {
   }
 
   return (
-    <div className="stage-root" data-scene={scene} ref={stageRef}>
-      <StageLayer intakeOverride={scene === 'tool' ? operatorIntake : null} />
-      <LandingCast onTryTool={() => navigate('/try')} />
-      <ToolCast active={scene === 'tool'} onIntakeChange={setOperatorIntake} />
-    </div>
+    <WorkspaceControllerProvider
+      key={scene}
+      drawingId={scene === 'tool' ? 'cat-panels' : 'rooftop_demo'}
+    >
+      <div className="stage-root" data-scene={scene} ref={stageRef}>
+        <StageLayer intakeOverride={scene === 'tool' ? operatorIntake : null} />
+        <LandingCast onTryTool={() => navigate('/try')} />
+        <ToolCast active={scene === 'tool'} onIntakeChange={setOperatorIntake} />
+      </div>
+    </WorkspaceControllerProvider>
   )
 }

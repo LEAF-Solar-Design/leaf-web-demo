@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getDrawingIntake, getSession, redoDrawing, undoDrawing } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
-import useConverseSessionController from '../controllers/useConverseSessionController.js'
+import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 import useJobController from '../controllers/useJobController.js'
 import { navigate } from './router.js'
@@ -24,9 +24,8 @@ function phaseLabel(phase) {
 
 export default function ToolCast({ active, onIntakeChange }) {
   const [prompt, setPrompt] = useState(CAT_REQUEST)
-  const { sessionId, turns, startTurn, resetCached } = useConverseSessionController({
-    drawingId: 'cat-panels',
-  })
+  const { converse } = useWorkspaceControllers()
+  const { sessionId, turns, startTurn, resetCached } = converse
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
   const [linkedJobId, setLinkedJobId] = useState(null)
