@@ -326,6 +326,56 @@ def test_store_representation_dxf_intake_blob_plus_cache(client):
     assert json.loads(backend.get(ckey).decode("utf-8"))["layers"] == ["Panels"]
 
 
+def test_dxf_layer_dedup_stays_linear_under_adversarial_input():
+    """REGRESSION (review blocker, 2026-07-24): the layer dedup must not be
+    quadratic in the number of UNIQUE layers.
+
+    Routing live guest DXF to this parser put it on an unauthenticated path,
+    and a guest picks the layer count: a LAYER entry costs ~36 bytes, so about
+    728k unique layers fit inside LEAF_UPLOAD_MAX_BYTES. With `x not in
+    <list>` dedup that measured 9.1s at 32k layers and extrapolated past an
+    hour of pegged CPU at the cap. With set-backed membership the same cap-
+    sized input parses in ~1.6s.
+
+    The bound here is deliberately loose (100k layers, 20s) so it is a
+    complexity guard, not a machine-speed benchmark: the old code needed well
+    over a minute for this input, the new code needs a fraction of a second."""
+    import time
+
+    import dxf_intake
+    n = 100_000
+    out = ["0", "SECTION", "2", "TABLES"]
+    for i in range(n):
+        out += ["0", "LAYER", "2", f"layer_name_number_{i:07d}"]
+    out += ["0", "ENDSEC", "0", "EOF"]
+    raw = "\n".join(out).encode()
+
+    t0 = time.perf_counter()
+    parsed = dxf_intake.parse_dxf_bytes(raw, source_name="wide.dxf")
+    elapsed = time.perf_counter() - t0
+
+    assert len(parsed["layers"]) == n, "every unique layer must survive dedup"
+    assert parsed["layers"][0] == "layer_name_number_0000000", "first-seen order preserved"
+    assert parsed["layers"][-1] == f"layer_name_number_{n - 1:07d}"
+    assert elapsed < 20.0, (
+        f"parsing {n} unique layers took {elapsed:.1f}s — the layer dedup has "
+        "gone quadratic again (see dxf_intake.seen_layers)")
+
+
+def test_dxf_layer_dedup_preserves_first_seen_order_with_repeats():
+    """The set is a membership index only — `layers` must still be the
+    first-seen ORDER of distinct names, which is part of the intake shape."""
+    import dxf_intake
+    body = (
+        "0\nSECTION\n2\nENTITIES\n"
+        "0\nLWPOLYLINE\n8\nBeta\n70\n1\n10\n0\n20\n0\n10\n1\n20\n1\n"
+        "0\nLWPOLYLINE\n8\nAlpha\n70\n1\n10\n0\n20\n0\n10\n2\n20\n2\n"
+        "0\nLWPOLYLINE\n8\nBeta\n70\n1\n10\n0\n20\n0\n10\n3\n20\n3\n"
+        "0\nENDSEC\n0\nEOF\n"
+    ).encode()
+    assert dxf_intake.parse_dxf_bytes(body)["layers"] == ["Beta", "Alpha"]
+
+
 def test_live_mode_dxf_parses_locally_and_never_calls_the_broker(client, monkeypatch):
     """REGRESSION (live staging, 2026-07-24): at APS_LIVE=1 a .dxf must still
     be parsed locally and must NOT be sent to the broker.

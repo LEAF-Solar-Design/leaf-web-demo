@@ -214,7 +214,9 @@ def verify_guest_session(token: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
-# guest rate limiting (cost exposure: each live extraction is a paid APS run)
+# guest rate limiting (cost exposure: each live DWG extraction is a paid APS
+# run; a DXF is parsed locally, so its cost is service CPU, not an APS charge —
+# dxf_intake is linear in input size, see its layer-dedup note)
 # --------------------------------------------------------------------------- #
 _RATE_LOCK = threading.Lock()
 _RATE_STATE: Dict[str, Any] = {"day": None, "per_ip": {}, "total": 0}
