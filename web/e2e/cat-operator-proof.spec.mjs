@@ -1,8 +1,9 @@
 import { expect, test } from '@playwright/test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { REQUEST, catProofResponse, makeCatProofState } from './catProofFixture.mjs'
+import { writeProofReceipt } from './proofReceipt.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..', '..')
@@ -14,6 +15,7 @@ test('operator request produces an approved cat version and undo restores its pa
   expect(proofState.count).toBe(3328)
   const browserErrors = []
   const failedResources = []
+  const apiEndpoints = []
   page.on('pageerror', (error) => browserErrors.push(error.message))
   page.on('console', (message) => {
     if (message.type() === 'error') browserErrors.push(message.text())
@@ -24,6 +26,7 @@ test('operator request produces an approved cat version and undo restores its pa
   await page.route('http://leaf-proof.invalid/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
+    apiEndpoints.push(`${request.method()} ${url.pathname}`)
     const body = request.postData() ? request.postDataJSON() : {}
     const result = catProofResponse({ method: request.method(), path: url.pathname, body }, proofState)
     return route.fulfill({
@@ -60,13 +63,38 @@ test('operator request produces an approved cat version and undo restores its pa
   await expect(page.getByRole('button', { name: 'Redo' })).toBeEnabled({ timeout: 10_000 })
   await page.locator('.workspace-card').screenshot({ path: join(PROOF_DIR, '03-undo-restored.png') })
 
-  writeFileSync(join(PROOF_DIR, 'receipt.json'), JSON.stringify({
-    scope: 'deterministic browser acceptance fixture, not a live Claude or APS run',
-    request: REQUEST,
-    panels_preserved: proofState.count,
-    proposal: { tool: 'arrange-panels-as-cat', capability: 'drawing.write', expected_head: 1 },
-    result: { verdict: 'pass', template: 'sitting-v1', iou: 1, outline_chamfer_px: 0, overlap_pixels: 0, version: 2, parent: 1 },
-    undo: { head: 1, redo_available: true },
-  }, null, 2) + '\n')
+  writeProofReceipt(join(PROOF_DIR, 'receipt.json'), {
+    capability_ids: ['CV-01', 'CV-02', 'RN-01', 'JB-01', 'VW-01', 'VR-01', 'VR-03'],
+    evidence_tier: 'contract',
+    route: '/app',
+    runtime: 'Vite with deterministic API transport',
+    api_endpoints: apiEndpoints,
+    assertions: [
+      'write proposal binds drawing.write and expected head 1',
+      'approved job produces version 2 with parent 1',
+      'cat oracle reports IoU 1.000 and zero overlap',
+      'undo restores version 1 and makes redo available',
+    ],
+    artifacts: [
+      '01-request-and-approval.png',
+      '02-cat-version.png',
+      '02-cat-version-full.png',
+      '03-undo-restored.png',
+    ],
+    result: {
+      verdict: 'pass',
+      request: REQUEST,
+      panels_preserved: proofState.count,
+      proposal: { tool: 'arrange-panels-as-cat', capability: 'drawing.write', expected_head: 1 },
+      cat_oracle: { template: 'sitting-v1', iou: 1, outline_chamfer_px: 0, overlap_pixels: 0 },
+      version: { head: 2, parent: 1 },
+      undo: { head: 1, redo_available: true },
+    },
+    limitations: [
+      'This is a deterministic browser contract, not a live Claude run.',
+      'This is a deterministic browser contract, not an APS run.',
+      'The unified /try route is covered by the companion standards-surface test.',
+    ],
+  })
   expect({ browserErrors, failedResources }).toEqual({ browserErrors: [], failedResources: [] })
 })

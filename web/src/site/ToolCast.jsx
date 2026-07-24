@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getDrawingIntake, getJob, getSession, redoDrawing, undoDrawing } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
-import { ensureSession, postMessage, resetSession } from '../converse.js'
+import useConverseSessionController from '../controllers/useConverseSessionController.js'
 import { navigate } from './router.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
@@ -20,8 +20,9 @@ function phaseLabel(phase) {
 
 export default function ToolCast({ active, onIntakeChange }) {
   const [prompt, setPrompt] = useState(CAT_REQUEST)
-  const [sessionId, setSessionId] = useState(null)
-  const [turns, setTurns] = useState([])
+  const { sessionId, turns, startTurn, resetCached } = useConverseSessionController({
+    drawingId: 'cat-panels',
+  })
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
   const [jobId, setJobId] = useState(null)
@@ -86,23 +87,16 @@ export default function ToolCast({ active, onIntakeChange }) {
     setError(null)
     setPhase('starting')
     try {
-      const drawingId = 'cat-panels'
-      const session = await ensureSession(drawingId)
-      setSessionId(session.session_id)
-      const turn = await postMessage(session.session_id, {
-        text,
-        classifier_hint: { lane: 'build', tool: null, confidence: 0.42 },
-      })
-      setTurns((current) => [...current, { turnId: turn.turn_id, text }])
+      await startTurn(text, { lane: 'build', tool: null, confidence: 0.42 })
       setPhase('proposal')
     } catch {
-      resetSession('cat-panels')
+      resetCached()
       setError('The assistant could not start this request. The drawing is unchanged.')
       setPhase('failed')
     } finally {
       setBusy(false)
     }
-  }, [busy, prompt])
+  }, [busy, prompt, resetCached, startTurn])
 
   const undo = useCallback(async () => {
     if (busy || version !== 2) return

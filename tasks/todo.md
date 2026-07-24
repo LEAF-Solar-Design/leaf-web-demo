@@ -29,6 +29,26 @@ Risks:
 - Keep the cat data labeled as a deterministic proof fixture, not a live Claude or APS run.
 - Preserve the committed motion and calm-surface standards.
 
+# Unified surface end-to-end program
+
+- [x] Inventory the legacy `/app`, current `/try`, API seams, and design standards.
+- [x] Reconcile the Opus 5 critique into the traceability ledger and wave plan.
+- [ ] Wave 0: add the three-tier proof ladder, behavior pins, receipts, and capability test IDs.
+- [ ] Wave 1: extract shared controllers and mount them under both routes. Conversation is the first integrated slice.
+- [ ] Wave 2: integrate and prove the core workspace, command, job, drawing, and version journey.
+- [ ] Wave 3: integrate authoring and trust controls, then add the missing ingest seam.
+- [ ] Wave 4: prove accessibility, keyboard, responsive, motion, and visual standards.
+- [ ] Wave 5: record the aggregate walk and promote authorized flows to staging proof.
+
+Files and ownership are defined in `plans/UNIFIED-SURFACE-E2E-EXECUTION.md`.
+
+Risks:
+
+- Do not copy production state machines into another fixture-only surface.
+- Do not label deterministic browser fixtures as local-stack or staging proof.
+- Preserve exact approval, tenant, checkout, and version bindings.
+- Keep the existing staging-fixes failure visible until its root cause is fixed.
+
 # Live edge-contract repair
 
 - [x] Bound `drawing_state` summary output while preserving useful counts.

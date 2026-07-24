@@ -9,6 +9,11 @@
     "build": "vite build",
     "preview": "vite preview --port 5175",
     "proof:cat": "playwright test e2e/cat-operator-proof.spec.mjs e2e/cat-standards-surface.spec.mjs",
+    "proof:unified:wave0": "playwright test e2e/cat-operator-proof.spec.mjs e2e/cat-standards-surface.spec.mjs e2e/converse-session-controller.spec.mjs",
+    "proof:fixture": "playwright test e2e/cat-operator-proof.spec.mjs e2e/cat-standards-surface.spec.mjs e2e/converse-session-controller.spec.mjs",
+    "proof:local": "playwright test --config playwright.local.config.mjs",
+    "proof:prod": "playwright test --config playwright.prod.config.mjs",
+    "check:unified-pins": "node scripts/check_unified_behavior_pins.mjs",
     "proof:cat:api": "node e2e/catProofApi.mjs",
     "check:customization": "node scripts/check_customization.mjs",
     "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs"

@@ -44,10 +44,8 @@ import { shouldStartTour } from './demo/tourEntry.js'
 import DemoTour from './demo/DemoTour.jsx'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
-import {
-  THRESHOLDS, ensureSession, resetSession, classifyAgentError,
-  postMessage as sendConverseMessage,
-} from './converse.js'
+import { THRESHOLDS, classifyAgentError } from './converse.js'
+import useConverseSessionController from './controllers/useConverseSessionController.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -291,11 +289,14 @@ export default function App() {
   if (tourOn) tourAvailable.current = true
 
   // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
-  const [agentSessionId, setAgentSessionId] = useState(null) // this drawing's converse session
   const [agentMode, setAgentMode] = useState(null)  // null | 'race' (chip primary) | 'primary' (panel primary)
-  const [agentTurns, setAgentTurns] = useState([])  // [{turnId, text}] turns dispatched from the bar
   const [agentBanner, setAgentBanner] = useState(null) // {kind, message} calm degraded note
-  const agentSessionRef = useRef(null)              // sessionId without a render dependency
+  const {
+    sessionId: agentSessionId,
+    turns: agentTurns,
+    startTurn: startAgentTurn,
+    clear: clearAgentSession,
+  } = useConverseSessionController({ drawingId: DEFAULT_DRAWING_ID, retryNotFound: true })
 
   const viewerRef = useRef(null)
   const authorSectionRef = useRef(null)
@@ -398,8 +399,7 @@ export default function App() {
     setTier(null); setOrg(null)
     setHistoryOpen(false); setHistory(null); setHistoryErr(null)
     setPreviewing(null); setPreviewIntake(null)
-    setAgentMode(null); setAgentBanner(null); setAgentTurns([]); setAgentSessionId(null)
-    agentSessionRef.current = null
+    setAgentMode(null); setAgentBanner(null); clearAgentSession()
     runningSinceRef.current = null
     mockVersions.reset()
     const seat = (d) => {
@@ -1299,31 +1299,6 @@ export default function App() {
     () => tools.filter((t) => canRunWrite || !(t.capabilities || []).includes('drawing.write')),
     [tools, canRunWrite],
   )
-
-  // Start (or continue) the drawing's converse session and post one turn.
-  // The session create is idempotent per (tenant, drawing); a stale cached
-  // session (harness restarted -> session_not_found) re-attaches once.
-  const startAgentTurn = useCallback(async (text, hint) => {
-    const drawingId = DEFAULT_DRAWING_ID
-    const attach = async () => {
-      const sid = (await ensureSession(drawingId)).session_id
-      agentSessionRef.current = sid
-      setAgentSessionId(sid)
-      return sid
-    }
-    const sid = agentSessionRef.current || (await attach())
-    try {
-      const res = await sendConverseMessage(sid, { text, classifier_hint: hint })
-      setAgentTurns((prev) => [...prev, { turnId: res.turn_id, text }])
-    } catch (e) {
-      if (classifyAgentError(e) !== 'not_found') throw e
-      resetSession(drawingId)
-      agentSessionRef.current = null
-      const fresh = await attach()
-      const res = await sendConverseMessage(fresh, { text, classifier_hint: hint })
-      setAgentTurns((prev) => [...prev, { turnId: res.turn_id, text }])
-    }
-  }, [])
 
   // `override` is an optional explicit string — the guided tour's canned prompt,
   // or the menu-picked "/tool" (state hasn't flushed yet). Click handlers pass
