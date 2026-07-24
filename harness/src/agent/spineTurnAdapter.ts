@@ -45,6 +45,7 @@
 
 import { ConverseLoop } from "./converseLoop.js";
 import { wireGrantToAgentGrant } from "../ports/wireGrant.js";
+import { grantSecrets, redactSecrets } from "../redact.js";
 import type {
   AgentGrant,
   AppRunClient,
@@ -175,10 +176,30 @@ export class SpineTurnAdapter implements ConverseRunner {
     // one per event on the signal); it only wakes the wait — the loop below
     // observes `aborted` and returns.
     opts?.signal?.addEventListener("abort", push, { once: true });
+    // Last chokepoint before a loop event becomes a DURABLE wire event (the app
+    // appends these to the transcript and streams them over SSE). The adapter is
+    // the only component here that holds the grant, so it is the only one that
+    // can scrub the secret BY VALUE; the loop deliberately never receives the
+    // credential, and a pattern match cannot cover an arbitrary BYO token (the
+    // app accepts any non-empty string, so "short-key!" defeats TOKENISH).
+    // sol-critic PR #117 round 2, blocker 1.
+    const secrets = grantSecrets(grant);
+    // A secret containing a quote/backslash appears JSON-escaped once
+    // serialized, so match that form too.
+    const secretForms = secrets.flatMap((s) => {
+      const escaped = JSON.stringify(s).slice(1, -1);
+      return escaped === s ? [s] : [s, escaped];
+    });
+    const scrub = (data: Record<string, unknown>): Record<string, unknown> => {
+      if (!secretForms.length) return data;
+      const raw = JSON.stringify(data);
+      if (raw === undefined || !secretForms.some((s) => raw.includes(s))) return data;
+      return JSON.parse(redactSecrets(raw, secretForms)) as Record<string, unknown>;
+    };
     const onEvent = (ev: ConverseEvent): void => {
       const type = ev.type as HarnessTurnEvent["type"];
       if (!WIRE_EVENT_TYPES.has(type)) return;
-      queue.push({ type, data: ev.data });
+      queue.push({ type, data: scrub(ev.data) });
       push();
     };
 

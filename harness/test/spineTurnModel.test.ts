@@ -21,6 +21,7 @@ import { FakeAppRunClient } from "../src/ports/fakes/fakeAppRunClient.js";
 import { FakeConverseRunner } from "../src/ports/fakes/fakeConverseRunner.js";
 import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
+import { redactTokens } from "../src/redact.js";
 import type { AgentGrant, OAuthGrantProvider } from "../src/ports/index.js";
 import type { ConverseTurnInput, HarnessTurnEvent } from "../src/ports/converse.js";
 
@@ -157,6 +158,50 @@ describe("mount your LLM — bring-your-own credential", () => {
 
     expect(oauth.consulted).toBe(1);
     expect(grants[0]).toEqual({ kind: "oauth", oauthToken: "TENANT-LINKED-GRANT" });
+  });
+
+  it("scrubs a SHORT credential the pattern redactor cannot match, on the wire", async () => {
+    // sol-critic PR #117 round 2, blocker 1: the app accepts ANY non-empty
+    // string as a BYO credential, so TOKENISH ( sk-ant-* | 40+ chars ) misses a
+    // short one and the pattern pass alone leaked it. This value is chosen to
+    // defeat that regex on purpose — assert on the VALUE, not the pattern.
+    const SHORT = "short-key!";
+    expect(redactTokens(`SDK rejected ${SHORT}`)).toContain(SHORT); // the gap, pinned
+
+    const runner = new FakeConverseRunner();
+    const store = new FakeSessionStore();
+    const adapter = new SpineTurnAdapter({
+      oauth: new UnusedOAuthProvider(),
+      appRun: new FakeAppRunClient(),
+      gate: new FakeGateClient(),
+      store,
+      runnerFor: () => runner,
+    });
+
+    // Drive the fake's terminal-failure hook, then rewrite the emitted error to
+    // quote the credential the way a real SDK/undici header error would.
+    const origRun = runner.run.bind(runner);
+    runner.run = async function* (runInput) {
+      for await (const ev of origRun(runInput)) {
+        if (ev.type === "done" && ev.error) {
+          yield { ...ev, error: { ...ev.error, message: `SDK rejected ${SHORT}` } };
+        } else {
+          yield ev;
+        }
+      }
+    };
+
+    const events = await drain(
+      adapter.runTurn(
+        turnInput({
+          text: "FAIL:error",
+          credential_grant: { kind: "api_key", api_key: SHORT },
+        }),
+      ),
+    );
+
+    expect(JSON.stringify(events)).not.toContain(SHORT);
+    expect(JSON.stringify(events)).toContain("[REDACTED]");
   });
 
   it("never persists the supplied credential in serialized session state", async () => {
