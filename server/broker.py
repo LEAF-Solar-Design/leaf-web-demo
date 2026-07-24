@@ -471,37 +471,52 @@ def _get_callbacks():
 
 
 class CallbackPrimaryUnavailable(RuntimeError):
-    """The flag selected callbacks but the DA adapter cannot submit them."""
+    """The reserved callback-primary flag was selected."""
 
 
 class CallbackPrimaryConfigurationError(RuntimeError):
     """Callback-primary was selected without all required operator settings."""
 
 
+def _callback_primary_requested() -> bool:
+    """Read the broker-owned posture without depending on the callback module."""
+    return os.environ.get("LEAF_CALLBACK_PRIMARY", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _require_supported_live_completion_mode() -> None:
+    """Reject the reserved callback mode before any APS live side effect."""
+    callbacks = _get_callbacks()
+    if callbacks is None:
+        if _callback_primary_requested():
+            raise CallbackPrimaryUnavailable(
+                "callback-primary requested but the callback module is unavailable; "
+                "refusing the APS live run"
+            )
+        return
+    config_error = callbacks.callback_primary_configuration_error()
+    if config_error:
+        raise CallbackPrimaryConfigurationError(config_error)
+    if callbacks.callback_primary_enabled():
+        raise CallbackPrimaryUnavailable(
+            "callback-primary is reserved: the APS-to-Leaf callback translation "
+            "adapter is a follow-up; native APS onComplete does not satisfy the "
+            "signed /da/callback contract"
+        )
+
+
 def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
     """Select the configured completion mechanism for one live run.
 
     The polling call is deliberately byte-for-byte compatible by default.
-    Callback-primary uses an additive ``run_tool_callback`` adapter method so it
-    never silently reverts to polling when an operator has selected callbacks.
-    The existing reaper remains the fallback for abandoned callback work.
+    Callback-primary is reserved until a translation adapter can turn native
+    APS completion metadata into the signed Leaf receipt envelope. Selecting
+    the flag fails closed without submitting or silently polling. The existing
+    reaper remains available for abandoned polling work.
     """
-    callbacks = _get_callbacks()
-    if callbacks is None:
-        return da.run_tool(local, tool, params)
-    config_error = callbacks.callback_primary_configuration_error()
-    if config_error:
-        raise CallbackPrimaryConfigurationError(config_error)
-    if not callbacks.callback_primary_enabled():
-        return da.run_tool(local, tool, params)
-    callback_run = getattr(da, "run_tool_callback", None)
-    if not callable(callback_run):
-        raise CallbackPrimaryUnavailable(
-            "callback-primary requires a DA adapter with run_tool_callback"
-        )
-    url = callbacks.callback_url()
-    assert url is not None  # callback_primary_enabled() checks this configuration
-    return callback_run(local, tool, params, callback_url=url)
+    _require_supported_live_completion_mode()
+    return da.run_tool(local, tool, params)
 
 
 def _cap_preflight(tenant_id: str, tool: Dict[str, Any]):
@@ -1652,7 +1667,7 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
             else (terminal_env.get("error") or {}).get("error_code", "error")
         )
         return JSONResponse(status_code=terminal_status, content=terminal_env)
-    except CallbackPrimaryConfigurationError as exc:
+    except (CallbackPrimaryConfigurationError, CallbackPrimaryUnavailable) as exc:
         entry["status"] = "INTERNAL"
         terminal_env = err_envelope(
             ErrorCode.INTERNAL, str(exc), retryable=False, tool=tool.get("name"))
@@ -1810,6 +1825,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
 
     live_dwg: Optional[Path] = None
     if req.aps_live:
+        # This guard must precede every live read/write branch, DA client lookup,
+        # signed URL, Activity, and WorkItem submission. Native APS cannot emit
+        # the signed callback receipt, so the reserved flag must never degrade
+        # into a polling WorkItem through a branch-specific path.
+        _require_supported_live_completion_mode()
         try:
             live_dwg = _resolve_live_dwg(req.dwg)
         except ValueError as exc:

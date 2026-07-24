@@ -1,9 +1,11 @@
-"""Signed Design Automation completion callbacks for the broker.
+"""Signed Design Automation completion receipts for the broker.
 
-The broker exposes ``POST /da/callback`` for a public Design Automation
-``onComplete`` URL. Set ``LEAF_CALLBACK_SECRET`` to provision the HMAC key,
-``LEAF_CALLBACK_URL`` to that public URL, and ``LEAF_CALLBACK_PRIMARY=1`` to
-ask the broker to use callback-primary completion.
+The broker exposes ``POST /da/callback`` for a producer that can post the
+signed Leaf callback envelope. Set ``LEAF_CALLBACK_SECRET`` to provision its
+HMAC key. The receipt seam is live, but native APS ``onComplete`` cannot emit
+that envelope. ``LEAF_CALLBACK_PRIMARY=1`` is therefore reserved and fails
+closed until an APS-to-Leaf callback translation adapter exists. Polling stays
+the only active completion mode.
 
 The signature covers the timestamp, nonce, and body. Consumed nonces live in
 the durable jobs SQLite database for the timestamp window, so a process restart

@@ -69,7 +69,7 @@ def test_invalid_or_missing_signature_fails_closed_without_creating_replay_state
     assert not (tmp_path / "jobs.db").exists()
 
 
-def test_poll_default_callback_primary_and_reaper_fallback(monkeypatch):
+def test_poll_default_callback_flag_is_reserved_and_reaper_fallback(monkeypatch):
     class DA:
         def __init__(self):
             self.calls = []
@@ -93,8 +93,14 @@ def test_poll_default_callback_primary_and_reaper_fallback(monkeypatch):
 
     monkeypatch.setenv("LEAF_CALLBACK_PRIMARY", "1")
     monkeypatch.setenv("LEAF_CALLBACK_URL", "https://example.test/da/callback")
-    assert broker._run_live_tool(da, "drawing.dwg", {"name": "tool"}, {}) == {"ok": True}
-    assert da.calls[-1] == ("callback", "https://example.test/da/callback")
+    with pytest.raises(
+        broker.CallbackPrimaryUnavailable,
+        match="callback-primary is reserved.*translation adapter",
+    ):
+        broker._run_live_tool(da, "drawing.dwg", {"name": "tool"}, {})
+    # The reserved flag must neither submit through a future-looking adapter
+    # method nor silently fall back to polling.
+    assert da.calls == ["poll"]
 
     response = broker.broker_reap(broker.BrokerReapRequest(
         records=[{"status": "submitted", "workitem_id": "wi-1", "session_closed": True}],
@@ -102,6 +108,145 @@ def test_poll_default_callback_primary_and_reaper_fallback(monkeypatch):
     ))
     assert response.status_code == 200
     assert ("reap", "wi-1") in da.calls
+
+
+def test_live_write_callback_flag_fails_before_aps_side_effects(monkeypatch, tmp_path):
+    calls = []
+
+    class DA:
+        def signed_download_url(self, _key):
+            calls.append("signed_download_url")
+            return "https://example.test/input"
+
+        def signed_upload_url(self, _key):
+            calls.append("signed_upload_url")
+            return "upload-key", "https://example.test/output"
+
+        def activity_qualified(self, _name):
+            calls.append("activity_qualified")
+            return "owner.LeafWriteProbe+prod"
+
+        def ensure_tool_activity(self, *_args, **_kwargs):
+            calls.append("ensure_tool_activity")
+            return {}
+
+        def submit_workitem(self, *_args, **kwargs):
+            calls.append(("submit_workitem", kwargs.get("poll")))
+            return {"id": "wi-should-not-exist", "status": "success"}
+
+        def run_tool(self, *_args, **_kwargs):
+            calls.append("run_tool")
+            return {"ok": True}
+
+    tenant_id = "callback-reserved-write"
+    monkeypatch.setenv("LEAF_CALLBACK_PRIMARY", "1")
+    monkeypatch.setenv("LEAF_CALLBACK_URL", "https://example.test/da/callback")
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "broker-ledger.jsonl")
+    monkeypatch.setattr(broker, "_cap_preflight", lambda *_args: None)
+    monkeypatch.setattr(broker, "_run_quota_preflight", lambda *_args: None)
+    monkeypatch.setattr(broker, "_resolve_live_dwg", lambda _dwg: tmp_path / "input.dwg")
+    monkeypatch.setattr(broker, "_get_da", lambda: DA())
+
+    backend = broker.write_loop.default_backend(aps_live=False)
+    broker.write_loop.ensure_demo_drawing(
+        backend, tenant_id, broker.write_loop.DEMO_DRAWING_ID)
+    monkeypatch.setattr(
+        broker.write_loop, "default_backend", lambda **_kwargs: backend)
+    response = broker.broker_run(broker.BrokerRunRequest(
+        tenant_id=tenant_id,
+        tool={
+            "name": "reserved-live-write",
+            "capabilities": ["drawing.write"],
+            "params_schema": {
+                "type": "object",
+                "properties": {"drawing_id": {"type": "string"}},
+            },
+        },
+        params={"drawing_id": "demo"},
+        dwg="rooftop_demo",
+        aps_live=True,
+    ))
+
+    body = json.loads(response.body)
+    assert response.status_code == 500, body
+    assert body["error"]["error_code"] == "INTERNAL"
+    assert body["error"]["retryable"] is False
+    assert "callback-primary is reserved" in body["error"]["message"]
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "params"),
+    [
+        (["drawing.read"], {}),
+        (["drawing.write"], {"drawing_id": "demo"}),
+    ],
+    ids=("live-read", "live-write"),
+)
+def test_primary_flag_fails_closed_when_callback_module_is_unavailable(
+        monkeypatch, tmp_path, capabilities, params):
+    calls = []
+
+    class DA:
+        def run_tool(self, *_args, **_kwargs):
+            calls.append("run_tool")
+            return {"ok": True}
+
+    def get_da():
+        calls.append("get_da")
+        return DA()
+
+    def resolve_live_dwg(_dwg):
+        calls.append("resolve_live_dwg")
+        return tmp_path / "input.dwg"
+
+    monkeypatch.setenv("LEAF_CALLBACK_PRIMARY", "1")
+    monkeypatch.setenv("LEAF_CALLBACK_URL", "https://example.test/da/callback")
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "broker-ledger.jsonl")
+    monkeypatch.setattr(broker, "_cap_preflight", lambda *_args: None)
+    monkeypatch.setattr(broker, "_run_quota_preflight", lambda *_args: None)
+    monkeypatch.setattr(broker, "_get_callbacks", lambda: None)
+    monkeypatch.setattr(broker, "_get_da", get_da)
+    monkeypatch.setattr(broker, "_resolve_live_dwg", resolve_live_dwg)
+
+    response = broker.broker_run(broker.BrokerRunRequest(
+        tenant_id="callback-module-unavailable",
+        tool={
+            "name": "module-unavailable-live-tool",
+            "capabilities": capabilities,
+            "params_schema": {
+                "type": "object",
+                "properties": {"drawing_id": {"type": "string"}},
+            },
+        },
+        params=params,
+        dwg="rooftop_demo",
+        aps_live=True,
+    ))
+
+    body = json.loads(response.body)
+    assert response.status_code == 500, body
+    assert body["error"]["error_code"] == "INTERNAL"
+    assert body["error"]["retryable"] is False
+    assert "callback module is unavailable" in body["error"]["message"]
+    assert calls == []
+
+
+def test_missing_callback_module_preserves_default_polling(monkeypatch):
+    class DA:
+        def __init__(self):
+            self.calls = []
+
+        def run_tool(self, *_args, **_kwargs):
+            self.calls.append("poll")
+            return {"ok": True}
+
+    da = DA()
+    monkeypatch.delenv("LEAF_CALLBACK_PRIMARY", raising=False)
+    monkeypatch.setattr(broker, "_get_callbacks", lambda: None)
+    assert broker._run_live_tool(da, "drawing.dwg", {"name": "tool"}, {}) == {"ok": True}
+    assert da.calls == ["poll"]
 
 
 def test_nonce_replay_survives_a_fresh_replay_store_instance(tmp_path):
