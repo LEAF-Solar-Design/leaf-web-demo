@@ -1,96 +1,63 @@
-import { authorizeRunIntent, createRunIntent } from '../src/runIntent.js'
+import { readFileSync } from 'node:fs'
+import {
+  confirmRunIntent,
+  createCatalogToolSnapshot,
+  createRunIntentState,
+  stageRunIntent,
+} from '../src/runIntent.js'
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
 
-const writeTool = {
+const tool = {
   name: 'delete-marked-panel',
   version: '1.0.0',
+  catalog_digest: `sha256:${'a'.repeat(64)}`,
   capabilities: ['drawing.read', 'drawing.write'],
   engine_op: 'delete_marked_panel',
-  params: {
-    type: 'object',
-    properties: { handle: { type: 'string', default: '' } },
-  },
+  params: { type: 'object', properties: { handle: { type: 'string' } } },
 }
 const context = {
-  mode: 'live', tenant_id: 'tenant-1', org_id: 'org-1', project_id: 'project-1',
-  drawing_id: 'demo', drawing_version: 3,
+  tenantId: 'tenant-1', orgId: 'org-1', projectId: 'project-1',
+  drawingId: 'version-1', drawingArtifactId: 'drawing-1', drawingVersion: null,
 }
-const intent = createRunIntent(writeTool, { handle: '9462' }, context, 'intent-1')
-
-assert(Object.isFrozen(intent), 'run intent must be immutable')
-assert(Object.isFrozen(intent.params), 'run intent params must be immutable')
-assert(
-  authorizeRunIntent(intent, {
-    id: 'intent-1', tool: writeTool, params: { handle: '9462' }, context,
-  }).ok,
-  'the exact displayed intent must authorize',
-)
-assert(
-  !authorizeRunIntent(intent, {
-    id: 'intent-1', tool: writeTool, params: { handle: 'other' }, context,
-  }).ok,
-  'changed parameters must fail closed',
-)
-assert(
-  !authorizeRunIntent(intent, {
-    id: 'stale', tool: writeTool, params: { handle: '9462' }, context,
-  }).ok,
-  'a stale intent id must fail closed',
-)
-assert(
-  !authorizeRunIntent(intent, {
-    id: 'intent-1',
-    tool: { ...writeTool, name: 'different-tool' },
-    params: { handle: '9462' },
-    context,
-  }).ok,
-  'a different tool must fail closed',
-)
-
-for (const changedTool of [
-  { ...writeTool, engine_op: 'count_by_layer' },
-  { ...writeTool, params: { type: 'object', properties: {} } },
-  { ...writeTool, provenance: { author: 'different-source' } },
-]) {
-  assert(
-    !authorizeRunIntent(intent, {
-      id: 'intent-1', tool: changedTool, params: { handle: '9462' }, context,
-    }).ok,
-    'same-name executable tool substitution must fail closed',
-  )
-}
-
-for (const changedContext of [
-  { ...context, mode: 'mock' },
-  { ...context, tenant_id: 'tenant-2' },
-  { ...context, org_id: 'org-2' },
-  { ...context, project_id: 'project-2' },
-  { ...context, drawing_id: 'other' },
-  { ...context, drawing_version: 4 },
-]) {
-  assert(
-    !authorizeRunIntent(intent, {
-      id: 'intent-1', tool: writeTool, params: { handle: '9462' }, context: changedContext,
-    }).ok,
-    'workspace or mode drift must fail closed',
-  )
-}
-
-const authorized = authorizeRunIntent(intent, {
-  id: 'intent-1', tool: writeTool, params: { handle: '9462' }, context,
+const staged = stageRunIntent(createRunIntentState('session-1'), {
+  intentId: 'intent-1', toolName: tool.name, params: { handle: '9462' },
+  context, toolSnapshot: createCatalogToolSnapshot(tool), createdAt: 1000,
 })
-assert(authorized.tool === intent.tool, 'execution must use the frozen tool snapshot')
-assert(Object.isFrozen(authorized.tool), 'the executed tool snapshot must stay immutable')
-assert(
-  !authorizeRunIntent(
-    intent,
-    { id: 'intent-1', tool: writeTool, params: { handle: '9462' }, context },
-    { now: intent.createdAt + 5 * 60 * 1000 + 1 },
-  ).ok,
-  'an expired confirmation must fail closed',
-)
+const request = {
+  intentId: staged.intent.intentId,
+  sessionId: staged.intent.sessionId,
+  toolName: tool.name,
+  params: staged.intent.params,
+  context: staged.intent.context,
+  toolSnapshot: staged.intent.toolSnapshot,
+}
+
+assert(confirmRunIntent(staged.state, request, { now: 1100 }).ok,
+  'the exact server-catalog intent must authorize')
+for (const [label, change] of [
+  ['params', { params: { handle: 'other' } }],
+  ['session', { sessionId: 'session-2' }],
+  ['context', { context: { ...context, drawingId: 'version-2' } }],
+  ['catalog', { toolSnapshot: createCatalogToolSnapshot({ ...tool, catalog_digest: `sha256:${'b'.repeat(64)}` }) }],
+]) {
+  const result = confirmRunIntent(staged.state, { ...request, ...change }, { now: 1100 })
+  assert(!result.ok, `${label} drift must fail closed`)
+}
+assert(!confirmRunIntent(staged.state, request, { now: 1000 + 5 * 60 * 1000 + 1 }).ok,
+  'an expired confirmation must fail closed')
+
+const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+assert(app.includes('const armDecision = useCallback((decision) =>'),
+  'all route decisions must cross the shared intent staging seam')
+assert(app.includes('armDecision(r)'), 'NL routes do not use the shared intent seam')
+assert(app.includes('armDecision({\n          lane: \'run\', tool: t.name'),
+  'slash routes do not use the shared intent seam')
+assert(app.includes('runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)'),
+  'route dismissal does not invalidate the active intent')
+assert(!app.includes('authorizeRunIntent') && !app.includes('createRunIntent('),
+  'the legacy client-only intent implementation was reintroduced')
 
 console.log('RUN_INTENT_OK')

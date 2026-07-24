@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 DEFAULT_SOLVER_ROOT = Path(__file__).resolve().parents[3] / "autofill-solver"
 TOOL_NAME = "string-autofill-opt"
 SOURCE_ATTESTATION = ".leaf-source-attestation.json"
+SOURCE_REVISION_MARKER = ".leaf-source-revision"
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -57,11 +58,12 @@ def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
 def _exact_revision(value: str, label: str = "AUTOFILL_SOLVER_REVISION") -> str:
     revision = str(value or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
-        raise RuntimeError(f"{label} must be an exact Git commit")
+        raise RuntimeError(
+            f"{label} must be an exact Git commit, an exact lowercase 40-character commit")
     return revision
 
 
-def _git_revision(root: Path) -> Optional[str]:
+def _git_source_revision(root: Path) -> Optional[str]:
     try:
         completed = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
@@ -69,6 +71,14 @@ def _git_revision(root: Path) -> Optional[str]:
         return _exact_revision(completed.stdout.strip(), "autofill solver source revision")
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _image_source_revision(root: Path) -> Optional[str]:
+    marker = root / SOURCE_REVISION_MARKER
+    if not marker.is_file():
+        return None
+    return _exact_revision(
+        marker.read_text(encoding="utf-8"), "autofill solver image revision")
 
 
 def _source_sha256(root: Path) -> str:
@@ -134,15 +144,20 @@ def _source_identity(root: Path) -> Dict[str, str]:
                 "AUTOFILL_SOLVER_REVISION does not match the attested solver source")
         return {"source_revision": attested_revision, "source_sha256": actual_sha256}
 
-    derived = _git_revision(root)
+    image_revision = _image_source_revision(root)
+    derived = _git_source_revision(root)
     if supplied is not None:
-        if derived is None:
+        if image_revision is not None and supplied != image_revision:
             raise RuntimeError(
-                "AUTOFILL_SOLVER_REVISION cannot be verified without Git metadata "
-                "or a build attestation")
-        if supplied != derived:
+                "AUTOFILL_SOLVER_REVISION does not match the worker image")
+        if derived is not None and supplied != derived:
             raise RuntimeError(
-                "AUTOFILL_SOLVER_REVISION does not match the checked-out solver source")
+                "AUTOFILL_SOLVER_REVISION does not match the solver checkout")
+        return {"source_revision": supplied, "source_sha256": actual_sha256}
+    if image_revision is not None:
+        if derived is not None and image_revision != derived:
+            raise RuntimeError("worker image revision does not match the solver checkout")
+        return {"source_revision": image_revision, "source_sha256": actual_sha256}
     revision = derived or f"sha256:{actual_sha256}"
     return {"source_revision": revision, "source_sha256": actual_sha256}
 
