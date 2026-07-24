@@ -49,6 +49,19 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SERVER_DIR.parent
 PLATFORM_DIR = PROJECT_ROOT / "platform"
 TENANT_REPO_SRC = Path(os.environ.get("LEAF_TENANT_REPO_SRC", "C:/tmp/leaf-tenants/demo-tenant"))
+
+# The C2/C5 tests fold a real tenant tool repo (layer-bounding-boxes et al) over
+# the engine catalog. That repo is an operator-host artifact, not something this
+# repo ships -- harness/test/fixtures/tenant-repo carries only count-by-layer --
+# so on a clean CI runner the default path does not exist. Skip-with-reason
+# keeps the other 11 tests in the gate instead of 3 failures + 4 fixture errors.
+_TENANT_REPO_PRESENT = TENANT_REPO_SRC.is_dir()
+_NO_TENANT_REPO_REASON = (
+    f"tenant tool repo absent at {TENANT_REPO_SRC} (set LEAF_TENANT_REPO_SRC to one)"
+)
+requires_tenant_repo = pytest.mark.skipif(
+    not _TENANT_REPO_PRESENT, reason=_NO_TENANT_REPO_REASON
+)
 INTAKE_PATH = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
 
 # route the jobs SQLite DB to a throwaway dir BEFORE `jobs` is imported anywhere.
@@ -89,6 +102,7 @@ def test_C2_fold_off_by_default_is_byte_identical(monkeypatch):
     assert "layer-bounding-boxes" not in names  # tenant fold OFF -> not present
 
 
+@requires_tenant_repo
 def test_C2_fold_precedence_tenant_over_engine_authored_over_both(monkeypatch):
     import deps
     monkeypatch.setenv("LEAF_TENANT_REPO", str(TENANT_REPO_SRC))
@@ -107,6 +121,7 @@ def test_C2_fold_precedence_tenant_over_engine_authored_over_both(monkeypatch):
     assert deps.find_tool("layer-bounding-boxes").get("_which") == "authored"
 
 
+@requires_tenant_repo
 def test_C2_entry_resolves_against_tenant_root_absolute(monkeypatch):
     import deps
     from tool_loader import resolve_local_file
@@ -122,6 +137,7 @@ def test_C2_entry_resolves_against_tenant_root_absolute(monkeypatch):
     assert resolve_local_file({"name": "x", "entry": "tools/layer-bounding-boxes/tool.py"}) is None
 
 
+@requires_tenant_repo
 def test_C2_run_matches_receipt_bbox_in_process(monkeypatch):
     import deps
     from tool_loader import run_tool_dynamic
@@ -444,6 +460,8 @@ def stop(proc: subprocess.Popen) -> None:
 
 @pytest.fixture(scope="module")
 def stack(tmp_path_factory):
+    if not _TENANT_REPO_PRESENT:
+        pytest.skip(_NO_TENANT_REPO_REASON)
     tmp = tmp_path_factory.mktemp("wave3")
     # Run against a COPY of the tenant repo (never mutate the live one).
     tenant_copy = tmp / "tenant"

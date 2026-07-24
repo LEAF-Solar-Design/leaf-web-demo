@@ -100,6 +100,12 @@ jobs:
         run: npm ci
 
       - name: Run the full gate
+        env:
+          # The autofill-solver is a sibling checkout on an operator box and is
+          # not vendored here. test_autofill_adapter.py offers exactly this flag
+          # to acknowledge a source-less host; it turns one hard failure into a
+          # visible skip and leaves the other 13 tests in the gate.
+          LEAF_AUTOFILL_SOLVER_ABSENT_OK: "1"
         run: python scripts/run-all-gates.py --log-dir "$RUNNER_TEMP/gate-logs"
 
       - name: Upload per-suite gate logs
