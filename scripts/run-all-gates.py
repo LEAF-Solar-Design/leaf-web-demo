@@ -27,6 +27,9 @@ Special handling, all documented on the scoreboard:
     reason rather than reported red.
   * harness `npm test` + `npx tsc --noEmit` + `npx tsc -p tsconfig.build.json`
     are included.
+  * `web-demo-gate` shells out to dispatch/run-local-ci.sh's demo-gate bucket,
+    the adapter for web/'s golden-path oracles (this runner has no other web/
+    test entry point). It needs a POSIX bash; see _bash().
   * the containerized harness smoke (census #13) is OPT-IN: it builds + boots
     the compose stack, so it runs only with LEAF_CONTAINER_SMOKE=1 and SKIPs
     (with reason) otherwise, or when Docker is unavailable (script exit 3).
@@ -130,6 +133,50 @@ def _npx() -> str:
     if os.name == "nt":
         return shutil.which("npx.cmd") or shutil.which("npx") or "npx.cmd"
     return shutil.which("npx") or "npx"
+
+
+# Standard Git for Windows install paths — the only bash on a Windows box that
+# sees this repo at its Windows path.
+_GIT_BASH_WIN = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+)
+
+
+def _is_wsl_launcher(path: str) -> bool:
+    r"""True for %SystemRoot%\System32\bash.exe — the WSL launcher, not a shell.
+
+    It runs a Linux distro with a /mnt/c view of the tree, so a script started
+    through it reports `uname -sm` as "Linux x86_64" and cannot execute the
+    Windows node_modules bin shims. dispatch/run-local-ci.sh branches on exactly
+    those two signals: it would conclude the deps are unusable and unpack
+    web/vendor/node_modules-linux-x64.tar.gz OVER the Windows web/node_modules
+    that the web-build / web-customization-check / web-staging-fixes-check
+    suites need — one suite silently breaking three others.
+    """
+    try:
+        system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+        return Path(path).resolve().parent == system32.resolve()
+    except OSError:
+        return False
+
+
+def _bash() -> str:
+    """POSIX bash for `script` suites whose argv is a shell script.
+
+    On Windows, shutil.which("bash") resolves to the System32 WSL launcher on
+    any machine with WSL installed, so prefer Git Bash and never fall through to
+    that shim: with no usable bash, return the canonical Git Bash path so the
+    suite fails to spawn with a FAIL row naming the missing binary rather than
+    running somewhere that corrupts the other suites' dependencies.
+    """
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+    for candidate in _GIT_BASH_WIN:
+        if Path(candidate).is_file():
+            return candidate
+    found = shutil.which("bash")
+    return found if found and not _is_wsl_launcher(found) else _GIT_BASH_WIN[0]
 
 
 def normalize_spawn_command(
@@ -396,6 +443,18 @@ def build_suites() -> List[Suite]:
         Suite("harness-container-smoke", "harness container smoke (compose)", "script",
               REPO, [sys.executable, "scripts/harness-container-smoke.py"], None,
               opt_in_env="LEAF_CONTAINER_SMOKE", timeout_s=1800),
+        # --- web presenter-kit demo gate --- #
+        # This runner had ZERO references to web/, so web/'s golden-path demo
+        # scripts (test/check_routes.mjs, test/check_integration.mjs,
+        # scripts/check_author.mjs, check_writeloop.mjs, check_tourscript.mjs)
+        # had no automated consumer at all. dispatch/run-local-ci.sh's demo-gate
+        # bucket is the purpose-built adapter for exactly those oracles and was
+        # never wired to anything; this row is that wiring. It also runs the vite
+        # build with a >=2-JS-chunk assertion, the offline pre-flight, and the
+        # authored-tool registry probe, so it is slower than a plain suite.
+        Suite("web-demo-gate", "web dispatch/run-local-ci.sh --only demo-gate", "script",
+              REPO, [_bash(), "dispatch/run-local-ci.sh", "--only", "demo-gate"], None,
+              timeout_s=1200),
     ]
     return suites
 

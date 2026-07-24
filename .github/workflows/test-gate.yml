@@ -1,0 +1,112 @@
+name: Test gate
+
+# ---------------------------------------------------------------------------
+# The repo's ONE always-on test signal.
+#
+# Before this workflow, the only pull_request-triggered check was
+# simulator-gate.yml, scoped to `paths: platform/**`. A PR touching server/,
+# web/, da/, engine/, harness/ or deploy/ got ZERO checks, so a green PR
+# carried no test signal at all. That matters here because merges are gated on
+# the check verdict.
+#
+# It runs scripts/run-all-gates.py, the canonical runner: every suite in its
+# own subprocess with the correct cwd and a cleaned env, one scoreboard, exit 0
+# iff every non-skipped gate passed.
+#
+# Deliberately hermetic -- NO secret, AWS credential, or DATABASE_URL is
+# required or provided:
+#   * DATABASE_URL is unset, so the runner's Postgres probe returns NO_DSN and
+#     the db_gated suites (platform, server-g1a-canonical-e2e) report SKIP with
+#     a reason instead of FAIL.
+#   * LEAF_CONTAINER_SMOKE is unset, so harness-container-smoke reports SKIP.
+# Both are the runner's own designed behaviour, visible on the scoreboard.
+#
+# `npm ci` runs in BOTH harness/ and web/: harness-vitest / harness-tsc-* need
+# harness/node_modules, and web-build / web-customization-check /
+# web-staging-fixes-check / web-demo-gate need web/node_modules.
+#
+# Also callable (workflow_call) so build-platform-images.yml can run this exact
+# gate against the exact commit it is about to push to ECR.
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Exact commit to test. Empty means the triggering ref."
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # github.workflow is the CALLER's name for a reusable workflow, so a run
+  # started by build-platform-images.yml never queues behind the standalone
+  # push-to-main run of this same file.
+  group: test-gate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    name: run-all-gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Empty string means actions/checkout uses the triggering ref.
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            server/requirements.txt
+            server/requirements-auth.txt
+            da/requirements.txt
+            platform/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            -r server/requirements.txt \
+            -r server/requirements-auth.txt \
+            -r da/requirements.txt \
+            -r platform/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            harness/package-lock.json
+            web/package-lock.json
+
+      - name: Install harness dependencies
+        working-directory: harness
+        run: npm ci
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Run the full gate
+        run: python scripts/run-all-gates.py --log-dir "$RUNNER_TEMP/gate-logs"
+
+      - name: Upload per-suite gate logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gate-logs
+          if-no-files-found: warn
+          retention-days: 14
