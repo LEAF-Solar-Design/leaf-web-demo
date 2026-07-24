@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -148,9 +149,16 @@ def test_upload_account_tenant_no_retention(client):
     assert r.status_code == 202
     body = r.json()
     assert body["tenant_kind"] == "account"
+    assert str(uuid.UUID(body["drawing_id"])) == body["drawing_id"]
     assert body["tenant_id"] == "acme-solar"
     assert body["retention_expires_at"] is None
     assert body["guest_session"] is None
+    status = client.get(
+        f"/api/drawings/{body['drawing_id']}/upload-status",
+        headers={"X-Tenant-Id": "acme-solar"},
+    ).json()
+    assert status["status"] == "ready"
+    assert status["extracted_version"] == 1
 
 
 def test_upload_oversize_413(client, monkeypatch):

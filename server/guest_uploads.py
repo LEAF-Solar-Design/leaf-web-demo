@@ -37,6 +37,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -149,9 +150,13 @@ def mint_guest_tenant_id() -> str:
 
 
 def new_upload_drawing_id() -> str:
-    """``u-<10 hex>`` — slug-safe; distinct namespace from the well-known
-    ``demo`` id and from UUID drawing ids so an upload is recognizable in logs."""
-    return "u-" + secrets.token_hex(5)
+    """Mint the canonical UUID required when an account adopts this upload.
+
+    Guest uploads keep their content-derived ``u-<10 hex>`` identity. Account
+    uploads need a UUID because the project drawing-import contract validates
+    ``source.drawing_id`` as a UUID before it reaches storage.
+    """
+    return str(uuid.uuid4())
 
 
 def derived_upload_drawing_id(tenant_id: str, data: bytes) -> str:
@@ -1167,6 +1172,7 @@ def status_view(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, 
         "uploaded_at": marker.get("uploaded_at"),
         "retention_expires_at": marker.get("retention_expires_at"),
         "tenant_kind": marker.get("tenant_kind"),
+        "extracted_version": marker.get("extracted_version"),
     }
 
 
