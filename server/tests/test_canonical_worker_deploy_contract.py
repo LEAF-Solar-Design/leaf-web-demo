@@ -24,24 +24,13 @@ def test_worker_required_config_is_headless_and_database_only():
     }
 
 
-def test_worker_image_installs_only_its_named_solver_requirements():
+def test_worker_image_does_not_install_conflicting_solver_service_requirements():
     dockerfile = (ROOT / "deploy" / "Dockerfile.canonical-worker").read_text(
         encoding="utf-8"
     )
-    other_images = "\n".join(
-        (ROOT / "deploy" / name).read_text(encoding="utf-8")
-        for name in (
-            "Dockerfile.app",
-            "Dockerfile.broker",
-            "Dockerfile.harness",
-            "Dockerfile.web",
-        )
-    )
-
-    assert "COPY --from=autofill_solver requirements.txt" in dockerfile
-    assert "-r /app/autofill-requirements.txt" in dockerfile
+    assert "COPY --from=autofill_solver . /opt/leaf/autofill-solver/" in dockerfile
+    assert "autofill-requirements.txt" not in dockerfile
     assert "> /opt/leaf/autofill-solver/.leaf-source-revision" in dockerfile
-    assert "autofill-requirements.txt" not in other_images
 
 
 def test_compose_supplies_exact_solver_revision_build_arg():

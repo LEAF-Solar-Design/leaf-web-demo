@@ -276,7 +276,6 @@ def test_canonical_worker_container_contract_is_non_root_and_source_bound():
     smoke = (REPO_ROOT / "scripts" / "canonical-container-smoke.py").read_text()
 
     assert "COPY --from=autofill_solver" in dockerfile
-    assert "autofill-requirements.txt" in dockerfile
     assert "ARG AUTOFILL_SOLVER_REVISION" in dockerfile
     assert "AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION}" in dockerfile
     assert "USER 65532:65532" in dockerfile
