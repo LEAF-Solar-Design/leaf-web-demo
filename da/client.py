@@ -57,6 +57,10 @@ OSS_REGION = os.environ.get("APS_OSS_REGION", "US")
 
 # Names ROOT provisions once (see da/setup_live.md). Overridable via env.
 EXTRACT_ACTIVITY = os.environ.get("APS_EXTRACT_ACTIVITY", "LeafExtract")
+# Separate Activity for DXF input. A DA Activity's parameter localName is FIXED
+# in the Activity definition and a WorkItem cannot override it, so one Activity
+# cannot serve both extensions — hence a second one rather than a flag.
+EXTRACT_DXF_ACTIVITY = os.environ.get("APS_EXTRACT_DXF_ACTIVITY", "LeafExtractDxf")
 TOOL_ACTIVITY_PREFIX = os.environ.get("APS_TOOL_PREFIX", "LeafTool_")
 ALIAS = os.environ.get("APS_ALIAS", "prod")
 
@@ -64,6 +68,11 @@ ALIAS = os.environ.get("APS_ALIAS", "prod")
 EXTRACT_RESULT_LOCALNAME = "result.txt"
 TOOL_RESULT_LOCALNAME = "result.json"
 HOSTDWG_LOCALNAME = "input.dwg"
+# The extension is the WHOLE point: accoreconsole dispatches its reader on it.
+# DXF bytes delivered as "input.dwg" are rejected outright ("Drawing file is not
+# valid", ErrorStatus=434) — that was the live guest-upload bug, reproduced
+# locally against a real AutoCAD 2026 accoreconsole on 2026-07-24.
+HOSTDXF_LOCALNAME = "input.dxf"
 
 _HTTP_TIMEOUT = 60
 
@@ -475,6 +484,17 @@ def _resolve_store_key(tenant_id: str, drawing_id: str, version, backend, dry_ru
     return v, _store.drawing_version_key(tenant_id, drawing_id, v)
 
 
+def extract_activity_for(local_path: str) -> str:
+    """Un-aliased Activity id for this input's extension.
+
+    `.dxf` -> the DXF twin; anything else -> the DWG Activity. Case-insensitive
+    because the staged name comes from a user-supplied filename.
+    """
+    return (EXTRACT_DXF_ACTIVITY
+            if os.path.splitext(local_path)[1].lower() == ".dxf"
+            else EXTRACT_ACTIVITY)
+
+
 def extract(dwg_local_path: str, dry_run: bool = False, *,
             tenant_id: str | None = None, drawing_id: str | None = None,
             version="head", backend=None) -> dict:
@@ -487,8 +507,13 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
     single-tenant demo path (upload a throwaway `in/<ts>_` object) is used.
 
     dry_run=True returns the WorkItem submission body WITHOUT any live call.
+
+    The Activity is chosen by the INPUT EXTENSION: a DA Activity's parameter
+    localName is fixed at definition time, and accoreconsole dispatches its
+    reader off that name's extension, so DXF must go to the DXF twin or it is
+    rejected as an invalid drawing. Everything else about the run is identical.
     """
-    activity_id = activity_qualified(EXTRACT_ACTIVITY)
+    activity_id = activity_qualified(extract_activity_for(dwg_local_path))
     version_aware = tenant_id is not None and drawing_id is not None
     dwg_name = os.path.basename(dwg_local_path)
     # per-run scratch OUTPUT key; tenant-scoped when a tenant is supplied
@@ -677,6 +702,40 @@ def extract_activity_spec() -> dict:
         },
         "settings": {"script": {"value": build_scr()}},
         "description": "Leaf headless DWG intake extraction (LISP families dump).",
+    }
+
+
+def extract_dxf_activity_spec() -> dict:
+    """POST /activities body for the DXF twin of the extract Activity.
+
+    Identical engine, command line and LISP body to extract_activity_spec —
+    same fidelity, same Result contract — differing in exactly two places, both
+    forced by measurements against a real accoreconsole (see da/lisp.py):
+
+      * HostDwg localName is `input.dxf`, so accoreconsole picks its DXF reader
+        instead of rejecting the bytes as an invalid drawing (ErrorStatus=434).
+      * the script ends with lisp.QUIT_SAVED, because a DXF-opened drawing has
+        no source .dwg to save back to and a plain QUIT blocks on a SAVEAS
+        prompt until the WorkItem times out — discarding a result the LISP had
+        already written.
+
+    The parameter is still NAMED HostDwg: renaming it would change the WorkItem
+    argument contract for no gain, and the name is only a key.
+    """
+    from lisp import build_scr, OUT_LOCALNAME, QUIT_SAVED
+    return {
+        "id": EXTRACT_DXF_ACTIVITY,
+        "engine": ENGINE,
+        "commandLine": [
+            r'$(engine.path)\accoreconsole.exe /i "$(args[HostDwg].path)" '
+            r'/s "$(settings[script].path)"'
+        ],
+        "parameters": {
+            "HostDwg": {"verb": "get", "required": True, "localName": HOSTDXF_LOCALNAME},
+            "Result": {"verb": "put", "required": True, "localName": OUT_LOCALNAME},
+        },
+        "settings": {"script": {"value": build_scr(quit_form=QUIT_SAVED)}},
+        "description": "Leaf headless DXF intake extraction (LISP families dump).",
     }
 
 

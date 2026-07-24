@@ -43,6 +43,7 @@ if str(SERVER_DIR) not in sys.path:
 
 import broker_client  # noqa: E402
 import jobs  # noqa: E402
+from _test_run_confirmation import confirmed_client_payload  # noqa: E402
 
 HDRS = {"X-Tenant-Id": "demo-tenant"}
 
@@ -166,7 +167,8 @@ def test_sse_stream_yields_transition_sequence_until_complete(monkeypatch):
     monkeypatch.setattr(broker_client, "run_via_broker", _fake_broker_ok)
     c = _client()
 
-    r = c.post("/api/run", json={"tool": "count-by-layer"}, headers=HDRS)
+    r = c.post("/api/run", json=confirmed_client_payload(
+        c, "count-by-layer", headers=HDRS), headers=HDRS)
     assert r.status_code == 202
     job_id = r.json()["job_id"]
 
@@ -210,6 +212,8 @@ def test_wait_fallback_still_returns_final_envelope(monkeypatch):
         broker_client, "run_via_broker",
         lambda *a, **k: {"ok": True, "degraded_mode": False,
                          "result": {"counts": {"Panels": 2345}}})
-    r = _client().post("/api/run?wait=1", json={"tool": "count-by-layer"}, headers=HDRS)
+    c = _client()
+    r = c.post("/api/run?wait=1", json=confirmed_client_payload(
+        c, "count-by-layer", headers=HDRS), headers=HDRS)
     assert r.status_code == 200
     assert r.json()["ok"] is True

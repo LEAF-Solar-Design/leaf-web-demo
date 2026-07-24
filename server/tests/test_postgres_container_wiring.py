@@ -76,6 +76,26 @@ def test_app_and_harness_images_are_ready_but_keep_legacy_defaults():
     assert "USER 10002:10002" in harness
 
 
+def test_harness_bootstraps_tls_before_using_debian_package_sources():
+    harness = _read("deploy/Dockerfile.harness")
+
+    trust_copy = (
+        "COPY --from=trust-store /etc/ssl/certs/ca-certificates.crt "
+        "/etc/ssl/certs/ca-certificates.crt"
+    )
+    rewrite_marker = "s|http://deb.debian.org|https://deb.debian.org|g"
+    assert "FROM node:22-bookworm AS trust-store" in harness
+    assert trust_copy in harness
+    assert rewrite_marker in harness
+    assert "s|http://security.debian.org|https://security.debian.org|g" in harness
+    assert (
+        harness.index(trust_copy)
+        < harness.index(rewrite_marker)
+        < harness.index("apt-get update")
+    )
+    assert "apt-get install -y --no-install-recommends git ca-certificates" in harness
+
+
 def test_base_compose_uses_explicit_legacy_defaults_and_separate_connections():
     compose = _read("docker-compose.yml")
     app = _service(compose, "app")

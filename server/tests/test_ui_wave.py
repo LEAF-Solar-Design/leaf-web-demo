@@ -38,6 +38,8 @@ os.environ.setdefault("JOBS_DB", str(Path(tempfile.mkdtemp(prefix="uiwave-jobs-"
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+from _test_run_confirmation import confirmed_requests_payload  # noqa: E402
+
 # §10 envelope schema (the app's, matching test_backbone).
 ENVELOPE_SCHEMA = json.loads((SERVER_DIR / "envelope_schema.json").read_text(encoding="utf-8"))
 
@@ -310,9 +312,12 @@ def _h(tenant: str) -> dict:
 
 
 def _run_wait(stack, tool, params, tenant):
+    headers = _h(tenant)
     return requests.post(f"{stack['app']}/api/run?wait=1",
-                         json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo"},
-                         headers=_h(tenant), timeout=120)
+                         json=confirmed_requests_payload(
+                             stack["app"], tool, params, "rooftop_demo",
+                             headers=headers),
+                         headers=headers, timeout=120)
 
 
 # --------------------------------------------------------------------------- #
