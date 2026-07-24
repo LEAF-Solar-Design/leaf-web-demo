@@ -52,6 +52,21 @@ def test_required_deployment_manifests_include_runtime_auth_secrets():
         assert required_secrets <= set(manifest["required"]["secrets"])
 
 
+def test_app_manifest_requires_durable_runtime_and_build_identity():
+    manifest = json.loads(
+        (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
+    )
+    required = set(manifest["required"]["environment"])
+    assert {
+        "LEAF_AGENT_AUDIT",
+        "LEAF_AGENT_LEDGER",
+        "LEAF_AGENT_STATE_DIR",
+        "LEAF_AGENT_TENANTS_FILE",
+        "LEAF_BUILD_REVISION_REQUIRED",
+        "LEAF_GUEST_STORE_DIR",
+    } <= required
+
+
 def test_web_image_writes_source_identity_health_file():
     dockerfile = (ROOT / "deploy" / "Dockerfile.web").read_text(encoding="utf-8")
     assert "ARG LEAF_SOURCE_SHA=unknown" in dockerfile
