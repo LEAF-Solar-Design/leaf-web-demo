@@ -486,11 +486,70 @@ def test_live_upload_never_loads_broker_only_aps_credentials(client, monkeypatch
     ).status_code == 200
 
 
-def test_storage_cutover_gate_blocks_upload_before_any_receipt(client, monkeypatch):
-    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+@pytest.mark.parametrize(
+    "configured", [None, "", "0", "true", "TRUE", "yes", "2", " 1 "]
+)
+def test_storage_cutover_gate_blocks_upload_before_any_receipt(
+    client, monkeypatch, configured
+):
+    if configured is None:
+        monkeypatch.delenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", configured)
     response = _upload(client, headers={"X-Tenant-Id": "account-a"})
     assert response.status_code == 503
     assert not any(guest_uploads.uploads_dir().glob("*"))
+
+
+def test_upload_gate_is_independent_from_authored_mutation_gate(client, monkeypatch):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+    response = _upload(client, headers={"X-Tenant-Id": "account-a"})
+    assert response.status_code == 202
+
+
+def test_guest_disable_keeps_signed_account_lane_open(client, monkeypatch):
+    import auth
+    import tenancy
+
+    canonical = "f49766b5-1e5a-4e67-a10f-4e3a9b576266"
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_ENABLED", "0")
+    monkeypatch.setattr(
+        auth,
+        "verify_platform_token",
+        lambda authorization: {"sub": "auth0|signed-account"},
+    )
+    monkeypatch.setattr(auth, "extract_tenant_claims", lambda payload: {})
+    monkeypatch.setattr(
+        deps,
+        "resolve_active_platform_tenant_authority",
+        lambda subject: (canonical, "hosted_pro"),
+    )
+    monkeypatch.setattr(
+        tenancy,
+        "get_store",
+        lambda: SimpleNamespace(resolve_workspace=lambda tenant_id: None),
+    )
+
+    account = _upload(
+        client,
+        headers={
+            "Authorization": "Bearer verified",
+            "X-Tenant-Id": "forged-account",
+        },
+    )
+    assert account.status_code == 202
+    assert account.json()["tenant_id"] == canonical
+    assert account.json()["tenant_kind"] == "account"
+    staged_before_guest = sorted(guest_uploads.uploads_dir().glob("*"))
+
+    signed_out_guest = _upload(client)
+    guest_session = _upload(client, headers={"X-Guest-Session": "blocked"})
+    assert signed_out_guest.status_code == 503
+    assert guest_session.status_code == 503
+    assert sorted(guest_uploads.uploads_dir().glob("*")) == staged_before_guest
 
 
 def test_upload_surfaces_have_no_da_client_call_site():
