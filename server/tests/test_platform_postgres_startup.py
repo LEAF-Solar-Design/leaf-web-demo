@@ -18,6 +18,19 @@ def test_postgres_requirement_defaults_off(monkeypatch):
     assert platform_link.validate_postgres_startup() is None
 
 
+@pytest.mark.parametrize("value", [None, "0", "false", "off"])
+def test_production_app_requires_master_postgres_gate(monkeypatch, value):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    if value is None:
+        monkeypatch.delenv("LEAF_PLATFORM_POSTGRES_REQUIRED", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_PLATFORM_POSTGRES_REQUIRED", value)
+    with pytest.raises(
+        RuntimeError, match="LEAF_PLATFORM_POSTGRES_REQUIRED=1"
+    ):
+        platform_link.validate_postgres_startup()
+
+
 def test_required_postgres_rejects_auth_off_before_database_access(monkeypatch):
     monkeypatch.setenv("LEAF_PLATFORM_POSTGRES_REQUIRED", "1")
     _enable_required_upload_authorities(monkeypatch)

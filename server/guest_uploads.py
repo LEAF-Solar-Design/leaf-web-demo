@@ -980,7 +980,8 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             # the local parser cannot. It also costs a paid APS run per upload,
             # exactly like the DWG path, and is bounded by the same guest rate
             # caps — hence a deliberate opt-in flag rather than the default.
-            intake = _extract_via_broker(tenant_id, drawing_id)
+            intake = _extract_via_broker(
+                tenant_id, drawing_id, str(marker.get("attempt") or ""))
         elif ext == ".dxf":
             # DEFAULT DXF path: parse locally (free, instant, always available).
             # The live APS extract Activity for DWG declares HostDwg with a
@@ -996,7 +997,8 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             intake = dxf_intake.parse_dxf_file(staged_path(tenant_id, drawing_id, ext),
                                                source_name=marker.get("filename") or drawing_id)
         elif deps.APS_LIVE:
-            intake = _extract_via_broker(tenant_id, drawing_id)
+            intake = _extract_via_broker(
+                tenant_id, drawing_id, str(marker.get("attempt") or ""))
         else:
             _mark_failed(backend, tenant_id, drawing_id, marker, "APS_UNAVAILABLE",
                          "DWG extraction requires the live APS path; "
@@ -1124,7 +1126,9 @@ class _ExtractError(Exception):
         self.retryable = retryable
 
 
-def _extract_via_broker(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
+def _extract_via_broker(
+    tenant_id: str, drawing_id: str, attempt: str
+) -> Dict[str, Any]:
     """POST /broker/extract {upload: true} — the SAME credential boundary as
     every other APS operation (the app process never reads the credential)."""
     try:
@@ -1135,7 +1139,7 @@ def _extract_via_broker(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
                 "dwg": drawing_id,
                 "upload": True,
                 "ledger_event_key": broker_client.extract_event_key(
-                    tenant_id, drawing_id, upload=True),
+                    tenant_id, drawing_id, upload=True, attempt=attempt),
             },
             headers=broker_client.broker_headers(),
             timeout=extract_timeout_s(),

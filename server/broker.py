@@ -663,6 +663,16 @@ def validate_runtime_safety() -> None:
         raise RuntimeError("production broker requires LEAF_AUTH_LIVE=1")
     if os.environ.get("LEAF_QA_HOOKS", "").strip() != "0":
         raise RuntimeError("production broker requires explicit LEAF_QA_HOOKS=0")
+    if _broker_store_mode() != "postgres":
+        raise RuntimeError("production broker requires LEAF_BROKER_STORE=postgres")
+    if _drawing_store_mode() != "postgres":
+        raise RuntimeError("production broker requires LEAF_DRAWING_STORE=postgres")
+    if os.environ.get("LEAF_UPLOAD_STORE", "").strip().lower() != "postgres":
+        raise RuntimeError("production broker requires LEAF_UPLOAD_STORE=postgres")
+    if write_loop.blob_store_mode() != "filesystem":
+        raise RuntimeError("production broker requires LEAF_BLOB_STORE=filesystem")
+    if not os.environ.get("DATABASE_URL", "").strip():
+        raise RuntimeError("production broker requires DATABASE_URL")
     if _authored_execution_enabled() and not _sandbox_configured():
         raise RuntimeError(
             "production authored execution requires LEAF_TOOL_SANDBOX_PROVIDER=e2b"

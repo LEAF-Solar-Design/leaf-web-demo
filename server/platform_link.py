@@ -153,6 +153,12 @@ def validate_canonical_upload_authority() -> None:
 
 def validate_postgres_startup() -> Optional[Dict[str, Any]]:
     """Fail closed before serving when any selected authority needs PostgreSQL."""
+    if (
+        os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower() == "production"
+        and not postgres_required()
+    ):
+        raise RuntimeError(
+            "production app requires LEAF_PLATFORM_POSTGRES_REQUIRED=1")
     if not postgres_startup_required():
         return None
     validate_canonical_upload_authority()

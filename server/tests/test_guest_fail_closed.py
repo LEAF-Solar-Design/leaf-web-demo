@@ -16,12 +16,61 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as app_module
+import broker_client
 import guest_uploads
 import write_loop
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 ROOFTOP = json.loads((SERVER_DIR.parent / "data" / "rooftop_demo.intake.json")
                      .read_text(encoding="utf-8"))
+
+
+def test_upload_extract_event_key_is_attempt_bound():
+    first = broker_client.extract_event_key(
+        "tenant-a", "drawing-a", upload=True, attempt="attempt-1")
+    replay = broker_client.extract_event_key(
+        "tenant-a", "drawing-a", upload=True, attempt="attempt-1")
+    replacement = broker_client.extract_event_key(
+        "tenant-a", "drawing-a", upload=True, attempt="attempt-2")
+
+    assert first == replay
+    assert first != replacement
+    with pytest.raises(ValueError, match="require an attempt"):
+        broker_client.extract_event_key("tenant-a", "drawing-a", upload=True)
+
+
+def test_non_upload_extract_event_key_keeps_legacy_digest():
+    assert broker_client.extract_event_key("tenant-a", "drawing-a") == (
+        "extract:cb0acff9bdde9af6b2a44562d8f8f12e1e679add31c0ce5afe69d6f50899a725"
+    )
+
+
+def test_scratch_cleanup_failure_logs_only_key_digest(caplog):
+    raw_key = "t/tenant-secret/in/private-file.dwg"
+
+    class _Da:
+        @staticmethod
+        def delete_scratch_object(_key):
+            raise OSError("cleanup unavailable")
+
+    with caplog.at_level("WARNING", logger=write_loop.LOGGER.name):
+        write_loop._cleanup_scratch_objects(_Da(), [raw_key])
+
+    assert "APS scratch cleanup failed" in caplog.text
+    assert raw_key not in caplog.text
+    assert len(caplog.records[0].scratch_key_sha256) == 64
+    assert caplog.records[0].error_type == "OSError"
+
+
+def test_missing_scratch_delete_api_is_observable_without_key(caplog):
+    raw_key = "t/tenant-secret/in/private-file.dwg"
+
+    with caplog.at_level("WARNING", logger=write_loop.LOGGER.name):
+        write_loop._cleanup_scratch_objects(object(), [raw_key])
+
+    assert "APS scratch cleanup unavailable" in caplog.text
+    assert raw_key not in caplog.text
+    assert caplog.records[0].error_type == "DeleteMethodUnavailable"
 
 
 @pytest.fixture()
