@@ -296,11 +296,20 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # this is the only chance to strip it (see _scrub_tree).
         if classifier_hint is not None:
             classifier_hint = _scrub_tree(classifier_hint, _secret)
-        # confirm carries a stored proposal, but a caller-supplied shape reaches
-        # this event too; scrub it on the same pass rather than leaving a second
-        # caller-controlled dict unhandled.
-        if confirm is not None:
-            confirm = _scrub_tree(confirm, _secret)
+        # `confirm` is deliberately NOT scrubbed. Its proposal is built
+        # server-side from the STORED approval row (routers/sessions.py builds
+        # {tool, params, capability} from `approval`, never from the client), so
+        # a caller cannot inject a credential into it, and its params came from a
+        # prior turn whose prompt was already scrubbed at this same boundary — it
+        # is clean by construction.
+        #
+        # Scrubbing it anyway is actively harmful: the app gate binds an approval
+        # to the EXACT argument hash, so rewriting the approved args makes
+        # redemption fail as `args_mismatch` on the documented store-loss
+        # recovery path, where spineTurnAdapter rebuilds its confirmation mirror
+        # from this proposal. That is the same self-inflicted break that the
+        # sink-scrubbing attempt caused in rounds 3-5.
+        # (sol-critic PR #123 round 8, blocker 1.)
 
     user_data: Dict[str, Any] = {}
     if text is not None:
