@@ -132,7 +132,9 @@ def dry_run_report(tenant_id=None, per_bucket=False, tools_path=None):
     bucket = _safe_bucket_key(tenant_id, per_bucket)
     print(f"[bucket]      key={bucket} region={client.OSS_REGION} policy=persistent (409=exists tolerated)")
     ext = f"{nick}.{client.EXTRACT_ACTIVITY}+{client.ALIAS}"
-    print(f"[activity]    extract: {ext}  (GLOBAL - shared across tenants)")
+    print(f"[activity]    extract (dwg): {ext}  (GLOBAL - shared across tenants)")
+    dxf = f"{nick}.{client.EXTRACT_DXF_ACTIVITY}+{client.ALIAS}"
+    print(f"[activity]    extract (dxf): {dxf}  (--with-dxf-activity / --dxf-activity-only)")
     print(f"[activity]    tools:   {nick}.{client.TOOL_ACTIVITY_PREFIX}<engine_op>+{client.ALIAS}  (GLOBAL)")
     if tenant_id is not None:
         tid = tenant_mod.validate_tenant_id(tenant_id)
@@ -197,10 +199,24 @@ def main():
         dry_run_report(tenant_id=tenant_id, per_bucket=per_bucket, tools_path=tools_path)
         return
 
+    dxf_only = "--dxf-activity-only" in argv
+    with_dxf = "--with-dxf-activity" in argv or dxf_only
+
     # ---- LIVE from here (mutating calls) ----
     print(f"[auth] nickname={client.nickname()} engine={client.ENGINE}")
+
+    if dxf_only:
+        # Narrow lane: create JUST the DXF extract Activity + alias and stop.
+        # Touches no bucket, no DWG Activity, no tools, no tenant — the safest
+        # way to add DXF extraction to an environment already provisioned.
+        ensure_activity(client.extract_dxf_activity_spec())
+        print("DONE (dxf-activity-only). LeafExtractDxf+prod is live; nothing else changed.")
+        return
+
     ensure_bucket()
     ensure_activity(client.extract_activity_spec())
+    if with_dxf:
+        ensure_activity(client.extract_dxf_activity_spec())
     if tools_path:
         reg = json.load(open(tools_path))
         for t in reg.get("tools", []):

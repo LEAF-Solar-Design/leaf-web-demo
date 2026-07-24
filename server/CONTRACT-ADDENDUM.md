@@ -1088,17 +1088,29 @@ staged upload files, drops empty tenant dirs, and appends one
 with NO retention promise (and none is shown).
 
 **Extraction** (`guest_uploads.run_extraction`, background thread + durable
-marker — deliberately NOT the tool-shaped jobs spine): `.dxf` is ALWAYS parsed
-locally by `server/dxf_intake.py`, in both modes — the live extract Activity
-binds HostDwg to a fixed `input.dwg` localName, so `accoreconsole` rejects DXF
-bytes as an invalid drawing and the broker path cannot extract a DXF at all.
-`.dwg` at APS_LIVE=1 goes through `POST /broker/extract {upload: true}`; the broker's
+marker — deliberately NOT the tool-shaped jobs spine): `.dwg` at APS_LIVE=1
+goes through `POST /broker/extract {upload: true}`; the broker's
 `_resolve_upload_dwg` applies the IDENTICAL strictness as the library resolver
 (bare name, no symlink, parent must BE `data/uploads/`) and the two namespaces
-never cross-resolve. At APS_LIVE=0 a .dxf is parsed locally
-(`server/dxf_intake.py` — a REAL parse of the user's bytes, LWPOLYLINE/
-POLYLINE + layers; nothing invented) and a .dwg fails honestly
-(APS_UNAVAILABLE: no local DWG reader exists).
+never cross-resolve. At APS_LIVE=0 a .dwg fails honestly (APS_UNAVAILABLE: no
+local DWG reader exists).
+
+`.dxf` extraction has two paths, chosen by `LEAF_GUEST_DXF_EXTRACT`:
+
+- `local` (DEFAULT) — parsed by `server/dxf_intake.py` in both modes: a REAL
+  parse of the user's bytes (LWPOLYLINE/POLYLINE + layer names; nothing
+  invented), free and instant. This is the honest baseline: a DXF sent to the
+  DWG extract Activity is rejected (its HostDwg localName is `input.dwg`, so
+  `accoreconsole` sees `.dwg` bytes that are really DXF and returns
+  ErrorStatus=434).
+- `aps` (OPT-IN, requires APS_LIVE=1 AND the `LeafExtractDxf` Activity
+  provisioned) — routed through the broker to a DXF-correct Activity
+  (`da.client.EXTRACT_DXF_ACTIVITY`: HostDwg localName `input.dxf`, plus a
+  save-safe QUIT so the WorkItem exits cleanly instead of blocking on a SAVEAS
+  prompt). Same LISP extract as DWG, so it recovers INSERT / 3DFACE / geo /
+  xdata, and costs a paid APS run per upload just like DWG (bounded by the same
+  guest rate caps). An unrecognized flag value falls back to `local`, so a typo
+  never silently bills APS.
 
 **Entitlements** (§17 extended): new capability `upload` (explicit grant
 required everywhere, per-key omission stays False) + new tier `guest` =
