@@ -224,6 +224,12 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
         fname = f"{tool['name']}.py"
         (AUTHORED_DIR / fname).write_text(code, encoding="utf-8")
         tool["entry"] = f"authored/{fname}"
+        # Stamp the authoring tenant. deps.all_tools() folds this global store
+        # last and now only surfaces entries whose tenant_id matches the
+        # requesting tenant, so without this stamp a template-authored tool
+        # would shadow a same-named tool in every OTHER tenant's registry.
+        # str(tenant) matches how all_tools() is called by its consumers.
+        tool["tenant_id"] = str(tenant)
         deps._AUTHORED[:] = [t for t in deps._AUTHORED if t["name"] != tool["name"]]
         deps._AUTHORED.append(tool)
         deps.save_authored_tools(deps._AUTHORED)

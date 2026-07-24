@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +36,32 @@ RECEIPT_PATH = Path(
         r"C:\tmp\leaf-web-demo\docs\auth0-live-login-receipt.json",
     )
 )
+
+
+def restrict_to_owner(path: Path) -> None:
+    """Make ``path`` readable only by its owner.
+
+    The default token location sits under C:\\tmp, whose inherited ACL grants
+    read to BUILTIN\\Users and modify to sandbox principals, so any other local
+    account could read (or replace) a live bearer token after a login run. On
+    Windows, drop inheritance and grant the current user alone; elsewhere fall
+    back to chmod 0600. Failures are reported but do not abort the login, which
+    has already succeeded by this point.
+    """
+    try:
+        if os.name == "nt":
+            user = os.environ.get("USERNAME") or ""
+            if not user:
+                raise RuntimeError("USERNAME not set; cannot scope ACL to owner")
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                check=True,
+                capture_output=True,
+            )
+        else:
+            os.chmod(path, 0o600)
+    except Exception as exc:  # noqa: BLE001 - best-effort hardening
+        print(f"WARNING: could not restrict permissions on {path}: {exc}", flush=True)
 
 
 def b64url(raw: bytes) -> str:
@@ -125,6 +152,10 @@ if not isinstance(access_token, str) or not access_token:
     raise SystemExit("Auth0 token response did not contain an access token")
 
 TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+# Create the file empty and lock its ACL down BEFORE the secret goes in, so the
+# token is never briefly world-readable by other local accounts on this host.
+TOKEN_PATH.touch(exist_ok=True)
+restrict_to_owner(TOKEN_PATH)
 TOKEN_PATH.write_text(access_token, encoding="utf-8")
 
 payload_segment = access_token.split(".")[1]
