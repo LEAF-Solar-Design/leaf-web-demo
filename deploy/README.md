@@ -62,6 +62,10 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml ps
 ```
 
+The canonical overlay requires the full 40-character `autofill-solver` commit.
+The worker image records that exact value in each solver descriptor, and the
+container smoke rejects an image whose descriptor does not match it.
+
 After the worker is healthy, run the clean-room real-solver receipt:
 
 ```bash

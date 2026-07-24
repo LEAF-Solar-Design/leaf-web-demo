@@ -290,12 +290,15 @@ def test_canonical_worker_container_contract_is_non_root_and_source_bound():
 
     assert "additional_contexts:" in overlay
     assert "autofill_solver: ../autofill-solver" in overlay
+    assert overlay.count("AUTOFILL_SOLVER_REVISION: ${AUTOFILL_SOLVER_REVISION:?") == 2
     assert "condition: service_completed_successfully" in overlay
     assert "db.apply_migration()" in overlay
     postgres_block = overlay.split("  postgres:", 1)[1].split("  migrate:", 1)[0]
     assert "ports:" not in postgres_block
 
     assert "idempotent resubmission created another job" in smoke
+    assert 'descriptor["source_revision"] != expected_revision' in smoke
+    assert '"solverRevision": descriptor["source_revision"]' in smoke
     assert 'expected = {"jobs": 1, "solves": 1, "history": 1, "outbox": 2, "solvePins": 3}' in smoke
 
 
