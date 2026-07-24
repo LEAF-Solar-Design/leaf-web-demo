@@ -478,6 +478,22 @@ class CallbackPrimaryConfigurationError(RuntimeError):
     """Callback-primary was selected without all required operator settings."""
 
 
+def _require_supported_live_completion_mode() -> None:
+    """Reject the reserved callback mode before any APS live side effect."""
+    callbacks = _get_callbacks()
+    if callbacks is None:
+        return
+    config_error = callbacks.callback_primary_configuration_error()
+    if config_error:
+        raise CallbackPrimaryConfigurationError(config_error)
+    if callbacks.callback_primary_enabled():
+        raise CallbackPrimaryUnavailable(
+            "callback-primary is reserved: the APS-to-Leaf callback translation "
+            "adapter is a follow-up; native APS onComplete does not satisfy the "
+            "signed /da/callback contract"
+        )
+
+
 def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
     """Select the configured completion mechanism for one live run.
 
@@ -487,19 +503,8 @@ def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, 
     the flag fails closed without submitting or silently polling. The existing
     reaper remains available for abandoned polling work.
     """
-    callbacks = _get_callbacks()
-    if callbacks is None:
-        return da.run_tool(local, tool, params)
-    config_error = callbacks.callback_primary_configuration_error()
-    if config_error:
-        raise CallbackPrimaryConfigurationError(config_error)
-    if not callbacks.callback_primary_enabled():
-        return da.run_tool(local, tool, params)
-    raise CallbackPrimaryUnavailable(
-        "callback-primary is reserved: the APS-to-Leaf callback translation "
-        "adapter is a follow-up; native APS onComplete does not satisfy the "
-        "signed /da/callback contract"
-    )
+    _require_supported_live_completion_mode()
+    return da.run_tool(local, tool, params)
 
 
 def _cap_preflight(tenant_id: str, tool: Dict[str, Any]):
@@ -1808,6 +1813,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
 
     live_dwg: Optional[Path] = None
     if req.aps_live:
+        # This guard must precede every live read/write branch, DA client lookup,
+        # signed URL, Activity, and WorkItem submission. Native APS cannot emit
+        # the signed callback receipt, so the reserved flag must never degrade
+        # into a polling WorkItem through a branch-specific path.
+        _require_supported_live_completion_mode()
         try:
             live_dwg = _resolve_live_dwg(req.dwg)
         except ValueError as exc:

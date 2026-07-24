@@ -110,6 +110,72 @@ def test_poll_default_callback_flag_is_reserved_and_reaper_fallback(monkeypatch)
     assert ("reap", "wi-1") in da.calls
 
 
+def test_live_write_callback_flag_fails_before_aps_side_effects(monkeypatch, tmp_path):
+    calls = []
+
+    class DA:
+        def signed_download_url(self, _key):
+            calls.append("signed_download_url")
+            return "https://example.test/input"
+
+        def signed_upload_url(self, _key):
+            calls.append("signed_upload_url")
+            return "upload-key", "https://example.test/output"
+
+        def activity_qualified(self, _name):
+            calls.append("activity_qualified")
+            return "owner.LeafWriteProbe+prod"
+
+        def ensure_tool_activity(self, *_args, **_kwargs):
+            calls.append("ensure_tool_activity")
+            return {}
+
+        def submit_workitem(self, *_args, **kwargs):
+            calls.append(("submit_workitem", kwargs.get("poll")))
+            return {"id": "wi-should-not-exist", "status": "success"}
+
+        def run_tool(self, *_args, **_kwargs):
+            calls.append("run_tool")
+            return {"ok": True}
+
+    tenant_id = "callback-reserved-write"
+    monkeypatch.setenv("LEAF_CALLBACK_PRIMARY", "1")
+    monkeypatch.setenv("LEAF_CALLBACK_URL", "https://example.test/da/callback")
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "broker-ledger.jsonl")
+    monkeypatch.setattr(broker, "_cap_preflight", lambda *_args: None)
+    monkeypatch.setattr(broker, "_run_quota_preflight", lambda *_args: None)
+    monkeypatch.setattr(broker, "_resolve_live_dwg", lambda _dwg: tmp_path / "input.dwg")
+    monkeypatch.setattr(broker, "_get_da", lambda: DA())
+
+    backend = broker.write_loop.default_backend(aps_live=False)
+    broker.write_loop.ensure_demo_drawing(
+        backend, tenant_id, broker.write_loop.DEMO_DRAWING_ID)
+    monkeypatch.setattr(
+        broker.write_loop, "default_backend", lambda **_kwargs: backend)
+    response = broker.broker_run(broker.BrokerRunRequest(
+        tenant_id=tenant_id,
+        tool={
+            "name": "reserved-live-write",
+            "capabilities": ["drawing.write"],
+            "params_schema": {
+                "type": "object",
+                "properties": {"drawing_id": {"type": "string"}},
+            },
+        },
+        params={"drawing_id": "demo"},
+        dwg="rooftop_demo",
+        aps_live=True,
+    ))
+
+    body = json.loads(response.body)
+    assert response.status_code == 500, body
+    assert body["error"]["error_code"] == "INTERNAL"
+    assert body["error"]["retryable"] is False
+    assert "callback-primary is reserved" in body["error"]["message"]
+    assert calls == []
+
+
 def test_nonce_replay_survives_a_fresh_replay_store_instance(tmp_path):
     callbacks = broker._get_callbacks()
     assert callbacks is not None
