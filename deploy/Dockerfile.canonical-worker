@@ -9,7 +9,10 @@ FROM python:3.12-slim AS canonical-worker
 WORKDIR /app
 
 COPY platform/requirements.txt /app/platform/requirements.txt
-RUN pip install --no-cache-dir -r /app/platform/requirements.txt
+COPY --from=autofill_solver requirements.txt /app/autofill-requirements.txt
+RUN pip install --no-cache-dir \
+      -r /app/platform/requirements.txt \
+      -r /app/autofill-requirements.txt
 
 COPY server/ /app/server/
 COPY platform/ /app/platform/
@@ -18,7 +21,15 @@ COPY --from=autofill_solver . /opt/leaf/autofill-solver/
 
 WORKDIR /app/server
 
+ARG AUTOFILL_SOLVER_REVISION
+RUN python -c \
+      "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit')" \
+      "$AUTOFILL_SOLVER_REVISION" \
+    && printf '%s\n' "$AUTOFILL_SOLVER_REVISION" \
+      > /opt/leaf/autofill-solver/.leaf-source-revision
+
 ENV AUTOFILL_SOLVER_ROOT=/opt/leaf/autofill-solver \
+    AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION} \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
@@ -29,4 +40,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
 
 USER 65532:65532
 
-CMD ["python", "canonical_worker.py", "--poll-seconds", "1", "--lease-seconds", "30"]
+CMD ["python", "canonical_worker.py", "--poll-seconds", "1"]

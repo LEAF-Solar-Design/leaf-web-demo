@@ -589,13 +589,15 @@ def _finish_pg_attempt(
 
 def _put_intake_cache_fenced(
     backend, tenant_id: str, drawing_id: str, key: str, data: bytes,
-    attempt: str, owner: str, fence: int,
-) -> None:
-    """Publish derived intake bytes while the extraction generation owns DB."""
+    attempt: str, owner: str, fence: int, version: int = 1,
+) -> str:
+    """Publish intake and persist its server-derived proof under the same fence."""
     db = _drawing_db()
+    digest = hashlib.sha256(data).hexdigest()
     params = {
         "tenant": tenant_id, "drawing": drawing_id,
         "attempt": attempt, "owner": owner, "fence": fence,
+        "version": int(version), "intake_ref": key, "intake_sha256": digest,
     }
 
     def operation(conn):
@@ -619,6 +621,24 @@ def _put_intake_cache_fenced(
                 raise ValueError("intake cache artifact does not match reserved version")
         else:
             backend.put(key, data)
+        version_row = conn.execute(
+            """
+            UPDATE drawing_store_versions
+            SET intake_ref = %(intake_ref)s,
+                intake_sha256 = %(intake_sha256)s
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = %(version)s AND state = 'ready'
+              AND (
+                intake_ref IS NULL
+                OR (intake_ref = %(intake_ref)s
+                    AND intake_sha256 = %(intake_sha256)s)
+              )
+            RETURNING version
+            """,
+            params,
+        ).fetchone()
+        if version_row is None:
+            raise ValueError("ready drawing version rejected intake proof")
         row = conn.execute(
             """
             SELECT 1 FROM drawing_upload_attempts
@@ -635,6 +655,7 @@ def _put_intake_cache_fenced(
                 "upload extraction lease expired during intake publication")
 
     db.run_transaction(operation, isolation="serializable")
+    return digest
 
 
 def new_marker(*, filename: str, data: bytes, tenant_kind: str,
@@ -1023,12 +1044,13 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             cache_data = json.dumps(
                 intake, separators=(",", ":")).encode("utf-8")
             if upload_store_mode() == "postgres":
-                _put_intake_cache_fenced(
+                intake_sha256 = _put_intake_cache_fenced(
                     backend, tenant_id, drawing_id, cache_key, cache_data,
                     str(marker["attempt"]), extraction_owner,
                     extraction_fence)
             else:
                 backend.put(cache_key, cache_data)
+                intake_sha256 = hashlib.sha256(cache_data).hexdigest()
         except (OSError, ValueError, RuntimeError) as exc:
             _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
                          f"ingest failed: {exc}", retryable=False,
@@ -1039,6 +1061,8 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         marker = dict(marker)
         marker["status"] = "ready"
         marker["extracted_version"] = 1
+        marker["intake_ref"] = cache_key
+        marker["intake_sha256"] = intake_sha256
         if upload_store_mode() == "postgres":
             _finish_pg_attempt(
                 tenant_id, drawing_id, marker,

@@ -337,6 +337,48 @@ def auth_live() -> bool:
     return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
 
 
+def resolve_active_platform_tenant_authority(subject: Optional[str]) -> tuple[str, str]:
+    """Resolve tenant identity and tier through one current server authority.
+
+    JWT tenant and org claims are hints that can outlive an account move. The
+    canonical upload namespace therefore comes only from the current platform
+    identity binding. Missing bindings and unavailable binding authority fail
+    closed instead of falling back to a signed claim.
+    """
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    if not isinstance(subject, str) or not subject.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="verified subject has no active platform identity binding",
+        )
+    try:
+        import platform_link  # noqa: PLC0415
+        platform_store = platform_link.platform_store()
+        binding = platform_store.resolve_active_identity_binding("auth0", subject)
+        org = (platform_store.get_org(binding.platform_tenant_id)
+               if binding is not None else None)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - authority failures must fail closed
+        raise HTTPException(
+            status_code=503,
+            detail="platform identity binding authority is unavailable",
+        ) from exc
+    if binding is None or org is None or org.status != "active":
+        raise HTTPException(
+            status_code=403,
+            detail="verified subject has no active platform tenant authority",
+        )
+    tier = org.tier if isinstance(org.tier, str) and org.tier.strip() else "restricted"
+    return str(binding.platform_tenant_id), tier
+
+
+def resolve_active_platform_tenant_id(subject: Optional[str]) -> str:
+    """Compatibility wrapper for callers that need only current tenant identity."""
+    return resolve_active_platform_tenant_authority(subject)[0]
+
+
 # --------------------------------------------------------------------------- #
 # harness back-edge trust (wire contract §0): with LEAF_AUTH_LIVE=1 the spine's
 # AppRunClient authenticates with X-Dispatch-Secret + X-Tenant-Id instead of a
