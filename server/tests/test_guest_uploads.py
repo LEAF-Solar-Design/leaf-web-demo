@@ -358,8 +358,30 @@ def test_dxf_layer_dedup_stays_linear_under_adversarial_input():
     assert parsed["layers"][0] == "layer_name_number_0000000", "first-seen order preserved"
     assert parsed["layers"][-1] == f"layer_name_number_{n - 1:07d}"
     assert elapsed < 20.0, (
-        f"parsing {n} unique layers took {elapsed:.1f}s — the layer dedup has "
-        "gone quadratic again (see dxf_intake.seen_layers)")
+        f"parsing {n} unique layers took {elapsed:.1f}s — the TABLES layer dedup "
+        "has gone quadratic again (see dxf_intake.seen_layers)")
+
+    # The SECOND dedup site is _finish_entity, reached only through entities.
+    # Guard it separately: a quadratic regression confined there would sail
+    # past the TABLES case above (re-review, non-blocking coverage gap).
+    m = 40_000
+    ent = ["0", "SECTION", "2", "ENTITIES"]
+    for i in range(m):
+        ent += ["0", "LWPOLYLINE", "8", f"entity_layer_{i:07d}", "70", "1",
+                "10", "0", "20", "0", "10", "1", "20", "1"]
+    ent += ["0", "ENDSEC", "0", "EOF"]
+    ent_raw = "\n".join(ent).encode()
+
+    t0 = time.perf_counter()
+    ent_parsed = dxf_intake.parse_dxf_bytes(ent_raw, source_name="entities.dxf")
+    ent_elapsed = time.perf_counter() - t0
+
+    assert len(ent_parsed["polylines"]) == m
+    assert len(ent_parsed["layers"]) == m, "entity layers must dedup to all-unique"
+    assert ent_parsed["layers"][0] == "entity_layer_0000000", "first-seen order preserved"
+    assert ent_elapsed < 20.0, (
+        f"parsing {m} entities on unique layers took {ent_elapsed:.1f}s — the "
+        "_finish_entity layer dedup has gone quadratic again")
 
 
 def test_dxf_layer_dedup_preserves_first_seen_order_with_repeats():

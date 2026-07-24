@@ -199,8 +199,10 @@ def upload_drawing(
                             ErrorCode.INTERNAL,
                             "could not reset the failed attempt's residue; "
                             "try again", retryable=True, status_code=500)
-                # Guest cost-exposure caps (each live extraction is a paid
-                # APS run). Counted AFTER validation on purpose (review round
+                # Guest cost-exposure caps (each live DWG extraction is a paid
+                # APS run; a DXF is parsed locally, so its cost is service CPU
+                # rather than an APS charge — see dxf_intake).
+                # Counted AFTER validation on purpose (review round
                 # 1, MAJOR): garbage requests must not be able to exhaust the
                 # shared daily pool — only an upload that will actually stage
                 # + extract consumes quota. A dedupe hit consumes none.
