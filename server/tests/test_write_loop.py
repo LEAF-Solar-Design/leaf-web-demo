@@ -114,8 +114,11 @@ def _h(tenant: str) -> dict:
 
 
 def run_wait(stack, tool, params=None, tenant="wl"):
+    tools = requests.get(f"{stack['app']}/api/tools", headers=_h(tenant), timeout=30).json()["tools"]
+    catalog_digest = next(item["catalog_digest"] for item in tools if item["name"] == tool)
     r = requests.post(f"{stack['app']}/api/run?wait=1",
-                      json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo"},
+                      json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo",
+                            "catalog_digest": catalog_digest},
                       headers=_h(tenant), timeout=120)
     return r
 

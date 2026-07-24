@@ -7,6 +7,28 @@ Claude review: Opus 4.8, run `20260724-091747-ee562015`, verdict `REVISE`
 Root approval status: executable locally. Staging mutation and independent
 publication approval remain human-authority gates.
 
+## Execution status
+
+- Wave 0 is complete on integration branch
+  `codex/cat-litmus-clearance-20260724`, based on live source line `99d7d18`.
+- Wave 1 is complete. Live customization authoring now requires a stable,
+  server-visible idempotency key.
+- Wave 2 is complete locally. The model can request publication with only a
+  durable change-set id. Approval, denial, and confirmation material remain on
+  trusted internal routes that the harness cannot reach.
+- Wave 3 is implemented locally. Write approvals bind the tool definition,
+  effective catalog generation, drawing id, head version, and parameters. The
+  subject-less trusted back-edge must supply the complete pin set, and the job
+  route checks it before creating a job. Fresh tenants receive a deterministic
+  base-catalog generation pin.
+- Wave 4 application proof is complete offline for non-demo tenant
+  `cat-litmus-tenant`. It produced version 2, passed the frozen sitting-cat
+  oracle at IoU 1.0 with zero overlap, and restored version 1 through undo.
+  This is not an APS or staging proof.
+- Wave 5 is blocked before mutation. The default AWS identity is root, the
+  non-root planning identity lacks ECS read access, and the configured SSO
+  profile is expired. No AWS change was made.
+
 ## Objective
 
 Prove that a user's conversational agent can find or author a panel-layout tool,
@@ -17,15 +39,14 @@ will execute.
 
 ## Current truth
 
-- Live staging `/api/ready` is fully ready. Worker, database, broker, harness,
-  durable stores, and build all report `ready`; `degraded_mode` is false.
-- Live staging reports source `99d7d188edfffd8f358024d701e13be3afa92001`.
-- This feature worktree started at `bb7a09098671707d6b7399d920929c3f4796be1a`
-  and is 11 commits behind `origin/main`. It must not be deployed without
-  integration against the live source line.
-- `origin/main` now threads a server-issued catalog digest into run submission.
-  It does not yet prove the expected drawing head, tool manifest digest, or the
-  trusted stage-to-publication continuation.
+- Earlier read-only evidence reported staging ready at source
+  `99d7d188edfffd8f358024d701e13be3afa92001`. A later unauthenticated public
+  probe returned 404, so current readiness has not been re-proved.
+- The clean integration worktree is based on `origin/main` at
+  `99d7d188edfffd8f358024d701e13be3afa92001`, the source revision reported by
+  staging during the read-only audit.
+- The integration branch now threads server-issued tool, effective catalog,
+  and drawing-head pins through approval and run submission.
 - The infrastructure checkout is dirty and behind `origin/main`. Its current
   source manifest reports repository head `7fc0e402108021562ce7d38124c98064efc328cd`,
   while fetched `origin/main` is `0d21a71afb731965155a0569eab83eef49249872`.
@@ -143,7 +164,9 @@ Owner: root. No AWS mutation.
 
 Use a non-demo tenant, real platform identity storage, separate author and
 approver subjects, static bindings off, and the new publication path. `APS_LIVE=0`
-is allowed only to prove the application loop.
+is allowed only to prove the application loop. The completed local proof covers
+the deterministic write, immutable version, oracle, and undo. The authenticated
+identity and publication proof remains part of the staging gate.
 
 Sequence:
 
@@ -246,6 +269,16 @@ npm run check:customization
 Add negative tests for missing and drifting idempotency keys, hidden publication
 authority, denial, expiry, replay, stale base, catalog collision, transcript
 recovery, stale drawing head, stale catalog pin, and stale tool manifest.
+
+Observed local results:
+
+- Harness full suite: 301 passed, 10 skipped. Typecheck and build passed.
+- Web production build and customization checks passed.
+- Focused publication, exact-pin, expiry, denial, and store proof: 38 passed.
+- Full server suite: 1,163 passed, 46 skipped, with 12 existing warnings.
+- Offline cat proof: sitting-cat IoU 1.0, zero overlap, version 2 parent 1,
+  undo restored version 1.
+- Independent read-only review returned `CLEAR` after two correction rounds.
 
 ## Strongest false-positive counterexample
 

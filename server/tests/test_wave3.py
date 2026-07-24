@@ -470,8 +470,9 @@ def stack(tmp_path_factory):
         # CPU-starved past the poll timeout (gate-runner flake follow-up). Force it now,
         # best-effort, so the timed assertions below run against a warm broker.
         try:
+            app_url = f"http://127.0.0.1:{app_port}"
             requests.post(f"http://127.0.0.1:{app_port}/api/run?wait=1",
-                          json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo"},
+                          json=_run_json(app_url, "count-by-layer", {}, "warmup"),
                           headers={"X-Tenant-Id": "warmup"}, timeout=120)
         except Exception:
             pass
@@ -487,6 +488,13 @@ def _h(tenant: str) -> dict:
     return {"X-Tenant-Id": tenant}
 
 
+def _run_json(app_url: str, tool: str, params: dict, tenant: str) -> dict:
+    tools = requests.get(f"{app_url}/api/tools", headers=_h(tenant), timeout=30).json()["tools"]
+    catalog_digest = next(item["catalog_digest"] for item in tools if item["name"] == tool)
+    return {"tool": tool, "params": params, "dwg": "rooftop_demo",
+            "catalog_digest": catalog_digest}
+
+
 # --- Contract 2 (through the real broker) ---------------------------------- #
 def test_C2_layer_bounding_boxes_in_api_tools(stack):
     r = requests.get(f"{stack['app']}/api/tools", timeout=15)
@@ -497,7 +505,7 @@ def test_C2_layer_bounding_boxes_in_api_tools(stack):
 
 def test_C2_run_through_broker_matches_receipt_bbox(stack):
     r = requests.post(f"{stack['app']}/api/run?wait=1",
-                      json={"tool": "layer-bounding-boxes", "params": {}, "dwg": "rooftop_demo"},
+                      json=_run_json(stack["app"], "layer-bounding-boxes", {}, "wave3-c2"),
                       headers=_h("wave3-c2"), timeout=60)
     assert r.status_code == 200, r.text
     _assert_panels_bbox(r.json())
@@ -509,7 +517,7 @@ def test_C5b_ops_disable_immediately_reflected(stack):
     qa = {"X-Internal-Role": "qa"}
     # baseline run so the tenant shows up in the ledger aggregation
     base = requests.post(f"{stack['app']}/api/run?wait=1",
-                         json={"tool": "count-by-layer", "params": {}},
+                         json=_run_json(stack["app"], "count-by-layer", {}, tenant),
                          headers=_h(tenant), timeout=60)
     assert base.status_code == 200, base.text
 
@@ -536,8 +544,8 @@ def test_C5c_executing_progress_observable(stack):
     # a slow read run holds `progress='executing'` during the broker sleep so a poller
     # sees more than status flips.
     r = requests.post(f"{stack['app']}/api/run",
-                      json={"tool": "count-by-layer", "params": {"_qa_sleep_s": 1.5},
-                            "dwg": "rooftop_demo"},
+                      json=_run_json(stack["app"], "count-by-layer", {"_qa_sleep_s": 1.5},
+                                     "wave3-prog"),
                       headers=_h("wave3-prog"), timeout=15)
     assert r.status_code == 202, r.text
     job_id = r.json()["job_id"]

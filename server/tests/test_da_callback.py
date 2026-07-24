@@ -274,8 +274,8 @@ def test_callback_completes_the_durable_job_and_poll_duplicate_is_a_noop(monkeyp
         def submit(self, *args, **kwargs):
             return None
 
-    if jobs._conn is not None:
-        jobs._conn.close()
+    # Keep the process-global connection alive. monkeypatch restores it after
+    # this isolated database test, so closing it here poisons later modules.
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
     monkeypatch.setattr(jobs, "_conn", None)
     monkeypatch.setattr(jobs, "_reaper_started", True)

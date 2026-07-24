@@ -107,6 +107,11 @@ def stop(proc: subprocess.Popen) -> None:
             proc.wait(timeout=10)
 
 
+def catalog_digest(app_url: str, tool: str, headers=None) -> str:
+    tools = requests.get(f"{app_url}/api/tools", headers=headers, timeout=30).json()["tools"]
+    return next(item["catalog_digest"] for item in tools if item["name"] == tool)
+
+
 @pytest.fixture(scope="module")
 def stack(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("dynloader")
@@ -128,8 +133,10 @@ def stack(tmp_path_factory):
         # CPU-starved past the poll timeout (gate-runner flake follow-up). Force it now,
         # best-effort, so the timed assertions below run against a warm broker.
         try:
+            app_url = f"http://127.0.0.1:{app_port}"
             requests.post(f"http://127.0.0.1:{app_port}/api/run?wait=1",
-                          json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo"},
+                          json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo",
+                                "catalog_digest": catalog_digest(app_url, "count-by-layer")},
                           headers={"X-Tenant-Id": "warmup"}, timeout=120)
         except Exception:
             pass
@@ -141,7 +148,8 @@ def stack(tmp_path_factory):
 
 def run_wait(stack, tool, params=None):
     r = requests.post(f"{stack['app']}/api/run?wait=1",
-                      json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo"},
+                      json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo",
+                            "catalog_digest": catalog_digest(stack["app"], tool)},
                       timeout=120)
     return r
 

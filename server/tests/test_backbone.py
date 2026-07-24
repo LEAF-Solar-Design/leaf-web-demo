@@ -145,14 +145,17 @@ def stack(tmp_path_factory):
     try:
         wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
         wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        app_url = f"http://127.0.0.1:{app_port}"
+        tools = requests.get(f"{app_url}/api/tools", timeout=30).json()["tools"]
         yield {
-            "app": f"http://127.0.0.1:{app_port}",
+            "app": app_url,
             "broker": f"http://127.0.0.1:{broker_port}",
             "ledger": ledger,
             "tmp": tmp,
             "app_env": app_env,
             "app_port": app_port,
             "procs": (broker, app),
+            "catalog_digests": {item["name"]: item["catalog_digest"] for item in tools},
         }
     finally:
         failures = []
@@ -217,7 +220,14 @@ def submit(stack, tool="count-by-layer", params=None, tenant=None, wait=False):
     headers = {"X-Tenant-Id": tenant} if tenant else {}
     url = f"{stack['app']}/api/run" + ("?wait=1" if wait else "")
     return requests.post(url, json={"tool": tool, "params": params or {},
-                                    "dwg": "rooftop_demo"}, headers=headers, timeout=120)
+                                    "dwg": "rooftop_demo",
+                                    "catalog_digest": stack["catalog_digests"][tool]},
+                         headers=headers, timeout=120)
+
+
+def _catalog_digest(base: str, tool: str) -> str:
+    tools = requests.get(f"{base}/api/tools", timeout=30).json()["tools"]
+    return next(item["catalog_digest"] for item in tools if item["name"] == tool)
 
 
 def poll_until_terminal(stack, job_id, timeout_s=30.0):
@@ -269,7 +279,9 @@ def test_2_progression_envelope_and_restart_durability(stack, tmp_path):
 
         r = requests.post(f"{base}/api/run", json={"tool": "count-by-layer",
                                                    "params": {"_qa_sleep_s": 1.5},
-                                                   "dwg": "rooftop_demo"}, timeout=10)
+                                                   "dwg": "rooftop_demo",
+                                                   "catalog_digest": _catalog_digest(base, "count-by-layer")},
+                          timeout=10)
         assert r.status_code == 202
         job_id = r.json()["job_id"]
 
@@ -320,7 +332,9 @@ def test_3_job_timeout(stack, tmp_path):
         wait_ready(f"{base}/api/health", app)
         r = requests.post(f"{base}/api/run", json={"tool": "count-by-layer",
                                                    "params": {"_qa_sleep_s": 6},
-                                                   "dwg": "rooftop_demo"}, timeout=10)
+                                                   "dwg": "rooftop_demo",
+                                                   "catalog_digest": _catalog_digest(base, "count-by-layer")},
+                          timeout=10)
         assert r.status_code == 202
         job_id = r.json()["job_id"]
         deadline = time.time() + 20

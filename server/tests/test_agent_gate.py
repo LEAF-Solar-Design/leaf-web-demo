@@ -248,7 +248,14 @@ def test_granted_approval_redeems_exactly_once_always_confirm():
     """Single-use pin: within the 300s TTL a granted always-confirm approval
     must not be replayable — one human click authorizes ONE execution, not a
     rate-limit budget of duplicates."""
-    args = {"tool": "my-tool", "manifest_sha256": "b" * 64}
+    args = {
+        "change_set_id": "7f3a51f0-9d9a-43be-8d29-cbdba31249c8",
+        "staged_commit": "b" * 40,
+        "catalog_digest": "b" * 64,
+        "platform_release": "release-1",
+        "workspace_contract_digest": "f" * 64,
+        "idempotency_key": "publish-once",
+    }
     first = _gate("register_tool", args, session="s-once")
     cid = first["confirmation_id"]
     agent_gate.grant_approval(cid)
@@ -311,7 +318,14 @@ def test_failed_reread_under_lock_denies_instead_of_reusing_the_stale_record():
     """Re-reading under the lock IS the replay guard. Falling back to the
     pre-lock copy on a failed re-read hands back a still-unconsumed record and
     reopens the window the lock exists to close."""
-    args = {"tool": "my-tool", "manifest_sha256": "e" * 64}
+    args = {
+        "change_set_id": "7f3a51f0-9d9a-43be-8d29-cbdba31249c8",
+        "staged_commit": "e" * 40,
+        "catalog_digest": "e" * 64,
+        "platform_release": "release-1",
+        "workspace_contract_digest": "f" * 64,
+        "idempotency_key": "publish-reread",
+    }
     first = _gate("register_tool", args, session="s-reread")
     cid = first["confirmation_id"]
     agent_gate.grant_approval(cid)
@@ -551,7 +565,14 @@ def test_pending_not_yet_decided_stays_awaiting():
 
 
 def test_always_confirm_never_persists_session_grant():
-    args = {"tool": "my-tool", "manifest_sha256": "a" * 64}
+    args = {
+        "change_set_id": "7f3a51f0-9d9a-43be-8d29-cbdba31249c8",
+        "staged_commit": "a" * 40,
+        "catalog_digest": "a" * 64,
+        "platform_release": "release-1",
+        "workspace_contract_digest": "f" * 64,
+        "idempotency_key": "publish-always-confirm",
+    }
     first = _gate("register_tool", args, session="s-R")
     assert first["decision"] == "awaiting_approval"
     cid = first["confirmation_id"]

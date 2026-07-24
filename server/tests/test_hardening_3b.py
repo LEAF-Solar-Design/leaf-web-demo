@@ -143,9 +143,13 @@ def versions(stack, tenant, drawing="demo"):
 
 
 def run_wait(stack, tool, params=None, tenant="wl"):
+    headers = _h(tenant)
+    tools = requests.get(f"{stack['app']}/api/tools", headers=headers, timeout=30).json()["tools"]
+    catalog_digest = next(item["catalog_digest"] for item in tools if item["name"] == tool)
     return requests.post(f"{stack['app']}/api/run?wait=1",
-                         json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo"},
-                         headers=_h(tenant), timeout=120)
+                         json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo",
+                               "catalog_digest": catalog_digest},
+                         headers=headers, timeout=120)
 
 
 def _envelope_ok(body: dict) -> None:

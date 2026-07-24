@@ -57,7 +57,7 @@ def test_shipped_catalog_loads_with_v1_shape():
     assert set(pol.actions) == {
         "request_confirmation", "read_platform_state", "run_read_tool",
         "run_write_tool", "submit_live_solve", "undo_drawing_version",
-        "author_tool", "register_tool", "customize_platform",
+        "author_tool", "request_publication", "register_tool", "customize_platform",
     }
     assert pol.rate_limits == {"low": 120, "medium": 60, "high": 10}
     assert pol.approval_ttl_s == 300
@@ -67,6 +67,18 @@ def test_shipped_catalog_loads_with_v1_shape():
     assert reg.tenant_tightenable is False
     assert reg.rung == 6
     assert reg.required_capability == "deploy"
+
+    publication = pol.actions["request_publication"]
+    assert publication.policy == "auto"
+    assert publication.tenant_tightenable is False
+    assert publication.rung == 6
+    assert publication.required_capability == "deploy"
+    assert publication.args_schema == {
+        "type": "object",
+        "properties": {"change_set_id": {"type": "string"}},
+        "required": ["change_set_id"],
+        "additionalProperties": False,
+    }
 
     cust = pol.actions["customize_platform"]
     assert cust.enabled is False

@@ -2,7 +2,7 @@
  * LIVE SpineConverseRunner - the ONLY Anthropic egress on the converse path, behind
  * the SpineConverseRunner port. One run() = one conversational TURN driven through
  * the Agent SDK; the ConverseLoop owns ALL tool semantics (gate checks, event
- * emission, dispatch) - this runner only TRANSPORTS: it mounts the six spine
+ * emission, dispatch) - this runner only TRANSPORTS: it mounts the seven spine
  * tools as an in-process MCP server whose handlers delegate to the loop's
  * ToolExecutor, bridges the SDK's canUseTool to the loop's CanUseTool, and
  * relays model text / usage / terminal state as ConverseRunnerEvents.
@@ -35,7 +35,7 @@
  *   1:1 onto this (extra SDK context args are dropped; null is never returned).
  *   NOTE: the gate consult itself lives in the LOOP's executor (a GateClient
  *   check precedes EVERY tool execution); the runner's canUseTool bridge only
- *   forwards to the loop's hook, which allowlists the six spine tools.
+ *   forwards to the loop's hook, which allowlists the seven spine tools.
  *
  * - createSdkMcpServer: `createSdkMcpServer({ name, version?, instructions?,
  *   tools?: SdkMcpToolDefinition[] })` (:480-501) returns an
@@ -115,7 +115,7 @@ function dynImport(parts: string[]): Promise<unknown> {
   return import(parts.join("/"));
 }
 
-/** The six spine tools as mounted MCP names (server key "spine"). */
+/** The seven spine tools as mounted MCP names (server key "spine"). */
 export const SPINE_MCP_TOOL_NAMES = SPINE_TOOL_NAMES.map((n) => `mcp__spine__${n}`);
 
 /** Rate-limit horizon split (plan B3 / wire contract section 3 stop reasons):
@@ -152,6 +152,8 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
   job_status: "Check a previously dispatched job. Args {job_id}.",
   author_tool:
     "Request creation of a new tool when nothing in the catalog fits. Args {description, mode?, confirmation_id?}. Re-invoke with the gate-issued confirmation_id after approval.",
+  request_publication:
+    "Request or resume publication of a durable staged change. Args {change_set_id}. This does not grant approval and never accepts a receipt or confirmation.",
   request_confirmation:
     "Ask the user to explicitly approve something before proceeding. Args {kind, payload?}. After a pending result, summarize and end your turn.",
 };
@@ -197,7 +199,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     // Scrubbed env with EXACTLY this tenant's grant injected (never logged).
     const childEnv = buildScrubbedEnv(this.grant, process.env);
 
-    // The six spine tools, BRIDGED to the loop's executor. The loop owns the
+    // The seven spine tools, BRIDGED to the loop's executor. The loop owns the
     // semantics (gate check, wire events, dispatch); handlers only transport.
     const toResult = (r: { content: string; isError?: boolean }): CallToolResult => ({
       content: [{ type: "text", text: r.content }],
@@ -218,6 +220,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         mode: z.enum(["build", "one_off"]).optional(),
         confirmation_id: z.string().optional(),
       },
+      request_publication: { change_set_id: z.string() },
       request_confirmation: { kind: z.string(), payload: z.record(z.unknown()).optional() },
     };
     const tools = SPINE_TOOL_NAMES.map((name) =>

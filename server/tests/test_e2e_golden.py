@@ -101,6 +101,11 @@ def stop(proc: subprocess.Popen) -> None:
             proc.wait(timeout=10)
 
 
+def _catalog_digest(app_url: str, tool: str, headers=None) -> str:
+    tools = requests.get(f"{app_url}/api/tools", headers=headers, timeout=30).json()["tools"]
+    return next(item["catalog_digest"] for item in tools if item["name"] == tool)
+
+
 # --------------------------------------------------------------------------- #
 # fixture: clean authored store, boot broker + app on ephemeral ports, tear down
 # --------------------------------------------------------------------------- #
@@ -137,7 +142,8 @@ def stack(tmp_path_factory):
         # tool -> no version side effects) so the MEASURED async run in the test is a
         # hot path. A broker that truly can't serve fails HERE with a clear error.
         warm = requests.post(f"{app_url}/api/run?wait=1",
-                             json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo"},
+                             json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo",
+                                   "catalog_digest": _catalog_digest(app_url, "count-by-layer")},
                              headers={"X-Tenant-Id": "e2e-warmup"}, timeout=120)
         assert warm.status_code == 200, f"broker warm-up failed: {warm.status_code} {warm.text[:300]}"
         yield {"app": app_url, "broker": f"http://127.0.0.1:{broker_port}"}
@@ -198,7 +204,8 @@ def test_golden_path(stack):
 
     # 2) run that tool through the ASYNC job spine: 202 {job_id} -> poll -> complete
     r = requests.post(f"{app}/api/run",
-                      json={"tool": nl["tool"], "params": {}, "dwg": "rooftop_demo"},
+                      json={"tool": nl["tool"], "params": {}, "dwg": "rooftop_demo",
+                            "catalog_digest": _catalog_digest(app, nl["tool"], _h())},
                       headers=_h(), timeout=15)
     assert r.status_code == 202, r.text
     body = r.json()
@@ -223,7 +230,9 @@ def test_golden_path(stack):
     # 4) a WRITE tool run -> a new immutable version v2 (parent v1)
     w = requests.post(f"{app}/api/run?wait=1",
                       json={"tool": "delete-marked-panel", "params": {"drawing_id": "demo"},
-                            "dwg": "rooftop_demo"}, headers=_h(), timeout=60)
+                            "dwg": "rooftop_demo",
+                            "catalog_digest": _catalog_digest(app, "delete-marked-panel", _h())},
+                      headers=_h(), timeout=60)
     assert w.status_code == 200, w.text
     wenv = w.json()
     assert wenv["ok"] is True and wenv["error"] is None

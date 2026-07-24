@@ -388,6 +388,13 @@ def _h(tenant: str) -> dict:
     return {"X-Tenant-Id": tenant}
 
 
+def _run_json(stack, tool: str, params: dict, tenant: str) -> dict:
+    tools = requests.get(f"{stack['app']}/api/tools", headers=_h(tenant), timeout=30).json()["tools"]
+    catalog_digest = next(item["catalog_digest"] for item in tools if item["name"] == tool)
+    return {"tool": tool, "params": params, "dwg": "rooftop_demo",
+            "catalog_digest": catalog_digest}
+
+
 # --------------------------------------------------------------------------- #
 # B. Contract B — linkage happy path (before/after terminal) + no-headers no-row
 # --------------------------------------------------------------------------- #
@@ -402,8 +409,7 @@ def test_B_project_scoped_legacy_dispatch_is_truthfully_locked(stack):
 
     # async submit WITH project context; slow the run so we can see the "before"
     r = requests.post(f"{stack['app']}/api/run",
-                      json={"tool": READ_TOOL, "params": {"_qa_sleep_s": 2},
-                            "dwg": "rooftop_demo"},
+                      json=_run_json(stack, READ_TOOL, {"_qa_sleep_s": 2}, "wave2-link"),
                       headers=hdr, timeout=15)
     assert r.status_code == 409, r.text
     assert "locked" in r.json()["error"]["message"]
@@ -418,7 +424,7 @@ def test_B_no_headers_creates_no_platform_row_and_byte_identical_202(stack):
 
     # run WITHOUT the project headers -> platform linkage is a no-op
     r = requests.post(f"{stack['app']}/api/run",
-                      json={"tool": READ_TOOL, "params": {}, "dwg": "rooftop_demo"},
+                      json=_run_json(stack, READ_TOOL, {}, "wave2-nohdr"),
                       headers=_h("wave2-nohdr"), timeout=15)
     assert r.status_code == 202, r.text
     # 202 body is byte-identical to the legacy shape (no org/tier echo)
@@ -440,7 +446,7 @@ def test_C_ops_disable_enable_proxy_and_kill_switch_blocks_run(stack):
 
     # a baseline successful run so the tenant appears with runs>=1
     ok0 = requests.post(f"{stack['app']}/api/run?wait=1",
-                        json={"tool": READ_TOOL, "params": {}}, headers=_h(tenant), timeout=60)
+                        json=_run_json(stack, READ_TOOL, {}, tenant), headers=_h(tenant), timeout=60)
     assert ok0.status_code == 200, ok0.text
 
     # DISABLE via the proxy -> broker's §-enveloped ack
@@ -452,7 +458,7 @@ def test_C_ops_disable_enable_proxy_and_kill_switch_blocks_run(stack):
 
     # the kill-switch actually blocks a run (broker rejects before any APS work)
     blocked = requests.post(f"{stack['app']}/api/run?wait=1",
-                            json={"tool": READ_TOOL, "params": {}}, headers=_h(tenant), timeout=60)
+                            json=_run_json(stack, READ_TOOL, {}, tenant), headers=_h(tenant), timeout=60)
     assert blocked.status_code == 403, blocked.text
     assert blocked.json()["error"]["error_code"] == "TENANT_DISABLED"
 
@@ -468,7 +474,7 @@ def test_C_ops_disable_enable_proxy_and_kill_switch_blocks_run(stack):
     e = requests.post(f"{stack['app']}/api/ops/tenants/{tenant}/enable", headers=qa, timeout=15)
     assert e.status_code == 200 and e.json()["disabled"] is False, e.text
     ok1 = requests.post(f"{stack['app']}/api/run?wait=1",
-                        json={"tool": READ_TOOL, "params": {}}, headers=_h(tenant), timeout=60)
+                        json=_run_json(stack, READ_TOOL, {}, tenant), headers=_h(tenant), timeout=60)
     assert ok1.status_code == 200, ok1.text
 
     tl2 = requests.get(f"{stack['app']}/api/ops/tenants", headers=qa, timeout=15)
@@ -484,7 +490,7 @@ def test_D_versions_checkout_null_then_populated(stack):
 
     # one write -> bootstraps demo (v1) + v2
     w = requests.post(f"{stack['app']}/api/run?wait=1",
-                      json={"tool": WRITE_TOOL, "params": {"drawing_id": "demo"}},
+                      json=_run_json(stack, WRITE_TOOL, {"drawing_id": "demo"}, tenant),
                       headers=_h(tenant), timeout=120)
     assert w.status_code == 200, w.text
 

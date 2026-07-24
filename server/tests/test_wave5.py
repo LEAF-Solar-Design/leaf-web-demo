@@ -102,6 +102,14 @@ def _client():
     return TestClient(app, raise_server_exceptions=False)
 
 
+def _run_json(tool: str, tenant_id: str = "org_wave5") -> dict:
+    import deps
+    package = deps.find_tool(tool, tenant_id)
+    assert package is not None
+    return {"tool": tool, "params": {},
+            "catalog_digest": deps.catalog_tool_digest(package)}
+
+
 @pytest.fixture
 def live_auth(monkeypatch):
     """Turn Auth0 verification ON, pointed at the local RS256 JWKS (no network)."""
@@ -336,7 +344,7 @@ def test_author_build_fails_closed_until_r5_is_enabled(live_auth, isolate_author
 def test_run_write_allowed_for_hosted_starter(live_auth):
     """hosted_starter HAS run_write -> a drawing.write run is accepted (202, not 403)."""
     c = _client()
-    r = c.post("/api/run", json={"tool": "delete-marked-panel", "params": {}},
+    r = c.post("/api/run", json=_run_json("delete-marked-panel"),
                headers=bearer("hosted_starter"))
     assert r.status_code == 202, r.text
     assert r.json().get("job_id")
@@ -344,7 +352,7 @@ def test_run_write_allowed_for_hosted_starter(live_auth):
 
 def test_run_read_allowed_for_hosted_starter(live_auth):
     c = _client()
-    r = c.post("/api/run", json={"tool": "count-by-layer", "params": {}},
+    r = c.post("/api/run", json=_run_json("count-by-layer"),
                headers=bearer("hosted_starter"))
     assert r.status_code == 202, r.text
 
@@ -361,7 +369,7 @@ def test_run_write_denied_for_restricted_tier(live_auth, monkeypatch, tmp_path):
     monkeypatch.setenv("LEAF_ENTITLEMENTS_FILE", str(pf))
     c = _client()
 
-    r = c.post("/api/run", json={"tool": "delete-marked-panel", "params": {}},
+    r = c.post("/api/run", json=_run_json("delete-marked-panel"),
                headers=bearer("locked"))
     assert r.status_code == 403, r.text
     b = r.json()
@@ -373,7 +381,7 @@ def test_run_write_denied_for_restricted_tier(live_auth, monkeypatch, tmp_path):
     assert b["degraded_mode"] is False
 
     # a read tool on the same restricted tier is still allowed.
-    r2 = c.post("/api/run", json={"tool": "count-by-layer", "params": {}},
+    r2 = c.post("/api/run", json=_run_json("count-by-layer"),
                 headers=bearer("locked"))
     assert r2.status_code == 202, r2.text
 
@@ -418,7 +426,7 @@ def test_author_allowed_demo_offauth(demo_offauth, isolate_authored, monkeypatch
 
 def test_run_write_allowed_demo_offauth(demo_offauth):
     c = _client()
-    r = c.post("/api/run", json={"tool": "delete-marked-panel", "params": {}},
+    r = c.post("/api/run", json=_run_json("delete-marked-panel", "demo-tenant"),
                headers=_h("demo-tenant"))
     assert r.status_code == 202, r.text
 

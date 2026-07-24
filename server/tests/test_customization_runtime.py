@@ -503,6 +503,27 @@ def test_live_author_fails_closed_when_r5_is_disabled(monkeypatch):
     assert legacy_calls == []
 
 
+def test_live_author_requires_stable_idempotency_key_when_r5_is_enabled(monkeypatch):
+    configured_calls = []
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(lambda cls: configured_calls.append(True)),
+    )
+
+    response = author_router.author(
+        author_router.AuthorRequest(description="make a tool"),
+        tenant="tenant-a",
+        idempotency_key=None,
+    )
+
+    assert response.status_code == 422
+    assert json.loads(response.body)["reason_code"] == "idempotency_key_required"
+    assert configured_calls == []
+
+
 def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
     tmp_path, monkeypatch
 ):

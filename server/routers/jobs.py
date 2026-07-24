@@ -26,6 +26,7 @@ from pydantic import BaseModel
 import deps
 import entitlements
 import jobs
+import customization_service
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
@@ -40,6 +41,10 @@ class RunRequest(BaseModel):
     dwg: str = "rooftop_demo"
     dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
     catalog_digest: Optional[str] = None
+    expected_drawing_head: Optional[int] = None
+    catalog_commit: Optional[str] = None
+    effective_catalog_digest: Optional[str] = None
+    tool_manifest_sha256: Optional[str] = None
     # specific immutable drawing version (da/store.py resolve_version) otherwise.
 
 
@@ -91,6 +96,21 @@ def _active_binding_tenant(tenant: Any) -> Optional[str]:
 def _bound_tenant_id(tenant: Any) -> str:
     """Prefer the active server-owned platform binding over stale JWT org claims."""
     return _active_binding_tenant(tenant) or str(tenant)
+
+
+def _legacy_drawing_head(tenant_id: str, drawing_id: str) -> int:
+    """Read the current legacy drawing head for an optimistic write check."""
+    import store
+    import write_loop
+
+    backend = write_loop.backend_for_tenant(
+        tenant_id,
+        aps_live=deps.APS_LIVE,
+        da=deps.get_da_client() if deps.APS_LIVE else None,
+    )
+    write_loop.ensure_demo_drawing(backend, tenant_id, drawing_id)
+    manifest = store.load_manifest(backend, tenant_id, drawing_id)
+    return int(manifest["head"])
 
 
 def _canonical_tenant_id(tenant: Any, context: Dict[str, Any]) -> str:
@@ -170,6 +190,9 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                 # UUID in ``dwg``; the legacy integer pin has no meaning here.
                 raise ValueError(
                     "dwg_version applies to the legacy path; canonical runs pin by version UUID in dwg")
+            if req.expected_drawing_head is not None:
+                raise ValueError(
+                    "expected_drawing_head applies only to legacy versioned drawings")
             try:
                 input_version_id = str(uuid.UUID(req.dwg))
             except (ValueError, AttributeError):
@@ -181,6 +204,55 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
         else:
             if tool.get("canonical_only"):
                 raise ValueError("X-Org-Id and X-Project-Id are required for this canonical solver")
+            exact_pins_required = required == "run_write" and (
+                os.environ.get("LEAF_EXACT_WRITE_PINS_REQUIRED", "0") == "1"
+                or (
+                    deps.auth_live()
+                    and isinstance(tenant_id, deps.TenantContext)
+                    and tenant_id.subject is None
+                )
+            )
+            exact_pin_values = (
+                req.expected_drawing_head,
+                req.dwg_version,
+                req.catalog_commit,
+                req.effective_catalog_digest,
+                req.tool_manifest_sha256,
+            )
+            if exact_pins_required and any(value is None for value in exact_pin_values):
+                raise ValueError(
+                    "conversational write requires exact catalog and drawing pins")
+            if req.expected_drawing_head is not None:
+                if req.dwg_version != req.expected_drawing_head:
+                    raise ValueError(
+                        "approved drawing version does not match expected drawing head")
+                if not all((req.catalog_commit, req.effective_catalog_digest,
+                            req.tool_manifest_sha256)):
+                    raise ValueError(
+                        "write approval is missing exact catalog generation pins")
+                if not hmac.compare_digest(
+                        req.tool_manifest_sha256 or "", current_catalog_digest):
+                    raise ValueError(
+                        "tool manifest changed after approval; refresh tools and confirm again")
+                current_pin = (
+                    customization_service.effective_catalog_pin(str(tenant_id))
+                    or deps.base_catalog_pin(deps.all_tools(str(tenant_id)))
+                )
+                if not (
+                    hmac.compare_digest(
+                        req.catalog_commit or "", current_pin["catalog_commit"]
+                    )
+                    and hmac.compare_digest(
+                        req.effective_catalog_digest or "",
+                        current_pin["effective_catalog_digest"],
+                    )
+                ):
+                    raise ValueError(
+                        "effective catalog changed after approval; refresh tools and confirm again")
+                current_head = _legacy_drawing_head(str(tenant_id), req.dwg)
+                if current_head != req.expected_drawing_head:
+                    raise ValueError(
+                        "drawing head changed after approval; refresh drawing state and confirm again")
             job_id = jobs.submit_job(
                 tenant_id, tool, params, req.dwg, aps_live=deps.APS_LIVE,
                 org_id=resolved_org, project_id=resolved_project,

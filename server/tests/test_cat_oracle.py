@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cat_oracle import FIXTURE_DIR, _read_pbm, evaluate_cat
+from cat_oracle import FIXTURE_DIR, _fixture_bytes, _read_pbm, evaluate_cat
 
 
 def entity(handle: str, x: float, y: float, *, size: float = 1.0) -> dict:
@@ -205,7 +205,8 @@ def test_nonseparating_calibration_fails_closed(tmp_path: Path):
     calibration_path.write_text(json.dumps(calibration, indent=2) + "\n", encoding="utf-8")
     manifest_path = tmp_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["sha256"]["calibration.json"] = hashlib.sha256(calibration_path.read_bytes()).hexdigest()
+    manifest["sha256"]["calibration.json"] = hashlib.sha256(
+        _fixture_bytes(calibration_path)).hexdigest()
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     before, after, handles = case_for("sitting-v1")
     report = evaluate_cat(before, after, handles, fixture_dir=tmp_path)

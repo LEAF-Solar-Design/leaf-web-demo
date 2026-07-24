@@ -46,6 +46,14 @@ import jobs  # noqa: E402
 
 HDRS = {"X-Tenant-Id": "demo-tenant"}
 
+
+def _run_json(tool: str, params=None) -> dict:
+    import deps
+    package = deps.find_tool(tool, "demo-tenant")
+    assert package is not None
+    return {"tool": tool, "params": params or {},
+            "catalog_digest": deps.catalog_tool_digest(package)}
+
 READ_TOOL = {"name": "fake-read", "engine_op": "count_by_layer",
              "capabilities": ["drawing.read"], "params": {}}
 WRITE_TOOL = {"name": "fake-write", "engine_op": "add_panel_row",
@@ -166,7 +174,7 @@ def test_sse_stream_yields_transition_sequence_until_complete(monkeypatch):
     monkeypatch.setattr(broker_client, "run_via_broker", _fake_broker_ok)
     c = _client()
 
-    r = c.post("/api/run", json={"tool": "count-by-layer"}, headers=HDRS)
+    r = c.post("/api/run", json=_run_json("count-by-layer"), headers=HDRS)
     assert r.status_code == 202
     job_id = r.json()["job_id"]
 
@@ -210,6 +218,6 @@ def test_wait_fallback_still_returns_final_envelope(monkeypatch):
         broker_client, "run_via_broker",
         lambda *a, **k: {"ok": True, "degraded_mode": False,
                          "result": {"counts": {"Panels": 2345}}})
-    r = _client().post("/api/run?wait=1", json={"tool": "count-by-layer"}, headers=HDRS)
+    r = _client().post("/api/run?wait=1", json=_run_json("count-by-layer"), headers=HDRS)
     assert r.status_code == 200
     assert r.json()["ok"] is True

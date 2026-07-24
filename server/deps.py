@@ -295,7 +295,29 @@ def catalog_tool_digest(tool: Dict[str, Any]) -> str:
 
 
 def catalog_tool_view(tool: Dict[str, Any]) -> Dict[str, Any]:
-    return {**tool, "catalog_digest": catalog_tool_digest(tool)}
+    digest = catalog_tool_digest(tool)
+    return {**tool, "catalog_digest": digest, "tool_manifest_sha256": digest}
+
+
+def base_catalog_pin(tools: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Issue a stable generation pin when no published customization exists."""
+    generated = {
+        "catalog_digest", "tool_manifest_sha256", "catalog_commit",
+        "effective_catalog_digest",
+    }
+    definitions = [
+        {key: value for key, value in tool.items() if key not in generated}
+        for tool in tools
+    ]
+    definitions.sort(key=lambda item: str(item.get("name", "")))
+    encoded = json.dumps(
+        definitions, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return {
+        "catalog_commit": hashlib.sha1(encoded).hexdigest(),  # noqa: S324
+        "effective_catalog_digest": hashlib.sha256(encoded).hexdigest(),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -402,10 +424,13 @@ def resolve_active_platform_tenant_id(subject: Optional[str]) -> str:
 # disabled => the ordinary JWT path (which 401s without a token).
 # --------------------------------------------------------------------------- #
 def _dispatch_backedge_route(method: str, path: str) -> bool:
-    """True iff (method, path) is a §0 back-edge route: POST /api/run or
-    /api/author, GET /api/jobs/{id}, capabilities, tools, or drawings."""
+    """Return whether this exact method and path is a harness back-edge."""
     if method == "POST":
-        return path in ("/api/run", "/api/author")
+        return path in (
+            "/api/run",
+            "/api/author",
+            "/api/author/publication-requests",
+        )
     if method != "GET":
         return False
     if path in ("/api/capabilities", "/api/tools"):
