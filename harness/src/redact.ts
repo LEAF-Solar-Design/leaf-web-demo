@@ -26,12 +26,27 @@ export function redactTokens(s: string): string {
  * secrets they do not hold (e.g. a tenant grant minted elsewhere).
  */
 export function redactSecrets(s: string, secrets: readonly (string | undefined)[]): string {
+  return redactTokens(stripSecrets(s, secrets));
+}
+
+/**
+ * Literal-only removal of known secrets — NO pattern pass.
+ *
+ * Use this on USER CONTENT. `redactSecrets` finishes with TOKENISH, which
+ * matches any 40+ character alphanumeric run, so a perfectly ordinary prompt
+ * mentioning a 40-char Git SHA would have that SHA rewritten to [REDACTED]
+ * before the model ever saw it. Corrupting a log line that way is harmless;
+ * corrupting the prompt changes what the model is asked. Content therefore gets
+ * exact literal removal of values we actually hold, and nothing heuristic.
+ * (sol-critic PR #123 round 7, blocker 2.)
+ */
+export function stripSecrets(s: string, secrets: readonly (string | undefined)[]): string {
   let out = s;
   for (const secret of secrets) {
     if (!isRedactableSecret(secret)) continue;
     out = out.split(secret).join("[REDACTED]");
   }
-  return redactTokens(out);
+  return out;
 }
 
 /**
@@ -48,11 +63,22 @@ export function redactSecrets(s: string, secrets: readonly (string | undefined)[
  */
 export const MIN_REDACTABLE_SECRET_LEN = 24;
 
+/**
+ * PRINTABLE ASCII, no space. Deliberately the same rule as the server's
+ * _CREDENTIAL_CHARS, and deliberately NOT "not whitespace": Python's
+ * str.isspace() and JavaScript's \s disagree (U+FEFF is whitespace to \s but
+ * not to isspace()), so a credential containing it was ACCEPTED by the app yet
+ * treated as unredactable here — accepted but unstrippable is the worst of both.
+ * An explicit shared charset removes the ambiguity, and real Agent SDK
+ * credentials are long ASCII strings. (sol-critic PR #123 rounds 6-8.)
+ */
+const PRINTABLE_ASCII = /^[\x21-\x7E]+$/;
+
 export function isRedactableSecret(secret: string | undefined): secret is string {
   return (
     typeof secret === "string" &&
     secret.length >= MIN_REDACTABLE_SECRET_LEN &&
-    !/\s/.test(secret)
+    PRINTABLE_ASCII.test(secret)
   );
 }
 

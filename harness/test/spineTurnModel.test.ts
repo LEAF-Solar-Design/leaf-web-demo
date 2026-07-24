@@ -36,7 +36,11 @@ class UnusedOAuthProvider implements OAuthGrantProvider {
 /** Records the tenant grant it hands back so tests can assert linked-grant use. */
 class RecordingOAuthProvider implements OAuthGrantProvider {
   consulted = 0;
-  constructor(private readonly grant: AgentGrant = { kind: "oauth", oauthToken: "TENANT-LINKED-GRANT" }) {}
+  // PRODUCTION-LENGTH: clears the 24-char redaction floor, so tests that use
+  // this provider actually exercise the linked-grant scrub path. The old
+  // 19-char value sat below the floor and made one test vacuous
+  // (sol-critic PR #123 round 7).
+  constructor(private readonly grant: AgentGrant = { kind: "oauth", oauthToken: "TENANT-LINKED-GRANT-abcdefgh" }) {}
   async getGrant(_tenantId: string): Promise<AgentGrant> {
     this.consulted += 1;
     return this.grant;
@@ -156,7 +160,7 @@ describe("mount your LLM — bring-your-own credential", () => {
     await drain(adapter.runTurn(turnInput({ text: "hi" })));
 
     expect(oauth.consulted).toBe(1);
-    expect(grants[0]).toEqual({ kind: "oauth", oauthToken: "TENANT-LINKED-GRANT" });
+    expect(grants[0]).toEqual({ kind: "oauth", oauthToken: "TENANT-LINKED-GRANT-abcdefgh" });
   });
 
   it("never persists the supplied credential in serialized session state", async () => {
@@ -272,12 +276,18 @@ describe("mount your LLM — a credential pasted into the prompt", () => {
     }
   });
 
-  it("leaves content alone when no wire credential is supplied", async () => {
-    // No wire credential, so the tenant's linked grant is resolved instead. Its
-    // value here is below the redaction floor, so nothing is rewritten — the
-    // point being that ordinary prose is never touched.
+  it("leaves ordinary content alone, including token-shaped strings", async () => {
+    // No wire credential, so the PRODUCTION-LENGTH linked grant is resolved and
+    // the scrub path really runs — the earlier version of this test used a
+    // below-floor grant, so it passed even with the scrub removed.
+    //
+    // The 40-char Git SHA is the load-bearing part: the input path must use
+    // LITERAL removal, not the TOKENISH pattern pass, or an ordinary prompt
+    // mentioning a commit would reach the model with it rewritten to
+    // [REDACTED]. (sol-critic PR #123 round 7, blocker 2.)
     const { adapter, runner } = makeAdapter(new RecordingOAuthProvider());
-    const text = "a perfectly ordinary message with no secrets";
+    const text =
+      "check commit e3b0c44298fc1c149afbf4c8996fb92427ae41e4 and key sk-ant-api03-looksreal";
     await drain(adapter.runTurn(turnInput({ text })));
 
     expect(JSON.stringify(runner.runs)).toContain(text);

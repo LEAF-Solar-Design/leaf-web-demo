@@ -86,12 +86,20 @@ def _invalid_model_response(model: Any) -> JSONResponse:
 # pathological value at the boundary, where it is cheap and unambiguous.
 _MIN_CREDENTIAL_LEN = 24
 
+# PRINTABLE ASCII, no space. Deliberately NOT "not str.isspace()": Python's
+# isspace() and JavaScript's \s disagree (U+FEFF is whitespace to \s but not to
+# isspace()), so such a credential was ACCEPTED here yet treated as unredactable
+# by harness/src/redact.ts — accepted but unstrippable is the worst of both.
+# Keep this rule identical to that file's PRINTABLE_ASCII.
+# (sol-critic PR #123 rounds 6-8.)
+_CREDENTIAL_CHARS = frozenset(chr(c) for c in range(0x21, 0x7F))
+
 
 def _valid_credential_value(tok: Any) -> bool:
     return (
         isinstance(tok, str)
         and len(tok) >= _MIN_CREDENTIAL_LEN
-        and not any(ch.isspace() for ch in tok)
+        and all(ch in _CREDENTIAL_CHARS for ch in tok)
     )
 
 
@@ -99,9 +107,10 @@ def _validate_credential_grant(raw: Any) -> Optional[Dict[str, Any]]:
     """Return the normalized BYO Agent SDK credential grant, or None if the shape
     is invalid. Accepts EXACTLY {kind:'api_key', api_key:<credential>} or
     {kind:'oauth', oauth_token:<credential>}; extra keys are dropped. A
-    <credential> is a whitespace-free string of at least _MIN_CREDENTIAL_LEN
-    characters (see above). The token VALUE is never logged here (nothing in this
-    module prints it)."""
+    <credential> is at least _MIN_CREDENTIAL_LEN characters and entirely
+    PRINTABLE ASCII (_CREDENTIAL_CHARS, 0x21-0x7E) — no space, no control
+    character, no non-ASCII codepoint. The token VALUE is never logged here
+    (nothing in this module prints it)."""
     if not isinstance(raw, dict):
         return None
     kind = raw.get("kind")

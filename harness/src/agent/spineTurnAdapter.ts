@@ -45,7 +45,7 @@
 
 import { ConverseLoop } from "./converseLoop.js";
 import { wireGrantToAgentGrant } from "../ports/wireGrant.js";
-import { grantSecrets, isRedactableSecret, redactSecrets } from "../redact.js";
+import { grantSecrets, isRedactableSecret, stripSecrets } from "../redact.js";
 import type {
   AgentGrant,
   AppRunClient,
@@ -133,13 +133,16 @@ export class SpineTurnAdapter implements ConverseRunner {
     // into a text_delta or propose a tool parameter containing it.
     //
     // Only long, whitespace-free values are eligible (isRedactableSecret), so a
-    // short or common string can never shred ordinary prose.
+    // short or common string can never shred ordinary prose. LITERAL removal only
+    // (stripSecrets, not redactSecrets): the pattern pass would rewrite any 40-char
+    // token-shaped run, e.g. a Git SHA the user legitimately pasted, before the
+    // model saw it. (sol-critic PR #123 round 7, blocker 2.)
     const secrets = grantSecrets(grant).filter(isRedactableSecret);
     if (secrets.length) {
       input = {
         ...input,
-        ...(input.text !== undefined ? { text: redactSecrets(input.text, secrets) } : {}),
-        messages: input.messages.map((m) => ({ ...m, text: redactSecrets(m.text, secrets) })),
+        ...(input.text !== undefined ? { text: stripSecrets(input.text, secrets) } : {}),
+        messages: input.messages.map((m) => ({ ...m, text: stripSecrets(m.text, secrets) })),
       };
     }
 

@@ -883,6 +883,35 @@ def test_pasted_credential_is_stripped_before_the_transcript_append(
     assert state.bodies[0]["credential_grant"]["api_key"] == _BYO_SECRET
 
 
+def test_pasted_credential_is_stripped_from_classifier_hint_too(
+    client, wired, behind_trusted_proxy,
+):
+    """sol-critic PR #123 round 7, blocker 1. `classifier_hint` is an
+    unrestricted caller-controlled dict that turn_runner persists verbatim into
+    the durable turn_started event, and it is NOT on the harness wire — so
+    nothing downstream can repair it. Scrubbing only `text` left this open."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={
+            "text": "hello",
+            "classifier_hint": {"rationale": f"the key is {_BYO_SECRET}",
+                                "nested": [{"deep": _BYO_SECRET}]},
+            "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET},
+        },
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    events = session_store.recent_events(sess["session_id"], 200)
+    dumped = json.dumps(events)
+    assert _BYO_SECRET not in dumped, "credential survived in classifier_hint"
+    # The hint itself is still recorded — scrubbed, not dropped.
+    assert "rationale" in dumped and "[REDACTED]" in dumped
+
+
 def test_byo_credential_over_plain_http_is_rejected(client, wired):
     url, state = wired
     sess = _new_session()
@@ -916,6 +945,12 @@ def test_byo_credential_malformed_is_rejected(client, wired, behind_trusted_prox
     ("has whitespace in it aaaaaaaaaaaa", True),  # long enough, not credential-shaped
     ("error", False),      # a protocol word: redaction would corrupt transcripts
     ('"', False),          # a JSON delimiter: redaction would corrupt shape
+    # PARITY: U+FEFF is NOT whitespace to Python's str.isspace() but IS matched
+    # by JavaScript's \s, so the old predicate accepted this here while the
+    # harness refused to redact it — accepted but unstrippable. Both sides now
+    # require printable ASCII. (sol-critic PR #123 rounds 6-8.)
+    ("abcdefghijklmnopqrstuvwx﻿", True),
+    ("abcdefghijklmnopqrstuvwxé", True),   # non-ASCII generally
 ])
 def test_credential_must_look_like_a_credential(
     client, wired, behind_trusted_proxy, bad, distinctive,
