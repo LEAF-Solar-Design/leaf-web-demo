@@ -253,6 +253,7 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile.${{ matrix.image }}
+          build-args: ${{ matrix.image == 'app' && format('LEAF_SOURCE_SHA={0}', needs.prepare.outputs.source_sha) || '' }}
           push: true
           tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           cache-from: ${{ steps.cache.outputs.from }}
