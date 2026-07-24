@@ -25,6 +25,7 @@ import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import { getSessionHolderId } from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
   dismissRunIntent, stageRunIntent,
@@ -355,10 +356,12 @@ export default function App() {
   const claudeNotLinked = !mock && !!grant && grant.linked === false
 
   // --- single-writer checkout (item 3) ---
-  // Our own holder id (best-effort): the echoed tenant, else the configured stub.
-  // A checkout held by US is not a lock; only a checkout held by ANOTHER session
-  // suppresses write-Run. `?demo=locked` injects a synthetic other-session lock.
-  const ownHolder = tenant || config.tenant || 'demo-tenant'
+  // Our own holder id: a per-SESSION id (see checkoutIdentity.js). It must not be
+  // the tenant. Every teammate in an org shares that, so each of them would read
+  // another's lock as their own. A checkout held by US is not a lock; only a
+  // checkout held by ANOTHER session suppresses write-Run. `?demo=locked` injects
+  // a synthetic other-session lock.
+  const ownHolder = useMemo(() => getSessionHolderId(), [])
   const rawCheckout = demoLocked
     ? { holder: 'another-session', acquired: new Date().toISOString(), expires: new Date(Date.now() + 3600e3).toISOString() }
     : checkout
