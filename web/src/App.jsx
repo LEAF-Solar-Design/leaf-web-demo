@@ -1443,8 +1443,7 @@ export default function App() {
   // --- M5 guided tour: canned prompts ride the REAL handlers ----------------
   // The tour types its beat into the real command bar, dispatches it through the
   // real nl-prompt router (onDispatch), and — for a read-only run beat — runs it
-  // through the real onRun path. NOTHING here fabricates a result: the numbers
-  // on screen come out of the same mock engine a human would have driven.
+  // through the same guarded intent path. NOTHING here fabricates a result.
   // Write beats (the versioned delete) deliberately stop at the confirm card;
   // paid/destructive actions never auto-execute, tour or not.
   const onCannedPrompt = useCallback(async (text, step) => {
@@ -1471,7 +1470,9 @@ export default function App() {
       if (r && r.lane === 'run' && step?.action === 'run') {
         const toolObj = tools.find((t) => t.name === r.tool)
         const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
-        if (toolObj && !isWrite) await onRun(toolObj, r.params || {})
+        if (toolObj && !isWrite) {
+          onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.')
+        }
       }
     } finally {
       // The BUILD lane hands off to AuthorPanel's auto-submit, whose onAuthor
@@ -1479,7 +1480,7 @@ export default function App() {
       // tool is actually authored, which is the whole differentiator beat.
       if (cannedSeq.current === seq && !(r && r.lane === 'build')) setTourLanded(true)
     }
-  }, [onDispatch, onRun, tools])
+  }, [onDispatch, onRequestCatalogRun, tools])
 
   const onTourExit = useCallback(() => {
     // Leaving the tour keeps you exactly where you are — in mock, on the same
@@ -2305,7 +2306,6 @@ export default function App() {
             running={running || !!previewing}
             writeLocked={writeLocked}
             writeEntitled={canRunWrite}
-            onRun={onRun}
             onConfirmIntent={onConfirmCatalogRun}
             onPickAlternative={onPickAlternative}
             onOpenAuthor={onOpenAuthor}

@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -6,16 +7,25 @@ import pytest
 from solver_adapters import autofill
 
 
-def _write_attestation(root: Path, revision: str) -> None:
+def _write_self_attestation(root: Path, revision: str) -> None:
     source_sha256 = autofill._source_sha256(root)
     (root / autofill.SOURCE_ATTESTATION).write_text(
         '{"revision":"' + revision + '","source_sha256":"' + source_sha256 + '"}\n')
 
 
-def test_descriptor_uses_verified_attested_solver_revision(monkeypatch, tmp_path):
+def _seal_trusted_source(monkeypatch, root: Path, revision: str) -> Path:
+    manifest = root / "trusted-sources.json"
+    manifest.write_text(json.dumps({revision: autofill._source_sha256(root)}) + "\n")
+    monkeypatch.setattr(autofill, "TRUSTED_SOURCES_MANIFEST", manifest)
+    autofill.attest_source(root, revision, manifest)
+    (root / autofill.SOURCE_REVISION_MARKER).write_text(revision + "\n")
+    return manifest
+
+
+def test_descriptor_uses_trusted_manifest_and_image_revision(monkeypatch, tmp_path):
     (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
     revision = "a" * 40
-    _write_attestation(tmp_path, revision)
+    _seal_trusted_source(monkeypatch, tmp_path, revision)
     monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", revision.upper())
 
     assert autofill.descriptor(solver_root=tmp_path)["source_revision"] == revision
@@ -29,21 +39,34 @@ def test_descriptor_rejects_invalid_supplied_solver_revision(monkeypatch, tmp_pa
         autofill.descriptor(solver_root=tmp_path)
 
 
-def test_descriptor_rejects_fake_exact_revision_for_unrelated_source(monkeypatch, tmp_path):
+def test_descriptor_rejects_untrusted_self_attestation(monkeypatch, tmp_path):
     (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
-    real_revision = "a" * 40
-    _write_attestation(tmp_path, real_revision)
-    monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", "0" * 40)
+    revision = "a" * 40
+    _write_self_attestation(tmp_path, revision)
+    (tmp_path / autofill.SOURCE_REVISION_MARKER).write_text(revision + "\n")
+    manifest = tmp_path / "trusted-sources.json"
+    manifest.write_text("{}\n")
+    monkeypatch.setattr(autofill, "TRUSTED_SOURCES_MANIFEST", manifest)
 
-    with pytest.raises(RuntimeError, match="does not match the attested solver source"):
+    with pytest.raises(RuntimeError, match="no trusted autofill source digest"):
         autofill.descriptor(solver_root=tmp_path)
 
 
-def test_descriptor_rejects_source_changed_after_build_attestation(monkeypatch, tmp_path):
+def test_descriptor_rejects_attestation_with_wrong_image_revision(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    revision = "a" * 40
+    _seal_trusted_source(monkeypatch, tmp_path, revision)
+    (tmp_path / autofill.SOURCE_REVISION_MARKER).write_text(("b" * 40) + "\n")
+
+    with pytest.raises(RuntimeError, match="image revision does not match"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
+def test_descriptor_rejects_source_changed_after_trusted_attestation(monkeypatch, tmp_path):
     solver = tmp_path / "solver.py"
     solver.write_text("def solve_targets(*args, **kwargs): return {}\n")
     revision = "a" * 40
-    _write_attestation(tmp_path, revision)
+    _seal_trusted_source(monkeypatch, tmp_path, revision)
     monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", revision)
     solver.write_text("def solve_targets(*args, **kwargs): return {'changed': True}\n")
 

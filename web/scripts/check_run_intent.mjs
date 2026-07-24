@@ -50,6 +50,7 @@ assert(!confirmRunIntent(staged.state, request, { now: 1000 + 5 * 60 * 1000 + 1 
   'an expired confirmation must fail closed')
 
 const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+const routePanel = readFileSync(new URL('../src/components/RoutePanel.jsx', import.meta.url), 'utf8')
 assert(app.includes('const armDecision = useCallback((decision) =>'),
   'all route decisions must cross the shared intent staging seam')
 assert(app.includes('armDecision(r)'), 'NL routes do not use the shared intent seam')
@@ -59,5 +60,13 @@ assert(app.includes('runIntentStateRef.current = dismissRunIntent(runIntentState
   'route dismissal does not invalidate the active intent')
 assert(!app.includes('authorizeRunIntent') && !app.includes('createRunIntent('),
   'the legacy client-only intent implementation was reintroduced')
+assert(!routePanel.includes('onRun(toolObj, params)'),
+  'RoutePanel still bypasses confirmation for a low-confidence best guess')
+assert(routePanel.includes('if (!running && !locked && !entBlocked) requestRun()'),
+  'RoutePanel best guesses do not use the guarded requestRun seam')
+assert(!app.includes('await onRun(toolObj, r.params || {})'),
+  'the guided tour still bypasses the guarded intent seam')
+assert(app.includes("onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection."),
+  'the guided tour does not stage the PR107 intent contract')
 
 console.log('RUN_INTENT_OK')

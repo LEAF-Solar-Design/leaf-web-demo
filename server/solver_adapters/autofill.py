@@ -19,6 +19,7 @@ DEFAULT_SOLVER_ROOT = Path(__file__).resolve().parents[3] / "autofill-solver"
 TOOL_NAME = "string-autofill-opt"
 SOURCE_ATTESTATION = ".leaf-source-attestation.json"
 SOURCE_REVISION_MARKER = ".leaf-source-revision"
+TRUSTED_SOURCES_MANIFEST = Path(__file__).resolve().parents[2] / "deploy" / "autofill-solver-sources.json"
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -98,9 +99,7 @@ def _source_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
-def attest_source(root: Path, revision: str, manifest_path: Path) -> Dict[str, str]:
-    """Verify copied solver bytes against a trusted commit manifest and seal them."""
-    root = Path(root).resolve()
+def _trusted_source_sha256(revision: str, manifest_path: Path) -> str:
     revision = _exact_revision(revision)
     try:
         manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
@@ -110,6 +109,14 @@ def attest_source(root: Path, revision: str, manifest_path: Path) -> Dict[str, s
             f"no trusted autofill source digest for revision {revision}") from exc
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
         raise RuntimeError(f"invalid trusted source digest for revision {revision}")
+    return expected_sha256
+
+
+def attest_source(root: Path, revision: str, manifest_path: Path) -> Dict[str, str]:
+    """Verify copied solver bytes against a trusted commit manifest and seal them."""
+    root = Path(root).resolve()
+    revision = _exact_revision(revision)
+    expected_sha256 = _trusted_source_sha256(revision, manifest_path)
     actual_sha256 = _source_sha256(root)
     if actual_sha256 != expected_sha256:
         raise RuntimeError(
@@ -139,6 +146,20 @@ def _source_identity(root: Path) -> Dict[str, str]:
         if not re.fullmatch(r"[0-9a-f]{64}", attested_sha256) \
                 or attested_sha256 != actual_sha256:
             raise RuntimeError("autofill source bytes do not match their build attestation")
+        trusted_sha256 = _trusted_source_sha256(
+            attested_revision, TRUSTED_SOURCES_MANIFEST)
+        if trusted_sha256 != attested_sha256:
+            raise RuntimeError(
+                "autofill source attestation does not match the trusted source manifest")
+        image_revision = _image_source_revision(root)
+        derived = _git_source_revision(root)
+        if image_revision is None and derived is None:
+            raise RuntimeError(
+                "autofill source attestation requires Git metadata or an image revision marker")
+        if image_revision is not None and image_revision != attested_revision:
+            raise RuntimeError("worker image revision does not match the attested solver source")
+        if derived is not None and derived != attested_revision:
+            raise RuntimeError("solver checkout does not match the attested solver source")
         if supplied is not None and supplied != attested_revision:
             raise RuntimeError(
                 "AUTOFILL_SOLVER_REVISION does not match the attested solver source")
