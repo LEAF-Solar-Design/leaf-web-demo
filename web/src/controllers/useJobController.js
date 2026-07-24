@@ -61,6 +61,7 @@ function formatLifecycleError(error, formatter) {
  */
 export default function useJobController({
   mock = false,
+  resetKey = null,
   services = defaultServices,
   storage,
   pollIntervalMs = 2500,
@@ -110,6 +111,46 @@ export default function useJobController({
     setElapsedMs(null)
     runningSinceRef.current = null
   }, [])
+
+  const reset = useCallback(({ clearPointer = false } = {}) => {
+    sequenceRef.current += 1
+    setJobId(null)
+    setJobTool(null)
+    setInflight(null)
+    setReattaching(false)
+    setResult(null)
+    setError(null)
+    resetActivity()
+    if (clearPointer) clearInflightJob(null, storageRef.current)
+  }, [resetActivity, setJobId])
+
+  const reportError = useCallback((cause) => {
+    setError(typeof cause === 'string'
+      ? cause
+      : formatLifecycleError(cause, callbacksRef.current.formatError))
+  }, [])
+
+  const clearError = useCallback(() => setError(null), [])
+
+  const adoptEnvelope = useCallback((envelope, { jobId = null, toolName = null } = {}) => {
+    sequenceRef.current += 1
+    setJobId(jobId)
+    setJobTool(toolName || envelope?.tool || 'job')
+    setResult(envelope || null)
+    setError(null)
+    setInflight(null)
+    setReattaching(false)
+    resetActivity()
+    return envelope
+  }, [resetActivity, setJobId])
+
+  const adoptRecord = useCallback((record) => {
+    if (!record) return null
+    return adoptEnvelope(servicesRef.current.recordToEnvelope(record), {
+      jobId: record.job_id,
+      toolName: record.tool,
+    })
+  }, [adoptEnvelope])
 
   const markRunning = useCallback((startedAtSec) => {
     if (runningSinceRef.current == null) {
@@ -267,6 +308,10 @@ export default function useJobController({
   const resumeJobPolling = useCallback(() => setPollGeneration((value) => value + 1), [])
 
   useEffect(() => {
+    reset()
+  }, [mock, reset, resetKey])
+
+  useEffect(() => {
     if (status !== 'running') return undefined
     const timer = setInterval(() => {
       if (runningSinceRef.current != null) setElapsedMs(Date.now() - runningSinceRef.current)
@@ -392,6 +437,11 @@ export default function useJobController({
     runJob,
     attachJob,
     detachJob,
+    reset,
+    reportError,
+    clearError,
+    adoptEnvelope,
+    adoptRecord,
     refreshJobs,
     resumeJobPolling,
   }

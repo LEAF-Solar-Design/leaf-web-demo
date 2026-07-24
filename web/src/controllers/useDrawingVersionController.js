@@ -57,6 +57,10 @@ export default function useDrawingVersionController({
 
   const shown = previewIntake || versionIntake || intake
   const activeVersion = previewing?.version ?? drawingState?.head ?? drawingState?.version ?? null
+  const numericHead = Number(drawingState?.head)
+  const numericLatest = Number(drawingState?.latest)
+  const canUndo = Number.isFinite(numericHead) && numericHead > 1
+  const canRedo = Number.isFinite(numericHead) && Number.isFinite(numericLatest) && numericHead < numericLatest
 
   const reportError = useCallback((error, operation) => {
     setVersionError(formatError(error))
@@ -297,6 +301,8 @@ export default function useDrawingVersionController({
     activeVersion,
     head: drawingState?.head ?? null,
     latest: drawingState?.latest ?? null,
+    canUndo,
+    canRedo,
     versionBusy,
     versionError,
     overlayStale,

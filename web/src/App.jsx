@@ -34,8 +34,8 @@ import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
   config, getSession, getTools, getCapabilities, getUsage, getHealth, runTool, runToolAsync,
-  attachToJob, getJob, listJobs, recordToEnvelope, stageAuthorTool, publishStagedAuthor, getDrawingIntake,
-  getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt, closeJobBeacon,
+  getJob, recordToEnvelope, stageAuthorTool, publishStagedAuthor, getDrawingIntake,
+  getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
   getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant, getEntitlements,
 } from './api.js'
@@ -46,6 +46,8 @@ import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.
 import ConversePanel from './components/ConversePanel.jsx'
 import { THRESHOLDS, classifyAgentError } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
+import useJobController from './controllers/useJobController.js'
+import useDrawingVersionController from './controllers/useDrawingVersionController.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -66,17 +68,6 @@ function ViewerSkeleton() {
 
 // Durable pointer to the one in-flight live job, so a closed/reloaded tab can
 // re-attach instead of orphaning the UI (CONTRACT-ADDENDUM §7, MATRIX gap #1).
-const INFLIGHT_KEY = 'leaf.inflightJob'
-const saveInflight = (job_id, tool) => {
-  try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify({ job_id, tool, ts: Date.now() })) } catch { /* noop */ }
-}
-const clearInflight = () => {
-  try { localStorage.removeItem(INFLIGHT_KEY) } catch { /* noop */ }
-}
-const readInflight = () => {
-  try { return JSON.parse(localStorage.getItem(INFLIGHT_KEY) || 'null') } catch { return null }
-}
-
 // Elapsed wall-clock for the running strip: "4.2s" under a minute, "2:41" after.
 const fmtElapsed = (ms) => {
   if (ms == null) return null
@@ -184,30 +175,17 @@ function SignedOutGate({ onDemo, onSignIn }) {
 
 export default function App() {
   const [mock, setMock] = useState(config.mockDefault)
-  const [intake, setIntake] = useState(null)
-  const [versionIntake, setVersionIntake] = useState(null) // applied next-version
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
-  const [refreshFail, setRefreshFail] = useState(null) // {drawing_id, version} — post-write viewer refresh failed (X1)
   const [tools, setTools] = useState([])
   const [toolsErr, setToolsErr] = useState(null)
   const [toolsRetryKey, setToolsRetryKey] = useState(0) // R ladder / Retry chip — bumping re-runs the tools load effect
-  const [visibleLayers, setVisibleLayers] = useState({})
   const [selectedTool, setSelectedTool] = useState(null)
-  const [running, setRunning] = useState(false)
-  const [runStatus, setRunStatus] = useState(null)   // live job phase: 'submitted' | 'running'
-  const [runProgress, setRunProgress] = useState(null) // richer progress string (e.g. 'storing version')
-  const [runElapsedMs, setRunElapsedMs] = useState(null) // ticking wall-clock while running
-  const [result, setResult] = useState(null)
-  const [runErr, setRunErr] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
   const [pendingEdit, setPendingEdit] = useState(null)
   // Write-loop (§11, live mode): the current drawing/version chain from the last
   // drawing response and an undo/redo-in-flight guard. Version-completed events
   // surface as NT2 toasts (showToast), never as a persistent amber note.
-  const [drawingState, setDrawingState] = useState(null) // {drawing_id, version, head, latest}
-  const [versionBusy, setVersionBusy] = useState(false)  // undo/redo request in flight
-  const [overlayStale, setOverlayStale] = useState(false) // last result overlay no longer matches shown version
   const [openTool, setOpenTool] = useState(null)         // the tool card expanded in ToolsPanel (for the write ghost)
 
   // --- platform session state ---
@@ -225,22 +203,12 @@ export default function App() {
   const [entitlements, setEntitlements] = useState(null) // {tier, entitlements:{run_read,run_write,build}, source}
   const [entLoading, setEntLoading] = useState(false)
   // Version-history browser (§ version chain) + read-only preview state.
-  const [historyOpen, setHistoryOpen] = useState(false)
-  const [history, setHistory] = useState(null)           // {drawing_id, head, latest, versions[]}
-  const [historyErr, setHistoryErr] = useState(null)
-  const [historyLoading, setHistoryLoading] = useState(false)
-  const [previewing, setPreviewing] = useState(null)     // {version} while previewing a non-head version
-  const [previewIntake, setPreviewIntake] = useState(null) // that version's intake, seated read-only
   const [prompt, setPrompt] = useState('')               // dispatch box text
   const [route, setRoute] = useState(null)               // §12 nl-prompt routing decision
   const [routing, setRouting] = useState(false)          // awaiting the router
   const [routeErr, setRouteErr] = useState(null)         // routing call failed -> failed strip
-  const [jobs, setJobs] = useState([])                   // live rail: recent GET /api/jobs
   const [authRequired, setAuthRequired] = useState(false) // live mode with no session: 401s observed -> polls stop, footer says so
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
-  const [currentJobId, setCurrentJobId] = useState(null) // this session's live job id (dedupe)
-  const [inflightPtr, setInflightPtr] = useState(null)   // localStorage re-attach pointer
-  const [reattaching, setReattaching] = useState(false)  // auto re-attach in progress
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
   const [authorOpen, setAuthorOpen] = useState(false)    // author flow (opens on build lane)
   const [authorSeed, setAuthorSeed] = useState('')       // build-lane prefill text
@@ -300,15 +268,14 @@ export default function App() {
   } = converse
 
   const viewerRef = useRef(null)
+  const drawingErrorRef = useRef(null)
   const authorSectionRef = useRef(null)
-  const runningSinceRef = useRef(null)  // ms epoch the job entered 'running'
   const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
   const barInputRef = useRef(null)      // ⌘K focuses the command bar input
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
   const toastSeqRef = useRef(0)         // monotonic toast ids
   const cannedSeq = useRef(0)           // supersedes an in-flight tour beat (typing + dispatch)
-  const runSeqRef = useRef(0)           // Esc-interrupt bumps this to detach a run
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
     const randomId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
@@ -321,9 +288,66 @@ export default function App() {
   const runIntentSeqRef = useRef(0)
 
   const isEditFixture = mock && fixtureParam === 'edit'
+  const applyDrawingIntake = useCallback((nextIntake) => {
+    viewerRef.current?.applyVersion(nextIntake)
+  }, [])
+  const resetDrawingSelection = useCallback(() => {
+    setSelectedHandle(null)
+    setPendingEdit(null)
+  }, [])
+  const reportDrawingError = useCallback((error, { operation } = {}) => {
+    if (operation === 'undo' || operation === 'redo') drawingErrorRef.current?.(error)
+  }, [])
+  const drawingAdapters = useMemo(() => ({
+    loadHead: (drawingId) => getDrawingIntake(mock, drawingId, 'head'),
+    loadVersion: (drawingId, version) => getDrawingIntake(mock, drawingId, version),
+    loadVersions: (drawingId) => getDrawingVersions(mock, drawingId),
+    undoVersion: (drawingId) => undoDrawing(mock, drawingId),
+    redoVersion: (drawingId) => redoDrawing(mock, drawingId),
+  }), [mock])
+  const drawing = useDrawingVersionController({
+    ...drawingAdapters,
+    formatError: humanizeError,
+    onApplyIntake: applyDrawingIntake,
+    onResetSelection: resetDrawingSelection,
+    onError: reportDrawingError,
+  })
+  const {
+    intake,
+    versionIntake,
+    shown,
+    visibleLayers,
+    drawingState,
+    canUndo,
+    canRedo,
+    versionBusy,
+    overlayStale,
+    historyOpen,
+    history,
+    historyError: historyErr,
+    historyLoading,
+    previewing,
+    refreshFailure: refreshFail,
+    actions: drawingActions,
+  } = drawing
+  const {
+    reset: resetDrawing,
+    seatIntake,
+    seatVersion: seatDrawingVersion,
+    setVisibleLayers,
+    setOverlayStale,
+    undo: undoDrawingVersion,
+    redo: redoDrawingVersion,
+    loadHistory,
+    toggleHistory: onToggleHistory,
+    closeHistory,
+    previewVersion: onPreviewVersion,
+    backToHead: onBackToHead,
+    markRefreshFailure,
+    retryRefresh: onRetryViewerRefresh,
+  } = drawingActions
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
   // else the applied write-loop version, else the base intake.
-  const shown = previewIntake || versionIntake || intake
   const projectName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : 'your project'
   // Honest identity: tenant id and tier are DISTINCT. tenant defaults to "demo"
   // off-auth; tier is only known when the session echo carries it (auth live).
@@ -389,29 +413,20 @@ export default function App() {
   // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
-    setIntake(null); setVersionIntake(null); setLoadErr(null); setRefreshFail(null)
-    setResult(null); setSelectedHandle(null); setPendingEdit(null)
-    setRunning(false); setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); setRunErr(null)
-    setDrawingState(null); setVersionBusy(false)
-    setOverlayStale(false); setOpenTool(null)
+    resetDrawing(); setLoadErr(null)
+    setOpenTool(null)
     setToast(null); setDrawer(null); setRouteErr(null)
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    setRoute(null); setRouting(false); setCurrentJobId(null); setTenant(null)
+    setRoute(null); setRouting(false); setTenant(null)
     setTier(null); setOrg(null)
-    setHistoryOpen(false); setHistory(null); setHistoryErr(null)
-    setPreviewing(null); setPreviewIntake(null)
     setAgentMode(null); setAgentBanner(null); clearAgentSession()
-    runningSinceRef.current = null
     mockVersions.reset()
     const seat = (d) => {
       if (!alive) return
-      setIntake(d)
+      seatIntake(d)
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
-      const vis = {}
-      for (const l of d.layers || []) vis[l] = true
-      setVisibleLayers(vis)
     }
     if (isEditFixture) {
       seat(editFixture) // synchronous local fixture — no backend
@@ -435,7 +450,7 @@ export default function App() {
         }
       })
     return () => { alive = false }
-  }, [mock, isEditFixture, intakeRetryKey])
+  }, [mock, isEditFixture, intakeRetryKey, resetDrawing, seatIntake])
 
   useEffect(() => {
     let alive = true
@@ -621,73 +636,16 @@ export default function App() {
   // server-side; the localStorage re-attach path is untouched — if the user
   // returns quickly the re-attach still re-fetches the record (which may have
   // completed before the reaper swept). Absolute URL respects VITE_API_BASE.
-  useEffect(() => {
-    if (mock) return
-    const fire = () => {
-      const saved = readInflight()
-      if (saved && saved.job_id) closeJobBeacon(saved.job_id)
-    }
-    const onHide = () => fire()
-    const onVis = () => { if (document.visibilityState === 'hidden') fire() }
-    window.addEventListener('pagehide', onHide)
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      window.removeEventListener('pagehide', onHide)
-      document.removeEventListener('visibilitychange', onVis)
-    }
-  }, [mock])
-
   // Refresh the live job rail on demand (after a run completes, so the job shows
   // immediately rather than waiting for the next poll). No-op in mock.
-  const refreshJobs = useCallback(async () => {
-    if (mock) return
-    try { setJobs(await listJobs()) } catch { /* transient */ }
-  }, [mock])
-
   // Poll the recent-jobs list (live only; zero /api calls in mock). A 401 means
   // there is NO session — polling forever would just hammer the API with error
   // traffic, so the poll STOPS on the first 401 and resumes only when the mode
   // flips (the effect re-runs). Transient non-auth errors keep polling.
-  useEffect(() => {
-    if (mock) { setJobs([]); setAuthRequired(false); return }
-    let alive = true
-    let id = null
-    const tick = async () => {
-      try {
-        const js = await listJobs()
-        if (alive) { setJobs(js); setAuthRequired(false) }
-      } catch (e) {
-        if (e?.status === 401) {
-          if (alive) setAuthRequired(true)
-          if (id) { clearInterval(id); id = null }
-        } /* other errors: transient, keep polling */
-      }
-    }
-    tick()
-    id = setInterval(tick, 2500)
-    return () => { alive = false; if (id) clearInterval(id) }
-  }, [mock])
-
   // A live job entered 'running' — begin (or resume) the wall-clock, using the
   // server's started_at when known (localhost clocks match) so a re-attach
   // continues the real elapsed time instead of restarting at zero.
-  const markRunning = useCallback((startedAtSec) => {
-    if (runningSinceRef.current == null) {
-      runningSinceRef.current = startedAtSec ? startedAtSec * 1000 : Date.now()
-    }
-    setRunStatus('running')
-    setRunElapsedMs(Math.max(0, Date.now() - runningSinceRef.current))
-  }, [])
-
   // Tick the calm "running · N.Ns" clock while a live job runs (no animated loader).
-  useEffect(() => {
-    if (runStatus !== 'running') return
-    const id = setInterval(() => {
-      if (runningSinceRef.current != null) setRunElapsedMs(Date.now() - runningSinceRef.current)
-    }, 200)
-    return () => clearInterval(id)
-  }, [runStatus])
-
   // --- NT2 toast plumbing (one slot — newest replaces; Toast auto-fades ~5s) --
   const showToast = useCallback((t) => {
     toastSeqRef.current += 1
@@ -703,10 +661,41 @@ export default function App() {
     workspaceCardRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }, [])
 
+  const completedVersionRef = useRef(null)
+  const {
+    jobs,
+    currentJobId,
+    currentJob,
+    inflight: inflightPtr,
+    reattaching,
+    running,
+    status: runStatus,
+    progress: runProgress,
+    elapsedMs: runElapsedMs,
+    result,
+    error: runErr,
+    runJob,
+    attachJob: attachSharedJob,
+    detachJob: interruptRun,
+    reportError: setRunErr,
+    clearError: clearRunErr,
+    adoptEnvelope,
+    refreshJobs,
+  } = useJobController({
+    mock,
+    resetKey: `${isEditFixture}:${intakeRetryKey}`,
+    formatError: humanizeError,
+    onAuthRequired: setAuthRequired,
+    onNotice: ({ text }) => showToast({ text, action: { label: 'View', onClick: viewResult } }),
+    onCompleteVersion: (...args) => completedVersionRef.current?.(...args),
+  })
+  drawingErrorRef.current = setRunErr
+
   // Tab-close survivability: on load in live mode, if a durable in-flight job
   // pointer exists, re-attach. Terminal already -> render its envelope; still
   // running -> resume calm progress + final render. The rail shows a re-attach
   // chip while this runs. Clear the pointer either way.
+  /* Legacy reattach is disabled; useJobController owns this lifecycle.
   useEffect(() => {
     if (mock) { setInflightPtr(null); setReattaching(false); return }
     const saved = readInflight()
@@ -772,6 +761,7 @@ export default function App() {
     })()
     return () => { alive = false }
   }, [mock, markRunning, refreshJobs, showToast, viewResult])
+  */
 
   // Count ALL entity kinds per layer (polylines + inserts + 3DFACEs) so
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
@@ -800,92 +790,47 @@ export default function App() {
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
   const seatVersion = useCallback((view, drawingId, note) => {
-    viewerRef.current?.applyVersion(view.intake)
-    setVersionIntake(view.intake)
-    setPendingEdit(null)
-    setSelectedHandle(null)
-    setDrawingState({ drawing_id: drawingId, version: view.head, head: view.head, latest: view.latest })
+    seatDrawingVersion(view, { drawingId, source: 'version' })
     if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'View', onClick: viewViewer } })
-    // the version chain changed — drop any open history popover / active preview.
-    setHistoryOpen(false); setHistory(null); setPreviewing(null); setPreviewIntake(null)
-  }, [showToast, viewViewer])
+  }, [seatDrawingVersion, showToast, viewViewer])
+
+  const seatCompletedVersion = useCallback(async (newVersion, envelope) => {
+    let version = newVersion?.version
+    if (mock) {
+      try {
+        if (!mockVersions.isSeeded() && intake) mockVersions.seedBase(intake)
+        const commit = mockVersions.applyDelete(envelope?.result?.removed)
+        version = commit.version
+      } catch {
+        showToast({ text: `Version ${version} created` })
+        markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
+        return
+      }
+    }
+    try {
+      const view = await getDrawingIntake(mock, newVersion.drawing_id, 'head')
+      seatVersion(view, newVersion.drawing_id, `Version ${version} created`)
+    } catch {
+      showToast({ text: `Version ${version} created` })
+      markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
+    }
+  }, [intake, markRefreshFailure, mock, seatVersion, showToast])
+  completedVersionRef.current = seatCompletedVersion
 
   const onUndo = useCallback(async () => {
-    if (!drawingState || versionBusy) return
-    setVersionBusy(true); setOverlayStale(true)
-    try {
-      const view = await undoDrawing(mock, drawingState.drawing_id)
-      seatVersion(view, drawingState.drawing_id, `Reverted to version ${view.head}`)
-    } catch (e) {
-      setRunErr(humanizeError(e))
-    } finally {
-      setVersionBusy(false)
-    }
-  }, [mock, drawingState, versionBusy, seatVersion])
+    const view = await undoDrawingVersion()
+    if (view) showToast({ text: `Reverted to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+  }, [drawingState, showToast, undoDrawingVersion, viewViewer])
 
   const onRedo = useCallback(async () => {
-    if (!drawingState || versionBusy) return
-    setVersionBusy(true); setOverlayStale(true)
-    try {
-      const view = await redoDrawing(mock, drawingState.drawing_id)
-      seatVersion(view, drawingState.drawing_id, `Advanced to version ${view.head}`)
-    } catch (e) {
-      setRunErr(humanizeError(e))
-    } finally {
-      setVersionBusy(false)
-    }
-  }, [mock, drawingState, versionBusy, seatVersion])
+    const view = await redoDrawingVersion()
+    if (view) showToast({ text: `Advanced to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+  }, [drawingState, redoDrawingVersion, showToast, viewViewer])
 
   // --- version-history browser + read-only preview -------------------------
   const toggleFamily = useCallback((id) => {
     setOpenFamilies((o) => ({ ...o, [id]: !o[id] }))
   }, [])
-
-  // Shared by the History toggle and the X3 takeover's Retry chip.
-  const loadHistory = useCallback(async () => {
-    if (!drawingState) return
-    setHistoryLoading(true); setHistoryErr(null)
-    try {
-      setHistory(await getDrawingVersions(mock, drawingState.drawing_id))
-    } catch (e) {
-      setHistoryErr(humanizeError(e)); setHistory(null)
-    } finally {
-      setHistoryLoading(false)
-    }
-  }, [mock, drawingState])
-
-  const onToggleHistory = useCallback(async () => {
-    if (historyOpen) { setHistoryOpen(false); return }
-    setHistoryOpen(true)
-    loadHistory()
-  }, [historyOpen, loadHistory])
-
-  // Read-only preview of a version. Head -> restore head + clear preview; any
-  // other version -> seat that intake in the viewer WITHOUT touching head/latest
-  // (undo/redo remain the only mutations; confirm via /intake?version=head).
-  const onPreviewVersion = useCallback(async (v) => {
-    if (!drawingState) return
-    const isHead = v === drawingState.head
-    try {
-      const view = await getDrawingIntake(mock, drawingState.drawing_id, isHead ? 'head' : v)
-      viewerRef.current?.applyVersion(view.intake)
-      setSelectedHandle(null)
-      if (isHead) {
-        setVersionIntake(view.intake)   // re-sync the seated head
-        setPreviewIntake(null); setPreviewing(null)
-      } else {
-        setPreviewIntake(view.intake)
-        setPreviewing({ version: v })
-        setOverlayStale(true)           // last run's overlay describes a different version
-      }
-    } catch (e) {
-      setHistoryErr(humanizeError(e))
-    }
-  }, [mock, drawingState])
-
-  const onBackToHead = useCallback(() => {
-    if (drawingState) onPreviewVersion(drawingState.head)
-  }, [drawingState, onPreviewVersion])
 
   // --- projects / orgs workspace handlers (item 1) -------------------------
   const onOpenProject = useCallback(async (pid) => {
@@ -1028,6 +973,7 @@ export default function App() {
     })
   }, [armDecision])
 
+  /* Legacy inline run lifecycle is disabled; useJobController owns it.
   const onRun = useCallback(async (tool, params, {
     intentConfirmed = false, runContext = null, idempotencyKey = null,
   } = {}) => {
@@ -1134,6 +1080,45 @@ export default function App() {
     }
   }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
       loadCheckout, writeLocked, openProjectId, rehydrate, showToast, viewResult, prepareRunParams, catalogRunContext])
+  */
+
+  const onRun = useCallback(async (tool, params, {
+    intentConfirmed = false, runContext = null, idempotencyKey = null,
+  } = {}) => {
+    if (previewing) return null
+    if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return null
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+    setRoute(null); setRouteErr(null)
+    setAgentMode((mode) => (mode === 'race' ? null : mode))
+    setSelectedTool(tool)
+    setOverlayStale(false); markRefreshFailure(null)
+    const merged = intentConfirmed ? params : prepareRunParams(tool, params)
+    const executionContext = runContext || catalogRunContext
+    lastRunRef.current = { tool, params: merged }
+
+    const envelope = await runJob({
+      toolName: tool.name,
+      execute: ({ onSubmit, onStatus }) => (mock
+        ? runTool(mock, tool, merged, shown)
+        : runToolAsync(tool, merged, executionContext.drawingId, {
+          orgId: executionContext.orgId || undefined,
+          projectId: executionContext.projectId || undefined,
+          dwgVersion: executionContext.drawingVersion ?? undefined,
+          idempotencyKey: idempotencyKey || undefined,
+          catalogDigest: (runContext?.toolSnapshot?.catalogDigest
+            || createCatalogToolSnapshot(tool).catalogDigest || undefined),
+          onSubmit,
+          onStatus,
+        })),
+    })
+
+    if (!mock) {
+      loadUsage(); loadCheckout()
+      if (openProjectId) rehydrate()
+    }
+    return envelope
+  }, [catalogRunContext, loadCheckout, loadUsage, mock, openProjectId, prepareRunParams,
+    markRefreshFailure, previewing, rehydrate, runJob, shown, writeLocked])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     let currentTool = tool
@@ -1180,6 +1165,7 @@ export default function App() {
   // An agent-dispatched job (job_linked event) -> the SAME §7 attach
   // affordance the tab-close re-attach uses: subscribe to the job, stream
   // progress into the result pane, toast on completion. Never re-submits.
+  /* Legacy inline attach lifecycle is disabled; useJobController owns it.
   const onAttachAgentJob = useCallback(async (jobId, toolName) => {
     if (!jobId || mock) return
     const seq = ++runSeqRef.current // Esc-interrupt detaches, like any run
@@ -1225,17 +1211,15 @@ export default function App() {
       refreshJobs()
     }
   }, [mock, markRunning, refreshJobs, seatVersion, showToast, viewResult])
+  */
+
+  const onAttachAgentJob = useCallback(async (jobId, toolName) => {
+    if (!jobId || mock) return null
+    setSelectedTool({ name: toolName || 'job' })
+    return attachSharedJob(jobId, { toolName: toolName || 'job', persist: true })
+  }, [attachSharedJob, mock])
 
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
-  const onRetryViewerRefresh = useCallback(async () => {
-    if (!refreshFail) return
-    try {
-      const view = await getDrawingIntake(mock, refreshFail.drawing_id, 'head')
-      seatVersion(view, refreshFail.drawing_id, null)
-      setRefreshFail(null)
-    } catch { /* still failing — the X1 row stays */ }
-  }, [mock, refreshFail, seatVersion])
-
   const onAuthor = useCallback(async (description) => {
     // R5 only stages bytes. It must not place a tool in the runnable catalog.
     return stageAuthorTool(mock, description)
@@ -1511,9 +1495,8 @@ export default function App() {
           label: 'Show in result pane',
           onClick: () => {
             setSelectedTool({ name: rec.tool || job.tool })
-            setResult(env)
-            setRunErr(null); setRunning(false); setOverlayStale(false)
-            setCurrentJobId(job.job_id)
+            adoptEnvelope(env, { jobId: job.job_id, toolName: rec.tool || job.tool })
+            setOverlayStale(false)
             setDrawer(null)
             setTimeout(() => resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
           },
@@ -1523,7 +1506,7 @@ export default function App() {
     } catch (e) {
       setRunErr(humanizeError(e))
     }
-  }, [])
+  }, [adoptEnvelope, setRunErr])
 
   // "Details" in the result receipt area -> the run's DT2 provenance drawer.
   const openRunDetails = useCallback(() => {
@@ -1582,6 +1565,7 @@ export default function App() {
 
   // Esc while a live run is in flight: detach this session from the job (the
   // rail keeps tracking it; the close beacon flags it reap-able server-side).
+  /* Legacy interrupt is disabled; useJobController owns it.
   const interruptRun = useCallback(() => {
     runSeqRef.current += 1
     if (!mock && currentJobId) closeJobBeacon(currentJobId)
@@ -1590,6 +1574,7 @@ export default function App() {
     runningSinceRef.current = null
     refreshJobs()
   }, [mock, currentJobId, refreshJobs])
+  */
 
   // R ladder (item D): every displayed R keycap must be live, and only the
   // HIGHEST-PRIORITY visible error responds — one keypress, one retry, never
@@ -1633,9 +1618,9 @@ export default function App() {
       }
       if (e.key === 'Escape') {
         if (drawer) { setDrawer(null); return }
-        if (historyOpen) { setHistoryOpen(false); return }
+        if (historyOpen) { closeHistory(); return }
         if (route) { dismissRoute(); return }
-        if (routeErr || runErr) { setRouteErr(null); setRunErr(null); return }
+        if (routeErr || runErr) { setRouteErr(null); clearRunErr(); return }
         if (running) { interruptRun(); return }
         if (selectedHandle) { setSelectedHandle(null); return }
         // Bottom rung: the WorkspaceSummary Esc cap — close the open project
@@ -1677,7 +1662,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, onDispatch, openProjectId, onCloseProject, rTarget,
-      loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute])
+      closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
@@ -1704,11 +1689,8 @@ export default function App() {
   }, [])
 
   const applyVersion = useCallback(() => {
-    viewerRef.current?.applyVersion(editFixtureV2)
-    setVersionIntake(editFixtureV2)
-    setPendingEdit(null)
-    setSelectedHandle(null)
-  }, [])
+    seatDrawingVersion({ intake: editFixtureV2 }, { source: 'fixture' })
+  }, [seatDrawingVersion])
 
   // The last run's overlay only describes the version it produced; once the user
   // undoes/redoes to a different version, suppress it so the viewer never shows a
@@ -1723,31 +1705,6 @@ export default function App() {
     const caps = openTool?.capabilities || []
     return caps.includes('drawing.write') ? { removed: [selectedHandle] } : null
   }, [mock, selectedHandle, openTool])
-
-  // The current in-session run, shown as a rail card until it appears in the
-  // polled live list (deduped by job_id in JobRail).
-  const currentJob = useMemo(() => {
-    const toolName = selectedTool?.name
-    if (!toolName) return null
-    let status
-    if (running) status = runStatus || 'running'
-    else if (result) status = result.ok ? 'complete' : 'failed'
-    else return null
-    return {
-      job_id: currentJobId,
-      tool: toolName,
-      status,
-      // Prefer the richer progress string ('storing version' etc.) when present.
-      progress: runProgress || runStatus || 'running',
-      elapsed_ms: runElapsedMs != null ? runElapsedMs : (result?.timing_ms ?? null),
-      degraded_mode: !!result?.degraded_mode,
-      error: result?.error || null,
-      // Per-run cost (live APS) for the rail card; null for mock runs.
-      cost: result?.cost || null,
-      // Plan-boundary rejection -> calm amber rail card (not red failed).
-      entitlement_required: !!result?.entitlement_required,
-    }
-  }, [selectedTool, running, runStatus, runProgress, result, runElapsedMs, currentJobId])
 
   const degraded = !!result?.degraded_mode || demoDegraded
 
@@ -2047,14 +2004,14 @@ export default function App() {
                   <button
                     className="btn ghost"
                     onClick={onUndo}
-                    disabled={versionBusy || running || !!previewing || drawingState.head <= 1}
+                    disabled={versionBusy || running || !!previewing || !canUndo}
                   >
                     Undo
                   </button>
                   <button
                     className="btn ghost"
                     onClick={onRedo}
-                    disabled={versionBusy || running || !!previewing || drawingState.head >= drawingState.latest}
+                    disabled={versionBusy || running || !!previewing || !canRedo}
                   >
                     Redo
                   </button>
@@ -2075,7 +2032,7 @@ export default function App() {
                         previewingVersion={previewing?.version ?? null}
                         onPreview={onPreviewVersion}
                         onBackToHead={onBackToHead}
-                        onClose={() => setHistoryOpen(false)}
+                        onClose={closeHistory}
                         onRetry={loadHistory}
                         retryKey={rTarget === 'history'}
                         exiting={historyExit.exiting}

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const app = readFileSync(join(ROOT, 'src', 'App.jsx'), 'utf8')
+const jobs = readFileSync(join(ROOT, 'src', 'controllers', 'useJobController.js'), 'utf8')
 const styles = readFileSync(join(ROOT, 'src', 'styles.css'), 'utf8')
 const landing = readFileSync(join(ROOT, 'src', 'site', 'landing.css'), 'utf8')
 const demo = readFileSync(join(ROOT, 'src', 'demo', 'demo.css'), 'utf8')
@@ -13,7 +14,8 @@ function assert(condition, message) {
 }
 
 assert(
-  app.includes('runSeqRef.current += 1') && app.includes('if (!mock && currentJobId) closeJobBeacon(currentJobId)'),
+  jobs.includes('sequenceRef.current += 1') &&
+    jobs.includes('if (!mock && jobId) servicesRef.current.closeJobBeacon(jobId)'),
   'Escape must detach the current run and send the close beacon',
 )
 assert(
@@ -27,7 +29,8 @@ assert(
   'quota notices must clear only after a newer successful usage read',
 )
 assert(
-  app.includes("if (e?.status === 401)") && app.includes('clearInterval(id); id = null'),
+  jobs.includes('if (alive && isUnauthorized(cause))') &&
+    jobs.includes('if (timer) clearInterval(timer)') && jobs.includes('timer = null'),
   'job polling must stop after an unauthenticated response',
 )
 assert(
@@ -37,9 +40,9 @@ assert(
   'guided-tour cancellation must retain its sequence token',
 )
 assert(
-  app.includes("const INFLIGHT_KEY = 'leaf.inflightJob'") &&
-    app.includes('localStorage.setItem(INFLIGHT_KEY') &&
-    app.includes("localStorage.getItem(INFLIGHT_KEY) || 'null'"),
+  jobs.includes("export const INFLIGHT_JOB_KEY = 'leaf.inflightJob'") &&
+    jobs.includes('storage?.setItem(INFLIGHT_JOB_KEY') &&
+    jobs.includes("storage?.getItem(INFLIGHT_JOB_KEY) || 'null'"),
   'inflight jobs must retain the durable browser pointer used for reattach',
 )
 assert(

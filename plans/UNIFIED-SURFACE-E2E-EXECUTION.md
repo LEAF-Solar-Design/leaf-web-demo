@@ -230,8 +230,15 @@ Progress:
   pointer, reattach, beacon, and sequence guards instead of its 30-poll loop.
 - `/try` now uses the shared drawing-version controller and derives Undo and
   Redo availability from `head` and `latest` instead of literal version guards.
-- `/app` still owns its inline job and drawing-version machines. Wave 1 remains
-  open until those move into the provider and the old copies are removed.
+- `/app` now uses the same job lifecycle controller as `/try`. The unchanged
+  fixture suite proves submit, attach, durable reattach, Escape detach, job rail,
+  result seating, and negative terminal states.
+- `/app` now uses the same drawing-version controller as `/try`. The `/app` cat
+  proof creates version 2, seats it in the viewer, undoes to version 1, and makes
+  redo available. Both surfaces use controller-owned `canUndo` and `canRedo`.
+- Catalog, workspace, and platform-trust controllers are extracted behind stable
+  interfaces. Their 22 focused tests pass. App integration and provider lifting
+  remain open before Wave 1 is complete.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

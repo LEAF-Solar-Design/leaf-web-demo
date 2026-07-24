@@ -1,0 +1,51 @@
+export const PLATFORM_TRUST_AUTH_SOURCE = 'platform-trust'
+
+export function isUnauthorized(error) {
+  return error?.status === 401 || / -> 401$/.test(String(error?.message || ''))
+}
+
+export function entitlementAllowed(entitlements, key, fallback = true) {
+  const value = entitlements?.entitlements?.[key]
+  if (value == null) return fallback
+  return value !== false
+}
+
+export function classifyQuotaResult(result) {
+  if (!result || result.ok !== false) return null
+  if (result.quota_kind === 'daily_runs') {
+    return {
+      kind: 'daily_runs',
+      error: result.error,
+      limit: Number.isFinite(Number(result.limit)) ? Number(result.limit) : null,
+      used: Number.isFinite(Number(result.used)) ? Number(result.used) : null,
+    }
+  }
+
+  if (result?.error?.error_code !== 'quota_exceeded') return null
+  return { kind: 'spend', error: result.error, limit: null, used: null }
+}
+
+export function resolveQuotaStatus({ result, conditionAt = 0, usage, usageAt = 0 } = {}) {
+  const condition = classifyQuotaResult(result)
+  if (!condition) return { condition: null, freshUsage: null, cleared: false, visible: null }
+
+  // A usage read that completed before or at the rejection cannot clear it.
+  const freshUsage = conditionAt > 0 && usageAt > conditionAt ? usage : null
+  let cleared = false
+  if (condition.kind === 'spend') {
+    cleared = !!(freshUsage?.cap?.enabled
+      && typeof freshUsage.cap.remaining === 'number'
+      && freshUsage.cap.remaining > 0)
+  } else if (condition.limit != null) {
+    cleared = !!(freshUsage?.today
+      && Number(freshUsage.today.runs || 0) < condition.limit)
+  }
+
+  return { condition, freshUsage, cleared, visible: cleared ? null : condition }
+}
+
+export function classifyHealth(health) {
+  if (!health) return { status: 'unknown', degraded: false }
+  const degraded = health.degraded_mode === true || health.ok === false
+  return { status: degraded ? 'degraded' : 'healthy', degraded }
+}

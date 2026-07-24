@@ -63,8 +63,7 @@ export default function ToolCast({ active, onIntakeChange }) {
     redo: redoDrawingVersion,
   } = drawing.actions
   const version = drawing.head
-  const canUndo = Number.isFinite(Number(version)) && Number(version) > 1
-  const canRedo = phase === 'undone' && Number(drawing.latest) > Number(version)
+  const { canUndo, canRedo } = drawing
 
   useEffect(() => {
     if (!active) return undefined
