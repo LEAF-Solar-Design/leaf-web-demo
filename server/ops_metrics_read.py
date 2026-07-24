@@ -63,9 +63,19 @@ def _round_opt(value: Any, ndigits: int = 3) -> Optional[float]:
 # --------------------------------------------------------------------------- #
 # fleet / tenant rollup (broker_usage_ledger)
 # --------------------------------------------------------------------------- #
+# Denials are policy rejections, not executions. Match the billing authority
+# EXACTLY (broker_pg_store.aggregate_usage / spent_usd, casing included) so cost
+# and "runs" here reconcile with /api/usage. A chargeable FAILED WorkItem (e.g.
+# WORKITEM_FAILED carrying a cost block) IS counted; only these two denial
+# statuses are excluded from runs + cost.
+_EXECUTED = "status NOT IN ('quota_exceeded', 'TENANT_DISABLED')"
+
+
 def _agg_row(conn, since: float, tenant_id: Optional[str]) -> Dict[str, Any]:
     """One aggregate pass over the ledger for ts >= since (optionally one tenant).
-    FILTER-based so a single scan yields counts, cost, and engine percentiles."""
+    FILTER-based so a single scan yields counts, cost, and engine percentiles.
+    ``runs``/``usd_est`` exclude denials to match the billing authority; ``attempts``
+    keeps the raw total (incl. denials) for ops volume."""
     where = "WHERE ts >= %(since)s"
     params: Dict[str, Any] = {"since": float(since)}
     if tenant_id:
@@ -74,21 +84,23 @@ def _agg_row(conn, since: float, tenant_id: Optional[str]) -> Dict[str, Any]:
     row = conn.execute(
         f"""
         SELECT
-          COUNT(*)                                             AS runs,
-          COUNT(*) FILTER (WHERE aps_live)                     AS live_runs,
-          COUNT(*) FILTER (WHERE status = 'ok')                AS ok_runs,
-          COUNT(*) FILTER (WHERE status <> 'ok')               AS error_runs,
+          COUNT(*)                                              AS attempts,
+          COUNT(*) FILTER (WHERE {_EXECUTED})                   AS runs,
+          COUNT(*) FILTER (WHERE NOT ({_EXECUTED}))             AS denied,
+          COUNT(*) FILTER (WHERE aps_live AND {_EXECUTED})      AS live_runs,
+          COUNT(*) FILTER (WHERE status = 'ok')                 AS ok_runs,
+          COUNT(*) FILTER (WHERE {_EXECUTED} AND status <> 'ok') AS error_runs,
           COALESCE(SUM(usd_est) FILTER (
-              WHERE usd_est IS NOT NULL AND status = 'ok'), 0) AS usd_est,
+              WHERE usd_est IS NOT NULL AND {_EXECUTED}), 0)    AS usd_est,
           COALESCE(SUM(engine_seconds) FILTER (
-              WHERE engine_seconds IS NOT NULL), 0)            AS engine_seconds_sum,
+              WHERE engine_seconds IS NOT NULL), 0)             AS engine_seconds_sum,
           PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY engine_seconds)
-              FILTER (WHERE engine_seconds IS NOT NULL)        AS p50,
+              FILTER (WHERE engine_seconds IS NOT NULL)         AS p50,
           PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY engine_seconds)
-              FILTER (WHERE engine_seconds IS NOT NULL)        AS p95,
+              FILTER (WHERE engine_seconds IS NOT NULL)         AS p95,
           PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY engine_seconds)
-              FILTER (WHERE engine_seconds IS NOT NULL)        AS p99,
-          MAX(ts)                                              AS last_ts
+              FILTER (WHERE engine_seconds IS NOT NULL)         AS p99,
+          MAX(ts)                                               AS last_ts
         FROM broker_usage_ledger
         {where}
         """,
@@ -126,7 +138,7 @@ def fleet_metrics(window_seconds: int = 86_400,
         today = _agg_row(conn, today_start, tenant_id)
         taxonomy = _error_taxonomy(conn, since, tenant_id)
 
-    runs = int(window.get("runs") or 0)
+    runs = int(window.get("runs") or 0)  # executed (denials excluded), billing-consistent
     ok_runs = int(window.get("ok_runs") or 0)
     live_runs = int(window.get("live_runs") or 0)
     return {
@@ -134,15 +146,17 @@ def fleet_metrics(window_seconds: int = 86_400,
         "window_seconds": window_seconds,
         "generated_at": now,
         "throughput": {
-            "runs": runs,
+            "attempts": int(window.get("attempts") or 0),  # all broker calls incl. denials
+            "runs": runs,                                   # executed only
+            "denied": int(window.get("denied") or 0),       # quota / tenant-disabled
             "live_runs": live_runs,
             "mock_runs": runs - live_runs,
             "today_runs": int(today.get("runs") or 0),
         },
         "reliability": {
             "ok_runs": ok_runs,
-            "error_runs": int(window.get("error_runs") or 0),
-            "success_rate": round(ok_runs / runs, 4) if runs else None,
+            "error_runs": int(window.get("error_runs") or 0),  # executed and not ok
+            "success_rate": round(ok_runs / runs, 4) if runs else None,  # over executed
             "error_taxonomy": taxonomy,
         },
         "cost": {
@@ -163,9 +177,10 @@ def fleet_metrics(window_seconds: int = 86_400,
 # live in-flight job tail (async_jobs)
 # --------------------------------------------------------------------------- #
 def inflight(limit: int = 100, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """In-flight jobs (status submitted/running), newest-queued first. Ages are
-    seconds-since; a heartbeat age past the reaper's stale window means the job
-    is about to be reaped. Uses the `async_jobs_reclaim_idx` partial index."""
+    """In-flight jobs (status submitted/running), OLDEST first — the stalest
+    in-flight job (closest to the reaper's stale window) surfaces at the top,
+    matching broker list_executing. Ages are seconds-since. Uses the
+    `async_jobs_reclaim_idx` partial index."""
     limit = max(1, min(int(limit), 500))
     where = "WHERE status IN ('submitted', 'running')"
     params: Dict[str, Any] = {"limit": limit}
@@ -245,6 +260,7 @@ def run_drilldown(limit: int = 50, tenant_id: Optional[str] = None,
             FROM broker_usage_ledger l
             LEFT JOIN async_jobs j
                    ON j.job_id = split_part(l.event_key, ':', 1)
+                  AND j.tenant_id = l.tenant_id
             {where}
             ORDER BY l.ts DESC
             LIMIT %(limit)s

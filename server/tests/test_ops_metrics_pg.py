@@ -72,20 +72,24 @@ def test_read_model_over_real_postgres():
 
     tenant = f"obs-{uuid.uuid4()}"
     job_running = str(uuid.uuid4())   # in-flight
-    job_done = str(uuid.uuid4())      # terminal
+    job_done = str(uuid.uuid4())      # terminal (failed but CHARGEABLE)
     orphan = str(uuid.uuid4())        # a ledger run with no owning job
+    denied_key = str(uuid.uuid4())    # a denial — excluded from runs + cost
     now = time.time()
 
     with db.get_pool().connection() as conn:
         _insert_job(conn, job_running, tenant, "running", "executing", now)
-        _insert_job(conn, job_done, tenant, "complete", None, now)
+        _insert_job(conn, job_done, tenant, "failed", None, now)
 
     # ledger rows (admission first to satisfy the FK, then the row):
-    #   ok live run (owns job_running) · failed live run (owns job_done) · ok mock orphan
+    #   ok live+chargeable (owns job_running) · FAILED live+CHARGEABLE (owns job_done,
+    #   must still be counted in cost) · ok mock orphan (no charge, no job) ·
+    #   quota denial (must be excluded from runs and cost).
     ledger = [
         (f"{job_running}:broker-run", "ok", True, 4.0, 0.007),
-        (f"{job_done}:broker-run", "WORKITEM_FAILED", True, None, None),
+        (f"{job_done}:broker-run", "WORKITEM_FAILED", True, 5.0, 0.01),
         (f"{orphan}:broker-run", "ok", False, 0.2, None),
+        (f"{denied_key}:broker-run", "quota_exceeded", True, None, None),
     ]
     for event_key, status, aps_live, engine_seconds, usd in ledger:
         _admit(store, event_key, tenant)
@@ -94,19 +98,22 @@ def test_read_model_over_real_postgres():
 
     # ---- fleet_metrics (tenant-scoped so a shared DB stays deterministic) ----
     m = ops_metrics_read.fleet_metrics(window_seconds=3600, tenant_id=tenant)
-    assert m["throughput"]["runs"] == 3
-    assert m["throughput"]["live_runs"] == 2
+    assert m["throughput"]["attempts"] == 4          # all broker calls
+    assert m["throughput"]["runs"] == 3              # executed (denial excluded)
+    assert m["throughput"]["denied"] == 1
+    assert m["throughput"]["live_runs"] == 2         # executed AND aps_live
     assert m["throughput"]["mock_runs"] == 1
     assert m["reliability"]["ok_runs"] == 2
-    assert m["reliability"]["error_runs"] == 1
+    assert m["reliability"]["error_runs"] == 1       # executed and not ok (the failed run)
     assert m["reliability"]["success_rate"] == pytest.approx(2 / 3, abs=1e-4)
     assert any(e["status"] == "WORKITEM_FAILED" and e["count"] == 1
                for e in m["reliability"]["error_taxonomy"])
-    # only non-null usd on ok rows counts -> just the 0.007 run
-    assert m["cost"]["usd_window"] == pytest.approx(0.007)
-    # engine percentiles over the two non-null values {4.0, 0.2}
-    assert m["engine_seconds"]["p50"] == pytest.approx(2.1, abs=1e-6)
-    assert m["engine_seconds"]["sum"] == pytest.approx(4.2, abs=1e-6)
+    # BLOCKER-1 regression: a chargeable FAILED run (0.01) counts; the denial does
+    # not; the null-usd ok run does not -> 0.007 + 0.01.
+    assert m["cost"]["usd_window"] == pytest.approx(0.017)
+    # engine percentiles over the non-null values {4.0, 5.0, 0.2}
+    assert m["engine_seconds"]["p50"] == pytest.approx(4.0, abs=1e-6)
+    assert m["engine_seconds"]["sum"] == pytest.approx(9.2, abs=1e-6)
 
     # ---- inflight: only submitted/running jobs ----
     tail = ops_metrics_read.inflight(tenant_id=tenant)

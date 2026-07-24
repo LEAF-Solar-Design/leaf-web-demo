@@ -91,3 +91,28 @@ def test_legacy_mode_requires_postgres(monkeypatch, stub_read_model):
     resp = _client().get("/api/ops/metrics", headers={"X-Ops-Secret": "ops-secret"})
     assert resp.status_code == 503
     assert "postgres" in resp.json().get("error", {}).get("message", "").lower()
+
+
+@pytest.mark.parametrize("path", ["/api/ops/metrics",
+                                  "/api/ops/metrics/inflight",
+                                  "/api/ops/metrics/runs"])
+def test_all_routes_fail_closed_on_wrong_secret(monkeypatch, stub_read_model, path):
+    """Every route (not just /metrics) must reject a wrong X-Ops-Secret."""
+    monkeypatch.setenv("LEAF_OPS_SECRET", "ops-secret")
+    resp = _client().get(path, headers={"X-Ops-Secret": "wrong"})
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("path,fn", [("/api/ops/metrics", "fleet_metrics"),
+                                     ("/api/ops/metrics/inflight", "inflight"),
+                                     ("/api/ops/metrics/runs", "run_drilldown")])
+def test_tenant_id_passes_through_to_read_model(monkeypatch, path, fn):
+    """The tenant_id query param must reach the read-model so scoping is honored."""
+    seen = {}
+    monkeypatch.setattr(ops_metrics_read, fn,
+                        lambda **kw: seen.update(kw) or ({"scope": "x"} if fn == "fleet_metrics" else []))
+    monkeypatch.setenv("LEAF_OPS_SECRET", "ops-secret")
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    resp = _client().get(f"{path}?tenant_id=acme", headers={"X-Ops-Secret": "ops-secret"})
+    assert resp.status_code == 200
+    assert seen.get("tenant_id") == "acme"
