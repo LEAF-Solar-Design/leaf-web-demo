@@ -102,6 +102,7 @@ assert(!toolsPanel.includes('onClick={() => onRun('), 'ToolsPanel still calls th
 assert(toolsPanel.includes('onRequestRun(t, params)'), 'ToolsPanel does not create an intent request')
 assert(routePanel.includes('onConfirmIntent(route.runIntent'), 'RoutePanel does not confirm catalog intents')
 assert(app.includes('onRequestRun={onRequestCatalogRun}'), 'App does not wire catalog requests to intents')
+assert(app.includes('const latestTools = await getTools(false)'), 'live confirmation does not refresh catalog ground truth')
 assert(app.includes('idempotencyKey: confirmed.execution.intentId'), 'confirmed intent ID is not sent to the API seam')
 assert(app.includes('runToolAsync(tool, merged, executionContext.drawingId'), 'confirmed drawing is not used for execution')
 assert(app.includes('dwgVersion: executionContext.drawingVersion'), 'confirmed drawing version is not used for execution')

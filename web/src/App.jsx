@@ -967,6 +967,8 @@ export default function App() {
     drawingId: drawingState?.drawing_id || DEFAULT_DRAWING_ID,
     drawingVersion: drawingState?.version ?? null,
   }), [tenant, orgId, openProjectId, drawingState])
+  const catalogRunContextRef = useRef(catalogRunContext)
+  catalogRunContextRef.current = catalogRunContext
 
   const onRequestCatalogRun = useCallback((tool, params) => {
     // Family catalog entries are presentation-normalized. Resolve the canonical
@@ -974,6 +976,7 @@ export default function App() {
     // server-sourced definition that RoutePanel will execute.
     const catalogTool = tools.find((candidate) => candidate.name === tool?.name)
     if (!catalogTool) return
+    if (!mock && !tenant) return
     const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
     if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
     const prepared = prepareRunParams(catalogTool, params)
@@ -981,7 +984,7 @@ export default function App() {
       intentId: `${runIntentSessionRef.current}:${++runIntentSeqRef.current}`,
       toolName: catalogTool.name,
       params: prepared,
-      context: catalogRunContext,
+      context: catalogRunContextRef.current,
       toolSnapshot: createCatalogToolSnapshot(catalogTool),
     })
     runIntentStateRef.current = staged.state
@@ -991,7 +994,7 @@ export default function App() {
       rationale: 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [], runIntent: staged.intent,
     })
-  }, [tools, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
+  }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
 
   const onRun = useCallback(async (tool, params, {
     intentConfirmed = false, runContext = null, idempotencyKey = null,
@@ -1097,10 +1100,15 @@ export default function App() {
   }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
       loadCheckout, writeLocked, openProjectId, rehydrate, showToast, viewResult, prepareRunParams, catalogRunContext])
 
-  const onConfirmCatalogRun = useCallback((intent, tool, params) => {
+  const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
+    let currentTool = tool
     let toolSnapshot
     try {
-      toolSnapshot = createCatalogToolSnapshot(tool)
+      if (!mock) {
+        const latestTools = await getTools(false)
+        currentTool = latestTools.find((candidate) => candidate.name === intent?.toolName) || null
+      }
+      toolSnapshot = createCatalogToolSnapshot(currentTool)
     } catch {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
       setRoute(null)
@@ -1110,9 +1118,9 @@ export default function App() {
     const confirmed = confirmRunIntent(runIntentStateRef.current, {
       intentId: intent?.intentId,
       sessionId: intent?.sessionId,
-      toolName: tool?.name,
+      toolName: currentTool?.name,
       params,
-      context: catalogRunContext,
+      context: catalogRunContextRef.current,
       toolSnapshot,
     })
     runIntentStateRef.current = confirmed.state
@@ -1121,12 +1129,12 @@ export default function App() {
       setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
       return
     }
-    onRun(tool, confirmed.execution.params, {
+    onRun(currentTool, confirmed.execution.params, {
       intentConfirmed: true,
       runContext: confirmed.execution.context,
       idempotencyKey: confirmed.execution.intentId,
     })
-  }, [onRun, catalogRunContext])
+  }, [mock, onRun])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
