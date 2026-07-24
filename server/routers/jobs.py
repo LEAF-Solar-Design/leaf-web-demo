@@ -78,14 +78,28 @@ def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
     return jobs.platform_link.get_canonical_job(job_id, str(tenant_id))
 
 
+def _active_binding_tenant(tenant: Any) -> Optional[str]:
+    if deps.auth_live() and isinstance(tenant, deps.TenantContext) and tenant.subject:
+        binding = jobs.platform_link.platform_store().resolve_active_identity_binding(
+            "auth0", tenant.subject)
+        if binding is not None:
+            return str(binding.platform_tenant_id)
+    return None
+
+
+def _bound_tenant_id(tenant: Any) -> str:
+    """Prefer the active server-owned platform binding over stale JWT org claims."""
+    return _active_binding_tenant(tenant) or str(tenant)
+
+
 def _canonical_tenant_id(tenant: Any, context: Dict[str, Any]) -> str:
     """Bind JWT tenant/org claims to the server-owned platform identity."""
     canonical = str(context["org_id"])
     if deps.auth_live():
         if not isinstance(tenant, deps.TenantContext) \
-                or str(tenant) != canonical or str(tenant.org_id or "") != canonical:
+                or _active_binding_tenant(tenant) != canonical:
             raise ValueError(
-                "verified tenant and org claims must match the active platform identity binding")
+                "verified subject must match the active platform identity binding")
     return canonical if context.get("authority_mode") == "postgres_canonical" else str(tenant)
 
 
@@ -205,10 +219,11 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
 
 @router.get("/api/jobs/{job_id}")
 def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
-    rec = _job_for_tenant(job_id, str(tenant))
+    tenant_id = _bound_tenant_id(tenant)
+    rec = _job_for_tenant(job_id, tenant_id)
     # 404 (never 403) both when the job is unknown AND when it belongs to another
     # tenant — no cross-tenant existence leak (security-audit F8).
-    if rec is None or rec.get("tenant_id") != str(tenant):
+    if rec is None or rec.get("tenant_id") != tenant_id:
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
     return _record_body(rec)
@@ -260,8 +275,9 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
     lifetime — N concurrent streams starve every sync endpoint. The 0.5s cadence
     now awaits on the event loop; the per-tick DB read hops to a thread so the
     loop never blocks on the jobs-module lock. Wire format/timing unchanged."""
-    _rec0 = await asyncio.to_thread(_job_for_tenant, job_id, str(tenant))
-    if _rec0 is None or _rec0.get("tenant_id") != str(tenant):
+    tenant_id = _bound_tenant_id(tenant)
+    _rec0 = await asyncio.to_thread(_job_for_tenant, job_id, tenant_id)
+    if _rec0 is None or _rec0.get("tenant_id") != tenant_id:
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
 
@@ -269,7 +285,7 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
         last = None
         deadline = time.time() + jobs.job_max_s() + 60
         while time.time() < deadline:
-            rec = await asyncio.to_thread(_job_for_tenant, job_id, str(tenant))
+            rec = await asyncio.to_thread(_job_for_tenant, job_id, tenant_id)
             if rec is None:
                 yield "data: " + json.dumps({"job_id": job_id, "status": "unknown"}) + "\n\n"
                 return
@@ -295,7 +311,7 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
 def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
-    canonical = jobs.platform_link.list_canonical_jobs(str(tenant), limit=limit)
+    canonical = jobs.platform_link.list_canonical_jobs(_bound_tenant_id(tenant), limit=limit)
     legacy = jobs.list_jobs(str(tenant), limit)
     return with_envelope_fields(
         {"jobs": [_record_body(r) for r in (canonical + legacy)[:limit]]}
