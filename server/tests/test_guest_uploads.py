@@ -399,23 +399,23 @@ def test_dxf_layer_dedup_preserves_first_seen_order_with_repeats():
 
 
 def test_live_mode_dxf_parses_locally_and_never_calls_the_broker(client, monkeypatch):
-    """REGRESSION (live staging, 2026-07-24): at APS_LIVE=1 a .dxf must still
-    be parsed locally and must NOT be sent to the broker.
+    """REGRESSION (live staging, 2026-07-24): BY DEFAULT, at APS_LIVE=1 a .dxf
+    must be parsed locally and must NOT be sent to the broker.
 
-    The live extract Activity declares HostDwg with a fixed `input.dwg`
-    localName and runs `accoreconsole /i input.dwg`, so DXF bytes arrive
-    wearing a .dwg extension and AutoCAD rejects them outright ("Drawing file
-    is not valid", ErrorStatus=434 -> WorkItem status failedInstructions).
-    Routing .dxf to the broker was therefore a guaranteed PAID failure: every
-    live DXF upload — the guest console's bundled sample included — died in
-    the failed strip. This test fails the build if that routing comes back:
-    the broker seam raises, so any call to it surfaces as a failed status
-    instead of the user's own geometry."""
+    Before the DXF-correct Activity existed, the DWG extract Activity declared
+    HostDwg with a fixed `input.dwg` localName, so DXF bytes sent there arrived
+    wearing a .dwg extension and AutoCAD rejected them ("Drawing file is not
+    valid", ErrorStatus=434). Routing .dxf to the broker was a guaranteed PAID
+    failure. The DXF-correct Activity lifts that, but the default routing stays
+    local (free, instant) until the operator opts in via LEAF_GUEST_DXF_EXTRACT
+    — this test locks the DEFAULT: the broker seam raises, so any default-path
+    call to it surfaces as a failed status instead of the user's geometry."""
     import deps
 
     def _broker_must_not_be_called(tenant_id, drawing_id):
-        raise AssertionError("a .dxf upload must never reach the APS broker")
+        raise AssertionError("a default-mode .dxf upload must never reach the APS broker")
 
+    monkeypatch.delenv("LEAF_GUEST_DXF_EXTRACT", raising=False)
     monkeypatch.setattr(deps, "APS_LIVE", True)
     monkeypatch.setattr(guest_uploads, "_extract_via_broker",
                         _broker_must_not_be_called)
@@ -435,6 +435,60 @@ def test_live_mode_dxf_parses_locally_and_never_calls_the_broker(client, monkeyp
     assert intake["layers"] == ["Panels"]
     assert any(DISTINCTIVE_COORD in pt for pl in intake["polylines"]
                for pt in pl["pts"]), "must carry the uploaded DXF's own coordinates"
+
+
+def test_dxf_extract_mode_aps_routes_dxf_through_the_broker(client, monkeypatch):
+    """OPT-IN: with LEAF_GUEST_DXF_EXTRACT=aps at APS_LIVE=1, a .dxf goes to the
+    broker (full-fidelity APS DXF Activity) instead of the local parser.
+
+    Mock the broker seam so the test stays offline; the point is the ROUTING —
+    the flag must send .dxf to _extract_via_broker, and the returned intake is
+    served as-is (proving nothing silently re-parses locally)."""
+    import deps
+    aps_intake = {"dwg": "mine.dxf", "layers": ["ApsLayer"],
+                  "polylines": [{"layer": "ApsLayer", "closed": True,
+                                 "pts": [[7, 7, 0], [8, 8, 0]],
+                                 "xdata": None, "handle": "FF"}]}
+    calls = {"n": 0}
+
+    def _fake_broker(tenant_id, drawing_id):
+        calls["n"] += 1
+        return aps_intake
+
+    monkeypatch.setenv("LEAF_GUEST_DXF_EXTRACT", "aps")
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.setattr(guest_uploads, "_extract_via_broker", _fake_broker)
+    r = _upload(client)
+    assert r.status_code == 202
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+
+    s = client.get(f"/api/drawings/{did}/upload-status", headers={"X-Tenant-Id": tenant})
+    assert s.status_code == 200
+    assert s.json()["status"] == "ready", s.json().get("error")
+    assert calls["n"] == 1, "aps mode must route .dxf through the broker exactly once"
+
+    i = client.get(f"/api/drawings/{did}/intake", headers={"X-Tenant-Id": tenant})
+    assert i.status_code == 200
+    assert i.json()["intake"]["layers"] == ["ApsLayer"], "APS intake served verbatim"
+
+
+def test_dxf_extract_mode_aps_ignored_when_aps_offline(client, monkeypatch):
+    """The opt-in must NOT reach the broker at APS_LIVE=0 — there is no live
+    APS to serve it, so DXF still parses locally (honest degrade, never a
+    broker call that would fail)."""
+    import deps
+
+    def _broker_must_not_be_called(tenant_id, drawing_id):
+        raise AssertionError("aps mode must not call the broker when APS is offline")
+
+    monkeypatch.setenv("LEAF_GUEST_DXF_EXTRACT", "aps")
+    monkeypatch.setattr(deps, "APS_LIVE", False)
+    monkeypatch.setattr(guest_uploads, "_extract_via_broker", _broker_must_not_be_called)
+    r = _upload(client)
+    assert r.status_code == 202
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+    s = client.get(f"/api/drawings/{did}/upload-status", headers={"X-Tenant-Id": tenant})
+    assert s.json()["status"] == "ready", s.json().get("error")
 
 
 def test_store_representation_dwg_raw_bytes_v1(client, monkeypatch):

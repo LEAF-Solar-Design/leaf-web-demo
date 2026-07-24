@@ -20,11 +20,45 @@ _LISP = r"""(setvar "CMDECHO" 0)
 (progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "INSERT") (cons 2 "*PVBlock*") (cons 410 "Model")))) (if ss (progn (setq seen nil i 0 nn (sslength ss)) (while (and (< i nn) (< (length seen) 12)) (setq nm (cdr (assoc 2 (entget (ssname ss i))))) (if (not (member nm seen)) (progn (setq seen (cons nm seen)) (setq bdef (tblobjname "BLOCK" nm)) (if bdef (progn (write-line (strcat "BD|" nm) f) (setq be (entnext bdef) cnt 0) (while (and be (< cnt 60)) (setq bed (entget be) bt (cdr (assoc 0 bed)) pts "") (foreach gg bed (if (= 10 (car gg)) (setq pts (strcat pts (rtos (cadr gg) 2 3) "," (rtos (caddr gg) 2 3) ";")))) (if (/= pts "") (write-line (strcat "BDE|" bt "|" pts) f)) (setq be (entnext be) cnt (1+ cnt))))))) (setq i (1+ i))))) (princ "BD-DONE") (close f))
 (progn (setq f (open "{OUT}" "a")) (setq gd (dictsearch (namedobjdict) "ACAD_GEOGRAPHICDATA")) (if (null gd) (write-line "GEO|none" f) (foreach pr gd (write-line (strcat "GEO|" (itoa (car pr)) "|" (cond ((= (type (cdr pr)) 'STR) (cdr pr)) ((= (type (cdr pr)) 'REAL) (rtos (cdr pr) 2 8)) ((= (type (cdr pr)) 'INT) (itoa (cdr pr))) ((= (type (cdr pr)) 'LIST) (strcat (rtos (car (cdr pr)) 2 6) "," (rtos (cadr (cdr pr)) 2 6) (if (caddr (cdr pr)) (strcat "," (rtos (caddr (cdr pr)) 2 6)) ""))) (T "?")) ) f))) (princ "GEO-DONE") (close f))
 (progn (setq f (open "{OUT}" "a")) (setq idict (dictsearch (namedobjdict) "ACAD_IMAGE_DICT")) (if idict (progn (foreach pr idict (if (= 3 (car pr)) (write-line (strcat "IMGNAME|" (cdr pr)) f))) (foreach pr idict (if (= 350 (car pr)) (progn (setq ie (entget (cdr pr))) (if ie (write-line (strcat "IMG|" (cond ((cdr (assoc 1 ie)) (cdr (assoc 1 ie))) (T "?"))) f))))))) (princ "IMG-DONE") (close f))
-(command "_.QUIT" "_Y")"""
+{QUIT}"""
+
+# How the script ends. These are NOT interchangeable — measured against a real
+# accoreconsole (AutoCAD 2026, the engine family DA runs) on 2026-07-24:
+#
+#   input      ending                     outcome
+#   ---------  -------------------------  ---------------------------------
+#   .dwg       QUIT _Y                    exits in 10.2s
+#   .dxf       QUIT _Y                    HANGS forever
+#   .dxf       QUIT _N                    HANGS forever
+#   .dxf       mark-saved + QUIT          exits in 3.4s
+#   .dwg       mark-saved + QUIT          exits in 3.8s, source bytes unchanged
+#
+# Why: opening a DXF makes AutoCAD build a NEW in-memory drawing, which counts
+# as modified and has no .dwg on disk to save back to. QUIT therefore walks into
+# a SAVEAS prompt ("Current file format: AutoCAD 2018 Drawing") and blocks on
+# stdin, whichever way the discard question is answered. Under DA that is not a
+# visible error — the job simply burns limitProcessingTimeSec (100s) and ends as
+# a timeout, and DA uploads Result only after a clean exit, so the extraction
+# output is thrown away even though the LISP already wrote it.
+#
+# QUIT_SAVED marks the document unmodified first, so QUIT has nothing to ask
+# about. It is also strictly safer for DWG (it cannot write back to the user's
+# uploaded bytes), but the LIVE LeafExtract+prod Activity still carries
+# QUIT_DEFAULT and is deliberately NOT re-provisioned here — see
+# client.extract_dxf_activity_spec.
+QUIT_DEFAULT = '(command "_.QUIT" "_Y")'
+QUIT_SAVED = ('(vl-load-com)'
+              '(vla-put-Saved (vla-get-ActiveDocument (vlax-get-acad-object)) :vlax-true)'
+              '(command "_.QUIT")')
 
 
-def build_scr(out_localname: str = OUT_LOCALNAME) -> str:
-    """Return the .scr content (CRLF line endings) for the extract Activity."""
-    body = _LISP.replace("{OUT}", out_localname)
+def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT) -> str:
+    """Return the .scr content (CRLF line endings) for the extract Activity.
+
+    quit_form defaults to the DWG-proven ending so the existing Activity's
+    script is byte-identical to what is live today. DXF input REQUIRES
+    QUIT_SAVED (see the table above) or the WorkItem hangs to timeout.
+    """
+    body = _LISP.replace("{OUT}", out_localname).replace("{QUIT}", quit_form)
     # accoreconsole scripts are CRLF; join every progn-line with \r\n and a trailing newline
     return body.replace("\n", "\r\n") + "\r\n"

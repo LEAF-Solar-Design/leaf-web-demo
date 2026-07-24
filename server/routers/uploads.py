@@ -200,8 +200,9 @@ def upload_drawing(
                             "could not reset the failed attempt's residue; "
                             "try again", retryable=True, status_code=500)
                 # Guest cost-exposure caps (each live DWG extraction is a paid
-                # APS run; a DXF is parsed locally, so its cost is service CPU
-                # rather than an APS charge — see dxf_intake).
+                # APS run; a DXF is parsed locally by default — service CPU, not
+                # an APS charge — but also a paid APS run under
+                # LEAF_GUEST_DXF_EXTRACT=aps, see guest_uploads.run_extraction).
                 # Counted AFTER validation on purpose (review round
                 # 1, MAJOR): garbage requests must not be able to exhaust the
                 # shared daily pool — only an upload that will actually stage

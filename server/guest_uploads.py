@@ -19,13 +19,15 @@ the mechanism cannot drift apart:
     error, nothing else).
 
 HONESTY RULE for extraction: geometry only ever comes from the user's actual
-bytes. A .dxf is ALWAYS parsed locally by server/dxf_intake.py (a real parse
-of their file), in both modes: the live extract Activity binds HostDwg to a
-fixed `input.dwg` localName, so accoreconsole rejects DXF bytes as an invalid
-drawing — the broker path cannot extract a DXF at all. A .dwg goes through the
-credential-holding broker (POST /broker/extract {upload: true}) at APS_LIVE=1,
-and fails honestly (APS_UNAVAILABLE) at APS_LIVE=0 because no local DWG reader
-exists.
+bytes. A .dxf is parsed by server/dxf_intake.py (a real parse of their file) by
+DEFAULT, in both modes — the DWG extract Activity binds HostDwg to a fixed
+`input.dwg` localName, so a DXF sent there is rejected as an invalid drawing.
+With LEAF_GUEST_DXF_EXTRACT=aps AND APS_LIVE=1, a .dxf instead goes through the
+credential-holding broker to the DXF-correct Activity (HostDwg localName
+`input.dxf`), a real full-fidelity APS extract that costs a paid run like DWG.
+A .dwg goes through the broker (POST /broker/extract {upload: true}) at
+APS_LIVE=1, and fails honestly (APS_UNAVAILABLE) at APS_LIVE=0 because no local
+DWG reader exists.
 """
 from __future__ import annotations
 
@@ -94,6 +96,20 @@ def extract_timeout_s() -> float:
         return float(os.environ.get("LEAF_UPLOAD_EXTRACT_TIMEOUT_S", "900"))
     except ValueError:
         return 900.0
+
+
+def _dxf_extract_mode() -> str:
+    """How live DXF uploads extract: `local` (default) or `aps`.
+
+    `local` — the built-in dxf_intake parser: free, instant, polylines + layer
+    names. `aps` — the full-fidelity DXF Activity (INSERT/3DFACE/geo/xdata),
+    which costs a paid APS run per upload just like DWG. `aps` only takes effect
+    at APS_LIVE=1 AND once da.client.EXTRACT_DXF_ACTIVITY is provisioned; any
+    unrecognized value falls back to `local` so a typo never silently bills
+    APS. Flip this only after the Activity exists (da/provision_live.py
+    --dxf-activity-only)."""
+    mode = os.environ.get("LEAF_GUEST_DXF_EXTRACT", "local").strip().lower()
+    return "aps" if mode == "aps" else "local"
 
 
 def purge_interval_s() -> float:
@@ -215,8 +231,9 @@ def verify_guest_session(token: str) -> Optional[str]:
 
 # --------------------------------------------------------------------------- #
 # guest rate limiting (cost exposure: each live DWG extraction is a paid APS
-# run; a DXF is parsed locally, so its cost is service CPU, not an APS charge —
-# dxf_intake is linear in input size, see its layer-dedup note)
+# run; a DXF is parsed locally by default — service CPU, not an APS charge, and
+# dxf_intake is linear in input size (see its layer-dedup note) — but a paid APS
+# run too under LEAF_GUEST_DXF_EXTRACT=aps, same caps as DWG)
 # --------------------------------------------------------------------------- #
 _RATE_LOCK = threading.Lock()
 _RATE_STATE: Dict[str, Any] = {"day": None, "per_ip": {}, "total": 0}
@@ -956,25 +973,27 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             return  # purged mid-flight; nothing to report against
 
     try:
-        if ext == ".dxf":
-            # DXF is parsed LOCALLY IN BOTH MODES — the APS path cannot read it.
-            # The live extract Activity declares HostDwg with a fixed
-            # `input.dwg` localName (da/client.HOSTDWG_LOCALNAME) and runs
-            # `accoreconsole /i input.dwg`, so DXF bytes arrive wearing a .dwg
-            # extension and accoreconsole rejects the file outright
-            # ("Drawing file is not valid", ErrorStatus=434 -> the WorkItem
-            # ends failedInstructions). Sending .dxf to the broker was
-            # therefore a guaranteed paid failure, not an extraction: every
-            # live DXF upload — including the console's bundled sample —
-            # died in the failed strip. Parsing locally is the ONLY path that
-            # returns real geometry for a DXF today, and it is what
-            # policy_view() has always advertised as `dxf_local_ok: True`.
-            # Fidelity note: this parser reads LWPOLYLINE/POLYLINE + layer
-            # names, which is less than the live LISP extract pulls from a
-            # DWG (INSERT, 3DFACE, geo data, xdata). A DXF-correct Activity
-            # whose localName preserves the .dxf extension is the follow-up
-            # that would restore full fidelity; until it exists, honest
-            # partial geometry beats a guaranteed failure.
+        if ext == ".dxf" and _dxf_extract_mode() == "aps" and deps.APS_LIVE:
+            # FULL-FIDELITY DXF via APS. Reachable only when the DXF-correct
+            # Activity (da.client.EXTRACT_DXF_ACTIVITY, localName `input.dxf`
+            # + save-safe QUIT) is provisioned; the broker selects it by the
+            # staged file's .dxf extension. This is the SAME LISP extract the
+            # DWG path runs, so it recovers INSERT / 3DFACE / geo / xdata that
+            # the local parser cannot. It also costs a paid APS run per upload,
+            # exactly like the DWG path, and is bounded by the same guest rate
+            # caps — hence a deliberate opt-in flag rather than the default.
+            intake = _extract_via_broker(tenant_id, drawing_id)
+        elif ext == ".dxf":
+            # DEFAULT DXF path: parse locally (free, instant, always available).
+            # The live APS extract Activity for DWG declares HostDwg with a
+            # fixed `input.dwg` localName, so DXF bytes sent there arrive
+            # wearing a .dwg extension and accoreconsole rejects them
+            # ("Drawing file is not valid", ErrorStatus=434). The DXF-correct
+            # Activity above lifts that, but until it is provisioned AND the
+            # operator opts in (LEAF_GUEST_DXF_EXTRACT=aps), the local parser
+            # is the honest path — and it is what policy_view() advertises as
+            # `dxf_local_ok: True`. Fidelity: LWPOLYLINE/POLYLINE + layer names
+            # only, less than the APS extract's INSERT/3DFACE/geo/xdata.
             import dxf_intake
             intake = dxf_intake.parse_dxf_file(staged_path(tenant_id, drawing_id, ext),
                                                source_name=marker.get("filename") or drawing_id)
