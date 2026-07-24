@@ -42,3 +42,9 @@ def test_worker_image_installs_only_its_named_solver_requirements():
     assert "-r /app/autofill-requirements.txt" in dockerfile
     assert "> /opt/leaf/autofill-solver/.leaf-source-revision" in dockerfile
     assert "autofill-requirements.txt" not in other_images
+
+
+def test_compose_supplies_exact_solver_revision_build_arg():
+    overlay = (ROOT / "docker-compose.canonical.yml").read_text(encoding="utf-8")
+
+    assert overlay.count("AUTOFILL_SOLVER_REVISION: ${AUTOFILL_SOLVER_REVISION:?") == 2

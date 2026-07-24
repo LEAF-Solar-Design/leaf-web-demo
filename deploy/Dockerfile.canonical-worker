@@ -40,4 +40,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
 
 USER 65532:65532
 
-CMD ["python", "canonical_worker.py", "--poll-seconds", "1", "--lease-seconds", "30"]
+CMD ["python", "canonical_worker.py", "--poll-seconds", "1"]

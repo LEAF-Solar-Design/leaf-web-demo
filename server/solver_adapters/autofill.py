@@ -146,7 +146,9 @@ sys.path.insert(0, sys.argv[1])
 import solver
 body = json.load(sys.stdin)
 result = solver.solve_targets(
-    body['groups'], body['panelsPerString'], body['options'])
+    body['groups'], body['panelsPerString'], body['options'],
+    panel_angle=body['panelAngle'], panel_width=body['panelWidth'],
+    panel_height=body['panelHeight'])
 if not isinstance(result, dict):
     raise TypeError('autofill solver returned a non-object result')
 sys.stdout.write(json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False))

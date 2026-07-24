@@ -69,13 +69,13 @@ def _resolve_upload_identity(
             import auth  # noqa: PLC0415 - lazy, mirrors deps.require_tenant
             import tenancy  # noqa: PLC0415
             payload = auth.verify_platform_token(authorization)
-            claims = auth.extract_tenant_claims(payload)
             subject = payload.get("sub") if isinstance(payload.get("sub"), str) else None
-            platform_tenant_id = deps.resolve_active_platform_tenant_id(subject)
+            platform_tenant_id, platform_tier = (
+                deps.resolve_active_platform_tenant_authority(subject))
             ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
             tenant = deps.TenantContext(
                 platform_tenant_id, org_id=platform_tenant_id,
-                tier=claims.get("tier"),
+                tier=platform_tier,
                 workspace=ws.workspace_dir if ws is not None else None,
                 subject=subject)
             return tenant, "account", False

@@ -77,7 +77,8 @@ def test_live_account_upload_uses_active_binding_not_stale_claims(monkeypatch):
             "tier": "demo",
         })
     monkeypatch.setattr(
-        deps, "resolve_active_platform_tenant_id", lambda subject: canonical)
+        deps, "resolve_active_platform_tenant_authority",
+        lambda subject: (canonical, "restricted"))
     monkeypatch.setattr(
         tenancy, "get_store", lambda: SimpleNamespace(
             resolve_workspace=lambda tenant_id: None))
@@ -86,6 +87,7 @@ def test_live_account_upload_uses_active_binding_not_stale_claims(monkeypatch):
         "forged-header-tenant", "Bearer verified", "stale-guest-session")
     assert str(tenant) == canonical
     assert tenant.org_id == canonical
+    assert tenant.tier == "restricted"
     assert tenant.subject == "auth0|bound"
     assert kind == "account"
     assert minted is False
@@ -102,11 +104,15 @@ def test_active_binding_resolution_fails_closed_for_unbound_subject(monkeypatch)
 
 def test_active_binding_resolution_returns_server_owned_tenant(monkeypatch):
     binding = SimpleNamespace(platform_tenant_id="canonical-org")
+    org = SimpleNamespace(tier="hosted_pro", status="active")
     monkeypatch.setattr(
         platform_link, "platform_store", lambda: SimpleNamespace(
-            resolve_active_identity_binding=lambda authority, subject: binding))
+            resolve_active_identity_binding=lambda authority, subject: binding,
+            get_org=lambda org_id: org))
     assert deps.resolve_active_platform_tenant_id(
         "auth0|foreign-claim") == "canonical-org"
+    assert deps.resolve_active_platform_tenant_authority(
+        "auth0|foreign-claim") == ("canonical-org", "hosted_pro")
 
 
 def test_upload_dxf_happy_path_serves_their_geometry(client):

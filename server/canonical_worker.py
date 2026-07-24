@@ -9,6 +9,7 @@ import argparse
 import os
 import signal
 import socket
+import subprocess
 import threading
 import uuid
 from typing import Any, Dict
@@ -98,17 +99,27 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> boo
             # Do not attempt a terminal write after durable custody was lost.
             # The current owner or the expiry/retry path remains authoritative.
             return True
-        outcome = canonical_jobs.complete_solve(job["job_id"], owner, result, provenance)
-        if outcome not in {"applied", "duplicate"}:
-            raise RuntimeError(f"canonical completion was not accepted: {outcome}")
     except Exception as exc:  # noqa: BLE001
         guard.close()
         if guard.lost:
             return True
+        retryable = isinstance(
+            exc, (subprocess.TimeoutExpired, TimeoutError, ConnectionError))
         error = {"error_code": "SOLVER_FAILED", "message": f"{type(exc).__name__}: {exc}",
-                 "retryable": False}
+                 "retryable": retryable}
         canonical_jobs.fail_or_retry(job["job_id"], owner, error,
                                      {**base_provenance, "failure": error})
+        return True
+    guard.close()
+    if guard.lost:
+        return True
+    try:
+        # A persistence failure is not evidence that the deterministic solver
+        # failed. Leave the running lease to expire so another attempt can
+        # safely retry instead of writing a false terminal result.
+        canonical_jobs.complete_solve(job["job_id"], owner, result, provenance)
+    except Exception:  # noqa: BLE001 - lease expiry is the durable retry path
+        return True
     finally:
         guard.close()
     return True

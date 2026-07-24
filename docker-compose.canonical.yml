@@ -28,6 +28,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.canonical-worker
+      args:
+        AUTOFILL_SOLVER_REVISION: ${AUTOFILL_SOLVER_REVISION:?set AUTOFILL_SOLVER_REVISION to the exact autofill-solver commit}
       additional_contexts:
         autofill_solver: ../autofill-solver
     environment:
@@ -68,6 +70,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.canonical-worker
+      args:
+        AUTOFILL_SOLVER_REVISION: ${AUTOFILL_SOLVER_REVISION:?set AUTOFILL_SOLVER_REVISION to the exact autofill-solver commit}
       additional_contexts:
         autofill_solver: ../autofill-solver
     environment:

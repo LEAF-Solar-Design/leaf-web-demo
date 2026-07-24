@@ -1,4 +1,5 @@
 import uuid
+import subprocess
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -89,6 +90,41 @@ def test_worker_idle_claim_is_false(monkeypatch):
         "tool_name": "string-autofill-opt", "runtime": "python-test",
         "source_revision": "abc123", "source_sha256": "c" * 64})
     assert canonical_worker.run_once("worker-idle") is False
+
+
+def test_worker_retries_bounded_transient_solver_timeout(monkeypatch):
+    store = FakeCanonicalJobs({"job_id": "job-timeout", "attempt": 1,
+                               "tool_name": "string-autofill-opt", "params": {}})
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(canonical_worker.autofill, "descriptor", lambda: {
+        "tool_name": "string-autofill-opt", "runtime": "python-test",
+        "source_revision": "abc123", "source_sha256": "c" * 64})
+    monkeypatch.setitem(
+        canonical_worker.ADAPTERS, "string-autofill-opt",
+        lambda _params: (_ for _ in ()).throw(subprocess.TimeoutExpired("solver", 60)))
+
+    assert canonical_worker.run_once("worker-timeout") is True
+    assert store.failed[0][2]["retryable"] is True
+
+
+def test_worker_does_not_terminalize_completion_infrastructure_failure(monkeypatch):
+    store = FakeCanonicalJobs({"job_id": "job-complete-db", "attempt": 1,
+                               "tool_name": "string-autofill-opt", "params": {}})
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(canonical_worker.autofill, "descriptor", lambda: {
+        "tool_name": "string-autofill-opt", "runtime": "python-test",
+        "source_revision": "abc123", "source_sha256": "c" * 64})
+    monkeypatch.setitem(canonical_worker.ADAPTERS, "string-autofill-opt", lambda _params: {
+        "solver_revision": "abc123", "source_sha256": "c" * 64,
+        "runtime": "python-test", "solver_result": {"ok": True},
+        "solver_input": {}, "request_sha256": "a" * 64,
+        "input_sha256": "a" * 64, "result_sha256": "b" * 64})
+    monkeypatch.setattr(
+        store, "complete_solve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("database unavailable")))
+
+    assert canonical_worker.run_once("worker-complete-db") is True
+    assert store.failed == []
 
 
 def test_worker_renews_lease_during_synchronous_solver(monkeypatch):
@@ -246,7 +282,7 @@ def test_canonical_worker_container_contract_is_non_root_and_source_bound():
     assert "USER 65532:65532" in dockerfile
     assert "canonical_worker_health('string-autofill-opt')" in dockerfile
     assert 'CMD ["python", "canonical_worker.py"' in dockerfile
-    assert '"--lease-seconds", "30"' in dockerfile
+    assert '"--lease-seconds", "30"' not in dockerfile
 
     assert "additional_contexts:" in overlay
     assert "autofill_solver: ../autofill-solver" in overlay

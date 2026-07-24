@@ -56,6 +56,7 @@ The production cutover gates and the complete mutable-authority inventory are
 in [`docs/POSTGRES-CUTOVER.md`](../docs/POSTGRES-CUTOVER.md).
 
 ```bash
+export AUTOFILL_SOLVER_REVISION="$(git -C ../autofill-solver rev-parse HEAD)"
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml build app canonical-worker migrate
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml ps
@@ -72,7 +73,9 @@ The overlay adds PostgreSQL 16, an idempotent migration job that applies every
 checked-in numbered migration, and a non-root canonical worker with a database-heartbeat
 healthcheck. The worker image receives `../autofill-solver` as a named BuildKit
 context; solver code is not duplicated into this repository, and the adapter hashes
-the exact source tree before and after every invocation. The local PostgreSQL password
+the exact source tree before and after every invocation. The overlay refuses to build
+unless `AUTOFILL_SOLVER_REVISION` names the exact 40-character commit supplied by that
+context. The local PostgreSQL password
 is deliberately non-secret and the database port is not published. Staging must use
 Secrets Manager and a managed PostgreSQL endpoint instead of these local credentials.
 
