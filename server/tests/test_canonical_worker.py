@@ -1,6 +1,7 @@
 import uuid
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import canonical_worker
 from routers import jobs as jobs_router
@@ -164,22 +165,29 @@ def test_canonical_tool_requires_project_context(monkeypatch):
     assert b"X-Org-Id and X-Project-Id are required" in response.body
 
 
-def test_canonical_identity_rejects_confused_deputy_claims(monkeypatch):
+def test_canonical_identity_prefers_verified_subject_binding(monkeypatch):
     context = {"org_id": uuid.uuid4(), "project_id": uuid.uuid4(),
                "authority_mode": "postgres_canonical"}
     canonical = str(context["org_id"])
     monkeypatch.setattr(jobs_router.deps, "auth_live", lambda: True)
-    assert jobs_router._canonical_tenant_id(
-        jobs_router.deps.TenantContext(canonical, org_id=canonical), context) == canonical
+    binding = SimpleNamespace(platform_tenant_id=context["org_id"])
+    store = SimpleNamespace(resolve_active_identity_binding=lambda authority, subject: (
+        binding if (authority, subject) == ("auth0", "auth0|owner") else None))
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "platform_store", lambda: store)
+    stale = jobs_router.deps.TenantContext(
+        "stale-website-tenant", org_id="stale-website-org", subject="auth0|owner")
+    assert jobs_router._canonical_tenant_id(stale, context) == canonical
+    assert jobs_router._bound_tenant_id(stale) == canonical
+
     for tenant in (
         jobs_router.deps.TenantContext("foreign-tenant", org_id=canonical),
-        jobs_router.deps.TenantContext(canonical, org_id=str(uuid.uuid4())),
+        jobs_router.deps.TenantContext(canonical, org_id=canonical, subject="auth0|foreign"),
         canonical,
     ):
         try:
             jobs_router._canonical_tenant_id(tenant, context)
         except ValueError as exc:
-            assert "must match" in str(exc)
+            assert "subject must match" in str(exc)
         else:
             raise AssertionError("mismatched platform identity was accepted")
 
