@@ -63,8 +63,12 @@ def test_app_manifest_requires_durable_runtime_and_build_identity():
         "LEAF_AGENT_STATE_DIR",
         "LEAF_AGENT_TENANTS_FILE",
         "LEAF_BUILD_REVISION_REQUIRED",
+        "LEAF_GUEST_CAP_STORE",
         "LEAF_GUEST_STORE_DIR",
     } <= required
+    assert "LEAF_GUEST_CAP_HMAC_SECRET" in set(
+        manifest["required"]["secrets"]
+    )
 
 
 def test_web_image_writes_source_identity_health_file():
