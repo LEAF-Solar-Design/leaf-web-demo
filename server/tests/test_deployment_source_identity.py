@@ -66,9 +66,10 @@ def test_app_manifest_requires_durable_runtime_and_build_identity():
         "LEAF_GUEST_CAP_STORE",
         "LEAF_GUEST_STORE_DIR",
     } <= required
-    assert "LEAF_GUEST_CAP_HMAC_SECRET" in set(
-        manifest["required"]["secrets"]
-    )
+    assert {
+        "LEAF_GUEST_CAP_HMAC_SECRET",
+        "LEAF_GUEST_SECRET",
+    } <= set(manifest["required"]["secrets"])
 
 
 def test_web_image_writes_source_identity_health_file():

@@ -1,3 +1,21 @@
+# Staging failed-test repair
+
+- [x] Wave 0: capture the current gate baseline and add failing regression checks.
+- [x] Wave 1A: route catalog actions through fail-closed run intents.
+- [x] Wave 1B: implement honest every-N authoring and unsupported declines.
+- [x] Wave 1C: bound startup fetches and use one session mock catalog.
+- [x] Wave 2: integrate and pass the full local application gate.
+- [x] Wave 3: repair the staging web build contract and add canonical-worker infrastructure.
+- [ ] Wave 4: deploy staging only and replay the complete browser and readiness gate.
+- [ ] Audit the final diffs, CI, deployment receipts, rollback evidence, and ledger.
+
+Risks:
+
+- Confirmation is safety-sensitive. Stale or changed intents must never execute.
+- Authenticated staging must never silently fall back to mock tenant data.
+- Web build arguments must remain staging-only and must never move production aliases.
+- Database and worker rollout stays operator-gated and uses named or federated AWS identity.
+
 # Live edge-contract repair
 
 - [x] Bound `drawing_state` summary output while preserving useful counts.
@@ -111,3 +129,20 @@ Baseline gate:
 
 - [x] Preserve the completed live edge-contract repair from `origin/main`.
 - [x] Preserve authored-execution containment from `origin/main`.
+
+# Automatic public solve-proof renewal
+
+- [x] Replace the canned public solve with the broker-backed solve route.
+- [x] Renew the proof once per 20-hour window with a stable broker event key.
+- [x] Keep cache writes atomic and collapse concurrent refreshes into one run.
+- [x] Rotate the ETag when the proof timestamp changes.
+- [x] Add an hourly staging canary that verifies proof age and real solve evidence.
+- [ ] Prove cache, expiry, failure, concurrency, CI, and staging behavior.
+
+Risks:
+
+- An expired proof must fail closed if the broker is unavailable. It must not
+  present stale evidence as current.
+- The public request path must not hold a process lock during broker or file IO.
+- GitHub schedules can be delayed, so backend request-time renewal remains the
+  source of truth and the canary runs away from the start-of-hour peak.

@@ -1,88 +1,125 @@
-"""GET /api/site/* — the PUBLIC, unauthenticated site-facing namespace.
+"""Public marketing-site endpoints with no authentication dependency.
 
-Consumed by the leaf_website Next.js app's cache-through routes
-(app/api/site/{capabilities,demo-solve}/route.ts), which serve the marketing
-stage and landing surfaces to anonymous visitors. Everything here must stay
-safe to expose with no session: default-tenant catalog only, internal/QA
-tools always filtered, and no per-tenant state.
-
-BUILTIN-ONLY (merge-gate finding #6): site_capabilities() must NEVER expose
-an authored/runtime tool — a tenant's own harness-authored tool (folded in
-per-tenant by deps.load_tenant_repo_tools()) or anything in the
-process-global deps._AUTHORED overlay (both populated at RUNTIME by real
-harness author sessions, per deps.all_tools()'s own docstring). deps.py's
-/health endpoint (app.py) already draws exactly this line -- `n_tools`
-(deps.all_tools(), the full union) vs `n_authored` (len(deps._AUTHORED), the
-authored overlay alone) -- this module reuses that same split: the catalog
-here is built from ONLY the two static/tracked loaders, deps.load_engine_
-registry_tools() (engine/registry.json, falling back to the built-in
-DEFAULT_TOOLS) and deps.load_seed_write_tools() (the tracked write_tools.json
-seed), deliberately excluding load_tenant_repo_tools() and _AUTHORED.
-
-demo-solve serves the canned July demo solve artifact (site_demo_solve.json,
-sha-stamped inside the payload). The Solve lane does not execute yet
-(CONTRACT-ADDENDUM: declared, honestly unimplemented) — when it does, this
-endpoint should compute a fresh solve from the bundled sample intake instead
-of replaying the artifact. Until then the artifact IS the contract: the
-stage's intakeCache treats a 200 here as the non-degraded path.
+The capability route exposes only static builtin tools. The solve route serves
+a broker-backed proof over the bundled sample intake. Both routes provide HTTP
+validators and a five-minute public cache policy.
 """
 from __future__ import annotations
 
+import hashlib
 import json
-from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Request, Response
+from fastapi.responses import JSONResponse
 
+import broker_client
 import catalog
 import deps
-from envelopes import with_envelope_fields
+import site_demo
+from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
 
-_DEMO_SOLVE_PATH = Path(__file__).resolve().parent.parent / "site_demo_solve.json"
+CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=3600"
+
+
+def _cache_headers(etag: str) -> Dict[str, str]:
+    return {"ETag": etag, "Cache-Control": CACHE_CONTROL}
+
+
+def _if_none_match_hit(request: Request, etag: str) -> bool:
+    header = request.headers.get("if-none-match")
+    if not header:
+        return False
+    candidates = [value.strip().removeprefix("W/") for value in header.split(",")]
+    return etag in candidates or "*" in candidates
 
 
 def _builtin_tools() -> list:
-    """The BASE/builtin tool set only — see the module docstring's BUILTIN-ONLY
-    note. Same de-dupe-by-name posture as deps.all_tools() (last loader wins),
-    just restricted to the two static/tracked loaders."""
+    """Return only tracked static tools, never tenant or runtime overlays."""
     by_name: Dict[str, Dict[str, Any]] = {}
-    for t in deps.load_engine_registry_tools():
-        by_name[t["name"]] = t
-    for t in deps.load_seed_write_tools():
-        by_name[t["name"]] = t
+    for tool in deps.load_engine_registry_tools():
+        by_name[tool["name"]] = tool
+    for tool in deps.load_seed_write_tools():
+        by_name[tool["name"]] = tool
     return list(by_name.values())
 
 
-@router.get("/api/site/capabilities")
-def site_capabilities() -> Dict[str, Any]:
-    """Default-tenant capability catalog, internal tools always excluded,
-    BUILTIN tools only — no authored/runtime tool ever reaches this public,
-    unauthenticated surface (see module docstring)."""
+def _public_families() -> List[Dict[str, Any]]:
+    """Project the builtin-only catalog without params or provenance."""
     families = catalog.build_catalog(_builtin_tools(), include_internal=False)
-    return with_envelope_fields({"families": families})
+    return [
+        {
+            "family_id": family.get("family_id"),
+            "label": family.get("label", ""),
+            "description": family.get("description", ""),
+            "tools": [
+                {
+                    "name": tool.get("name"),
+                    "version": tool.get("version", "1.0.0"),
+                    "description": tool.get("description", ""),
+                    "capabilities": tool.get("capabilities", []),
+                }
+                for tool in family.get("capabilities", [])
+            ],
+        }
+        for family in families
+    ]
+
+
+@router.get("/api/site/capabilities")
+def site_capabilities(request: Request):
+    """Public, builtin-only capability projection with HTTP validators."""
+    families = _public_families()
+    digest = hashlib.sha256(
+        json.dumps(families, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    etag = f'"{digest[:16]}-1"'
+    if _if_none_match_hit(request, etag):
+        return Response(status_code=304, headers=_cache_headers(etag))
+    return JSONResponse(
+        status_code=200,
+        content=with_envelope_fields({"ok": True, "families": families}),
+        headers=_cache_headers(etag),
+    )
 
 
 @router.get("/api/site/guest-upload-policy")
 def guest_upload_policy() -> Dict[str, Any]:
-    """PUBLIC upload policy for the guest console (CONTRACT-ADDENDUM §19).
+    """Return the public guest upload policy from its enforcement source."""
+    import guest_uploads
 
-    Pure config, no tenant state, safe with no session — squarely inside this
-    namespace's rules (the BUILTIN-ONLY tool rule is about the catalog and is
-    untouched). The retention/size numbers here come from the SAME
-    guest_uploads functions the purge job and upload endpoint read, so the
-    copy the frontend renders can never drift from what the server enforces."""
-    import guest_uploads  # lazy: keeps this module's import surface unchanged
     return with_envelope_fields(guest_uploads.policy_view())
 
 
 @router.get("/api/site/demo-solve")
-def site_demo_solve() -> Dict[str, Any]:
-    """The canned demo solve artifact the marketing stage renders."""
+def site_demo_solve(request: Request):
+    """Serve a current broker-backed solve proof or a standard 502 envelope."""
     try:
-        return json.loads(_DEMO_SOLVE_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise HTTPException(status_code=503, detail="site_demo_solve.json missing on this deployment")
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="site_demo_solve.json is not valid JSON")
+        solve = site_demo.get_demo_solve()
+    except broker_client.BrokerUnreachable as exc:
+        return error_response(
+            ErrorCode.BROKER_UNREACHABLE,
+            f"demo solve unavailable: {exc}",
+            retryable=True,
+            status_code=502,
+        )
+    except site_demo.SiteSolveError as exc:
+        error = exc.envelope.get("error") or {}
+        code = error.get("error_code")
+        code = code if code in ErrorCode.ALL else ErrorCode.WORKITEM_FAILED
+        return error_response(
+            code,
+            f"demo solve failed: {exc}",
+            retryable=bool(error.get("retryable", True)),
+            status_code=502,
+        )
+    etag = site_demo.solve_etag(solve)
+    if _if_none_match_hit(request, etag):
+        return Response(status_code=304, headers=_cache_headers(etag))
+    return JSONResponse(
+        status_code=200,
+        content=with_envelope_fields({"ok": True, "solve": solve}),
+        headers=_cache_headers(etag),
+    )

@@ -45,6 +45,23 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (14, "broker"), (15, "guest_caps"),
                 (16, "drawing_upload_authority"),
                 (17, "harness_sessions"),
+                (18, "drawing_import_provenance"),
         ]
     ]
     assert all(len(item["sha256"]) == 64 for item in manifest)
+
+
+def test_drawing_import_schema_is_required_before_startup():
+    assert {"provenance", "idempotency_key", "import_fingerprint"} <= (
+        db._REQUIRED_COLUMNS["drawing_versions"]
+    )
+    assert {"tenant_id", "drawing_id", "attempt", "status", "marker"} <= (
+        db._REQUIRED_COLUMNS["drawing_upload_attempts"]
+    )
+    assert {
+        "tenant_id", "drawing_id", "version", "state", "object_key",
+        "byte_count", "content_sha256",
+    } <= db._REQUIRED_COLUMNS["drawing_store_versions"]
+    assert {"binding_id", "platform_tenant_id", "role", "status"} <= (
+        db._REQUIRED_COLUMNS["identity_bindings"]
+    )

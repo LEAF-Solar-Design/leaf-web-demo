@@ -19,6 +19,7 @@ import type {
 export const FAKE_CATALOG: CapabilityEntry[] = [
   {
     name: "count-by-layer",
+    catalog_digest: `sha256:${"1".repeat(64)}`,
     description: "Count entities per layer of the drawing.",
     capabilities: ["drawing.read"],
     params_schema: {
@@ -29,11 +30,13 @@ export const FAKE_CATALOG: CapabilityEntry[] = [
   },
   {
     name: "list-layers",
+    catalog_digest: `sha256:${"2".repeat(64)}`,
     description: "List the drawing's layer names.",
     capabilities: ["drawing.read"],
   },
   {
     name: "add-panel",
+    catalog_digest: `sha256:${"3".repeat(64)}`,
     description: "Add a solar panel block to the drawing (writes a new version).",
     capabilities: ["drawing.read", "drawing.write"],
   },
@@ -41,6 +44,7 @@ export const FAKE_CATALOG: CapabilityEntry[] = [
     // Mirrors the server catalog's aps_live projection so tests can exercise
     // the submit_live_solve (R4, real-USD) gate rung.
     name: "solve-live",
+    catalog_digest: `sha256:${"4".repeat(64)}`,
     description: "Run the live APS solve on the drawing (real-USD compute).",
     capabilities: ["drawing.read", "drawing.write"],
     aps_live: true,

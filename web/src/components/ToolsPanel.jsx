@@ -64,7 +64,7 @@ function provenanceLine(t) {
 
 // `retryKey` (App's R ladder): the R keycap renders only while this row is the
 // ladder's active rung — a shown cap is never inert, never double-firing.
-export default function ToolsPanel({ tools, error, running, selectedTool, onRun, onOpenTool, onRetry, retryKey, subtitle, writeLocked, writeEntitled = true }) {
+export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onRetry, retryKey, subtitle, writeLocked, writeEntitled = true }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
@@ -129,9 +129,9 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRun,
                   <button
                     className="chip-act tool-run"
                     disabled={running || locked || entBlocked}
-                    onClick={() => onRun(t, params)}
+                    onClick={() => onRequestRun(t, params)}
                   >
-                    {isRunningThis ? 'Running on Leaf…' : 'Run'}
+                    {isRunningThis ? 'Running on Leaf…' : 'Review & run'}
                   </button>
                   {entBlocked && !locked && (
                     <p className="lock-note">Your plan doesn’t include editing tools — upgrade to run write tools. Read tools still run.</p>

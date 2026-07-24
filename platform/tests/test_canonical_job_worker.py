@@ -82,6 +82,55 @@ def test_two_claimers_get_one_owner_and_tenant_reads_are_isolated(make_org):
     assert canonical_jobs.list_jobs_for_tenant("other-tenant") == []
 
 
+def test_tool_scoped_worker_claims_only_its_exact_adapter(make_org):
+    org, project = _project(make_org)
+    store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
+    unsupported = canonical_jobs.submit_solve_job(
+        org.org_id, project.project_id, "tenant-tools", "future-canonical-tool", {},
+        "tool-unsupported")
+    supported = canonical_jobs.submit_solve_job(
+        org.org_id, project.project_id, "tenant-tools", "string-autofill-opt", {},
+        "tool-supported")
+
+    claimed = canonical_jobs.claim_next(
+        "worker-autofill", request_tenant_id="tenant-tools",
+        tool_name="string-autofill-opt")
+
+    assert claimed["job_id"] == supported["job_id"]
+    assert claimed["tool_name"] == "string-autofill-opt"
+    untouched = canonical_jobs.get_job_for_tenant(
+        unsupported["job_id"], "tenant-tools")
+    assert untouched["status"] == "queued"
+    assert untouched["attempt"] == 0
+
+
+def test_tool_scoped_cleanup_does_not_fail_expired_unsupported_job(make_org):
+    org, project = _project(make_org)
+    store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
+    unsupported = canonical_jobs.submit_solve_job(
+        org.org_id, project.project_id, "tenant-cleanup", "future-canonical-tool", {},
+        "cleanup-unsupported", max_attempts=1)
+    started = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+    claimed_unsupported = canonical_jobs.claim_next(
+        "worker-future", lease_seconds=1, now=started,
+        request_tenant_id="tenant-cleanup", tool_name="future-canonical-tool")
+    assert claimed_unsupported["job_id"] == unsupported["job_id"]
+
+    assert canonical_jobs.claim_next(
+        "worker-autofill", request_tenant_id="tenant-cleanup",
+        tool_name="string-autofill-opt", now=started + timedelta(seconds=2)) is None
+
+    untouched = canonical_jobs.get_job_for_tenant(
+        unsupported["job_id"], "tenant-cleanup")
+    assert untouched["status"] == "running"
+    assert untouched["attempt"] == 1
+
+
+def test_claim_rejects_blank_tool_filter():
+    with pytest.raises(ValueError, match="tool_name must be a nonblank string"):
+        canonical_jobs.claim_next("worker-autofill", tool_name=" ")
+
+
 def test_heartbeat_and_stale_completion_require_current_unexpired_lease(make_org):
     org, project = _project(make_org)
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")

@@ -110,6 +110,20 @@ const OPS = {
       overlay: { highlight_handles: handles },
     }
   },
+
+  select_every_nth(intake, params) {
+    const layer = params?.layer ?? 'Panels'
+    const stride = Math.max(2, Math.floor(Number(params?.stride) || 10))
+    const onLayer = intake.polylines.filter((polyline) => polyline.layer === layer)
+    const handles = []
+    for (let index = stride - 1; index < onLayer.length; index += stride) {
+      handles.push(onLayer[index].handle)
+    }
+    return {
+      result: { layer, stride, selected: handles.length },
+      overlay: { highlight_handles: handles },
+    }
+  },
 }
 
 export function runMock(tool, params, intake) {

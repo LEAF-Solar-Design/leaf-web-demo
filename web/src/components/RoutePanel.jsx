@@ -28,7 +28,7 @@ function paramsSummary(params) {
 
 export default function RoutePanel({
   route: liveRoute, tools, running, writeLocked, writeEntitled = true,
-  onRun, onPickAlternative, onOpenAuthor, onDismiss,
+  onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss,
 }) {
   // M1 exit: on dismissal (Esc / typing / a run consuming the decision) the
   // last route is held for the 180 ms .exit fade (display-only) before unmount.
@@ -53,6 +53,10 @@ export default function RoutePanel({
   // Plan gate (real, enforced server-side): a write tool the tenant's plan
   // doesn't include. Distinct from `locked` (another session holds the checkout).
   const entBlocked = isWrite && !writeEntitled
+  const requestRun = () => {
+    if (route.runIntent) onConfirmIntent(route.runIntent, toolObj, params)
+    else if (toolObj) onPickAlternative(toolObj.name)
+  }
 
   // Resolver rows (low-confidence best guess, or a tool missing from this
   // catalog): the direct-run best guess first, then the alternatives. The LIVE
@@ -92,13 +96,13 @@ export default function RoutePanel({
       if (route.lane === 'build') { onOpenAuthor(); return }
       if (route.lane === 'solve') { if (onDismiss) onDismiss(); return }
       if (confident && toolObj) {
-        if (!running && !locked && !entBlocked) onRun(toolObj, params)
+        if (!running && !locked && !entBlocked) requestRun()
         return
       }
       const row = rows[activeIdx]
       if (!row) return
       if (row.kind === 'run' && toolObj) {
-        if (!running && !locked && !entBlocked) onRun(toolObj, params)
+        if (!running && !locked && !entBlocked) requestRun()
       } else {
         onPickAlternative(row.tool)
       }
@@ -106,7 +110,7 @@ export default function RoutePanel({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [route, exiting, rows, activeIdx, confident, toolObj, params, running, locked, entBlocked,
-      onRun, onPickAlternative, onOpenAuthor, onDismiss])
+      onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss])
 
   if (!route) return null
   const motion = exiting ? 'exit' : 'enter'
@@ -144,7 +148,9 @@ export default function RoutePanel({
 
   // ---- RUN lane, confident: decision strip (Run · Enter · Esc) --------------
   if (confident && toolObj) {
-    const summary = paramsSummary(params)
+    const summary = route.runIntent
+      ? `params ${JSON.stringify(route.runIntent.params)}`
+      : paramsSummary(params)
     return (
       <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
@@ -168,7 +174,7 @@ export default function RoutePanel({
           className="chip-act"
           aria-label={`Run ${route.tool}`}
           disabled={running || locked || entBlocked}
-          onClick={() => onRun(toolObj, params)}
+          onClick={requestRun}
         >
           {running ? 'Running…' : 'Run'}
         </button>
@@ -198,7 +204,7 @@ export default function RoutePanel({
           onMouseEnter={() => setActiveIdx(i)}
           onClick={() => {
             if (row.kind === 'run' && toolObj) {
-              if (!running && !locked && !entBlocked) onRun(toolObj, params)
+              if (!running && !locked && !entBlocked) requestRun()
             } else {
               onPickAlternative(row.tool)
             }

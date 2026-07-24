@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "container": "leaf-platform-worker",
+  "required": {
+    "environment": [
+      "AUTOFILL_SOLVER_REVISION",
+      "LEAF_CANONICAL_LEASE_SECONDS"
+    ],
+    "mountPaths": [],
+    "secrets": [
+      "DATABASE_URL"
+    ]
+  }
+}

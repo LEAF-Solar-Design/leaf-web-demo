@@ -127,6 +127,7 @@ export class HttpAppRunClient implements AppRunClient {
       tool: req.tool,
       params: req.params,
       dwg: req.dwg,
+      catalog_digest: req.catalogDigest,
     });
     const jobId = String(body.job_id ?? "");
     let status = String(body.status ?? "submitted");
