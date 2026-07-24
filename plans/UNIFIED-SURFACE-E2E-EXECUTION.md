@@ -222,6 +222,17 @@ Gate: `/app` passes the unchanged fixture suite and all behavior pins. `/app`
 and `/try` then use the same controller instances and API transports. The cat
 fixture works only by swapping the transport layer.
 
+Progress:
+
+- The conversation controller is extracted and provided above both `/app` and
+  `/try`; stale-session retry is browser-proven.
+- `/try` now uses the shared job lifecycle with SSE plus poll fallback, durable
+  pointer, reattach, beacon, and sequence guards instead of its 30-poll loop.
+- `/try` now uses the shared drawing-version controller and derives Undo and
+  Redo availability from `head` and `latest` instead of literal version guards.
+- `/app` still owns its inline job and drawing-version machines. Wave 1 remains
+  open until those move into the provider and the old copies are removed.
+
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
 Mount one resident viewer in the unified shell. Wire picking, layers, selection,
