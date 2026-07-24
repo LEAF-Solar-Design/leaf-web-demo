@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getDrawingIntake, getJob, getSession, redoDrawing, undoDrawing } from '../api.js'
+import { getDrawingIntake, getSession, redoDrawing, undoDrawing } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
 import useConverseSessionController from '../controllers/useConverseSessionController.js'
+import useJobController from '../controllers/useJobController.js'
 import { navigate } from './router.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
-
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function phaseLabel(phase) {
   if (phase === 'starting') return 'Starting request'
@@ -25,7 +24,7 @@ export default function ToolCast({ active, onIntakeChange }) {
   })
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
-  const [jobId, setJobId] = useState(null)
+  const [linkedJobId, setLinkedJobId] = useState(null)
   const [version, setVersion] = useState(1)
   const [panelCount, setPanelCount] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -58,31 +57,50 @@ export default function ToolCast({ active, onIntakeChange }) {
     setPhase(nextPhase)
   }, [onIntakeChange])
 
-  const attachJob = useCallback(async (linkedJobId) => {
-    if (!linkedJobId) return
-    setJobId(linkedJobId)
-    setPhase('running')
-    setError(null)
+  const onCompleteVersion = useCallback(async (newVersion) => {
+    const drawingId = newVersion?.drawing_id || 'cat-panels'
     try {
-      let job = null
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        job = await getJob(linkedJobId)
-        if (job?.status === 'complete' || job?.status === 'failed') break
-        await wait(400)
-      }
-      if (job?.status !== 'complete' || !job?.result?.ok) throw new Error('job did not complete')
-      const drawingId = job.result?.result?.new_version?.drawing_id || 'cat-panels'
       const view = await getDrawingIntake(false, drawingId, 'head')
       seatView(view, 'complete')
     } catch {
-      setError('The panel run did not produce a readable drawing version.')
+      setError('The panel run completed, but its drawing version could not be loaded.')
       setPhase('failed')
     }
   }, [seatView])
 
+  const {
+    currentJobId,
+    running: jobRunning,
+    error: jobError,
+    attachJob: attachTrackedJob,
+  } = useJobController({
+    onCompleteVersion,
+    formatError: () => 'The panel run did not produce a readable result.',
+  })
+
+  const onJobLinked = useCallback((nextJobId) => {
+    if (!nextJobId) return
+    setLinkedJobId(nextJobId)
+    setPhase('running')
+    setError(null)
+  }, [])
+
+  const attachJob = useCallback(async (nextJobId, toolName) => {
+    if (!nextJobId) return
+    onJobLinked(nextJobId)
+    const envelope = await attachTrackedJob(nextJobId, {
+      toolName: toolName || 'arrange-panels-as-cat',
+      persist: true,
+    })
+    if (!envelope?.ok) {
+      setPhase('failed')
+      setError('The panel run did not produce a readable drawing version.')
+    }
+  }, [attachTrackedJob, onJobLinked])
+
   const runRequest = useCallback(async () => {
     const text = prompt.trim()
-    if (!text || busy) return
+    if (!text || busy || jobRunning) return
     setBusy(true)
     setError(null)
     setPhase('starting')
@@ -96,10 +114,10 @@ export default function ToolCast({ active, onIntakeChange }) {
     } finally {
       setBusy(false)
     }
-  }, [busy, prompt, resetCached, startTurn])
+  }, [busy, jobRunning, prompt, resetCached, startTurn])
 
   const undo = useCallback(async () => {
-    if (busy || version !== 2) return
+    if (busy || jobRunning || version !== 2) return
     setBusy(true)
     setError(null)
     try {
@@ -109,10 +127,10 @@ export default function ToolCast({ active, onIntakeChange }) {
     } finally {
       setBusy(false)
     }
-  }, [busy, seatView, version])
+  }, [busy, jobRunning, seatView, version])
 
   const redo = useCallback(async () => {
-    if (busy || version !== 1 || phase !== 'undone') return
+    if (busy || jobRunning || version !== 1 || phase !== 'undone') return
     setBusy(true)
     setError(null)
     try {
@@ -122,7 +140,7 @@ export default function ToolCast({ active, onIntakeChange }) {
     } finally {
       setBusy(false)
     }
-  }, [busy, phase, seatView, version])
+  }, [busy, jobRunning, phase, seatView, version])
 
   const runOnEnter = (event) => {
     if (event.key === 'Enter') runRequest()
@@ -162,7 +180,7 @@ export default function ToolCast({ active, onIntakeChange }) {
             <span>{phase === 'loading' ? 'Loading the drawing backend' : 'Type the request in the command bar. The proposal will stay in this rail.'}</span>
           </div>
         )}
-        {error && <div className="tc-operator-error"><span className="dot red" />{error}</div>}
+        {(error || jobError) && <div className="tc-operator-error"><span className="dot red" />{error || jobError}</div>}
         <div className="tc-rail-foot">
           <span className="tc-link">Drawing operator</span>
           <span className="tc-link muted">Deterministic proof</span>
@@ -186,9 +204,9 @@ export default function ToolCast({ active, onIntakeChange }) {
             <span className="tc-event-time">{panelCount?.toLocaleString('en-US') || 'pending'}</span>
           </div>
           <div className="tc-event">
-            <span className={jobId ? 'dot' : 'dot hollow'} />
+            <span className={(currentJobId || linkedJobId) ? 'dot' : 'dot hollow'} />
             <span className="tc-event-text">Tool job</span>
-            <span className="tc-event-time">{jobId ? jobId.slice(0, 8) : 'pending'}</span>
+            <span className="tc-event-time">{(currentJobId || linkedJobId) ? (currentJobId || linkedJobId).slice(0, 8) : 'pending'}</span>
           </div>
           <div className="tc-event">
             <span className={version === 2 ? 'dot' : 'dot hollow'} />
@@ -197,8 +215,8 @@ export default function ToolCast({ active, onIntakeChange }) {
           </div>
         </div>
         <div className="tc-version-actions">
-          <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || version !== 2}>Undo</button>
-          <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || phase !== 'undone'}>Redo</button>
+          <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || jobRunning || version !== 2}>Undo</button>
+          <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || jobRunning || phase !== 'undone'}>Redo</button>
         </div>
         <div className="tc-rail-note">
           <span>The request, approval, job, drawing, and version history remain in this scene.</span>
@@ -218,7 +236,7 @@ export default function ToolCast({ active, onIntakeChange }) {
               onKeyDown={runOnEnter}
               aria-label="Command bar"
             />
-            <button type="button" className="tc-run" onClick={runRequest} disabled={busy || phase === 'loading'}>Run</button>
+            <button type="button" className="tc-run" onClick={runRequest} disabled={busy || jobRunning || phase === 'loading'}>Run</button>
           </div>
           <div className="tc-bar-controls">
             <span className="tc-bar-chip">Scope · this drawing</span>
