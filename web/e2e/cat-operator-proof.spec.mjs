@@ -35,7 +35,7 @@ test('operator request produces an approved cat version and undo restores its pa
   })
 
   await page.goto('/app')
-  await expect(page.getByText('cat.dwg')).toBeVisible()
+  await expect(page.locator('.viewer-title')).toContainText('cat.dwg')
   await expect(page.locator('body')).not.toHaveText('Internal Server Error')
   await expect(page.locator('.vite-error-overlay')).toHaveCount(0)
   await page.getByRole('combobox', { name: 'Command bar' }).fill(REQUEST)

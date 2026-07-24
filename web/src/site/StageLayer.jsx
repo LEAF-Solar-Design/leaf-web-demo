@@ -28,7 +28,7 @@ function ReadySentinel({ onReady }) {
   return null
 }
 
-export default function StageLayer() {
+export default function StageLayer({ intakeOverride = null }) {
   const [intake, setIntake] = useState(null)
   const [routes, setRoutes] = useState([])
   const [fallback, setFallback] = useState(false)
@@ -62,14 +62,14 @@ export default function StageLayer() {
       ) : (
         <div className={`stage-viewer${entered ? ' in' : ''}${settled ? ' settled' : ''}`}>
           <Suspense fallback={null}>
-            {intake && (
+            {(intakeOverride || intake) && (
               <>
                 <Viewer
-                  intake={intake}
+                  intake={intakeOverride || intake}
                   colorForLayer={stageColorForLayer}
                   background="transparent"
                   controlsEnabled={false}
-                  stringRoutes={routes}
+                  stringRoutes={intakeOverride ? [] : routes}
                   onGlError={() => setFallback(true)}
                 />
                 <ReadySentinel onReady={handleReady} />

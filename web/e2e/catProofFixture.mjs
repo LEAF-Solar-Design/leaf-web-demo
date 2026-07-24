@@ -109,6 +109,10 @@ export function catProofResponse({ method, path, body = {} }, state) {
     state.head = 1
     return json({ drawing_id: 'cat-panels', intake: state.base, version: 1, head: 1, latest: 2 })
   }
+  if (path === '/api/drawings/cat-panels/redo' && method === 'POST') {
+    state.head = 2
+    return json({ drawing_id: 'cat-panels', intake: state.cat, version: 2, head: 2, latest: 2 })
+  }
   if (path === '/api/drawings/demo/versions') return json({ drawing_id: 'demo', head: 1, latest: 1, checkout: null, versions: [] })
   return json({ error: { message: `unhandled proof route ${method} ${path}` } }, 404)
 }

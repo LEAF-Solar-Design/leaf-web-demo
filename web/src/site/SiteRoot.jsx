@@ -45,6 +45,7 @@ export default function SiteRoot() {
   const { path } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
   const stageRef = useRef(null)
+  const [operatorIntake, setOperatorIntake] = useState(null)
 
   // Keyboard recasts — ONLY in scenes site|tool (listener not registered in
   // scene app/sheets), and never when focus is in an editable element.
@@ -94,9 +95,9 @@ export default function SiteRoot() {
 
   return (
     <div className="stage-root" data-scene={scene} ref={stageRef}>
-      <StageLayer />
+      <StageLayer intakeOverride={scene === 'tool' ? operatorIntake : null} />
       <LandingCast onTryTool={() => navigate('/try')} />
-      <ToolCast active={scene === 'tool'} />
+      <ToolCast active={scene === 'tool'} onIntakeChange={setOperatorIntake} />
     </div>
   )
 }

@@ -143,6 +143,8 @@ The run writes `artifacts/cat-operator-proof/01-request-and-approval.png`,
 `02-cat-version.png`, `02-cat-version-full.png`, `03-undo-restored.png`, and
 `receipt.json`. Playwright also records the full browser session under the
 proof test-results directory. These files are local test artifacts and are ignored by Git.
+The same command also exercises `/try`, where the request, approval, drawing,
+execution ledger, version head, Undo, and Redo remain visible in one standards-based scene.
 This browser proof does not claim a live Claude or APS run. Pair it with
 `server/tests/test_cat_litmus_offline_e2e.py` for identity, geometry, oracle,
 version, and undo assertions.
