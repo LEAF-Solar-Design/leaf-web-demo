@@ -2,10 +2,15 @@ import { useCallback, useEffect, useState } from 'react'
 import { getDrawingIntake, getSession, redoDrawing, undoDrawing } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
 import useConverseSessionController from '../controllers/useConverseSessionController.js'
+import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 import useJobController from '../controllers/useJobController.js'
 import { navigate } from './router.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
+const DRAWING_ID = 'cat-panels'
+const loadHead = (drawingId) => getDrawingIntake(false, drawingId, 'head')
+const undoVersion = (drawingId) => undoDrawing(false, drawingId)
+const redoVersion = (drawingId) => redoDrawing(false, drawingId)
 
 function phaseLabel(phase) {
   if (phase === 'starting') return 'Starting request'
@@ -25,9 +30,42 @@ export default function ToolCast({ active, onIntakeChange }) {
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
   const [linkedJobId, setLinkedJobId] = useState(null)
-  const [version, setVersion] = useState(1)
   const [panelCount, setPanelCount] = useState(null)
   const [busy, setBusy] = useState(false)
+
+  const applyIntake = useCallback((nextIntake) => {
+    onIntakeChange(nextIntake)
+    setPanelCount(nextIntake?.polylines?.length || null)
+  }, [onIntakeChange])
+
+  const onVersionEvent = useCallback(({ event }) => {
+    setPhase(event === 'undo' ? 'undone' : 'complete')
+  }, [])
+
+  const onDrawingError = useCallback((cause, { operation }) => {
+    if (operation === 'undo') setError('Undo failed. The current drawing version is unchanged.')
+    else if (operation === 'redo') setError('Redo failed. The current drawing version is unchanged.')
+    else setError(String(cause?.message || cause))
+  }, [])
+
+  const drawing = useDrawingVersionController({
+    loadHead,
+    undoVersion,
+    redoVersion,
+    onApplyIntake: applyIntake,
+    onVersionEvent,
+    onError: onDrawingError,
+    initialDrawingState: { drawing_id: DRAWING_ID, version: 1, head: 1, latest: 1 },
+  })
+  const {
+    seatIntake,
+    seatVersion,
+    undo: undoDrawingVersion,
+    redo: redoDrawingVersion,
+  } = drawing.actions
+  const version = drawing.head
+  const canUndo = Number.isFinite(Number(version)) && Number(version) > 1
+  const canRedo = phase === 'undone' && Number(drawing.latest) > Number(version)
 
   useEffect(() => {
     if (!active) return undefined
@@ -36,8 +74,11 @@ export default function ToolCast({ active, onIntakeChange }) {
     getSession(false, 'cat')
       .then((data) => {
         if (!live) return
-        onIntakeChange(data.intake)
-        setPanelCount(data.intake?.polylines?.length || null)
+        seatIntake(data.intake, {
+          drawingId: DRAWING_ID,
+          drawingState: { drawing_id: DRAWING_ID, version: 1, head: 1, latest: 1 },
+          apply: true,
+        })
         setPhase('ready')
       })
       .catch(() => {
@@ -46,27 +87,18 @@ export default function ToolCast({ active, onIntakeChange }) {
         setPhase('failed')
       })
     return () => { live = false }
-  }, [active, onIntakeChange])
-
-  const seatView = useCallback((view, nextPhase) => {
-    if (view?.intake) {
-      onIntakeChange(view.intake)
-      setPanelCount(view.intake.polylines?.length || null)
-    }
-    if (Number.isFinite(Number(view?.head))) setVersion(Number(view.head))
-    setPhase(nextPhase)
-  }, [onIntakeChange])
+  }, [active, seatIntake])
 
   const onCompleteVersion = useCallback(async (newVersion) => {
     const drawingId = newVersion?.drawing_id || 'cat-panels'
     try {
       const view = await getDrawingIntake(false, drawingId, 'head')
-      seatView(view, 'complete')
+      seatVersion(view, { drawingId, source: 'job', event: 'complete' })
     } catch {
       setError('The panel run completed, but its drawing version could not be loaded.')
       setPhase('failed')
     }
-  }, [seatView])
+  }, [seatVersion])
 
   const {
     currentJobId,
@@ -117,30 +149,16 @@ export default function ToolCast({ active, onIntakeChange }) {
   }, [busy, jobRunning, prompt, resetCached, startTurn])
 
   const undo = useCallback(async () => {
-    if (busy || jobRunning || version !== 2) return
-    setBusy(true)
+    if (busy || jobRunning || !canUndo) return
     setError(null)
-    try {
-      seatView(await undoDrawing(false, 'cat-panels'), 'undone')
-    } catch {
-      setError('Undo failed. The current drawing version is unchanged.')
-    } finally {
-      setBusy(false)
-    }
-  }, [busy, jobRunning, seatView, version])
+    await undoDrawingVersion()
+  }, [busy, canUndo, jobRunning, undoDrawingVersion])
 
   const redo = useCallback(async () => {
-    if (busy || jobRunning || version !== 1 || phase !== 'undone') return
-    setBusy(true)
+    if (busy || jobRunning || !canRedo) return
     setError(null)
-    try {
-      seatView(await redoDrawing(false, 'cat-panels'), 'complete')
-    } catch {
-      setError('Redo failed. The current drawing version is unchanged.')
-    } finally {
-      setBusy(false)
-    }
-  }, [busy, jobRunning, phase, seatView, version])
+    await redoDrawingVersion()
+  }, [busy, canRedo, jobRunning, redoDrawingVersion])
 
   const runOnEnter = (event) => {
     if (event.key === 'Enter') runRequest()
@@ -155,7 +173,7 @@ export default function ToolCast({ active, onIntakeChange }) {
           <span className={`dot ${statusClass}${phase === 'running' ? ' pulse' : ''}`} />
           {phaseLabel(phase)}
         </span>
-        <span className="tc-version" data-testid="version-head">Version {version}</span>
+        <span className="tc-version" data-testid="version-head">Version {version ?? 'pending'}</span>
         <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
         <span className="key">Esc</span>
       </div>
@@ -209,14 +227,14 @@ export default function ToolCast({ active, onIntakeChange }) {
             <span className="tc-event-time">{(currentJobId || linkedJobId) ? (currentJobId || linkedJobId).slice(0, 8) : 'pending'}</span>
           </div>
           <div className="tc-event">
-            <span className={version === 2 ? 'dot' : 'dot hollow'} />
+            <span className={canUndo ? 'dot' : 'dot hollow'} />
             <span className="tc-event-text">Version head</span>
             <span className="tc-event-time">v{version}</span>
           </div>
         </div>
         <div className="tc-version-actions">
-          <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || jobRunning || version !== 2}>Undo</button>
-          <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || jobRunning || phase !== 'undone'}>Redo</button>
+          <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || jobRunning || drawing.versionBusy || !canUndo}>Undo</button>
+          <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || jobRunning || drawing.versionBusy || !canRedo}>Redo</button>
         </div>
         <div className="tc-rail-note">
           <span>The request, approval, job, drawing, and version history remain in this scene.</span>
