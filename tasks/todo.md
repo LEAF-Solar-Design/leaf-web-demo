@@ -129,3 +129,20 @@ Baseline gate:
 
 - [x] Preserve the completed live edge-contract repair from `origin/main`.
 - [x] Preserve authored-execution containment from `origin/main`.
+
+# Automatic public solve-proof renewal
+
+- [x] Replace the canned public solve with the broker-backed solve route.
+- [x] Renew the proof once per 20-hour window with a stable broker event key.
+- [x] Keep cache writes atomic and collapse concurrent refreshes into one run.
+- [x] Rotate the ETag when the proof timestamp changes.
+- [x] Add an hourly staging canary that verifies proof age and real solve evidence.
+- [ ] Prove cache, expiry, failure, concurrency, CI, and staging behavior.
+
+Risks:
+
+- An expired proof must fail closed if the broker is unavailable. It must not
+  present stale evidence as current.
+- The public request path must not hold a process lock during broker or file IO.
+- GitHub schedules can be delayed, so backend request-time renewal remains the
+  source of truth and the canary runs away from the start-of-hour peak.
