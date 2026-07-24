@@ -478,10 +478,22 @@ class CallbackPrimaryConfigurationError(RuntimeError):
     """Callback-primary was selected without all required operator settings."""
 
 
+def _callback_primary_requested() -> bool:
+    """Read the broker-owned posture without depending on the callback module."""
+    return os.environ.get("LEAF_CALLBACK_PRIMARY", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _require_supported_live_completion_mode() -> None:
     """Reject the reserved callback mode before any APS live side effect."""
     callbacks = _get_callbacks()
     if callbacks is None:
+        if _callback_primary_requested():
+            raise CallbackPrimaryUnavailable(
+                "callback-primary requested but the callback module is unavailable; "
+                "refusing the APS live run"
+            )
         return
     config_error = callbacks.callback_primary_configuration_error()
     if config_error:
