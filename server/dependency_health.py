@@ -26,6 +26,7 @@ _REVISION_RE = re.compile(r"^(?:[0-9a-fA-F]{7,64}|sha256:[0-9a-fA-F]{64})$")
 _TRUE = {"1", "true", "yes", "on"}
 _REVISION_KEYS = (
     "LEAF_BUILD_REVISION",
+    "LEAF_SOURCE_SHA",
     "SOURCE_REVISION",
     "GIT_COMMIT",
     "VERCEL_GIT_COMMIT_SHA",
@@ -234,10 +235,16 @@ def _durability_cycle(directory: Path) -> None:
 
 
 def _durable_stores_probe(env: Mapping[str, str]) -> None:
+    guest_store = Path(env.get(
+        "LEAF_GUEST_STORE_DIR", str(_SERVER_DIR / "guest_drawings")))
+    try:
+        guest_store.mkdir(parents=False, exist_ok=True)
+    except OSError as exc:
+        raise DependencyUnavailable() from exc
     locations = (
         Path(env.get("JOBS_DB", str(_SERVER_DIR / "jobs.db"))).parent,
         Path(env.get("LEAF_STORE_DIR", str(_SERVER_DIR / "drawings"))),
-        Path(env.get("LEAF_GUEST_STORE_DIR", str(_SERVER_DIR / "guest_drawings"))),
+        guest_store,
         Path(env.get("LEAF_AGENT_STATE_DIR", str(_SERVER_DIR.parent / "data"))),
         Path(env.get("LEAF_TENANTS_DIR", str(_SERVER_DIR / "tenants"))),
     )
