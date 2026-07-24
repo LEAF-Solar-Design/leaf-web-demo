@@ -59,9 +59,27 @@ export function isRedactableSecret(secret: string | undefined): secret is string
 /*
  * WHY THERE IS NO DEEP "scrub the whole event graph" HELPER HERE.
  *
- * Rounds 2-5 of the PR #117 review chased a credential through every downstream
- * sink: transcript events, confirmations, the app gate's pending record, usage
- * rows, session rows. Each patch created a worse defect than the leak it closed:
+ * Two different properties are at stake, and only one of them needs redaction.
+ *
+ * 1. The credential THIS SYSTEM IS ENTRUSTED WITH must never be logged, echoed,
+ *    or persisted. That is structural, not a scrubbing problem: the app
+ *    validates the grant and forwards it, the harness maps it into a scrubbed
+ *    child env (buildScrubbedEnv), and neither writes it to a transcript, a
+ *    database, or a log. The two places it could genuinely escape are covered —
+ *    the 422 validation body (server/envelopes.py) and an SDK/Node throw quoting
+ *    the env value (converseSdkRunner's run(), which uses redactSecrets above).
+ *
+ * 2. A credential the USER PASTED INTO THEIR OWN PROMPT is content. That IS
+ *    scrubbed, but at the INPUT and nowhere else:
+ *      - server/turn_runner.py start_turn, before the transcript append (the app
+ *        persists the prompt before the harness is ever called, so this is the
+ *        only place that can keep it out of app storage);
+ *      - spineTurnAdapter.runTurn, for the tenant's linked grant, whose value
+ *        the app never sees.
+ *
+ * Rounds 2-5 of the PR #117 review tried to do (2) by scrubbing every downstream
+ * SINK instead — transcript events, confirmations, the app gate's pending
+ * record, usage rows. Each patch created a worse defect than the leak it closed:
  *
  *   - rebuilding objects with redacted KEYS silently dropped a field on
  *     collision, and `__proto__` mutated the rebuilt object's prototype — a
@@ -70,22 +88,10 @@ export function isRedactableSecret(secret: string | undefined): secret is string
  *     disagree, so approval replay failed the args hash as `args_mismatch` —
  *     the fix broke the approval flow outright.
  *
- * The mistake was scope. The contract is that THIS SYSTEM must not log, echo, or
- * persist the credential IT IS ENTRUSTED WITH. That is bounded and now holds:
- * the app validates the grant and forwards it (server/routers/sessions.py), the
- * harness maps it into a scrubbed child env (buildScrubbedEnv), and neither
- * writes it to a transcript, a database, or a log. The two places it could
- * genuinely escape are covered — the 422 validation body (server/envelopes.py)
- * and an SDK/Node throw quoting the env value (converseSdkRunner's run()).
- *
- * A credential that appears in a transcript because the USER PASTED IT INTO
- * THEIR OWN PROMPT is a different thing: it is the user's own secret, in their
- * own tenant's session, echoed back to them. Scrubbing arbitrary user content
- * for a value that merely looks like the grant is unbounded, and the attempt
- * demonstrably corrupted data and broke a security flow. If that ever needs
- * addressing, it belongs at the UI ("don't paste keys into chat") or as an
- * explicit, separately-designed content policy — not as string surgery on every
- * durable write.
+ * Scrubbing the source has neither failure mode: every downstream copy derives
+ * from the same scrubbed text, so they agree by construction and no hash can
+ * mismatch, and only `text` strings are touched, never a key or a structure. Do
+ * not reintroduce a sink-side deep scrub.
  */
 
 /** The secret values carried by a grant, for redactSecrets(). */
