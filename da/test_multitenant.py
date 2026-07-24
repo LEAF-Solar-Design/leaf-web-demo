@@ -18,6 +18,7 @@ A module-level no-network guard makes any accidental live APS call fail loudly,
 satisfying the acceptance clause 'no live APS call by importing/exercising this
 suite'.
 """
+import contextlib
 import importlib.util
 import json
 import os
@@ -145,9 +146,6 @@ def test_b_queue_ceiling_and_round_robin_fairness():
 # drive queue.fair_admit — the entry point da/client.submit_workitem actually
 # calls — from real threads, and assert the same two properties.
 # --------------------------------------------------------------------------- #
-import contextlib  # noqa: E402
-
-
 @contextlib.contextmanager
 def _ceiling(n: int):
     """Set APS_MAX_CONCURRENCY for the block (the gate reads it at call time)."""
