@@ -152,6 +152,49 @@ def test_submit_without_pin_reads_none(monkeypatch):
     assert rec["dwg_version"] is None
 
 
+def test_completed_backfill_is_not_rescanned_on_second_connect(monkeypatch):
+    """The ledger prevents later first-connects from scanning or updating jobs."""
+    ledger_db = Path(tempfile.mkdtemp(prefix="dwgver-ledger-")) / "jobs.db"
+    conn = sqlite3.connect(str(ledger_db))
+    conn.execute(_PREDECESSOR_SCHEMA)
+    stranded = str(uuid.uuid4())
+    _insert_predecessor_row(conn, stranded, json.dumps(
+        {"tool": {"name": "legacy-tool"}, "aps_live": False, "dwg_version": 11}))
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(jobs, "DB_PATH", ledger_db)
+    monkeypatch.setattr(jobs, "_conn", None)
+    rec = jobs.get_job(stranded)
+    assert rec is not None
+    assert rec["dwg_version"] == 11
+    first_conn = jobs._db()
+    applied = first_conn.execute(
+        "SELECT id FROM schema_migrations WHERE id = ?",
+        (jobs._DWG_VERSION_BACKFILL_MIGRATION,)).fetchone()
+    assert applied is not None
+    first_conn.close()
+    monkeypatch.setattr(jobs, "_conn", None)
+
+    statements = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        second_conn = connect(*args, **kwargs)
+        second_conn.set_trace_callback(statements.append)
+        return second_conn
+
+    monkeypatch.setattr(jobs.sqlite3, "connect", traced_connect)
+    second_conn = jobs._db()
+    second_conn.close()
+
+    assert not any(
+        "SELECT job_id, execution_json FROM jobs" in statement
+        and "WHERE dwg_version IS NULL" in statement
+        for statement in statements)
+    assert not any("UPDATE jobs SET dwg_version" in statement for statement in statements)
+
+
 def test_interrupted_backfill_is_retried_on_next_connect(monkeypatch):
     """Column already present but NULL (a prior backfill crashed after the DDL
     autocommitted): the next first-connect must backfill anyway (review round 2:
