@@ -1,5 +1,5 @@
 """
-Minimal, honest ASCII-DXF -> intake parser (guest uploads, APS_LIVE=0 path).
+Minimal, honest ASCII-DXF -> intake parser (guest uploads, BOTH modes).
 
 Extracts ONLY what it can literally read from the user's own bytes —
 LWPOLYLINE / POLYLINE entities and layer names — into the exact intake shape
@@ -10,10 +10,12 @@ LWPOLYLINE / POLYLINE entities and layer names — into the exact intake shape
                     "xdata": null, "handle"}]}
 
 HONESTY: nothing is invented. No entities -> an intake with zero polylines
-(honest and renderable as such). A binary DXF raises (the local demo cannot
-read it; the live path can). This parser exists so the APS_LIVE=0 demo can
-show a REAL end-to-end guest flow on a user's own DXF without fabricating
-geometry — the live deployment extracts through APS instead.
+(honest and renderable as such). A binary DXF raises — nothing reads it here,
+and the APS path cannot read a DXF either (its Activity binds HostDwg to a
+fixed `input.dwg` localName, so accoreconsole rejects DXF bytes as an invalid
+drawing). This parser is therefore the ONLY DXF extractor the guest lane has,
+in live and local modes alike: it shows a REAL end-to-end guest flow on the
+user's own DXF without fabricating geometry. DWG still extracts through APS.
 """
 from __future__ import annotations
 
@@ -35,8 +37,8 @@ def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
 def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
-            "binary DXF is not supported by the local demo parser; "
-            "the live APS path reads it")
+            "binary DXF is not supported; re-save this drawing as ASCII DXF "
+            "or upload the DWG instead")
     try:
         text = raw.decode("utf-8", errors="replace")
     except Exception as exc:  # pragma: no cover - decode with replace cannot raise
@@ -44,6 +46,15 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
 
     pairs = _group_pairs(text)
     layers: List[str] = []
+    # Membership set beside the ordered list. `layers` stays a list because
+    # first-seen ORDER is part of the intake shape; the set only answers
+    # "seen already?" in O(1). A plain `x not in layers` scan was quadratic in
+    # the number of unique layers, and a guest can pick that number: ~36 bytes
+    # per LAYER entry means ~728k layers fit inside LEAF_UPLOAD_MAX_BYTES,
+    # which measured out to over an hour of pegged CPU on ONE unauthenticated
+    # upload. Cheap to write, and it was the live-traffic blocker for routing
+    # DXF here (see guest_uploads.run_extraction).
+    seen_layers: set[str] = set()
     polylines: List[Dict[str, Any]] = []
     handle_seq = 0
 
@@ -64,7 +75,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             # the next code-2 before the next code-0 names the layer
             j = i + 1
             while j < n and pairs[j][0] != 0:
-                if pairs[j][0] == 2 and pairs[j][1] not in layers:
+                if pairs[j][0] == 2 and pairs[j][1] not in seen_layers:
+                    seen_layers.add(pairs[j][1])
                     layers.append(pairs[j][1])
                 j += 1
             i = j
@@ -72,12 +84,12 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         if section == "ENTITIES" and code == 0 and value == "LWPOLYLINE":
             entity, i = _parse_lwpolyline(pairs, i + 1)
             handle_seq += 1
-            _finish_entity(entity, handle_seq, layers, polylines)
+            _finish_entity(entity, handle_seq, layers, seen_layers, polylines)
             continue
         if section == "ENTITIES" and code == 0 and value == "POLYLINE":
             entity, i = _parse_polyline(pairs, i + 1)
             handle_seq += 1
-            _finish_entity(entity, handle_seq, layers, polylines)
+            _finish_entity(entity, handle_seq, layers, seen_layers, polylines)
             continue
         i += 1
 
@@ -85,12 +97,13 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
 
 
 def _finish_entity(entity: Dict[str, Any], seq: int, layers: List[str],
-                   polylines: List[Dict[str, Any]]) -> None:
+                   seen_layers: set, polylines: List[Dict[str, Any]]) -> None:
     if len(entity["pts"]) < 2:
         return  # a 0/1-point polyline carries no geometry worth claiming
     if not entity.get("handle"):
         entity["handle"] = f"L{seq:X}"  # synthetic-but-labeled: DXF handle absent
-    if entity["layer"] not in layers:
+    if entity["layer"] not in seen_layers:
+        seen_layers.add(entity["layer"])
         layers.append(entity["layer"])
     polylines.append(entity)
 
