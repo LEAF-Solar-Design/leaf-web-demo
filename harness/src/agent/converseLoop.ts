@@ -14,6 +14,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { redactTokens } from "../redact.js";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
 import { SPINE_TOOL_NAMES } from "../ports/index.js";
 import type {
@@ -419,7 +420,10 @@ export class ConverseLoop {
         await emit("error", {
           error: {
             error_code: "internal",
-            message: (e as Error).message,
+            // Redacted: this message is APPENDED TO THE TRANSCRIPT and streamed
+            // to the client, so an arbitrary throw carrying a BYO grant value
+            // would be persisted and published. sol-critic PR #117, blocker 2.
+            message: redactTokens((e as Error).message),
             retryable: false,
           },
           degraded_mode: false,

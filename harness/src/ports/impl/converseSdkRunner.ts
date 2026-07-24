@@ -81,6 +81,7 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { redactTokens } from "../../redact.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces we rely on (documented above,
@@ -338,7 +339,15 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     } catch (e) {
       // An aborted SDK stream throws; our own aborts (timeout / terminal error)
       // are classified below, anything else is a genuine stream fault.
-      if (!timedOut && !terminalError) streamFault = (e as Error).message;
+      //
+      // REDACT before this string escapes. Unlike the stderr sites, this message
+      // becomes a DURABLE error event: the app relays it into the transcript and
+      // out over SSE (server/turn_runner.py append_event). A grant is injected
+      // into the runner env and can be embedded verbatim in a thrown message
+      // (e.g. Node/undici header-validation errors quote the offending value),
+      // so an unredacted fault would persist and publish the caller's token.
+      // sol-critic review of PR #117, blocker 2.
+      if (!timedOut && !terminalError) streamFault = redactTokens((e as Error).message);
     } finally {
       clearTimeout(timer);
     }

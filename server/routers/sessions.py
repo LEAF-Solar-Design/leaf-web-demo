@@ -95,19 +95,34 @@ def _validate_credential_grant(raw: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _credential_insecure_transport(request: Request) -> bool:
     """True when a BYO credential must be REJECTED because the request did not
-    arrive over TLS. The effective scheme is the proxy-set X-Forwarded-Proto when
-    present (TLS is terminated upstream in prod), else the request scheme. The
-    dev/test opt-out LEAF_ALLOW_INSECURE_CREDENTIAL=1 must be set EXPLICITLY —
-    production leaves it unset and enforces TLS by default (never weakened)."""
-    if os.environ.get("LEAF_ALLOW_INSECURE_CREDENTIAL", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    ):
+    arrive over TLS.
+
+    X-Forwarded-Proto is CALLER-CONTROLLED unless a trusted proxy actually sets
+    it. docker-compose publishes this app straight to :8130 with nothing in
+    front, so honoring that header unconditionally would let anyone bypass the
+    gate by adding one line to a plaintext request (sol-critic review of PR #117,
+    blocker 1). The header is therefore consulted ONLY when the deployment
+    asserts it sits behind a proxy that overwrites it, via
+    LEAF_TRUST_FORWARDED_PROTO=1. Unset (the default, including docker-compose)
+    means the real transport decides and the header is ignored.
+
+    LEAF_ALLOW_INSECURE_CREDENTIAL=1 remains the explicit dev/test opt-out.
+    Both flags fail CLOSED: absent or unparsable -> enforce TLS on the real
+    connection."""
+    if _truthy_env("LEAF_ALLOW_INSECURE_CREDENTIAL"):
         return False
-    forwarded = request.headers.get("x-forwarded-proto", "")
-    proto = forwarded.split(",")[0].strip().lower() if forwarded else request.url.scheme.lower()
-    return proto != "https"
+    scheme = request.url.scheme.lower()
+    if _truthy_env("LEAF_TRUST_FORWARDED_PROTO"):
+        forwarded = request.headers.get("x-forwarded-proto", "")
+        if forwarded:
+            scheme = forwarded.split(",")[0].strip().lower()
+    return scheme != "https"
 
 # SSE polling cadence (§2.1.3): cheap poll of the durable event log, a ": ping"
 # comment to keep idle connections alive through proxies, and a bounded
@@ -224,10 +239,17 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             retryable=False, status_code=409,
         )
 
-    # 2b. "Mount your LLM" input hygiene — validated BEFORE the confirm consume so
-    # a bad model/credential never burns an approval. Model: allowlist-checked.
-    # Credential: TLS-gated (a BYO token may only ride an encrypted request) and
-    # shape-checked; the validated (never the raw) grant is forwarded to the turn.
+    # 2b. "Mount your LLM" input hygiene — validated BEFORE the confirm consume,
+    # so a bad model or credential never burns an approval. Model:
+    # allowlist-checked. Credential: TLS-gated (a BYO token may only ride an
+    # encrypted request) and shape-checked; the validated (never the raw) grant
+    # is forwarded to the turn.
+    #
+    # This orders THESE inputs ahead of the consume. It is not a general
+    # no-burn guarantee: `consume_approval` below still runs before
+    # `start_turn`'s busy CAS, so a confirm that races a concurrent turn is
+    # consumed and then answered 409, and the retry fails as already-consumed.
+    # That window predates this feature (e064086) and is tracked separately.
     if req.model is not None and not turn_runner.is_allowed_model(req.model):
         return _invalid_model_response(req.model)
     validated_grant: Optional[Dict[str, Any]] = None

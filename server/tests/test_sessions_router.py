@@ -823,7 +823,16 @@ def test_message_rejects_unknown_model(client, wired):
 _BYO_SECRET = "sk-ant-api-BYO-DO-NOT-LEAK-4417"
 
 
-def test_byo_credential_over_tls_reaches_wire_but_not_session_state(client, wired):
+@pytest.fixture
+def behind_trusted_proxy(monkeypatch):
+    """Deployment that genuinely sits behind a proxy which OVERWRITES
+    X-Forwarded-Proto. Only then may that header stand in for the transport."""
+    monkeypatch.setenv("LEAF_TRUST_FORWARDED_PROTO", "1")
+
+
+def test_byo_credential_over_tls_reaches_wire_but_not_session_state(
+    client, wired, behind_trusted_proxy,
+):
     """A BYO credential on an https-forwarded request rides the POST /turn body
     (so the runner can use it) but is NEVER written into the durable transcript."""
     url, state = wired
@@ -856,7 +865,7 @@ def test_byo_credential_over_plain_http_is_rejected(client, wired):
     assert state.hits == 0
 
 
-def test_byo_credential_malformed_is_rejected(client, wired):
+def test_byo_credential_malformed_is_rejected(client, wired, behind_trusted_proxy):
     url, state = wired
     sess = _new_session()
     r = client.post(
@@ -867,6 +876,25 @@ def test_byo_credential_malformed_is_rejected(client, wired):
     assert r.status_code == 400, r.text
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"
     assert state.hits == 0
+
+
+def test_forwarded_proto_header_alone_cannot_bypass_the_tls_gate(client, wired):
+    """sol-critic review of PR #117, blocker 1. docker-compose publishes this app
+    straight to :8130 with no proxy in front, so X-Forwarded-Proto is attacker
+    controlled. WITHOUT LEAF_TRUST_FORWARDED_PROTO the header must be ignored
+    entirely: a plaintext request claiming https is still refused, and the
+    credential never reaches the harness."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},  # the spoof
+    )
+    assert r.status_code == 400, r.text
+    assert "TLS" in r.json()["error"]["message"]
+    assert state.hits == 0
+    assert _BYO_SECRET not in json.dumps(state.bodies)
 
 
 def test_byo_credential_is_never_echoed_by_the_validation_handler(client, wired):

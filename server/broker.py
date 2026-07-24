@@ -385,7 +385,31 @@ def _ledger_append(entry: Dict[str, Any], event_key: Optional[str] = None) -> No
 _da_mod = None
 
 
+def _in_test_process() -> bool:
+    """True when running under pytest. `PYTEST_CURRENT_TEST` is set by pytest for
+    the duration of every test, so this is true during tests and false in any
+    real server process."""
+    return "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+
+
 def _get_da():
+    """Resolve the APS Design Automation client — the ONLY object that reads the
+    real credential and can spend money.
+
+    FAIL CLOSED UNDER TEST. The live path is chosen by the REQUEST field
+    `aps_live`, not by the APS_LIVE env var, so the documented `APS_LIVE=0
+    pytest` command does NOT prevent a test that passes `aps_live=True` from
+    reaching real APS with the credentials at ~/.aps/credentials.json. Every
+    such test today monkeypatches this function; a future one that forgets would
+    silently submit a paid WorkItem. Returning None makes that failure loud and
+    free instead: callers already treat a missing client as APS_UNAVAILABLE or
+    fall back to the pure-python path. A test that genuinely wants the live
+    client must opt in with LEAF_ALLOW_LIVE_APS_IN_TESTS=1.
+    (sol-critic review of PR #117, blocker 6.)"""
+    if _in_test_process() and os.environ.get(
+        "LEAF_ALLOW_LIVE_APS_IN_TESTS", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+
     global _da_mod
     if _da_mod is None:
         import importlib.util

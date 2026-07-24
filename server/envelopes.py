@@ -175,9 +175,15 @@ def install_error_handlers(app) -> None:
         # `credential_grant`) is a validated field — so a wrongly-shaped grant
         # would mirror the caller's token into this body, and from there into
         # access logs and error monitoring. Body parsing runs BEFORE that router's
-        # TLS gate, so it would leak over plain http too. loc/msg/type are kept:
-        # they say WHICH field and WHY, never the secret itself.
-        safe = [{k: v for k, v in err.items() if k != "input"} for err in exc.errors()]
+        # TLS gate, so it would leak over plain http too.
+        #
+        # ALLOWLIST, not denylist: keep exactly loc/msg/type — which field and
+        # why — and drop everything else. `input` is the known offender, but
+        # pydantic also carries `ctx`, whose contents vary by validator and can
+        # embed the rejected value; a denylist would silently start leaking the
+        # day a new key appears. (sol-critic review of PR #117, non-blocking 3.)
+        safe = [{k: err[k] for k in ("loc", "msg", "type") if k in err}
+                for err in exc.errors()]
         return error_response(ErrorCode.BAD_PARAMS, str(safe), retryable=False, status_code=422)
 
     @app.exception_handler(HTTPException)
