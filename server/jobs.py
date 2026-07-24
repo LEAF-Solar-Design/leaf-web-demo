@@ -34,6 +34,22 @@ import platform_link
 from envelopes import ErrorCode, err_envelope, error_obj
 from job_pg_store import PostgresJobStore
 
+try:  # APS domain metrics (CloudWatch EMF); best-effort, optional
+    import emf_metrics
+except Exception:  # pragma: no cover
+    emf_metrics = None  # type: ignore[assignment]
+
+
+def _emit_job_terminal(status: str) -> None:
+    """Best-effort JobTerminal EMF emit. NEVER raises: called on the terminal
+    path and must not corrupt job completion."""
+    if emf_metrics is None:
+        return
+    try:
+        emf_metrics.emit_job_terminal(status)
+    except Exception:  # noqa: BLE001 - metrics must never break job completion
+        pass
+
 SERVER_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
 
@@ -590,6 +606,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         )
         if outcome == "applied":
             platform_link.on_terminal(job_id, status, result_env, error)
+            _emit_job_terminal(status)
         return outcome
     applied = False
     with _lock:
@@ -648,6 +665,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             return "conflict"
     if applied:
         platform_link.on_terminal(job_id, status, result_env, error)
+        _emit_job_terminal(status)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
 
