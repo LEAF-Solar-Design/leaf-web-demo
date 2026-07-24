@@ -1,0 +1,29 @@
+{
+  "schema": "leaf.cat-oracle.calibration.v1",
+  "level": "synthetic-level-0",
+  "caveat": "These bounds separate only the frozen synthetic fixtures and are not production calibration evidence.",
+  "positive_cases": [
+    "sitting-v1",
+    "standing-v1",
+    "curled-v1"
+  ],
+  "negative_cases": [
+    "sitting-v1-same-count-rectangle",
+    "standing-v1-same-count-rectangle",
+    "curled-v1-same-count-rectangle"
+  ],
+  "separating_intervals": {
+    "iou": {
+      "negative_max": 0.7008789339381911,
+      "positive_min": 1.0
+    },
+    "chamfer_px": {
+      "positive_max": 0.0,
+      "negative_min": 4.757171263657117
+    },
+    "minimum_region_recall": {
+      "negative_max": 0.4579710144927536,
+      "positive_min": 1.0
+    }
+  }
+}

@@ -249,9 +249,22 @@ holds different bytes by mode:
 ### Mock write semantics (`APS_LIVE=0`)
 
 A write tool's `run(intake, params) -> (result, overlay)` is a PURE function that
-DECLARES its edit as `result["mutations"] = {"added": [<intake entities>],
-"removed": [<handles>]}`. The execution chain (`server/write_loop.py`) applies
-those to the CURRENT version's intake → new intake → `store.put_drawing`
+DECLARES its edit through additive `result["mutations"]` fields. Existing tools
+use `{"added": [<intake entities>], "removed": [<handles>]}`. A panel layout
+tool may also use the first-class `panel-transform/v1` field:
+
+```json
+{"transforms": [{"handle": "9462", "dx": 120.0, "dy": -48.0, "rotation_deg": 0.0}]}
+```
+
+Each transform rotates the source polyline's XY vertices around their vertex
+centroid, then translates them. `rotation_deg` defaults to zero. The write loop
+preserves Z and all other entity fields, rounds transformed XY values to nine
+decimal places, and rejects the complete batch before persistence when a handle
+or transform value is invalid. Translation is limited to 10000 drawing units per
+axis and rotation to `[-360, 360]` degrees. The execution chain
+(`server/write_loop.py`) applies the mutations to the CURRENT version's intake
+→ new intake → `store.put_drawing`
 (parent = head) → stamps `result.new_version`. At `APS_LIVE=1` the chain instead
 runs the proven `LeafWriteProbe+prod` Activity (HostDwg = current version's DWG,
 Result = `output.dwg`), stores `output.dwg` via `put_drawing`, re-extracts for
