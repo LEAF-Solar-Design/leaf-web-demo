@@ -14,9 +14,12 @@ solver").
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 
 class ErrorCode:
@@ -213,4 +216,34 @@ def install_error_handlers(app) -> None:
             error_code, retryable = ErrorCode.INTERNAL, False
         return error_response(
             error_code, str(exc.detail), retryable=retryable, status_code=status_code
+        )
+
+    # Registered LAST: the app-wide catch-all. Any route that raises something
+    # neither guarded in-route nor covered above used to escape as a RAW
+    # framework 500 -- unshaped (no {ok,error,degraded_mode} body the frontend
+    # can parse) and inconsistently logged. Now every unhandled exception logs
+    # with its traceback and answers in the section-10 envelope.
+    #
+    # Ordering note: registration order is NOT what keeps this from shadowing
+    # the specific handlers above. Starlette dispatches Exception/500 to
+    # ServerErrorMiddleware (the OUTERMOST layer) and everything else to the
+    # inner ExceptionMiddleware, so HTTPException and RequestValidationError
+    # are handled before this is ever consulted. Registering last simply keeps
+    # the reading order honest.
+    @app.exception_handler(Exception)
+    async def _unhandled_handler(request, exc):  # noqa: ANN001
+        # Log the FULL detail (type, message, traceback) server-side...
+        logger.exception(
+            "unhandled exception serving %s %s: %s",
+            getattr(request, "method", "?"),
+            getattr(getattr(request, "url", None), "path", "?"),
+            exc,
+        )
+        # ...but do NOT echo str(exc) to the caller. An arbitrary in-flight
+        # exception can carry a filesystem path, a SQL fragment, or credential
+        # material (same leak class the validation handler above refuses to
+        # echo). The client gets the machine-readable code; the operator gets
+        # the detail from the log.
+        return error_response(
+            ErrorCode.INTERNAL, "internal server error", retryable=False, status_code=500
         )
