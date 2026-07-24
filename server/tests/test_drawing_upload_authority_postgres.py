@@ -854,11 +854,11 @@ def test_expired_extractor_cannot_resurrect_after_purge(
     entered = threading.Event()
 
     class SlowBackend(store.FilesystemBackend):
-        def put(self, key, data):
+        def put_if_absent_or_verify(self, key, data):
             if key.endswith("00000001.dwg"):
                 entered.set()
                 time.sleep(0.35)
-            super().put(key, data)
+            super().put_if_absent_or_verify(key, data)
 
     backend = SlowBackend(str(guest_root))
     marker = guest_uploads.new_marker(
