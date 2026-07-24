@@ -2,7 +2,13 @@
 
 Date: 2026-07-24
 
-Source under test: `origin/main` at `bb7a09098671707d6b7399d920929c3f4796be1a`
+Source under test: integration branch based on `origin/main` at
+`99d7d188edfffd8f358024d701e13be3afa92001`
+
+Current status: Levels 0 through 4 are implemented or proven locally. Staging
+execution remains blocked by AWS read authority, customization database
+authority, tenant identity, distinct approver, and product-owner contract gates.
+No deployment or AWS mutation occurred.
 
 ## Goal
 
@@ -10,13 +16,16 @@ Prove that a user's conversational agent can rearrange existing drawing panels i
 
 ## Readiness gates
 
-### A. Staging environment: NOT READY
+### A. Staging environment: NOT CURRENTLY RE-PROVED OR AUTHORIZED FOR LITMUS
 
-Read-only checks show that the staging app, broker, harness, and web services are running and their target groups are healthy. The public health endpoint reports source revision `bb7a09098671707d6b7399d920929c3f4796be1a`, which matches `origin/main`.
+Earlier read-only checks showed healthy staging services and later reported
+source revision `99d7d188edfffd8f358024d701e13be3afa92001`. A final unauthenticated
+public probe returned 404, so this record does not claim current readiness.
 
 The lane is not ready for the live litmus because:
 
-- `/api/ready` reports `degraded`, with the worker marked as an optional degraded dependency.
+- A later read-only check reported `/api/ready` fully ready, including the
+  worker and database, with `degraded_mode` false.
 - The web service was in a rolling deployment during the first audit. A later
   read-only check found one running task and a completed primary deployment at
   task definition `leaf-platform-web:6`.
@@ -50,15 +59,24 @@ outline Chamfer at most `0.15` pixels, minimum named-region recall at least
 `0.98`, and zero overlap pixels. These thresholds separate the frozen synthetic
 fixtures. They are not yet production calibration evidence.
 
-### D. Conversational author and publish path: NOT READY
+### D. Conversational author and publish path: IMPLEMENTED LOCALLY
 
-The current converse executor's `author_tool` dispatch calls the app's legacy `POST /api/author` route. In live customization mode the app stages a change, but the conversational spine has no first-class receipt, independent approval, publish, catalog refresh, and run sequence. The harness exposes `/author/stage` and `/author/publish`, but those operations are not wired into the six conversational spine tools.
+The spine now exposes `request_publication(change_set_id)`. The app loads the
+durable staged receipt, waits for an independent trusted approval or denial,
+and resumes publication without exposing confirmation material to the model or
+harness. Raw registration and internal decision routes remain outside the
+back-edge allowlist.
 
-The existing `register_tool` policy schema is not a shortcut. It binds only a
-tool name and manifest hash, while the publication API requires the full staged
-receipt, a separate R6 confirmation, and an idempotency key. Chat staging also
-generates a fresh idempotency key today. A later write approval does not bind the
-catalog generation, tool digest, or expected drawing head.
+Chat staging uses a deterministic idempotency key. Write approval now binds the
+tool definition digest, effective catalog commit and digest, drawing id, exact
+head, and parameters. The run route requires those pins from the trusted
+subject-less back-edge and rechecks them before job creation. A fresh tenant
+uses a server-issued deterministic base-catalog generation.
+
+Publication denial and expiry keep the change staged. Denial revokes approvals
+issued before the decision, while a later independent approval can resume the
+same durable request. Publication success invalidates the turn-local catalog so
+the next search or run fetches the new effective catalog.
 
 The production-like acceptance path therefore needs an explicit state machine:
 
@@ -111,11 +129,13 @@ npm run check:customization
 
 Observed results:
 
-- Server combined gate: `127 passed`, with 10 existing deprecation warnings.
-- Harness typecheck: passed.
-- Harness focused converse tests: `42 passed`.
+- Server full suite: `1,163 passed, 46 skipped`, with 12 warnings.
+- Focused publication, pin, denial, expiry, and store suite: `38 passed`.
+- Harness full suite: `301 passed, 10 skipped`.
+- Harness typecheck and production build: passed.
 - Web production build: passed, with the existing large-chunk warning.
 - Web customization checks: passed.
+- Independent read-only review: `CLEAR`.
 
 ## Deployment gate
 

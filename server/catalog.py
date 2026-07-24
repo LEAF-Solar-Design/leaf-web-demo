@@ -59,6 +59,9 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         "kind": tool.get("kind"),
         "engine_op": tool.get("engine_op"),
         "catalog_digest": tool.get("catalog_digest"),
+        "tool_manifest_sha256": tool.get("tool_manifest_sha256"),
+        "catalog_commit": tool.get("catalog_commit"),
+        "effective_catalog_digest": tool.get("effective_catalog_digest"),
     }
 
 

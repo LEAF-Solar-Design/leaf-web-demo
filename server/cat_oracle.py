@@ -187,13 +187,18 @@ def _read_pbm(path: Path) -> frozenset[tuple[int, int]]:
     return frozenset((index % 96, index // 96) for index, bit in enumerate(bits) if bit == "1")
 
 
+def _fixture_bytes(path: Path) -> bytes:
+    """Canonicalize tracked text fixture line endings before hashing."""
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 def _load_fixtures(fixture_dir: Path) -> tuple[dict[str, dict[str, frozenset[tuple[int, int]]]], dict[str, Any], str]:
     manifest_path = fixture_dir / "manifest.json"
     thresholds_path = fixture_dir / "thresholds.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     thresholds = json.loads(thresholds_path.read_text(encoding="utf-8"))
     for filename, expected in manifest["sha256"].items():
-        actual = hashlib.sha256((fixture_dir / filename).read_bytes()).hexdigest()
+        actual = hashlib.sha256(_fixture_bytes(fixture_dir / filename)).hexdigest()
         if actual != expected:
             raise OracleInputError(f"fixture hash mismatch: {filename}")
     calibration = json.loads((fixture_dir / "calibration.json").read_text(encoding="utf-8"))
@@ -210,7 +215,7 @@ def _load_fixtures(fixture_dir: Path) -> tuple[dict[str, dict[str, frozenset[tup
         loaded[name] = {"silhouette": _read_pbm(fixture_dir / f"{name}.pbm")}
         for region in REGIONS:
             loaded[name][region] = _read_pbm(fixture_dir / f"{name}.{region}.pbm")
-    return loaded, thresholds, hashlib.sha256(thresholds_path.read_bytes()).hexdigest()
+    return loaded, thresholds, hashlib.sha256(_fixture_bytes(thresholds_path)).hexdigest()
 
 
 def _boundary(mask: frozenset[tuple[int, int]]) -> frozenset[tuple[int, int]]:
@@ -379,9 +384,9 @@ def evaluate_cat(before_intake: dict[str, Any], after_intake: dict[str, Any], se
             reasons.append("region_recall_below_threshold:" + ",".join(low_regions))
         report = {
             **base_report,
-            "fixture_manifest_hash": hashlib.sha256((fixture_dir / "manifest.json").read_bytes()).hexdigest(),
+            "fixture_manifest_hash": hashlib.sha256(_fixture_bytes(fixture_dir / "manifest.json")).hexdigest(),
             "thresholds_hash": thresholds_hash,
-            "template_sha256": hashlib.sha256((fixture_dir / f"{best['template']}.pbm").read_bytes()).hexdigest(),
+            "template_sha256": hashlib.sha256(_fixture_bytes(fixture_dir / f"{best['template']}.pbm")).hexdigest(),
             "template": best["template"], "alignment": best["alignment"],
             "metrics": {"iou": best["iou"], "outline_chamfer_px": best["chamfer"], "region_recall": best["region_recall"], "components_4": best["components_4"], "overlap_pixels": best["overlap_pixels"], "overlap_pixel_fraction": best["overlap_pixels"] / max(1, len(best["mask"]))},
             "verdict": "pass" if not reasons else "fail", "reasons": reasons,

@@ -71,6 +71,13 @@ class RegisterRequest(BaseModel):
         extra = "forbid"
 
 
+class PublicationRequest(BaseModel):
+    change_set_id: str = Field(..., min_length=36, max_length=36)
+
+    class Config:
+        extra = "forbid"
+
+
 class RollbackRequest(BaseModel):
     change_set_id: str
     idempotency_key: str = Field(..., min_length=1, max_length=200)
@@ -296,10 +303,14 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
+    if not idempotency_key or not idempotency_key.strip():
+        return _customization_error(
+            CustomizationServiceError("idempotency_key_required", 422)
+        )
     try:
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode="build",
-            idempotency_key=idempotency_key or str(__import__("uuid").uuid4()),
+            idempotency_key=idempotency_key.strip(),
         )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
@@ -344,6 +355,35 @@ def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[
         if isinstance(exc, AuthorityError):
             return _customization_error(CustomizationServiceError(exc.reason_code, 403))
         return _customization_error(CustomizationServiceError("invalid_publish_request", 422))
+
+
+@router.post("/api/author/publication-requests")
+def request_publication(
+    req: PublicationRequest,
+    tenant=Depends(deps.require_tenant),
+) -> Dict[str, Any]:
+    """Request continuation only. Independent approval stays off this route."""
+    denied = _customization_gate(6, tenant)
+    if denied is not None:
+        return denied
+    try:
+        return CustomizationService.configured().request_publication(
+            tenant=tenant, change_set_id=req.change_set_id
+        )
+    except (CustomizationServiceError, AuthorityError, ValueError) as exc:
+        if isinstance(exc, CustomizationServiceError):
+            return _customization_error(exc)
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403)
+            )
+        return _customization_error(
+            CustomizationServiceError("invalid_publication_request", 422)
+        )
+    except Exception:
+        return _customization_error(
+            CustomizationServiceError("customization_publish_failed", 503)
+        )
 
 
 @router.post("/api/author/confirmations")
@@ -413,6 +453,42 @@ def confirm(req: InternalConfirmRequest, x_tenant_id: str | None = Header(defaul
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+        return _customization_error(exc)
+
+
+@router.post("/internal/customization/deny")
+def deny_publication(
+    req: InternalConfirmRequest,
+    x_tenant_id: str | None = Header(default=None),
+    x_approval_secret: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    """Independent denial endpoint. The harness cannot reach this route."""
+    approval_secret = os.environ.get(
+        "LEAF_CUSTOMIZATION_APPROVAL_SECRET", ""
+    ).strip()
+    try:
+        secrets_match = hmac.compare_digest(
+            (x_approval_secret or "").encode("ascii"),
+            approval_secret.encode("ascii"),
+        )
+    except UnicodeEncodeError:
+        secrets_match = False
+    if not x_tenant_id or not approval_secret or not secrets_match:
+        return _customization_error(
+            CustomizationServiceError("approval_authority_denied", 403)
+        )
+    denied = _customization_gate(6, x_tenant_id)
+    if denied is not None:
+        return denied
+    try:
+        return CustomizationService.configured().deny_publication(
+            tenant_id=x_tenant_id, change_set_id=req.change_set_id
+        )
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403)
+            )
         return _customization_error(exc)
 
 
