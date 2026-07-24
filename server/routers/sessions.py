@@ -76,21 +76,42 @@ def _invalid_model_response(model: Any) -> JSONResponse:
     )
 
 
+# A credential must actually LOOK like one. Accepting any non-empty string made
+# downstream redaction unwinnable: the harness scrubs the grant out of the
+# transcript by literal match, so a credential of "error", "a" or '"' would
+# either corrupt ordinary text and protocol values or have to be left in place
+# (sol-critic PR #117 round 4, blockers 2 and 3). Real Agent SDK credentials are
+# long, opaque, and whitespace-free — `sk-ant-...` keys and OAuth tokens run to
+# ~100 chars — so this floor rejects nothing genuine while removing every
+# pathological value at the boundary, where it is cheap and unambiguous.
+_MIN_CREDENTIAL_LEN = 24
+
+
+def _valid_credential_value(tok: Any) -> bool:
+    return (
+        isinstance(tok, str)
+        and len(tok) >= _MIN_CREDENTIAL_LEN
+        and not any(ch.isspace() for ch in tok)
+    )
+
+
 def _validate_credential_grant(raw: Any) -> Optional[Dict[str, Any]]:
     """Return the normalized BYO Agent SDK credential grant, or None if the shape
-    is invalid. Accepts EXACTLY {kind:'api_key', api_key:<non-empty str>} or
-    {kind:'oauth', oauth_token:<non-empty str>}; extra keys are dropped. The token
-    VALUE is never logged here (nothing in this module prints it)."""
+    is invalid. Accepts EXACTLY {kind:'api_key', api_key:<credential>} or
+    {kind:'oauth', oauth_token:<credential>}; extra keys are dropped. A
+    <credential> is a whitespace-free string of at least _MIN_CREDENTIAL_LEN
+    characters (see above). The token VALUE is never logged here (nothing in this
+    module prints it)."""
     if not isinstance(raw, dict):
         return None
     kind = raw.get("kind")
     if kind == "api_key":
         tok = raw.get("api_key")
-        if isinstance(tok, str) and tok.strip():
+        if _valid_credential_value(tok):
             return {"kind": "api_key", "api_key": tok}
     elif kind == "oauth":
         tok = raw.get("oauth_token")
-        if isinstance(tok, str) and tok.strip():
+        if _valid_credential_value(tok):
             return {"kind": "oauth", "oauth_token": tok}
     return None
 

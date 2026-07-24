@@ -386,10 +386,15 @@ _da_mod = None
 
 
 def _in_test_process() -> bool:
-    """True when running under pytest. `PYTEST_CURRENT_TEST` is set by pytest for
-    the duration of every test, so this is true during tests and false in any
-    real server process."""
-    return "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+    """True only while a pytest test is executing.
+
+    Deliberately NOT `"pytest" in sys.modules`: server/requirements.txt ships
+    pytest and deploy/Dockerfile.broker installs it into the production image, so
+    any prod process that imports pytest for any reason would look like a test
+    and silently lose live APS. `PYTEST_CURRENT_TEST` is set by pytest only for
+    the duration of each test and is never present in a real server process.
+    (sol-critic PR #117 round 2, blocker 3.)"""
+    return "PYTEST_CURRENT_TEST" in os.environ
 
 
 def _get_da():
@@ -401,14 +406,23 @@ def _get_da():
     pytest` command does NOT prevent a test that passes `aps_live=True` from
     reaching real APS with the credentials at ~/.aps/credentials.json. Every
     such test today monkeypatches this function; a future one that forgets would
-    silently submit a paid WorkItem. Returning None makes that failure loud and
-    free instead: callers already treat a missing client as APS_UNAVAILABLE or
-    fall back to the pure-python path. A test that genuinely wants the live
-    client must opt in with LEAF_ALLOW_LIVE_APS_IN_TESTS=1.
-    (sol-critic review of PR #117, blocker 6.)"""
+    silently submit a paid WorkItem.
+
+    RAISE, do not return None. None is an ordinary "no credential" signal that
+    callers absorb into a degraded pure-python write (see run_write_mock's
+    degraded=True branch), which would turn a forgotten monkeypatch into a
+    quietly WRONG passing test instead of a caught mistake. A test that
+    genuinely wants the live client must opt in with
+    LEAF_ALLOW_LIVE_APS_IN_TESTS=1.
+    (sol-critic PR #117, round 1 blocker 6 and round 2 blocker 3.)"""
     if _in_test_process() and os.environ.get(
         "LEAF_ALLOW_LIVE_APS_IN_TESTS", "").strip().lower() not in ("1", "true", "yes", "on"):
-        return None
+        raise RuntimeError(
+            "refusing to load the live APS client inside a test process: this call "
+            "would spend real money against ~/.aps/credentials.json. Monkeypatch "
+            "broker._get_da in this test, or set LEAF_ALLOW_LIVE_APS_IN_TESTS=1 to "
+            "opt in deliberately."
+        )
 
     global _da_mod
     if _da_mod is None:
