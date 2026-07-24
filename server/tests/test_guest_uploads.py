@@ -326,6 +326,45 @@ def test_store_representation_dxf_intake_blob_plus_cache(client):
     assert json.loads(backend.get(ckey).decode("utf-8"))["layers"] == ["Panels"]
 
 
+def test_live_mode_dxf_parses_locally_and_never_calls_the_broker(client, monkeypatch):
+    """REGRESSION (live staging, 2026-07-24): at APS_LIVE=1 a .dxf must still
+    be parsed locally and must NOT be sent to the broker.
+
+    The live extract Activity declares HostDwg with a fixed `input.dwg`
+    localName and runs `accoreconsole /i input.dwg`, so DXF bytes arrive
+    wearing a .dwg extension and AutoCAD rejects them outright ("Drawing file
+    is not valid", ErrorStatus=434 -> WorkItem status failedInstructions).
+    Routing .dxf to the broker was therefore a guaranteed PAID failure: every
+    live DXF upload — the guest console's bundled sample included — died in
+    the failed strip. This test fails the build if that routing comes back:
+    the broker seam raises, so any call to it surfaces as a failed status
+    instead of the user's own geometry."""
+    import deps
+
+    def _broker_must_not_be_called(tenant_id, drawing_id):
+        raise AssertionError("a .dxf upload must never reach the APS broker")
+
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.setattr(guest_uploads, "_extract_via_broker",
+                        _broker_must_not_be_called)
+    r = _upload(client)
+    assert r.status_code == 202
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+
+    s = client.get(f"/api/drawings/{did}/upload-status",
+                   headers={"X-Tenant-Id": tenant})
+    assert s.status_code == 200
+    assert s.json()["status"] == "ready", s.json().get("error")
+
+    # and it is THEIR geometry, not a fabricated or cached intake
+    i = client.get(f"/api/drawings/{did}/intake", headers={"X-Tenant-Id": tenant})
+    assert i.status_code == 200
+    intake = i.json()["intake"]
+    assert intake["layers"] == ["Panels"]
+    assert any(DISTINCTIVE_COORD in pt for pl in intake["polylines"]
+               for pt in pl["pts"]), "must carry the uploaded DXF's own coordinates"
+
+
 def test_store_representation_dwg_raw_bytes_v1(client, monkeypatch):
     """A .dwg upload's v1 blob is the user's RAW DWG bytes — what a later
     live write signs and sends to APS as HostDwg. Extraction is mocked at

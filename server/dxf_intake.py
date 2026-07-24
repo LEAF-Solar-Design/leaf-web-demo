@@ -1,5 +1,5 @@
 """
-Minimal, honest ASCII-DXF -> intake parser (guest uploads, APS_LIVE=0 path).
+Minimal, honest ASCII-DXF -> intake parser (guest uploads, BOTH modes).
 
 Extracts ONLY what it can literally read from the user's own bytes —
 LWPOLYLINE / POLYLINE entities and layer names — into the exact intake shape
@@ -10,10 +10,12 @@ LWPOLYLINE / POLYLINE entities and layer names — into the exact intake shape
                     "xdata": null, "handle"}]}
 
 HONESTY: nothing is invented. No entities -> an intake with zero polylines
-(honest and renderable as such). A binary DXF raises (the local demo cannot
-read it; the live path can). This parser exists so the APS_LIVE=0 demo can
-show a REAL end-to-end guest flow on a user's own DXF without fabricating
-geometry — the live deployment extracts through APS instead.
+(honest and renderable as such). A binary DXF raises — nothing reads it here,
+and the APS path cannot read a DXF either (its Activity binds HostDwg to a
+fixed `input.dwg` localName, so accoreconsole rejects DXF bytes as an invalid
+drawing). This parser is therefore the ONLY DXF extractor the guest lane has,
+in live and local modes alike: it shows a REAL end-to-end guest flow on the
+user's own DXF without fabricating geometry. DWG still extracts through APS.
 """
 from __future__ import annotations
 
@@ -35,8 +37,8 @@ def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
 def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
-            "binary DXF is not supported by the local demo parser; "
-            "the live APS path reads it")
+            "binary DXF is not supported; re-save this drawing as ASCII DXF "
+            "or upload the DWG instead")
     try:
         text = raw.decode("utf-8", errors="replace")
     except Exception as exc:  # pragma: no cover - decode with replace cannot raise
