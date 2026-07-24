@@ -34,9 +34,13 @@ evidence (sha256 + size of the persisted output). Translation refuses, raising
   * ``expired_lease``        — the APS lease deadline has passed (a completion
                                delivered after the lease is not trustworthy);
   * ``bad_nonce``            — empty delivery nonce;
-  * ``replay``               — this (job, nonce) was already translated
-                               (producer-side idempotency; the consumer's nonce
-                               store is the second, durable line of defence).
+  * ``bad_clock``            — non-finite translation clock;
+  * ``missing_workitem``     — no WorkItem id to bind the receipt to;
+  * ``duplicate_completion`` — this (job, ATTEMPT) already produced a receipt.
+                               Keyed on completion identity, not the nonce: a
+                               second delivery bearing a fresh nonce would
+                               otherwise complete one attempt twice, since the
+                               consumer only dedupes the same nonce.
 
 Run:  cd server && python -m pytest tests/test_aps_callback_adapter.py -q
 """
@@ -45,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -131,29 +136,51 @@ def translate(
     job_attempt: int,
     secret: bytes,
     now: float,
-    seen_nonce: Optional[Callable[[str, str], bool]] = None,
+    seen_completion: Optional[Callable[[str, int], bool]] = None,
 ) -> CallbackEnvelope:
     """Translate a successful APS WorkItem completion into a signed envelope.
 
     ``job_attempt`` is the job store's authoritative current attempt; ``now`` is
-    the epoch seconds at translation; ``seen_nonce(job_id, nonce) -> bool`` is an
-    optional producer-side replay guard. Raises ``AdapterError`` on every
-    fail-closed condition rather than emitting a weaker envelope.
+    the epoch seconds at translation.
+
+    ``seen_completion(job_id, attempt) -> bool`` is the producer-side
+    duplicate-completion guard, and it is keyed on the COMPLETION IDENTITY
+    (job, attempt), NOT on the nonce. That distinction is the whole point: the
+    consumer's durable nonce store only rejects a repeat of the SAME nonce, so a
+    second delivery of the same completion bearing a FRESH nonce would otherwise
+    mint a second envelope that ``consume_callback`` accepts, completing one
+    attempt twice. One attempt yields at most one completion receipt, and this
+    adapter is the authority for that; the consumer's nonce store remains the
+    second line of defence against a captured envelope being replayed verbatim.
     """
     if not isinstance(completion.job_id, str) or not completion.job_id.strip():
         raise AdapterError("missing_job")
+    if not isinstance(completion.workitem_id, str) or not completion.workitem_id.strip():
+        raise AdapterError("missing_workitem")
     if not isinstance(completion.status, str) or completion.status.strip().lower() not in _SUCCESS_STATUSES:
         raise AdapterError("workitem_not_success")
     if output is None or len(output) == 0:
         raise AdapterError("missing_output")
-    if not isinstance(completion.attempt, int) or completion.attempt != job_attempt:
+    # `bool` is a subclass of `int` and `True == 1`, so an unguarded isinstance
+    # check lets attempt=True satisfy job_attempt=1 and sign `"attempt":true`.
+    if (isinstance(completion.attempt, bool) or not isinstance(completion.attempt, int)
+            or isinstance(job_attempt, bool) or not isinstance(job_attempt, int)
+            or completion.attempt != job_attempt):
         raise AdapterError("wrong_attempt")
-    if not isinstance(completion.lease_expiry, (int, float)) or now > completion.lease_expiry:
+    # NaN defeats every comparison (`now > nan` is False), so a non-finite lease
+    # deadline would sail past an ordinary expiry check. callbacks.py guards its
+    # own timestamp with math.isfinite for the same reason.
+    if (isinstance(completion.lease_expiry, bool)
+            or not isinstance(completion.lease_expiry, (int, float))
+            or not math.isfinite(completion.lease_expiry)
+            or now > completion.lease_expiry):
         raise AdapterError("expired_lease")
+    if not isinstance(now, (int, float)) or isinstance(now, bool) or not math.isfinite(now):
+        raise AdapterError("bad_clock")
     if not isinstance(completion.nonce, str) or not completion.nonce.strip():
         raise AdapterError("bad_nonce")
-    if seen_nonce is not None and seen_nonce(completion.job_id, completion.nonce):
-        raise AdapterError("replay")
+    if seen_completion is not None and seen_completion(completion.job_id, completion.attempt):
+        raise AdapterError("duplicate_completion")
 
     output_sha256 = hashlib.sha256(output).hexdigest()
     payload: Dict[str, Any] = {

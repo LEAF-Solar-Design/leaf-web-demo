@@ -44,12 +44,24 @@ recomputes it.
 | `reason` | Condition | Why it must fail |
 |----------|-----------|------------------|
 | `missing_job` | no job id | nothing to complete |
+| `missing_workitem` | blank WorkItem id | the receipt must bind to a real WorkItem |
 | `workitem_not_success` | WorkItem not succeeded | a failure is not a completion receipt; polling reports it |
 | `missing_output` | no persisted output bytes | an empty receipt would attest a completion that produced nothing |
-| `wrong_attempt` | completion attempt ≠ job's current attempt | a stale retry's late callback must not complete a newer attempt |
-| `expired_lease` | `now` past the APS lease deadline | a completion delivered after the lease is not trustworthy |
+| `wrong_attempt` | completion attempt ≠ job's current attempt, or either is not a real `int` | a stale retry's late callback must not complete a newer attempt. `bool` is an `int` subclass and `True == 1`, so `attempt=True` is rejected explicitly rather than satisfying `job_attempt=1` |
+| `expired_lease` | `now` past the lease deadline, or the deadline is not finite | a late completion is untrustworthy; `NaN` defeats every comparison (`now > nan` is `False`), so non-finite deadlines are refused outright |
+| `bad_clock` | non-finite translation clock | a `NaN` clock would make the freshness stamp meaningless |
 | `bad_nonce` | empty delivery nonce | the nonce is the signed + replay key |
-| `replay` | this `(job, nonce)` already translated | producer-side idempotency; the consumer's durable nonce store is the second line |
+| `duplicate_completion` | this `(job, ATTEMPT)` already produced a receipt | **keyed on completion identity, not the nonce.** The consumer's nonce store only rejects a repeat of the *same* nonce, so a second delivery bearing a *fresh* nonce would otherwise mint a second accepted envelope and complete one attempt twice. This adapter is the authority for one-receipt-per-attempt; the nonce store remains the second line against a verbatim replay |
+
+### Why the replay key changed
+
+The first version of this adapter keyed its guard on `(job_id, nonce)`, which
+mirrored the consumer and therefore added no defence: the same job, attempt,
+WorkItem and output delivered under two different nonces produced two envelopes
+that the real `consume_callback` accepted against one replay authority. That is a
+duplicate completion, and it is now covered end-to-end by
+`test_two_nonces_for_one_attempt_cannot_both_be_consumed`, which drives the real
+consumer and asserts exactly one acceptance.
 
 ## Defence in depth (verified by the round-trip test)
 

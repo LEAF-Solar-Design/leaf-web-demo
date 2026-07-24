@@ -94,12 +94,22 @@ def test_headers_carry_the_signed_triple():
 
 @pytest.mark.parametrize("mutate,output,job_attempt,reason", [
     (dict(job_id="  "), b"out", 2, "missing_job"),
+    (dict(workitem_id="   "), b"out", 2, "missing_workitem"),
     (dict(status="failed"), b"out", 2, "workitem_not_success"),
     (dict(status="inprogress"), b"out", 2, "workitem_not_success"),
     (dict(), None, 2, "missing_output"),
     (dict(), b"", 2, "missing_output"),
     (dict(attempt=1), b"out", 2, "wrong_attempt"),          # stale retry's late callback
+    # `bool` is an int subclass and True == 1, so attempt=True must NOT satisfy
+    # job_attempt=1 and sign `"attempt":true`.
+    (dict(attempt=True), b"out", 1, "wrong_attempt"),
+    (dict(attempt=2.0), b"out", 2, "wrong_attempt"),
     (dict(lease_expiry=NOW - 1.0), b"out", 2, "expired_lease"),
+    # NaN defeats comparison (`now > nan` is False), so it must be refused
+    # explicitly rather than sailing past the expiry check.
+    (dict(lease_expiry=float("nan")), b"out", 2, "expired_lease"),
+    (dict(lease_expiry=float("inf")), b"out", 2, "expired_lease"),
+    (dict(lease_expiry=None), b"out", 2, "expired_lease"),
     (dict(nonce="   "), b"out", 2, "bad_nonce"),
 ])
 def test_every_fail_closed_mode_refuses_with_its_reason(mutate, output, job_attempt, reason):
@@ -108,16 +118,53 @@ def test_every_fail_closed_mode_refuses_with_its_reason(mutate, output, job_atte
     assert excinfo.value.reason == reason
 
 
-def test_producer_side_replay_guard_refuses_a_seen_nonce():
-    seen = {("job-1", "nonce-abc")}
+def test_a_non_finite_clock_is_refused():
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(), b"out", job_attempt=2, secret=SECRET, now=NOW,
-                          seen_nonce=lambda job, nonce: (job, nonce) in seen)
-    assert excinfo.value.reason == "replay"
-    # A fresh nonce for the same job is allowed.
-    envelope = adapter.translate(_completion(nonce="nonce-def"), b"out", job_attempt=2, secret=SECRET,
-                                 now=NOW, seen_nonce=lambda job, nonce: (job, nonce) in seen)
-    assert envelope.nonce == "nonce-def"
+        adapter.translate(_completion(lease_expiry=float("nan")), b"out", job_attempt=2,
+                          secret=SECRET, now=float("nan"))
+    assert excinfo.value.reason in {"expired_lease", "bad_clock"}
+
+
+def test_duplicate_completion_guard_is_keyed_on_attempt_not_nonce():
+    """The regression this replaces: the guard used to key on (job, nonce), so a
+    second delivery of the SAME completion bearing a FRESH nonce produced a
+    second envelope the real consumer accepted — completing one attempt twice."""
+    completed = {("job-1", 2)}
+    for nonce in ("nonce-abc", "nonce-def", "totally-new-nonce"):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(nonce=nonce), b"out", job_attempt=2, secret=SECRET,
+                              now=NOW, seen_completion=lambda job, attempt: (job, attempt) in completed)
+        assert excinfo.value.reason == "duplicate_completion", f"nonce {nonce} must not mint a second receipt"
+    # A genuinely different ATTEMPT of the same job is a distinct completion.
+    envelope = adapter.translate(_completion(attempt=3, nonce="nonce-xyz"), b"out", job_attempt=3,
+                                 secret=SECRET, now=NOW,
+                                 seen_completion=lambda job, attempt: (job, attempt) in completed)
+    assert json.loads(envelope.body)["attempt"] == 3
+
+
+def test_two_nonces_for_one_attempt_cannot_both_be_consumed():
+    """End-to-end proof against the REAL consumer, not just the guard: with the
+    adapter as the completion authority, one attempt yields one accepted receipt."""
+    completed = set()
+
+    def guard(job, attempt):
+        return (job, attempt) in completed
+
+    store = callbacks.CallbackReplayStore()
+    accepted = 0
+    for nonce in ("nonce-1", "nonce-2"):
+        try:
+            envelope = adapter.translate(_completion(nonce=nonce), b"out", job_attempt=2,
+                                         secret=SECRET, now=NOW, seen_completion=guard)
+        except adapter.AdapterError as exc:
+            assert exc.reason == "duplicate_completion"
+            continue
+        result = callbacks.consume_callback(envelope.body, envelope.signature, envelope.timestamp,
+                                           envelope.nonce, now=NOW, replay_store=store)
+        if result["ok"]:
+            accepted += 1
+            completed.add(("job-1", 2))
+    assert accepted == 1, "one attempt must produce exactly one accepted completion"
 
 
 def test_a_stale_translated_envelope_is_rejected_by_the_consumer_freshness_window():
