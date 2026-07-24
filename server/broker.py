@@ -82,6 +82,19 @@ try:  # noqa: E402 - APS domain metrics via CloudWatch EMF; best-effort, optiona
 except Exception:  # pragma: no cover - emit is optional; its absence must not break the broker
     emf_metrics = None  # type: ignore[assignment]
 
+
+def _emit_aps_metric(entry: Dict[str, Any], event_key: str) -> None:
+    """Best-effort APS EMF emit. NEVER raises: called from broker `finally`
+    blocks, so nothing here may escape into the response/ledger path (defence in
+    depth on top of emf_metrics' own best-effort handlers)."""
+    if emf_metrics is None:
+        return
+    try:
+        entry["event_key"] = event_key
+        emf_metrics.emit_broker_run(entry)
+    except Exception:  # noqa: BLE001 - metrics must never break a broker run
+        pass
+
 LEDGER_PATH = Path(os.environ.get("BROKER_LEDGER", str(SERVER_DIR / "broker_ledger.jsonl")))
 TENANTS_PATH = Path(os.environ.get("BROKER_TENANTS", str(SERVER_DIR / "broker_tenants.json")))
 APS_ENDPOINT = "https://developer.api.autodesk.com"
@@ -1508,9 +1521,7 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
                 terminal_env,
                 terminal_status,
             )
-            if emf_metrics is not None:
-                entry["event_key"] = req.ledger_event_key
-                emf_metrics.emit_broker_run(entry)
+            _emit_aps_metric(entry, req.ledger_event_key)
     assert terminal_env is not None and terminal_status is not None
     return JSONResponse(status_code=terminal_status, content=terminal_env)
 
@@ -1689,14 +1700,10 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
                 terminal_env,
                 terminal_status,
             )
-            if emf_metrics is not None:
-                entry["event_key"] = ledger_event_key
-                emf_metrics.emit_broker_run(entry)
+            _emit_aps_metric(entry, ledger_event_key)
         elif not postgres_mode:
             _ledger_append(entry, ledger_event_key)
-            if emf_metrics is not None:
-                entry["event_key"] = ledger_event_key
-                emf_metrics.emit_broker_run(entry)
+            _emit_aps_metric(entry, ledger_event_key)
 
 
 def _start_admitted_execution(

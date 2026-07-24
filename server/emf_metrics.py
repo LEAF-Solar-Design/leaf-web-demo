@@ -14,9 +14,9 @@ CONTRACT (owned by the unified-observability plane; see CONTRACT.md):
   Metrics    : BrokerRun (Count), EngineSeconds (Seconds), UsdEst (None),
                JobTerminal (Count)
   Dimensions : LOW-CARDINALITY ONLY -> {aps_live, status}. tenant_id and tool
-               are LOG FIELDS, never metric dimensions (custom-metric cost
-               explosion guard). tool can be promoted to a dimension by setting
-               APS_EMF_TOOL_DIM=1 once its cardinality is known-bounded.
+               are LOG FIELDS, never metric dimensions: tool is request/tenant-
+               derived and unbounded, so making it a dimension would explode
+               custom-metric cost.
 
 SAFETY: every public function is best-effort and NEVER raises into the caller.
   The broker's `finally: _ledger_append(entry)` and jobs' terminal callback must
@@ -38,7 +38,6 @@ NAMESPACE = "Leaf/Platform/APS"
 
 # Kill switch + knobs (env-driven; safe defaults).
 _DISABLED = os.environ.get("APS_EMF_DISABLED", "") == "1"
-_TOOL_AS_DIM = os.environ.get("APS_EMF_TOOL_DIM", "") == "1"
 
 
 def _now_ms() -> int:
@@ -102,14 +101,11 @@ def emit_broker_run(entry: Dict[str, Any]) -> None:
         tool_s = str(tool) if tool else "none"
 
         # Dimension VALUES must be strings and present at the root.
+        # LOW-CARDINALITY ONLY: aps_live (2 values) x status (small enum). `tool`
+        # is request/tenant-derived and unbounded, so it is a LOG FIELD only,
+        # never a metric dimension (custom-metric cost-explosion guard).
         dim_values: Dict[str, Any] = {"aps_live": aps_live, "status": status}
-        dim_keys = ["aps_live", "status"]
-        if _TOOL_AS_DIM:
-            dim_values["tool"] = tool_s
-            dim_keys = ["aps_live", "status", "tool"]
-
-        # Bounded dimension sets: full combo + an aps_live rollup.
-        dimension_sets = [dim_keys, ["aps_live"]]
+        dimension_sets = [["aps_live", "status"], ["aps_live"]]
 
         metrics: list[Dict[str, str]] = [{"Name": "BrokerRun", "Unit": "Count"}]
         values: Dict[str, Any] = {"BrokerRun": 1}
@@ -129,8 +125,7 @@ def emit_broker_run(entry: Dict[str, Any]) -> None:
             "engine_op": str(entry.get("engine_op") or ""),
             "aps_endpoint": str(entry.get("aps_endpoint") or ""),
         }
-        if not _TOOL_AS_DIM:
-            fields["tool"] = tool_s
+        fields["tool"] = tool_s
         # Correlation key. On origin/main the broker already threads
         # `event_key` (broker_usage_ledger.event_key, and jobs set it to
         # f"{job_id}:broker-run") — emit it as a log field so a metric/log
@@ -147,7 +142,10 @@ def emit_broker_run(entry: Dict[str, Any]) -> None:
 
         _write(_emf_line(metrics, dimension_sets, {**dim_values, **values}, fields, ts_ms))
     except Exception as exc:  # noqa: BLE001 - metrics must never break the request
-        print(f"[emf] emit_broker_run failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        try:
+            print(f"[emf] emit_broker_run failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        except Exception:  # pragma: no cover - even the stderr write must not raise
+            pass
 
 
 def emit_job_terminal(status: str, execution_path: Optional[str] = None) -> None:
@@ -168,7 +166,10 @@ def emit_job_terminal(status: str, execution_path: Optional[str] = None) -> None
         values = {"JobTerminal": 1}
         _write(_emf_line(metrics, [dim_keys, ["status"]], {**dim_values, **values}, {}))
     except Exception as exc:  # noqa: BLE001
-        print(f"[emf] emit_job_terminal failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        try:
+            print(f"[emf] emit_job_terminal failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        except Exception:  # pragma: no cover
+            pass
 
 
 if __name__ == "__main__":
