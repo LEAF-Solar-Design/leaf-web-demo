@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 5175",
+    "proof:cat": "playwright test e2e/cat-operator-proof.spec.mjs",
     "check:customization": "node scripts/check_customization.mjs",
     "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs"
   },
@@ -18,6 +19,7 @@
     "three": "^0.169.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@vitejs/plugin-react": "^4.3.4",
     "vite": "^6.0.7"
   }

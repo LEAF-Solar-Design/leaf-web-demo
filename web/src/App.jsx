@@ -1200,6 +1200,19 @@ export default function App() {
         if (env?.ok) {
           showToast({ text: `${toolName || env.tool || 'job'} complete`, action: { label: 'View', onClick: viewResult } })
         }
+        // Agent-dispatched writes use the same immutable version contract as
+        // catalog runs. Attaching must seat the new head, otherwise the receipt
+        // says the write completed while the viewer still shows its parent.
+        if (env?.ok && env.result?.new_version) {
+          const nv = env.result.new_version
+          try {
+            const view = await getDrawingIntake(false, nv.drawing_id, 'head')
+            seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
+          } catch {
+            showToast({ text: `Version ${nv.version} created` })
+            setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
+          }
+        }
       }
     } catch (e) {
       if (runSeqRef.current === seq) setRunErr(String(e.message || e))
@@ -1210,7 +1223,7 @@ export default function App() {
       }
       refreshJobs()
     }
-  }, [mock, markRunning, refreshJobs, showToast, viewResult])
+  }, [mock, markRunning, refreshJobs, seatVersion, showToast, viewResult])
 
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
   const onRetryViewerRefresh = useCallback(async () => {
