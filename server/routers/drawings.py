@@ -38,13 +38,22 @@ SUMMARY_LAYER_CAP = 50
 CACHED_DEMO_DRAWING_ID = "rooftop_demo"
 
 
+def _mutation_gate() -> Optional[JSONResponse]:
+    if write_loop.drawing_mutations_enabled():
+        return None
+    return error_response(
+        ErrorCode.INTERNAL,
+        "drawing mutations are temporarily disabled for a storage cutover",
+        retryable=True,
+        status_code=503,
+    )
+
+
 def _backend(tenant_id: str = ""):
     """Per-tenant store selection (§19): guest tenants read/write the isolated
     guest store; every other tenant keeps the exact pre-§19 default backend."""
     return write_loop.backend_for_tenant(
-        str(tenant_id),
-        aps_live=deps.APS_LIVE,
-        da=deps.get_da_client() if deps.APS_LIVE else None,
+        str(tenant_id), aps_live=False, da=None,
     )
 
 
@@ -133,6 +142,9 @@ def get_summary(drawing_id: str, version: str = "head",
 
 @router.post("/api/drawings/{drawing_id}/undo")
 def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+    blocked = _mutation_gate()
+    if blocked is not None:
+        return blocked
     try:
         view = write_loop.undo_view(str(tenant_id), drawing_id, backend=_backend(str(tenant_id)))
     except (KeyError, ValueError) as exc:
@@ -142,6 +154,9 @@ def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict
 
 @router.post("/api/drawings/{drawing_id}/redo")
 def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+    blocked = _mutation_gate()
+    if blocked is not None:
+        return blocked
     try:
         view = write_loop.redo_view(str(tenant_id), drawing_id, backend=_backend(str(tenant_id)))
     except (KeyError, ValueError) as exc:
@@ -248,6 +263,9 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     error}` so the UI can render "locked by X". The same holder re-acquiring
     refreshes the lease (200). Same 404 pattern as the other routes for an unknown
     drawing (the well-known `demo` bootstraps on first use at APS_LIVE=0)."""
+    blocked = _mutation_gate()
+    if blocked is not None:
+        return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
 
     backend = _backend(str(tenant_id))
@@ -299,6 +317,9 @@ def release_checkout_route(drawing_id: str, holder: Optional[str] = None,
     trying to release an active lock → HTTP 403 (the lock is left intact). Releasing
     when nothing is held (or the lock already expired) is an idempotent 200 with the
     cleared state. §10-enveloped `{drawing_id, released, checkout: null}`."""
+    blocked = _mutation_gate()
+    if blocked is not None:
+        return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
 
     backend = _backend(str(tenant_id))

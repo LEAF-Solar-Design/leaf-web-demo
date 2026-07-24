@@ -65,6 +65,28 @@ def test_live_session_extracts_through_broker_only(monkeypatch):
     assert "da.client" not in source
 
 
+def test_storage_cutover_gate_blocks_broker_write_before_preflight(monkeypatch):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.setattr(broker, "tenant_disabled", lambda tenant_id: False)
+    monkeypatch.setattr(
+        broker,
+        "_cap_preflight",
+        lambda *args: pytest.fail("mutation gate ran after cost preflight"),
+    )
+    tool = {"name": "write", "capabilities": ["drawing.write"]}
+    env, status = broker._execute(
+        broker.BrokerRunRequest(
+            tenant_id="tenant-a", tool=tool, params={}, aps_live=True,
+        ),
+        tool,
+        "write",
+        0.0,
+        {},
+    )
+    assert status == 503
+    assert env["error"]["retryable"] is True
+
+
 def test_mock_session_default_dwg_serves_cached_intake_and_never_calls_broker(monkeypatch):
     """APS_LIVE=0 + the default drawing -> the unchanged cached-intake path.
 

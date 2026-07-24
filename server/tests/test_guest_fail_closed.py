@@ -16,12 +16,61 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as app_module
+import broker_client
 import guest_uploads
 import write_loop
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 ROOFTOP = json.loads((SERVER_DIR.parent / "data" / "rooftop_demo.intake.json")
                      .read_text(encoding="utf-8"))
+
+
+def test_upload_extract_event_key_is_attempt_bound():
+    first = broker_client.extract_event_key(
+        "tenant-a", "drawing-a", upload=True, attempt="attempt-1")
+    replay = broker_client.extract_event_key(
+        "tenant-a", "drawing-a", upload=True, attempt="attempt-1")
+    replacement = broker_client.extract_event_key(
+        "tenant-a", "drawing-a", upload=True, attempt="attempt-2")
+
+    assert first == replay
+    assert first != replacement
+    with pytest.raises(ValueError, match="require an attempt"):
+        broker_client.extract_event_key("tenant-a", "drawing-a", upload=True)
+
+
+def test_non_upload_extract_event_key_keeps_legacy_digest():
+    assert broker_client.extract_event_key("tenant-a", "drawing-a") == (
+        "extract:cb0acff9bdde9af6b2a44562d8f8f12e1e679add31c0ce5afe69d6f50899a725"
+    )
+
+
+def test_scratch_cleanup_failure_logs_only_key_digest(caplog):
+    raw_key = "t/tenant-secret/in/private-file.dwg"
+
+    class _Da:
+        @staticmethod
+        def delete_scratch_object(_key):
+            raise OSError("cleanup unavailable")
+
+    with caplog.at_level("WARNING", logger=write_loop.LOGGER.name):
+        write_loop._cleanup_scratch_objects(_Da(), [raw_key])
+
+    assert "APS scratch cleanup failed" in caplog.text
+    assert raw_key not in caplog.text
+    assert len(caplog.records[0].scratch_key_sha256) == 64
+    assert caplog.records[0].error_type == "OSError"
+
+
+def test_missing_scratch_delete_api_is_observable_without_key(caplog):
+    raw_key = "t/tenant-secret/in/private-file.dwg"
+
+    with caplog.at_level("WARNING", logger=write_loop.LOGGER.name):
+        write_loop._cleanup_scratch_objects(object(), [raw_key])
+
+    assert "APS scratch cleanup unavailable" in caplog.text
+    assert raw_key not in caplog.text
+    assert caplog.records[0].error_type == "DeleteMethodUnavailable"
 
 
 @pytest.fixture()
@@ -142,6 +191,24 @@ def test_live_write_refuses_non_dwg_uploaded_source():
     assert "DWG source" in env["error"]["message"]
 
 
+def test_storage_cutover_gate_blocks_all_app_drawing_mutations(client, monkeypatch):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    headers = {"X-Tenant-Id": "account-a"}
+    assert client.post("/api/drawings/any/undo", headers=headers).status_code == 503
+    assert client.post("/api/drawings/any/redo", headers=headers).status_code == 503
+    assert client.post(
+        "/api/drawings/any/checkout", headers=headers, json={}
+    ).status_code == 503
+    assert client.delete(
+        "/api/drawings/any/checkout", headers=headers
+    ).status_code == 503
+
+    platform_api = (
+        Path(__file__).resolve().parents[2] / "platform" / "api.py"
+    ).read_text(encoding="utf-8")
+    assert 'os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1")' in platform_api
+
+
 def test_purge_extraction_race_cannot_resurrect(client, monkeypatch, tmp_path):
     """Round-3 MAJOR: an extraction that finishes AFTER the purge deleted its
     drawing must not resurrect anything — the marker re-check under the shared
@@ -211,6 +278,175 @@ def test_live_write_dwg_marker_without_source_ext_uses_filename():
         "acme-solar", backend=_marker_backend("roof plan.dwg"),
         da=_SentinelDa(), t0=time.perf_counter())
     assert not (status == 400 and "DWG source" in (env.get("error") or {}).get("message", ""))
+
+
+def test_live_write_stages_filesystem_blob_in_broker_owned_aps_scratch():
+    """An EFS-backed DWG is copied to APS scratch before its URL is signed."""
+    import store
+    import time
+
+    backend = store.InMemoryBackend()
+    tenant, drawing = "acme-solar", "u-live1"
+    raw = b"AC1032" + b"\x00" * 64
+    vkey = store.drawing_version_key(tenant, drawing, 1)
+    backend.put(vkey, raw)
+    backend.put(
+        store.manifest_key(tenant, drawing),
+        json.dumps({
+            "schema": 1,
+            "tenant_id": tenant,
+            "drawing_id": drawing,
+            "head": 1,
+            "latest": 1,
+            "versions": [{
+                "v": 1, "parent": None, "created": "2026-07-24T00:00:00Z",
+                "bytes": len(raw), "sha256": "source", "workitem_id": None,
+                "tool": None, "note": "upload",
+            }],
+            "checkout": None,
+        }).encode(),
+    )
+    backend.put(
+        write_loop.upload_marker_key(tenant, drawing),
+        json.dumps({"status": "ready", "source_ext": ".dwg"}).encode(),
+    )
+
+    class DA:
+        def __init__(self):
+            self.staged = {}
+            self.deleted = []
+
+        def ephemeral_input_key(self, name, tenant_id, ts):
+            return f"t/{tenant_id}/in/{ts}_{name}"
+
+        def upload_scratch_object(self, local_path, key):
+            self.staged[key] = Path(local_path).read_bytes()
+
+        def scratch_signed_download_url(self, key):
+            assert self.staged[key] == raw
+            return "https://aps.test/input"
+
+        def scratch_signed_upload_url(self, key):
+            assert key.startswith(f"t/{tenant}/out/")
+            return "upload-key", "https://aps.test/output"
+
+        def activity_qualified(self, name):
+            return f"owner.{name}+prod"
+
+        def submit_workitem(self, *_args, **_kwargs):
+            return {"id": "wi-1", "status": "success"}
+
+        def finalize_scratch_upload(self, object_key, upload_key):
+            assert upload_key == "upload-key"
+
+        def download_scratch_object(self, object_key):
+            return raw + b"updated"
+
+        def delete_scratch_object(self, object_key):
+            self.deleted.append(object_key)
+
+        def extract(self, local_path):
+            assert Path(local_path).read_bytes() == raw + b"updated"
+            return {"layers": ["Updated"], "polylines": []}
+
+        def _engine_seconds(self, status):
+            return 1.0
+
+    da = DA()
+    env, status = write_loop.run_write_live(
+        {"name": "delete-marked-panel"},
+        {"drawing_id": drawing},
+        tenant,
+        backend=backend,
+        da=da,
+        t0=time.perf_counter(),
+    )
+
+    assert status == 200
+    assert env["result"]["new_version"]["version"] == 2
+    assert backend.get(store.drawing_version_key(tenant, drawing, 2)) == raw + b"updated"
+    assert len(da.deleted) == 2
+    assert all(key.startswith(f"t/{tenant}/") for key in da.deleted)
+
+
+def test_live_write_scratch_keys_are_unique_within_one_second(monkeypatch):
+    """Concurrent tenant writes cannot share APS input or output objects."""
+    import store
+    import time
+
+    monkeypatch.setattr(write_loop.time, "time", lambda: 1_800_000_000)
+    nonces = iter(("nonce-a", "nonce-b"))
+    monkeypatch.setattr(
+        write_loop.secrets, "token_hex", lambda _size: next(nonces),
+    )
+
+    def run(tenant):
+        backend = store.InMemoryBackend()
+        drawing = "demo"
+        raw = (tenant + "-dwg").encode()
+        backend.put(store.drawing_version_key(tenant, drawing, 1), raw)
+        backend.put(
+            store.manifest_key(tenant, drawing),
+            json.dumps({
+                "schema": 1, "tenant_id": tenant, "drawing_id": drawing,
+                "head": 1, "latest": 1,
+                "versions": [{
+                    "v": 1, "parent": None, "created": "now",
+                    "bytes": len(raw), "sha256": "source",
+                    "workitem_id": None, "tool": None, "note": None,
+                }],
+                "checkout": None,
+            }).encode(),
+        )
+
+        class DA:
+            def __init__(self):
+                self.inputs = []
+                self.outputs = []
+
+            def upload_object(self, path, key):
+                self.inputs.append(key)
+
+            def signed_download_url(self, key):
+                return "https://aps.test/input"
+
+            def signed_upload_url(self, key):
+                self.outputs.append(key)
+                return "upload", "https://aps.test/output"
+
+            def activity_qualified(self, name):
+                return name
+
+            def submit_workitem(self, *args, **kwargs):
+                return {"id": tenant, "status": "success"}
+
+            def finalize_upload(self, *args):
+                pass
+
+            def download_object(self, key):
+                return raw + b"-out"
+
+            def extract(self, path):
+                return {"layers": [], "polylines": []}
+
+            def _engine_seconds(self, status):
+                return 0
+
+        da = DA()
+        env, status = write_loop.run_write_live(
+            {"name": "write"}, {"drawing_id": drawing}, tenant,
+            backend=backend, da=da, t0=time.perf_counter(),
+        )
+        assert status == 200, env
+        return da.inputs[0], da.outputs[0]
+
+    first = run("tenant-a")
+    second = run("tenant-b")
+    assert first != second
+    assert first[0].startswith("t/tenant-a/in/")
+    assert first[1].startswith("t/tenant-a/out/")
+    assert second[0].startswith("t/tenant-b/in/")
+    assert second[1].startswith("t/tenant-b/out/")
 
 
 def test_purge_landing_mid_extraction_cannot_resurrect(client, monkeypatch):

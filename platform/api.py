@@ -189,6 +189,11 @@ def import_drawing_version(
     actor_binding_id: uuid.UUID = Depends(get_write_binding_id),
 ):
     """Adopt a ready same-org account upload using server-derived refs and provenance."""
+    if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
+        raise HTTPException(
+            status_code=503,
+            detail="drawing mutations are temporarily disabled for a storage cutover",
+        )
     try:
         version, replayed = store.import_ready_account_upload(
             org_id,
