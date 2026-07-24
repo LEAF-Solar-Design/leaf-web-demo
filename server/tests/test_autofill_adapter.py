@@ -85,21 +85,17 @@ def test_adapter_rejects_non_json_and_invalid_panel_count():
             raise AssertionError(f"invalid adapter input was accepted: {invalid!r}")
 
 
-def test_adapter_forwards_geometry_to_pinned_solver_contract(tmp_path):
+def test_adapter_matches_pinned_three_argument_solver_contract(tmp_path):
     (tmp_path / "solver.py").write_text(
-        "def solve_targets(groups, n, options=None, panel_angle=0.0, "
-        "panel_width=0.0, panel_height=0.0):\n"
-        "    return {'angle': panel_angle, 'width': panel_width, "
-        "'height': panel_height}\n",
+        "def solve_targets(groups, n, options=None):\n"
+        "    return {'groups': len(groups), 'n': n, 'options': options or {}}\n",
         encoding="utf-8",
     )
 
-    body = {**SMOKE_INPUT, "panelAngle": 0.5, "panelWidth": 1.25,
-            "panelHeight": 2.5}
-    result = autofill.run(body, solver_root=tmp_path)
+    result = autofill.run(SMOKE_INPUT, solver_root=tmp_path)
 
     assert result["solver_result"] == {
-        "angle": 0.5,
-        "width": 1.25,
-        "height": 2.5,
+        "groups": 2,
+        "n": 10,
+        "options": SMOKE_INPUT["options"],
     }
