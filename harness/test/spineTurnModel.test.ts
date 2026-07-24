@@ -167,7 +167,7 @@ describe("mount your LLM — bring-your-own credential", () => {
     // ConverseLoop persists BEFORE it calls onEvent, and the leak is not limited
     // to thrown errors: a plain text_delta can carry the value. Assert on the
     // STORE first; that is the assertion that fails without the scrubbing store.
-    const SHORT = "short-key!";
+    const SHORT = "BYO-credential-value-1234!"; // >= the 24-char floor, still invisible to TOKENISH
     const runner = new FakeConverseRunner();
     const store = new FakeSessionStore();
     const adapter = new SpineTurnAdapter({
@@ -197,11 +197,18 @@ describe("mount your LLM — bring-your-own credential", () => {
     expect(serializedState(store)).toContain("[REDACTED]");
   });
 
-  it("does not corrupt events when the credential is a JSON delimiter", async () => {
-    // sol-critic PR #117 round 3, blocker 2. `"` is a credential the app accepts
-    // today. Scrubbing by serialize-replace-reparse turned every delimiter into
-    // [REDACTED] and threw on parse; ConverseLoop swallows that callback error,
-    // so the turn died silently. Scrubbing string LEAVES cannot corrupt shape.
+  it("leaves a below-floor credential alone rather than corrupting the transcript", async () => {
+    // sol-critic PR #117 round 3 blocker 2 and round 4 blocker 3. `"` used to be
+    // an accepted credential: scrubbing by serialize-replace-reparse rewrote
+    // every JSON delimiter and threw on parse, and ConverseLoop swallows that
+    // callback error, so the turn died silently. Literal replacement of a
+    // one-character secret is unwinnable — it would shred ordinary text instead.
+    //
+    // The real fix is at the boundary: the app now REFUSES a credential this
+    // short (server/routers/sessions.py _MIN_CREDENTIAL_LEN), and the harness
+    // mirrors that floor in isRedactableSecret. So such a value can no longer
+    // arrive; if one somehow does, it must be left to the pattern pass rather
+    // than blasted through the transcript. This pins the no-corruption half.
     const QUOTE = '"';
     const runner = new FakeConverseRunner();
     const store = new FakeSessionStore();
@@ -223,6 +230,39 @@ describe("mount your LLM — bring-your-own credential", () => {
     expect(events.length).toBeGreaterThan(0);
     // …and every event is a well-formed object, not corrupted text.
     for (const ev of events) expect(typeof ev.data).toBe("object");
+    // …and no event was shredded into [REDACTED] fragments by a 1-char secret.
+    expect(JSON.stringify(events)).not.toContain("[REDACTED]");
+  });
+
+  it("scrubs a credential used as a tool PARAMETER NAME, not just a value", async () => {
+    // sol-critic PR #117 round 4, blocker 2: scrubDeep rebuilt objects with
+    // `out[k]` verbatim, so a credential used as a JSON key survived in both the
+    // durable event and the wire event.
+    const SECRET = "BYO-credential-value-1234!";
+    const runner = new FakeConverseRunner();
+    const store = new FakeSessionStore();
+    const adapter = new SpineTurnAdapter({
+      oauth: new UnusedOAuthProvider(),
+      appRun: new FakeAppRunClient(),
+      gate: new FakeGateClient(),
+      store,
+      runnerFor: () => runner,
+    });
+
+    const origRun = runner.run.bind(runner);
+    runner.run = async function* (runInput) {
+      yield { type: "text_delta", text: JSON.stringify({ params: { [SECRET]: "value" } }) };
+      yield* origRun(runInput);
+    };
+
+    const events = await drain(
+      adapter.runTurn(
+        turnInput({ text: "hi", credential_grant: { kind: "api_key", api_key: SECRET } }),
+      ),
+    );
+
+    expect(serializedState(store)).not.toContain(SECRET);
+    expect(JSON.stringify(events)).not.toContain(SECRET);
   });
 
   it("scrubs a SHORT credential the pattern redactor cannot match, on the wire", async () => {
@@ -230,7 +270,7 @@ describe("mount your LLM — bring-your-own credential", () => {
     // string as a BYO credential, so TOKENISH ( sk-ant-* | 40+ chars ) misses a
     // short one and the pattern pass alone leaked it. This value is chosen to
     // defeat that regex on purpose — assert on the VALUE, not the pattern.
-    const SHORT = "short-key!";
+    const SHORT = "BYO-credential-value-1234!"; // >= the 24-char floor, still invisible to TOKENISH
     expect(redactTokens(`SDK rejected ${SHORT}`)).toContain(SHORT); // the gap, pinned
 
     const runner = new FakeConverseRunner();

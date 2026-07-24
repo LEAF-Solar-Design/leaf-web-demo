@@ -114,17 +114,6 @@ export class SpineTurnAdapter implements ConverseRunner {
       ? wireGrantToAgentGrant(input.credential_grant)
       : await this.ports.oauth.getGrant(input.tenant_id);
 
-    // 2. The loop's own session row (idempotent per tenant+drawing).
-    const session = await this.ports.store.createOrGetSession(
-      input.tenant_id,
-      input.drawing_id,
-    );
-
-    // 3. Resilience seed for the confirm mirror (see header).
-    if (input.confirm) {
-      await this.seedConfirmationMirror(session.session_id, input);
-    }
-
     // The credential must be scrubbed BEFORE it can be persisted, not after.
     // ConverseLoop's emit() calls store.appendEvent and only then hands the event
     // to onEvent, so any wire-level filtering is too late for the transcript —
@@ -149,12 +138,33 @@ export class SpineTurnAdapter implements ConverseRunner {
                 data: Record<string, unknown>,
               ) => target.appendEvent(sessionId, turnId, type, scrubDeep(data, secrets));
             }
+            // Confirmations are a SECOND durable write, not routed through
+            // appendEvent: the loop serializes raw tool arguments into
+            // args_json and persists them (file store and the postgres
+            // args_json column). A credential echoed into a proposed tool's
+            // params would land there unscrubbed.
+            // (sol-critic PR #117 round 4, blocker 1.)
+            if (prop === "putConfirmation") {
+              return (rec: ConfirmationRecord) =>
+                target.putConfirmation(scrubDeep(rec, secrets));
+            }
             const v = Reflect.get(target, prop, receiver);
             // Rebind to the real store so its own state stays reachable.
             return typeof v === "function" ? v.bind(target) : v;
           },
         }) as SessionStore)
       : inner;
+
+    // 2. The loop's own session row (idempotent per tenant+drawing).
+    const session = await store.createOrGetSession(input.tenant_id, input.drawing_id);
+
+    // 3. Resilience seed for the confirm mirror (see header). Routed through the
+    //    SCRUBBING store: this seed persists the proposal's raw params, so it is
+    //    a durable write that must not carry the credential either. It is
+    //    ordered after the wrapper for exactly that reason.
+    if (input.confirm) {
+      await this.seedConfirmationMirror(store, session.session_id, input);
+    }
 
     const loop = new ConverseLoop(
       {
@@ -259,11 +269,12 @@ export class SpineTurnAdapter implements ConverseRunner {
    *  proposal so a store-loss never strands a consumed approval. args are exactly
    *  {tool, params} — the propose-time gate consult shape (hash compatibility). */
   private async seedConfirmationMirror(
+    store: SessionStore,
     loopSessionId: string,
     input: ConverseTurnInput,
   ): Promise<void> {
     const confirm = input.confirm!;
-    const existing = await this.ports.store.getConfirmation(confirm.confirmation_id);
+    const existing = await store.getConfirmation(confirm.confirmation_id);
     if (existing) return;
     const ttlS = this.opts.confirmationTtlS ?? 300;
     const now = Date.now();
@@ -283,6 +294,6 @@ export class SpineTurnAdapter implements ConverseRunner {
       decided_at: null,
       decided_by: null,
     };
-    await this.ports.store.putConfirmation(rec);
+    await store.putConfirmation(rec);
   }
 }

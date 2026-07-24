@@ -878,6 +878,40 @@ def test_byo_credential_malformed_is_rejected(client, wired, behind_trusted_prox
     assert state.hits == 0
 
 
+@pytest.mark.parametrize("bad,distinctive", [
+    ("short", True),                          # below the length floor
+    ("x" * 23, True),                         # one char below the floor
+    ("has whitespace in it aaaaaaaaaaaa", True),  # long enough, not credential-shaped
+    ("error", False),      # a protocol word: redaction would corrupt transcripts
+    ('"', False),          # a JSON delimiter: redaction would corrupt shape
+])
+def test_credential_must_look_like_a_credential(
+    client, wired, behind_trusted_proxy, bad, distinctive,
+):
+    """sol-critic PR #117 round 4, blocker 3. Accepting ANY non-empty string made
+    downstream redaction unwinnable: the harness strips the grant out of the
+    transcript by literal match, so a credential of 'error' or '"' would either
+    corrupt ordinary text and protocol values or have to be left in place. Real
+    Agent SDK credentials are long and whitespace-free, so rejecting these costs
+    nothing genuine and removes the pathological cases at the boundary."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key", "api_key": bad}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert state.hits == 0          # rejected before any harness traffic
+    # Echo check only for values that are not substrings of an ordinary error
+    # envelope — `error` and `"` occur in any JSON body, so their presence would
+    # prove nothing. The dedicated non-echo proof is
+    # test_byo_credential_is_never_echoed_by_the_validation_handler.
+    if distinctive:
+        assert bad not in r.text
+
+
 def test_forwarded_proto_header_alone_cannot_bypass_the_tls_gate(client, wired):
     """sol-critic review of PR #117, blocker 1. docker-compose publishes this app
     straight to :8130 with no proxy in front, so X-Forwarded-Proto is attacker
