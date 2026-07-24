@@ -58,6 +58,7 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         "provenance": tool.get("provenance", {}),
         "kind": tool.get("kind"),
         "engine_op": tool.get("engine_op"),
+        "catalog_digest": tool.get("catalog_digest"),
     }
 
 

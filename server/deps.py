@@ -9,6 +9,7 @@ Sibling-session ownership (see README.md): `auth0-identity-signup` owns
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import importlib.util
 import json
@@ -281,6 +282,20 @@ def find_tool(name: str, tenant_id: str = _DEFAULT_TENANT) -> Optional[Dict[str,
         if t.get("name") == name:
             return t
     return None
+
+
+def catalog_tool_digest(tool: Dict[str, Any]) -> str:
+    """Strong canonical digest issued by GET and required again by POST /api/run."""
+    definition = {key: value for key, value in tool.items() if key != "catalog_digest"}
+    encoded = json.dumps(
+        definition, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def catalog_tool_view(tool: Dict[str, Any]) -> Dict[str, Any]:
+    return {**tool, "catalog_digest": catalog_tool_digest(tool)}
 
 
 # --------------------------------------------------------------------------- #

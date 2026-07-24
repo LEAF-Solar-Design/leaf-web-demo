@@ -11,6 +11,7 @@
 // see the same shape the old synchronous /api/run used to return.
 
 import registry from './mock/registry.json'
+import { createRunSubmissionRequest } from './runIntent.js'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
@@ -520,13 +521,11 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
   // When a project is open, X-Org-Id + X-Project-Id make the backend record a
   // canonical platform Job row (spine_ref-linked) so the workspace jobs[] grows.
   // Absent -> byte-identical to the plain tenant-only run (no linkage).
-  const linkHeaders = {}
-  if (opts.orgId) linkHeaders['X-Org-Id'] = opts.orgId
-  if (opts.projectId) linkHeaders['X-Project-Id'] = opts.projectId
+  const submission = createRunSubmissionRequest(toolName, params, dwg, opts)
   const res = await fetch(`${API_BASE}/api/run`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...linkHeaders, ...authHeaders() },
-    body: JSON.stringify({ tool: toolName, params: params || {}, dwg }),
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...submission.headers, ...authHeaders() },
+    body: JSON.stringify(submission.body),
   })
   const body = await res.json().catch(() => null)
 

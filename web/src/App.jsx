@@ -25,6 +25,10 @@ import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import {
+  confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
+  dismissRunIntent, stageRunIntent,
+} from './runIntent.js'
 import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
@@ -251,6 +255,7 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(false)
   const [openProjectId, setOpenProjectId] = useState(null)
   const [workspace, setWorkspace] = useState(null)       // hydration payload {project, drawing_versions[], jobs[], built_tools[]}
+  const [canonicalVersionId, setCanonicalVersionId] = useState(null)
   const [wsLoading, setWsLoading] = useState(false)      // re-hydration in flight
   const [orgBusy, setOrgBusy] = useState(false)
   const [projectBusy, setProjectBusy] = useState(false)
@@ -302,6 +307,16 @@ export default function App() {
   const toastSeqRef = useRef(0)         // monotonic toast ids
   const cannedSeq = useRef(0)           // supersedes an in-flight tour beat (typing + dispatch)
   const runSeqRef = useRef(0)           // Esc-interrupt bumps this to detach a run
+  const runIntentSessionRef = useRef(null)
+  if (!runIntentSessionRef.current) {
+    const randomId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
+    runIntentSessionRef.current = `catalog-${randomId}`
+  }
+  const runIntentStateRef = useRef(null)
+  if (!runIntentStateRef.current) {
+    runIntentStateRef.current = createRunIntentState(runIntentSessionRef.current)
+  }
+  const runIntentSeqRef = useRef(0)
 
   const isEditFixture = mock && fixtureParam === 'edit'
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
@@ -873,7 +888,8 @@ export default function App() {
   // --- projects / orgs workspace handlers (item 1) -------------------------
   const onOpenProject = useCallback(async (pid) => {
     if (!pid) return
-    setOpenProjectId(pid); setWsLoading(true); setProjectsErr(null)
+    setOpenProjectId(pid); setWorkspace(null); setCanonicalVersionId(null)
+    setWsLoading(true); setProjectsErr(null)
     try {
       setWorkspace(await openProject(pid, orgId))
     } catch (e) {
@@ -895,7 +911,7 @@ export default function App() {
   }, [openProjectId, orgId])
 
   const onCloseProject = useCallback(() => {
-    setOpenProjectId(null); setWorkspace(null)
+    setOpenProjectId(null); setWorkspace(null); setCanonicalVersionId(null)
   }, [])
 
   // Both creators accept the name from an inline F1 field (ProjectSwitcher);
@@ -935,7 +951,63 @@ export default function App() {
     }
   }, [orgId, onOpenProject])
 
-  const onRun = useCallback(async (tool, params) => {
+  const dismissRoute = useCallback(() => {
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+    setRoute(null)
+  }, [])
+
+  const prepareRunParams = useCallback((tool, params) => {
+    const isWrite = (tool.capabilities || []).includes('drawing.write')
+    return selectedHandle
+      ? { ...(params || {}), target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
+      : (params || {})
+  }, [selectedHandle])
+
+  const catalogRunContext = useMemo(() => createCatalogRunContext({
+    tenantId: tenant || config.tenant,
+    orgId,
+    projectId: openProjectId || null,
+    workspace,
+    selectedVersionId: canonicalVersionId,
+    drawingState,
+    fallbackDrawingId: DEFAULT_DRAWING_ID,
+  }), [tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState])
+  const catalogRunContextRef = useRef(catalogRunContext)
+  catalogRunContextRef.current = catalogRunContext
+
+  const onRequestCatalogRun = useCallback((tool, params) => {
+    // Family catalog entries are presentation-normalized. Resolve the canonical
+    // flat-catalog record before snapshotting so confirmation compares the same
+    // server-sourced definition that RoutePanel will execute.
+    const catalogTool = tools.find((candidate) => candidate.name === tool?.name)
+    if (!catalogTool) return
+    if (!mock && !tenant) return
+    if (!catalogRunContextRef.current) {
+      setRunErr('This workspace has no canonical drawing version to run. Import a drawing first.')
+      return
+    }
+    const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
+    if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
+    const prepared = prepareRunParams(catalogTool, params)
+    const staged = stageRunIntent(runIntentStateRef.current, {
+      intentId: `${runIntentSessionRef.current}:${++runIntentSeqRef.current}`,
+      toolName: catalogTool.name,
+      params: prepared,
+      context: catalogRunContextRef.current,
+      toolSnapshot: createCatalogToolSnapshot(catalogTool),
+    })
+    runIntentStateRef.current = staged.state
+    setRouteErr(null)
+    setRoute({
+      lane: 'run', tool: tool.name, params: staged.intent.params, confidence: 1,
+      rationale: 'Catalog selection. Confirm the exact tool and parameters before it runs.',
+      alternatives: [], runIntent: staged.intent,
+    })
+  }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
+
+  const onRun = useCallback(async (tool, params, {
+    intentConfirmed = false, runContext = null, idempotencyKey = null,
+  } = {}) => {
     // Read-only version preview never mutates head — Run is disabled while previewing.
     if (previewing) return
     // Single-writer lock (item 3): write tools are suppressed while another
@@ -952,25 +1024,27 @@ export default function App() {
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
     setOverlayStale(false); setCurrentJobId(null); setRefreshFail(null)
-    lastRunRef.current = { tool, params }
+    const merged = intentConfirmed ? params : prepareRunParams(tool, params)
+    const executionContext = runContext || catalogRunContext
+    lastRunRef.current = { tool, params: merged }
     // feed the picked entity to the tool so an edit tool can target it. A write
     // tool (delete-marked-panel) reads `handle`, so map the selection onto it
     // too — that makes the pending ghost's previewed deletion the real target.
-    const isWrite = (tool.capabilities || []).includes('drawing.write')
-    const merged = selectedHandle
-      ? { ...(params || {}), target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
-      : params
     try {
       let env
       if (mock) {
         // Mock stays fully client-side — no jobs API, no progress phases.
         env = await runTool(mock, tool, merged, shown)
       } else {
-        env = await runToolAsync(tool, merged, DEFAULT_DRAWING_ID, {
+        env = await runToolAsync(tool, merged, executionContext.drawingId, {
           // When a project is open, link the run so a platform Job row is recorded
           // (X-Org-Id + X-Project-Id) and the workspace jobs[] grows.
-          orgId: (openProjectId && orgId) ? orgId : undefined,
-          projectId: openProjectId || undefined,
+          orgId: executionContext.orgId || undefined,
+          projectId: executionContext.projectId || undefined,
+          dwgVersion: executionContext.drawingVersion ?? undefined,
+          idempotencyKey: idempotencyKey || undefined,
+          catalogDigest: (runContext?.toolSnapshot?.catalogDigest
+            || createCatalogToolSnapshot(tool).catalogDigest || undefined),
           onSubmit: (job_id) => { saveInflight(job_id, tool.name); setCurrentJobId(job_id) },
           onStatus: (st) => {
             // Richer progress string (e.g. 'executing' · 'storing version' ·
@@ -1035,13 +1109,49 @@ export default function App() {
       }
     }
   }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
-      loadCheckout, writeLocked, openProjectId, orgId, rehydrate, showToast, viewResult])
+      loadCheckout, writeLocked, openProjectId, rehydrate, showToast, viewResult, prepareRunParams, catalogRunContext])
+
+  const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
+    let currentTool = tool
+    let toolSnapshot
+    try {
+      if (!mock) {
+        const latestTools = await getTools(false)
+        currentTool = latestTools.find((candidate) => candidate.name === intent?.toolName) || null
+      }
+      toolSnapshot = createCatalogToolSnapshot(currentTool)
+    } catch {
+      runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
+      setRoute(null)
+      setRunErr('That catalog tool changed or is no longer available. Choose Run again to create a new intent.')
+      return
+    }
+    const confirmed = confirmRunIntent(runIntentStateRef.current, {
+      intentId: intent?.intentId,
+      sessionId: intent?.sessionId,
+      toolName: currentTool?.name,
+      params,
+      context: catalogRunContextRef.current,
+      toolSnapshot,
+    })
+    runIntentStateRef.current = confirmed.state
+    if (!confirmed.ok) {
+      setRoute(null)
+      setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
+      return
+    }
+    onRun(currentTool, confirmed.execution.params, {
+      intentConfirmed: true,
+      runContext: { ...confirmed.execution.context, toolSnapshot: confirmed.execution.toolSnapshot },
+      idempotencyKey: confirmed.execution.intentId,
+    })
+  }, [mock, onRun])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
     const last = lastRunRef.current
-    if (last) onRun(last.tool, last.params)
-  }, [onRun])
+    if (last) onRequestCatalogRun(last.tool, last.params)
+  }, [onRequestCatalogRun])
 
   // An agent-dispatched job (job_linked event) -> the SAME §7 attach
   // affordance the tab-close re-attach uses: subscribe to the job, stream
@@ -1186,6 +1296,7 @@ export default function App() {
   const onDispatch = useCallback(async (override) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     // Slash fast-path: "/name" is an EXPLICIT invocation — no NL router call.
     // The route decision strip still asks for confirmation before anything runs.
     if (text.startsWith('/')) {
@@ -1284,6 +1395,7 @@ export default function App() {
   // Typing invalidates a shown route/failure — the decision must match the text.
   const onPromptChange = useCallback((v) => {
     setPrompt(v)
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     setRoute((r) => (r ? null : r))
     setRouteErr((e) => (e ? null : e))
   }, [])
@@ -1507,7 +1619,7 @@ export default function App() {
       if (e.key === 'Escape') {
         if (drawer) { setDrawer(null); return }
         if (historyOpen) { setHistoryOpen(false); return }
-        if (route) { setRoute(null); return }
+        if (route) { dismissRoute(); return }
         if (routeErr || runErr) { setRouteErr(null); setRunErr(null); return }
         if (running) { interruptRun(); return }
         if (selectedHandle) { setSelectedHandle(null); return }
@@ -1550,7 +1662,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, onDispatch, openProjectId, onCloseProject, rTarget,
-      loadHistory, retryTools, loadCatalog, onRetryViewerRefresh])
+      loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
@@ -1798,7 +1910,7 @@ export default function App() {
                 retryKey={rTarget === 'tools'}
                 running={running || !!previewing}
                 selectedTool={selectedTool}
-                onRun={onRun}
+                onRequestRun={onRequestCatalogRun}
                 onOpenTool={setOpenTool}
               />
             </Section>
@@ -1830,7 +1942,7 @@ export default function App() {
               retryKey={rTarget === 'tools'}
               running={running || !!previewing}
               selectedTool={selectedTool}
-              onRun={onRun}
+              onRequestRun={onRequestCatalogRun}
               onOpenTool={setOpenTool}
             />
           </Section>
@@ -1876,7 +1988,13 @@ export default function App() {
         </div>
 
         {!mock && openProjectId && (
-          <WorkspaceSummary workspace={workspace} loading={wsLoading} onClose={onCloseProject} />
+          <WorkspaceSummary
+            workspace={workspace}
+            loading={wsLoading}
+            selectedVersionId={canonicalVersionId}
+            onSelectVersion={setCanonicalVersionId}
+            onClose={onCloseProject}
+          />
         )}
 
         <div className="workspace-card enter" style={{ '--rank': 1 }} ref={workspaceCardRef}>
@@ -2163,9 +2281,10 @@ export default function App() {
             writeLocked={writeLocked}
             writeEntitled={canRunWrite}
             onRun={onRun}
+            onConfirmIntent={onConfirmCatalogRun}
             onPickAlternative={onPickAlternative}
             onOpenAuthor={onOpenAuthor}
-            onDismiss={() => setRoute(null)}
+            onDismiss={dismissRoute}
           />
           <PromptBox
             value={prompt}
