@@ -287,12 +287,17 @@ outcome = jobs.complete_callback(
 print(outcome)
 """
     args = [str(jobs.DB_PATH), str(SERVER_DIR), job_id, worker_id]
+    # The subprocess completes a job, which emits a JobTerminal EMF metric line
+    # to STDOUT (the CloudWatch awslogs pattern). This test parses subprocess
+    # STDOUT for its "applied"/"conflict" result, so disable EMF in the children
+    # to keep their stdout clean. (APS_EMF_DISABLED is the emitter's own gate.)
+    _child_env = {**os.environ, "APS_EMF_DISABLED": "1"}
     first = subprocess.Popen(
         [sys.executable, "-c", script, *args, "a"], stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True)
+        stderr=subprocess.PIPE, text=True, env=_child_env)
     second = subprocess.Popen(
         [sys.executable, "-c", script, *args, "b"], stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True)
+        stderr=subprocess.PIPE, text=True, env=_child_env)
     first_out, first_err = first.communicate(timeout=20)
     second_out, second_err = second.communicate(timeout=20)
     assert first.returncode == 0, first_err
