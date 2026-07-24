@@ -1,10 +1,10 @@
-"""da/test_on_submitted_hook.py — the WorkItem id must be observable BEFORE polling.
+"""da/test_on_submitted_hook.py: the WorkItem id must be observable BEFORE polling.
 
 `submit_workitem` POSTs a WorkItem and then blocks in `_poll_workitem` for up to
 900s. Until this hook existed, the live id was born and died inside that frame,
 so an abandoned run had no id anything outside could cancel: a closed browser tab
 left paid APS compute running to completion. These tests pin the one property
-that makes tab-close reaping possible — `on_submitted(workitem_id)` fires with
+that makes tab-close reaping possible: `on_submitted(workitem_id)` fires with
 the real id and fires BEFORE the blocking poll begins.
 
 Pure-python: `requests` is stubbed, no network, no APS, no credential.

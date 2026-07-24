@@ -3,8 +3,8 @@
 THE GAP THIS PINS. POST /api/jobs/{id}/close (the tab-close beacon) marked the
 job row terminal and stopped there. The WorkItem kept running on APS and kept
 BILLING to completion, because nothing correlated a job_id with a WorkItem id:
-the id lives only inside the broker's blocking poll, and the app side — which
-holds no APS credential — never learns it. `orphan_lease_records()` hardcoded
+the id lives only inside the broker's blocking poll, and the app side (which
+holds no APS credential) never learns it. `orphan_lease_records()` hardcoded
 `workitem_id: None` and had no callers at all.
 
 The wiring under test, end to end:
@@ -104,7 +104,7 @@ def test_tab_close_reaps_exactly_once_with_the_job_correlation(monkeypatch):
 
 def test_heartbeat_stale_row_is_redispatched_and_never_reaped(monkeypatch):
     """A stale row gets REDISPATCHED, and the previous worker may still be in
-    flight — cancelling by job_id there could kill the WorkItem the retry is
+    flight, so cancelling by job_id there could kill the WorkItem the retry is
     about to adopt. Only a closed tab is race-free."""
     job_id = _submit()
     assert jobs.claim_lease(job_id, "dead-owner") == 1
@@ -124,7 +124,7 @@ def test_heartbeat_stale_row_is_redispatched_and_never_reaped(monkeypatch):
 
 def test_unreachable_broker_still_leaves_the_job_terminal(monkeypatch, capsys):
     """Pre-existing contract: failing to cancel remote compute must not un-finish
-    the local row. It must not be silent either — money is still burning."""
+    the local row. It must not be silent either: money is still burning."""
     job_id = _submit()
     assert jobs.claim_lease(job_id, "worker-1") == 1
     assert jobs.mark_job_closed(job_id) is True
