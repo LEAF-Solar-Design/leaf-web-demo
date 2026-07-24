@@ -584,6 +584,45 @@ def _claim_extraction(
     return db.run_transaction(operation, isolation="serializable")
 
 
+def _release_pg_extraction_lease(
+    tenant_id: str, drawing_id: str, attempt: str, owner: str, fence: int,
+) -> bool:
+    """Make a transient publication failure resumable by the same attempt."""
+    db = _drawing_db()
+    with db.connection() as conn:
+        row = conn.execute(
+            """
+            UPDATE drawing_upload_attempts
+            SET marker = jsonb_set(
+                    jsonb_set(
+                      marker,
+                      '{finalize_retry_started_at}',
+                      to_jsonb(clock_timestamp()::text),
+                      true
+                    ),
+                    '{finalize_retry_count}',
+                    to_jsonb(COALESCE((marker->>'finalize_retry_count')::int, 0) + 1),
+                    true
+                ),
+                extraction_owner = NULL, extraction_expires_at = NULL,
+                updated_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND attempt = %(attempt)s AND status = 'extracting'
+              AND extraction_owner = %(owner)s
+              AND extraction_fence = %(fence)s
+            RETURNING attempt
+            """,
+            {
+                "tenant": tenant_id,
+                "drawing": drawing_id,
+                "attempt": attempt,
+                "owner": owner,
+                "fence": fence,
+            },
+        ).fetchone()
+    return row is not None
+
+
 def _finish_pg_attempt(
     tenant_id: str, drawing_id: str, marker: Dict[str, Any],
     owner: str, fence: int,
@@ -682,6 +721,117 @@ def _put_intake_cache_fenced(
                 "upload extraction lease expired during intake publication")
 
     db.run_transaction(operation, isolation="serializable")
+    return digest
+
+
+def _finalize_pg_ready_attempt(
+    backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
+    owner: str, fence: int, key: str, data: bytes, version: int = 1,
+) -> str:
+    """Publish cache, version visibility, and ready marker as one DB commit."""
+    from psycopg.types.json import Jsonb
+
+    db = _drawing_db()
+    digest = hashlib.sha256(data).hexdigest()
+    if (
+        marker.get("status") != "ready"
+        or marker.get("intake_ref") != key
+        or marker.get("intake_sha256") != digest
+    ):
+        raise ValueError("ready upload marker does not match intake proof")
+    params = {
+        "tenant": tenant_id,
+        "drawing": drawing_id,
+        "attempt": str(marker["attempt"]),
+        "owner": owner,
+        "fence": fence,
+        "version": int(version),
+        "intake_ref": key,
+        "intake_sha256": digest,
+        "marker": Jsonb(marker),
+        "status": str(marker["status"]),
+    }
+
+    backend.put_if_absent_or_verify(key, data)
+    if hashlib.sha256(backend.get(key)).hexdigest() != digest:
+        raise ValueError("intake cache artifact does not match reserved version")
+
+    def operation(conn):
+        row = conn.execute(
+            """
+            SELECT 1 FROM drawing_upload_attempts
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND attempt = %(attempt)s AND status = 'extracting'
+              AND extraction_owner = %(owner)s
+              AND extraction_fence = %(fence)s
+              AND extraction_expires_at > clock_timestamp()
+            FOR UPDATE
+            """,
+            params,
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("upload extraction lease is stale")
+
+        version_row = conn.execute(
+            """
+            UPDATE drawing_store_versions
+            SET state = 'ready', ready_at = NOW(),
+                reservation_token = NULL, reservation_expires_at = NULL,
+                intake_ref = %(intake_ref)s,
+                intake_sha256 = %(intake_sha256)s
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = %(version)s AND state = 'reserved'
+              AND reservation_token = %(attempt)s
+            RETURNING version
+            """,
+            params,
+        ).fetchone()
+        if version_row is None:
+            raise RuntimeError("reserved drawing version is not owned by upload attempt")
+
+        manifest_row = conn.execute(
+            """
+            UPDATE drawing_store_manifests
+            SET head = %(version)s, latest = %(version)s, updated_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND head IS NULL
+            RETURNING head
+            """,
+            params,
+        ).fetchone()
+        if manifest_row is None:
+            raise RuntimeError("drawing manifest is no longer reserved")
+
+        attempt_row = conn.execute(
+            """
+            UPDATE drawing_upload_attempts
+            SET marker = %(marker)s, status = %(status)s,
+                extraction_owner = NULL, extraction_expires_at = NULL,
+                updated_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND attempt = %(attempt)s AND status = 'extracting'
+              AND extraction_owner = %(owner)s
+              AND extraction_fence = %(fence)s
+              AND extraction_expires_at > clock_timestamp()
+            RETURNING attempt
+            """,
+            params,
+        ).fetchone()
+        if attempt_row is None:
+            raise RuntimeError("upload extraction lease expired before ready commit")
+
+    db.run_transaction(operation, isolation="serializable")
+    try:
+        backend.put(
+            write_loop.upload_marker_key(tenant_id, drawing_id),
+            b'{"authority":"postgres"}',
+        )
+    except Exception as exc:  # noqa: BLE001 - compatibility sentinel is not authority
+        # Compatibility sentinel only. PostgreSQL is canonical after commit.
+        write_loop.LOGGER.warning(
+            "upload compatibility sentinel publication failed",
+            extra={"error_type": type(exc).__name__},
+        )
     return digest
 
 
@@ -1067,6 +1217,7 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                     "attempt": marker["attempt"],
                     "owner": extraction_owner,
                     "fence": extraction_fence,
+                    "defer_ready": True,
                 }
             if ext == ".dwg":
                 store.ingest_drawing(backend, tenant_id,
@@ -1086,36 +1237,67 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                         os.remove(tmp)
                     except OSError:
                         pass
-            cache_key = write_loop.intake_cache_key(
-                tenant_id, drawing_id, 1)
+            cache_key = write_loop.intake_cache_key(tenant_id, drawing_id, 1)
             cache_data = json.dumps(
                 intake, separators=(",", ":")).encode("utf-8")
             if upload_store_mode() == "postgres":
-                intake_sha256 = _put_intake_cache_fenced(
-                    backend, tenant_id, drawing_id, cache_key, cache_data,
-                    str(marker["attempt"]), extraction_owner,
-                    extraction_fence)
+                ready_marker = dict(marker)
+                ready_marker["status"] = "ready"
+                ready_marker["extracted_version"] = 1
+                ready_marker["intake_ref"] = cache_key
+                ready_marker["intake_sha256"] = hashlib.sha256(
+                    cache_data).hexdigest()
+                _finalize_pg_ready_attempt(
+                    backend, tenant_id, drawing_id, ready_marker,
+                    extraction_owner, extraction_fence, cache_key, cache_data)
             else:
                 backend.put(cache_key, cache_data)
                 intake_sha256 = hashlib.sha256(cache_data).hexdigest()
-        except (OSError, ValueError, RuntimeError) as exc:
+        except ValueError as exc:
             _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
                          f"ingest failed: {exc}", retryable=False,
                          extraction_owner=extraction_owner,
                          extraction_fence=extraction_fence)
             return
+        except Exception as exc:  # noqa: BLE001 - classify DB/storage failures
+            transient = isinstance(exc, (OSError, RuntimeError))
+            if upload_store_mode() == "postgres":
+                try:
+                    import psycopg
+                    transient = transient or isinstance(exc, psycopg.Error)
+                except ImportError:
+                    pass
+            if upload_store_mode() == "postgres" and transient:
+                try:
+                    current = read_marker(backend, tenant_id, drawing_id)
+                except Exception:  # DB response may itself be unavailable
+                    current = None
+                if current is not None and current.get("status") == "ready":
+                    return
+                _release_pg_extraction_lease(
+                    tenant_id, drawing_id, str(marker["attempt"]),
+                    extraction_owner, extraction_fence)
+                return
+            write_loop.LOGGER.error(
+                "upload extraction failed with a non-transient defect",
+                extra={"error_type": type(exc).__name__},
+            )
+            _mark_failed(
+                backend, tenant_id, drawing_id, marker, "INTERNAL",
+                "ingest failed during canonical finalization", retryable=False,
+                extraction_owner=extraction_owner,
+                extraction_fence=extraction_fence,
+            )
+            return
 
+        if upload_store_mode() == "postgres":
+            return
         marker = dict(marker)
         marker["status"] = "ready"
         marker["extracted_version"] = 1
         marker["intake_ref"] = cache_key
         marker["intake_sha256"] = intake_sha256
-        if upload_store_mode() == "postgres":
-            _finish_pg_attempt(
-                tenant_id, drawing_id, marker,
-                extraction_owner, extraction_fence)
-        else:
-            write_marker(backend, tenant_id, drawing_id, marker)
+        write_marker(backend, tenant_id, drawing_id, marker)
 
 
 class _ExtractError(Exception):
@@ -1177,12 +1359,28 @@ def status_view(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, 
     status = marker.get("status")
     error = marker.get("error")
     if status == "extracting":
+        retry_count = int(marker.get("finalize_retry_count") or 0)
         try:
-            started = datetime.fromisoformat(str(marker.get("uploaded_at")))
-            stale = (_now() - started).total_seconds() > extract_timeout_s()
+            started = datetime.fromisoformat(str(
+                marker.get("finalize_retry_started_at")
+                or marker.get("uploaded_at")
+            ))
+            stale = (
+                retry_count >= 3
+                or (_now() - started).total_seconds() > extract_timeout_s()
+            )
         except ValueError:
             stale = True
-        if stale:
+        if not stale and upload_store_mode() == "postgres":
+            source_ext = str(marker.get("source_ext") or "").lower()
+            if source_ext not in {".dwg", ".dxf"}:
+                source_ext = Path(str(marker.get("filename") or "")).suffix.lower()
+            if source_ext in {".dwg", ".dxf"}:
+                # Claim fencing makes duplicate poll-triggered workers cheap.
+                # A released transient failure resumes the same attempt and
+                # therefore replays the same broker event key.
+                start_extraction_thread(tenant_id, drawing_id, source_ext)
+        elif stale:
             # Persist the honest terminal state so the surface is stable —
             # an "extracting" that outlived its budget is a failure, not a
             # forever-spinner. If the persist LOSES the race (extraction

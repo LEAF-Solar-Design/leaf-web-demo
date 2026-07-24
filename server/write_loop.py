@@ -286,7 +286,13 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
     """
     import store
     validate_tenant_id(drawing_id, kind="drawing id")  # reject path-y / malformed ids, up front
-    if backend.exists(store.manifest_key(tenant_id, drawing_id)):
+    if store.authority_mode() == "postgres":
+        try:
+            store.load_manifest(backend, tenant_id, drawing_id)
+            return
+        except KeyError:
+            pass
+    elif backend.exists(store.manifest_key(tenant_id, drawing_id)):
         return
     # FAIL-CLOSED GUARDS (guest-upload lane, CONTRACT-ADDENDUM §19): the
     # auto-bootstrap below serves the CACHED DEMO ROOF's geometry. For an

@@ -6,6 +6,7 @@ DATABASE_URL and skip cleanly otherwise.
 from __future__ import annotations
 
 import os
+import hashlib
 import tempfile
 import threading
 import time
@@ -49,6 +50,35 @@ def test_legacy_manifest_and_checkout_contract_is_unchanged(monkeypatch, tmp_pat
     manifest = store.load_manifest(backend, "tenant-a", "drawing-a")
     assert manifest["head"] == manifest["latest"] == 1
     assert manifest["checkout"]["holder"] == "holder-a"
+
+
+def test_filesystem_immutable_publish_never_replaces_concurrent_winner(tmp_path):
+    backend = store.FilesystemBackend(str(tmp_path / "store"))
+    key = "tenants/t/drawings/d/v/00000001.intake.json"
+    barrier = threading.Barrier(2)
+    successes, conflicts = [], []
+
+    def publish(payload):
+        barrier.wait(timeout=5)
+        try:
+            backend.put_if_absent_or_verify(key, payload)
+            successes.append(payload)
+        except ValueError:
+            conflicts.append(payload)
+
+    threads = [
+        threading.Thread(target=publish, args=(payload,))
+        for payload in (b"first", b"second")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert backend.get(key) == successes[0]
+    assert not list((tmp_path / "store").rglob(".leaf-immutable-*"))
 
 
 def test_migration_declares_fences_cas_and_receipts():
@@ -249,6 +279,286 @@ def test_fenced_intake_publication_persists_digest_proof(
         )
         proof = cur.fetchone()
     assert proof == {"intake_ref": intake_ref, "intake_sha256": digest}
+
+
+@requires_database
+def test_ready_upload_finalize_is_atomic_and_cache_failure_stays_invisible(
+    postgres_authority,
+):
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    intake_ref = write_loop.intake_cache_key(tenant, drawing, 1)
+
+    class FailingCacheBackend(store.InMemoryBackend):
+        fail_cache = True
+        fail_sentinel = False
+
+        def put_if_absent_or_verify(self, key, data):
+            if self.fail_cache and key == intake_ref:
+                raise OSError("cache write failed")
+            super().put_if_absent_or_verify(key, data)
+
+        def put(self, key, data):
+            if self.fail_sentinel and key == write_loop.upload_marker_key(
+                tenant, drawing
+            ):
+                raise RuntimeError("compatibility sentinel failed")
+            super().put(key, data)
+
+    backend = FailingCacheBackend()
+    marker = guest_uploads.new_marker(
+        filename="drawing.dxf", data=b"dxf", tenant_kind="account",
+        source_ext=".dxf")
+    guest_uploads.write_marker(backend, tenant, drawing, marker)
+    claimed, owner, fence = guest_uploads._claim_extraction(tenant, drawing)
+    source = _temp_blob(b"stored-version")
+    try:
+        store.ingest_drawing(
+            backend, tenant, source, drawing_id=drawing,
+            authority_guard={
+                "attempt": claimed["attempt"],
+                "owner": owner,
+                "fence": fence,
+                "defer_ready": True,
+            },
+        )
+    finally:
+        os.remove(source)
+
+    intake_data = b'{"layers":[],"polylines":[]}'
+    ready = dict(
+        claimed,
+        status="ready",
+        extracted_version=1,
+        intake_ref=intake_ref,
+        intake_sha256=hashlib.sha256(intake_data).hexdigest(),
+    )
+    with pytest.raises(OSError, match="cache write failed"):
+        guest_uploads._finalize_pg_ready_attempt(
+            backend, tenant, drawing, ready, owner, fence,
+            intake_ref, intake_data,
+        )
+    with postgres_authority.cursor() as cur:
+        cur.execute(
+            """
+            SELECT m.head, v.state, u.status
+            FROM drawing_store_manifests m
+            JOIN drawing_store_versions v
+              ON v.tenant_id = m.tenant_id AND v.drawing_id = m.drawing_id
+             AND v.version = 1
+            JOIN drawing_upload_attempts u
+              ON u.tenant_id = m.tenant_id AND u.drawing_id = m.drawing_id
+            WHERE m.tenant_id = %(tenant)s AND m.drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant, "drawing": drawing},
+        )
+        failed = cur.fetchone()
+    assert failed == {"head": None, "state": "reserved", "status": "extracting"}
+
+    backend.fail_cache = False
+    backend.fail_sentinel = True
+    digest = guest_uploads._finalize_pg_ready_attempt(
+        backend, tenant, drawing, ready, owner, fence,
+        intake_ref, intake_data,
+    )
+    with postgres_authority.cursor() as cur:
+        cur.execute(
+            """
+            SELECT m.head, v.state, v.intake_ref, v.intake_sha256, u.status
+            FROM drawing_store_manifests m
+            JOIN drawing_store_versions v
+              ON v.tenant_id = m.tenant_id AND v.drawing_id = m.drawing_id
+             AND v.version = 1
+            JOIN drawing_upload_attempts u
+              ON u.tenant_id = m.tenant_id AND u.drawing_id = m.drawing_id
+            WHERE m.tenant_id = %(tenant)s AND m.drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant, "drawing": drawing},
+        )
+        committed = cur.fetchone()
+    assert committed == {
+        "head": 1,
+        "state": "ready",
+        "intake_ref": intake_ref,
+        "intake_sha256": digest,
+        "status": "ready",
+    }
+
+
+@requires_database
+def test_run_extraction_retries_same_attempt_after_cache_publish_failure(
+    postgres_authority, monkeypatch, tmp_path,
+):
+    import deps
+
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    intake_ref = write_loop.intake_cache_key(tenant, drawing, 1)
+
+    class FailingCacheBackend(store.InMemoryBackend):
+        fail_cache = True
+
+        def put_if_absent_or_verify(self, key, data):
+            if self.fail_cache and key == intake_ref:
+                raise OSError("cache write failed")
+            super().put_if_absent_or_verify(key, data)
+
+    backend = FailingCacheBackend()
+    marker = guest_uploads.new_marker(
+        filename="drawing.dwg", data=b"DWG", tenant_kind="account",
+        source_ext=".dwg")
+    guest_uploads.write_marker(backend, tenant, drawing, marker)
+    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(tmp_path / "uploads"))
+    staged = guest_uploads.staged_path(tenant, drawing, ".dwg")
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(b"DWG")
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    attempts = []
+
+    def broker_extract(_tenant, _drawing, attempt):
+        attempts.append(attempt)
+        return {"layers": [], "polylines": []}
+
+    monkeypatch.setattr(guest_uploads, "_extract_via_broker", broker_extract)
+    guest_uploads.run_extraction(tenant, drawing, ".dwg")
+
+    after_failure = guest_uploads.read_marker(backend, tenant, drawing)
+    assert after_failure["status"] == "extracting"
+    assert after_failure["attempt"] == marker["attempt"]
+    with postgres_authority.cursor() as cur:
+        cur.execute(
+            """
+            SELECT m.head, v.state, u.status, u.extraction_owner
+            FROM drawing_store_manifests m
+            JOIN drawing_store_versions v
+              ON v.tenant_id = m.tenant_id AND v.drawing_id = m.drawing_id
+             AND v.version = 1
+            JOIN drawing_upload_attempts u
+              ON u.tenant_id = m.tenant_id AND u.drawing_id = m.drawing_id
+            WHERE m.tenant_id = %(tenant)s AND m.drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant, "drawing": drawing},
+        )
+        failed = cur.fetchone()
+    assert failed == {
+        "head": None,
+        "state": "reserved",
+        "status": "extracting",
+        "extraction_owner": None,
+    }
+
+    backend.fail_cache = False
+    guest_uploads.run_extraction(tenant, drawing, ".dwg")
+    ready = guest_uploads.read_marker(backend, tenant, drawing)
+    assert ready["status"] == "ready"
+    assert ready["attempt"] == marker["attempt"]
+    assert attempts == [marker["attempt"], marker["attempt"]]
+
+
+@requires_database
+def test_stale_finalizer_cannot_replace_new_fence_cache_winner(
+    postgres_authority, tmp_path,
+):
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    intake_ref = write_loop.intake_cache_key(tenant, drawing, 1)
+    stale_checked = threading.Event()
+    resume_stale = threading.Event()
+
+    class PausingBackend(store.FilesystemBackend):
+        def put_if_absent_or_verify(self, key, data):
+            if (
+                key == intake_ref
+                and threading.current_thread().name == "stale-finalizer"
+            ):
+                stale_checked.set()
+                assert resume_stale.wait(10)
+            return super().put_if_absent_or_verify(key, data)
+
+    backend = PausingBackend(str(tmp_path / "store"))
+    marker = guest_uploads.new_marker(
+        filename="drawing.dwg", data=b"DWG", tenant_kind="account",
+        source_ext=".dwg")
+    guest_uploads.write_marker(backend, tenant, drawing, marker)
+    claimed, old_owner, old_fence = guest_uploads._claim_extraction(
+        tenant, drawing)
+    source = _temp_blob(b"stored-version")
+    try:
+        store.ingest_drawing(
+            backend, tenant, source, drawing_id=drawing,
+            authority_guard={
+                "attempt": claimed["attempt"],
+                "owner": old_owner,
+                "fence": old_fence,
+                "defer_ready": True,
+            },
+        )
+    finally:
+        os.remove(source)
+
+    stale_data = b'{"layers":["stale"],"polylines":[]}'
+    fresh_data = b'{"layers":["fresh"],"polylines":[]}'
+
+    def ready_marker(data):
+        return dict(
+            claimed,
+            status="ready",
+            extracted_version=1,
+            intake_ref=intake_ref,
+            intake_sha256=hashlib.sha256(data).hexdigest(),
+        )
+
+    stale_errors = []
+
+    def stale_finalize():
+        try:
+            guest_uploads._finalize_pg_ready_attempt(
+                backend, tenant, drawing, ready_marker(stale_data),
+                old_owner, old_fence, intake_ref, stale_data,
+            )
+        except Exception as exc:  # expected immutable conflict
+            stale_errors.append(exc)
+
+    stale_thread = threading.Thread(
+        target=stale_finalize, name="stale-finalizer")
+    stale_thread.start()
+    assert stale_checked.wait(10)
+    with postgres_authority.connection() as conn:
+        conn.execute(
+            """
+            UPDATE drawing_upload_attempts
+            SET extraction_expires_at = NOW() - INTERVAL '1 second'
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant, "drawing": drawing},
+        )
+    current, new_owner, new_fence = guest_uploads._claim_extraction(
+        tenant, drawing)
+    fresh_digest = guest_uploads._finalize_pg_ready_attempt(
+        backend, tenant, drawing, ready_marker(fresh_data),
+        new_owner, new_fence, intake_ref, fresh_data,
+    )
+    resume_stale.set()
+    stale_thread.join(10)
+
+    assert stale_errors and isinstance(stale_errors[0], ValueError)
+    assert backend.get(intake_ref) == fresh_data
+    with postgres_authority.cursor() as cur:
+        cur.execute(
+            """
+            SELECT v.intake_sha256, u.marker->>'intake_sha256' AS marker_sha
+            FROM drawing_store_versions v
+            JOIN drawing_upload_attempts u
+              ON u.tenant_id = v.tenant_id AND u.drawing_id = v.drawing_id
+            WHERE v.tenant_id = %(tenant)s AND v.drawing_id = %(drawing)s
+              AND v.version = 1
+            """,
+            {"tenant": tenant, "drawing": drawing},
+        )
+        proof = cur.fetchone()
+    assert proof == {"intake_sha256": fresh_digest, "marker_sha": fresh_digest}
 
 
 @requires_database
