@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { runMock } from '../src/mock/mockEngine.js'
 import * as versions from '../src/mock/mockVersions.js'
 import {
-  confirmRunIntent, createRunIntentState, dismissRunIntent, stageRunIntent,
+  confirmRunIntent, createCatalogToolSnapshot, createRunIntentState, dismissRunIntent, stageRunIntent,
 } from '../src/runIntent.js'
 
 function assert(condition, message) {
@@ -31,6 +31,8 @@ function confirmAndExecute(intent, tool, params, now) {
     sessionId: intent.sessionId,
     toolName: tool.name,
     params,
+    context: intent.context,
+    toolSnapshot: createCatalogToolSnapshot(tool),
   }, { now })
   state = result.state
   if (!result.ok) return result
@@ -42,6 +44,8 @@ function confirmAndExecute(intent, tool, params, now) {
 
 let request = stageRunIntent(state, {
   intentId: 'write-escape', toolName: writeTool.name, params: { handle: target }, createdAt: 1000,
+  context: { tenantId: 'demo-tenant', orgId: null, projectId: null, drawingId: 'demo', drawingVersion: 1 },
+  toolSnapshot: createCatalogToolSnapshot(writeTool),
 })
 state = request.state
 assert(versions.list().versions.length === 1, 'catalog click created a version before confirmation')
@@ -53,6 +57,8 @@ assert(versions.list().versions.length === 1, 'Escape created a version')
 
 request = stageRunIntent(state, {
   intentId: 'write-confirm', toolName: writeTool.name, params: { handle: target }, createdAt: 1200,
+  context: { tenantId: 'demo-tenant', orgId: null, projectId: null, drawingId: 'demo', drawingVersion: 1 },
+  toolSnapshot: createCatalogToolSnapshot(writeTool),
 })
 state = request.state
 const confirmed = confirmAndExecute(request.intent, writeTool, { handle: target }, 1300)
@@ -70,6 +76,8 @@ assert(versions.headIntake().polylines.length === baselineCount, 'Undo did not r
 
 const retry = stageRunIntent(state, {
   intentId: 'write-retry', toolName: writeTool.name, params: { handle: target }, createdAt: 1400,
+  context: { tenantId: 'demo-tenant', orgId: null, projectId: null, drawingId: 'demo', drawingVersion: 1 },
+  toolSnapshot: createCatalogToolSnapshot(writeTool),
 })
 state = retry.state
 assert(retry.intent.intentId !== request.intent.intentId, 'retry reused the old intent')
@@ -78,6 +86,8 @@ state = dismissRunIntent(state, retry.intent.intentId)
 
 const readRequest = stageRunIntent(state, {
   intentId: 'read-confirm', toolName: readTool.name, params: {}, createdAt: 1500,
+  context: { tenantId: 'demo-tenant', orgId: null, projectId: null, drawingId: 'demo', drawingVersion: 1 },
+  toolSnapshot: createCatalogToolSnapshot(readTool),
 })
 state = readRequest.state
 const readConfirmed = confirmAndExecute(readRequest.intent, readTool, {}, 1600)
@@ -87,9 +97,14 @@ assert(versions.list().versions.length === 2, 'read tool created a drawing versi
 const toolsPanel = readFileSync(join(root, 'src', 'components', 'ToolsPanel.jsx'), 'utf8')
 const routePanel = readFileSync(join(root, 'src', 'components', 'RoutePanel.jsx'), 'utf8')
 const app = readFileSync(join(root, 'src', 'App.jsx'), 'utf8')
+const api = readFileSync(join(root, 'src', 'api.js'), 'utf8')
 assert(!toolsPanel.includes('onClick={() => onRun('), 'ToolsPanel still calls the executor directly')
 assert(toolsPanel.includes('onRequestRun(t, params)'), 'ToolsPanel does not create an intent request')
 assert(routePanel.includes('onConfirmIntent(route.runIntent'), 'RoutePanel does not confirm catalog intents')
 assert(app.includes('onRequestRun={onRequestCatalogRun}'), 'App does not wire catalog requests to intents')
+assert(app.includes('idempotencyKey: confirmed.execution.intentId'), 'confirmed intent ID is not sent to the API seam')
+assert(app.includes('runToolAsync(tool, merged, executionContext.drawingId'), 'confirmed drawing is not used for execution')
+assert(app.includes('dwgVersion: executionContext.drawingVersion'), 'confirmed drawing version is not used for execution')
+assert(api.includes("linkHeaders['Idempotency-Key'] = opts.idempotencyKey"), 'run submission omits its idempotency key')
 
 console.log('CATALOG_CONFIRMATION_OK')

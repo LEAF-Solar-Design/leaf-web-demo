@@ -28,15 +28,66 @@ export function normalizeRunParams(params) {
   return freeze(normalize(params || {}))
 }
 
+function stableDigest(value) {
+  const json = JSON.stringify(value)
+  let hash = 0x811c9dc5
+  for (let i = 0; i < json.length; i += 1) {
+    hash ^= json.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `fnv1a32:${hash.toString(16).padStart(8, '0')}`
+}
+
+export function createCatalogToolSnapshot(tool) {
+  if (!tool || typeof tool !== 'object' || typeof tool.name !== 'string' || !tool.name) {
+    throw new TypeError('catalog tool is required')
+  }
+  const definition = normalizeRunParams(tool)
+  const capabilities = [...new Set(Array.isArray(definition.capabilities) ? definition.capabilities : [])].sort()
+  const revision = definition.catalog_revision
+    || definition.catalog_digest
+    || definition.version
+    || definition.provenance?.commit
+    || null
+  return freeze({
+    name: definition.name,
+    revision,
+    capabilities,
+    digest: stableDigest(definition),
+    definition,
+  })
+}
+
+export function normalizeRunContext(context) {
+  if (!context || typeof context !== 'object') throw new TypeError('run context is required')
+  const normalized = normalizeRunParams({
+    tenantId: context.tenantId ?? null,
+    orgId: context.orgId ?? null,
+    projectId: context.projectId ?? null,
+    drawingId: context.drawingId ?? null,
+    drawingVersion: context.drawingVersion ?? null,
+  })
+  if (typeof normalized.tenantId !== 'string' || !normalized.tenantId) {
+    throw new TypeError('run context tenantId is required')
+  }
+  if (typeof normalized.drawingId !== 'string' || !normalized.drawingId) {
+    throw new TypeError('run context drawingId is required')
+  }
+  return normalized
+}
+
 export function createRunIntentState(sessionId) {
   if (typeof sessionId !== 'string' || !sessionId) throw new TypeError('sessionId is required')
   return freeze({ sessionId, pending: null, consumedIds: [] })
 }
 
-export function stageRunIntent(state, { intentId, toolName, params, createdAt = Date.now() }) {
+export function stageRunIntent(state, {
+  intentId, toolName, params, context, toolSnapshot, createdAt = Date.now(),
+}) {
   if (!state?.sessionId) throw new TypeError('valid run intent state is required')
   if (typeof intentId !== 'string' || !intentId) throw new TypeError('intentId is required')
   if (typeof toolName !== 'string' || !toolName) throw new TypeError('toolName is required')
+  if (toolSnapshot?.name !== toolName) throw new TypeError('tool snapshot must match toolName')
   if (!Number.isFinite(createdAt)) throw new TypeError('createdAt must be finite')
   if (state.pending?.intentId === intentId || state.consumedIds.includes(intentId)) {
     throw new Error('run intent id must be unique within its session')
@@ -46,6 +97,8 @@ export function stageRunIntent(state, { intentId, toolName, params, createdAt = 
     sessionId: state.sessionId,
     toolName,
     params: normalizeRunParams(params),
+    context: normalizeRunContext(context),
+    toolSnapshot: freeze(normalize(toolSnapshot)),
     createdAt,
   })
   return freeze({
@@ -87,7 +140,31 @@ export function confirmRunIntent(state, request, {
   }
   if (JSON.stringify(params) !== JSON.stringify(intent.params)) return denied(state, 'changed_params')
 
-  const execution = freeze({ toolName: intent.toolName, params: intent.params })
+  let context
+  try {
+    context = normalizeRunContext(request?.context)
+  } catch {
+    return denied(state, 'changed_context')
+  }
+  if (JSON.stringify(context) !== JSON.stringify(intent.context)) return denied(state, 'changed_context')
+
+  let toolSnapshot
+  try {
+    toolSnapshot = freeze(normalize(request?.toolSnapshot))
+  } catch {
+    return denied(state, 'changed_tool_snapshot')
+  }
+  if (JSON.stringify(toolSnapshot) !== JSON.stringify(intent.toolSnapshot)) {
+    return denied(state, 'changed_tool_snapshot')
+  }
+
+  const execution = freeze({
+    intentId: intent.intentId,
+    toolName: intent.toolName,
+    params: intent.params,
+    context: intent.context,
+    toolSnapshot: intent.toolSnapshot,
+  })
   return freeze({
     ok: true,
     state: freeze({

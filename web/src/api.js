@@ -523,10 +523,16 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
   const linkHeaders = {}
   if (opts.orgId) linkHeaders['X-Org-Id'] = opts.orgId
   if (opts.projectId) linkHeaders['X-Project-Id'] = opts.projectId
+  if (opts.idempotencyKey) linkHeaders['Idempotency-Key'] = opts.idempotencyKey
   const res = await fetch(`${API_BASE}/api/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...linkHeaders, ...authHeaders() },
-    body: JSON.stringify({ tool: toolName, params: params || {}, dwg }),
+    body: JSON.stringify({
+      tool: toolName,
+      params: params || {},
+      dwg,
+      ...(opts.dwgVersion != null ? { dwg_version: opts.dwgVersion } : {}),
+    }),
   })
   const body = await res.json().catch(() => null)
 
