@@ -710,6 +710,11 @@ export class ConverseLoop {
         if (!target) return err("run_capability requires args.tool (a catalog tool name)");
         const params = asRecord(args.params);
         const dwg = String(args.dwg ?? ctx.session.drawing_id);
+        const catalogEntry = (await ctx.catalogFor()).find((entry) => entry.name === target);
+        const catalogDigest = catalogEntry?.catalog_digest;
+        if (typeof catalogDigest !== "string" || !catalogDigest) {
+          return err("run_capability requires a current server-issued catalog digest");
+        }
         const capability = await ctx.capabilityOf(target);
         // Read tools may wait inline (fast path); writes are long jobs — async row.
         const res = await appRun.submitRun({
@@ -717,6 +722,7 @@ export class ConverseLoop {
           tool: target,
           params,
           dwg,
+          catalogDigest,
           wait: capability === "drawing.read",
           waitTimeoutS: this.readWaitS,
         });

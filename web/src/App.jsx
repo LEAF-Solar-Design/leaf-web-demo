@@ -255,6 +255,7 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(false)
   const [openProjectId, setOpenProjectId] = useState(null)
   const [workspace, setWorkspace] = useState(null)       // hydration payload {project, drawing_versions[], jobs[], built_tools[]}
+  const [canonicalVersionId, setCanonicalVersionId] = useState(null)
   const [wsLoading, setWsLoading] = useState(false)      // re-hydration in flight
   const [orgBusy, setOrgBusy] = useState(false)
   const [projectBusy, setProjectBusy] = useState(false)
@@ -887,7 +888,8 @@ export default function App() {
   // --- projects / orgs workspace handlers (item 1) -------------------------
   const onOpenProject = useCallback(async (pid) => {
     if (!pid) return
-    setOpenProjectId(pid); setWsLoading(true); setProjectsErr(null)
+    setOpenProjectId(pid); setWorkspace(null); setCanonicalVersionId(null)
+    setWsLoading(true); setProjectsErr(null)
     try {
       setWorkspace(await openProject(pid, orgId))
     } catch (e) {
@@ -909,7 +911,7 @@ export default function App() {
   }, [openProjectId, orgId])
 
   const onCloseProject = useCallback(() => {
-    setOpenProjectId(null); setWorkspace(null)
+    setOpenProjectId(null); setWorkspace(null); setCanonicalVersionId(null)
   }, [])
 
   // Both creators accept the name from an inline F1 field (ProjectSwitcher);
@@ -966,9 +968,10 @@ export default function App() {
     orgId,
     projectId: openProjectId || null,
     workspace,
+    selectedVersionId: canonicalVersionId,
     drawingState,
     fallbackDrawingId: DEFAULT_DRAWING_ID,
-  }), [tenant, orgId, openProjectId, workspace, drawingState])
+  }), [tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState])
   const catalogRunContextRef = useRef(catalogRunContext)
   catalogRunContextRef.current = catalogRunContext
 
@@ -1040,6 +1043,8 @@ export default function App() {
           projectId: executionContext.projectId || undefined,
           dwgVersion: executionContext.drawingVersion ?? undefined,
           idempotencyKey: idempotencyKey || undefined,
+          catalogDigest: (runContext?.toolSnapshot?.catalogDigest
+            || createCatalogToolSnapshot(tool).catalogDigest || undefined),
           onSubmit: (job_id) => { saveInflight(job_id, tool.name); setCurrentJobId(job_id) },
           onStatus: (st) => {
             // Richer progress string (e.g. 'executing' · 'storing version' ·
@@ -1137,7 +1142,7 @@ export default function App() {
     }
     onRun(currentTool, confirmed.execution.params, {
       intentConfirmed: true,
-      runContext: confirmed.execution.context,
+      runContext: { ...confirmed.execution.context, toolSnapshot: confirmed.execution.toolSnapshot },
       idempotencyKey: confirmed.execution.intentId,
     })
   }, [mock, onRun])
@@ -1983,7 +1988,13 @@ export default function App() {
         </div>
 
         {!mock && openProjectId && (
-          <WorkspaceSummary workspace={workspace} loading={wsLoading} onClose={onCloseProject} />
+          <WorkspaceSummary
+            workspace={workspace}
+            loading={wsLoading}
+            selectedVersionId={canonicalVersionId}
+            onSelectVersion={setCanonicalVersionId}
+            onClose={onCloseProject}
+          />
         )}
 
         <div className="workspace-card enter" style={{ '--rank': 1 }} ref={workspaceCardRef}>

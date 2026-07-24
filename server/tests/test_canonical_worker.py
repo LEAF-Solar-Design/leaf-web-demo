@@ -186,8 +186,9 @@ def test_run_route_submits_canonical_tool_without_sqlite_mirror(monkeypatch):
                             AssertionError("canonical route touched SQLite")))
     response = jobs_router.run(
         jobs_router.RunRequest(tool="string-autofill-opt", params={"groups": [{}],
-                                                                      "panelsPerString": 10},
-                               dwg=str(uuid.uuid4())),
+                                                                          "panelsPerString": 10},
+                                   dwg=str(uuid.uuid4()),
+                                   catalog_digest=jobs_router.deps.catalog_tool_digest(tool)),
         tenant_id="tenant-1", x_org_id="org-1", x_project_id="project-1",
         idempotency_key="request-1", authorization="Bearer verified")
     assert response.status_code == 202
@@ -203,7 +204,9 @@ def test_canonical_tool_requires_project_context(monkeypatch):
     monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
                         lambda *_args: None)
     response = jobs_router.run(
-        jobs_router.RunRequest(tool="string-autofill-opt", params={}),
+        jobs_router.RunRequest(
+            tool="string-autofill-opt", params={},
+            catalog_digest=jobs_router.deps.catalog_tool_digest(tool)),
         tenant_id="tenant-1", x_org_id=None, x_project_id=None,
         idempotency_key=None, authorization=None)
     assert response.status_code == 400
@@ -360,7 +363,9 @@ def test_run_route_returns_stored_entitlement_denial_verbatim(monkeypatch):
                         lambda *_args, **_kwargs: (_ for _ in ()).throw(
                             AssertionError("denied canonical run touched SQLite")))
     response = jobs_router.run(
-        jobs_router.RunRequest(tool="string-autofill-opt", params={}, dwg=str(uuid.uuid4())),
+            jobs_router.RunRequest(
+                tool="string-autofill-opt", params={}, dwg=str(uuid.uuid4()),
+                catalog_digest=jobs_router.deps.catalog_tool_digest(tool)),
         tenant_id="tenant-1", x_org_id="org-1", x_project_id="project-1",
         idempotency_key="request-denied-1", authorization="Bearer verified")
     assert response is denial
@@ -377,7 +382,9 @@ def test_run_route_invalid_policy_is_structured_503(monkeypatch, tmp_path):
     tool = {"name": "demo-read-tool", "capabilities": ["drawing.read"], "default_params": {}}
     monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: tool)
     response = jobs_router.run(
-        jobs_router.RunRequest(tool="demo-read-tool", params={}),
+            jobs_router.RunRequest(
+                tool="demo-read-tool", params={},
+                catalog_digest=jobs_router.deps.catalog_tool_digest(tool)),
         tenant_id="tenant-1", x_org_id=None, x_project_id=None,
         idempotency_key=None, authorization=None)
     assert response.status_code == 503
@@ -401,7 +408,9 @@ def test_run_route_non_utf8_policy_is_structured_503(monkeypatch, tmp_path):
     tool = {"name": "demo-read-tool", "capabilities": ["drawing.read"], "default_params": {}}
     monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: tool)
     response = jobs_router.run(
-        jobs_router.RunRequest(tool="demo-read-tool", params={}),
+            jobs_router.RunRequest(
+                tool="demo-read-tool", params={},
+                catalog_digest=jobs_router.deps.catalog_tool_digest(tool)),
         tenant_id="tenant-1", x_org_id=None, x_project_id=None,
         idempotency_key=None, authorization=None)
     assert response.status_code == 503

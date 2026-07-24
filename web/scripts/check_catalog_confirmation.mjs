@@ -117,30 +117,52 @@ const canonicalContext = createCatalogRunContext({
   workspace: {
     project: { project_id: '22222222-2222-4222-8222-222222222222' },
     drawing_versions: [
-      { version_id: '33333333-3333-4333-8333-333333333333', seq: 1 },
-      { version_id: '44444444-4444-4444-8444-444444444444', seq: 2 },
+      { version_id: '33333333-3333-4333-8333-333333333333', seq: 1,
+        org_id: '11111111-1111-4111-8111-111111111111', project_id: '22222222-2222-4222-8222-222222222222',
+        drawing_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+      { version_id: '44444444-4444-4444-8444-444444444444', seq: 99,
+        org_id: '11111111-1111-4111-8111-111111111111', project_id: '22222222-2222-4222-8222-222222222222',
+        drawing_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' },
     ],
   },
+  selectedVersionId: '33333333-3333-4333-8333-333333333333',
   drawingState: { drawing_id: 'legacy-drawing', version: 7 },
   fallbackDrawingId: 'rooftop_demo',
 })
-assert(canonicalContext.drawingId === '44444444-4444-4444-8444-444444444444',
-  'canonical context did not select the latest immutable version UUID')
+assert(canonicalContext.drawingId === '33333333-3333-4333-8333-333333333333',
+  'canonical context did not preserve the explicit version selection in a two-drawing project')
 assert(canonicalContext.drawingVersion === null,
   'canonical context retained a legacy integer drawing version')
-const selectedContext = createCatalogRunContext({
+assert(createCatalogRunContext({
   tenantId: canonicalContext.tenantId,
   orgId: canonicalContext.orgId,
   projectId: canonicalContext.projectId,
-  workspace: { project: { project_id: canonicalContext.projectId }, drawing_versions: [
-    { version_id: '33333333-3333-4333-8333-333333333333', seq: 1 },
-    { version_id: '44444444-4444-4444-8444-444444444444', seq: 2 },
-  ] },
-  selectedVersionId: '33333333-3333-4333-8333-333333333333',
+  workspace: {
+    project: { project_id: canonicalContext.projectId },
+    drawing_versions: [{
+      version_id: canonicalContext.drawingId, seq: 1,
+      org_id: canonicalContext.orgId, project_id: canonicalContext.projectId,
+      drawing_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    }],
+  },
   fallbackDrawingId: 'rooftop_demo',
-})
-assert(selectedContext.drawingId === '33333333-3333-4333-8333-333333333333',
-  'canonical context ignored the selected immutable version UUID')
+}) === null, 'canonical context chose a version without an explicit selection')
+assert(createCatalogRunContext({
+  tenantId: canonicalContext.tenantId,
+  orgId: canonicalContext.orgId,
+  projectId: canonicalContext.projectId,
+  selectedVersionId: canonicalContext.drawingId,
+  workspace: {
+    project: { project_id: canonicalContext.projectId },
+    drawing_versions: [{
+      version_id: canonicalContext.drawingId, seq: 1,
+      org_id: '99999999-9999-4999-8999-999999999999',
+      project_id: canonicalContext.projectId,
+      drawing_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    }],
+  },
+  fallbackDrawingId: 'rooftop_demo',
+}) === null, 'canonical context accepted a cross-org selected version')
 assert(createCatalogRunContext({
   tenantId: canonicalContext.tenantId,
   orgId: canonicalContext.orgId,
@@ -164,10 +186,11 @@ const runRequest = createRunSubmissionRequest('string-autofill-opt', { groups: [
   projectId: canonicalContext.projectId,
   dwgVersion: canonicalContext.drawingVersion ?? undefined,
   idempotencyKey: 'catalog-session:1',
+  catalogDigest: `sha256:${'c'.repeat(64)}`,
 })
 const runBody = runRequest.body
 const runHeaders = runRequest.headers
-assert(runBody.dwg === '44444444-4444-4444-8444-444444444444',
+assert(runBody.dwg === '33333333-3333-4333-8333-333333333333',
   'canonical request did not send the immutable version UUID as dwg')
 assert(!Object.hasOwn(runBody, 'dwg_version'),
   'canonical request mixed the legacy integer version into its payload')
@@ -176,5 +199,7 @@ assert(runHeaders['X-Org-Id'] === canonicalContext.orgId
   'canonical request omitted its confirmed org/project binding')
 assert(runHeaders['Idempotency-Key'] === 'catalog-session:1',
   'canonical request omitted the confirmed intent idempotency key')
+assert(runBody.catalog_digest === `sha256:${'c'.repeat(64)}`,
+  'canonical request omitted the server-issued catalog digest')
 
 console.log('CATALOG_CONFIRMATION_OK')

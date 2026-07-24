@@ -116,13 +116,22 @@ describe("invariant v2 — dynamic: submitRun is the only side-effecting surface
 
     // --- The dispatch payload contract ------------------------------------- //
     expect(appRun.submitCalls.length).toBe(2); // the read + the confirmed write
-    const ALLOWED_KEYS = new Set(["tenantId", "tool", "params", "dwg", "wait", "waitTimeoutS"]);
+    const ALLOWED_KEYS = new Set([
+      "tenantId",
+      "tool",
+      "params",
+      "dwg",
+      "catalogDigest",
+      "wait",
+      "waitTimeoutS",
+    ]);
     for (const call of appRun.submitCalls) {
       for (const key of Object.keys(call)) expect(ALLOWED_KEYS.has(key)).toBe(true);
       // A registered catalog NAME — never code.
       expect(typeof call.tool).toBe("string");
       expect(appRun.catalog.some((c) => c.name === call.tool)).toBe(true);
       expect(typeof call.dwg).toBe("string");
+      expect(call.catalogDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
       // Params are plain data and carry no authored code / drawing deltas.
       const paramsJson = JSON.stringify(call.params);
       for (const banned of ["code", "script", "entry", "source", "entities", "delta", "def run("]) {

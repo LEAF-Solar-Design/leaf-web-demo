@@ -28,5 +28,8 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         denial = ops_router._require_ops(x_ops_secret)
         if denial is not None:
             return denial
-    families = catalog.build_catalog(deps.all_tools(str(tenant)), include_internal=include_internal)
+    families = catalog.build_catalog(
+        [deps.catalog_tool_view(tool) for tool in deps.all_tools(str(tenant))],
+        include_internal=include_internal,
+    )
     return with_envelope_fields({"families": families})

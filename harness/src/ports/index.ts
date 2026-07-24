@@ -522,6 +522,7 @@ export interface CapabilityEntry {
   description: string;
   capabilities: Capability[];
   params_schema?: JsonSchema;
+  catalog_digest?: string;
   [k: string]: unknown;
 }
 
@@ -531,6 +532,7 @@ export interface SubmitRunRequest {
   tool: string;
   params: Record<string, unknown>;
   dwg: string;
+  catalogDigest: string;
   /** Fast-tool read path: hold the request open (?wait=1) up to waitTimeoutS. */
   wait?: boolean;
   waitTimeoutS?: number;

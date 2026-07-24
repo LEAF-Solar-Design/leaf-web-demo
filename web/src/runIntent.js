@@ -35,20 +35,19 @@ export function createCatalogRunContext({
   if (projectId) {
     const workspaceProjectId = workspace?.project?.project_id || workspace?.project?.id || null
     if (!orgId || workspaceProjectId !== projectId) return null
+    if (typeof selectedVersionId !== 'string' || !selectedVersionId) return null
     const versions = (workspace?.drawing_versions || [])
       .filter((version) => typeof version?.version_id === 'string' && version.version_id)
-    const selected = selectedVersionId
-      ? versions.find((version) => version.version_id === selectedVersionId)
-      : null
-    const latest = selected || [...versions].sort((left, right) => {
-      const seqDelta = Number(right.seq || 0) - Number(left.seq || 0)
-      if (seqDelta) return seqDelta
-      return String(right.version_id).localeCompare(String(left.version_id))
-    })[0]
-    if (!latest) return null
+    const selected = versions.find((version) => version.version_id === selectedVersionId)
+    if (!selected
+      || selected.org_id !== orgId
+      || selected.project_id !== projectId
+      || typeof selected.drawing_id !== 'string'
+      || !selected.drawing_id) return null
     return freeze(normalize({
       tenantId, orgId, projectId,
-      drawingId: latest.version_id,
+      drawingId: selected.version_id,
+      drawingArtifactId: selected.drawing_id,
       drawingVersion: null,
     }))
   }
@@ -70,19 +69,10 @@ export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
       tool: toolName,
       params: params || {},
       dwg,
+      ...(opts.catalogDigest ? { catalog_digest: opts.catalogDigest } : {}),
       ...(opts.dwgVersion != null ? { dwg_version: opts.dwgVersion } : {}),
     },
   }
-}
-
-function stableDigest(value) {
-  const json = JSON.stringify(value)
-  let hash = 0x811c9dc5
-  for (let i = 0; i < json.length; i += 1) {
-    hash ^= json.charCodeAt(i)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return `fnv1a32:${hash.toString(16).padStart(8, '0')}`
 }
 
 export function createCatalogToolSnapshot(tool) {
@@ -96,11 +86,15 @@ export function createCatalogToolSnapshot(tool) {
     || definition.version
     || definition.provenance?.commit
     || null
+  const catalogDigest = typeof definition.catalog_digest === 'string'
+    ? definition.catalog_digest
+    : null
   return freeze({
     name: definition.name,
     revision,
+    catalogDigest,
     capabilities,
-    digest: stableDigest(definition),
+    digest: catalogDigest,
     definition,
   })
 }
@@ -112,6 +106,7 @@ export function normalizeRunContext(context) {
     orgId: context.orgId ?? null,
     projectId: context.projectId ?? null,
     drawingId: context.drawingId ?? null,
+    drawingArtifactId: context.drawingArtifactId ?? null,
     drawingVersion: context.drawingVersion ?? null,
   })
   if (typeof normalized.tenantId !== 'string' || !normalized.tenantId) {
