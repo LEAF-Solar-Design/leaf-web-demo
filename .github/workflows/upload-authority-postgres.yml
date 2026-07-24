@@ -1,0 +1,67 @@
+name: Upload authority PostgreSQL gate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/upload-authority-postgres.yml'
+      - 'da/store.py'
+      - 'platform/migrations/0016_drawing_upload_authority.sql'
+      - 'server/guest_uploads.py'
+      - 'server/write_loop.py'
+      - 'server/tests/test_drawing_upload_authority_postgres.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upload-authority-postgres-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres-authority:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: leaf_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d leaf_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/leaf_test
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            server/requirements.txt
+            platform/requirements.txt
+            da/requirements.txt
+
+      - name: Install test dependencies
+        run: >-
+          python -m pip install
+          -r server/requirements.txt
+          -r platform/requirements.txt
+          -r da/requirements.txt
+
+      - name: Run PostgreSQL authority and race tests
+        working-directory: server
+        run: python -m pytest -q tests/test_drawing_upload_authority_postgres.py

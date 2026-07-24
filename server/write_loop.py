@@ -24,7 +24,9 @@ process allowed to hold it), mirroring server/tool_loader.py.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import logging
 import os
 import secrets
 import sys
@@ -39,6 +41,7 @@ from tenant_id_validator import validate_tenant_id
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
 CACHED_INTAKE_PATH = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
+LOGGER = logging.getLogger(__name__)
 
 # Make da/store.py importable. APPEND (never front-insert) so a stdlib module is
 # never shadowed by a da/ sibling (e.g. da/queue.py); `store` is da-only and still
@@ -85,6 +88,41 @@ def blob_store_mode() -> str:
         raise RuntimeError(
             "LEAF_BLOB_STORE must be 'legacy', 'filesystem', or 'aps_oss'")
     return mode
+
+
+def _cleanup_scratch_objects(da: Any, scratch_keys) -> None:
+    """Best-effort immediate cleanup with nonsecret failure telemetry."""
+    if not scratch_keys:
+        return
+    delete = (
+        getattr(da, "delete_scratch_object", None)
+        or getattr(da, "delete_object", None)
+    )
+    if delete is None:
+        for key in scratch_keys:
+            LOGGER.warning(
+                "APS scratch cleanup unavailable",
+                extra={
+                    "scratch_key_sha256": hashlib.sha256(
+                        str(key).encode("utf-8")
+                    ).hexdigest(),
+                    "error_type": "DeleteMethodUnavailable",
+                },
+            )
+        return
+    for key in scratch_keys:
+        try:
+            delete(key)
+        except Exception as exc:  # noqa: BLE001 - cleanup stays best effort
+            LOGGER.warning(
+                "APS scratch cleanup failed",
+                extra={
+                    "scratch_key_sha256": hashlib.sha256(
+                        str(key).encode("utf-8")
+                    ).hexdigest(),
+                    "error_type": type(exc).__name__,
+                },
+            )
 
 
 def drawing_mutations_enabled() -> bool:
@@ -248,7 +286,13 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
     """
     import store
     validate_tenant_id(drawing_id, kind="drawing id")  # reject path-y / malformed ids, up front
-    if backend.exists(store.manifest_key(tenant_id, drawing_id)):
+    if store.authority_mode() == "postgres":
+        try:
+            store.load_manifest(backend, tenant_id, drawing_id)
+            return
+        except KeyError:
+            pass
+    elif backend.exists(store.manifest_key(tenant_id, drawing_id)):
         return
     # FAIL-CLOSED GUARDS (guest-upload lane, CONTRACT-ADDENDUM §19): the
     # auto-bootstrap below serves the CACHED DEMO ROOF's geometry. For an
@@ -553,17 +597,6 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                              retryable=True, tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
     finally:
-        if scratch_keys:
-            delete_scratch = getattr(da, "delete_scratch_object", None)
-            delete_fallback = getattr(da, "delete_object", None)
-            delete = delete_scratch or delete_fallback
-        else:
-            delete = None
-        if delete is not None:
-            for key in scratch_keys:
-                try:
-                    delete(key)
-                except Exception:
-                    # Best effort only. The dedicated transient bucket still
-                    # expires the copy if an immediate delete is interrupted.
-                    pass
+        # Best effort only. The dedicated transient bucket still expires a copy
+        # if an immediate delete is interrupted.
+        _cleanup_scratch_objects(da, scratch_keys)
