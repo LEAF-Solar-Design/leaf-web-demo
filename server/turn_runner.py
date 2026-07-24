@@ -97,9 +97,13 @@ _MIN_REDACTABLE_SECRET_LEN = 24
 
 def _grant_secret(grant: Optional[Dict[str, Any]]) -> Optional[str]:
     """The token value carried by a validated credential grant, if it is long and
-    opaque enough to strip by literal match. Short or whitespace-bearing values
-    are never eligible: replacing them would rewrite ordinary prose instead of a
-    secret. Validation upstream already enforces the same floor."""
+    opaque enough to strip by literal match: at least _MIN_REDACTABLE_SECRET_LEN
+    characters, all PRINTABLE ASCII (0x21-0x7E). Anything shorter, or carrying a
+    space, a control character, or a non-ASCII codepoint, is never eligible —
+    replacing such a value would rewrite ordinary prose instead of a secret.
+    Keep this rule identical to routers/sessions.py _CREDENTIAL_CHARS and
+    harness/src/redact.ts PRINTABLE_ASCII; validation upstream enforces the
+    same one."""
     if not isinstance(grant, dict):
         return None
     tok = grant.get("api_key") if grant.get("kind") == "api_key" else grant.get("oauth_token")
@@ -299,9 +303,18 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # `confirm` is deliberately NOT scrubbed. Its proposal is built
         # server-side from the STORED approval row (routers/sessions.py builds
         # {tool, params, capability} from `approval`, never from the client), so
-        # a caller cannot inject a credential into it, and its params came from a
-        # prior turn whose prompt was already scrubbed at this same boundary — it
-        # is clean by construction.
+        # a caller cannot inject a credential into it. When the SAME grant was
+        # mounted on the propose turn, its params are clean already: this scrub
+        # ran on that turn's prompt before the model ever saw it.
+        #
+        # That invariant is NOT absolute, and deliberately so. A proposal made
+        # with NO grant, with a DIFFERENT grant, or before this code existed can
+        # contain a value later mounted as the confirm turn's grant. Scrubbing it
+        # here still would not help: that value was already user content, already
+        # seen by the model, and already persisted in the propose turn's
+        # transcript — so the approval row is a second copy of an existing leak,
+        # not a new one. Proposal-time scrubbing cannot help either, since it
+        # cannot know a future, different grant.
         #
         # Scrubbing it anyway is actively harmful: the app gate binds an approval
         # to the EXACT argument hash, so rewriting the approved args makes

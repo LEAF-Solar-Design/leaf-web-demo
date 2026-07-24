@@ -107,9 +107,10 @@ def _validate_credential_grant(raw: Any) -> Optional[Dict[str, Any]]:
     """Return the normalized BYO Agent SDK credential grant, or None if the shape
     is invalid. Accepts EXACTLY {kind:'api_key', api_key:<credential>} or
     {kind:'oauth', oauth_token:<credential>}; extra keys are dropped. A
-    <credential> is a whitespace-free string of at least _MIN_CREDENTIAL_LEN
-    characters (see above). The token VALUE is never logged here (nothing in this
-    module prints it)."""
+    <credential> is at least _MIN_CREDENTIAL_LEN characters and entirely
+    PRINTABLE ASCII (_CREDENTIAL_CHARS, 0x21-0x7E) — no space, no control
+    character, no non-ASCII codepoint. The token VALUE is never logged here
+    (nothing in this module prints it)."""
     if not isinstance(raw, dict):
         return None
     kind = raw.get("kind")
