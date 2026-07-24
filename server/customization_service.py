@@ -11,6 +11,7 @@ import hmac
 import json
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -20,12 +21,13 @@ from uuid import uuid4
 
 import deps
 import entitlements
+import platform_link
 from customization_authority import (
     AuthorityError, BuilderEntitlement, CustomizationAuthority,
     HmacConfirmationSigner, PublishRequest, StaffAuthority, StagedChange,
     TenantBinding,
 )
-from customization_flags import RolloutMode, enabled, mode as customization_mode
+from customization_flags import enabled
 from customization_models import ChangeSet, ChangeSetNotFoundError, ChangeState
 from customization_store import SQLiteCustomizationStore
 from platform_release_policy import PlatformReleasePolicyError, classify_path, load_policy
@@ -34,6 +36,8 @@ from tenant_id_validator import is_valid_tenant_id
 
 CONTRACT = "leaf.customization.v1"
 DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
+_configured_lock = threading.Lock()
+_configured_services: dict[str, "CustomizationService"] = {}
 
 
 class CustomizationServiceError(RuntimeError):
@@ -47,13 +51,6 @@ def database_path() -> Path:
     return Path(raw) if raw else DEFAULT_DB
 
 
-def _activation_requested() -> bool:
-    return any(
-        customization_mode(name) is not RolloutMode.OFF
-        for name in ("LEAF_CUSTOMIZATION_R5_MODE", "LEAF_CUSTOMIZATION_R6_MODE")
-    )
-
-
 def _shared_sqlite_path(path: Path) -> bool:
     """Identify the deployed shared EFS authority path.
 
@@ -62,6 +59,16 @@ def _shared_sqlite_path(path: Path) -> bool:
     """
     normalized = str(path).replace("\\", "/").rstrip("/")
     return normalized == "/data/state" or normalized.startswith("/data/state/")
+
+
+def _canonical_database_key(path: Path) -> str:
+    return os.path.normcase(str(path.expanduser().resolve(strict=False)))
+
+
+def reset_configured_services() -> None:
+    """Clear the process cache. Intended for tests that replace a DB in place."""
+    with _configured_lock:
+        _configured_services.clear()
 
 
 def _secret(name: str) -> bytes:
@@ -131,19 +138,27 @@ def _binding(tenant: Any) -> TenantBinding:
         raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
     if os.environ.get("DATABASE_URL", "").strip():
         try:
-            from platform.store import active_identity_role, resolve_active_identity_binding
-            binding = resolve_active_identity_binding("auth0", subject)
+            platform_store = platform_link.platform_store()
+            from psycopg import Error as PostgresError
+        except (ImportError, OSError, RuntimeError) as exc:
+            raise CustomizationServiceError("tenant_identity_binding_unavailable", 503) from exc
+        try:
+            binding = platform_store.resolve_active_identity_binding("auth0", subject)
             if binding is None:
                 raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
             expected_org = str(getattr(tenant, "org_id", "") or tenant_id)
             if str(binding.platform_tenant_id) != expected_org:
                 raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
-            role = active_identity_role(binding.platform_tenant_id, binding.binding_id)
+            role = platform_store.active_identity_role(
+                binding.platform_tenant_id, binding.binding_id
+            )
             return TenantBinding(tenant_id, subject, role, True)
         except CustomizationServiceError:
             raise
-        except Exception as exc:
-            raise CustomizationServiceError("tenant_identity_binding_unavailable", 503) from exc
+        except (PostgresError, OSError, RuntimeError, ValueError) as exc:
+            raise CustomizationServiceError(
+                "tenant_identity_binding_unavailable", 503
+            ) from exc
     if os.environ.get("LEAF_CUSTOMIZATION_ALLOW_STATIC_BINDINGS", "") == "1":
         raw = os.environ.get("LEAF_CUSTOMIZATION_TENANT_BINDINGS", "")
         try:
@@ -177,13 +192,21 @@ class CustomizationService:
 
     @classmethod
     def configured(cls) -> "CustomizationService":
-        if _activation_requested() and _shared_sqlite_path(database_path()):
+        path = database_path()
+        if _shared_sqlite_path(path):
             raise CustomizationServiceError(
                 "customization_shared_sqlite_unsupported", 503
             )
-        store = SQLiteCustomizationStore(database_path())
-        store.initialize()
-        return cls(store)
+        key = _canonical_database_key(path)
+        with _configured_lock:
+            cached = _configured_services.get(key)
+            if cached is not None:
+                return cached
+            store = SQLiteCustomizationStore(path)
+            store.initialize()
+            service = cls(store)
+            _configured_services[key] = service
+            return service
 
     def _authority(self) -> CustomizationAuthority:
         secret_name = (

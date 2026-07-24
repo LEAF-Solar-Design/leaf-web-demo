@@ -122,7 +122,7 @@ export class TenantChangeRepo {
     mkdirSync(workBase, { recursive: true });
     const dir = mkdtempSync(join(workBase, `leaf-change-${changeSetId}-`));
     try {
-      this.git(["worktree", "add", "--detach", dir, expectedBaseSha]);
+      this.git(["-c", "core.autocrlf=false", "worktree", "add", "--detach", dir, expectedBaseSha]);
     } catch (error) {
       // Delete only the ref reserved by this call, and only if it still names the base.
       try {
@@ -153,7 +153,7 @@ export class TenantChangeRepo {
     const workBase = this.opts.workBase ?? tmpdir();
     mkdirSync(workBase, { recursive: true });
     const dir = mkdtempSync(join(workBase, `leaf-change-${changeSetId}-`));
-    this.git(["worktree", "add", "--detach", dir, observed]);
+    this.git(["-c", "core.autocrlf=false", "worktree", "add", "--detach", dir, observed]);
     return {
       id: changeSetId,
       ref,

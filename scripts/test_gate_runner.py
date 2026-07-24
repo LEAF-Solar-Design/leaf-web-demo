@@ -87,3 +87,40 @@ def test_clean_env_scrubs_sandbox_activation_and_credentials(monkeypatch):
     cleaned = g.clean_env()
     for name in names:
         assert name not in cleaned
+
+
+def test_windows_command_shim_uses_command_interpreter_and_windows_quoting():
+    g = _load_runner()
+    original = [
+        r"C:\Program Files\nodejs\npx.cmd",
+        "tsc",
+        "--project",
+        r"C:\repo with spaces\tsconfig.json",
+    ]
+
+    command, use_shell, interpreter = g.normalize_spawn_command(
+        original,
+        os_name="nt",
+        command_interpreter=r"C:\Windows\System32\cmd.exe",
+    )
+
+    assert command == subprocess.list2cmdline(original)
+    assert use_shell is True
+    assert interpreter == r"C:\Windows\System32\cmd.exe"
+    assert original == [
+        r"C:\Program Files\nodejs\npx.cmd",
+        "tsc",
+        "--project",
+        r"C:\repo with spaces\tsconfig.json",
+    ]
+
+
+def test_spawn_normalization_leaves_linux_and_native_windows_commands_unchanged():
+    g = _load_runner()
+    linux = ["npx", "tsc", "--noEmit"]
+    windows_exe = [r"C:\nodejs\node.exe", "script.js"]
+
+    assert g.normalize_spawn_command(linux, os_name="posix") == (linux, False, None)
+    assert g.normalize_spawn_command(windows_exe, os_name="nt") == (
+        windows_exe, False, None
+    )

@@ -128,6 +128,19 @@ def _npx() -> str:
     return shutil.which("npx") or shutil.which("npx.cmd") or "npx"
 
 
+def normalize_spawn_command(
+    argv: List[str], *, os_name: Optional[str] = None,
+    command_interpreter: Optional[str] = None,
+) -> tuple[List[str] | str, bool, Optional[str]]:
+    """Route Windows command shims through cmd.exe with Windows quoting."""
+    normalized = [str(arg) for arg in argv]
+    platform_name = os.name if os_name is None else os_name
+    if platform_name != "nt" or Path(normalized[0]).suffix.lower() not in (".cmd", ".bat"):
+        return normalized, False, None
+    interpreter = command_interpreter or os.environ.get("COMSPEC") or "cmd.exe"
+    return subprocess.list2cmdline(normalized), True, interpreter
+
+
 def build_suites() -> List[Suite]:
     repo_name = REPO.name  # "leaf-web-demo"
     suites: List[Suite] = [
@@ -575,6 +588,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     fault = os.environ.get("LEAF_GATE_FAULT_INJECT", "")
     if fault and attempt == 1 and fault == f"{suite.id}:spawn":
         argv = [argv[0] + ".fault-injected-missing.exe"] + argv[1:]
+    spawn_command, use_shell, shell_executable = normalize_spawn_command(argv)
     spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
@@ -582,9 +596,10 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         logf.flush()
         try:
             proc = subprocess.run(
-                argv,
+                spawn_command,
                 cwd=str(suite.cwd), env={**clean_env(), **db_env},
                 capture_output=True, text=True, timeout=suite.timeout_s,
+                shell=use_shell, executable=shell_executable,
                 # text=True without an explicit encoding decodes with the system
                 # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and
                 # quote glyphs. A byte outside cp1252 killed the reader thread,

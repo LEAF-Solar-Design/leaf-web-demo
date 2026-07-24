@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import platform as stdlib_platform
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,12 +17,20 @@ from customization_service import CustomizationService, CustomizationServiceErro
 from customization_store import SQLiteCustomizationStore
 from customization_authority import TenantBinding
 from routers import author as author_router
+from routers import ops as ops_router
 
 
 BASE = "a" * 40
 STAGED = "b" * 40
 DIGEST = "c" * 64
 WORKSPACE = "d" * 64
+
+
+@pytest.fixture(autouse=True)
+def reset_configured_service_cache():
+    customization_service.reset_configured_services()
+    yield
+    customization_service.reset_configured_services()
 
 
 def staged_change(store, tenant_id="tenant-a", suffix="a"):
@@ -139,13 +149,94 @@ def test_rollout_off_stage_route_does_not_open_store(monkeypatch):
 
 def test_shared_efs_sqlite_cannot_activate(monkeypatch):
     monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", "/data/state/customization.db")
-    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
 
     with pytest.raises(
         CustomizationServiceError,
         match="customization_shared_sqlite_unsupported",
     ):
         CustomizationService.configured()
+
+
+def test_shared_efs_sqlite_ops_routes_never_create_database(tmp_path, monkeypatch):
+    shared = Path("/data/state") / f"codex-pr72-{tmp_path.name}.db"
+    assert not shared.exists()
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(shared))
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    monkeypatch.setenv("LEAF_OPS_SECRET", "ops-secret")
+    verify = ops_router.DeploymentVerifyRequest(
+        snapshot_id="snapshot",
+        expected_effective_catalog_release="catalog",
+        expected_platform_release="release",
+    )
+    snapshot = ops_router.DeploymentSnapshotRequest(snapshot_id="snapshot")
+
+    responses = [
+        ops_router.customization_deployment_snapshot(
+            x_ops_secret="ops-secret"
+        ),
+        ops_router.customization_deployment_verify(
+            verify, x_ops_secret="ops-secret"
+        ),
+        ops_router.customization_deployment_rollback(
+            snapshot, x_ops_secret="ops-secret"
+        ),
+        ops_router.customization_deployment_rollback_verify(
+            snapshot, x_ops_secret="ops-secret"
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [503, 503, 503, 503]
+    assert not shared.exists()
+
+
+def test_configured_memoizes_service_per_canonical_database_path(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "customization.db"
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))
+    calls = []
+    original = SQLiteCustomizationStore.initialize
+
+    def initialize_once(store):
+        calls.append(store.database_path)
+        return original(store)
+
+    monkeypatch.setattr(SQLiteCustomizationStore, "initialize", initialize_once)
+
+    first = CustomizationService.configured()
+    second = CustomizationService.configured()
+
+    assert first is second
+    assert len(calls) == 1
+
+
+def test_database_binding_uses_collision_safe_platform_alias(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost/test")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setitem(sys.modules, "platform", stdlib_platform)
+    store = customization_service.platform_link.platform_store()
+    binding = SimpleNamespace(
+        platform_tenant_id="tenant-a", binding_id="binding-a"
+    )
+    monkeypatch.setattr(
+        store, "resolve_active_identity_binding", lambda authority, subject: binding
+    )
+    monkeypatch.setattr(
+        store, "active_identity_role", lambda tenant_id, binding_id: "owner"
+    )
+    tenant = customization_service.deps.TenantContext(
+        "tenant-a", org_id="tenant-a", subject="auth0|user"
+    )
+
+    resolved = customization_service._binding(tenant)
+
+    assert resolved == TenantBinding(
+        "tenant-a", "auth0|user", "owner", True
+    )
+    assert store.__name__ == "leaf_platform.store"
 
 
 def test_durable_confirmation_is_single_use(tmp_path):

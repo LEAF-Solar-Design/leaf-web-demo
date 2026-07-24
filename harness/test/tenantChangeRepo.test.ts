@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,6 +12,10 @@ const CHANGE_B = "22222222-2222-4222-8222-222222222222";
 
 function git(dir: string, args: string[]): string {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+}
+
+function gitBlob(dir: string, revision: string, path: string): Buffer {
+  return execFileSync("git", ["cat-file", "blob", `${revision}:${path}`], { cwd: dir });
 }
 
 describe("TenantChangeRepo", () => {
@@ -69,6 +73,30 @@ describe("TenantChangeRepo", () => {
     expect(changes.readRef(second.ref)).toBe(base);
     changes.cleanupWorktree(first);
     changes.cleanupWorktree(second);
+  });
+
+  it("materializes create and resume worktrees with blob-exact LF bytes", () => {
+    git(repoDir, ["config", "core.autocrlf", "true"]);
+    const base = git(repoDir, ["rev-parse", "main"]);
+    const changes = new TenantChangeRepo({ repoDir, workBase, identity: IDENTITY });
+    const created = changes.create(CHANGE_A, base);
+
+    expect(readFileSync(join(created.dir, "registry.json")))
+      .toEqual(gitBlob(repoDir, base, "registry.json"));
+    expect(readFileSync(join(created.dir, "registry.json"), "utf8")).not.toContain("\r\n");
+
+    writeFileSync(join(created.dir, "lf-only.txt"), "first\nsecond\n", "utf8");
+    const staged = changes.stageCommit(created, "stage LF bytes");
+    changes.cleanupWorktree(created);
+
+    const resumed = changes.createOrResume(CHANGE_A, base);
+    expect(resumed.stagedSha).toBe(staged);
+    expect(readFileSync(join(resumed.dir, "registry.json")))
+      .toEqual(gitBlob(repoDir, staged, "registry.json"));
+    expect(readFileSync(join(resumed.dir, "lf-only.txt")))
+      .toEqual(gitBlob(repoDir, staged, "lf-only.txt"));
+    expect(readFileSync(join(resumed.dir, "lf-only.txt"), "utf8")).toBe("first\nsecond\n");
+    changes.cleanupWorktree(resumed);
   });
 
   it("allows only one writer from the same main base to publish", () => {
