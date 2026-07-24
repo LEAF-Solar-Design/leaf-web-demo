@@ -25,6 +25,9 @@ import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import {
+  confirmRunIntent, createRunIntentState, dismissRunIntent, stageRunIntent,
+} from './runIntent.js'
 import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
@@ -302,6 +305,16 @@ export default function App() {
   const toastSeqRef = useRef(0)         // monotonic toast ids
   const cannedSeq = useRef(0)           // supersedes an in-flight tour beat (typing + dispatch)
   const runSeqRef = useRef(0)           // Esc-interrupt bumps this to detach a run
+  const runIntentSessionRef = useRef(null)
+  if (!runIntentSessionRef.current) {
+    const randomId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
+    runIntentSessionRef.current = `catalog-${randomId}`
+  }
+  const runIntentStateRef = useRef(null)
+  if (!runIntentStateRef.current) {
+    runIntentStateRef.current = createRunIntentState(runIntentSessionRef.current)
+  }
+  const runIntentSeqRef = useRef(0)
 
   const isEditFixture = mock && fixtureParam === 'edit'
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
@@ -935,7 +948,37 @@ export default function App() {
     }
   }, [orgId, onOpenProject])
 
-  const onRun = useCallback(async (tool, params) => {
+  const dismissRoute = useCallback(() => {
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+    setRoute(null)
+  }, [])
+
+  const prepareRunParams = useCallback((tool, params) => {
+    const isWrite = (tool.capabilities || []).includes('drawing.write')
+    return selectedHandle
+      ? { ...(params || {}), target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
+      : (params || {})
+  }, [selectedHandle])
+
+  const onRequestCatalogRun = useCallback((tool, params) => {
+    const isWrite = (tool.capabilities || []).includes('drawing.write')
+    if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
+    const prepared = prepareRunParams(tool, params)
+    const staged = stageRunIntent(runIntentStateRef.current, {
+      intentId: `${runIntentSessionRef.current}:${++runIntentSeqRef.current}`,
+      toolName: tool.name,
+      params: prepared,
+    })
+    runIntentStateRef.current = staged.state
+    setRouteErr(null)
+    setRoute({
+      lane: 'run', tool: tool.name, params: staged.intent.params, confidence: 1,
+      rationale: 'Catalog selection. Confirm the exact tool and parameters before it runs.',
+      alternatives: [], runIntent: staged.intent,
+    })
+  }, [prepareRunParams, running, previewing, writeLocked, canRunWrite])
+
+  const onRun = useCallback(async (tool, params, { intentConfirmed = false } = {}) => {
     // Read-only version preview never mutates head — Run is disabled while previewing.
     if (previewing) return
     // Single-writer lock (item 3): write tools are suppressed while another
@@ -952,14 +995,11 @@ export default function App() {
     setRunning(true); setRunErr(null); setResult(null)
     setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); runningSinceRef.current = null
     setOverlayStale(false); setCurrentJobId(null); setRefreshFail(null)
-    lastRunRef.current = { tool, params }
+    const merged = intentConfirmed ? params : prepareRunParams(tool, params)
+    lastRunRef.current = { tool, params: merged }
     // feed the picked entity to the tool so an edit tool can target it. A write
     // tool (delete-marked-panel) reads `handle`, so map the selection onto it
     // too — that makes the pending ghost's previewed deletion the real target.
-    const isWrite = (tool.capabilities || []).includes('drawing.write')
-    const merged = selectedHandle
-      ? { ...(params || {}), target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
-      : params
     try {
       let env
       if (mock) {
@@ -1035,13 +1075,29 @@ export default function App() {
       }
     }
   }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
-      loadCheckout, writeLocked, openProjectId, orgId, rehydrate, showToast, viewResult])
+      loadCheckout, writeLocked, openProjectId, orgId, rehydrate, showToast, viewResult, prepareRunParams])
+
+  const onConfirmCatalogRun = useCallback((intent, tool, params) => {
+    const confirmed = confirmRunIntent(runIntentStateRef.current, {
+      intentId: intent?.intentId,
+      sessionId: intent?.sessionId,
+      toolName: tool?.name,
+      params,
+    })
+    runIntentStateRef.current = confirmed.state
+    if (!confirmed.ok) {
+      setRoute(null)
+      setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
+      return
+    }
+    onRun(tool, confirmed.execution.params, { intentConfirmed: true })
+  }, [onRun])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
     const last = lastRunRef.current
-    if (last) onRun(last.tool, last.params)
-  }, [onRun])
+    if (last) onRequestCatalogRun(last.tool, last.params)
+  }, [onRequestCatalogRun])
 
   // An agent-dispatched job (job_linked event) -> the SAME §7 attach
   // affordance the tab-close re-attach uses: subscribe to the job, stream
@@ -1186,6 +1242,7 @@ export default function App() {
   const onDispatch = useCallback(async (override) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     // Slash fast-path: "/name" is an EXPLICIT invocation — no NL router call.
     // The route decision strip still asks for confirmation before anything runs.
     if (text.startsWith('/')) {
@@ -1284,6 +1341,7 @@ export default function App() {
   // Typing invalidates a shown route/failure — the decision must match the text.
   const onPromptChange = useCallback((v) => {
     setPrompt(v)
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     setRoute((r) => (r ? null : r))
     setRouteErr((e) => (e ? null : e))
   }, [])
@@ -1507,7 +1565,7 @@ export default function App() {
       if (e.key === 'Escape') {
         if (drawer) { setDrawer(null); return }
         if (historyOpen) { setHistoryOpen(false); return }
-        if (route) { setRoute(null); return }
+        if (route) { dismissRoute(); return }
         if (routeErr || runErr) { setRouteErr(null); setRunErr(null); return }
         if (running) { interruptRun(); return }
         if (selectedHandle) { setSelectedHandle(null); return }
@@ -1550,7 +1608,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, onDispatch, openProjectId, onCloseProject, rTarget,
-      loadHistory, retryTools, loadCatalog, onRetryViewerRefresh])
+      loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
@@ -1798,7 +1856,7 @@ export default function App() {
                 retryKey={rTarget === 'tools'}
                 running={running || !!previewing}
                 selectedTool={selectedTool}
-                onRun={onRun}
+                onRequestRun={onRequestCatalogRun}
                 onOpenTool={setOpenTool}
               />
             </Section>
@@ -1830,7 +1888,7 @@ export default function App() {
               retryKey={rTarget === 'tools'}
               running={running || !!previewing}
               selectedTool={selectedTool}
-              onRun={onRun}
+              onRequestRun={onRequestCatalogRun}
               onOpenTool={setOpenTool}
             />
           </Section>
@@ -2163,9 +2221,10 @@ export default function App() {
             writeLocked={writeLocked}
             writeEntitled={canRunWrite}
             onRun={onRun}
+            onConfirmIntent={onConfirmCatalogRun}
             onPickAlternative={onPickAlternative}
             onOpenAuthor={onOpenAuthor}
-            onDismiss={() => setRoute(null)}
+            onDismiss={dismissRoute}
           />
           <PromptBox
             value={prompt}
