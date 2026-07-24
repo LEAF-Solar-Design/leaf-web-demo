@@ -82,7 +82,7 @@ export default function ConversePanel({
       onEvent: (env) => {
         if (env.type === 'job_linked' && env.data?.job_id && !jobSeenRef.current.has(env.data.job_id)) {
           jobSeenRef.current.add(env.data.job_id)
-          if (onJobLinked) onJobLinked() // the rail shows the agent-dispatched job
+          if (onJobLinked) onJobLinked(env.data.job_id, env.data.tool) // the rail shows the agent-dispatched job
         }
         setEvents((prev) => [...prev, env])
       },
