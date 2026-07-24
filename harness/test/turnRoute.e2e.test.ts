@@ -251,6 +251,59 @@ describe("POST /turn - bad body", () => {
 });
 
 // --------------------------------------------------------------------------- //
+// Mount-your-LLM validation: an unknown model or malformed credential_grant is
+// a 400 BEFORE the runner is touched (defense in depth over the app's own gate).
+// --------------------------------------------------------------------------- //
+
+describe("POST /turn - mount your LLM validation", () => {
+  it("unknown model -> 400 (never reaches the runner)", async () => {
+    const neverCalled: ConverseRunner = {
+      async *runTurn(): AsyncGenerator<HarnessTurnEvent> {
+        throw new Error("must not be reached: invalid model should reject first");
+      },
+    };
+    const { server: s, baseUrl } = listen(basePorts(neverCalled));
+    server = s;
+    const res = await postTurn(baseUrl, validBody({ model: "gpt-4o" }));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: { message?: string } };
+    expect(String(body.error?.message)).toContain("model must be one of");
+  });
+
+  it("malformed credential_grant -> 400", async () => {
+    const { server: s, baseUrl } = listen(basePorts());
+    server = s;
+    const res = await postTurn(baseUrl, validBody({ credential_grant: { kind: "api_key" } }));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: { message?: string } };
+    expect(String(body.error?.message)).toContain("credential_grant");
+  });
+
+  it("a valid model + credential_grant pass validation and reach the runner", async () => {
+    let seen: ConverseTurnInput | undefined;
+    const capturing: ConverseRunner = {
+      async *runTurn(input: ConverseTurnInput): AsyncGenerator<HarnessTurnEvent> {
+        seen = input;
+        yield { type: "turn_complete", data: { stop_reason: "end_turn" } };
+      },
+    };
+    const { server: s, baseUrl } = listen(basePorts(capturing));
+    server = s;
+    const res = await postTurn(
+      baseUrl,
+      validBody({
+        model: "claude-opus-4-8",
+        credential_grant: { kind: "oauth", oauth_token: "sk-ant-oat-xyz" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(seen?.model).toBe("claude-opus-4-8");
+    expect(seen?.credential_grant).toEqual({ kind: "oauth", oauth_token: "sk-ant-oat-xyz" });
+  });
+});
+
+// --------------------------------------------------------------------------- //
 // Mid-stream throw -> in-band error + turn_complete(stop_reason:'error').
 // --------------------------------------------------------------------------- //
 

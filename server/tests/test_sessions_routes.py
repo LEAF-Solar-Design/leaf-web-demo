@@ -203,9 +203,11 @@ def test_messages_text_success_202_calls_start_turn(client, monkeypatch):
     sess = _seed_session()
     captured = {}
 
-    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None, classifier_hint=None):
+    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
+                         classifier_hint=None, model=None, credential_grant=None):
         captured.update(tenant_id=tenant_id, session_id=session_id, text=text,
-                        confirm=confirm, classifier_hint=classifier_hint)
+                        confirm=confirm, classifier_hint=classifier_hint,
+                        model=model, credential_grant=credential_grant)
         return "turn-abc"
 
     monkeypatch.setattr(turn_runner, "start_turn", _fake_start_turn)

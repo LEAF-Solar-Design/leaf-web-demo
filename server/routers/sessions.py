@@ -47,10 +47,11 @@ see that file's ``approve()``/``postMessage()`` comments — so requiring
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -61,6 +62,52 @@ import turn_runner
 from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 
 router = APIRouter()
+
+
+# --------------------------------------------------------------------------- #
+# "Mount your LLM" input validation (model allowlist + BYO credential hygiene).
+# --------------------------------------------------------------------------- #
+def _invalid_model_response(model: Any) -> JSONResponse:
+    allowed = ", ".join(sorted(turn_runner.ALLOWED_MODELS))
+    return error_response(
+        ErrorCode.BAD_PARAMS,
+        f"model {model!r} is not allowed; choose one of: {allowed}",
+        retryable=False, status_code=400,
+    )
+
+
+def _validate_credential_grant(raw: Any) -> Optional[Dict[str, Any]]:
+    """Return the normalized BYO Agent SDK credential grant, or None if the shape
+    is invalid. Accepts EXACTLY {kind:'api_key', api_key:<non-empty str>} or
+    {kind:'oauth', oauth_token:<non-empty str>}; extra keys are dropped. The token
+    VALUE is never logged here (nothing in this module prints it)."""
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind")
+    if kind == "api_key":
+        tok = raw.get("api_key")
+        if isinstance(tok, str) and tok.strip():
+            return {"kind": "api_key", "api_key": tok}
+    elif kind == "oauth":
+        tok = raw.get("oauth_token")
+        if isinstance(tok, str) and tok.strip():
+            return {"kind": "oauth", "oauth_token": tok}
+    return None
+
+
+def _credential_insecure_transport(request: Request) -> bool:
+    """True when a BYO credential must be REJECTED because the request did not
+    arrive over TLS. The effective scheme is the proxy-set X-Forwarded-Proto when
+    present (TLS is terminated upstream in prod), else the request scheme. The
+    dev/test opt-out LEAF_ALLOW_INSECURE_CREDENTIAL=1 must be set EXPLICITLY —
+    production leaves it unset and enforces TLS by default (never weakened)."""
+    if os.environ.get("LEAF_ALLOW_INSECURE_CREDENTIAL", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return False
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    proto = forwarded.split(",")[0].strip().lower() if forwarded else request.url.scheme.lower()
+    return proto != "https"
 
 # SSE polling cadence (§2.1.3): cheap poll of the durable event log, a ": ping"
 # comment to keep idle connections alive through proxies, and a bounded
@@ -93,12 +140,20 @@ _RETRYABLE_BY_CODE = {
 
 class CreateSessionRequest(BaseModel):
     drawing_id: str
+    # Per-session "mount your LLM" model choice (persisted). Validated against the
+    # allowlist; overrides the runner env default for this session's turns.
+    model: Optional[str] = None
 
 
 class MessageRequest(BaseModel):
     text: Optional[str] = None
     confirm: Optional[Dict[str, Any]] = None
     classifier_hint: Optional[Dict[str, Any]] = None
+    # Per-turn model override (validated); falls back to the session's stored model.
+    model: Optional[str] = None
+    # Optional bring-your-own Agent SDK credential for THIS turn only. Ephemeral:
+    # validated for shape, forwarded over TLS, never persisted, never logged.
+    credential_grant: Optional[Dict[str, Any]] = None
 
 
 def _session_not_found(session_id: str) -> JSONResponse:
@@ -134,13 +189,17 @@ def _turn_rejected_response(exc: "turn_runner.TurnRejected") -> JSONResponse:
 def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_tenant)):
     """Idempotent per (tenant, drawing_id) — a repeat POST with the same
     drawing_id returns the SAME session (session_store's UNIQUE constraint +
-    INSERT OR IGNORE, not re-derived here)."""
-    sess = session_store.get_or_create_session(str(tenant), req.drawing_id)
+    INSERT OR IGNORE, not re-derived here). An optional `model` (validated against
+    the allowlist) is persisted as the session's per-session model choice."""
+    if req.model is not None and not turn_runner.is_allowed_model(req.model):
+        return _invalid_model_response(req.model)
+    sess = session_store.get_or_create_session(str(tenant), req.drawing_id, req.model)
     return deps.tenant_echo(
         with_envelope_fields({
             "session_id": sess["session_id"],
             "status": sess["status"],
             "created_at": sess["created_at"],
+            "model": sess.get("model"),
         }),
         tenant,
     )
@@ -150,7 +209,8 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_tenant
 # POST /api/sessions/{id}/messages
 # --------------------------------------------------------------------------- #
 @router.post("/api/sessions/{session_id}/messages")
-def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.require_tenant)):
+def post_message(session_id: str, req: MessageRequest, request: Request,
+                 tenant=Depends(deps.require_tenant)):
     # 1. ownership guard (404-not-403, no existence leak).
     if _require_owned_session(session_id, tenant) is None:
         return _session_not_found(session_id)
@@ -163,6 +223,29 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
             ErrorCode.BAD_PARAMS, "exactly one of `text` or `confirm` is required",
             retryable=False, status_code=409,
         )
+
+    # 2b. "Mount your LLM" input hygiene — validated BEFORE the confirm consume so
+    # a bad model/credential never burns an approval. Model: allowlist-checked.
+    # Credential: TLS-gated (a BYO token may only ride an encrypted request) and
+    # shape-checked; the validated (never the raw) grant is forwarded to the turn.
+    if req.model is not None and not turn_runner.is_allowed_model(req.model):
+        return _invalid_model_response(req.model)
+    validated_grant: Optional[Dict[str, Any]] = None
+    if req.credential_grant is not None:
+        if _credential_insecure_transport(request):
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                "credential_grant requires a TLS (https) request",
+                retryable=False, status_code=400,
+            )
+        validated_grant = _validate_credential_grant(req.credential_grant)
+        if validated_grant is None:
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                "credential_grant must be {kind:'api_key',api_key} or "
+                "{kind:'oauth',oauth_token}",
+                retryable=False, status_code=400,
+            )
 
     # 3. entitlement gate (§17): mirrors routers/author.py:76-78 — the tenant's
     # tier must grant the `converse` capability. Off-auth/demo grants everything.
@@ -235,6 +318,7 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
         turn_id = turn_runner.start_turn(
             tenant, session_id,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
+            model=req.model, credential_grant=validated_grant,
         )
     except turn_runner.TurnBusy:
         return error_response(

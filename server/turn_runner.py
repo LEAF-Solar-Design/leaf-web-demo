@@ -74,6 +74,22 @@ from envelopes import ErrorCode
 # via monkeypatch/env without needing to re-import this module — same posture
 # as jobs.py's job_max_s()/heartbeat_stale_s()).
 # --------------------------------------------------------------------------- #
+# The per-session "mount your LLM" allowlist (the Claude family the Agent SDK
+# runner supports). Keep in lockstep with harness/src/ports/modelAllowlist.ts.
+# A true multi-provider (OpenAI/Gemini) adapter is an explicit, separate follow-up.
+ALLOWED_MODELS = frozenset({
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+    "claude-fable-5",
+})
+
+
+def is_allowed_model(model: Optional[str]) -> bool:
+    """True iff `model` is one of the allowed Claude-family ids."""
+    return isinstance(model, str) and model in ALLOWED_MODELS
+
+
 def turn_max_s() -> float:
     return float(os.environ.get("TURN_MAX_S", "300"))
 
@@ -192,7 +208,9 @@ def _safe_json(resp: "requests.Response") -> Optional[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                confirm: Optional[Dict[str, Any]] = None,
-               classifier_hint: Optional[Dict[str, Any]] = None) -> str:
+               classifier_hint: Optional[Dict[str, Any]] = None,
+               model: Optional[str] = None,
+               credential_grant: Optional[Dict[str, Any]] = None) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
     # string tenant_id used on the harness wire. Off-auth callers are plain
@@ -237,6 +255,17 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         payload["text"] = text
     if confirm is not None:
         payload["confirm"] = confirm
+
+    # "Mount your LLM" (additive wire fields, only present when in play):
+    #   - model: the per-turn override wins, else the session's stored model; an
+    #     unknown id is dropped so the harness applies its env default rather than
+    #     erroring (the app router already 400s unknown ids at the entry).
+    #   - credential_grant: forwarded verbatim, NEVER logged, NEVER persisted.
+    effective_model = model if model is not None else sess.get("model")
+    if is_allowed_model(effective_model):
+        payload["model"] = effective_model
+    if credential_grant is not None:
+        payload["credential_grant"] = credential_grant
 
     try:
         resp = requests.post(f"{harness_url}/turn", json=payload,

@@ -50,6 +50,16 @@ export interface HarnessTurnEvent {
 }
 
 /**
+ * A per-session bring-your-own Agent SDK credential ("mount your LLM", Concern
+ * 2), in the snake_case shape the app forwards on the wire. Mapped to the
+ * internal camelCase `AgentGrant` by ports/wireGrant.ts, then injected into the
+ * runner's scrubbed child env for THIS turn only. NEVER logged, NEVER persisted.
+ */
+export type WireAgentGrant =
+  | { kind: "api_key"; api_key: string }
+  | { kind: "oauth"; oauth_token: string };
+
+/**
  * Body of `POST /turn`. `messages` is prior turn context, bounded and
  * assembled by the turn engine (never the full unbounded transcript).
  * Exactly one of `text` / `confirm` drives the turn — a fresh user message,
@@ -74,6 +84,20 @@ export interface ConverseTurnInput {
       capability?: string;
     };
   };
+  /**
+   * OPTIONAL per-session model override ("mount your LLM"). When present it
+   * overrides the runner's env-default model (LEAF_SPINE_MODEL, else
+   * claude-sonnet-5) for THIS turn. The app validates it against the allowed
+   * Claude family (server/turn_runner.py ALLOWED_MODELS); the harness validates
+   * again defensively (ports/modelAllowlist.ts) before it reaches sdk.query().
+   */
+  model?: string;
+  /**
+   * OPTIONAL per-session bring-your-own credential. When present the turn runs on
+   * THIS grant (injected into the scrubbed runner env) instead of the tenant's
+   * linked grant. Ephemeral: never logged, never persisted in session state.
+   */
+  credential_grant?: WireAgentGrant;
 }
 
 /**

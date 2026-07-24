@@ -750,6 +750,125 @@ def test_entitlement_denied_403_before_any_harness_traffic_or_events(client, wir
     assert session_store.recent_events(sess["session_id"], 10) == []
 
 
+# =========================================================================== #
+# "Mount your LLM" — per-session model + bring-your-own credential on the wire
+# =========================================================================== #
+def _create_session_via_client(client, tenant: str, drawing: str, model=None):
+    body = {"drawing_id": drawing}
+    if model is not None:
+        body["model"] = model
+    return client.post("/api/sessions", json=body, headers=_h(tenant))
+
+
+def test_create_session_persists_and_returns_model(client):
+    r = _create_session_via_client(client, "tenant-model", "dwg-model-1", "claude-opus-4-8")
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "claude-opus-4-8"
+    # Re-attach (idempotent) reflects the stored model.
+    r2 = _create_session_via_client(client, "tenant-model", "dwg-model-1")
+    assert r2.json()["session_id"] == r.json()["session_id"]
+    assert r2.json()["model"] == "claude-opus-4-8"
+
+
+def test_create_session_rejects_unknown_model(client):
+    r = _create_session_via_client(client, "tenant-model", "dwg-bad-model", "gpt-4o")
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+
+
+def test_stored_session_model_reaches_the_turn_wire(client, wired):
+    """A session created with a model forwards THAT model on POST /turn even when
+    the message itself carries none — the env default is thus overridden."""
+    url, state = wired
+    r = _create_session_via_client(client, "tenant-model", "dwg-wire-1", "claude-haiku-4-5")
+    sess = {"session_id": r.json()["session_id"], "tenant_id": "tenant-model",
+            "drawing_id": "dwg-wire-1"}
+    assert _post_text(client, sess, text="hi").status_code == 202
+    _wait_terminal(sess["session_id"])
+    assert state.bodies[0]["model"] == "claude-haiku-4-5"
+
+
+def test_per_turn_model_override_wins_over_stored(client, wired):
+    url, state = wired
+    r = _create_session_via_client(client, "tenant-model", "dwg-wire-2", "claude-sonnet-5")
+    sid = r.json()["session_id"]
+    m = client.post(f"/api/sessions/{sid}/messages",
+                    json={"text": "hi", "model": "claude-opus-4-8"},
+                    headers=_h("tenant-model"))
+    assert m.status_code == 202, m.text
+    _wait_terminal(sid)
+    assert state.bodies[0]["model"] == "claude-opus-4-8"
+
+
+def test_no_model_anywhere_omits_model_on_the_wire(client, wired):
+    """A session + message with no model leaves the wire body model-free, so the
+    frozen no-model shape (and the harness env default) is preserved."""
+    url, state = wired
+    sess = _new_session()
+    assert _post_text(client, sess, text="hi").status_code == 202
+    _wait_terminal(sess["session_id"])
+    assert "model" not in state.bodies[0]
+
+
+def test_message_rejects_unknown_model(client, wired):
+    url, state = wired
+    sess = _new_session()
+    r = client.post(f"/api/sessions/{sess['session_id']}/messages",
+                    json={"text": "hi", "model": "llama-3"}, headers=_h(sess["tenant_id"]))
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert state.hits == 0  # rejected before any harness traffic
+
+
+_BYO_SECRET = "sk-ant-api-BYO-DO-NOT-LEAK-4417"
+
+
+def test_byo_credential_over_tls_reaches_wire_but_not_session_state(client, wired):
+    """A BYO credential on an https-forwarded request rides the POST /turn body
+    (so the runner can use it) but is NEVER written into the durable transcript."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+    # Flowed to the harness…
+    assert state.bodies[0]["credential_grant"] == {"kind": "api_key", "api_key": _BYO_SECRET}
+    # …but never into serialized session state (transcript events).
+    events = session_store.recent_events(sess["session_id"], 200)
+    assert _BYO_SECRET not in json.dumps(events)
+
+
+def test_byo_credential_over_plain_http_is_rejected(client, wired):
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "oauth", "oauth_token": _BYO_SECRET}},
+        headers=_h(sess["tenant_id"]),  # no X-Forwarded-Proto: https
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert "TLS" in r.json()["error"]["message"]
+    assert state.hits == 0
+
+
+def test_byo_credential_malformed_is_rejected(client, wired):
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key"}},  # no token
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert state.hits == 0
+
+
 # --------------------------------------------------------------------------- #
 # script runner
 # --------------------------------------------------------------------------- #
