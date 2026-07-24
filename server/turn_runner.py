@@ -90,6 +90,43 @@ def is_allowed_model(model: Optional[str]) -> bool:
     return isinstance(model, str) and model in ALLOWED_MODELS
 
 
+# Keep in step with harness/src/redact.ts MIN_REDACTABLE_SECRET_LEN and with
+# routers/sessions.py _MIN_CREDENTIAL_LEN.
+_MIN_REDACTABLE_SECRET_LEN = 24
+
+
+def _grant_secret(grant: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The token value carried by a validated credential grant, if it is long and
+    opaque enough to strip by literal match. Short or whitespace-bearing values
+    are never eligible: replacing them would rewrite ordinary prose instead of a
+    secret. Validation upstream already enforces the same floor."""
+    if not isinstance(grant, dict):
+        return None
+    tok = grant.get("api_key") if grant.get("kind") == "api_key" else grant.get("oauth_token")
+    if (isinstance(tok, str) and len(tok) >= _MIN_REDACTABLE_SECRET_LEN
+            and not any(c.isspace() for c in tok)):
+        return tok
+    return None
+
+
+def _scrub_secret(value: Optional[str], secret: Optional[str]) -> Optional[str]:
+    """Remove a bring-your-own credential the user pasted into their own prompt.
+
+    THIS is the boundary that matters: `append_event` below writes the user's
+    text into the durable transcript BEFORE the harness is ever called, so a
+    harness-side scrub cannot keep the value out of app storage (sol-critic PR
+    #123 round 6). Scrubbing here covers the app transcript AND the wire body,
+    and because the harness's prior-turn `messages` are read back out of this
+    same transcript, earlier turns stay clean too.
+
+    Only the BYO grant is strippable here — the tenant's linked grant is resolved
+    inside the harness and this process never sees it, which is why the harness
+    keeps its own equivalent pass."""
+    if not value or not secret:
+        return value
+    return value.replace(secret, "[REDACTED]")
+
+
 def turn_max_s() -> float:
     return float(os.environ.get("TURN_MAX_S", "300"))
 
@@ -228,6 +265,12 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     # message OR the resume of a halted turn), plus the optional dispatcher
     # hint — classifier_hint is recorded here for the durable log ONLY, it is
     # NOT part of ConverseTurnInput (frozen shape has no such field).
+    # Strip a pasted BYO credential BEFORE the transcript append below, so it is
+    # never durable here and never rides the wire. See _scrub_secret.
+    _secret = _grant_secret(credential_grant)
+    if _secret:
+        text = _scrub_secret(text, _secret)
+
     user_data: Dict[str, Any] = {}
     if text is not None:
         user_data["text"] = text

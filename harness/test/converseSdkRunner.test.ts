@@ -268,6 +268,42 @@ describe("ConverseSdkRunner — env scrubbing", () => {
 });
 
 // --------------------------------------------------------------------------- //
+// Credential redaction on a throw (sol-critic PR #123 round 6, non-blocking 4:
+// this security boundary was correct by inspection but had no direct test).
+// --------------------------------------------------------------------------- //
+
+describe("ConverseSdkRunner — a throw never carries the grant out", () => {
+  // Clears the app's 24-char floor, but is deliberately invisible to TOKENISH
+  // (not sk-ant-*, under 40 chars) so this proves VALUE-based redaction rather
+  // than passing on the pattern.
+  const GRANT = "linked-grant-value-98765!";
+
+  it("strips the held grant from an SDK error that quotes it", async () => {
+    const mock = makeMockSdk([]);
+    // Node/undici header validation is the realistic case: the message embeds
+    // the offending header VALUE, which here is the credential. Override only
+    // `query` so the rest of the module keeps its real shape.
+    const base = await mock.sdkImport();
+    mock.sdkImport = async () =>
+      Object.assign({}, base, {
+        query: () => {
+          throw new Error(`Invalid header value: ${GRANT}`);
+        },
+      });
+
+    const runner = runnerWith(mock, {
+      grant: { kind: "oauth", oauthToken: GRANT },
+    });
+
+    const events = await collect(runner, makeInput()).catch((e: Error) => e);
+    const serialized = JSON.stringify(events) + String(events);
+
+    expect(serialized).not.toContain(GRANT);
+    expect(serialized).toContain("[REDACTED]");
+  });
+});
+
+// --------------------------------------------------------------------------- //
 // Options wiring (resume / streaming / tool allowlist / model)
 // --------------------------------------------------------------------------- //
 

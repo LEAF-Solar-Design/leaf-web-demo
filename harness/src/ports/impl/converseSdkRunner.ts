@@ -372,10 +372,13 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       // (e.g. Node/undici header-validation errors quote the offending value),
       // so an unredacted fault would persist and publish the caller's token.
       //
-      // Scrub THIS RUN'S ACTUAL grant value, not just token-shaped text: the app
-      // accepts any non-empty string as a BYO credential, so a short one such as
-      // "short-key!" does not match TOKENISH and the pattern pass alone would
-      // leak it. (sol-critic PR #117 round 1 blocker 2, round 2 blocker 1.)
+      // Scrub THIS RUN'S ACTUAL grant value, not just token-shaped text: a
+      // credential can clear the app's 24-char floor while still being too short
+      // for TOKENISH (which wants sk-ant-* or 40+ chars), so the pattern pass
+      // alone would leak it. This is also the ONE place the tenant's LINKED
+      // grant can be stripped — the app never sees that value, so its own
+      // input-side scrub cannot cover it.
+      // (sol-critic PR #117 round 1 blocker 2, round 2 blocker 1.)
       if (!timedOut && !terminalError) {
         streamFault = redactSecrets((e as Error).message, grantSecrets(this.grant));
       }

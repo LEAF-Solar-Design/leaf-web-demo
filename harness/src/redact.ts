@@ -14,13 +14,12 @@ export function redactTokens(s: string): string {
 /**
  * Scrub a KNOWN secret value by literal match, then apply the pattern pass.
  *
- * The pattern alone is not sufficient for bring-your-own credentials: the app
- * accepts ANY non-empty string as api_key/oauth_token
- * (server/routers/sessions.py _validate_credential_grant), so a short or
- * unusually-shaped token — "short-key!", "hunter2" — does not match TOKENISH and
- * would survive. Wherever the caller actually HOLDS the secret, matching it
- * literally is exact instead of heuristic. (sol-critic PR #117 round 2,
- * blocker 1.)
+ * The pattern alone is not sufficient for bring-your-own credentials. TOKENISH
+ * only recognizes `sk-ant-*` or a 40+ character run, so a shorter credential —
+ * the app's floor is 24 (server/routers/sessions.py _MIN_CREDENTIAL_LEN) — can
+ * clear validation and still slip past the regex. Wherever the caller actually
+ * HOLDS the secret, matching it literally is exact instead of heuristic.
+ * (sol-critic PR #117 round 2, blocker 1.)
  *
  * Empty/whitespace-only secrets are ignored so we never replace every empty
  * string in the message. Callers pass the pattern pass as a backstop for

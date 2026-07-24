@@ -851,6 +851,38 @@ def test_byo_credential_over_tls_reaches_wire_but_not_session_state(
     assert _BYO_SECRET not in json.dumps(events)
 
 
+def test_pasted_credential_is_stripped_before_the_transcript_append(
+    client, wired, behind_trusted_proxy,
+):
+    """A user who pastes their own key into the PROMPT must not have it persisted.
+
+    sol-critic PR #123 round 6: turn_runner appends the user's text to the durable
+    transcript BEFORE the harness is called, so a harness-side scrub cannot keep
+    the value out of app storage. The strip has to happen here, and covers the
+    wire body too because both derive from the same scrubbed text."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": f"please use {_BYO_SECRET} for this",
+              "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    # Not in the durable transcript…
+    events = session_store.recent_events(sess["session_id"], 200)
+    dumped = json.dumps(events)
+    assert _BYO_SECRET not in dumped
+    assert "[REDACTED]" in dumped, "the turn_started text should be scrubbed, not dropped"
+
+    # …and not in the wire body's TEXT either (the grant field itself still
+    # carries it — that is the whole point of the mount).
+    assert _BYO_SECRET not in state.bodies[0].get("text", "")
+    assert state.bodies[0]["credential_grant"]["api_key"] == _BYO_SECRET
+
+
 def test_byo_credential_over_plain_http_is_rejected(client, wired):
     url, state = wired
     sess = _new_session()
