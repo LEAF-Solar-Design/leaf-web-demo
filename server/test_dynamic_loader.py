@@ -30,6 +30,8 @@ import jsonschema
 import pytest
 import requests
 
+from _test_run_confirmation import confirmed_requests_payload
+
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
 ENGINE_SCHEMA = json.loads((PROJECT_ROOT / "engine" / "envelope_schema.json").read_text(encoding="utf-8"))
@@ -128,9 +130,13 @@ def stack(tmp_path_factory):
         # CPU-starved past the poll timeout (gate-runner flake follow-up). Force it now,
         # best-effort, so the timed assertions below run against a warm broker.
         try:
+            app_url = f"http://127.0.0.1:{app_port}"
+            headers = {"X-Tenant-Id": "warmup"}
             requests.post(f"http://127.0.0.1:{app_port}/api/run?wait=1",
-                          json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo"},
-                          headers={"X-Tenant-Id": "warmup"}, timeout=120)
+                          json=confirmed_requests_payload(
+                              app_url, "count-by-layer", dwg="rooftop_demo",
+                              headers=headers),
+                          headers=headers, timeout=120)
         except Exception:
             pass
         yield {"app": f"http://127.0.0.1:{app_port}", "broker": f"http://127.0.0.1:{broker_port}"}
@@ -141,7 +147,8 @@ def stack(tmp_path_factory):
 
 def run_wait(stack, tool, params=None):
     r = requests.post(f"{stack['app']}/api/run?wait=1",
-                      json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo"},
+                      json=confirmed_requests_payload(
+                          stack["app"], tool, params, "rooftop_demo"),
                       timeout=120)
     return r
 

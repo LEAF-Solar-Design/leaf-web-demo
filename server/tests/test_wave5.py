@@ -50,6 +50,8 @@ PROJECT_ROOT = SERVER_DIR.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+from _test_run_confirmation import confirmed_client_payload  # noqa: E402
+
 # route the jobs SQLite DB to a throwaway dir BEFORE `jobs`/`app` import anywhere.
 os.environ.setdefault("JOBS_DB", str(Path(tempfile.mkdtemp(prefix="wave5-jobs-")) / "jobs.db"))
 
@@ -336,16 +338,18 @@ def test_author_build_fails_closed_until_r5_is_enabled(live_auth, isolate_author
 def test_run_write_allowed_for_hosted_starter(live_auth):
     """hosted_starter HAS run_write -> a drawing.write run is accepted (202, not 403)."""
     c = _client()
-    r = c.post("/api/run", json={"tool": "delete-marked-panel", "params": {}},
-               headers=bearer("hosted_starter"))
+    headers = bearer("hosted_starter")
+    r = c.post("/api/run", json=confirmed_client_payload(
+        c, "delete-marked-panel", headers=headers), headers=headers)
     assert r.status_code == 202, r.text
     assert r.json().get("job_id")
 
 
 def test_run_read_allowed_for_hosted_starter(live_auth):
     c = _client()
-    r = c.post("/api/run", json={"tool": "count-by-layer", "params": {}},
-               headers=bearer("hosted_starter"))
+    headers = bearer("hosted_starter")
+    r = c.post("/api/run", json=confirmed_client_payload(
+        c, "count-by-layer", headers=headers), headers=headers)
     assert r.status_code == 202, r.text
 
 
@@ -361,8 +365,9 @@ def test_run_write_denied_for_restricted_tier(live_auth, monkeypatch, tmp_path):
     monkeypatch.setenv("LEAF_ENTITLEMENTS_FILE", str(pf))
     c = _client()
 
-    r = c.post("/api/run", json={"tool": "delete-marked-panel", "params": {}},
-               headers=bearer("locked"))
+    headers = bearer("locked")
+    r = c.post("/api/run", json=confirmed_client_payload(
+        c, "delete-marked-panel", headers=headers), headers=headers)
     assert r.status_code == 403, r.text
     b = r.json()
     jsonschema.validate(b, ENVELOPE_SCHEMA)
@@ -373,8 +378,8 @@ def test_run_write_denied_for_restricted_tier(live_auth, monkeypatch, tmp_path):
     assert b["degraded_mode"] is False
 
     # a read tool on the same restricted tier is still allowed.
-    r2 = c.post("/api/run", json={"tool": "count-by-layer", "params": {}},
-                headers=bearer("locked"))
+    r2 = c.post("/api/run", json=confirmed_client_payload(
+        c, "count-by-layer", headers=headers), headers=headers)
     assert r2.status_code == 202, r2.text
 
 
@@ -418,8 +423,9 @@ def test_author_allowed_demo_offauth(demo_offauth, isolate_authored, monkeypatch
 
 def test_run_write_allowed_demo_offauth(demo_offauth):
     c = _client()
-    r = c.post("/api/run", json={"tool": "delete-marked-panel", "params": {}},
-               headers=_h("demo-tenant"))
+    headers = _h("demo-tenant")
+    r = c.post("/api/run", json=confirmed_client_payload(
+        c, "delete-marked-panel", headers=headers), headers=headers)
     assert r.status_code == 202, r.text
 
 
