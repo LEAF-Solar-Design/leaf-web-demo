@@ -19,13 +19,15 @@ the mechanism cannot drift apart:
     error, nothing else).
 
 HONESTY RULE for extraction: geometry only ever comes from the user's actual
-bytes. A .dxf is ALWAYS parsed locally by server/dxf_intake.py (a real parse
-of their file), in both modes: the live extract Activity binds HostDwg to a
-fixed `input.dwg` localName, so accoreconsole rejects DXF bytes as an invalid
-drawing — the broker path cannot extract a DXF at all. A .dwg goes through the
-credential-holding broker (POST /broker/extract {upload: true}) at APS_LIVE=1,
-and fails honestly (APS_UNAVAILABLE) at APS_LIVE=0 because no local DWG reader
-exists.
+bytes. A .dxf is parsed by server/dxf_intake.py (a real parse of their file) by
+DEFAULT, in both modes — the DWG extract Activity binds HostDwg to a fixed
+`input.dwg` localName, so a DXF sent there is rejected as an invalid drawing.
+With LEAF_GUEST_DXF_EXTRACT=aps AND APS_LIVE=1, a .dxf instead goes through the
+credential-holding broker to the DXF-correct Activity (HostDwg localName
+`input.dxf`), a real full-fidelity APS extract that costs a paid run like DWG.
+A .dwg goes through the broker (POST /broker/extract {upload: true}) at
+APS_LIVE=1, and fails honestly (APS_UNAVAILABLE) at APS_LIVE=0 because no local
+DWG reader exists.
 """
 from __future__ import annotations
 
@@ -229,8 +231,9 @@ def verify_guest_session(token: str) -> Optional[str]:
 
 # --------------------------------------------------------------------------- #
 # guest rate limiting (cost exposure: each live DWG extraction is a paid APS
-# run; a DXF is parsed locally, so its cost is service CPU, not an APS charge —
-# dxf_intake is linear in input size, see its layer-dedup note)
+# run; a DXF is parsed locally by default — service CPU, not an APS charge, and
+# dxf_intake is linear in input size (see its layer-dedup note) — but a paid APS
+# run too under LEAF_GUEST_DXF_EXTRACT=aps, same caps as DWG)
 # --------------------------------------------------------------------------- #
 _RATE_LOCK = threading.Lock()
 _RATE_STATE: Dict[str, Any] = {"day": None, "per_ip": {}, "total": 0}

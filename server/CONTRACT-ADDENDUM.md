@@ -1052,7 +1052,9 @@ are built against their defaults; both are env-tunable without a code change.
   guest_session|null, status: "extracting"}` (§10-enveloped). Guest rate caps:
   `LEAF_GUEST_UPLOADS_PER_IP_PER_DAY` (10), `LEAF_GUEST_UPLOADS_PER_DAY` (100)
   → 429 `quota_exceeded` (each live DWG extraction is a paid APS run; DXF is
-  parsed locally, so its cost is CPU on the service, not an APS charge).
+  parsed locally by default — CPU on the service, not an APS charge — but a
+  paid APS run too when `LEAF_GUEST_DXF_EXTRACT=aps`, see the Extraction note
+  below).
   GUEST uploads are idempotent by content: the drawing id derives from
   (tenant, sha256(bytes)), so re-posting the same bytes as the same guest
   returns the SAME drawing's receipt (its CURRENT `status`, original
