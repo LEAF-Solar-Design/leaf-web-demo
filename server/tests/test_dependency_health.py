@@ -3,12 +3,113 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import dependency_health
 
 
 def _spec(name, required=True, probe=lambda: None):
     return dependency_health.DependencySpec(name, required, probe)
+
+
+def test_database_probe_sets_query_timeout_after_connect_without_startup_options(
+        monkeypatch):
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, args=None):
+            calls.append((sql, args))
+
+        def fetchall(self):
+            return [("jobs", "job_id")]
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    connect_kwargs = {}
+
+    def connect(url, **kwargs):
+        assert url == "postgresql://redacted"
+        connect_kwargs.update(kwargs)
+        return Connection()
+
+    db = SimpleNamespace(_REQUIRED_COLUMNS={"jobs": {"job_id"}})
+    psycopg = SimpleNamespace(connect=connect)
+    monkeypatch.setattr(
+        dependency_health,
+        "_database_parts",
+        lambda _timeout: (db, psycopg, "postgresql://redacted", 750),
+    )
+
+    dependency_health._database_probe(0.75)
+
+    assert connect_kwargs == {"connect_timeout": 1}
+    assert calls[0] == (
+        "SELECT set_config('statement_timeout', %s, true)", ("750ms",))
+    assert "information_schema.columns" in calls[1][0]
+
+
+def test_worker_probe_sets_query_timeout_after_connect_without_startup_options(
+        monkeypatch):
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, args=None):
+            calls.append((sql, args))
+
+        def fetchone(self):
+            return ("abc1234", datetime.now(timezone.utc))
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    connect_kwargs = {}
+
+    def connect(url, **kwargs):
+        assert url == "postgresql://redacted"
+        connect_kwargs.update(kwargs)
+        return Connection()
+
+    psycopg = SimpleNamespace(connect=connect)
+    monkeypatch.setattr(
+        dependency_health,
+        "_database_parts",
+        lambda _timeout: (object(), psycopg, "postgresql://redacted", 750),
+    )
+
+    dependency_health._worker_probe(0.75, "string-autofill-opt", 30.0, "abc1234")
+
+    assert connect_kwargs == {"connect_timeout": 1}
+    assert calls[0] == (
+        "SELECT set_config('statement_timeout', %s, true)", ("750ms",))
+    assert "canonical_worker_heartbeats" in calls[1][0]
 
 
 def test_all_success_is_ready_and_preserves_dependency_order():

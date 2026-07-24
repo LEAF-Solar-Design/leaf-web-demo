@@ -146,16 +146,25 @@ def _database_parts(timeout: float):
     db.validate_database_url(url)
     import psycopg
 
-    options = f"-c statement_timeout={max(50, int(timeout * 1000))}"
-    return db, psycopg, url, options
+    statement_timeout_ms = max(50, int(timeout * 1000))
+    return db, psycopg, url, statement_timeout_ms
+
+
+def _configure_statement_timeout(cur: Any, timeout_ms: int) -> None:
+    """Bound probe queries without sending proxy-sensitive startup options."""
+    cur.execute(
+        "SELECT set_config('statement_timeout', %s, true)",
+        (f"{timeout_ms}ms",),
+    )
 
 
 def _database_probe(timeout: float) -> None:
     try:
-        db, psycopg, url, options = _database_parts(timeout)
+        db, psycopg, url, statement_timeout_ms = _database_parts(timeout)
         with psycopg.connect(
-                url, connect_timeout=max(1, math.ceil(timeout)), options=options) as conn:
+                url, connect_timeout=max(1, math.ceil(timeout))) as conn:
             with conn.cursor() as cur:
+                _configure_statement_timeout(cur, statement_timeout_ms)
                 cur.execute(
                     "SELECT table_name, column_name FROM information_schema.columns "
                     "WHERE table_schema = current_schema() AND table_name = ANY(%s)",
@@ -180,10 +189,11 @@ def _worker_probe(
         timeout: float, tool_name: str, max_age_seconds: float,
         expected_revision: Optional[str]) -> None:
     try:
-        _db, psycopg, url, options = _database_parts(timeout)
+        _db, psycopg, url, statement_timeout_ms = _database_parts(timeout)
         with psycopg.connect(
-                url, connect_timeout=max(1, math.ceil(timeout)), options=options) as conn:
+                url, connect_timeout=max(1, math.ceil(timeout))) as conn:
             with conn.cursor() as cur:
+                _configure_statement_timeout(cur, statement_timeout_ms)
                 cur.execute(
                     "SELECT source_revision, observed_at "
                     "FROM canonical_worker_heartbeats WHERE tool_name = %s "
