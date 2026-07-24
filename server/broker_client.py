@@ -60,7 +60,8 @@ def extract_event_key(tenant_id: str, dwg: str, *, upload: bool = False) -> str:
 def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                    dwg: str, aps_live: bool, timeout_s: Optional[float] = None,
                    dwg_version: Optional[int] = None,
-                   ledger_event_key: Optional[str] = None) -> Dict[str, Any]:
+                   ledger_event_key: Optional[str] = None,
+                   job_id: Optional[str] = None) -> Dict[str, Any]:
     """POST /broker/run -> extended section-3 envelope (ok true OR false).
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
@@ -68,15 +69,46 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
     an older broker (that ignores unknown fields) stays compatible.
     ``ledger_event_key`` is the durable job-execution identity used by a
     PostgreSQL broker to prevent duplicate paid execution across task retries.
+    ``job_id`` (None -> unchanged behaviour) lets the broker correlate this run's
+    live WorkItem with the job row, so ``reap_via_broker`` can cancel it when the
+    owning browser tab closes. An older broker ignores the unknown field.
     """
     try:
         resp = requests.post(
             f"{broker_url()}/broker/run",
             json={"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
-                  "ledger_event_key": ledger_event_key},
+                  "ledger_event_key": ledger_event_key, "job_id": job_id},
             headers=broker_headers(),
             timeout=timeout_s or 600,
+        )
+        return resp.json()
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise BrokerUnreachable(f"broker at {broker_url()} unreachable: {exc}") from exc
+    except ValueError as exc:  # non-JSON body
+        raise BrokerUnreachable(f"broker at {broker_url()} returned non-JSON: {exc}") from exc
+
+
+def reap_via_broker(records: list, timeout_s: Optional[float] = None) -> Dict[str, Any]:
+    """POST /broker/reap -> cancel the orphaned WorkItems named by ``records``.
+
+    Each record is an orphan signal the app side owns: ``job_id``, ``tenant_id``,
+    and ``session_closed``/``lease_expires``. The app never knows the APS
+    WorkItem id (it holds no credential); the broker resolves it from ``job_id``.
+    Whether a LIVE DA cancel is issued stays the broker's decision, gated on
+    APS_LIVE + BROKER_REAP_LIVE.
+
+    Raises BrokerUnreachable on transport failure, like run_via_broker. Callers
+    reaping on the tab-close path must treat that as non-fatal: the local job row
+    is already terminal, and failing to cancel remote compute must not un-finish
+    it.
+    """
+    try:
+        resp = requests.post(
+            f"{broker_url()}/broker/reap",
+            json={"records": records},
+            headers=broker_headers(),
+            timeout=timeout_s or 30,
         )
         return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:

@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -856,6 +857,9 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                 # accepts work, a later attempt must observe the existing
                 # executing admission, never buy the same run again.
                 ledger_event_key=f"{job_id}:broker-run",
+                # Correlates this job row with the live WorkItem inside the
+                # broker, so a tab closed mid-run has an id to cancel.
+                job_id=job_id,
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -1010,11 +1014,56 @@ def _reap_orphans_once() -> int:
                               error=error_obj(ErrorCode.INTERNAL,
                                               "orphaned: session closed (tab-close)", True),
                               _allow_closed=True)
+            _cancel_remote_workitem(row["job_id"], _row_get(row, "tenant_id"))
             handled += 1
             continue
         if _redispatch_record(row["job_id"]):
             handled += 1
     return handled
+
+
+def _row_get(row: Any, key: str) -> Any:
+    """Read `key` from a sqlite3.Row or a dict row, None when absent.
+
+    The two stores return different shapes for the same sweep: sqlite selects
+    whole rows, while the PostgreSQL `reclaimable` projection is job_id+progress
+    only. Missing columns must not raise -- sqlite3.Row raises IndexError and a
+    dict raises KeyError for the same lookup.
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str]) -> None:
+    """Ask the broker to cancel this job's APS WorkItem (tab-close path ONLY).
+
+    Marking the row terminal stops US from waiting; it does NOT stop APS, which
+    keeps running and BILLING the abandoned WorkItem to completion. This is the
+    call that actually reaps it.
+
+    Restricted to the CLOSED_PROGRESS branch on purpose. A heartbeat-stale row is
+    REDISPATCHED, and its prior worker may still be mid-flight, so cancelling by
+    job_id there could kill the WorkItem the retry is about to adopt. A closed
+    tab has no such race: the row is terminal and nothing will redispatch it.
+
+    Best-effort by contract. The row is already terminal before this runs, and an
+    unreachable broker must not undo that or stop the sweep's remaining rows. It
+    is NOT silent: a failure here means real money is still burning on APS, so it
+    is reported on stderr (the convention elsewhere in this codebase).
+    """
+    try:
+        broker_client.reap_via_broker([{
+            "job_id": job_id,
+            "tenant_id": tenant_id,
+            "status": "inprogress",
+            "workitem_id": None,   # broker resolves it from job_id
+            "session_closed": True,
+        }])
+    except Exception as exc:  # noqa: BLE001  (broker down != job not finished)
+        print(f"[leaf-jobs] tab-close reap failed for job {job_id}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
 
 def _redispatch_record(job_id: str) -> bool:

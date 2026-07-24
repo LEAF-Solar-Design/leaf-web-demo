@@ -35,8 +35,10 @@ import platform as _stdlib_platform  # noqa: F401  (cache stdlib before the
 #   PROJECT_ROOT sys.path insert below makes the local platform/ package shadow it;
 #   requests/urllib3 import `platform` lazily inside request handlers)
 
+import functools
 import hashlib
 import hmac
+import inspect
 import json
 import math
 import os
@@ -530,7 +532,24 @@ def _require_supported_live_completion_mode() -> None:
         )
 
 
-def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+def _accepts_on_submitted(fn: Any) -> bool:
+    """Whether `fn` can take an `on_submitted` kwarg.
+
+    The live client is resolved at runtime and is a test double in most suites,
+    so the kwarg is offered only to implementations that declare it (explicitly
+    or via **kwargs). An older/stubbed run_tool keeps its exact call signature.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "on_submitted" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, Any],
+                   on_submitted=None) -> Dict[str, Any]:
     """Select the configured completion mechanism for one live run.
 
     The polling call is deliberately byte-for-byte compatible by default.
@@ -538,8 +557,13 @@ def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, 
     APS completion metadata into the signed Leaf receipt envelope. Selecting
     the flag fails closed without submitting or silently polling. The existing
     reaper remains available for abandoned polling work.
+
+    `on_submitted` (set only when the caller supplied a job_id) is forwarded so
+    the WorkItem id is registered before the poll blocks.
     """
     _require_supported_live_completion_mode()
+    if on_submitted is not None and _accepts_on_submitted(da.run_tool):
+        return da.run_tool(local, tool, params, on_submitted=on_submitted)
     return da.run_tool(local, tool, params)
 
 
@@ -822,6 +846,43 @@ def _tenant_tier(tenant_id: str) -> str:
     return entitlements.resolve_tier(_TenantTier(provisioned))
 
 
+# --------------------------------------------------------------------------- #
+# job_id -> live WorkItem correlation (tab-close reaping)
+# --------------------------------------------------------------------------- #
+# The app/jobs side knows a job_id; only THIS process ever sees the APS WorkItem
+# id, and only for the duration of the blocking poll inside da/client. Without a
+# mapping between the two, POST /broker/reap arrives with `workitem_id: None` and
+# there is nothing to cancel -- a closed tab leaves paid compute running to
+# completion. This registry is that mapping: written the moment the WorkItem is
+# submitted, dropped when broker_run leaves (success, failure, or timeout), so it
+# only ever holds genuinely in-flight runs.
+_active_workitems: Dict[str, str] = {}
+_active_workitems_lock = threading.Lock()
+
+
+def _record_active_workitem(job_id: str, workitem_id: Optional[str]) -> None:
+    if not job_id or not workitem_id:
+        return
+    with _active_workitems_lock:
+        _active_workitems[job_id] = str(workitem_id)
+
+
+def _drop_active_workitem(job_id: Optional[str]) -> Optional[str]:
+    """Evict and return job_id's WorkItem id (None when absent)."""
+    if not job_id:
+        return None
+    with _active_workitems_lock:
+        return _active_workitems.pop(job_id, None)
+
+
+def active_workitem_for(job_id: Optional[str]) -> Optional[str]:
+    """Read job_id's in-flight WorkItem id without evicting it."""
+    if not job_id:
+        return None
+    with _active_workitems_lock:
+        return _active_workitems.get(job_id)
+
+
 class BrokerRunRequest(BaseModel):
     tenant_id: str
     tool: Dict[str, Any]
@@ -832,6 +893,13 @@ class BrokerRunRequest(BaseModel):
     dwg_version: Optional[int] = None
     # Required in PostgreSQL mode. Use one durable key across job redeliveries.
     ledger_event_key: Optional[str] = None
+    # Optional durable job identity. When present, this run's live WorkItem id is
+    # registered against it so /broker/reap can cancel it on tab close. Omitting
+    # it leaves behaviour and the response shape byte-for-byte unchanged. It is
+    # deliberately NOT part of _broker_request_fingerprint: the fingerprint
+    # identifies the WORK, and adding a per-job field would make an existing
+    # ledger row's fingerprint unrecognisable on replay.
+    job_id: Optional[str] = None
 
 
 def _broker_request_fingerprint(req: BrokerRunRequest) -> str:
@@ -1265,6 +1333,32 @@ class BrokerReapRequest(BaseModel):
     live: Optional[bool] = None  # None -> reaper decides (APS_LIVE + BROKER_REAP_LIVE)
 
 
+def _resolve_reap_workitems(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fill in each record's missing `workitem_id` from the live-run registry.
+
+    The app/jobs side supplies the orphan SIGNAL (job_id + session_closed) but
+    never learns the WorkItem id -- only this process does. A record that arrives
+    with no workitem_id is therefore not un-reapable, it is un-CORRELATED: look
+    the id up by job_id. Records that already carry a workitem_id, or that name
+    no known job, pass through untouched (sweep leaves an id-less orphan's cancel
+    as a no-op, exactly as before).
+
+    This PEEKS. Deciding what is an orphan is sweep()'s job, and a caller may
+    include healthy rows in the same batch -- consuming their entry here would
+    leave a still-running job with no id to cancel when its tab really does
+    close. Eviction happens afterwards, for the rows sweep actually reaped.
+    """
+    out: List[Dict[str, Any]] = []
+    for rec in records:
+        rec = dict(rec)
+        if not rec.get("workitem_id"):
+            resolved = active_workitem_for(rec.get("job_id"))
+            if resolved:
+                rec["workitem_id"] = resolved
+        out.append(rec)
+    return out
+
+
 @app.post("/broker/reap", dependencies=[Depends(require_broker_auth)])
 def broker_reap(req: BrokerReapRequest) -> JSONResponse:
     """Cancel orphaned WorkItems (closed tab / expired lease). Only the
@@ -1279,7 +1373,12 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
                                                  "reaper module unavailable", retryable=False))
     use_live = reaper.reap_live_enabled() if req.live is None else bool(req.live)
     cc = reaper.cancel_client_for(live=use_live, da_client=_get_da() if use_live else None)
-    reaped = reaper.sweep(req.records, cancel_client=cc)
+    records = _resolve_reap_workitems(req.records)
+    reaped = reaper.sweep(records, cancel_client=cc)
+    for rec in reaped:
+        # Cancelled -> no longer in flight. Drop it so a repeated sweep cannot
+        # cancel the same WorkItem twice.
+        _drop_active_workitem(rec.get("job_id"))
     return JSONResponse(status_code=200, content=with_envelope_fields({
         "ok": True,
         "reaped": [r.get("workitem_id") for r in reaped],
@@ -1724,6 +1823,10 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
         return JSONResponse(status_code=terminal_status, content=terminal_env)
     finally:
+        # This run is over (returned, raised, or timed out): its WorkItem is no
+        # longer reapable, and leaving the entry would grow the registry without
+        # bound. Runs into the same `finally` on every exit path.
+        _drop_active_workitem(req.job_id)
         if (
             postgres_mode and admission is not None
             and admission.get("lease_token") and not admission.get("capacity_wait")
@@ -1941,7 +2044,14 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                     da.ensure_tool_activity(tool)
                 else:
                     _start_admitted_execution(req, admission, aps_submission=True)
-                env = dict(_run_live_tool(da, local, tool, params) or {})
+                # Register this run's WorkItem id against the caller's job_id the
+                # instant APS accepts it, so a tab closed mid-poll has something
+                # to cancel. No job_id -> no callback -> unchanged call.
+                on_submitted = (
+                    functools.partial(_record_active_workitem, req.job_id)
+                    if req.job_id else None)
+                env = dict(_run_live_tool(da, local, tool, params,
+                                          on_submitted=on_submitted) or {})
                 env.setdefault("ok", True)
                 env.setdefault("tool", tool.get("name"))
                 env.setdefault("version", tool.get("version", "1.0.0"))
