@@ -34,6 +34,22 @@ import platform_link
 from envelopes import ErrorCode, err_envelope, error_obj
 from job_pg_store import PostgresJobStore
 
+try:  # APS domain metrics (CloudWatch EMF); best-effort, optional
+    import emf_metrics
+except Exception:  # pragma: no cover
+    emf_metrics = None  # type: ignore[assignment]
+
+
+def _emit_job_terminal(status: str) -> None:
+    """Best-effort JobTerminal EMF emit. NEVER raises: called on the terminal
+    path and must not corrupt job completion."""
+    if emf_metrics is None:
+        return
+    try:
+        emf_metrics.emit_job_terminal(status)
+    except Exception:  # noqa: BLE001 - metrics must never break job completion
+        pass
+
 SERVER_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
 
@@ -142,6 +158,8 @@ _MIGRATIONS = {
     "dwg_version": "INTEGER",
 }
 
+_DWG_VERSION_BACKFILL_MIGRATION = "backfill_dwg_version"
+
 
 def _db() -> sqlite3.Connection:
     global _conn
@@ -156,23 +174,33 @@ def _db() -> sqlite3.Connection:
         for name, ddl in _MIGRATIONS.items():
             if name not in columns:
                 _conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
+        _conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations ("
+            "id TEXT PRIMARY KEY, applied_at REAL NOT NULL)")
         # Backfill dwg_version for rows written by releases that stored the pin
-        # only inside execution_json. Runs on EVERY first-connect and touches
-        # only NULL rows, so a previously interrupted backfill is retried rather
-        # than permanently skipped (the ALTER above may already have committed
+        # only inside execution_json. The ledger is written only after the scan
+        # completes, so a prior interrupted backfill is retried rather than
+        # permanently skipped (the ALTER above may already have committed
         # the column before a mid-backfill failure). Python-side parse — no
         # JSON1 dependency; malformed or non-object payloads are skipped.
-        for row in _conn.execute(
-                "SELECT job_id, execution_json FROM jobs "
-                "WHERE dwg_version IS NULL AND execution_json IS NOT NULL").fetchall():
-            try:
-                decoded = json.loads(row["execution_json"])
-            except (ValueError, TypeError):
-                continue
-            pin = decoded.get("dwg_version") if isinstance(decoded, dict) else None
-            if isinstance(pin, int) and not isinstance(pin, bool):
-                _conn.execute("UPDATE jobs SET dwg_version = ? WHERE job_id = ?",
-                              (pin, row["job_id"]))
+        applied = _conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE id = ?",
+            (_DWG_VERSION_BACKFILL_MIGRATION,)).fetchone()
+        if applied is None:
+            for row in _conn.execute(
+                    "SELECT job_id, execution_json FROM jobs "
+                    "WHERE dwg_version IS NULL AND execution_json IS NOT NULL").fetchall():
+                try:
+                    decoded = json.loads(row["execution_json"])
+                except (ValueError, TypeError):
+                    continue
+                pin = decoded.get("dwg_version") if isinstance(decoded, dict) else None
+                if isinstance(pin, int) and not isinstance(pin, bool):
+                    _conn.execute("UPDATE jobs SET dwg_version = ? WHERE job_id = ?",
+                                  (pin, row["job_id"]))
+            _conn.execute(
+                "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+                (_DWG_VERSION_BACKFILL_MIGRATION, time.time()))
         _conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS jobs_project_idempotency_uq "
             "ON jobs(tenant_id, project_id, idempotency_key) "
@@ -590,6 +618,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         )
         if outcome == "applied":
             platform_link.on_terminal(job_id, status, result_env, error)
+            _emit_job_terminal(status)
         return outcome
     applied = False
     with _lock:
@@ -648,6 +677,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             return "conflict"
     if applied:
         platform_link.on_terminal(job_id, status, result_env, error)
+        _emit_job_terminal(status)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
 

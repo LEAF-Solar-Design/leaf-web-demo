@@ -212,7 +212,7 @@ def build_suites() -> List[Suite]:
         Suite("server-live-lsp-resolution", "server tests/test_live_lsp_resolution.py",
               "pytest", SERVER, _py_pytest("tests/test_live_lsp_resolution.py"), 2),
         Suite("server-job-dwg-version", "server tests/test_job_dwg_version_persist.py",
-              "pytest", SERVER, _py_pytest("tests/test_job_dwg_version_persist.py"), 5),
+              "pytest", SERVER, _py_pytest("tests/test_job_dwg_version_persist.py"), 6),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
               SERVER, _py_pytest("tests/test_canonical_worker.py"), 13),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
