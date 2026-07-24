@@ -89,6 +89,12 @@ LANE_FAST = "fast"
 LANE_SLOW = "slow"
 
 _lock = threading.Lock()
+# Serializes the first-connect build ONLY (see _db). Deliberately separate from
+# _lock: _db() is called both under _lock (_exec/_query/claim/...) and unlocked
+# (ensure_started -> line ~1120), so a single reentrant lock would deadlock. The
+# ordering is always _lock -> _conn_lock or _conn_lock alone, never the reverse,
+# so no cycle exists.
+_conn_lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
 _executors: Dict[str, ThreadPoolExecutor] = {}
 _reaper_started = False
@@ -239,30 +245,44 @@ def _db() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        deadline = time.monotonic() + 10.0
-        while _conn is None:
-            conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            try:
-                conn.execute("PRAGMA busy_timeout = 10000")
-                # WAL negotiation itself takes a SQLite lock and can race before
-                # the migration guard runs. Retry the complete first-connect path
-                # so a losing process does not crash during startup.
-                conn.execute("PRAGMA journal_mode = WAL")
-                _apply_first_connect_migrations(conn)
-            except sqlite3.OperationalError as exc:
-                conn.close()
-                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.05)
-                continue
-            except BaseException:
-                # Don't strand a half-migrated connection as the module singleton:
-                # close it (which rolls back any open transaction and frees the
-                # write lock) and leave _conn None for a later retry.
-                conn.close()
-                raise
-            _conn = conn
+        # Double-checked locking on the SINGLETON PROMOTION. Without it two threads
+        # racing the None window (the DB is lazy — first-connect happens on the
+        # first request, and ensure_started() calls _db() UNLOCKED) each build,
+        # migrate, and assign a connection. The unconditional `_conn = conn` below
+        # would then let a slow second builder flip _conn A->B *after* A was in use,
+        # so a caller that reads _db() separately for execute and commit (_exec,
+        # update_progress, release_for_retry) could execute on A but commit B —
+        # stranding the write on the discarded connection. Serializing the build so
+        # exactly one connection is ever created closes both the leak and that
+        # lost-write. Threads that lose the race re-check _conn and reuse the winner.
+        with _conn_lock:
+            if _conn is None:
+                deadline = time.monotonic() + 10.0
+                while _conn is None:
+                    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+                    conn.row_factory = sqlite3.Row
+                    try:
+                        conn.execute("PRAGMA busy_timeout = 10000")
+                        # WAL negotiation itself takes a SQLite lock and can race
+                        # before the migration guard runs. Retry the complete
+                        # first-connect path so a losing process does not crash
+                        # during startup.
+                        conn.execute("PRAGMA journal_mode = WAL")
+                        _apply_first_connect_migrations(conn)
+                    except sqlite3.OperationalError as exc:
+                        conn.close()
+                        if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.05)
+                        continue
+                    except BaseException:
+                        # Don't strand a half-migrated connection as the module
+                        # singleton: close it (which rolls back any open transaction
+                        # and frees the write lock) and leave _conn None for a later
+                        # retry.
+                        conn.close()
+                        raise
+                    _conn = conn
     return _conn
 
 
