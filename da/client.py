@@ -385,9 +385,10 @@ def submit_workitem(activity_id: str, arguments: dict,
     dry_run=False -> POST, then (poll=True) poll to a terminal status and return it.
 
     The LIVE submit (dry_run=False) is the head-of-line-blocking point, so it is
-    routed through the account Flex CEILING gate (da/queue.admit): at most
+    routed through the FAIR account Flex gate (da/queue.fair_admit): at most
     APS_MAX_CONCURRENCY WorkItems are in flight across all tenants in this
-    process. With poll=True the slot is held for the WorkItem's whole lifetime
+    process, AND slots go round-robin per tenant so none can starve another.
+    With poll=True the slot is held for the WorkItem's whole lifetime
     (submit -> terminal), which is exactly what the ceiling should count. dry_run
     returns BEFORE the gate, so APS_LIVE=0 / dry-run paths are unaffected.
     """
@@ -396,7 +397,7 @@ def submit_workitem(activity_id: str, arguments: dict,
         return {"_dry_run": True, "endpoint": f"POST {DA}/workitems",
                 "body": _redact(body)}
     _q = _leaf_queue()
-    with _q.admit(tenant_id):
+    with _q.fair_admit(tenant_id):
         r = requests.post(f"{DA}/workitems",
                           headers={**_auth_headers(), "Content-Type": "application/json"},
                           data=json.dumps(body), timeout=_HTTP_TIMEOUT)
