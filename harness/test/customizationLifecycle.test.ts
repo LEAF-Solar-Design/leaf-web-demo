@@ -12,6 +12,7 @@ import type {
   CustomizationCoordination,
   HarnessPorts,
   StagedCustomizationReceipt,
+  TenantMutationFence,
 } from "../src/ports/index.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +42,21 @@ class TestCustomizationCoordination implements CustomizationCoordination {
   }
 }
 
+class FencedFakeTenantRepoProvider extends FakeTenantRepoProvider {
+  leaseLost = false;
+
+  override async withTenantLease<T>(
+    tenantId: string,
+    action: (runFenced: TenantMutationFence) => Promise<T>,
+  ): Promise<T> {
+    this.leaseTenants.push(tenantId);
+    return action(async (operation) => {
+      if (this.leaseLost) throw new Error("tenant writer lease lost");
+      return operation();
+    });
+  }
+}
+
 function request(changeSetId: string, expectedBaseSha: string) {
   return {
     changeSetId,
@@ -66,7 +82,55 @@ async function setup() {
   return { agent, bare, coordination, loop: new AuthorLoop(ports), tenantRepo };
 }
 
+async function setupFenced() {
+  const tenantRepo = new FencedFakeTenantRepoProvider(FIXTURE);
+  const coordination = new TestCustomizationCoordination();
+  const agent = new FakeAgentRunner();
+  const ports: HarnessPorts = {
+    oauth: new FakeOAuthGrantProvider(),
+    tenantRepo,
+    broker: new FakeBrokerApsClient(),
+    agentRunner: agent,
+    customizationCoordination: coordination,
+  };
+  const bare = await tenantRepo.bare(TENANT);
+  return { agent, bare, coordination, loop: new AuthorLoop(ports), tenantRepo };
+}
+
 describe("customizationLifecycle", () => {
+  it("does not advance the reserved change ref after the tenant writer lease is lost", async () => {
+    const { agent, bare, loop, tenantRepo } = await setupFenced();
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    const originalRun = agent.run.bind(agent);
+    agent.run = async (input) => {
+      const result = await originalRun(input);
+      tenantRepo.leaseLost = true;
+      return result;
+    };
+
+    await expect(
+      loop.stage(TENANT, "count entities per layer", request(CHANGE_A, base)),
+    ).rejects.toThrow("tenant writer lease lost");
+
+    expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+    expect(git(bare.dir, ["rev-parse", "--verify", `refs/leaf/changes/${CHANGE_A}`])).toBe(base);
+  });
+
+  it("does not move main when the tenant writer lease is lost during publish authorization", async () => {
+    const { bare, coordination, loop, tenantRepo } = await setupFenced();
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    const staged = await loop.stage(TENANT, "count entities per layer", request(CHANGE_A, base));
+    coordination.approved.add(CHANGE_A);
+    const originalAuthorize = coordination.authorizePublish.bind(coordination);
+    coordination.authorizePublish = async (receipt, expectedMainSha) => {
+      await originalAuthorize(receipt, expectedMainSha);
+      tenantRepo.leaseLost = true;
+    };
+
+    await expect(loop.publish(staged.receipt, base)).rejects.toThrow("tenant writer lease lost");
+    expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+  });
+
   it("holds the tenant writer lease across stage and publish", async () => {
     const { bare, coordination, loop, tenantRepo } = await setup();
     const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);

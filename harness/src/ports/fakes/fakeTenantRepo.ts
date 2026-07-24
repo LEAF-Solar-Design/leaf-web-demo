@@ -13,7 +13,13 @@ import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { HarnessIdentity, TenantBareRepo, TenantRepo, TenantRepoProvider } from "../index.js";
+import type {
+  HarnessIdentity,
+  TenantBareRepo,
+  TenantMutationFence,
+  TenantRepo,
+  TenantRepoProvider,
+} from "../index.js";
 
 const SEED_IDENTITY: HarnessIdentity = {
   name: "fixture-seed",
@@ -71,9 +77,12 @@ export class FakeTenantRepoProvider implements TenantRepoProvider {
   }
 
   /** Materialize one real bare repository per tenant for lifecycle tests. */
-  async withTenantLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
+  async withTenantLease<T>(
+    tenantId: string,
+    action: (runFenced: TenantMutationFence) => Promise<T>,
+  ): Promise<T> {
     this.leaseTenants.push(tenantId);
-    return action();
+    return action(async (operation) => operation());
   }
 
   async bare(tenantId: string): Promise<TenantBareRepo> {

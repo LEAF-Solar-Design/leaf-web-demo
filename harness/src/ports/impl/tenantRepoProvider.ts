@@ -20,7 +20,13 @@ import { join } from "node:path";
 import { Pool } from "pg";
 import type { PoolClient, PoolConfig } from "pg";
 import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
-import type { HarnessIdentity, TenantBareRepo, TenantRepo, TenantRepoProvider } from "../index.js";
+import type {
+  HarnessIdentity,
+  TenantBareRepo,
+  TenantMutationFence,
+  TenantRepo,
+  TenantRepoProvider,
+} from "../index.js";
 
 /** Resolves a tenant to its mushy-codebase git remote/worktree. */
 export interface TenantRepoLocator {
@@ -393,13 +399,20 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   /** Hold one tenant lease across checkout, Agent SDK edits, registry update, and commit. */
-  async withTenantLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
+  async withTenantLease<T>(
+    tenantId: string,
+    action: (runFenced: TenantMutationFence) => Promise<T>,
+  ): Promise<T> {
     assertAuthoringModeSafe(this.authoringMode);
-    if (!this.lease) return action();
+    if (!this.lease) {
+      return action(async (operation) => operation());
+    }
     return this.lease.withLease(tenantId, (lease) =>
       this.leaseContext.run(lease, async () => {
+        const runFenced = <R>(operation: () => R | Promise<R>) =>
+          this.lease!.runFenced(lease, async () => operation());
         try {
-          return await action();
+          return await action(runFenced);
         } finally {
           for (const dir of lease.repoDirs) {
             await this.lease!.runFenced(lease, async () => resetWorkingTree(dir));

@@ -29,7 +29,7 @@ import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
-import type { TenantRepo } from "../src/ports/index.js";
+import type { TenantMutationFence, TenantRepo } from "../src/ports/index.js";
 import { AuthorLoop } from "../src/agent/authorLoop.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -45,11 +45,14 @@ class LeaseAwareFakeTenantRepoProvider extends FakeTenantRepoProvider {
   readLeaseActive = false;
   readLeaseCalls = 0;
 
-  override async withTenantLease<T>(_tenantId: string, action: () => Promise<T>): Promise<T> {
+  override async withTenantLease<T>(
+    _tenantId: string,
+    action: (runFenced: TenantMutationFence) => Promise<T>,
+  ): Promise<T> {
     this.leaseCalls += 1;
     this.leaseActive = true;
     try {
-      return await action();
+      return await action(async (operation) => operation());
     } finally {
       this.leaseActive = false;
     }

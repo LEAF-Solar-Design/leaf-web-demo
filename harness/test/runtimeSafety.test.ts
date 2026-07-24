@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  authoredExecutionEnabled,
   authorSandboxProvider,
   validateProductionHarnessEnv,
 } from "../src/runtimeSafety.js";
@@ -15,6 +16,12 @@ const VALID = {
 };
 
 describe("production harness runtime safety", () => {
+  it("defaults authored execution off in every runtime posture", () => {
+    expect(authoredExecutionEnabled({})).toBe(false);
+    expect(authoredExecutionEnabled({ LEAF_RUNTIME_ENV: "staging" })).toBe(false);
+    expect(authoredExecutionEnabled({ LEAF_AUTHORED_EXECUTION: "1" })).toBe(true);
+  });
+
   it("leaves non-production startup unchanged", () => {
     expect(() => validateProductionHarnessEnv({})).not.toThrow();
   });
@@ -43,6 +50,13 @@ describe("production harness runtime safety", () => {
   it("rejects a missing broker secret", () => {
     expect(() => validateProductionHarnessEnv({ ...VALID, LEAF_BROKER_SECRET: "\n" }))
       .toThrow(/LEAF_BROKER_SECRET/);
+  });
+
+  it("requires an explicit authored-execution selector in production", () => {
+    expect(() => validateProductionHarnessEnv({
+      ...VALID,
+      LEAF_AUTHORED_EXECUTION: undefined,
+    })).toThrow(/explicit LEAF_AUTHORED_EXECUTION/);
   });
 
   it("preserves legacy local author fallback with explicit-selector precedence", () => {

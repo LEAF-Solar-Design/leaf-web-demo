@@ -32,6 +32,7 @@ import type {
   HarnessPorts,
   ResultEnvelope,
   StagedCustomizationReceipt,
+  TenantMutationFence,
   ToolPackage,
 } from "../ports/index.js";
 
@@ -63,14 +64,13 @@ export class AuthorLoop {
 
   private withTenantRepoLease<T>(
     tenantId: string,
-    action: () => Promise<T>,
+    action: (runFenced: TenantMutationFence) => Promise<T>,
   ): Promise<T> {
-    const provider = this.ports.tenantRepo as HarnessPorts["tenantRepo"] & {
-      withTenantLease?<R>(tenant: string, operation: () => Promise<R>): Promise<R>;
-    };
-    return provider.withTenantLease
-      ? provider.withTenantLease(tenantId, action)
-      : action();
+    const provider = this.ports.tenantRepo;
+    if (!provider.withTenantLease) {
+      return Promise.reject(new AuthorLoopError("tenant repository writer lease is required", 503));
+    }
+    return provider.withTenantLease(tenantId, action);
   }
 
   private withTenantRepoReadLease<T>(
@@ -192,21 +192,24 @@ export class AuthorLoop {
     description: string,
     request: StageCustomizationRequest,
   ): Promise<StageCustomizationResponse> {
-    return this.withTenantRepoLease(tenantId, async () => {
-    const { bare, coordination } = this.lifecyclePorts();
-    const bareRepo = await bare.call(this.ports.tenantRepo, tenantId);
-    const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
-    const observedMainSha = changes.readRef("refs/heads/main");
-    const existingChangeSha = changes.readChangeRef(request.changeSetId);
-    if (existingChangeSha === null && observedMainSha !== request.expectedBaseSha) {
-      throw new AuthorLoopError("staging base no longer matches main", 409);
-    }
-    const change = changes.createOrResume(request.changeSetId, request.expectedBaseSha);
-    try {
-      if (change.stagedSha !== null) {
-        const catalogDigest = createHash("sha256")
-          .update(readFileSync(join(change.dir, REGISTRY_FILE)))
-          .digest("hex");
+    return this.withTenantRepoLease(tenantId, async (runFenced) => {
+      const { bare, coordination } = this.lifecyclePorts();
+      const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, tenantId));
+      const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
+      const { observedMainSha, existingChangeSha } = await runFenced(() => ({
+        observedMainSha: changes.readRef("refs/heads/main"),
+        existingChangeSha: changes.readChangeRef(request.changeSetId),
+      }));
+      if (existingChangeSha === null && observedMainSha !== request.expectedBaseSha) {
+        throw new AuthorLoopError("staging base no longer matches main", 409);
+      }
+      const change = await runFenced(() =>
+        changes.createOrResume(request.changeSetId, request.expectedBaseSha));
+      try {
+        if (change.stagedSha !== null) {
+          const catalogDigest = await runFenced(() => createHash("sha256")
+            .update(readFileSync(join(change.dir, REGISTRY_FILE)))
+            .digest("hex"));
         const receipt = Object.freeze({
           contract: "leaf.customization.v1" as const,
           tenant_id: tenantId,
@@ -219,15 +222,18 @@ export class AuthorLoop {
           workspace_contract_digest: request.workspaceContractDigest,
           idempotency_key: request.idempotencyKey,
         });
-        await coordination.recordStaged(receipt);
-        return { receipt };
-      }
-      const run = await this.authorInRepo(tenantId, description, change.dir);
-      registerTool(change.dir, run.tool);
-      const stagedCommit = changes.stageCommit(change, `stage tool: ${run.tool.name}`);
-      const catalogDigest = createHash("sha256")
-        .update(readFileSync(join(change.dir, REGISTRY_FILE)))
-        .digest("hex");
+          await coordination.recordStaged(receipt);
+          return { receipt };
+        }
+        const run = await this.authorInRepo(tenantId, description, change.dir);
+        const { stagedCommit, catalogDigest } = await runFenced(() => {
+          registerTool(change.dir, run.tool);
+          const stagedCommit = changes.stageCommit(change, `stage tool: ${run.tool.name}`);
+          const catalogDigest = createHash("sha256")
+            .update(readFileSync(join(change.dir, REGISTRY_FILE)))
+            .digest("hex");
+          return { stagedCommit, catalogDigest };
+        });
       const receipt = Object.freeze({
         contract: "leaf.customization.v1" as const,
         tenant_id: tenantId,
@@ -240,17 +246,17 @@ export class AuthorLoop {
         workspace_contract_digest: request.workspaceContractDigest,
         idempotency_key: request.idempotencyKey,
       });
-      await coordination.recordStaged(receipt);
-      return {
-        tool: run.tool,
-        code: run.code,
-        preview: run.preview,
-        receipt,
-        ...(run.telemetry ? { telemetry: run.telemetry } : {}),
-      };
-    } finally {
-      changes.cleanupWorktree(change);
-    }
+        await coordination.recordStaged(receipt);
+        return {
+          tool: run.tool,
+          code: run.code,
+          preview: run.preview,
+          receipt,
+          ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+        };
+      } finally {
+        await runFenced(() => changes.cleanupWorktree(change));
+      }
     });
   }
 
@@ -260,32 +266,33 @@ export class AuthorLoop {
    * and CAS-updates main.
    */
   async publish(receipt: StagedCustomizationReceipt, expectedMainSha: string): Promise<{ commit: string }> {
-    return this.withTenantRepoLease(receipt.tenant_id, async () => {
-    const { bare, coordination } = this.lifecyclePorts();
-    const bareRepo = await bare.call(this.ports.tenantRepo, receipt.tenant_id);
-    const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
-    const ref = `refs/leaf/changes/${receipt.change_set_id.toLowerCase()}`;
-    const observedRef = changes.readRef(ref);
-    if (observedRef !== receipt.staged_commit) {
-      throw new GitRefConflictError(ref, receipt.staged_commit, observedRef);
-    }
-    const observedMain = changes.readRef("refs/heads/main");
-    if (observedMain === receipt.staged_commit) {
+    return this.withTenantRepoLease(receipt.tenant_id, async (runFenced) => {
+      const { bare, coordination } = this.lifecyclePorts();
+      const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, receipt.tenant_id));
+      const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
+      const ref = `refs/leaf/changes/${receipt.change_set_id.toLowerCase()}`;
       await coordination.authorizePublish(receipt, expectedMainSha);
-      return { commit: receipt.staged_commit };
-    }
-    if (observedMain !== expectedMainSha) {
-      throw new GitRefConflictError("refs/heads/main", expectedMainSha, observedMain);
-    }
-    await coordination.authorizePublish(receipt, expectedMainSha);
-    const change: TenantChangeSet = {
-      id: receipt.change_set_id,
-      ref,
-      dir: "",
-      expectedBaseSha: receipt.base_commit,
-      stagedSha: receipt.staged_commit,
-    };
-    return { commit: changes.publishToMain(change, expectedMainSha) };
+      return runFenced(() => {
+        const observedRef = changes.readRef(ref);
+        if (observedRef !== receipt.staged_commit) {
+          throw new GitRefConflictError(ref, receipt.staged_commit, observedRef);
+        }
+        const observedMain = changes.readRef("refs/heads/main");
+        if (observedMain === receipt.staged_commit) {
+          return { commit: receipt.staged_commit };
+        }
+        if (observedMain !== expectedMainSha) {
+          throw new GitRefConflictError("refs/heads/main", expectedMainSha, observedMain);
+        }
+        const change: TenantChangeSet = {
+          id: receipt.change_set_id,
+          ref,
+          dir: "",
+          expectedBaseSha: receipt.base_commit,
+          stagedSha: receipt.staged_commit,
+        };
+        return { commit: changes.publishToMain(change, expectedMainSha) };
+      });
     });
   }
 

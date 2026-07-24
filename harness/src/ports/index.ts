@@ -235,6 +235,9 @@ export interface TenantBareRepo {
   readonly dir: string;
 }
 
+/** Execute one short repository operation only while the current writer lease is valid. */
+export type TenantMutationFence = <T>(operation: () => T | Promise<T>) => Promise<T>;
+
 export interface TenantRepoProvider {
   /** Provide a checkout of the tenant's repo (git working copy + commit()). */
   checkout(tenantId: string): Promise<TenantRepo>;
@@ -243,6 +246,11 @@ export interface TenantRepoProvider {
    * providers may omit it, but live stage and publish fail closed without it.
    */
   bare?(tenantId: string): Promise<TenantBareRepo>;
+  /** Hold the tenant writer lease and fence every shared Git mutation inside it. */
+  withTenantLease?<T>(
+    tenantId: string,
+    action: (runFenced: TenantMutationFence) => Promise<T>,
+  ): Promise<T>;
 }
 
 /** Immutable fields bound into the leaf.customization.v1 staged receipt. */
