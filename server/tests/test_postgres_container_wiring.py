@@ -58,8 +58,7 @@ def test_upload_import_boundary_has_a_real_postgres_pr_gate():
         "deploy/required-config.app.json",
     ):
         assert f"- '{protected_path}'" in workflow
-    assert "working-directory: platform" in workflow
-    assert "python -m pytest -q tests/test_drawing_import.py" in workflow
+    assert "python -m pytest -q platform/tests/test_drawing_import.py" in workflow
 
 
 def test_broker_image_contains_pg_runtime_without_crossing_secret_boundary():
