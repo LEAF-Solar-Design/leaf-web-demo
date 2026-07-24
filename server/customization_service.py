@@ -28,7 +28,7 @@ from customization_authority import (
     HmacConfirmationSigner, PublishRequest, StaffAuthority, StagedChange,
     TenantBinding,
 )
-from customization_flags import enabled
+from customization_flags import RolloutMode, enabled, mode
 from customization_models import ChangeSet, ChangeSetNotFoundError, ChangeState
 from customization_store import SQLiteCustomizationStore
 from platform_release_policy import PlatformReleasePolicyError, classify_path, load_policy
@@ -760,10 +760,18 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
 
     R5/R6 flags control mutation. Once a catalog is published, its durable pin
     remains runtime authority so a flag change cannot expose mutable ``main``.
+    The deployed shared SQLite path is not a valid authority and is ignored only
+    while both rollout modes are off. Any active mode still fails closed.
     """
     tenant_id = _tenant_id(tenant_id)
     try:
         path = database_path()
+        if (
+            _shared_sqlite_path(path)
+            and mode("LEAF_CUSTOMIZATION_R5_MODE") is RolloutMode.OFF
+            and mode("LEAF_CUSTOMIZATION_R6_MODE") is RolloutMode.OFF
+        ):
+            return None
         if not path.exists():
             if enabled(5, tenant_id) or enabled(6, tenant_id):
                 raise CustomizationServiceError(

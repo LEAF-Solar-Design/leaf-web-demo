@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import app as app_module
+import customization_service
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +18,22 @@ def test_health_reports_image_source_sha(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["source_sha"] == source_sha
+
+
+def test_health_stays_live_with_disabled_shared_customization_store(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "customization.db"
+    database.touch()
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    monkeypatch.setattr(customization_service, "database_path", lambda: database)
+    monkeypatch.setattr(customization_service, "_shared_sqlite_path", lambda path: True)
+
+    response = TestClient(app_module.app).get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
 
 
 def test_required_deployment_manifests_have_frozen_shape():

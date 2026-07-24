@@ -111,3 +111,11 @@ Baseline gate:
 
 - [x] Preserve the completed live edge-contract repair from `origin/main`.
 - [x] Preserve authored-execution containment from `origin/main`.
+
+# Disabled customization health repair
+
+- [x] Reproduce the staging `/api/health` failure with shared SQLite configured.
+- [x] Keep the shared SQLite authority fail-closed whenever R5 or R6 is active.
+- [x] Skip shared SQLite catalog lookup only when both rollout modes are off.
+- [x] Run focused and full repository gates.
+- [x] Review and publish the staging-only repair.
