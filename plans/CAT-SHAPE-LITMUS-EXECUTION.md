@@ -141,7 +141,8 @@ npm run proof:cat
 
 The run writes `artifacts/cat-operator-proof/01-request-and-approval.png`,
 `02-cat-version.png`, `02-cat-version-full.png`, `03-undo-restored.png`, and
-`receipt.json`. These files are local test artifacts and are ignored by Git.
+`receipt.json`. Playwright also records the full browser session under the
+proof test-results directory. These files are local test artifacts and are ignored by Git.
 This browser proof does not claim a live Claude or APS run. Pair it with
 `server/tests/test_cat_litmus_offline_e2e.py` for identity, geometry, oracle,
 version, and undo assertions.
