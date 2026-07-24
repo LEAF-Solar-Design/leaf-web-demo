@@ -38,30 +38,58 @@ RECEIPT_PATH = Path(
 )
 
 
-def restrict_to_owner(path: Path) -> None:
-    """Make ``path`` readable only by its owner.
+def write_token_owner_only(path: Path, token: str) -> None:
+    """Write ``token`` to ``path`` readable only by the current user, FAIL-CLOSED.
 
     The default token location sits under C:\\tmp, whose inherited ACL grants
     read to BUILTIN\\Users and modify to sandbox principals, so any other local
-    account could read (or replace) a live bearer token after a login run. On
-    Windows, drop inheritance and grant the current user alone; elsewhere fall
-    back to chmod 0600. Failures are reported but do not abort the login, which
-    has already succeeded by this point.
+    account could read (or replace) a live bearer token. Hardening:
+
+    * Remove any existing file first, so a pre-planted symlink/junction or a
+      stale token cannot redirect the write or survive it (dropping a reparse
+      point deletes the link, not its target).
+    * Create the file EXCLUSIVELY (O_CREAT|O_EXCL) so a race that re-creates the
+      path between the unlink and the open is caught instead of followed.
+    * Lock the DACL to the owner BEFORE the secret is written: on Windows,
+      ``icacls /inheritance:r`` drops every inherited ACE and ``/grant:r`` sets
+      the current user as the only principal; elsewhere ``os.fchmod`` 0600.
+    * If the lock cannot be set, DELETE the file and raise -- never leave a
+      readable token behind (the previous version warned and wrote it anyway).
     """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if os.name == "nt":
             user = os.environ.get("USERNAME") or ""
             if not user:
                 raise RuntimeError("USERNAME not set; cannot scope ACL to owner")
-            subprocess.run(
+            res = subprocess.run(
                 ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-                check=True,
                 capture_output=True,
             )
+            if res.returncode != 0:
+                raise RuntimeError(
+                    "icacls failed: " + res.stderr.decode("utf-8", "replace").strip()
+                )
         else:
-            os.chmod(path, 0o600)
-    except Exception as exc:  # noqa: BLE001 - best-effort hardening
-        print(f"WARNING: could not restrict permissions on {path}: {exc}", flush=True)
+            os.fchmod(fd, 0o600)
+        os.write(fd, token.encode("utf-8"))
+    except BaseException:
+        # Fail closed: never leave a token we could not protect.
+        os.close(fd)
+        fd = None
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def b64url(raw: bytes) -> str:
@@ -151,12 +179,9 @@ access_token = token_response.get("access_token")
 if not isinstance(access_token, str) or not access_token:
     raise SystemExit("Auth0 token response did not contain an access token")
 
-TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-# Create the file empty and lock its ACL down BEFORE the secret goes in, so the
-# token is never briefly world-readable by other local accounts on this host.
-TOKEN_PATH.touch(exist_ok=True)
-restrict_to_owner(TOKEN_PATH)
-TOKEN_PATH.write_text(access_token, encoding="utf-8")
+# Write the token owner-only and fail-closed: locked before the secret lands,
+# and deleted rather than left exposed if the lock cannot be set.
+write_token_owner_only(TOKEN_PATH, access_token)
 
 payload_segment = access_token.split(".")[1]
 payload_segment += "=" * (-len(payload_segment) % 4)

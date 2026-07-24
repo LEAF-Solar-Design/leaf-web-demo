@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -217,20 +218,34 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
         # returned tool keeps its tenant-repo-relative entry.
         pass
     else:
-        # TEMPLATE path (unchanged): PERSIST the authored file + point the registry
-        # entry at it (the FILE is the tool). entry is stored relative to server/ so
-        # the broker resolves it regardless of cwd. Register into our lane's store.
-        AUTHORED_DIR.mkdir(parents=True, exist_ok=True)
+        # TEMPLATE path: PERSIST the authored file + point the registry entry at
+        # it (the FILE is the tool). entry is stored relative to server/ so the
+        # broker resolves it regardless of cwd. Register into our lane's store.
+        #
+        # TENANT ISOLATION: the file path AND the store key must both be
+        # tenant-scoped. A flat authored/<name>.py let tenant B overwrite tenant
+        # A's file, and a dedup keyed on name alone evicted A's catalog entry, so
+        # B could hijack A's tool by name. Write under a per-tenant subdirectory
+        # and dedup on (tenant_id, name) so each tenant's authored tools are
+        # physically and logically their own.
+        tenant_id = str(tenant)
+        # Filesystem-safe tenant slug: keep only [A-Za-z0-9_-] (drops '.', so a
+        # slug can never become '.'/'..'); guard the empty case. entry stays a
+        # plain multi-segment relative path, accepted by the loader's _is_unsafe_ref.
+        tenant_slug = re.sub(r"[^A-Za-z0-9_-]", "_", tenant_id) or "_tenant"
+        tenant_dir = AUTHORED_DIR / tenant_slug
+        tenant_dir.mkdir(parents=True, exist_ok=True)
         fname = f"{tool['name']}.py"
-        (AUTHORED_DIR / fname).write_text(code, encoding="utf-8")
-        tool["entry"] = f"authored/{fname}"
-        # Stamp the authoring tenant. deps.all_tools() folds this global store
-        # last and now only surfaces entries whose tenant_id matches the
-        # requesting tenant, so without this stamp a template-authored tool
-        # would shadow a same-named tool in every OTHER tenant's registry.
-        # str(tenant) matches how all_tools() is called by its consumers.
-        tool["tenant_id"] = str(tenant)
-        deps._AUTHORED[:] = [t for t in deps._AUTHORED if t["name"] != tool["name"]]
+        (tenant_dir / fname).write_text(code, encoding="utf-8")
+        tool["entry"] = f"authored/{tenant_slug}/{fname}"
+        # deps.all_tools() folds this global store last and only surfaces entries
+        # whose tenant_id matches the requesting tenant. str(tenant) matches how
+        # all_tools() is called by its consumers.
+        tool["tenant_id"] = tenant_id
+        deps._AUTHORED[:] = [
+            t for t in deps._AUTHORED
+            if not (t.get("tenant_id") == tenant_id and t.get("name") == tool["name"])
+        ]
         deps._AUTHORED.append(tool)
         deps.save_authored_tools(deps._AUTHORED)
 
