@@ -8,9 +8,9 @@ provenance + preview.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
-import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -229,15 +229,18 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
         # and dedup on (tenant_id, name) so each tenant's authored tools are
         # physically and logically their own.
         tenant_id = str(tenant)
-        # Filesystem-safe tenant slug: keep only [A-Za-z0-9_-] (drops '.', so a
-        # slug can never become '.'/'..'); guard the empty case. entry stays a
-        # plain multi-segment relative path, accepted by the loader's _is_unsafe_ref.
-        tenant_slug = re.sub(r"[^A-Za-z0-9_-]", "_", tenant_id) or "_tenant"
-        tenant_dir = AUTHORED_DIR / tenant_slug
+        # Collision-resistant per-tenant directory. A lossy character-substitution
+        # slug is NOT injective ("tenant.a" and "tenant_a" would collide onto one
+        # directory and re-open the cross-tenant overwrite), so derive the
+        # directory name from a SHA-256 of the exact tenant id: distinct ids map
+        # to distinct directories, and the hex output is inherently path-safe
+        # (accepted by the loader's _is_unsafe_ref, never '.'/'..').
+        tenant_dir_name = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()[:32]
+        tenant_dir = AUTHORED_DIR / tenant_dir_name
         tenant_dir.mkdir(parents=True, exist_ok=True)
         fname = f"{tool['name']}.py"
         (tenant_dir / fname).write_text(code, encoding="utf-8")
-        tool["entry"] = f"authored/{tenant_slug}/{fname}"
+        tool["entry"] = f"authored/{tenant_dir_name}/{fname}"
         # deps.all_tools() folds this global store last and only surfaces entries
         # whose tenant_id matches the requesting tenant. str(tenant) matches how
         # all_tools() is called by its consumers.

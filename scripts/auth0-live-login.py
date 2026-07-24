@@ -38,6 +38,36 @@ RECEIPT_PATH = Path(
 )
 
 
+def _lock_dir_owner_only(directory: Path) -> None:
+    """Lock ``directory`` so only the current user may access it, and so files
+    CREATED inside it inherit that owner-only access.
+
+    This is the key to closing the creation-time window: if the token file's
+    parent is already owner-only with an INHERITABLE owner ACE, the file is
+    owner-only the instant it is created, so no other local account ever has a
+    window to open a read handle before the DACL is tightened. On Windows,
+    ``/inheritance:r`` drops inherited ACEs and ``/grant:r "<user>:(OI)(CI)F"``
+    grants the user full control, inheritable by files (OI) and subdirs (CI).
+    Fail-closed: raise if the lock cannot be set.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        user = os.environ.get("USERNAME") or ""
+        if not user:
+            raise RuntimeError("USERNAME not set; cannot scope ACL to owner")
+        res = subprocess.run(
+            ["icacls", str(directory), "/inheritance:r",
+             "/grant:r", f"{user}:(OI)(CI)F"],
+            capture_output=True,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(
+                "icacls (dir) failed: " + res.stderr.decode("utf-8", "replace").strip()
+            )
+    else:
+        os.chmod(directory, 0o700)
+
+
 def write_token_owner_only(path: Path, token: str) -> None:
     """Write ``token`` to ``path`` readable only by the current user, FAIL-CLOSED.
 
@@ -45,37 +75,29 @@ def write_token_owner_only(path: Path, token: str) -> None:
     read to BUILTIN\\Users and modify to sandbox principals, so any other local
     account could read (or replace) a live bearer token. Hardening:
 
-    * Remove any existing file first, so a pre-planted symlink/junction or a
-      stale token cannot redirect the write or survive it (dropping a reparse
-      point deletes the link, not its target).
-    * Create the file EXCLUSIVELY (O_CREAT|O_EXCL) so a race that re-creates the
-      path between the unlink and the open is caught instead of followed.
-    * Lock the DACL to the owner BEFORE the secret is written: on Windows,
-      ``icacls /inheritance:r`` drops every inherited ACE and ``/grant:r`` sets
-      the current user as the only principal; elsewhere ``os.fchmod`` 0600.
-    * If the lock cannot be set, DELETE the file and raise -- never leave a
-      readable token behind (the previous version warned and wrote it anyway).
+    * Lock the PARENT directory owner-only with an inheritable owner ACE FIRST,
+      so the token file is owner-only from the instant it is created -- there is
+      no window where it carries the broad inherited ACL for another account to
+      grab a read handle through (icacls-after-create left exactly that window).
+    * Remove any existing file, so a pre-planted symlink/junction or a stale
+      token cannot redirect the write or survive it (dropping a reparse point
+      deletes the link, not its target).
+    * Create the file EXCLUSIVELY (O_CREAT|O_EXCL) inside the locked directory so
+      a race that re-creates the path is caught instead of followed, and write
+      the secret through that same handle.
+    * If anything fails, DELETE the file and raise -- never leave a readable
+      token behind (the original version warned and wrote it anyway).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _lock_dir_owner_only(path.parent)
     try:
         path.unlink()
     except FileNotFoundError:
         pass
+    # The file inherits the parent's owner-only ACE at creation (Windows) / is
+    # created 0600 (POSIX): owner-only before a single byte is written.
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        if os.name == "nt":
-            user = os.environ.get("USERNAME") or ""
-            if not user:
-                raise RuntimeError("USERNAME not set; cannot scope ACL to owner")
-            res = subprocess.run(
-                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-                capture_output=True,
-            )
-            if res.returncode != 0:
-                raise RuntimeError(
-                    "icacls failed: " + res.stderr.decode("utf-8", "replace").strip()
-                )
-        else:
+        if os.name != "nt":
             os.fchmod(fd, 0o600)
         os.write(fd, token.encode("utf-8"))
     except BaseException:
