@@ -26,7 +26,6 @@ RUN PYTHONPATH=/app/server python -c "from pathlib import Path; from solver_adap
 
 WORKDIR /app/server
 
-ARG AUTOFILL_SOLVER_REVISION
 RUN python -c \
       "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit')" \
       "$AUTOFILL_SOLVER_REVISION" \
