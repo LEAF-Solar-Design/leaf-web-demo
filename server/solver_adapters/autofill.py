@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any, Dict, Optional
 
 DEFAULT_SOLVER_ROOT = Path(__file__).resolve().parents[3] / "autofill-solver"
 TOOL_NAME = "string-autofill-opt"
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -52,16 +54,50 @@ def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
     }, allow_nan=False))
 
 
-def _source_revision(root: Path) -> str:
+def _git_source_revision(root: Path) -> Optional[str]:
     try:
         completed = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
             text=True, timeout=5, check=True)
         revision = completed.stdout.strip()
-        if revision:
+        if _COMMIT_RE.fullmatch(revision):
             return revision
     except (OSError, subprocess.SubprocessError):
         pass
+    return None
+
+
+def _image_source_revision(root: Path) -> Optional[str]:
+    marker = root / ".leaf-source-revision"
+    if not marker.is_file():
+        return None
+    revision = marker.read_text(encoding="utf-8").strip()
+    if not _COMMIT_RE.fullmatch(revision):
+        raise RuntimeError("autofill solver image contains an invalid source revision marker")
+    return revision
+
+
+def _source_revision(root: Path) -> str:
+    configured = os.environ.get("AUTOFILL_SOLVER_REVISION", "").strip()
+    image_revision = _image_source_revision(root)
+    observed = _git_source_revision(root)
+    if configured:
+        if not _COMMIT_RE.fullmatch(configured):
+            raise RuntimeError(
+                "AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit")
+        if image_revision is not None and image_revision != configured:
+            raise RuntimeError(
+                "AUTOFILL_SOLVER_REVISION does not match the worker image")
+        if observed is not None and observed != configured:
+            raise RuntimeError(
+                "AUTOFILL_SOLVER_REVISION does not match the solver checkout")
+        return configured
+    if image_revision is not None:
+        if observed is not None and observed != image_revision:
+            raise RuntimeError("worker image revision does not match the solver checkout")
+        return image_revision
+    if observed is not None:
+        return observed
     solver_file = root / "solver.py"
     if not solver_file.is_file():
         raise RuntimeError(f"autofill solver source not found: {solver_file}")
@@ -110,9 +146,7 @@ sys.path.insert(0, sys.argv[1])
 import solver
 body = json.load(sys.stdin)
 result = solver.solve_targets(
-    body['groups'], body['panelsPerString'], body['options'],
-    panel_angle=body['panelAngle'], panel_width=body['panelWidth'],
-    panel_height=body['panelHeight'])
+    body['groups'], body['panelsPerString'], body['options'])
 if not isinstance(result, dict):
     raise TypeError('autofill solver returned a non-object result')
 sys.stdout.write(json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False))

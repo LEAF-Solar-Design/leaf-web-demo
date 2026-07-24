@@ -83,3 +83,19 @@ def test_adapter_rejects_non_json_and_invalid_panel_count():
             pass
         else:
             raise AssertionError(f"invalid adapter input was accepted: {invalid!r}")
+
+
+def test_adapter_matches_pinned_three_argument_solver_contract(tmp_path):
+    (tmp_path / "solver.py").write_text(
+        "def solve_targets(groups, n, options=None):\n"
+        "    return {'groups': len(groups), 'n': n, 'options': options or {}}\n",
+        encoding="utf-8",
+    )
+
+    result = autofill.run(SMOKE_INPUT, solver_root=tmp_path)
+
+    assert result["solver_result"] == {
+        "groups": 2,
+        "n": 10,
+        "options": SMOKE_INPUT["options"],
+    }

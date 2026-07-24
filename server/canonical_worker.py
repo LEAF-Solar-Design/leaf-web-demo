@@ -76,7 +76,8 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> boo
     canonical_jobs.record_worker_heartbeat(
         owner, descriptor["tool_name"], descriptor["runtime"], descriptor["source_revision"],
         descriptor["source_sha256"])
-    job = canonical_jobs.claim_next(owner, lease_seconds=lease_seconds)
+    job = canonical_jobs.claim_next(
+        owner, lease_seconds=lease_seconds, tool_name=descriptor["tool_name"])
     if job is None:
         return False
     attempt = int(job["attempt"])
