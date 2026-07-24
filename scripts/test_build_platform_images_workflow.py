@@ -34,6 +34,10 @@ def main() -> None:
     assert "source_mode: ${{ steps.source.outputs.mode }}" in text
     assert "ref: ${{ inputs.source_sha || github.sha }}" in text
     assert "ref: ${{ needs.prepare.outputs.source_sha }}" in text
+    assert (
+        "build-args: ${{ matrix.image == 'app' && "
+        "format('LEAF_SOURCE_SHA={0}', needs.prepare.outputs.source_sha) || '' }}"
+    ) in text
     assert "pull-requests: read" in text
     assert "source_sha must be a full 40-character lowercase hexadecimal commit" in text
     assert '.state == "open"' in text

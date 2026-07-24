@@ -7,11 +7,7 @@ function flagOn(value: string | undefined): boolean {
 export type AuthorSandboxProvider = "off" | "e2b";
 
 export function authoredExecutionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const value = env.LEAF_AUTHORED_EXECUTION;
-  if (value === undefined) {
-    return (env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase() !== "production";
-  }
-  return flagOn(value);
+  return flagOn(env.LEAF_AUTHORED_EXECUTION);
 }
 
 export function authorSandboxProvider(env: NodeJS.ProcessEnv = process.env): AuthorSandboxProvider {
@@ -39,6 +35,9 @@ export function validateProductionHarnessEnv(env: NodeJS.ProcessEnv = process.en
   if (!(env.LEAF_BROKER_SECRET ?? "").trim()) {
     throw new Error("production harness requires nonblank LEAF_BROKER_SECRET");
   }
+  if (!['0', '1'].includes((env.LEAF_AUTHORED_EXECUTION ?? '').trim())) {
+    throw new Error("production harness requires explicit LEAF_AUTHORED_EXECUTION=0 or 1");
+  }
   if (authoredExecutionEnabled(env) &&
       (env.LEAF_AUTHOR_SANDBOX_PROVIDER ?? "").trim().toLowerCase() !== "e2b") {
     throw new Error(
@@ -46,6 +45,11 @@ export function validateProductionHarnessEnv(env: NodeJS.ProcessEnv = process.en
     );
   }
   if (authoredExecutionEnabled(env)) {
+    if ((env.LEAF_HARNESS_SESSION_STORE ?? "").trim().toLowerCase() !== "postgres") {
+      throw new Error(
+        "production authored execution requires LEAF_HARNESS_SESSION_STORE=postgres",
+      );
+    }
     if (!(env.E2B_API_KEY ?? "").trim() && !(env.E2B_API_KEY_FILE ?? "").trim()) {
       throw new Error("production author sandbox requires an E2B credential source");
     }

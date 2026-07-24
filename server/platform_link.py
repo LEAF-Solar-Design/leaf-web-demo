@@ -82,6 +82,12 @@ def _load_platform():
     return _pkg
 
 
+def platform_store():
+    """Return the canonical store through the collision-safe package alias."""
+    store, _db, _platform_deps = _load_platform()
+    return store
+
+
 def _db_configured() -> bool:
     """True iff the platform package imports AND a DATABASE_URL resolves (env or
     platform/.env.local). Never raises; a False here is the silent no-op path

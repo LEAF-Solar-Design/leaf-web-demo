@@ -155,6 +155,14 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   });
 }
 
+function requiredText(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new AuthorLoopError(`${field} is required`, 400);
+  }
+  return value.trim();
+}
+
 function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json" });
@@ -390,6 +398,13 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         if (!description.trim()) {
           return send(res, 400, { error: { message: "description is required" } });
         }
+        // A live lifecycle has an isolated stage/publish path. Never let the
+        // compatibility route move main when that path is wired.
+        if (auth.enabled && ports.customizationCoordination) {
+          return send(res, 410, {
+            error: { message: "live authoring requires /author/stage then /author/publish" },
+          });
+        }
         const route = classifyRoute({ path, body });
         if (route === "one-off") {
           const out = await loop.oneOff(tenant, description);
@@ -397,6 +412,46 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         }
         // default author route = build (author + register + one commit)
         const out = await loop.build(tenant, description);
+        return send(res, 200, out);
+      }
+
+      if (method === "POST" && path === "/author/stage") {
+        if (!authoredExecutionEnabled()) {
+          return send(res, 403, {
+            error: { message: "tenant-authored execution is disabled" },
+          });
+        }
+        const body = await readJsonBody(req);
+        const tenant = tenantForRequest(req, body);
+        const description = requiredText(body, "description");
+        // These names deliberately match AuthorLoop.stage's request exactly.
+        const out = await loop.stage(tenant, description, {
+          changeSetId: requiredText(body, "changeSetId"),
+          expectedBaseSha: requiredText(body, "expectedBaseSha"),
+          platformRelease: requiredText(body, "platformRelease"),
+          workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
+          idempotencyKey: requiredText(body, "idempotencyKey"),
+        });
+        return send(res, 200, out);
+      }
+
+      if (method === "POST" && path === "/author/publish") {
+        if (!authoredExecutionEnabled()) {
+          return send(res, 403, {
+            error: { message: "tenant-authored execution is disabled" },
+          });
+        }
+        const body = await readJsonBody(req);
+        const receipt = body.receipt;
+        if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) {
+          return send(res, 400, { error: { message: "receipt is required" } });
+        }
+        // Do not reconstitute receipt fields. The exact staged receipt is the
+        // publish authority and AuthorLoop verifies its private ref again.
+        const out = await loop.publish(
+          receipt as import("./ports/index.js").StagedCustomizationReceipt,
+          requiredText(body, "expectedMainSha"),
+        );
         return send(res, 200, out);
       }
 
@@ -481,8 +536,12 @@ export async function startReal(port = 8130): Promise<Server> {
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
   const { createTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
+  const { CustomizationCoordinationClient } = await import("./ports/impl/customizationCoordinationClient.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
+  const tenantGitDir = process.env.LEAF_TENANT_GIT_DIR ?? `${tenantsDir}/tenant-git`;
+  const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
+  const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
   // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
   const grantStore = createTenantGrantStore();
 
@@ -494,7 +553,11 @@ export async function startReal(port = 8130): Promise<Server> {
     tenantRepo: new TenantRepoProviderImpl({
       locator: { async repoRef(t) { return `${tenantsDir}/${t}`; } },
       inPlace: true,
+      bareBase: tenantGitDir,
     }),
+    ...(appUrl && dispatchSecret
+      ? { customizationCoordination: new CustomizationCoordinationClient({ baseUrl: appUrl, dispatchSecret }) }
+      : {}),
   };
   return createHarness(ports).listen(port);
 }

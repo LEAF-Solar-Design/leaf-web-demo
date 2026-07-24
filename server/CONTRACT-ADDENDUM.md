@@ -1159,3 +1159,26 @@ Setting `LEAF_AUTHORED_EXECUTION=1` in production also requires
 `LEAF_SANDBOX=e2b` or `LEAF_SANDBOX=e2b-microvm`. Broker startup fails when
 that combination is incomplete. Local and demo deployments that do not set
 `LEAF_RUNTIME_ENV=production` keep their existing behavior.
+## §21 Tenant customization and controlled platform promotion
+
+Status: **FROZEN v1, 2026-07-23**
+
+The normative customization contract is
+[`../contract/CUSTOMIZATION.md`](../contract/CUSTOMIZATION.md), with the
+machine-readable schema at
+[`../contract/customization.v1.schema.json`](../contract/customization.v1.schema.json).
+
+R5 stages tenant customization bytes without changing the effective catalog.
+R6 publishes one exact, approved staged receipt through
+`POST /api/author/register`. No other R6 route exists. In live-auth mode,
+legacy `POST /api/author` cannot publish or persist bytes. R7 remains disabled
+and route-less.
+
+Tenant Git is the byte authority. The customization coordination store is the
+authority for effective catalog and platform-release pointers, workflow state,
+approval, audit, and rollback. The platform release bundle is the sole authority
+for frozen and slushy path policy. Tenant-controlled content cannot widen it.
+
+Deployment rollback is complete only when it restores the prior image digests,
+effective catalog commit and digest, effective platform release, and one
+idempotent audit record.

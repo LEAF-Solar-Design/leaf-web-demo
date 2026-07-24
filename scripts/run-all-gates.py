@@ -73,6 +73,7 @@ REPO_PARENT = REPO.parent               # cwd the platform suite runs from (e.g.
 SERVER = REPO / "server"
 DA = REPO / "da"
 HARNESS = REPO / "harness"
+WEB = REPO / "web"
 AUTHORED_TOOLS = SERVER / "authored_tools.json"
 
 # Defensive: never let the repo root shadow the stdlib `platform` module inside
@@ -120,11 +121,28 @@ def _py_pytest(target: str) -> List[str]:
 
 
 def _npm() -> str:
-    return shutil.which("npm") or shutil.which("npm.cmd") or "npm"
+    if os.name == "nt":
+        return shutil.which("npm.cmd") or shutil.which("npm") or "npm.cmd"
+    return shutil.which("npm") or "npm"
 
 
 def _npx() -> str:
-    return shutil.which("npx") or shutil.which("npx.cmd") or "npx"
+    if os.name == "nt":
+        return shutil.which("npx.cmd") or shutil.which("npx") or "npx.cmd"
+    return shutil.which("npx") or "npx"
+
+
+def normalize_spawn_command(
+    argv: List[str], *, os_name: Optional[str] = None,
+    command_interpreter: Optional[str] = None,
+) -> tuple[List[str] | str, bool, Optional[str]]:
+    """Route Windows command shims through cmd.exe with Windows quoting."""
+    normalized = [str(arg) for arg in argv]
+    platform_name = os.name if os_name is None else os_name
+    if platform_name != "nt" or Path(normalized[0]).suffix.lower() not in (".cmd", ".bat"):
+        return normalized, False, None
+    interpreter = command_interpreter or os.environ.get("COMSPEC") or "cmd.exe"
+    return subprocess.list2cmdline(normalized), True, interpreter
 
 
 def build_suites() -> List[Suite]:
@@ -144,7 +162,7 @@ def build_suites() -> List[Suite]:
         Suite("server-write-loop", "server tests/test_write_loop.py", "pytest", SERVER,
               _py_pytest("tests/test_write_loop.py"), 8),
         Suite("server-nl-router", "server tests/test_nl_router.py", "pytest", SERVER,
-              _py_pytest("tests/test_nl_router.py"), 17, reset_authored=True),
+              _py_pytest("tests/test_nl_router.py"), 18, reset_authored=True),
         Suite("server-ui-wave", "server tests/test_ui_wave.py", "pytest", SERVER,
               _py_pytest("tests/test_ui_wave.py"), 9),
         Suite("server-wave2", "server tests/test_wave2.py", "pytest", SERVER,
@@ -158,7 +176,7 @@ def build_suites() -> List[Suite]:
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 14),
         Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 11),
+              SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 12),
         # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
         # by hand — same gap this branch closed for its own suites.
         Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
@@ -168,11 +186,11 @@ def build_suites() -> List[Suite]:
         # suites share on-disk approval + audit state and the router suites toggle
         # dispatch-secret env, so one pytest process cross-contaminates them.
         Suite("server-agent-policy", "server tests/test_agent_policy.py", "pytest", SERVER,
-              _py_pytest("tests/test_agent_policy.py"), 22),
+              _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
-              _py_pytest("tests/test_agent_gate.py"), 30),
+              _py_pytest("tests/test_agent_gate.py"), 49),
         Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
-              _py_pytest("tests/test_agent_router.py"), 23),
+              _py_pytest("tests/test_agent_router.py"), 30),
         Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
               _py_pytest("tests/test_sessions_router.py"), 25),
         Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
@@ -184,7 +202,7 @@ def build_suites() -> List[Suite]:
         Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
               _py_pytest("tests/test_billing_tiers.py"), 30),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
-              _py_pytest("tests/test_job_lanes.py"), 11),
+              _py_pytest("tests/test_job_lanes.py"), 12),
         Suite("server-agent-e2e", "server tests/test_agent_e2e.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_e2e.py"), 4),
         # --- guest drawing uploads (CONTRACT-ADDENDUM section 19) --- #
@@ -213,7 +231,7 @@ def build_suites() -> List[Suite]:
         Suite("server-job-dwg-version", "server tests/test_job_dwg_version_persist.py",
               "pytest", SERVER, _py_pytest("tests/test_job_dwg_version_persist.py"), 6),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
-              SERVER, _py_pytest("tests/test_canonical_worker.py"), 10),
+              SERVER, _py_pytest("tests/test_canonical_worker.py"), 13),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
               "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 15),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
@@ -223,11 +241,11 @@ def build_suites() -> List[Suite]:
         Suite("server-adapter-autofill", "server tests/test_autofill_adapter.py", "pytest",
               SERVER, _py_pytest("tests/test_autofill_adapter.py"), 3),
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
-              SERVER, _py_pytest("tests/test_agent_approvals.py"), 10),
+              SERVER, _py_pytest("tests/test_agent_approvals.py"), 19),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
               SERVER, _py_pytest("tests/test_approval_consume.py"), 13),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
-              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 16),
+              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 17),
         Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_entitlements.py"), 26),
         Suite("server-policy-unavailable-paths", "server tests/test_policy_unavailable_paths.py",
@@ -250,11 +268,11 @@ def build_suites() -> List[Suite]:
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
               _py_pytest("tests/test_quota_shape.py"), 12),
         Suite("server-session-store", "server tests/test_session_store.py", "pytest", SERVER,
-              _py_pytest("tests/test_session_store.py"), 19),
+              _py_pytest("tests/test_session_store.py"), 20),
         Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
               SERVER, _py_pytest("tests/test_sessions_routes.py"), 33),
         Suite("server-turn-runner", "server tests/test_turn_runner.py", "pytest", SERVER,
-              _py_pytest("tests/test_turn_runner.py"), 12),
+              _py_pytest("tests/test_turn_runner.py"), 16),
         # g1a canonical e2e self-skips without a reachable Postgres; gate it the
         # same way as the platform suite so the skip is visible, not silent.
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
@@ -299,6 +317,23 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_store.py"), 14),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
+        # --- tenant customization control plane (one process per file) --- #
+        Suite("server-customization-authority", "server customization authority", "pytest",
+              SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
+        Suite("server-customization-store", "server customization store", "pytest",
+              SERVER, _py_pytest("tests/test_customization_store.py"), 8),
+        Suite("server-customization-reconcile", "server customization reconcile", "pytest",
+              SERVER, _py_pytest("tests/test_customization_reconcile.py"), 8),
+        Suite("server-customization-contract", "server customization contract freeze", "pytest",
+              SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
+        Suite("server-customization-runtime", "server customization runtime", "pytest",
+              SERVER, _py_pytest("tests/test_customization_runtime.py"), 9),
+        Suite("server-customization-adversarial", "server customization adversarial", "pytest",
+              SERVER, _py_pytest("tests/test_customization_adversarial.py"), 5),
+        Suite("server-customization-publish-recovery", "server customization publish recovery", "pytest",
+              SERVER, _py_pytest("tests/test_customization_publish_recovery.py"), 1),
+        Suite("server-platform-release-policy", "server platform release policy", "pytest",
+              SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
         # Expected 118 = the full DB-configured collection, measured on this
         # tree 2026-07-22 via `DATABASE_URL=... pytest --collect-only -q
@@ -336,11 +371,17 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 256),
+              [_npm(), "test"], 289),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
               [_npx(), "tsc", "-p", "tsconfig.build.json"], None),
+        Suite("harness-audit-high", "harness npm audit (high threshold)", "script", HARNESS,
+              [_npm(), "audit", "--audit-level=high"], None),
+        Suite("web-customization-check", "web customization static check", "script", WEB,
+              [_npm(), "run", "check:customization"], None),
+        Suite("web-build", "web production build", "script", WEB,
+              [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
         # Builds + boots the real compose stack (broker+harness+app, mock agent)
         # and proves the authed app->harness hop, durable grant/tenant volumes,
@@ -551,6 +592,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     fault = os.environ.get("LEAF_GATE_FAULT_INJECT", "")
     if fault and attempt == 1 and fault == f"{suite.id}:spawn":
         argv = [argv[0] + ".fault-injected-missing.exe"] + argv[1:]
+    spawn_command, use_shell, shell_executable = normalize_spawn_command(argv)
     spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
@@ -558,9 +600,10 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         logf.flush()
         try:
             proc = subprocess.run(
-                argv,
+                spawn_command,
                 cwd=str(suite.cwd), env={**clean_env(), **db_env},
                 capture_output=True, text=True, timeout=suite.timeout_s,
+                shell=use_shell, executable=shell_executable,
                 # text=True without an explicit encoding decodes with the system
                 # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and
                 # quote glyphs. A byte outside cp1252 killed the reader thread,

@@ -34,20 +34,38 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
+from uuid import uuid4
 
 import requests
 from fastapi import APIRouter, Header
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import agent_audit
 import agent_ledger
 import agent_policy
 import broker_client
 import deps
+from customization_service import CustomizationService, CustomizationServiceError
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
+
+
+class DeploymentVerifyRequest(BaseModel):
+    snapshot_id: str = Field(..., min_length=1, max_length=256)
+    expected_effective_catalog_release: str = Field(..., min_length=1, max_length=256)
+    expected_platform_release: str = Field(..., min_length=1, max_length=256)
+
+    class Config:
+        extra = "forbid"
+
+
+class DeploymentSnapshotRequest(BaseModel):
+    snapshot_id: str = Field(..., min_length=1, max_length=256)
+
+    class Config:
+        extra = "forbid"
 
 
 # --------------------------------------------------------------------------- #
@@ -387,3 +405,87 @@ def ops_agent_overlay(
         "overlay": entry["overlay"],
         "revision": int(entry["revision"]),
     })
+
+
+def _customization_ops_error(exc: Exception) -> JSONResponse:
+    reason = exc.code if isinstance(exc, CustomizationServiceError) else "customization_ops_failed"
+    status_code = exc.status_code if isinstance(exc, CustomizationServiceError) else 503
+    return JSONResponse(
+        status_code=status_code,
+        content=with_envelope_fields({
+            "error": {
+                "error_code": "INTERNAL",
+                "message": "customization deployment operation failed",
+                "retryable": status_code >= 500,
+            },
+            "reason_code": reason,
+        }),
+    )
+
+
+@router.post("/internal/ops/customization/deployment-snapshot")
+def customization_deployment_snapshot(
+    x_ops_secret: Optional[str] = Header(default=None),
+) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    try:
+        return CustomizationService.configured().capture_deployment_snapshot(
+            idempotency_key=f"deploy-snapshot:{uuid4()}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _customization_ops_error(exc)
+
+
+@router.post("/internal/ops/customization/deployment-verify")
+def customization_deployment_verify(
+    req: DeploymentVerifyRequest,
+    x_ops_secret: Optional[str] = Header(default=None),
+) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    try:
+        return CustomizationService.configured().verify_deployment(
+            snapshot_id=req.snapshot_id,
+            expected_effective_catalog_release=req.expected_effective_catalog_release,
+            expected_platform_release=req.expected_platform_release,
+            idempotency_key=f"deploy-verify:{req.snapshot_id}:{req.expected_platform_release}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _customization_ops_error(exc)
+
+
+@router.post("/internal/ops/customization/deployment-rollback")
+def customization_deployment_rollback(
+    req: DeploymentSnapshotRequest,
+    x_ops_secret: Optional[str] = Header(default=None),
+) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    try:
+        return CustomizationService.configured().restore_deployment_snapshot(
+            snapshot_id=req.snapshot_id,
+            idempotency_key=f"deploy-restore:{req.snapshot_id}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _customization_ops_error(exc)
+
+
+@router.post("/internal/ops/customization/deployment-rollback-verify")
+def customization_deployment_rollback_verify(
+    req: DeploymentSnapshotRequest,
+    x_ops_secret: Optional[str] = Header(default=None),
+) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    try:
+        return CustomizationService.configured().verify_restored_deployment(
+            snapshot_id=req.snapshot_id,
+            idempotency_key=f"deploy-restore-verify:{req.snapshot_id}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _customization_ops_error(exc)

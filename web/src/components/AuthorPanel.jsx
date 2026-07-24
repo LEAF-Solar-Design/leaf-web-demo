@@ -198,7 +198,16 @@ function ServiceGate() {
   )
 }
 
-export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal, seedAutoSubmit = false, notLinked, onLinkClaude, buildEntitled = true }) {
+function lifecycleMessage(error) {
+  const code = String(error?.body?.reason_code || error?.body?.error?.code || error?.body?.error?.message || error?.message || '').toLowerCase()
+  if (/independent_approval_pending|approval.pending/.test(code)) return 'An independent reviewer has not approved this exact staged change yet. It remains staged and is not runnable.'
+  if (error?.status === 409 || /conflict|stale/.test(code)) return 'This staged change conflicts with a newer catalog. Stage it again to review the current base.'
+  if (error?.status === 410 || /expired/.test(code)) return 'That publish approval expired. Stage the tool again to request a fresh approval.'
+  if (error?.status === 503 || /not configured|unavailable|fail.closed/.test(code)) return 'Publishing is unavailable because the protected customization service is not ready. The staged tool was not published.'
+  return 'Publish did not complete. The staged tool is not runnable.'
+}
+
+export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, seedSignal, seedAutoSubmit = false, notLinked, onLinkClaude, buildEntitled = true }) {
   const [desc, setDesc] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
@@ -207,6 +216,8 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
   const [buildGate, setBuildGate] = useState(false) // a build-entitlement rejection (calm plan gate, not red)
   const [svcGate, setSvcGate] = useState(false) // authoring service unreachable (B2; calm, not red)
   const [authored, setAuthored] = useState(null)
+  const [publishing, setPublishing] = useState(false)
+  const [publishErr, setPublishErr] = useState(null)
   const lastSignal = useRef(null)
   const startRef = useRef(null)
   const authoredRef = useRef(null)
@@ -240,7 +251,7 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
   async function submit(override) {
     const d = (typeof override === 'string' ? override : desc).trim()
     if (!d || !buildEntitled) return
-    setBusy(true); setErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setAuthored(null)
+    setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setAuthored(null)
     try {
       const res = await onAuthor(d)
       setAuthored(res)
@@ -255,6 +266,19 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
       else setErr(String(e.message || e))
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function publish() {
+    if (!authored || publishing) return
+    setPublishing(true); setPublishErr(null)
+    try {
+      const published = await onPublish(authored)
+      setAuthored(published)
+    } catch (e) {
+      setPublishErr(lifecycleMessage(e))
+    } finally {
+      setPublishing(false)
     }
   }
 
@@ -279,7 +303,7 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
 
   return (
     <div className="author-panel author-inner">
-      <p className="panel-sub">Describe a CAD tool in plain English. Leaf generates it and adds it to the catalog.</p>
+      <p className="panel-sub">Describe a CAD tool in plain English. Leaf stages it for review before publication.</p>
       {(!buildEntitled || buildGate)
         ? <BuildGate />
         : svcGate
@@ -335,10 +359,29 @@ export default function AuthorPanel({ onAuthor, onUseAuthored, seed, seedSignal,
             </div>
           )}
           <p className="authored-desc">{authored.preview || authored.tool.description}</p>
+          {!authored.published && (
+            <div className="customization-state" role="status">
+              <span className="dot square" aria-hidden="true" />
+              <span>{authored.demo ? 'Demo preview staged. Publish to make it available in this demo.' : 'Staged and awaiting approval. It is not runnable until publication succeeds.'}</span>
+            </div>
+          )}
+          {authored.validation && (
+            <div className="customization-detail"><span>Server validation</span><pre>{typeof authored.validation === 'string' ? authored.validation : JSON.stringify(authored.validation, null, 2)}</pre></div>
+          )}
+          {(authored.diff_summary || authored.diff) && (
+            <div className="customization-detail"><span>Server diff</span><pre>{typeof (authored.diff_summary || authored.diff) === 'string' ? (authored.diff_summary || authored.diff) : JSON.stringify(authored.diff_summary || authored.diff, null, 2)}</pre></div>
+          )}
           <pre className="code"><code>{authored.code}</code></pre>
-          <button className="chip-act" onClick={() => onUseAuthored(authored.tool)}>
-            Run it now
-          </button>
+          {!authored.published ? (
+            <button className="chip-act" onClick={publish} disabled={publishing}>
+              {publishing ? 'Publishing…' : 'Publish tool'}
+            </button>
+          ) : (
+            <button className="chip-act" onClick={() => onUseAuthored(authored.tool)}>
+              Run it now
+            </button>
+          )}
+          {publishErr && <div className="customization-state error" role="status">{publishErr}</div>}
         </div>
       )}
 

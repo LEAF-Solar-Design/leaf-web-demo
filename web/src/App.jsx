@@ -30,7 +30,7 @@ import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
   config, getSession, getTools, getCapabilities, getUsage, getHealth, runTool, runToolAsync,
-  attachToJob, getJob, listJobs, recordToEnvelope, authorTool, getDrawingIntake,
+  attachToJob, getJob, listJobs, recordToEnvelope, stageAuthorTool, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt, closeJobBeacon,
   getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
   getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant, getEntitlements,
@@ -1090,14 +1090,17 @@ export default function App() {
   }, [mock, refreshFail, seatVersion])
 
   const onAuthor = useCallback(async (description) => {
-    // Every authoring call funnels through here, so this is where the tour's
-    // build beat learns it has actually landed (onCannedPrompt deliberately
-    // does NOT flip `landed` for the build lane — see its finally).
+    // R5 only stages bytes. It must not place a tool in the runnable catalog.
+    return stageAuthorTool(mock, description)
+  }, [mock])
+
+  const onPublishAuthor = useCallback(async (staged) => {
     try {
-      const res = await authorTool(mock, description)
+      const res = await publishStagedAuthor(mock, staged)
+      const tool = res.tool || staged.tool
       setTools((prev) => {
-        const rest = prev.filter((t) => t.name !== res.tool.name)
-        return [...rest, res.tool]
+        const rest = prev.filter((t) => t.name !== tool.name)
+        return [...rest, tool]
       })
       // Re-group the catalog so the new tool lands in "Custom authored tools"
       // (visible re-fetch of the grouped capabilities).
@@ -1105,7 +1108,7 @@ export default function App() {
       // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
       // it is visible even when the author section is collapsed / scrolled away.
       showToast({
-        text: `Tool authored — ${res.tool.name}`,
+        text: `Tool published — ${tool.name}`,
         action: {
           label: 'View',
           onClick: () => {
@@ -1114,7 +1117,7 @@ export default function App() {
           },
         },
       })
-      return res
+      return { ...res, tool }
     } finally {
       setTourLanded(true)
     }
@@ -1841,6 +1844,7 @@ export default function App() {
         >
           <AuthorPanel
             onAuthor={onAuthor}
+            onPublish={onPublishAuthor}
             onUseAuthored={onUseAuthored}
             seed={authorSeed}
             seedSignal={authorSignal}

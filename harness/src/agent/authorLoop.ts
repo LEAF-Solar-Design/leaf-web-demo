@@ -8,6 +8,9 @@
  * over it.
  */
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
@@ -16,14 +19,34 @@ import {
   HARNESS_IDENTITY,
   findTool,
   registerTool,
+  REGISTRY_FILE,
 } from "../registry/registerTool.js";
+import {
+  GitRefConflictError,
+  TenantChangeRepo,
+  type TenantChangeSet,
+} from "../ports/impl/tenantChangeRepo.js";
 import type {
   AuthorResponse,
   AuthorToolset,
   HarnessPorts,
   ResultEnvelope,
+  StagedCustomizationReceipt,
+  TenantMutationFence,
   ToolPackage,
 } from "../ports/index.js";
+
+export interface StageCustomizationRequest {
+  changeSetId: string;
+  expectedBaseSha: string;
+  platformRelease: string;
+  workspaceContractDigest: string;
+  idempotencyKey: string;
+}
+
+export interface StageCustomizationResponse extends Partial<AuthorResponse> {
+  receipt: StagedCustomizationReceipt;
+}
 
 export class AuthorLoopError extends Error {
   constructor(
@@ -41,26 +64,24 @@ export class AuthorLoop {
 
   private withTenantRepoLease<T>(
     tenantId: string,
-    action: () => Promise<T>,
+    action: (runFenced: TenantMutationFence) => Promise<T>,
   ): Promise<T> {
-    const provider = this.ports.tenantRepo as HarnessPorts["tenantRepo"] & {
-      withTenantLease?<R>(tenant: string, operation: () => Promise<R>): Promise<R>;
-    };
-    return provider.withTenantLease
-      ? provider.withTenantLease(tenantId, action)
-      : action();
+    const provider = this.ports.tenantRepo;
+    if (!provider.withTenantLease) {
+      return Promise.reject(new AuthorLoopError("tenant repository writer lease is required", 503));
+    }
+    return provider.withTenantLease(tenantId, action);
   }
 
   private withTenantRepoReadLease<T>(
     tenantId: string,
     action: () => Promise<T>,
   ): Promise<T> {
-    const provider = this.ports.tenantRepo as HarnessPorts["tenantRepo"] & {
-      withTenantReadLease?<R>(tenant: string, operation: () => Promise<R>): Promise<R>;
-    };
-    return provider.withTenantReadLease
-      ? provider.withTenantReadLease(tenantId, action)
-      : action();
+    const provider = this.ports.tenantRepo;
+    if (!provider.withTenantReadLease) {
+      return Promise.reject(new AuthorLoopError("tenant repository read lease is required", 503));
+    }
+    return provider.withTenantReadLease(tenantId, action);
   }
 
   private persistTool(
@@ -99,16 +120,15 @@ export class AuthorLoop {
    * Shared authoring core (used by both build and one-off): spawn ONE design-time
    * session, get the authored tool package, then re-validate with the oracle.
    */
-  private async author(tenantId: string, description: string) {
+  private async authorInRepo(tenantId: string, description: string, repoDir: string) {
     // Concern 2 grant ONLY (never the platform JWT). Injected explicitly.
     const grant = await this.ports.oauth.getGrant(tenantId);
-    const repo = await this.ports.tenantRepo.checkout(tenantId);
-    const toolset = this.toolsetFor(repo.dir, tenantId);
+    const toolset = this.toolsetFor(repoDir, tenantId);
 
     const run = await this.ports.agentRunner.run({
       description,
       systemPrompt: AUTHOR_SYSTEM_PROMPT,
-      repoDir: repo.dir,
+      repoDir,
       grant,
       toolset,
     });
@@ -122,22 +142,156 @@ export class AuthorLoop {
         vr.diagnostics,
       );
     }
+    return run;
+  }
+
+  private async author(tenantId: string, description: string) {
+    const repo = await this.ports.tenantRepo.checkout(tenantId);
+    const run = await this.authorInRepo(tenantId, description, repo.dir);
     return { repo, run };
   }
 
-  /** build route: author + register + exactly one harness commit. */
-  async build(tenantId: string, description: string): Promise<AuthorResponse> {
+  private lifecyclePorts() {
+    const bare = this.ports.tenantRepo.bare;
+    const coordination = this.ports.customizationCoordination;
+    if (!bare || !coordination) {
+      throw new AuthorLoopError("customization lifecycle is not configured", 503);
+    }
+    return { bare, coordination };
+  }
+
+  /** Legacy auth-off compatibility: author + register + direct commit. */
+  async buildLegacyAuthOff(tenantId: string, description: string): Promise<AuthorResponse> {
     return this.withTenantRepoLease(tenantId, async () => {
       const { repo, run } = await this.author(tenantId, description);
       await this.persistTool(repo, run.tool);
-      // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
-      // to /author, ADDITIVELY. A runner that did not meter leaves it undefined.
+    // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
+    // to /author, ADDITIVELY. A runner that did not meter (the fake) leaves it undefined,
+    // so the response stays exactly {tool, code, preview} — the frozen shape is preserved.
       return {
         tool: run.tool,
         code: run.code,
         preview: run.preview,
         ...(run.telemetry ? { telemetry: run.telemetry } : {}),
       };
+    });
+  }
+
+  /** @deprecated Live authenticated customization must use stage() then publish(). */
+  async build(tenantId: string, description: string): Promise<AuthorResponse> {
+    return this.buildLegacyAuthOff(tenantId, description);
+  }
+
+  /**
+   * Stage a proposed catalog change in an isolated worktree and private change
+   * ref. This never updates main or an effective catalog pointer.
+   */
+  async stage(
+    tenantId: string,
+    description: string,
+    request: StageCustomizationRequest,
+  ): Promise<StageCustomizationResponse> {
+    return this.withTenantRepoLease(tenantId, async (runFenced) => {
+      const { bare, coordination } = this.lifecyclePorts();
+      const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, tenantId));
+      const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
+      const { observedMainSha, existingChangeSha } = await runFenced(() => ({
+        observedMainSha: changes.readRef("refs/heads/main"),
+        existingChangeSha: changes.readChangeRef(request.changeSetId),
+      }));
+      if (existingChangeSha === null && observedMainSha !== request.expectedBaseSha) {
+        throw new AuthorLoopError("staging base no longer matches main", 409);
+      }
+      const change = await runFenced(() =>
+        changes.createOrResume(request.changeSetId, request.expectedBaseSha));
+      try {
+        if (change.stagedSha !== null) {
+          const catalogDigest = await runFenced(() => createHash("sha256")
+            .update(readFileSync(join(change.dir, REGISTRY_FILE)))
+            .digest("hex"));
+        const receipt = Object.freeze({
+          contract: "leaf.customization.v1" as const,
+          tenant_id: tenantId,
+          change_set_id: request.changeSetId,
+          state: "staged" as const,
+          base_commit: request.expectedBaseSha,
+          staged_commit: change.stagedSha,
+          catalog_digest: catalogDigest,
+          platform_release: request.platformRelease,
+          workspace_contract_digest: request.workspaceContractDigest,
+          idempotency_key: request.idempotencyKey,
+        });
+          await coordination.recordStaged(receipt);
+          return { receipt };
+        }
+        const run = await this.authorInRepo(tenantId, description, change.dir);
+        const { stagedCommit, catalogDigest } = await runFenced(() => {
+          registerTool(change.dir, run.tool);
+          const stagedCommit = changes.stageCommit(change, `stage tool: ${run.tool.name}`);
+          const catalogDigest = createHash("sha256")
+            .update(readFileSync(join(change.dir, REGISTRY_FILE)))
+            .digest("hex");
+          return { stagedCommit, catalogDigest };
+        });
+      const receipt = Object.freeze({
+        contract: "leaf.customization.v1" as const,
+        tenant_id: tenantId,
+        change_set_id: request.changeSetId,
+        state: "staged" as const,
+        base_commit: request.expectedBaseSha,
+        staged_commit: stagedCommit,
+        catalog_digest: catalogDigest,
+        platform_release: request.platformRelease,
+        workspace_contract_digest: request.workspaceContractDigest,
+        idempotency_key: request.idempotencyKey,
+      });
+        await coordination.recordStaged(receipt);
+        return {
+          tool: run.tool,
+          code: run.code,
+          preview: run.preview,
+          receipt,
+          ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+        };
+      } finally {
+        await runFenced(() => changes.cleanupWorktree(change));
+      }
+    });
+  }
+
+  /**
+   * Trusted publish step. Durable approval and exact-receipt matching occur at
+   * the coordination port before the Wave 1 adapter rechecks its private ref
+   * and CAS-updates main.
+   */
+  async publish(receipt: StagedCustomizationReceipt, expectedMainSha: string): Promise<{ commit: string }> {
+    return this.withTenantRepoLease(receipt.tenant_id, async (runFenced) => {
+      const { bare, coordination } = this.lifecyclePorts();
+      const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, receipt.tenant_id));
+      const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
+      const ref = `refs/leaf/changes/${receipt.change_set_id.toLowerCase()}`;
+      await coordination.authorizePublish(receipt, expectedMainSha);
+      return runFenced(() => {
+        const observedRef = changes.readRef(ref);
+        if (observedRef !== receipt.staged_commit) {
+          throw new GitRefConflictError(ref, receipt.staged_commit, observedRef);
+        }
+        const observedMain = changes.readRef("refs/heads/main");
+        if (observedMain === receipt.staged_commit) {
+          return { commit: receipt.staged_commit };
+        }
+        if (observedMain !== expectedMainSha) {
+          throw new GitRefConflictError("refs/heads/main", expectedMainSha, observedMain);
+        }
+        const change: TenantChangeSet = {
+          id: receipt.change_set_id,
+          ref,
+          dir: "",
+          expectedBaseSha: receipt.base_commit,
+          stagedSha: receipt.staged_commit,
+        };
+        return { commit: changes.publishToMain(change, expectedMainSha) };
+      });
     });
   }
 

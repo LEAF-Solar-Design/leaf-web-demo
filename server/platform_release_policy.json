@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "workspace_contracts": [
+    {
+      "id": "leaf.workspace.v1",
+      "sha256": "fc5fdcb63704127f1c70a430632699e878f79bcea4d7fecdc60782fc210e6865"
+    }
+  ],
+  "releases": [
+    {
+      "release_id": "leaf-platform-2026.07.23",
+      "workspace_contract": "leaf.workspace.v1",
+      "workspace_contract_sha256": "fc5fdcb63704127f1c70a430632699e878f79bcea4d7fecdc60782fc210e6865",
+      "rules": [
+        {"path": "registry.json", "mutability": "frozen"},
+        {"path": "platform_release_policy.json", "mutability": "frozen"},
+        {"path": ".github/workflows/**", "mutability": "frozen"},
+        {"path": ".aps/**", "mutability": "frozen"},
+        {"path": "credentials/**", "mutability": "frozen"},
+        {"path": "requirements.txt", "mutability": "frozen"},
+        {"path": "pyproject.toml", "mutability": "frozen"},
+        {"path": "package-lock.json", "mutability": "frozen"},
+        {"path": "tools/**", "mutability": "tenant_owned"},
+        {"path": "config/**", "mutability": "slushy"}
+      ]
+    }
+  ]
+}

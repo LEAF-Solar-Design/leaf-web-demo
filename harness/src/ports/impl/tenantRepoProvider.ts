@@ -20,7 +20,13 @@ import { join } from "node:path";
 import { Pool } from "pg";
 import type { PoolClient, PoolConfig } from "pg";
 import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
-import type { HarnessIdentity, TenantRepo, TenantRepoProvider } from "../index.js";
+import type {
+  HarnessIdentity,
+  TenantBareRepo,
+  TenantMutationFence,
+  TenantRepo,
+  TenantRepoProvider,
+} from "../index.js";
 
 /** Resolves a tenant to its mushy-codebase git remote/worktree. */
 export interface TenantRepoLocator {
@@ -32,6 +38,8 @@ export interface TenantRepoProviderOptions {
   locator: TenantRepoLocator;
   /** Base dir for per-session checkouts (default: OS temp). */
   workBase?: string;
+  /** Durable base directory for canonical bare tenant repositories. */
+  bareBase?: string;
   /**
    * In-place mode: treat the locator's ref as a LOCAL working directory and operate
    * on it directly (no clone into a temp dir). This is the single-node demo model
@@ -354,6 +362,7 @@ function resetWorkingTree(dir: string): void {
 }
 
 export class TenantRepoProviderImpl implements TenantRepoProvider {
+  private readonly bareRepos = new Map<string, TenantBareRepo>();
   private readonly lease?: PgTenantRepoLeaseCoordinator;
   private readonly leaseContext = new AsyncLocalStorage<RepoLease>();
   private readonly authoringMode: "disabled" | "singleton" | "fleet";
@@ -390,16 +399,41 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   /** Hold one tenant lease across checkout, Agent SDK edits, registry update, and commit. */
-  async withTenantLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
+  async withTenantLease<T>(
+    tenantId: string,
+    action: (runFenced: TenantMutationFence) => Promise<T>,
+  ): Promise<T> {
     assertAuthoringModeSafe(this.authoringMode);
-    if (!this.lease) return action();
+    if (!this.lease) {
+      throw new Error("PostgreSQL tenant repository writer lease is required");
+    }
     return this.lease.withLease(tenantId, (lease) =>
       this.leaseContext.run(lease, async () => {
+        const runFenced = <R>(operation: () => R | Promise<R>) =>
+          this.lease!.runFenced(lease, async () => operation());
+        let primaryError: unknown;
         try {
-          return await action();
+          return await action(runFenced);
+        } catch (error) {
+          primaryError = error;
+          throw error;
         } finally {
+          const cleanupErrors: unknown[] = [];
           for (const dir of lease.repoDirs) {
-            await this.lease!.runFenced(lease, async () => resetWorkingTree(dir));
+            try {
+              await this.lease!.runFenced(lease, async () => resetWorkingTree(dir));
+            } catch (error) {
+              cleanupErrors.push(error);
+            }
+          }
+          if (cleanupErrors.length > 0) {
+            const cleanupError = cleanupErrors.length === 1
+              ? cleanupErrors[0]
+              : new AggregateError(cleanupErrors, "tenant repository teardown failed");
+            if (primaryError === undefined) throw cleanupError;
+            if (primaryError instanceof Error && primaryError.cause === undefined) {
+              primaryError.cause = cleanupError;
+            }
           }
         }
       }),
@@ -408,7 +442,10 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
 
   /** Read a committed snapshot while excluding authoring for this tenant. */
   async withTenantReadLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
-    if (!this.lease) return action();
+    if (!this.lease) {
+      if (this.authoringMode === "disabled") return action();
+      throw new Error("PostgreSQL tenant repository read lease is required while authoring is enabled");
+    }
     return this.lease.withLease(tenantId, (lease) =>
       this.leaseContext.run(lease, action),
     );
@@ -485,5 +522,46 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
             }
           : undefined;
     return new GitTenantRepo(dir, fence);
+  }
+
+  /**
+   * The customization lifecycle always works through a fresh bare clone. It
+   * never reuses a live checkout, which prevents a stale worktree from becoming
+   * the source of a staged change or publish.
+   */
+  async bare(tenantId: string): Promise<TenantBareRepo> {
+    const existing = this.bareRepos.get(tenantId);
+    if (existing) {
+      // Refresh branch heads without ever reusing a mutable checkout. Private
+      // refs remain local so a later publish sees the exact staged receipt.
+      git(existing.dir, ["fetch", "--prune", "origin"]);
+      return existing;
+    }
+    const ref = await this.opts.locator.repoRef(tenantId);
+    if (this.opts.inPlace && this.opts.autoProvisionFrom && !repoExists(ref)) {
+      this.provision(ref);
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(tenantId)) {
+      throw new Error("tenantId must be a single safe path component");
+    }
+    let dir: string;
+    if (this.opts.bareBase) {
+      mkdirSync(this.opts.bareBase, { recursive: true });
+      dir = join(this.opts.bareBase, `${tenantId}.git`);
+      const alreadyExists = existsSync(join(dir, "HEAD"));
+      if (!alreadyExists) {
+        git(this.opts.bareBase, ["clone", "--bare", ref, dir]);
+      } else {
+        git(dir, ["fetch", "--prune", "origin"]);
+      }
+    } else {
+      const base = this.opts.workBase ?? tmpdir();
+      mkdirSync(base, { recursive: true });
+      dir = mkdtempSync(join(base, `mushy-bare-${tenantId}-`));
+      git(dir, ["clone", "--bare", ref, "."]);
+    }
+    const repo = { dir };
+    this.bareRepos.set(tenantId, repo);
+    return repo;
   }
 }

@@ -45,3 +45,69 @@ Risks:
 - The full server suite has unrelated baseline failures. Use the recorded
   focused 107-test baseline plus subsystem tests added by each lane.
 - Migration numbers are centrally allocated from `0011` through `0017`.
+
+# Customization delivery waves
+
+Source baseline: `origin/main` at `4b8771bd351f17526d69ba498136f91b79b161e1`.
+
+Baseline gate:
+
+- `LEAF_AUTOFILL_SOLVER_ABSENT_OK=1 python scripts/run-all-gates.py`
+- 80 suites passed, 0 failed, 3 environment skips
+- 1,178 tests passed
+
+## Wave 0
+
+- [x] Freeze `leaf.customization.v1` wire and storage contract.
+- [x] Freeze `/api/author/register` as the only R6 publish route.
+- [x] Freeze state transitions, approval binding, audit receipts, and feature flags.
+- [x] Freeze platform-owned mutability and desired/effective release authority.
+- [x] Add contract-freeze tests.
+
+## Wave 1
+
+- [x] Tenant Git change-set adapter with isolated refs and compare-and-swap updates.
+- [x] SQLite coordination store with idempotency and recovery.
+- [x] Platform release policy loader with strict path normalization.
+
+## Wave 2
+
+- [x] Split authoring into stage and publish operations.
+- [x] Add desired/effective platform reconciliation.
+- [x] Add tenant approval and staff authority separation.
+
+## Wave 3
+
+- [x] Add canonical R6 server route and close live direct-publish fallbacks when R5 is enabled.
+- [x] Connect in-app R5 staging and R6 publish confirmation.
+- [x] Extend deployment rollback to include effective catalog state.
+
+## Wave 4
+
+- [x] Frozen-path, self-approval, expiry, and prompt-injection falsification.
+- [x] Git/SQLite crash, replay, and concurrent publication falsification.
+- [x] Reconcile, deploy, and idempotent rollback falsification.
+
+## Wave 5
+
+- [ ] Merge and verify the staging-only code and infrastructure PRs.
+- [ ] Build immutable images without production promotion.
+- [ ] Internal-tenant R5 activation and evidence.
+- [ ] Independent-approval R6 activation and rollback evidence.
+- [ ] Controlled tenant expansion.
+- [ ] Keep R7 disabled until the platform-admin path is separately proven.
+- [ ] Keep `leafautomation.ai` and `www.leafautomation.ai` pinned until staging is 100% verified.
+
+## Operator gates
+
+- Provision a dedicated platform Postgres database and populate verified identity bindings before R5 activation.
+- Select and enforce an independent required reviewer before R6 activation.
+- Provision E2B credentials and prove the authored execution path before R6 execution.
+- Keep the production aliases and production backend unchanged until the staging sign-off.
+- Keep R7 absent until the platform-admin path is separately proven.
+- Track the three moderate transitive Agent SDK audit findings. The exposed Hono/MCP server code is not imported or mounted by this harness.
+
+## Adopted main repairs
+
+- [x] Preserve the completed live edge-contract repair from `origin/main`.
+- [x] Preserve authored-execution containment from `origin/main`.

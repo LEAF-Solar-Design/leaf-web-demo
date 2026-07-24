@@ -26,13 +26,16 @@ from fastapi.responses import JSONResponse
 
 import dependency_health
 import deps
+import jobs as job_store
+from customization_flags import RolloutMode, mode as customization_mode
+from customization_service import CustomizationService
 from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
     agent,
     author,
     capabilities,
     drawings,
-    jobs,
+    jobs as jobs_router,
     ops,
     ops_metrics,
     prompt,
@@ -70,6 +73,19 @@ def _cors_origins() -> list[str]:
 
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 
+
+@app.on_event("startup")
+def initialize_customization_store() -> None:
+    """SQLite coordination is intentionally a single-process deployment."""
+    if (
+        customization_mode("LEAF_CUSTOMIZATION_R5_MODE") is RolloutMode.OFF
+        and customization_mode("LEAF_CUSTOMIZATION_R6_MODE") is RolloutMode.OFF
+    ):
+        return
+    if not deps.auth_live():
+        raise RuntimeError("customization requires live authentication")
+    CustomizationService.configured()
+
 # §19: byte-counting wall on the upload route — bounds multipart pre-parse
 # disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.
 # Registered BEFORE CORSMiddleware so CORS wraps it (last-added = outermost):
@@ -90,7 +106,7 @@ app.include_router(session.router)
 app.include_router(sessions.router)  # sessions wire spec (S2): POST /api/sessions, .../messages, .../stream, .../transcript
 app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_id} (record-only)
 app.include_router(tools.router)
-app.include_router(jobs.router)
+app.include_router(jobs_router.router)
 app.include_router(capabilities.router)
 app.include_router(author.router)
 app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoints
@@ -133,7 +149,7 @@ def _mount_platform_router() -> None:
         import platform_link
 
         platform_link.validate_postgres_startup()
-        jobs.validate_store_startup()
+        job_store.validate_store_startup()
         if "leaf_platform" not in sys.modules:
             spec = importlib.util.spec_from_file_location(
                 "leaf_platform", pkg_dir / "__init__.py",
@@ -163,6 +179,7 @@ def health() -> Dict[str, Any]:
         "da_client_present": (deps.DA_DIR / "client.py").exists(),
         "n_tools": len(deps.all_tools()),
         "n_authored": len(deps._AUTHORED),
+        "source_sha": os.environ.get("LEAF_SOURCE_SHA", "unknown"),
     })
 
 

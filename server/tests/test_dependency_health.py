@@ -95,6 +95,16 @@ def test_source_revision_precedence_and_invalid_value_redaction():
     )
     assert digest["source_revision"] == "sha256:" + "a" * 64
 
+    image_source = dependency_health.readiness_report(
+        {
+            "LEAF_READINESS_TIMEOUT_S": "0.2",
+            "LEAF_SOURCE_SHA": "b" * 40,
+        },
+        [_spec("build", True)],
+    )
+    assert image_source["ready"] is True
+    assert image_source["source_revision"] == "b" * 40
+
 
 def test_default_contract_has_all_dependency_classes_without_targets(monkeypatch):
     env = {
@@ -184,6 +194,28 @@ def test_durable_store_requires_exact_mount_and_runs_clean_sentinel_cycle(tmp_pa
     else:
         raise AssertionError("a writable ancestor accepted an absent configured mount")
     assert not missing.exists()
+
+
+def test_durable_store_initializes_only_guest_subdirectory(tmp_path):
+    directories = {
+        name: tmp_path / name
+        for name in ("jobs", "drawings", "agent", "tenants")
+    }
+    for directory in directories.values():
+        directory.mkdir()
+    guest = directories["drawings"] / "guest"
+    env = {
+        "JOBS_DB": str(directories["jobs"] / "jobs.db"),
+        "LEAF_STORE_DIR": str(directories["drawings"]),
+        "LEAF_GUEST_STORE_DIR": str(guest),
+        "LEAF_AGENT_STATE_DIR": str(directories["agent"]),
+        "LEAF_TENANTS_DIR": str(directories["tenants"]),
+    }
+
+    dependency_health._durable_stores_probe(env)
+
+    assert guest.is_dir()
+    assert list(guest.iterdir()) == []
 
 
 def test_repeated_timeout_calls_keep_process_probe_threads_bounded():
@@ -300,5 +332,8 @@ def test_ready_route_is_separate_from_unchanged_liveness(monkeypatch):
     assert set(original_health) == {
         "ok", "aps_live", "data_file_present", "engine_registry_present",
         "da_client_present", "n_tools", "n_authored", "error", "degraded_mode",
+        "source_sha",
     }
-    assert any(route.path == "/api/ready" for route in app.app.routes)
+    paths = set(app.app.openapi()["paths"])
+    assert "/api/ready" in paths
+    assert "/api/projects" in paths

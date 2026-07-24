@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "container": "leaf-platform-app",
+  "required": {
+    "environment": [
+      "APS_LIVE",
+      "BROKER_URL",
+      "BROKER_LEDGER",
+      "JOBS_DB",
+      "LEAF_AUTH_LIVE",
+      "LEAF_AUTH0_AUDIENCE",
+      "LEAF_AUTH0_ISSUER",
+      "LEAF_AUTH0_JWKS_URL",
+      "LEAF_AGENT_AUDIT",
+      "LEAF_AGENT_LEDGER",
+      "LEAF_AGENT_STATE_DIR",
+      "LEAF_AGENT_TENANTS_FILE",
+      "LEAF_AUTHORED_EXECUTION",
+      "LEAF_AUTHOR_HARNESS_URL",
+      "LEAF_BUILD_REVISION_REQUIRED",
+      "LEAF_CUSTOMIZATION_DB",
+      "LEAF_CUSTOMIZATION_R5_MODE",
+      "LEAF_CUSTOMIZATION_R6_MODE",
+      "LEAF_EFFECTIVE_TENANTS_DIR",
+      "LEAF_GUEST_STORE_DIR",
+      "LEAF_PLATFORM_RELEASE",
+      "LEAF_RUNTIME_ENV",
+      "LEAF_STORE_DIR",
+      "LEAF_TENANTS_DIR",
+      "LEAF_TENANT_CLAIM_NS",
+      "LEAF_TENANT_GIT_DIR"
+    ],
+    "mountPaths": [
+      "/data/drawings",
+      "/data/effective",
+      "/data/state",
+      "/data/tenant-git",
+      "/data/tenants"
+    ],
+    "secrets": [
+      "DATABASE_URL",
+      "LEAF_APP_DISPATCH_SECRET",
+      "LEAF_BROKER_SECRET",
+      "LEAF_CUSTOMIZATION_APPROVAL_SECRET",
+      "LEAF_CUSTOMIZATION_CONFIRMATION_KEY",
+      "LEAF_HARNESS_SECRET",
+      "LEAF_OPS_SECRET"
+    ]
+  }
+}
