@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 
 DEFAULT_SOLVER_ROOT = Path(__file__).resolve().parents[3] / "autofill-solver"
 TOOL_NAME = "string-autofill-opt"
-_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+SOURCE_ATTESTATION = ".leaf-source-attestation.json"
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -54,54 +54,21 @@ def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
     }, allow_nan=False))
 
 
-def _git_source_revision(root: Path) -> Optional[str]:
+def _exact_revision(value: str, label: str = "AUTOFILL_SOLVER_REVISION") -> str:
+    revision = str(value or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise RuntimeError(f"{label} must be an exact Git commit")
+    return revision
+
+
+def _git_revision(root: Path) -> Optional[str]:
     try:
         completed = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
             text=True, timeout=5, check=True)
-        revision = completed.stdout.strip()
-        if _COMMIT_RE.fullmatch(revision):
-            return revision
+        return _exact_revision(completed.stdout.strip(), "autofill solver source revision")
     except (OSError, subprocess.SubprocessError):
-        pass
-    return None
-
-
-def _image_source_revision(root: Path) -> Optional[str]:
-    marker = root / ".leaf-source-revision"
-    if not marker.is_file():
         return None
-    revision = marker.read_text(encoding="utf-8").strip()
-    if not _COMMIT_RE.fullmatch(revision):
-        raise RuntimeError("autofill solver image contains an invalid source revision marker")
-    return revision
-
-
-def _source_revision(root: Path) -> str:
-    configured = os.environ.get("AUTOFILL_SOLVER_REVISION", "").strip()
-    image_revision = _image_source_revision(root)
-    observed = _git_source_revision(root)
-    if configured:
-        if not _COMMIT_RE.fullmatch(configured):
-            raise RuntimeError(
-                "AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit")
-        if image_revision is not None and image_revision != configured:
-            raise RuntimeError(
-                "AUTOFILL_SOLVER_REVISION does not match the worker image")
-        if observed is not None and observed != configured:
-            raise RuntimeError(
-                "AUTOFILL_SOLVER_REVISION does not match the solver checkout")
-        return configured
-    if image_revision is not None:
-        if observed is not None and observed != image_revision:
-            raise RuntimeError("worker image revision does not match the solver checkout")
-        return image_revision
-    if observed is not None:
-        return observed
-    solver_file = root / "solver.py"
-    if not solver_file.is_file():
-        raise RuntimeError(f"autofill solver source not found: {solver_file}")
-    return "sha256:" + hashlib.sha256(solver_file.read_bytes()).hexdigest()
 
 
 def _source_sha256(root: Path) -> str:
@@ -121,13 +88,72 @@ def _source_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
+def attest_source(root: Path, revision: str, manifest_path: Path) -> Dict[str, str]:
+    """Verify copied solver bytes against a trusted commit manifest and seal them."""
+    root = Path(root).resolve()
+    revision = _exact_revision(revision)
+    try:
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        expected_sha256 = str(manifest[revision]).strip().lower()
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"no trusted autofill source digest for revision {revision}") from exc
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise RuntimeError(f"invalid trusted source digest for revision {revision}")
+    actual_sha256 = _source_sha256(root)
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"autofill source does not match revision {revision}: "
+            f"expected {expected_sha256}, got {actual_sha256}")
+    attestation = {"revision": revision, "source_sha256": actual_sha256}
+    (root / SOURCE_ATTESTATION).write_text(
+        json.dumps(attestation, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return attestation
+
+
+def _source_identity(root: Path) -> Dict[str, str]:
+    supplied_raw = os.environ.get("AUTOFILL_SOLVER_REVISION", "").strip()
+    supplied = _exact_revision(supplied_raw) if supplied_raw else None
+    actual_sha256 = _source_sha256(root)
+    attestation_path = root / SOURCE_ATTESTATION
+    if attestation_path.is_file():
+        try:
+            attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+            attested_revision = _exact_revision(
+                attestation["revision"], "attested autofill solver revision")
+            attested_sha256 = str(attestation["source_sha256"]).strip().lower()
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("autofill source attestation is invalid") from exc
+        if not re.fullmatch(r"[0-9a-f]{64}", attested_sha256) \
+                or attested_sha256 != actual_sha256:
+            raise RuntimeError("autofill source bytes do not match their build attestation")
+        if supplied is not None and supplied != attested_revision:
+            raise RuntimeError(
+                "AUTOFILL_SOLVER_REVISION does not match the attested solver source")
+        return {"source_revision": attested_revision, "source_sha256": actual_sha256}
+
+    derived = _git_revision(root)
+    if supplied is not None:
+        if derived is None:
+            raise RuntimeError(
+                "AUTOFILL_SOLVER_REVISION cannot be verified without Git metadata "
+                "or a build attestation")
+        if supplied != derived:
+            raise RuntimeError(
+                "AUTOFILL_SOLVER_REVISION does not match the checked-out solver source")
+    revision = derived or f"sha256:{actual_sha256}"
+    return {"source_revision": revision, "source_sha256": actual_sha256}
+
+
 def descriptor(*, solver_root: Optional[Path] = None) -> Dict[str, str]:
     root = Path(solver_root or os.environ.get("AUTOFILL_SOLVER_ROOT")
                 or DEFAULT_SOLVER_ROOT).resolve()
     if not (root / "solver.py").is_file():
         raise RuntimeError(f"autofill solver repository is unavailable: {root}")
-    return {"tool_name": TOOL_NAME, "source_revision": _source_revision(root),
-            "source_sha256": _source_sha256(root),
+    source = _source_identity(root)
+    return {"tool_name": TOOL_NAME, **source,
             "runtime": f"python-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"}
 
 
@@ -146,7 +172,9 @@ sys.path.insert(0, sys.argv[1])
 import solver
 body = json.load(sys.stdin)
 result = solver.solve_targets(
-    body['groups'], body['panelsPerString'], body['options'])
+    body['groups'], body['panelsPerString'], body['options'],
+    panel_angle=body['panelAngle'], panel_width=body['panelWidth'],
+    panel_height=body['panelHeight'])
 if not isinstance(result, dict):
     raise TypeError('autofill solver returned a non-object result')
 sys.stdout.write(json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False))

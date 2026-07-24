@@ -63,8 +63,12 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml ps
 ```
 
 The canonical overlay requires the full 40-character `autofill-solver` commit.
-The worker image records that exact value in each solver descriptor, and the
-container smoke rejects an image whose descriptor does not match it.
+The commit must exist in `deploy/autofill-solver-sources.json` with the digest
+of its Python source tree. Compose uses the sibling checkout by default; set
+`AUTOFILL_SOLVER_CONTEXT` to another clean checkout or archive when needed.
+The image build rejects bytes that do not match the trusted digest, seals the
+verified identity into the image, and the container smoke rejects a missing or
+mismatched attestation.
 
 After the worker is healthy, run the clean-room real-solver receipt:
 

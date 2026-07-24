@@ -6,9 +6,16 @@ import pytest
 from solver_adapters import autofill
 
 
-def test_descriptor_uses_exact_supplied_solver_revision(monkeypatch, tmp_path):
+def _write_attestation(root: Path, revision: str) -> None:
+    source_sha256 = autofill._source_sha256(root)
+    (root / autofill.SOURCE_ATTESTATION).write_text(
+        '{"revision":"' + revision + '","source_sha256":"' + source_sha256 + '"}\n')
+
+
+def test_descriptor_uses_verified_attested_solver_revision(monkeypatch, tmp_path):
     (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
     revision = "a" * 40
+    _write_attestation(tmp_path, revision)
     monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", revision.upper())
 
     assert autofill.descriptor(solver_root=tmp_path)["source_revision"] == revision
@@ -20,6 +27,38 @@ def test_descriptor_rejects_invalid_supplied_solver_revision(monkeypatch, tmp_pa
 
     with pytest.raises(RuntimeError, match="exact Git commit"):
         autofill.descriptor(solver_root=tmp_path)
+
+
+def test_descriptor_rejects_fake_exact_revision_for_unrelated_source(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    real_revision = "a" * 40
+    _write_attestation(tmp_path, real_revision)
+    monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", "0" * 40)
+
+    with pytest.raises(RuntimeError, match="does not match the attested solver source"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
+def test_descriptor_rejects_source_changed_after_build_attestation(monkeypatch, tmp_path):
+    solver = tmp_path / "solver.py"
+    solver.write_text("def solve_targets(*args, **kwargs): return {}\n")
+    revision = "a" * 40
+    _write_attestation(tmp_path, revision)
+    monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", revision)
+    solver.write_text("def solve_targets(*args, **kwargs): return {'changed': True}\n")
+
+    with pytest.raises(RuntimeError, match="bytes do not match their build attestation"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
+def test_build_attestation_rejects_revision_source_digest_mismatch(tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    fake_revision = "0" * 40
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"' + fake_revision + '":"' + ("f" * 64) + '"}\n')
+
+    with pytest.raises(RuntimeError, match="source does not match revision"):
+        autofill.attest_source(tmp_path, fake_revision, manifest)
 
 
 # The adapter's default assumes leaf-web-demo and autofill-solver are sibling

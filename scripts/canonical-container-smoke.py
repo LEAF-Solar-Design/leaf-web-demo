@@ -28,6 +28,8 @@ def main() -> None:
     if descriptor["source_revision"] != expected_revision:
         raise AssertionError(
             "canonical worker descriptor does not match its pinned solver revision")
+    if not (Path(os.environ["AUTOFILL_SOLVER_ROOT"]) / autofill.SOURCE_ATTESTATION).is_file():
+        raise AssertionError("canonical worker image lacks a verified solver source attestation")
 
     store, db, _deps = platform_link._load_platform()
     canonical_jobs = platform_link._canonical_jobs_module()

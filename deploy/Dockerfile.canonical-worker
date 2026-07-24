@@ -16,7 +16,13 @@ RUN pip install --no-cache-dir -r /app/platform/requirements.txt
 COPY server/ /app/server/
 COPY platform/ /app/platform/
 COPY scripts/canonical-container-smoke.py /app/scripts/canonical-container-smoke.py
+COPY deploy/autofill-solver-sources.json /app/deploy/autofill-solver-sources.json
 COPY --from=autofill_solver . /opt/leaf/autofill-solver/
+
+# The named context may be a mutable local checkout. Do not trust the revision
+# argument by itself. Hash the copied Python source, require the checked-in
+# commit-to-digest mapping, then seal that verified identity into the image.
+RUN PYTHONPATH=/app/server python -c "from pathlib import Path; from solver_adapters.autofill import attest_source; attest_source(Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', Path('/app/deploy/autofill-solver-sources.json'))"
 
 WORKDIR /app/server
 
