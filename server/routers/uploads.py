@@ -100,6 +100,13 @@ def upload_drawing(
     authorization: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
 ) -> Any:
+    if not write_loop.drawing_mutations_enabled():
+        return error_response(
+            ErrorCode.INTERNAL,
+            "drawing mutations are temporarily disabled for a storage cutover",
+            retryable=True,
+            status_code=503,
+        )
     if not guest_uploads.enabled():
         return error_response(ErrorCode.INTERNAL,
                               "drawing uploads are disabled on this deployment",
@@ -145,9 +152,7 @@ def upload_drawing(
         return error_response(ErrorCode.BAD_PARAMS, reason, retryable=False,
                               status_code=400)
 
-    backend = write_loop.backend_for_tenant(
-        str(tenant), aps_live=deps.APS_LIVE,
-        da=deps.get_da_client() if deps.APS_LIVE else None)
+    backend = write_loop.upload_backend_for_tenant(str(tenant))
     import store  # importable via write_loop's sys.path setup
 
     # §19 idempotent GUEST uploads (FE review round 3, MAJOR — receipt
@@ -337,9 +342,7 @@ def upload_status(drawing_id: str,
     truth). Guests reach this via their guest-session header (live) or the
     X-Tenant-Id stub (demo). 404 (never 403) for an unknown marker — same
     no-existence-leak posture as the jobs routes."""
-    backend = write_loop.backend_for_tenant(
-        str(tenant), aps_live=deps.APS_LIVE,
-        da=deps.get_da_client() if deps.APS_LIVE else None)
+    backend = write_loop.upload_backend_for_tenant(str(tenant))
     view = guest_uploads.status_view(backend, str(tenant), drawing_id)
     if view is None:
         return error_response(ErrorCode.BAD_PARAMS,

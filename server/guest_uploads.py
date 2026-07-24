@@ -958,9 +958,7 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     failure path lands in the marker as an honest §10 error object."""
     import deps  # lazy: call-time APS_LIVE so tests can monkeypatch
 
-    backend = write_loop.backend_for_tenant(
-        tenant_id, aps_live=deps.APS_LIVE,
-        da=deps.get_da_client() if deps.APS_LIVE else None)
+    backend = write_loop.upload_backend_for_tenant(tenant_id)
     extraction_owner, extraction_fence = "", 0
     if upload_store_mode() == "postgres":
         claim = _claim_extraction(tenant_id, drawing_id)
