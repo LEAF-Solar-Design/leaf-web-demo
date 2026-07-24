@@ -96,6 +96,7 @@ def test_create_bucket_default_policy_is_persistent(monkeypatch):
     assert client.bucket_key().startswith("leaf-web-store-")
 
 
+@requires_aps_creds
 def test_workitem_scratch_bucket_is_transient(monkeypatch):
     captured = {}
 
