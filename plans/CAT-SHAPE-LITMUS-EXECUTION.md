@@ -127,6 +127,25 @@ npm run build
 npm run check:customization
 ```
 
+### Automated operator-surface proof
+
+The browser proof drives the live-mode frontend through the normal command bar,
+assistant proposal, operator approval, linked job, version refresh, and Undo
+controls. It uses the frozen `sitting-v1` cat fixture and a deterministic API
+stub so it needs no Claude, APS, AWS, or tenant credentials:
+
+```powershell
+cd web
+npm run proof:cat
+```
+
+The run writes `artifacts/cat-operator-proof/01-request-and-approval.png`,
+`02-cat-version.png`, `02-cat-version-full.png`, `03-undo-restored.png`, and
+`receipt.json`. These files are local test artifacts and are ignored by Git.
+This browser proof does not claim a live Claude or APS run. Pair it with
+`server/tests/test_cat_litmus_offline_e2e.py` for identity, geometry, oracle,
+version, and undo assertions.
+
 Observed results:
 
 - Server full suite: `1,163 passed, 46 skipped`, with 12 warnings.

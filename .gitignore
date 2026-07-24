@@ -27,3 +27,4 @@ server/customization.db-shm
 server/customization.db-wal
 server/guest_drawings/
 data/uploads/
+artifacts/
