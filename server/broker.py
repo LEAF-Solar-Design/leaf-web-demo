@@ -77,6 +77,11 @@ from tool_loader import is_trusted_builtin_tool, run_tool_dynamic  # noqa: E402
 from tool_validate import validate_params  # noqa: E402
 import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 
+try:  # noqa: E402 - APS domain metrics via CloudWatch EMF; best-effort, optional
+    import emf_metrics
+except Exception:  # pragma: no cover - emit is optional; its absence must not break the broker
+    emf_metrics = None  # type: ignore[assignment]
+
 LEDGER_PATH = Path(os.environ.get("BROKER_LEDGER", str(SERVER_DIR / "broker_ledger.jsonl")))
 TENANTS_PATH = Path(os.environ.get("BROKER_TENANTS", str(SERVER_DIR / "broker_tenants.json")))
 APS_ENDPOINT = "https://developer.api.autodesk.com"
@@ -1503,6 +1508,9 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
                 terminal_env,
                 terminal_status,
             )
+            if emf_metrics is not None:
+                entry["event_key"] = req.ledger_event_key
+                emf_metrics.emit_broker_run(entry)
     assert terminal_env is not None and terminal_status is not None
     return JSONResponse(status_code=terminal_status, content=terminal_env)
 
@@ -1681,8 +1689,14 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
                 terminal_env,
                 terminal_status,
             )
+            if emf_metrics is not None:
+                entry["event_key"] = ledger_event_key
+                emf_metrics.emit_broker_run(entry)
         elif not postgres_mode:
             _ledger_append(entry, ledger_event_key)
+            if emf_metrics is not None:
+                entry["event_key"] = ledger_event_key
+                emf_metrics.emit_broker_run(entry)
 
 
 def _start_admitted_execution(

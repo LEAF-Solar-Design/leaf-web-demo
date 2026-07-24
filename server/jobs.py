@@ -30,6 +30,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import broker_client
+try:  # APS domain metrics (CloudWatch EMF); best-effort, optional
+    import emf_metrics
+except Exception:  # pragma: no cover
+    emf_metrics = None  # type: ignore[assignment]
 import platform_link
 from envelopes import ErrorCode, err_envelope, error_obj
 from job_pg_store import PostgresJobStore
@@ -648,6 +652,8 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             return "conflict"
     if applied:
         platform_link.on_terminal(job_id, status, result_env, error)
+        if emf_metrics is not None:
+            emf_metrics.emit_job_terminal(status)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
 
