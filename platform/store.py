@@ -14,6 +14,9 @@ saveDeployment) to org-scoped list/get/create.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -21,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from psycopg.types.json import Jsonb
 from psycopg.errors import UniqueViolation
 
-from .db import connection, cursor
+from .db import connection, cursor, run_transaction
 from .models import (
     BuiltTool,
     CanonicalHash,
@@ -41,6 +44,20 @@ from .models import (
 
 OrgId = uuid.UUID
 ProjectId = uuid.UUID
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class DrawingImportUnavailable(ValueError):
+    """The project or source cannot be disclosed to this caller."""
+
+
+class DrawingImportForbidden(ValueError):
+    """The verified platform actor cannot mutate this project."""
+
+
+class DrawingImportConflict(ValueError):
+    """An idempotency key or immutable source version conflicts."""
 
 # --------------------------------------------------------------------------- #
 # writes
@@ -494,7 +511,8 @@ def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
                 "VALUES (%(version_id)s, %(drawing_id)s, %(project_id)s, %(org_id)s, %(seq)s, "
                 "%(oss_object)s, %(intake_ref)s, %(created_by)s) "
                 "RETURNING version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, "
-                "created_by, created_at, deleted_at, purge_requested_at, purge_completed_at",
+                "created_by, provenance, idempotency_key, created_at, deleted_at, "
+                "purge_requested_at, purge_completed_at",
                 {
                     "version_id": new_uuid(), "drawing_id": drawing_id,
                     "project_id": project_id, "org_id": org_id,
@@ -503,6 +521,214 @@ def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
                 },
             )
             return DrawingVersion.from_row(cur.fetchone())
+
+
+def import_ready_account_upload(
+    org_id: uuid.UUID,
+    project_id: uuid.UUID,
+    *,
+    source_drawing_id: uuid.UUID,
+    source_version: int,
+    name: str,
+    idempotency_key: str,
+    actor_binding_id: uuid.UUID,
+) -> tuple[DrawingVersion, bool]:
+    """Adopt one server-verified ready account upload into a canonical project.
+
+    The request supplies only source identity and a display name. Object refs,
+    digests, tenant identity, actor identity, and provenance all come from
+    server-owned PostgreSQL rows. A ready upload is the current proof that both
+    the immutable object and fenced intake cache were published. Migration 0016
+    does not persist an intake digest, so this contract records that exact proof
+    boundary instead of inventing one.
+    """
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 200:
+        raise DrawingImportConflict("idempotency key must contain 1 to 200 characters")
+    if not name or len(name) > 200:
+        raise DrawingImportConflict("drawing name must contain 1 to 200 characters")
+    if isinstance(source_version, bool) or source_version < 1:
+        raise DrawingImportConflict("source version must be a positive integer")
+
+    fingerprint_input = {
+        "actor_binding_id": str(actor_binding_id),
+        "name": name,
+        "org_id": str(org_id),
+        "project_id": str(project_id),
+        "source_drawing_id": str(source_drawing_id),
+        "source_version": int(source_version),
+    }
+    fingerprint = hashlib.sha256(json.dumps(
+        fingerprint_input, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+    columns = (
+        "version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, "
+        "created_by, provenance, idempotency_key, created_at, deleted_at, "
+        "purge_requested_at, purge_completed_at"
+    )
+
+    def operation(conn):
+        with conn.cursor() as cur:
+            # The project row is the serialization point for concurrent imports.
+            # Authority is server-owned and cannot be selected by request data.
+            cur.execute(
+                "SELECT p.project_id FROM projects p "
+                "WHERE p.org_id = %(org_id)s AND p.project_id = %(project_id)s "
+                "AND p.status = 'active' AND p.deleted_at IS NULL "
+                "AND COALESCE((SELECT authority_mode FROM project_authority_modes "
+                "WHERE org_id = p.org_id AND project_id = p.project_id), "
+                "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = p.org_id), "
+                "'legacy_sqlite') = 'postgres_canonical' FOR UPDATE",
+                {"org_id": org_id, "project_id": project_id},
+            )
+            if cur.fetchone() is None:
+                raise DrawingImportUnavailable(
+                    "project or source account upload is unavailable")
+
+            cur.execute(
+                "SELECT role FROM identity_bindings "
+                "WHERE platform_tenant_id = %(org_id)s AND binding_id = %(binding_id)s "
+                "AND status = 'active'",
+                {"org_id": org_id, "binding_id": actor_binding_id},
+            )
+            actor = cur.fetchone()
+            if actor is None or actor["role"] not in {"owner", "editor"}:
+                raise DrawingImportForbidden("platform role does not permit drawing import")
+
+            cur.execute(
+                f"SELECT {columns}, import_fingerprint FROM drawing_versions "
+                "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+                "AND idempotency_key = %(key)s AND deleted_at IS NULL",
+                {"org_id": org_id, "project_id": project_id, "key": key},
+            )
+            replay = cur.fetchone()
+            if replay is not None:
+                if replay["import_fingerprint"] != fingerprint:
+                    raise DrawingImportConflict(
+                        "idempotency key already exists with different drawing import input")
+                return DrawingVersion.from_row(replay), True
+
+            tenant_id = str(org_id)
+            cur.execute(
+                "SELECT v.object_key, v.byte_count, v.content_sha256, "
+                "v.intake_ref, v.intake_sha256, u.attempt, u.marker "
+                "FROM drawing_store_versions v "
+                "JOIN drawing_upload_attempts u "
+                "ON u.tenant_id = v.tenant_id AND u.drawing_id = v.drawing_id "
+                "WHERE v.tenant_id = %(org_id)s AND v.drawing_id = %(drawing_id)s "
+                "AND v.version = %(source_version)s AND v.state = 'ready' "
+                "AND u.status = 'ready' AND u.marker->>'tenant_kind' = 'account' "
+                "AND u.marker->>'extracted_version' = %(source_version_text)s "
+                "FOR UPDATE OF v, u",
+                {"org_id": tenant_id, "drawing_id": str(source_drawing_id),
+                 "source_version": source_version,
+                 "source_version_text": str(source_version)},
+            )
+            source = cur.fetchone()
+            if source is None:
+                raise DrawingImportUnavailable(
+                    "project or source account upload is unavailable")
+
+            marker = source["marker"]
+            marker_is_object = isinstance(marker, dict)
+            upload_sha256 = marker.get("content_sha256") if marker_is_object else None
+            marker_status = marker.get("status") if marker_is_object else None
+            marker_attempt = marker.get("attempt") if marker_is_object else None
+            marker_intake_ref = marker.get("intake_ref") if marker_is_object else None
+            marker_intake_sha256 = (
+                marker.get("intake_sha256") if marker_is_object else None)
+            stored_sha256 = source["content_sha256"]
+            expected_object_key = (
+                f"tenants/{tenant_id}/drawings/{source_drawing_id}/"
+                f"v/{source_version:08d}.dwg"
+            )
+            object_key = source["object_key"]
+            expected_intake_ref = expected_object_key[:-4] + ".intake.json"
+            intake_ref = source["intake_ref"]
+            intake_sha256 = source["intake_sha256"]
+            if (
+                not isinstance(object_key, str)
+                or object_key != expected_object_key
+                or marker_status != "ready"
+                or str(marker_attempt) != str(source["attempt"])
+                or not isinstance(upload_sha256, str)
+                or _SHA256_RE.fullmatch(upload_sha256) is None
+                or not isinstance(stored_sha256, str)
+                or _SHA256_RE.fullmatch(stored_sha256) is None
+                or not isinstance(intake_ref, str)
+                or intake_ref != expected_intake_ref
+                or marker_intake_ref != intake_ref
+                or not isinstance(intake_sha256, str)
+                or _SHA256_RE.fullmatch(intake_sha256) is None
+                or marker_intake_sha256 != intake_sha256
+            ):
+                raise DrawingImportUnavailable(
+                    "project or source account upload is unavailable")
+            provenance = {
+                "schema": "leaf.drawing-import.v1",
+                "source": {
+                    "kind": "account_upload",
+                    "tenant_id": tenant_id,
+                    "drawing_id": str(source_drawing_id),
+                    "version": source_version,
+                    "upload_attempt": str(source["attempt"]),
+                    "upload_content_sha256": upload_sha256,
+                    "stored_object": {
+                        "ref": object_key,
+                        "sha256": stored_sha256,
+                        "bytes": int(source["byte_count"]),
+                    },
+                    "intake": {
+                        "ref": intake_ref,
+                        "sha256": intake_sha256,
+                        "proof": "ready_upload_after_fenced_cache_publication",
+                    },
+                },
+                "imported_by_binding_id": str(actor_binding_id),
+            }
+
+            # A source drawing keeps one stable UUID across both stores. This
+            # also prevents the same immutable source from being attached to a
+            # different project.
+            cur.execute(
+                "INSERT INTO drawing_artifacts "
+                "(drawing_id, project_id, org_id, name) "
+                "VALUES (%(drawing_id)s, %(project_id)s, %(org_id)s, %(name)s) "
+                "ON CONFLICT (drawing_id) DO NOTHING",
+                {"drawing_id": source_drawing_id, "project_id": project_id,
+                 "org_id": org_id, "name": name},
+            )
+            cur.execute(
+                "SELECT drawing_id, project_id, name FROM drawing_artifacts "
+                "WHERE org_id = %(org_id)s AND drawing_id = %(drawing_id)s FOR UPDATE",
+                {"org_id": org_id, "drawing_id": source_drawing_id},
+            )
+            artifact = cur.fetchone()
+            if artifact is None or artifact["project_id"] != project_id or artifact["name"] != name:
+                raise DrawingImportUnavailable(
+                    "project or source account upload is unavailable")
+
+            try:
+                cur.execute(
+                    "INSERT INTO drawing_versions "
+                    "(version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, "
+                    "created_by, provenance, idempotency_key, import_fingerprint) "
+                    "VALUES (%(version_id)s, %(drawing_id)s, %(project_id)s, %(org_id)s, "
+                    "%(seq)s, %(oss_object)s, %(intake_ref)s, %(created_by)s, %(provenance)s, "
+                    "%(key)s, %(fingerprint)s) RETURNING " + columns,
+                    {"version_id": new_uuid(), "drawing_id": source_drawing_id,
+                     "project_id": project_id, "org_id": org_id, "seq": source_version,
+                     "oss_object": object_key, "intake_ref": intake_ref,
+                     "created_by": str(actor_binding_id), "provenance": Jsonb(provenance),
+                     "key": key, "fingerprint": fingerprint},
+                )
+            except UniqueViolation as exc:
+                raise DrawingImportConflict(
+                    "source drawing version is already attached to a canonical project") from exc
+            return DrawingVersion.from_row(cur.fetchone()), False
+
+    return run_transaction(operation, isolation="serializable")
 
 
 def create_job(org_id: uuid.UUID, project_id: uuid.UUID, kind: str, *,
@@ -599,7 +825,8 @@ def list_drawing_versions(org_id: uuid.UUID, project_id: uuid.UUID) -> List[Draw
     with cursor() as cur:
         cur.execute(
             "SELECT version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, created_by, "
-            "created_at, deleted_at, purge_requested_at, purge_completed_at "
+            "provenance, idempotency_key, created_at, deleted_at, purge_requested_at, "
+            "purge_completed_at "
             "FROM drawing_versions "
             "WHERE org_id = %(org_id)s AND project_id = %(project_id)s AND deleted_at IS NULL "
             "ORDER BY seq ASC",

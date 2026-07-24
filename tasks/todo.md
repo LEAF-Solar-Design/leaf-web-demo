@@ -1,3 +1,21 @@
+# Staging failed-test repair
+
+- [x] Wave 0: capture the current gate baseline and add failing regression checks.
+- [x] Wave 1A: route catalog actions through fail-closed run intents.
+- [x] Wave 1B: implement honest every-N authoring and unsupported declines.
+- [x] Wave 1C: bound startup fetches and use one session mock catalog.
+- [x] Wave 2: integrate and pass the full local application gate.
+- [x] Wave 3: repair the staging web build contract and add canonical-worker infrastructure.
+- [ ] Wave 4: deploy staging only and replay the complete browser and readiness gate.
+- [ ] Audit the final diffs, CI, deployment receipts, rollback evidence, and ledger.
+
+Risks:
+
+- Confirmation is safety-sensitive. Stale or changed intents must never execute.
+- Authenticated staging must never silently fall back to mock tenant data.
+- Web build arguments must remain staging-only and must never move production aliases.
+- Database and worker rollout stays operator-gated and uses named or federated AWS identity.
+
 # Live edge-contract repair
 
 - [x] Bound `drawing_state` summary output while preserving useful counts.

@@ -25,7 +25,9 @@ def tools(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     requesting tenant's OWN repo tools are folded in (tenant A's authored tools are
     invisible to tenant B). Auth OFF -> tenant is the X-Tenant-Id stub (default
     demo-tenant); with no tenant repo configured this is byte-identical to before."""
-    return with_envelope_fields({"tools": deps.all_tools(str(tenant))})
+    return with_envelope_fields({
+        "tools": [deps.catalog_tool_view(tool) for tool in deps.all_tools(str(tenant))]
+    })
 
 
 @router.get("/api/entitlements")

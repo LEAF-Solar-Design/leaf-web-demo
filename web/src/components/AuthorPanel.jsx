@@ -365,6 +365,12 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
               <span>{authored.demo ? 'Demo preview staged. Publish to make it available in this demo.' : 'Staged and awaiting approval. It is not runnable until publication succeeds.'}</span>
             </div>
           )}
+          {authored.published && authored.demo_session_only && (
+            <div className="customization-state" role="status">
+              <span className="dot square" aria-hidden="true" />
+              <span>Published for this demo session only. Reloading restores the seeded demo catalog.</span>
+            </div>
+          )}
           {authored.validation && (
             <div className="customization-detail"><span>Server validation</span><pre>{typeof authored.validation === 'string' ? authored.validation : JSON.stringify(authored.validation, null, 2)}</pre></div>
           )}

@@ -80,11 +80,7 @@ def postgres_authority(monkeypatch):
     if not os.environ.get("DATABASE_URL"):
         pytest.skip("PostgreSQL race test requires explicit DATABASE_URL")
     db = store._db()
-    migration = (
-        Path(__file__).resolve().parents[2]
-        / "platform" / "migrations" / "0016_drawing_upload_authority.sql"
-    )
-    db.apply_migration(migration)
+    db.apply_migration()
     monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
     monkeypatch.setenv("LEAF_UPLOAD_STORE", "postgres")
     yield db
@@ -212,6 +208,47 @@ def test_two_tasks_share_one_checkout_and_one_extraction_lease(
     for thread in threads:
         thread.join(timeout=20)
     assert sum(item is not None for item in claims) == 1
+
+
+@requires_database
+def test_fenced_intake_publication_persists_digest_proof(
+    postgres_authority,
+):
+    import hashlib
+
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    backend = store.InMemoryBackend()
+    marker = guest_uploads.new_marker(
+        filename="drawing.dxf", data=b"dxf", tenant_kind="account",
+        source_ext=".dxf")
+    guest_uploads.write_marker(backend, tenant, drawing, marker)
+    claimed, owner, fence = guest_uploads._claim_extraction(tenant, drawing)
+    source = _temp_blob(b"stored-version")
+    try:
+        store.ingest_drawing(
+            backend, tenant, source, drawing_id=drawing,
+            authority_guard={
+                "attempt": claimed["attempt"], "owner": owner, "fence": fence,
+            })
+    finally:
+        os.remove(source)
+
+    intake_data = b'{"layers":["Panels"],"polylines":[]}'
+    intake_ref = write_loop.intake_cache_key(tenant, drawing, 1)
+    digest = guest_uploads._put_intake_cache_fenced(
+        backend, tenant, drawing, intake_ref, intake_data,
+        str(claimed["attempt"]), owner, fence)
+    assert digest == hashlib.sha256(intake_data).hexdigest()
+    with postgres_authority.cursor() as cur:
+        cur.execute(
+            "SELECT intake_ref, intake_sha256 FROM drawing_store_versions "
+            "WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s "
+            "AND version = 1",
+            {"tenant": tenant, "drawing": drawing},
+        )
+        proof = cur.fetchone()
+    assert proof == {"intake_ref": intake_ref, "intake_sha256": digest}
 
 
 @requires_database

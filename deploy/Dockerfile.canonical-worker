@@ -6,6 +6,8 @@
 # it stays owned by its repository and its exact bytes are hashed at runtime.
 FROM python:3.12-slim AS canonical-worker
 
+ARG AUTOFILL_SOLVER_REVISION
+
 WORKDIR /app
 
 COPY platform/requirements.txt /app/platform/requirements.txt
@@ -14,11 +16,24 @@ RUN pip install --no-cache-dir -r /app/platform/requirements.txt
 COPY server/ /app/server/
 COPY platform/ /app/platform/
 COPY scripts/canonical-container-smoke.py /app/scripts/canonical-container-smoke.py
+COPY deploy/autofill-solver-sources.json /app/deploy/autofill-solver-sources.json
 COPY --from=autofill_solver . /opt/leaf/autofill-solver/
+
+# The named context may be a mutable local checkout. Do not trust the revision
+# argument by itself. Hash the copied Python source, require the checked-in
+# commit-to-digest mapping, then seal that verified identity into the image.
+RUN PYTHONPATH=/app/server python -c "from pathlib import Path; from solver_adapters.autofill import attest_source; attest_source(Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', Path('/app/deploy/autofill-solver-sources.json'))"
 
 WORKDIR /app/server
 
+RUN python -c \
+      "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit')" \
+      "$AUTOFILL_SOLVER_REVISION" \
+    && printf '%s\n' "$AUTOFILL_SOLVER_REVISION" \
+      > /opt/leaf/autofill-solver/.leaf-source-revision
+
 ENV AUTOFILL_SOLVER_ROOT=/opt/leaf/autofill-solver \
+    AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION} \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
@@ -29,4 +44,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
 
 USER 65532:65532
 
-CMD ["python", "canonical_worker.py", "--poll-seconds", "1", "--lease-seconds", "30"]
+CMD ["python", "canonical_worker.py", "--poll-seconds", "1"]

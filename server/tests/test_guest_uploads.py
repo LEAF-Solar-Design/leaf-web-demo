@@ -15,13 +15,18 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app as app_module
+import deps
 import guest_uploads
+import platform_link
 import write_loop
+from routers import uploads as uploads_router
 
 # A distinctive DXF nothing in the repo shares coordinates with. Rooftop demo
 # coordinates live around 14000-15500; these are nowhere near.
@@ -55,6 +60,59 @@ def _upload(client, data=DXF_BYTES, name="mine.dxf", headers=None):
     return client.post("/api/drawings/upload",
                        files={"file": (name, io.BytesIO(data))},
                        headers=headers or {})
+
+
+def test_live_account_upload_uses_active_binding_not_stale_claims(monkeypatch):
+    import auth
+    import tenancy
+
+    canonical = "f49766b5-1e5a-4e67-a10f-4e3a9b576266"
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(
+        auth, "verify_platform_token", lambda authorization: {"sub": "auth0|bound"})
+    monkeypatch.setattr(
+        auth, "extract_tenant_claims", lambda payload: {
+            "tenant_id": "stale-claim-tenant",
+            "org_id": "stale-claim-org",
+            "tier": "demo",
+        })
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        lambda subject: (canonical, "restricted"))
+    monkeypatch.setattr(
+        tenancy, "get_store", lambda: SimpleNamespace(
+            resolve_workspace=lambda tenant_id: None))
+
+    tenant, kind, minted = uploads_router._resolve_upload_identity(
+        "forged-header-tenant", "Bearer verified", "stale-guest-session")
+    assert str(tenant) == canonical
+    assert tenant.org_id == canonical
+    assert tenant.tier == "restricted"
+    assert tenant.subject == "auth0|bound"
+    assert kind == "account"
+    assert minted is False
+
+
+def test_active_binding_resolution_fails_closed_for_unbound_subject(monkeypatch):
+    monkeypatch.setattr(
+        platform_link, "platform_store", lambda: SimpleNamespace(
+            resolve_active_identity_binding=lambda authority, subject: None))
+    with pytest.raises(HTTPException) as exc:
+        deps.resolve_active_platform_tenant_id("auth0|unbound")
+    assert exc.value.status_code == 403
+
+
+def test_active_binding_resolution_returns_server_owned_tenant(monkeypatch):
+    binding = SimpleNamespace(platform_tenant_id="canonical-org")
+    org = SimpleNamespace(tier="hosted_pro", status="active")
+    monkeypatch.setattr(
+        platform_link, "platform_store", lambda: SimpleNamespace(
+            resolve_active_identity_binding=lambda authority, subject: binding,
+            get_org=lambda org_id: org))
+    assert deps.resolve_active_platform_tenant_id(
+        "auth0|foreign-claim") == "canonical-org"
+    assert deps.resolve_active_platform_tenant_authority(
+        "auth0|foreign-claim") == ("canonical-org", "hosted_pro")
 
 
 def test_upload_dxf_happy_path_serves_their_geometry(client):
@@ -182,6 +240,10 @@ def test_marker_records_content_identity(client):
     assert marker["filename"] == "mine.dxf"
     import hashlib
     assert marker["content_sha256"] == hashlib.sha256(DXF_BYTES).hexdigest()
+    intake_ref = write_loop.intake_cache_key(tenant, did, 1)
+    assert marker["intake_ref"] == intake_ref
+    assert marker["intake_sha256"] == hashlib.sha256(
+        backend.get(intake_ref)).hexdigest()
 
 
 def test_policy_endpoint_reads_the_one_constant(client, monkeypatch):

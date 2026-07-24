@@ -4,8 +4,9 @@
 #   docker compose -f docker-compose.yml -f docker-compose.canonical.yml build app canonical-worker migrate
 #   docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 #
-# The sibling autofill-solver repository remains the source owner. Compose
-# passes it as a named BuildKit context rather than copying it into this repo.
+# The autofill-solver repository remains the source owner. Compose passes its
+# checkout as a named BuildKit context, and the image build refuses it unless
+# the copied bytes match the trusted digest for the required commit.
 
 services:
   postgres:
@@ -28,8 +29,10 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.canonical-worker
+      args:
+        AUTOFILL_SOLVER_REVISION: ${AUTOFILL_SOLVER_REVISION:?set AUTOFILL_SOLVER_REVISION to the exact autofill-solver commit}
       additional_contexts:
-        autofill_solver: ../autofill-solver
+        autofill_solver: ${AUTOFILL_SOLVER_CONTEXT:-../autofill-solver}
     environment:
       DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
     command:
@@ -68,8 +71,10 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.canonical-worker
+      args:
+        AUTOFILL_SOLVER_REVISION: ${AUTOFILL_SOLVER_REVISION:?set AUTOFILL_SOLVER_REVISION to the exact autofill-solver commit}
       additional_contexts:
-        autofill_solver: ../autofill-solver
+        autofill_solver: ${AUTOFILL_SOLVER_CONTEXT:-../autofill-solver}
     environment:
       DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
     depends_on:

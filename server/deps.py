@@ -9,6 +9,7 @@ Sibling-session ownership (see README.md): `auth0-identity-signup` owns
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import importlib.util
 import json
@@ -283,6 +284,20 @@ def find_tool(name: str, tenant_id: str = _DEFAULT_TENANT) -> Optional[Dict[str,
     return None
 
 
+def catalog_tool_digest(tool: Dict[str, Any]) -> str:
+    """Strong canonical digest issued by GET and required again by POST /api/run."""
+    definition = {key: value for key, value in tool.items() if key != "catalog_digest"}
+    encoded = json.dumps(
+        definition, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def catalog_tool_view(tool: Dict[str, Any]) -> Dict[str, Any]:
+    return {**tool, "catalog_digest": catalog_tool_digest(tool)}
+
+
 # --------------------------------------------------------------------------- #
 # tenant identity  (owned by `auth0-identity-signup`)
 #
@@ -335,6 +350,48 @@ def auth_live() -> bool:
     """LEAF_AUTH_LIVE gate. Read at call time so a single process can be toggled
     in tests and subprocess env overrides apply."""
     return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
+
+
+def resolve_active_platform_tenant_authority(subject: Optional[str]) -> tuple[str, str]:
+    """Resolve tenant identity and tier through one current server authority.
+
+    JWT tenant and org claims are hints that can outlive an account move. The
+    canonical upload namespace therefore comes only from the current platform
+    identity binding. Missing bindings and unavailable binding authority fail
+    closed instead of falling back to a signed claim.
+    """
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    if not isinstance(subject, str) or not subject.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="verified subject has no active platform identity binding",
+        )
+    try:
+        import platform_link  # noqa: PLC0415
+        platform_store = platform_link.platform_store()
+        binding = platform_store.resolve_active_identity_binding("auth0", subject)
+        org = (platform_store.get_org(binding.platform_tenant_id)
+               if binding is not None else None)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - authority failures must fail closed
+        raise HTTPException(
+            status_code=503,
+            detail="platform identity binding authority is unavailable",
+        ) from exc
+    if binding is None or org is None or org.status != "active":
+        raise HTTPException(
+            status_code=403,
+            detail="verified subject has no active platform tenant authority",
+        )
+    tier = org.tier if isinstance(org.tier, str) and org.tier.strip() else "restricted"
+    return str(binding.platform_tenant_id), tier
+
+
+def resolve_active_platform_tenant_id(subject: Optional[str]) -> str:
+    """Compatibility wrapper for callers that need only current tenant identity."""
+    return resolve_active_platform_tenant_authority(subject)[0]
 
 
 # --------------------------------------------------------------------------- #

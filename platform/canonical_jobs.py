@@ -213,9 +213,12 @@ def _existing_by_idempotency_key(cur: Any, org_id: uuid.UUID, project_id: uuid.U
 
 def claim_next(worker_id: str, *, lease_seconds: float = 30,
                now: Optional[datetime] = None,
-               request_tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+               request_tenant_id: Optional[str] = None,
+               tool_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if not worker_id or lease_seconds <= 0:
         raise ValueError("worker_id and a positive lease are required")
+    if tool_name is not None and (not isinstance(tool_name, str) or not tool_name.strip()):
+        raise ValueError("tool_name must be a nonblank string when supplied")
     current = _now(now)
     expires = current + timedelta(seconds=lease_seconds)
     with connection() as conn:
@@ -225,15 +228,18 @@ def claim_next(worker_id: str, *, lease_seconds: float = 30,
                 "UPDATE jobs SET status = 'failed', error = %(error)s, finished_at = %(now)s, "
                 "updated_at = %(now)s, lease_owner = NULL, lease_expires_at = NULL "
                 "WHERE status = 'running' AND lease_expires_at < %(now)s "
+                "AND (%(tool)s::text IS NULL OR tool_name = %(tool)s::text) "
                 "AND attempt >= max_attempts AND deleted_at IS NULL",
                 {"now": current, "error": Jsonb({"error_code": "ATTEMPTS_EXHAUSTED",
                                                   "message": "maximum attempts exhausted",
-                                                  "retryable": False})},
+                                                  "retryable": False}),
+                 "tool": tool_name},
             )
             cur.execute(
                 "WITH candidate AS (SELECT j.job_id FROM jobs j "
                 "WHERE j.deleted_at IS NULL AND j.request_tenant_id IS NOT NULL "
                 "AND (%(tenant)s::text IS NULL OR j.request_tenant_id = %(tenant)s::text) "
+                "AND (%(tool)s::text IS NULL OR j.tool_name = %(tool)s::text) "
                 "AND j.attempt < j.max_attempts "
                 "AND (j.status = 'queued' OR (j.status = 'running' AND j.lease_expires_at < %(now)s)) "
                 "AND COALESCE((SELECT authority_mode FROM project_authority_modes "
@@ -247,7 +253,7 @@ def claim_next(worker_id: str, *, lease_seconds: float = 30,
                 "updated_at = %(now)s FROM candidate c WHERE j.job_id = c.job_id "
                 "RETURNING " + ", ".join("j." + c.strip() for c in _job_columns().split(",")),
                 {"now": current, "expires": expires, "worker": worker_id,
-                 "tenant": request_tenant_id},
+                 "tenant": request_tenant_id, "tool": tool_name},
             )
             return _record(cur.fetchone())
 

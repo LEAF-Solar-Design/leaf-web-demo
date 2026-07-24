@@ -216,6 +216,8 @@ class DrawingVersion:
     oss_object: Optional[str] = None
     intake_ref: Optional[str] = None
     created_by: Optional[str] = None
+    provenance: Optional[Dict[str, Any]] = None
+    idempotency_key: Optional[str] = None
     created_at: Optional[datetime] = None
     # deletion/compliance columns (migration 0002; DELETION-OFFBOARDING-DESIGN.md sec 4)
     deleted_at: Optional[datetime] = None
@@ -228,7 +230,8 @@ class DrawingVersion:
             version_id=r["version_id"], drawing_id=r["drawing_id"],
             project_id=r["project_id"], org_id=r["org_id"],
             seq=r["seq"], oss_object=r.get("oss_object"), intake_ref=r.get("intake_ref"),
-            created_by=r.get("created_by"), created_at=r.get("created_at"),
+            created_by=r.get("created_by"), provenance=r.get("provenance"),
+            idempotency_key=r.get("idempotency_key"), created_at=r.get("created_at"),
             deleted_at=r.get("deleted_at"),
             purge_requested_at=r.get("purge_requested_at"),
             purge_completed_at=r.get("purge_completed_at"),
@@ -240,6 +243,7 @@ class DrawingVersion:
             "project_id": str(self.project_id),
             "org_id": str(self.org_id), "seq": self.seq, "oss_object": self.oss_object,
             "intake_ref": self.intake_ref, "created_by": self.created_by,
+            "provenance": self.provenance, "idempotency_key": self.idempotency_key,
             "created_at": _iso(self.created_at),
             "deleted_at": _iso(self.deleted_at),
             "purge_requested_at": _iso(self.purge_requested_at),
