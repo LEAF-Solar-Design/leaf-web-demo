@@ -41,7 +41,10 @@ _TRANSACTION_ISOLATION = {
 _REQUIRED_COLUMNS = {
     "orgs": {"org_id", "tier", "status"},
     "projects": {"project_id", "org_id", "status"},
-    "drawing_versions": {"version_id", "project_id", "org_id", "drawing_id"},
+    "drawing_versions": {
+        "version_id", "project_id", "org_id", "drawing_id", "provenance",
+        "idempotency_key", "import_fingerprint",
+    },
     "jobs": {
         "job_id", "project_id", "org_id", "status", "request_tenant_id",
         "attempt", "max_attempts", "lease_owner", "lease_expires_at",
@@ -53,6 +56,16 @@ _REQUIRED_COLUMNS = {
         "worker_id", "tool_name", "source_revision", "source_sha256", "observed_at",
     },
     "drawing_artifacts": {"drawing_id", "org_id", "project_id"},
+    "drawing_upload_attempts": {
+        "tenant_id", "drawing_id", "attempt", "status", "marker",
+    },
+    "drawing_store_versions": {
+        "tenant_id", "drawing_id", "version", "state", "object_key",
+        "byte_count", "content_sha256",
+    },
+    "identity_bindings": {
+        "binding_id", "platform_tenant_id", "role", "status",
+    },
 }
 _RECONCILIATION_TABLES = (
     "orgs", "projects", "drawing_artifacts", "drawing_versions", "jobs",

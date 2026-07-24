@@ -14,10 +14,10 @@ from __future__ import annotations
 import hmac
 import os
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import billing, entitlements, store
 from .db import cursor
@@ -38,6 +38,21 @@ class CreateOrgBody(BaseModel):
 
 
 class CreateProjectBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class AccountUploadSourceBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["account_upload"]
+    drawing_id: uuid.UUID
+    version: int = Field(ge=1)
+
+
+class ImportDrawingVersionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: AccountUploadSourceBody
     name: str = Field(min_length=1, max_length=200)
 
 
@@ -155,6 +170,34 @@ def open_project(project_id: uuid.UUID, org_id: uuid.UUID = Depends(get_org_id))
     if payload is None:
         raise HTTPException(status_code=404, detail="project not found")
     return payload
+
+
+@router.post("/projects/{project_id}/drawing-versions/import", status_code=201)
+def import_drawing_version(
+    project_id: uuid.UUID,
+    body: ImportDrawingVersionBody,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    org_id: uuid.UUID = Depends(get_write_org_id),
+    actor_binding_id: uuid.UUID = Depends(get_write_binding_id),
+):
+    """Adopt a ready same-org account upload using server-derived refs and provenance."""
+    try:
+        version, replayed = store.import_ready_account_upload(
+            org_id,
+            project_id,
+            source_drawing_id=body.source.drawing_id,
+            source_version=body.source.version,
+            name=body.name,
+            idempotency_key=idempotency_key,
+            actor_binding_id=actor_binding_id,
+        )
+    except store.DrawingImportUnavailable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except store.DrawingImportForbidden as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    except store.DrawingImportConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"drawing_version": version.to_dict(), "replayed": replayed}
 
 
 # --------------------------------------------------------------------------- #
