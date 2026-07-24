@@ -45,7 +45,7 @@ class LeaseAwareFakeTenantRepoProvider extends FakeTenantRepoProvider {
   readLeaseActive = false;
   readLeaseCalls = 0;
 
-  async withTenantLease<T>(_tenantId: string, action: () => Promise<T>): Promise<T> {
+  override async withTenantLease<T>(_tenantId: string, action: () => Promise<T>): Promise<T> {
     this.leaseCalls += 1;
     this.leaseActive = true;
     try {

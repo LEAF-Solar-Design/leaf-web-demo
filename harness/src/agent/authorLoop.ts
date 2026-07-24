@@ -192,6 +192,7 @@ export class AuthorLoop {
     description: string,
     request: StageCustomizationRequest,
   ): Promise<StageCustomizationResponse> {
+    return this.withTenantRepoLease(tenantId, async () => {
     const { bare, coordination } = this.lifecyclePorts();
     const bareRepo = await bare.call(this.ports.tenantRepo, tenantId);
     const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
@@ -250,6 +251,7 @@ export class AuthorLoop {
     } finally {
       changes.cleanupWorktree(change);
     }
+    });
   }
 
   /**
@@ -258,6 +260,7 @@ export class AuthorLoop {
    * and CAS-updates main.
    */
   async publish(receipt: StagedCustomizationReceipt, expectedMainSha: string): Promise<{ commit: string }> {
+    return this.withTenantRepoLease(receipt.tenant_id, async () => {
     const { bare, coordination } = this.lifecyclePorts();
     const bareRepo = await bare.call(this.ports.tenantRepo, receipt.tenant_id);
     const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
@@ -283,6 +286,7 @@ export class AuthorLoop {
       stagedSha: receipt.staged_commit,
     };
     return { commit: changes.publishToMain(change, expectedMainSha) };
+    });
   }
 
   /** one-off route: author + (optionally) test-run once, but DO NOT persist. */

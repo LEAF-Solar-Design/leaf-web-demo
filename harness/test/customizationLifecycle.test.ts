@@ -63,10 +63,20 @@ async function setup() {
     customizationCoordination: coordination,
   };
   const bare = await tenantRepo.bare(TENANT);
-  return { agent, bare, coordination, loop: new AuthorLoop(ports) };
+  return { agent, bare, coordination, loop: new AuthorLoop(ports), tenantRepo };
 }
 
 describe("customizationLifecycle", () => {
+  it("holds the tenant writer lease across stage and publish", async () => {
+    const { bare, coordination, loop, tenantRepo } = await setup();
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    const staged = await loop.stage(TENANT, "count entities per layer", request(CHANGE_A, base));
+    coordination.approved.add(CHANGE_A);
+    await loop.publish(staged.receipt, base);
+
+    expect(tenantRepo.leaseTenants).toEqual([TENANT, TENANT]);
+  });
+
   it("stages in a private ref without moving main, and the model receives no publish capability", async () => {
     const { agent, bare, loop } = await setup();
     const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);

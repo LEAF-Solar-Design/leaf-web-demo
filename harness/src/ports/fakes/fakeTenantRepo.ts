@@ -48,6 +48,7 @@ class FakeTenantRepo implements TenantRepo {
 }
 
 export class FakeTenantRepoProvider implements TenantRepoProvider {
+  readonly leaseTenants: string[] = [];
   /** The most recent checkout (handy for post-POST assertions in tests). */
   lastCheckout: FakeTenantRepo | null = null;
   readonly checkouts: FakeTenantRepo[] = [];
@@ -70,6 +71,11 @@ export class FakeTenantRepoProvider implements TenantRepoProvider {
   }
 
   /** Materialize one real bare repository per tenant for lifecycle tests. */
+  async withTenantLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
+    this.leaseTenants.push(tenantId);
+    return action();
+  }
+
   async bare(tenantId: string): Promise<TenantBareRepo> {
     const existing = this.bareRepos.get(tenantId);
     if (existing) return existing;

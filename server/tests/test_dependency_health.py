@@ -300,5 +300,8 @@ def test_ready_route_is_separate_from_unchanged_liveness(monkeypatch):
     assert set(original_health) == {
         "ok", "aps_live", "data_file_present", "engine_registry_present",
         "da_client_present", "n_tools", "n_authored", "error", "degraded_mode",
+        "source_sha",
     }
-    assert any(route.path == "/api/ready" for route in app.app.routes)
+    paths = set(app.app.openapi()["paths"])
+    assert "/api/ready" in paths
+    assert "/api/projects" in paths

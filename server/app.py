@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 
 import dependency_health
 import deps
+import jobs as job_store
 from customization_flags import RolloutMode, mode as customization_mode
 from customization_service import CustomizationService
 from envelopes import install_error_handlers, with_envelope_fields
@@ -34,7 +35,7 @@ from routers import (
     author,
     capabilities,
     drawings,
-    jobs,
+    jobs as jobs_router,
     ops,
     prompt,
     session,
@@ -102,7 +103,7 @@ app.include_router(session.router)
 app.include_router(sessions.router)  # sessions wire spec (S2): POST /api/sessions, .../messages, .../stream, .../transcript
 app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_id} (record-only)
 app.include_router(tools.router)
-app.include_router(jobs.router)
+app.include_router(jobs_router.router)
 app.include_router(capabilities.router)
 app.include_router(author.router)
 app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoints
@@ -144,7 +145,7 @@ def _mount_platform_router() -> None:
         import platform_link
 
         platform_link.validate_postgres_startup()
-        jobs.validate_store_startup()
+        job_store.validate_store_startup()
         if "leaf_platform" not in sys.modules:
             spec = importlib.util.spec_from_file_location(
                 "leaf_platform", pkg_dir / "__init__.py",
