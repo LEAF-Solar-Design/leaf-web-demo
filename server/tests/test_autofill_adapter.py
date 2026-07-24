@@ -8,7 +8,13 @@ from solver_adapters import autofill
 
 
 STAGING_SOLVER_REVISION = "3ae53e274a5c6be3edeab30054234d09fdd74b41"
-STAGING_SOLVER_SHA256 = "135ddcd4f7db951a25f5e3e5a5a5761365aeda768a07406b2e60d1231438ed37"
+STAGING_SOLVER_SHA256 = "c50ab70db1802f36af2af1ac24f8177d347a1083b9caf4bc85009310addcd721"
+
+
+def test_trusted_manifest_is_limited_to_the_deployed_solver() -> None:
+    manifest = json.loads(autofill.TRUSTED_SOURCES_MANIFEST.read_text(encoding="utf-8"))
+
+    assert manifest == {STAGING_SOLVER_REVISION: STAGING_SOLVER_SHA256}
 
 
 def _write_self_attestation(root: Path, revision: str) -> None:
