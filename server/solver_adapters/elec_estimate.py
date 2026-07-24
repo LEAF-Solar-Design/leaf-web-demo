@@ -127,6 +127,17 @@ def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
         # non-physical corrected voltage and a false PASS. Fail closed at input.
         raise ValueError(
             "module.temperature_coefficient_pct_per_c magnitude is non-physical (expected >= -1.0 %/degC)")
+    # Cross-field physical consistency. Individually-plausible module values can
+    # be mutually contradictory (e.g. Isc below the implied Imp, or Vmp >= Voc);
+    # such a module cannot exist, and feeding it to the safety checks would
+    # under-state current/voltage and emit a false PASS. Reject at input.
+    _voc, _vmp = normalized_module["voc"], normalized_module["vmp"]
+    _isc, _watts = normalized_module["isc"], normalized_module["watts"]
+    if _voc is not None and _vmp is not None and _vmp >= _voc:
+        raise ValueError("module.vmp must be less than module.voc (max-power voltage is below open-circuit)")
+    if _watts is not None and _vmp is not None and _isc is not None and _isc <= _watts / _vmp:
+        raise ValueError(
+            "module.isc must exceed the implied Imp = watts / vmp (short-circuit current exceeds max-power current)")
 
     architecture = inverter.get("architecture")
     if architecture not in {"central", "solaredge"}:
