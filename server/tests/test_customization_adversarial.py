@@ -235,6 +235,42 @@ def test_enabled_customization_never_falls_back_when_database_is_absent(
         effective_catalog_dir("tenant-a")
 
 
+def test_shared_sqlite_is_inert_while_customization_is_disabled(monkeypatch):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", "/data/state/customization.db")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    monkeypatch.setattr(
+        CustomizationService,
+        "configured",
+        classmethod(lambda cls: pytest.fail("shared SQLite must not be opened")),
+    )
+
+    assert effective_catalog_dir("tenant-a") is None
+
+
+def test_shared_sqlite_fails_closed_when_customization_is_enabled(monkeypatch):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", "/data/state/customization.db")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+
+    with pytest.raises(
+        CustomizationServiceError,
+        match="customization_shared_sqlite_unsupported",
+    ):
+        effective_catalog_dir("tenant-a")
+
+
+def test_shared_sqlite_fails_closed_for_r6_only_configuration(monkeypatch):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", "/data/state/customization.db")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
+
+    with pytest.raises(
+        CustomizationServiceError,
+        match="customization_shared_sqlite_unsupported",
+    ):
+        effective_catalog_dir("tenant-a")
+
+
 def test_enabled_customization_never_falls_back_when_pin_is_absent(
     tmp_path, monkeypatch
 ):
