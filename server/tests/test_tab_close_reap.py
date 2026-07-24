@@ -18,6 +18,7 @@ monkeypatched or returns None under pytest) and no cancel leaves the process.
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -136,6 +137,37 @@ def test_unreachable_broker_still_leaves_the_job_terminal(monkeypatch, capsys):
     assert jobs._reap_orphans_once() == 1
     assert jobs.get_job(job_id)["status"] == "failed"
     assert "tab-close reap failed" in capsys.readouterr().err
+
+
+def test_row_get_tolerates_both_store_row_shapes():
+    """The two stores hand the same sweep different row shapes: sqlite selects
+    whole rows, the PostgreSQL `reclaimable` projection is job_id+progress only.
+    A missing column raises IndexError on sqlite3.Row and KeyError on a dict --
+    neither may escape and kill the sweep."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE t (job_id TEXT, tenant_id TEXT)")
+    conn.execute("INSERT INTO t VALUES ('j1', 'tenant-a')")
+    sqlite_row = conn.execute("SELECT * FROM t").fetchone()
+    conn.close()
+
+    assert jobs._row_get(sqlite_row, "tenant_id") == "tenant-a"
+    assert jobs._row_get(sqlite_row, "nope") is None
+    assert jobs._row_get({"job_id": "j1"}, "tenant_id") is None
+
+
+def test_reap_payload_survives_a_missing_tenant(monkeypatch):
+    """PostgreSQL's projection carries no tenant_id. The broker correlates on
+    job_id and never reads it, so a null tenant must not break the send."""
+    sent = []
+    monkeypatch.setattr(broker_client, "reap_via_broker",
+                        lambda records, **_kw: sent.append(records) or {"ok": True})
+
+    jobs._cancel_remote_workitem("job-no-tenant", None)
+
+    assert sent == [[{"job_id": "job-no-tenant", "tenant_id": None,
+                      "status": "inprogress", "workitem_id": None,
+                      "session_closed": True}]]
 
 
 def test_the_cloud_run_sends_its_job_id_so_correlation_can_exist(monkeypatch):
