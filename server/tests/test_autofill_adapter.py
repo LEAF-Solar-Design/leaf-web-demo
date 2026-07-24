@@ -6,6 +6,22 @@ import pytest
 from solver_adapters import autofill
 
 
+def test_descriptor_uses_exact_supplied_solver_revision(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    revision = "a" * 40
+    monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", revision.upper())
+
+    assert autofill.descriptor(solver_root=tmp_path)["source_revision"] == revision
+
+
+def test_descriptor_rejects_invalid_supplied_solver_revision(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", "latest")
+
+    with pytest.raises(RuntimeError, match="exact Git commit"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
 # The adapter's default assumes leaf-web-demo and autofill-solver are sibling
 # checkouts. AUTOFILL_SOLVER_ROOT overrides for isolated worktrees and must be
 # valid when set. The smoke is REQUIRED by default: an unresolvable solver

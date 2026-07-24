@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 5175",
-    "check:customization": "node scripts/check_customization.mjs"
+    "check:customization": "node scripts/check_customization.mjs",
+    "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs"
   },
   "dependencies": {
     "@auth0/auth0-spa-js": "^2.23.0",

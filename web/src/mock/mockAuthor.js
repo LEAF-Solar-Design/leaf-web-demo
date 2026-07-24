@@ -40,16 +40,34 @@ function parseDistance(desc) {
 }
 
 const WRITE_VERBS = /\b(delete|remove|erase|move|insert|add)\b/
+const SELECT_VERBS = /\b(select(?:s|ed|ing)?|highlight(?:s|ed|ing)?|mark(?:s|ed|ing)?|show(?:s|ed|ing)?|pick(?:s|ed|ing)?)\b/
+const ORDINALS = new Map([
+  ['second', 2], ['third', 3], ['fourth', 4], ['fifth', 5],
+  ['sixth', 6], ['seventh', 7], ['eighth', 8], ['ninth', 9],
+  ['tenth', 10], ['eleventh', 11], ['twelfth', 12],
+])
+
+function parseStride(desc) {
+  const text = String(desc).toLowerCase()
+  const numeric = text.match(/\bevery\s+(\d+)(?:st|nd|rd|th)?\b/)
+  if (numeric) return Math.max(2, Number(numeric[1]))
+  const word = text.match(/\bevery\s+([a-z]+)\b/)
+  return word ? (ORDINALS.get(word[1]) || null) : null
+}
 
 function classify(desc) {
   const d = desc.toLowerCase()
+  const stride = parseStride(d)
+  if (stride && WRITE_VERBS.test(d)) return null
+  if (stride && SELECT_VERBS.test(d)) return 'select_every_nth'
   // Write verbs win first — a "delete panels near the edge" request is a write,
   // not a read-only near-edge highlight.
   if (WRITE_VERBS.test(d)) return 'delete_marked_panel'
   if (/(area|square|sqft|sq ft|size|coverage)/.test(d)) return 'measure_area'
   if (/(edge|perimeter|within|near|setback|border|inches|distance)/.test(d)) return 'highlight_near_edge'
   if (/(count|how many|number of|tally)/.test(d)) return 'count_by_layer'
-  return 'select_by_layer'
+  if (SELECT_VERBS.test(d)) return 'select_by_layer'
+  return null
 }
 
 const TEMPLATES = {
@@ -105,7 +123,28 @@ const TEMPLATES = {
 (defun c:${n.replace(/-/g, '')} ( / lyr ss)
   (setq lyr (leaf:param "layer" "Panels"))
   (setq ss (ssget "X" (list (cons 8 lyr))))
-  (leaf:highlight ss))`,
+    (leaf:highlight ss))`,
+  },
+  select_every_nth: {
+    caps: ['drawing.read'],
+    params: {
+      type: 'object',
+      properties: {
+        layer: { type: 'string', title: 'Layer', default: 'Panels' },
+        stride: { type: 'number', title: 'Every Nth entity', default: 10 },
+      },
+      required: ['layer', 'stride'],
+    },
+    code: (n, stride = 10) => `; ${n} - generated LISP (script) tool
+(defun c:${n.replace(/-/g, '')} ( / lyr stride ss i picked)
+  (setq lyr (leaf:param "layer" "Panels"))
+  (setq stride (leaf:param "stride" ${Math.max(2, Number(stride) || 10)}))
+  (setq ss (ssget "X" (list (cons 8 lyr))))
+  (setq i (1- stride) picked (ssadd))
+  (while (< i (sslength ss))
+    (ssadd (ssname ss i) picked)
+    (setq i (+ i stride)))
+  (leaf:highlight picked))`,
   },
   // Write template — aligns with M3's engine op `delete_marked_panel`. Creates
   // a new undoable version instead of reading the drawing read-only.
@@ -127,6 +166,13 @@ const TEMPLATES = {
 
 export function authorMock(description) {
   const op = classify(description)
+  if (!op) {
+    return {
+      unsupported: true,
+      message: 'This demo can author count, area, edge-distance, layer-selection, every-N selection, and single-panel delete tools. Rephrase the request as one of those operations.',
+      supported: ['count', 'area', 'edge distance', 'layer selection', 'every-N selection', 'single-panel delete'],
+    }
+  }
   const tmpl = TEMPLATES[op]
   const name = slugify(description)
 
@@ -140,6 +186,17 @@ export function authorMock(description) {
       type: 'object',
       properties: { distance_in: { type: 'number', title: 'Distance (inches)', default: dist == null ? 60 : dist } },
       required: [],
+    }
+  }
+  if (op === 'select_every_nth') {
+    const stride = parseStride(description) || 10
+    params = {
+      type: 'object',
+      properties: {
+        layer: { type: 'string', title: 'Layer', default: 'Panels' },
+        stride: { type: 'number', title: 'Every Nth entity', default: stride },
+      },
+      required: ['layer', 'stride'],
     }
   }
 
@@ -158,7 +215,10 @@ export function authorMock(description) {
     capabilities: caps,
     provenance: { author: 'agent', created, grants: caps, reviewer: null },
   }
-  const code = tmpl.code(name, params.properties?.distance_in?.default)
+  const codeArg = op === 'select_every_nth'
+    ? params.properties?.stride?.default
+    : params.properties?.distance_in?.default
+  const code = tmpl.code(name, codeArg)
   const preview = isWrite
     ? `Generated a "${op}" script tool from your description.\n` +
       `It creates a new undoable version of the drawing when you run it on Leaf.`

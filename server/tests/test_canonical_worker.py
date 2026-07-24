@@ -283,6 +283,8 @@ def test_canonical_worker_container_contract_is_non_root_and_source_bound():
     assert "AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION}" in dockerfile
     assert "USER 65532:65532" in dockerfile
     assert "canonical_worker_health('string-autofill-opt')" in dockerfile
+    assert "ARG AUTOFILL_SOLVER_REVISION" in dockerfile
+    assert "AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION}" in dockerfile
     assert 'CMD ["python", "canonical_worker.py"' in dockerfile
     assert '"--lease-seconds", "30"' not in dockerfile
 
