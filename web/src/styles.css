@@ -838,8 +838,15 @@ footer .warn-txt { color: var(--status-warning); }
      maximum-scale hack in index.html, so pinch-zoom stays available. */
   .bar-input input, .bar-input .bar-field { font-size: 16px; }
 }
-/* reduced motion: freeze, never hide (M1) */
-@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+/* reduced motion: complete immediately, never cancel a filled animation (M1) */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+  }
+}
 
 /* ---------------- UI wave 1: identity chip · spend chip · quota · history ---------------- */
 
@@ -1504,7 +1511,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 
 /* ---------------- M1 motion (glide) ---------------- */
 :root { --m-enter: 520ms; --m-exit: 180ms; --m-curve: cubic-bezier(.22, 1, .36, 1); --m-stagger: 20ms; }
-@keyframes m1-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes m1-in { from { opacity: 0; transform: scale(.985); } to { opacity: 1; transform: none; } }
 @keyframes m1-out { to { opacity: 0; } }
 .enter {
   animation: m1-in var(--m-enter) var(--m-curve) both;

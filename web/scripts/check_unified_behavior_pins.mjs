@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const app = readFileSync(join(ROOT, 'src', 'App.jsx'), 'utf8')
+const styles = readFileSync(join(ROOT, 'src', 'styles.css'), 'utf8')
+const landing = readFileSync(join(ROOT, 'src', 'site', 'landing.css'), 'utf8')
+const demo = readFileSync(join(ROOT, 'src', 'demo', 'demo.css'), 'utf8')
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -38,6 +41,15 @@ assert(
     app.includes('localStorage.setItem(INFLIGHT_KEY') &&
     app.includes("localStorage.getItem(INFLIGHT_KEY) || 'null'"),
   'inflight jobs must retain the durable browser pointer used for reattach',
+)
+assert(
+  !styles.includes('animation: none !important') && !landing.includes('animation: none !important'),
+  'reduced motion must complete filled animations instead of canceling them',
+)
+assert(
+  !styles.includes('translateY(12px)') && !demo.includes('translateY(12px)') &&
+    styles.includes('transform: scale(.985)') && demo.includes('transform: scale(.985)'),
+  'micro entrances must use the scale tier and never translated motion',
 )
 
 console.log('unified behavior pins passed')

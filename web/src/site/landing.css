@@ -98,12 +98,13 @@
     filter var(--recast-focus) var(--recast-curve) calc(var(--recast-gap) + var(--rank, 0) * var(--recast-stagger));
 }
 
-/* Reduced motion = hard cut, everywhere on the stage. */
+/* Reduced motion = immediate completion, everywhere on the stage. */
 @media (prefers-reduced-motion: reduce) {
   .stage-root, .stage-root * {
     transition-duration: 0s !important;
     transition-delay: 0s !important;
-    animation: none !important;
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
   }
 }
 

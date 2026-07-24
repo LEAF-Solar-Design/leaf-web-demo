@@ -103,8 +103,8 @@ These rows prevent broad capability rows from hiding important failure paths.
 | VR-04 | Undo and redo at arbitrary depth | PARTIAL | three-version chain, two undos, two redos |
 | NT-02 | Single-fire R ladder and fall-through | APP ONLY | behavior pin for every priority target |
 | AX-02 | Run and result live-region announcements | APP ONLY | accessibility tree and announcement proof |
-| MO-02 | No fill-mode snap under reduced motion | FAILING STANDARD | forced reduced-motion result pane remains painted |
-| MO-03 | Micro entrances use scale, never translation | FAILING STANDARD | CSS pin plus visual proof |
+| MO-02 | No fill-mode snap under reduced motion | CONTRACT_PROVEN | forced reduced-motion result pane remains painted |
+| MO-03 | Micro entrances use scale, never translation | CONTRACT_PROVEN | CSS pin plus visual proof |
 | DM-01 | Guided tour drives production handlers | APP ONLY | deterministic tour without copied actions |
 | FT-01 | Fetch budget and timeout seam | FOUND | unit pin and slow-response browser proof |
 
@@ -291,9 +291,9 @@ baseline defect until fixed. Do not hide it by changing the gate.
 
 Observed Wave 0 results:
 
-- Fixture tier: 9 passed with two workers. It covers the cat happy path, route
+- Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
-  entitlement denial, quota, and spend cap.
+  entitlement denial, quota, spend cap, and reduced-motion completion.
 - Local tier: 1 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness and a real drawing session
   only. APS, Claude, Auth0, PostgreSQL, catalog, run, and version claims remain
