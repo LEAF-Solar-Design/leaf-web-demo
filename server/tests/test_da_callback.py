@@ -69,7 +69,7 @@ def test_invalid_or_missing_signature_fails_closed_without_creating_replay_state
     assert not (tmp_path / "jobs.db").exists()
 
 
-def test_poll_default_callback_primary_and_reaper_fallback(monkeypatch):
+def test_poll_default_callback_flag_is_reserved_and_reaper_fallback(monkeypatch):
     class DA:
         def __init__(self):
             self.calls = []
@@ -93,8 +93,14 @@ def test_poll_default_callback_primary_and_reaper_fallback(monkeypatch):
 
     monkeypatch.setenv("LEAF_CALLBACK_PRIMARY", "1")
     monkeypatch.setenv("LEAF_CALLBACK_URL", "https://example.test/da/callback")
-    assert broker._run_live_tool(da, "drawing.dwg", {"name": "tool"}, {}) == {"ok": True}
-    assert da.calls[-1] == ("callback", "https://example.test/da/callback")
+    with pytest.raises(
+        broker.CallbackPrimaryUnavailable,
+        match="callback-primary is reserved.*translation adapter",
+    ):
+        broker._run_live_tool(da, "drawing.dwg", {"name": "tool"}, {})
+    # The reserved flag must neither submit through a future-looking adapter
+    # method nor silently fall back to polling.
+    assert da.calls == ["poll"]
 
     response = broker.broker_reap(broker.BrokerReapRequest(
         records=[{"status": "submitted", "workitem_id": "wi-1", "session_closed": True}],

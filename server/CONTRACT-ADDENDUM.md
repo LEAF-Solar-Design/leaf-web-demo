@@ -1182,3 +1182,18 @@ for frozen and slushy path policy. Tenant-controlled content cannot widen it.
 Deployment rollback is complete only when it restores the prior image digests,
 effective catalog commit and digest, effective platform release, and one
 idempotent audit record.
+
+## §22 Signed Design Automation completion receipt
+
+`POST /da/callback` accepts a Leaf-owned terminal completion envelope signed
+with `LEAF_CALLBACK_SECRET`. Its HMAC covers the timestamp, nonce, and raw body.
+The broker consumes each `(job_id, nonce)` once through the selected durable
+replay authority, then applies the terminal result through the job spine's
+single completion transition.
+
+The receipt seam is live for producers that can generate this exact signed
+envelope. Native APS `onComplete` cannot generate it, so
+`LEAF_CALLBACK_PRIMARY=1` is reserved. Selecting that flag fails closed without
+submitting a WorkItem and without silently reverting to polling. Polling remains
+the only active completion mode until an APS-to-Leaf translation adapter owns
+output metadata, pending-job leases and heartbeats, and concurrency accounting.

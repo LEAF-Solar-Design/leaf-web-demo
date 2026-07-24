@@ -471,7 +471,7 @@ def _get_callbacks():
 
 
 class CallbackPrimaryUnavailable(RuntimeError):
-    """The flag selected callbacks but the DA adapter cannot submit them."""
+    """The reserved callback-primary flag was selected."""
 
 
 class CallbackPrimaryConfigurationError(RuntimeError):
@@ -482,9 +482,10 @@ def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, 
     """Select the configured completion mechanism for one live run.
 
     The polling call is deliberately byte-for-byte compatible by default.
-    Callback-primary uses an additive ``run_tool_callback`` adapter method so it
-    never silently reverts to polling when an operator has selected callbacks.
-    The existing reaper remains the fallback for abandoned callback work.
+    Callback-primary is reserved until a translation adapter can turn native
+    APS completion metadata into the signed Leaf receipt envelope. Selecting
+    the flag fails closed without submitting or silently polling. The existing
+    reaper remains available for abandoned polling work.
     """
     callbacks = _get_callbacks()
     if callbacks is None:
@@ -494,14 +495,11 @@ def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, 
         raise CallbackPrimaryConfigurationError(config_error)
     if not callbacks.callback_primary_enabled():
         return da.run_tool(local, tool, params)
-    callback_run = getattr(da, "run_tool_callback", None)
-    if not callable(callback_run):
-        raise CallbackPrimaryUnavailable(
-            "callback-primary requires a DA adapter with run_tool_callback"
-        )
-    url = callbacks.callback_url()
-    assert url is not None  # callback_primary_enabled() checks this configuration
-    return callback_run(local, tool, params, callback_url=url)
+    raise CallbackPrimaryUnavailable(
+        "callback-primary is reserved: the APS-to-Leaf callback translation "
+        "adapter is a follow-up; native APS onComplete does not satisfy the "
+        "signed /da/callback contract"
+    )
 
 
 def _cap_preflight(tenant_id: str, tool: Dict[str, Any]):
@@ -1652,7 +1650,7 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
             else (terminal_env.get("error") or {}).get("error_code", "error")
         )
         return JSONResponse(status_code=terminal_status, content=terminal_env)
-    except CallbackPrimaryConfigurationError as exc:
+    except (CallbackPrimaryConfigurationError, CallbackPrimaryUnavailable) as exc:
         entry["status"] = "INTERNAL"
         terminal_env = err_envelope(
             ErrorCode.INTERNAL, str(exc), retryable=False, tool=tool.get("name"))
