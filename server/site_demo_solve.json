@@ -10360,8 +10360,8 @@
       "solve_minutes": 3
     },
     "receipt": {
-      "computed_at": "2026-07-20T15:45:36Z",
-      "timing_ms": 1846,
+      "computed_at": "2026-07-24T11:47:33Z",
+      "timing_ms": 1744,
       "path": "broker",
       "ledger_line": true,
       "degraded_mode": false
