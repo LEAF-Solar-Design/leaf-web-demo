@@ -50,9 +50,27 @@ def callback_env(monkeypatch, tmp_path):
     monkeypatch.setenv("JOBS_DB", str(tmp_path / "jobs.db"))
 
 
+def _never(job_id, attempt):
+    """Permissive guard for tests whose subject is NOT the duplicate check."""
+    return False
+
+
+def test_translation_without_a_completion_guard_is_refused():
+    """An OPTIONAL guard defaulting to None is fail-open for a signing seam: a
+    caller who omits it silently regains the duplicate-completion hole. No
+    authority, no receipt."""
+    with pytest.raises(TypeError):
+        adapter.translate(_completion(), b"out", job_attempt=2, secret=SECRET, now=NOW)
+    for bad in (None, "nope", 42):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(), b"out", job_attempt=2, secret=SECRET, now=NOW,
+                              seen_completion=bad)
+        assert excinfo.value.reason == "no_completion_guard"
+
+
 def test_a_translated_envelope_verifies_and_consumes_exactly_once():
     output = b'{"strings": 12, "banks": 3}'
-    envelope = adapter.translate(_completion(), output, job_attempt=2, secret=SECRET, now=NOW)
+    envelope = adapter.translate(_completion(), output, job_attempt=2, secret=SECRET, now=NOW, seen_completion=_never)
 
     # The real signature verifier accepts it.
     assert callbacks.verify_signature(envelope.body, envelope.timestamp, envelope.nonce,
@@ -77,7 +95,7 @@ def test_a_translated_envelope_verifies_and_consumes_exactly_once():
 
 
 def test_tampering_the_body_breaks_the_signature():
-    envelope = adapter.translate(_completion(), b"output", job_attempt=2, secret=SECRET, now=NOW)
+    envelope = adapter.translate(_completion(), b"output", job_attempt=2, secret=SECRET, now=NOW, seen_completion=_never)
     tampered = envelope.body.replace(b'"size":6', b'"size":9')
     assert tampered != envelope.body
     assert callbacks.verify_signature(tampered, envelope.timestamp, envelope.nonce,
@@ -85,7 +103,7 @@ def test_tampering_the_body_breaks_the_signature():
 
 
 def test_headers_carry_the_signed_triple():
-    envelope = adapter.translate(_completion(), b"output", job_attempt=2, secret=SECRET, now=NOW)
+    envelope = adapter.translate(_completion(), b"output", job_attempt=2, secret=SECRET, now=NOW, seen_completion=_never)
     headers = envelope.headers()
     assert headers[callbacks.SIGNATURE_HEADER] == envelope.signature
     assert headers[callbacks.TIMESTAMP_HEADER] == envelope.timestamp
@@ -114,14 +132,14 @@ def test_headers_carry_the_signed_triple():
 ])
 def test_every_fail_closed_mode_refuses_with_its_reason(mutate, output, job_attempt, reason):
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(**mutate), output, job_attempt=job_attempt, secret=SECRET, now=NOW)
+        adapter.translate(_completion(**mutate), output, job_attempt=job_attempt, secret=SECRET, now=NOW, seen_completion=_never)
     assert excinfo.value.reason == reason
 
 
 def test_a_non_finite_clock_is_refused():
     with pytest.raises(adapter.AdapterError) as excinfo:
         adapter.translate(_completion(lease_expiry=float("nan")), b"out", job_attempt=2,
-                          secret=SECRET, now=float("nan"))
+                          secret=SECRET, now=float("nan"), seen_completion=_never)
     assert excinfo.value.reason in {"expired_lease", "bad_clock"}
 
 
@@ -170,7 +188,7 @@ def test_two_nonces_for_one_attempt_cannot_both_be_consumed():
 def test_a_stale_translated_envelope_is_rejected_by_the_consumer_freshness_window():
     # Adapter stamps produced_at = NOW; consuming far later exceeds max age.
     envelope = adapter.translate(_completion(lease_expiry=NOW + 10_000.0), b"out",
-                                 job_attempt=2, secret=SECRET, now=NOW)
+                                 job_attempt=2, secret=SECRET, now=NOW, seen_completion=_never)
     late = callbacks.consume_callback(envelope.body, envelope.signature, envelope.timestamp,
                                       envelope.nonce, now=NOW + 10_000.0,
                                       replay_store=callbacks.CallbackReplayStore())

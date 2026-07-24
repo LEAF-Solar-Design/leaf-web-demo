@@ -36,6 +36,9 @@ evidence (sha256 + size of the persisted output). Translation refuses, raising
   * ``bad_nonce``            — empty delivery nonce;
   * ``bad_clock``            — non-finite translation clock;
   * ``missing_workitem``     — no WorkItem id to bind the receipt to;
+  * ``no_completion_guard`` — no duplicate-completion authority was supplied.
+                               The guard is REQUIRED: an optional one defaulting
+                               to None is fail-open for a signing seam;
   * ``duplicate_completion`` — this (job, ATTEMPT) already produced a receipt.
                                Keyed on completion identity, not the nonce: a
                                second delivery bearing a fresh nonce would
@@ -136,14 +139,14 @@ def translate(
     job_attempt: int,
     secret: bytes,
     now: float,
-    seen_completion: Optional[Callable[[str, int], bool]] = None,
+    seen_completion: Callable[[str, int], bool],
 ) -> CallbackEnvelope:
     """Translate a successful APS WorkItem completion into a signed envelope.
 
     ``job_attempt`` is the job store's authoritative current attempt; ``now`` is
     the epoch seconds at translation.
 
-    ``seen_completion(job_id, attempt) -> bool`` is the producer-side
+    ``seen_completion(job_id, attempt) -> bool`` is the REQUIRED producer-side
     duplicate-completion guard, and it is keyed on the COMPLETION IDENTITY
     (job, attempt), NOT on the nonce. That distinction is the whole point: the
     consumer's durable nonce store only rejects a repeat of the SAME nonce, so a
@@ -179,7 +182,13 @@ def translate(
         raise AdapterError("bad_clock")
     if not isinstance(completion.nonce, str) or not completion.nonce.strip():
         raise AdapterError("bad_nonce")
-    if seen_completion is not None and seen_completion(completion.job_id, completion.attempt):
+    # REQUIRED, not optional. An optional guard defaulting to None is fail-OPEN
+    # for a signing seam: a caller who simply omits it gets the original
+    # duplicate-completion hole back, and nothing reports it. No authority, no
+    # receipt.
+    if not callable(seen_completion):
+        raise AdapterError("no_completion_guard")
+    if seen_completion(completion.job_id, completion.attempt):
         raise AdapterError("duplicate_completion")
 
     output_sha256 = hashlib.sha256(output).hexdigest()

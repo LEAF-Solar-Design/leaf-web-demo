@@ -51,6 +51,7 @@ recomputes it.
 | `expired_lease` | `now` past the lease deadline, or the deadline is not finite | a late completion is untrustworthy; `NaN` defeats every comparison (`now > nan` is `False`), so non-finite deadlines are refused outright |
 | `bad_clock` | non-finite translation clock | a `NaN` clock would make the freshness stamp meaningless |
 | `bad_nonce` | empty delivery nonce | the nonce is the signed + replay key |
+| `no_completion_guard` | no duplicate-completion authority supplied | the guard is **required**, not optional: defaulting it to `None` is fail-open for a signing seam, since a caller who omits it silently regains the duplicate-completion hole |
 | `duplicate_completion` | this `(job, ATTEMPT)` already produced a receipt | **keyed on completion identity, not the nonce.** The consumer's nonce store only rejects a repeat of the *same* nonce, so a second delivery bearing a *fresh* nonce would otherwise mint a second accepted envelope and complete one attempt twice. This adapter is the authority for one-receipt-per-attempt; the nonce store remains the second line against a verbatim replay |
 
 ### Why the replay key changed
