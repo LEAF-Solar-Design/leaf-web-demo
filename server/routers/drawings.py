@@ -35,6 +35,7 @@ from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 
 router = APIRouter()
 SUMMARY_LAYER_CAP = 50
+CACHED_DEMO_DRAWING_ID = "rooftop_demo"
 
 
 def _backend(tenant_id: str = ""):
@@ -73,17 +74,35 @@ def get_summary(drawing_id: str, version: str = "head",
     ver: Any = version
     if isinstance(version, str) and version not in ("head", "latest") and version.lstrip("-").isdigit():
         ver = int(version)
-    try:
-        view = write_loop.intake_view(
-            str(tenant_id), drawing_id, ver, backend=_backend(str(tenant_id))
-        )
-    except (KeyError, ValueError) as exc:
-        return error_response(
-            ErrorCode.BAD_PARAMS,
-            f"drawing/version unavailable: {exc}",
-            retryable=False,
-            status_code=404,
-        )
+    if deps.APS_LIVE and drawing_id == CACHED_DEMO_DRAWING_ID:
+        # The public demo is the bundled, immutable intake used by the UI and
+        # deterministic tools. Keep this read inside the app process so the
+        # app never needs the broker-only APS credential just to summarize it.
+        if ver not in ("head", "latest", 1):
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                f"drawing/version unavailable: version {ver!r} does not exist",
+                retryable=False,
+                status_code=404,
+            )
+        view = {
+            "intake": deps.load_cached_intake(),
+            "version": 1,
+            "head": 1,
+            "latest": 1,
+        }
+    else:
+        try:
+            view = write_loop.intake_view(
+                str(tenant_id), drawing_id, ver, backend=_backend(str(tenant_id))
+            )
+        except (KeyError, ValueError) as exc:
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                f"drawing/version unavailable: {exc}",
+                retryable=False,
+                status_code=404,
+            )
 
     layers: Dict[str, int] = {}
     total = 0

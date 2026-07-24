@@ -131,6 +131,33 @@ def test_summary_is_bounded_and_omits_raw_geometry(client):
     assert len(response.text) < 10_000
 
 
+def test_live_demo_summary_uses_cached_intake_without_aps_credentials(
+    client, monkeypatch
+):
+    from routers import drawings as drawings_router
+
+    monkeypatch.setattr(drawings_router.deps, "APS_LIVE", True)
+
+    def fail_if_aps_client_is_loaded():
+        raise AssertionError("the app process must not load APS credentials")
+
+    monkeypatch.setattr(
+        drawings_router.deps,
+        "get_da_client",
+        fail_if_aps_client_is_loaded,
+    )
+
+    response = client.get(
+        "/api/drawings/rooftop_demo/summary",
+        headers=_h("bootstrap-live-summary"),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["entity_total"] == CACHED_POLYLINE_COUNT
+    assert body["version"] == body["head"] == body["latest"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # 2 + 3. `demo` stays byte-identical; a fresh id ingests the SAME bytes via the
 #         SAME store.ingest_drawing call demo has always taken
