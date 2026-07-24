@@ -167,14 +167,24 @@ def run(params: Dict[str, Any], *, solver_root: Optional[Path] = None,
         raise RuntimeError(f"autofill solver repository is unavailable: {root}")
     source = descriptor(solver_root=root)
     script = r"""
-import json, sys
+import inspect, json, sys
 sys.path.insert(0, sys.argv[1])
 import solver
 body = json.load(sys.stdin)
-result = solver.solve_targets(
-    body['groups'], body['panelsPerString'], body['options'],
-    panel_angle=body['panelAngle'], panel_width=body['panelWidth'],
-    panel_height=body['panelHeight'])
+geometry = {
+    'panel_angle': body['panelAngle'],
+    'panel_width': body['panelWidth'],
+    'panel_height': body['panelHeight'],
+}
+parameters = inspect.signature(solver.solve_targets).parameters
+if all(name in parameters for name in geometry):
+    result = solver.solve_targets(
+        body['groups'], body['panelsPerString'], body['options'], **geometry)
+elif any(value != 0.0 for value in geometry.values()):
+    raise TypeError('autofill solver does not support panel geometry inputs')
+else:
+    result = solver.solve_targets(
+        body['groups'], body['panelsPerString'], body['options'])
 if not isinstance(result, dict):
     raise TypeError('autofill solver returned a non-object result')
 sys.stdout.write(json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False))

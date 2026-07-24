@@ -243,7 +243,7 @@ def build_suites() -> List[Suite]:
         Suite("server-adapter-combiner", "server tests/test_combiner_placement_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_combiner_placement_adapter.py"), 3),
         Suite("server-adapter-autofill", "server tests/test_autofill_adapter.py", "pytest",
-              SERVER, _py_pytest("tests/test_autofill_adapter.py"), 5),
+              SERVER, _py_pytest("tests/test_autofill_adapter.py"), 9),
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 19),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",

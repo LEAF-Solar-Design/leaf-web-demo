@@ -128,6 +128,17 @@ def test_real_autofill_solver_smoke_is_deterministic():
     assert first["runtime"].startswith("python-")
 
 
+def test_legacy_solver_accepts_defaults_but_rejects_geometry(tmp_path):
+    (tmp_path / "solver.py").write_text(
+        "def solve_targets(groups, n, options=None): return {'ok': True}\n")
+
+    result = autofill.run(SMOKE_INPUT, solver_root=tmp_path)
+    assert result["solver_result"] == {"ok": True}
+
+    with pytest.raises(RuntimeError, match="does not support panel geometry"):
+        autofill.run({**SMOKE_INPUT, "panelAngle": 1.0}, solver_root=tmp_path)
+
+
 def test_adapter_rejects_non_json_and_invalid_panel_count():
     for invalid in ({}, {"groups": [{}], "panelsPerString": True},
                     {"groups": [{}], "panelsPerString": 2},
