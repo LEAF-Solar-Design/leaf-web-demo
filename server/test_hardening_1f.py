@@ -27,6 +27,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import entitlements  # noqa: E402
+from _test_run_confirmation import confirmed_client_payload  # noqa: E402
 
 
 def _client():
@@ -66,11 +67,13 @@ def test_run_oversized_params_rejected_400():
     c = _client()
     # count-by-layer is a real read tool in the catalog; demo tier grants run_read.
     huge = {"blob": "x" * 70_000}                        # > 64 KiB serialised
-    r = c.post("/api/run", json={"tool": "count-by-layer", "params": huge}, headers=_h())
+    r = c.post("/api/run", json=confirmed_client_payload(
+        c, "count-by-layer", huge, headers=_h()), headers=_h())
     assert r.status_code == 400, r.text
     assert r.json()["error"] is not None                 # structured error envelope
     # a normally-sized run on the same tool is still accepted (control).
-    ok = c.post("/api/run", json={"tool": "count-by-layer", "params": {}}, headers=_h())
+    ok = c.post("/api/run", json=confirmed_client_payload(
+        c, "count-by-layer", headers=_h()), headers=_h())
     assert ok.status_code == 202, ok.text
 
 

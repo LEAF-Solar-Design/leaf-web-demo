@@ -57,6 +57,8 @@ os.environ.setdefault("JOBS_DB", str(Path(tempfile.mkdtemp(prefix="wave3-jobs-")
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+from _test_run_confirmation import confirmed_requests_payload  # noqa: E402
+
 ENVELOPE_SCHEMA = json.loads((SERVER_DIR / "envelope_schema.json").read_text(encoding="utf-8"))
 
 # Receipt oracle: data/nl_author_receipt.json's Panels bounding box (independent check).
@@ -470,9 +472,13 @@ def stack(tmp_path_factory):
         # CPU-starved past the poll timeout (gate-runner flake follow-up). Force it now,
         # best-effort, so the timed assertions below run against a warm broker.
         try:
+            app_url = f"http://127.0.0.1:{app_port}"
+            headers = {"X-Tenant-Id": "warmup"}
             requests.post(f"http://127.0.0.1:{app_port}/api/run?wait=1",
-                          json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo"},
-                          headers={"X-Tenant-Id": "warmup"}, timeout=120)
+                          json=confirmed_requests_payload(
+                              app_url, "count-by-layer", dwg="rooftop_demo",
+                              headers=headers),
+                          headers=headers, timeout=120)
         except Exception:
             pass
         yield {"app": f"http://127.0.0.1:{app_port}",
@@ -487,6 +493,11 @@ def _h(tenant: str) -> dict:
     return {"X-Tenant-Id": tenant}
 
 
+def _run_payload(stack, tool, params, headers, dwg=None):
+    return confirmed_requests_payload(
+        stack["app"], tool, params, dwg, headers=headers)
+
+
 # --- Contract 2 (through the real broker) ---------------------------------- #
 def test_C2_layer_bounding_boxes_in_api_tools(stack):
     r = requests.get(f"{stack['app']}/api/tools", timeout=15)
@@ -496,9 +507,12 @@ def test_C2_layer_bounding_boxes_in_api_tools(stack):
 
 
 def test_C2_run_through_broker_matches_receipt_bbox(stack):
+    headers = _h("wave3-c2")
     r = requests.post(f"{stack['app']}/api/run?wait=1",
-                      json={"tool": "layer-bounding-boxes", "params": {}, "dwg": "rooftop_demo"},
-                      headers=_h("wave3-c2"), timeout=60)
+                      json=_run_payload(
+                          stack, "layer-bounding-boxes", {}, headers,
+                          "rooftop_demo"),
+                      headers=headers, timeout=60)
     assert r.status_code == 200, r.text
     _assert_panels_bbox(r.json())
 
@@ -508,9 +522,10 @@ def test_C5b_ops_disable_immediately_reflected(stack):
     tenant = "wave3-ops"
     qa = {"X-Internal-Role": "qa"}
     # baseline run so the tenant shows up in the ledger aggregation
+    headers = _h(tenant)
     base = requests.post(f"{stack['app']}/api/run?wait=1",
-                         json={"tool": "count-by-layer", "params": {}},
-                         headers=_h(tenant), timeout=60)
+                         json=_run_payload(stack, "count-by-layer", {}, headers),
+                         headers=headers, timeout=60)
     assert base.status_code == 200, base.text
 
     d = requests.post(f"{stack['app']}/api/ops/tenants/{tenant}/disable", headers=qa, timeout=15)
@@ -535,10 +550,12 @@ def test_C5b_ops_disable_immediately_reflected(stack):
 def test_C5c_executing_progress_observable(stack):
     # a slow read run holds `progress='executing'` during the broker sleep so a poller
     # sees more than status flips.
+    headers = _h("wave3-prog")
     r = requests.post(f"{stack['app']}/api/run",
-                      json={"tool": "count-by-layer", "params": {"_qa_sleep_s": 1.5},
-                            "dwg": "rooftop_demo"},
-                      headers=_h("wave3-prog"), timeout=15)
+                      json=_run_payload(
+                          stack, "count-by-layer", {"_qa_sleep_s": 1.5},
+                          headers, "rooftop_demo"),
+                      headers=headers, timeout=15)
     assert r.status_code == 202, r.text
     job_id = r.json()["job_id"]
 

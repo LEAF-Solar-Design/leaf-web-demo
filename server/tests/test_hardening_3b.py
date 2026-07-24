@@ -40,6 +40,8 @@ from pathlib import Path
 import pytest
 import requests
 
+from _test_run_confirmation import confirmed_requests_payload
+
 SERVER_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -143,9 +145,12 @@ def versions(stack, tenant, drawing="demo"):
 
 
 def run_wait(stack, tool, params=None, tenant="wl"):
+    headers = _h(tenant)
     return requests.post(f"{stack['app']}/api/run?wait=1",
-                         json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo"},
-                         headers=_h(tenant), timeout=120)
+                         json=confirmed_requests_payload(
+                             stack["app"], tool, params, "rooftop_demo",
+                             headers=headers),
+                         headers=headers, timeout=120)
 
 
 def _envelope_ok(body: dict) -> None:

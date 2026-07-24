@@ -30,6 +30,8 @@ import jsonschema
 import pytest
 import requests
 
+from _test_run_confirmation import confirmed_requests_payload
+
 SERVER_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SERVER_DIR.parent
 ENGINE_SCHEMA = json.loads((PROJECT_ROOT / "engine" / "envelope_schema.json").read_text(encoding="utf-8"))
@@ -114,9 +116,12 @@ def _h(tenant: str) -> dict:
 
 
 def run_wait(stack, tool, params=None, tenant="wl"):
+    headers = _h(tenant)
     r = requests.post(f"{stack['app']}/api/run?wait=1",
-                      json={"tool": tool, "params": params or {}, "dwg": "rooftop_demo"},
-                      headers=_h(tenant), timeout=120)
+                      json=confirmed_requests_payload(
+                          stack["app"], tool, params, "rooftop_demo",
+                          headers=headers),
+                      headers=headers, timeout=120)
     return r
 
 
