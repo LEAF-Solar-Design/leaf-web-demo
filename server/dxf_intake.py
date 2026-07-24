@@ -1,5 +1,5 @@
 """
-Minimal, honest ASCII-DXF -> intake parser (guest uploads, BOTH modes).
+Minimal, honest ASCII-DXF -> intake parser (guest uploads, the DEFAULT DXF path).
 
 Extracts ONLY what it can literally read from the user's own bytes —
 LWPOLYLINE / POLYLINE entities and layer names — into the exact intake shape
@@ -10,12 +10,16 @@ LWPOLYLINE / POLYLINE entities and layer names — into the exact intake shape
                     "xdata": null, "handle"}]}
 
 HONESTY: nothing is invented. No entities -> an intake with zero polylines
-(honest and renderable as such). A binary DXF raises — nothing reads it here,
-and the APS path cannot read a DXF either (its Activity binds HostDwg to a
-fixed `input.dwg` localName, so accoreconsole rejects DXF bytes as an invalid
-drawing). This parser is therefore the ONLY DXF extractor the guest lane has,
-in live and local modes alike: it shows a REAL end-to-end guest flow on the
-user's own DXF without fabricating geometry. DWG still extracts through APS.
+(honest and renderable as such). A binary DXF raises — nothing reads it here.
+
+This is the DEFAULT DXF extractor and the ONLY one the local (APS_LIVE=0) demo
+has: it shows a REAL end-to-end guest flow on the user's own DXF without
+fabricating geometry, cheaply and instantly. It is intentionally minimal
+(LWPOLYLINE/POLYLINE + layers). For full fidelity (INSERT/3DFACE/geo/xdata)
+a live deployment can instead route DXF to the DXF-correct APS Activity by
+setting LEAF_GUEST_DXF_EXTRACT=aps (see guest_uploads.run_extraction and
+da.client.EXTRACT_DXF_ACTIVITY); that path costs a paid APS run. DWG always
+extracts through APS.
 """
 from __future__ import annotations
 
