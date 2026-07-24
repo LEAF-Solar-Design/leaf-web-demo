@@ -17,7 +17,7 @@ import uuid
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import billing, entitlements, store
 from .db import cursor
@@ -45,8 +45,16 @@ class AccountUploadSourceBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["account_upload"]
-    drawing_id: uuid.UUID
+    drawing_id: str
     version: int = Field(ge=1)
+
+    @field_validator("drawing_id")
+    @classmethod
+    def validate_drawing_id(cls, value: str) -> str:
+        if store.is_account_upload_source_id(value):
+            return value
+        raise ValueError(
+            "drawing_id must be a canonical UUID or legacy u-<10 lowercase hex>")
 
 
 class ImportDrawingVersionBody(BaseModel):

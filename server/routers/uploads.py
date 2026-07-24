@@ -275,12 +275,16 @@ def upload_drawing(
         # a foreign manifest squatting the derived id (quota already charged
         # above in that case).
         for _ in range(_MINT_ATTEMPTS):
-            candidate = guest_uploads.new_upload_drawing_id()
+            candidate = (
+                guest_uploads.new_account_upload_drawing_id()
+                if tenant_kind == "account"
+                else guest_uploads.new_upload_drawing_id()
+            )
             if (not backend.exists(store.manifest_key(str(tenant), candidate))
                     and guest_uploads.read_marker(backend, str(tenant), candidate) is None):
                 drawing_id = candidate
                 break
-        if drawing_id is None:  # pragma: no cover - 4 consecutive UUID collisions
+        if drawing_id is None:  # pragma: no cover - 4 consecutive random collisions
             return error_response(ErrorCode.INTERNAL, "could not mint a drawing id",
                                   retryable=True, status_code=500)
 

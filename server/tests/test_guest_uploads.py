@@ -161,6 +161,16 @@ def test_upload_account_tenant_no_retention(client):
     assert status["extracted_version"] == 1
 
 
+def test_guest_and_account_upload_id_mints_keep_distinct_syntax():
+    guest_id = guest_uploads.new_upload_drawing_id()
+    assert guest_id.startswith("u-")
+    assert len(guest_id) == 12
+    int(guest_id[2:], 16)
+
+    account_id = guest_uploads.new_account_upload_drawing_id()
+    assert str(uuid.UUID(account_id)) == account_id
+
+
 def test_upload_oversize_413(client, monkeypatch):
     monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "64")
     r = _upload(client, data=b"0\nSECTION\n" + b"x" * 100 + b"\nENTITIES\n")

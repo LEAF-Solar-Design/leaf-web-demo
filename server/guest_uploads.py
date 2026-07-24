@@ -150,12 +150,12 @@ def mint_guest_tenant_id() -> str:
 
 
 def new_upload_drawing_id() -> str:
-    """Mint the canonical UUID required when an account adopts this upload.
+    """Mint a random guest fallback id with the public ``u-<10 hex>`` shape."""
+    return "u-" + secrets.token_hex(5)
 
-    Guest uploads keep their content-derived ``u-<10 hex>`` identity. Account
-    uploads need a UUID because the project drawing-import contract validates
-    ``source.drawing_id`` as a UUID before it reaches storage.
-    """
+
+def new_account_upload_drawing_id() -> str:
+    """Mint the canonical UUID used for a new account upload receipt."""
     return str(uuid.uuid4())
 
 
