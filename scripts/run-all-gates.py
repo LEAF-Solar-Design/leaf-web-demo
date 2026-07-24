@@ -121,11 +121,15 @@ def _py_pytest(target: str) -> List[str]:
 
 
 def _npm() -> str:
-    return shutil.which("npm") or shutil.which("npm.cmd") or "npm"
+    if os.name == "nt":
+        return shutil.which("npm.cmd") or shutil.which("npm") or "npm.cmd"
+    return shutil.which("npm") or "npm"
 
 
 def _npx() -> str:
-    return shutil.which("npx") or shutil.which("npx.cmd") or "npx"
+    if os.name == "nt":
+        return shutil.which("npx.cmd") or shutil.which("npx") or "npx.cmd"
+    return shutil.which("npx") or "npx"
 
 
 def normalize_spawn_command(

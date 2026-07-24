@@ -124,3 +124,20 @@ def test_spawn_normalization_leaves_linux_and_native_windows_commands_unchanged(
     assert g.normalize_spawn_command(windows_exe, os_name="nt") == (
         windows_exe, False, None
     )
+
+
+def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch):
+    g = _load_runner()
+    monkeypatch.setattr(g.os, "name", "nt")
+
+    def fake_which(name):
+        return {
+            "npm": r"C:\Program Files\nodejs\npm",
+            "npm.cmd": r"C:\Program Files\nodejs\npm.cmd",
+            "npx": r"C:\Program Files\nodejs\npx",
+            "npx.cmd": r"C:\Program Files\nodejs\npx.cmd",
+        }.get(name)
+
+    monkeypatch.setattr(g.shutil, "which", fake_which)
+    assert g._npm().endswith("npm.cmd")
+    assert g._npx().endswith("npx.cmd")
