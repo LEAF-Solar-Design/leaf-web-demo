@@ -30,16 +30,18 @@ test('real local stack opens the unified surface without fixture interception', 
   await expect(page).toHaveURL(/\/try$/)
   await expect(page.getByTestId('operator-surface')).toBeVisible()
   await expect(page.getByTestId('operator-phase')).toContainText('Backend ready', { timeout: 15_000 })
+  await expect(page.getByText('Panels preserved').locator('..')).not.toContainText('pending')
+  expect(observed).toContain('GET /api/session 200')
 
   writeProofReceipt(join(PROOF_DIR, 'receipt.json'), {
-    capability_ids: ['ID-03', 'VW-01', 'HL-01'],
+    capability_ids: ['ID-03', 'HL-01'],
     evidence_tier: 'local-e2e',
     route: '/try',
     runtime: 'real local Vite, FastAPI, broker, harness, SQLite stores, and job workers',
     api_endpoints: observed,
     assertions: [
       'the real local readiness gate returned ready',
-      'the unified operator surface loaded without API interception',
+      'the real drawing session loaded a non-empty panel count without API interception',
       'no request targeted leaf-proof.invalid',
     ],
     result: { verdict: 'pass', readiness: ready },

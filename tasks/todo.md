@@ -33,7 +33,7 @@ Risks:
 
 - [x] Inventory the legacy `/app`, current `/try`, API seams, and design standards.
 - [x] Reconcile the Opus 5 critique into the traceability ledger and wave plan.
-- [ ] Wave 0: add the three-tier proof ladder, behavior pins, receipts, and capability test IDs.
+- [x] Wave 0: add the three-tier proof ladder, behavior pins, receipts, and capability test IDs.
 - [ ] Wave 1: extract shared controllers and mount them under both routes. Conversation is the first integrated slice.
 - [ ] Wave 2: integrate and prove the core workspace, command, job, drawing, and version journey.
 - [ ] Wave 3: integrate authoring and trust controls, then add the missing ingest seam.

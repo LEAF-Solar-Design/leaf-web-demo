@@ -289,6 +289,22 @@ Existing fact at plan creation: `npm run check:staging-fixes` fails the existing
 check named `slash routes do not use the shared intent seam`. Track it as a
 baseline defect until fixed. Do not hide it by changing the gate.
 
+Observed Wave 0 results:
+
+- Fixture tier: 9 passed with two workers. It covers the cat happy path, route
+  persistence, stale session reattach, denial, stale and expired approval,
+  entitlement denial, quota, and spend cap.
+- Local tier: 1 passed against an isolated real Vite, FastAPI, broker, harness,
+  SQLite, and job-worker stack. It proves readiness and a real drawing session
+  only. APS, Claude, Auth0, PostgreSQL, catalog, run, and version claims remain
+  open.
+- Production-like tier: runnable and skipped because no deployed base URL was
+  authorized or supplied.
+- Behavior pins, customization check, production build, and whitespace check:
+  passed.
+- Baseline `check:staging-fixes`: still fails the pre-existing slash-route seam
+  check and remains visible.
+
 ## Completion rule
 
 The program is complete only when each accepted ledger row reaches its required
