@@ -63,11 +63,22 @@ export function stripSecrets(s: string, secrets: readonly (string | undefined)[]
  */
 export const MIN_REDACTABLE_SECRET_LEN = 24;
 
+/**
+ * PRINTABLE ASCII, no space. Deliberately the same rule as the server's
+ * _CREDENTIAL_CHARS, and deliberately NOT "not whitespace": Python's
+ * str.isspace() and JavaScript's \s disagree (U+FEFF is whitespace to \s but
+ * not to isspace()), so a credential containing it was ACCEPTED by the app yet
+ * treated as unredactable here — accepted but unstrippable is the worst of both.
+ * An explicit shared charset removes the ambiguity, and real Agent SDK
+ * credentials are long ASCII strings. (sol-critic PR #123 rounds 6-8.)
+ */
+const PRINTABLE_ASCII = /^[\x21-\x7E]+$/;
+
 export function isRedactableSecret(secret: string | undefined): secret is string {
   return (
     typeof secret === "string" &&
     secret.length >= MIN_REDACTABLE_SECRET_LEN &&
-    !/\s/.test(secret)
+    PRINTABLE_ASCII.test(secret)
   );
 }
 

@@ -104,7 +104,7 @@ def _grant_secret(grant: Optional[Dict[str, Any]]) -> Optional[str]:
         return None
     tok = grant.get("api_key") if grant.get("kind") == "api_key" else grant.get("oauth_token")
     if (isinstance(tok, str) and len(tok) >= _MIN_REDACTABLE_SECRET_LEN
-            and not any(c.isspace() for c in tok)):
+            and all(0x21 <= ord(c) <= 0x7E for c in tok)):
         return tok
     return None
 

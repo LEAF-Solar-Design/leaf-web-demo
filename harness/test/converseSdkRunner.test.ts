@@ -301,6 +301,29 @@ describe("ConverseSdkRunner — a throw never carries the grant out", () => {
     expect(serialized).not.toContain(GRANT);
     expect(serialized).toContain("[REDACTED]");
   });
+
+  it("strips the grant from a throw that ESCAPES runInner (the public wrapper)", async () => {
+    // The test above is caught by runInner's own stream-fault handler, so it
+    // does not exercise run()'s outer try (sol-critic PR #123 round 7 caught
+    // that gap). sdkImport/zodImport are awaited BEFORE that inner try, so a
+    // rejection there escapes runInner and must be scrubbed by the public
+    // wrapper — the last boundary before ConverseLoop persists the error.
+    const mock = makeMockSdk([]);
+    mock.sdkImport = async () => {
+      throw new Error(`module load failed for token ${GRANT}`);
+    };
+
+    const runner = runnerWith(mock, { grant: { kind: "oauth", oauthToken: GRANT } });
+
+    const outcome = await collect(runner, makeInput()).catch((e: Error) => e);
+    expect(outcome).toBeInstanceOf(Error);
+    const err = outcome as Error;
+
+    expect(err.message).not.toContain(GRANT);
+    expect(err.message).toContain("[REDACTED]");
+    // The original stack can quote the value too, so it must be replaced.
+    expect(err.stack ?? "").not.toContain(GRANT);
+  });
 });
 
 // --------------------------------------------------------------------------- //

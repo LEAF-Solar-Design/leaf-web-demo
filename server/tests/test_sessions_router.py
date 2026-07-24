@@ -945,6 +945,12 @@ def test_byo_credential_malformed_is_rejected(client, wired, behind_trusted_prox
     ("has whitespace in it aaaaaaaaaaaa", True),  # long enough, not credential-shaped
     ("error", False),      # a protocol word: redaction would corrupt transcripts
     ('"', False),          # a JSON delimiter: redaction would corrupt shape
+    # PARITY: U+FEFF is NOT whitespace to Python's str.isspace() but IS matched
+    # by JavaScript's \s, so the old predicate accepted this here while the
+    # harness refused to redact it — accepted but unstrippable. Both sides now
+    # require printable ASCII. (sol-critic PR #123 rounds 6-8.)
+    ("abcdefghijklmnopqrstuvwx﻿", True),
+    ("abcdefghijklmnopqrstuvwxé", True),   # non-ASCII generally
 ])
 def test_credential_must_look_like_a_credential(
     client, wired, behind_trusted_proxy, bad, distinctive,
