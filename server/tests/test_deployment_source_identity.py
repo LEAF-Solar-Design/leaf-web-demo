@@ -65,7 +65,16 @@ def test_app_manifest_requires_durable_runtime_and_build_identity():
         "LEAF_BUILD_REVISION_REQUIRED",
         "LEAF_GUEST_CAP_STORE",
         "LEAF_GUEST_STORE_DIR",
+        "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED",
     } <= required
+    broker_manifest = json.loads(
+        (ROOT / "deploy" / "required-config.broker.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED" not in set(
+        broker_manifest["required"]["environment"]
+    )
     assert {
         "LEAF_GUEST_CAP_HMAC_SECRET",
         "LEAF_GUEST_SECRET",

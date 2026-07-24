@@ -38,11 +38,28 @@ def test_required_config_manifests_fail_closed_for_postgres_authority():
     assert {
         "LEAF_BLOB_STORE",
         "LEAF_PLATFORM_POSTGRES_REQUIRED",
+        "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED",
     }.issubset(app_environment)
     assert {
         "LEAF_BLOB_STORE",
         "LEAF_BROKER_STORE",
     }.issubset(broker_environment)
+    assert "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED" not in broker_environment
+
+
+def test_upload_import_boundary_has_a_real_postgres_pr_gate():
+    workflow = _read(".github/workflows/upload-authority-postgres.yml")
+
+    for protected_path in (
+        "platform/api.py",
+        "platform/tests/test_drawing_import.py",
+        "server/routers/uploads.py",
+        "server/write_loop.py",
+        "deploy/required-config.app.json",
+    ):
+        assert f"- '{protected_path}'" in workflow
+    assert "working-directory: platform" in workflow
+    assert "python -m pytest -q tests/test_drawing_import.py" in workflow
 
 
 def test_broker_image_contains_pg_runtime_without_crossing_secret_boundary():

@@ -16,3 +16,4 @@ from pathlib import Path
 _TEST_STATE = Path(tempfile.mkdtemp(prefix="leaf-server-pytest-"))
 os.environ.setdefault("SESSIONS_DB", str(_TEST_STATE / "sessions.db"))
 os.environ.setdefault("JOBS_DB", str(_TEST_STATE / "jobs.db"))
+os.environ.setdefault("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")

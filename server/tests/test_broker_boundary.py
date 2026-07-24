@@ -67,6 +67,7 @@ def test_live_session_extracts_through_broker_only(monkeypatch):
 
 def test_storage_cutover_gate_blocks_broker_write_before_preflight(monkeypatch):
     monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
     monkeypatch.setattr(broker, "tenant_disabled", lambda tenant_id: False)
     monkeypatch.setattr(
         broker,

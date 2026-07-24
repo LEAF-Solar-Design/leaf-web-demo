@@ -191,7 +191,7 @@ def test_live_write_refuses_non_dwg_uploaded_source():
     assert "DWG source" in env["error"]["message"]
 
 
-def test_storage_cutover_gate_blocks_all_app_drawing_mutations(client, monkeypatch):
+def test_storage_cutover_gate_blocks_authored_app_drawing_mutations(client, monkeypatch):
     monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
     headers = {"X-Tenant-Id": "account-a"}
     assert client.post("/api/drawings/any/undo", headers=headers).status_code == 503
@@ -206,7 +206,7 @@ def test_storage_cutover_gate_blocks_all_app_drawing_mutations(client, monkeypat
     platform_api = (
         Path(__file__).resolve().parents[2] / "platform" / "api.py"
     ).read_text(encoding="utf-8")
-    assert 'os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1")' in platform_api
+    assert 'os.environ.get("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "0")' in platform_api
 
 
 def test_purge_extraction_race_cannot_resurrect(client, monkeypatch, tmp_path):
