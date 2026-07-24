@@ -1777,6 +1777,14 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                            retryable=False, tool=tool.get("name"))
         return env, DEFAULT_HTTP_STATUS[ErrorCode.TENANT_DISABLED]
 
+    if write_loop.is_write_tool(tool) and not write_loop.drawing_mutations_enabled():
+        return (err_envelope(
+            ErrorCode.APS_UNAVAILABLE,
+            "drawing mutations are temporarily disabled for a storage cutover",
+            retryable=True,
+            tool=tool.get("name"),
+        ), 503)
+
     # 1a) HARD pre-flight cost cap — a tenant over its spend cap is rejected
     #     BEFORE any APS call (off unless a cap is configured for the tenant).
     if not quota_reserved:

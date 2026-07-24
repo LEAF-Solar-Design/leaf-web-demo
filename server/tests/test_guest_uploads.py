@@ -437,6 +437,69 @@ def test_live_mode_dxf_parses_locally_and_never_calls_the_broker(client, monkeyp
                for pt in pl["pts"]), "must carry the uploaded DXF's own coordinates"
 
 
+def test_live_upload_never_loads_broker_only_aps_credentials(client, monkeypatch):
+    """The live app persists upload state on its shared drawings volume.
+
+    APS extraction may cross the broker HTTP seam, but upload creation,
+    extraction persistence, and status reads must not load the APS credential
+    in the tenant-facing process.
+    """
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.setattr(
+        deps,
+        "get_da_client",
+        lambda: pytest.fail("tenant app attempted to load broker-only APS credentials"),
+    )
+    monkeypatch.setattr(
+        guest_uploads,
+        "_extract_via_broker",
+        lambda tenant_id, drawing_id: {
+            "dwg": drawing_id,
+            "layers": ["BrokerExtracted"],
+            "polylines": [],
+        },
+    )
+
+    receipt = _upload(
+        client,
+        data=b"AC1032" + b"\x00" * 64,
+        name="real.dwg",
+        headers={"X-Tenant-Id": "account-a"},
+    )
+    assert receipt.status_code == 202
+    tenant = receipt.json()["tenant_id"]
+    drawing = receipt.json()["drawing_id"]
+
+    status = client.get(
+        f"/api/drawings/{drawing}/upload-status",
+        headers={"X-Tenant-Id": tenant},
+    )
+    assert status.status_code == 200
+    assert status.json()["status"] == "ready"
+    assert client.get(
+        f"/api/drawings/{drawing}/intake",
+        headers={"X-Tenant-Id": tenant},
+    ).status_code == 200
+    assert client.get(
+        f"/api/drawings/{drawing}/versions",
+        headers={"X-Tenant-Id": tenant},
+    ).status_code == 200
+
+
+def test_storage_cutover_gate_blocks_upload_before_any_receipt(client, monkeypatch):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    response = _upload(client, headers={"X-Tenant-Id": "account-a"})
+    assert response.status_code == 503
+    assert not any(guest_uploads.uploads_dir().glob("*"))
+
+
+def test_upload_surfaces_have_no_da_client_call_site():
+    """Static guard for the app-side upload credential boundary."""
+    for module in (uploads_router, guest_uploads):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert "get_da_client" not in source
+
+
 def test_dxf_extract_mode_aps_routes_dxf_through_the_broker(client, monkeypatch):
     """OPT-IN: with LEAF_GUEST_DXF_EXTRACT=aps at APS_LIVE=1, a .dxf goes to the
     broker (full-fidelity APS DXF Activity) instead of the local parser.

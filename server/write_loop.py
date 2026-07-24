@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import secrets
 import sys
 import tempfile
 import time
@@ -77,11 +78,32 @@ def store_dir() -> str:
     return os.environ.get("LEAF_STORE_DIR", str(SERVER_DIR / "drawings"))
 
 
+def blob_store_mode() -> str:
+    """Return the configured durable blob location, independent of APS use."""
+    mode = os.environ.get("LEAF_BLOB_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "filesystem", "aps_oss"}:
+        raise RuntimeError(
+            "LEAF_BLOB_STORE must be 'legacy', 'filesystem', or 'aps_oss'")
+    return mode
+
+
+def drawing_mutations_enabled() -> bool:
+    """Global cutover drain for every drawing-authority mutation surface."""
+    return os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") == "1"
+
+
 def default_backend(*, aps_live: bool = False, da: Any = None):
-    """Pick the store backend. APS_LIVE=0 -> local FilesystemBackend (no creds);
-    APS_LIVE=1 with a da client -> OSSBackend (persistent bucket)."""
+    """Pick storage independently from whether execution uses live APS.
+
+    ``aps_live`` remains for caller compatibility. ``LEAF_BLOB_STORE`` owns
+    the storage choice. APS OSS is available only with a broker-side client.
+    """
     import store  # lazy (store imports da/client)
-    if aps_live and da is not None:
+    mode = blob_store_mode()
+    if mode == "aps_oss" or (mode == "legacy" and aps_live and da is not None):
+        if da is None:
+            raise RuntimeError(
+                "LEAF_BLOB_STORE=aps_oss requires the broker-side APS client")
         return store.OSSBackend()
     return store.FilesystemBackend(store_dir())
 
@@ -106,6 +128,18 @@ def backend_for_tenant(tenant_id: str, *, aps_live: bool = False, da: Any = None
     if str(tenant_id).startswith(GUEST_TENANT_PREFIX):
         return store.FilesystemBackend(guest_store_dir())
     return default_backend(aps_live=aps_live, da=da)
+
+
+def upload_backend_for_tenant(tenant_id: str):
+    """Credential-free backend for staged upload state and extracted artifacts.
+
+    The app and broker share ``LEAF_STORE_DIR`` and ``LEAF_GUEST_STORE_DIR`` on
+    the durable drawings volume. APS extraction crosses the broker HTTP seam,
+    but upload marker, raw file, and intake-cache persistence stays on that
+    shared volume. The tenant-facing app must never construct an OSS backend,
+    because doing so loads the broker-only APS credential.
+    """
+    return backend_for_tenant(tenant_id, aps_live=False, da=None)
 
 
 def _drawing_id(params: Dict[str, Any]) -> str:
@@ -345,6 +379,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     name = tool.get("name")
     tool_version = tool.get("version", "1.0.0")
     drawing_id = _drawing_id(params)
+    scratch_keys = []
     try:
         if not backend.exists(store.manifest_key(tenant_id, drawing_id)):
             return (err_envelope(ErrorCode.BAD_PARAMS,
@@ -386,12 +421,57 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                     f"blob is the extracted intake, not DWG bytes)",
                     retryable=False, tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
-        head_v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
-
-        in_url = da.signed_download_url(vkey)
         ts = int(time.time())
-        out_key = f"out/{ts}_{store.sanitize_id(drawing_id)}_write.dwg"
-        up_key, out_url = da.signed_upload_url(out_key)
+        run_nonce = secrets.token_hex(8)
+        head_v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+        if isinstance(backend, store.OSSBackend):
+            in_url = da.signed_download_url(vkey)
+        else:
+            # The persistent drawing blob lives on shared EFS. Stage only this
+            # WorkItem input in broker-owned APS scratch storage, then keep the
+            # resulting immutable version in the configured persistent backend.
+            input_key = (
+                da.ephemeral_input_key(
+                    f"{store.sanitize_id(drawing_id)}_v{head_v}_{run_nonce}.dwg",
+                    tenant_id=tenant_id,
+                    ts=ts,
+                )
+                if hasattr(da, "ephemeral_input_key")
+                else f"t/{store.sanitize_id(tenant_id)}/in/{ts}_"
+                     f"{store.sanitize_id(drawing_id)}_v{head_v}_{run_nonce}.dwg"
+            )
+            fd, staged_input = tempfile.mkstemp(suffix=".dwg")
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(backend.get(vkey))
+                if hasattr(da, "upload_scratch_object"):
+                    da.upload_scratch_object(staged_input, input_key)
+                else:
+                    da.upload_object(staged_input, input_key)
+                scratch_keys.append(input_key)
+            finally:
+                try:
+                    os.remove(staged_input)
+                except OSError:
+                    pass
+            in_url = (
+                da.scratch_signed_download_url(input_key)
+                if hasattr(da, "scratch_signed_download_url")
+                else da.signed_download_url(input_key)
+            )
+        output_name = f"{store.sanitize_id(drawing_id)}_write_{run_nonce}"
+        out_key = (
+            da.ephemeral_output_key(
+                output_name, tenant_id=tenant_id, ts=ts, suffix=".dwg")
+            if hasattr(da, "ephemeral_output_key")
+            else f"t/{store.sanitize_id(tenant_id)}/out/{ts}_{output_name}.dwg"
+        )
+        scratch_keys.append(out_key)
+        up_key, out_url = (
+            da.scratch_signed_upload_url(out_key)
+            if hasattr(da, "scratch_signed_upload_url")
+            else da.signed_upload_url(out_key)
+        )
         activity_id = da.activity_qualified(WRITE_ACTIVITY)
         w_args = {"HostDwg": {"url": in_url, "verb": "get"},
                   "Result": {"url": out_url, "verb": "put"}}
@@ -403,8 +483,12 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                                  f"report={status.get('reportUrl')}", retryable=True,
                                  tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
-        da.finalize_upload(out_key, up_key)
-        out_bytes = da.download_object(out_key)
+        if hasattr(da, "finalize_scratch_upload"):
+            da.finalize_scratch_upload(out_key, up_key)
+            out_bytes = da.download_scratch_object(out_key)
+        else:
+            da.finalize_upload(out_key, up_key)
+            out_bytes = da.download_object(out_key)
         if not out_bytes:
             return (err_envelope(ErrorCode.WORKITEM_FAILED, "write produced 0-byte output.dwg",
                                  retryable=True, tool=name, version=tool_version),
@@ -468,3 +552,18 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         return (err_envelope(ErrorCode.WORKITEM_FAILED, f"{type(exc).__name__}: {exc}",
                              retryable=True, tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
+    finally:
+        if scratch_keys:
+            delete_scratch = getattr(da, "delete_scratch_object", None)
+            delete_fallback = getattr(da, "delete_object", None)
+            delete = delete_scratch or delete_fallback
+        else:
+            delete = None
+        if delete is not None:
+            for key in scratch_keys:
+                try:
+                    delete(key)
+                except Exception:
+                    # Best effort only. The dedicated transient bucket still
+                    # expires the copy if an immediate delete is interrupted.
+                    pass
