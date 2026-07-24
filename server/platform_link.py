@@ -138,10 +138,30 @@ def postgres_startup_required() -> bool:
     return postgres_required() or postgres_authorities_selected()
 
 
+def validate_canonical_upload_authority() -> None:
+    """A required canonical platform must persist import proof in PostgreSQL."""
+    if not postgres_required():
+        return
+    for name in ("LEAF_DRAWING_STORE", "LEAF_UPLOAD_STORE"):
+        if os.environ.get(name, "legacy").strip().lower() != "postgres":
+            raise RuntimeError(
+                f"LEAF_PLATFORM_POSTGRES_REQUIRED requires {name}=postgres")
+    if os.environ.get("LEAF_BLOB_STORE", "legacy").strip().lower() != "filesystem":
+        raise RuntimeError(
+            "LEAF_PLATFORM_POSTGRES_REQUIRED requires LEAF_BLOB_STORE=filesystem")
+
+
 def validate_postgres_startup() -> Optional[Dict[str, Any]]:
     """Fail closed before serving when any selected authority needs PostgreSQL."""
+    if (
+        os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower() == "production"
+        and not postgres_required()
+    ):
+        raise RuntimeError(
+            "production app requires LEAF_PLATFORM_POSTGRES_REQUIRED=1")
     if not postgres_startup_required():
         return None
+    validate_canonical_upload_authority()
     if (
         postgres_required()
         and os.environ.get("LEAF_AUTH_LIVE", "").strip().lower()

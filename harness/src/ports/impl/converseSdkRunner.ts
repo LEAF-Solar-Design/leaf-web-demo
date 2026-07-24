@@ -81,7 +81,7 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
-import { redactTokens } from "../../redact.js";
+import { grantSecrets, redactSecrets } from "../../redact.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces we rely on (documented above,
@@ -191,7 +191,32 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     this.zodImport = opts.zodImport ?? (() => dynImport(["zod"]));
   }
 
+  /**
+   * Public entry: NOTHING carrying this run's credential may escape here.
+   *
+   * This runner is the only component that holds the grant. ConverseLoop, which
+   * catches whatever escapes, is deliberately credential-free (enforced by the
+   * import invariant in test/converseRuntimeSeparation.test.ts) and so cannot
+   * scrub by value — and its catch writes to the DURABLE transcript via
+   * store.appendEvent BEFORE any wire-level filtering runs. So the scrub has to
+   * happen here, on the way out. (sol-critic PR #117 round 2, blocker 1.)
+   */
   async *run(input: ConverseRunInput): AsyncIterable<ConverseRunnerEvent> {
+    try {
+      yield* this.runInner(input);
+    } catch (e) {
+      const scrubbed = redactSecrets(
+        e instanceof Error ? e.message : String(e),
+        grantSecrets(this.grant),
+      );
+      const wrapped = new Error(scrubbed);
+      // Drop the original stack: it can quote the offending value too.
+      wrapped.stack = `${wrapped.name}: ${scrubbed}`;
+      throw wrapped;
+    }
+  }
+
+  private async *runInner(input: ConverseRunInput): AsyncIterable<ConverseRunnerEvent> {
     const sdk = (await this.sdkImport()) as SdkModule;
     const { z } = (await this.zodImport()) as ZodModule;
 
@@ -346,8 +371,17 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       // into the runner env and can be embedded verbatim in a thrown message
       // (e.g. Node/undici header-validation errors quote the offending value),
       // so an unredacted fault would persist and publish the caller's token.
-      // sol-critic review of PR #117, blocker 2.
-      if (!timedOut && !terminalError) streamFault = redactTokens((e as Error).message);
+      //
+      // Scrub THIS RUN'S ACTUAL grant value, not just token-shaped text: a
+      // credential can clear the app's 24-char floor while still being too short
+      // for TOKENISH (which wants sk-ant-* or 40+ chars), so the pattern pass
+      // alone would leak it. This is also the ONE place the tenant's LINKED
+      // grant can be stripped — the app never sees that value, so its own
+      // input-side scrub cannot cover it.
+      // (sol-critic PR #117 round 1 blocker 2, round 2 blocker 1.)
+      if (!timedOut && !terminalError) {
+        streamFault = redactSecrets((e as Error).message, grantSecrets(this.grant));
+      }
     } finally {
       clearTimeout(timer);
     }

@@ -114,9 +114,8 @@ def _drawing_sections(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
         "checkout": {"held_by": None, "expires_at": None},
     }
     try:
-        backend = write_loop.default_backend(
-            aps_live=deps.APS_LIVE,
-            da=deps.get_da_client() if deps.APS_LIVE else None,
+        backend = write_loop.backend_for_tenant(
+            str(tenant_id), aps_live=False, da=None,
         )
         if not backend.exists(store.manifest_key(str(tenant_id), drawing_id)):
             return out  # pure read: never bootstrap the demo drawing here
