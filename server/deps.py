@@ -337,6 +337,40 @@ def auth_live() -> bool:
     return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
 
 
+def resolve_active_platform_tenant_id(subject: Optional[str]) -> str:
+    """Resolve a verified subject through the active server-owned binding.
+
+    JWT tenant and org claims are hints that can outlive an account move. The
+    canonical upload namespace therefore comes only from the current platform
+    identity binding. Missing bindings and unavailable binding authority fail
+    closed instead of falling back to a signed claim.
+    """
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    if not isinstance(subject, str) or not subject.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="verified subject has no active platform identity binding",
+        )
+    try:
+        import platform_link  # noqa: PLC0415
+        binding = platform_link.platform_store().resolve_active_identity_binding(
+            "auth0", subject)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - authority failures must fail closed
+        raise HTTPException(
+            status_code=503,
+            detail="platform identity binding authority is unavailable",
+        ) from exc
+    if binding is None:
+        raise HTTPException(
+            status_code=403,
+            detail="verified subject has no active platform identity binding",
+        )
+    return str(binding.platform_tenant_id)
+
+
 # --------------------------------------------------------------------------- #
 # harness back-edge trust (wire contract §0): with LEAF_AUTH_LIVE=1 the spine's
 # AppRunClient authenticates with X-Dispatch-Secret + X-Tenant-Id instead of a

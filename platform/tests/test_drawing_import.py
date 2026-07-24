@@ -16,7 +16,8 @@ def _binding(org_id, *, role="owner"):
         org_id, "auth0", f"auth0|drawing-import-{uuid.uuid4()}", role=role)
 
 
-def _ready_upload(org_id, *, tenant_kind="account", version=1):
+def _ready_upload(org_id, *, tenant_kind="account", version=1,
+                  marker_intake_sha256=None):
     drawing_id = uuid.uuid4()
     tenant_id = str(org_id)
     object_key = (
@@ -24,6 +25,9 @@ def _ready_upload(org_id, *, tenant_kind="account", version=1):
     )
     source_bytes = f"source:{drawing_id}".encode()
     source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    intake_ref = object_key[:-4] + ".intake.json"
+    intake_sha256 = hashlib.sha256(
+        f"intake:{drawing_id}".encode()).hexdigest()
     attempt = uuid.uuid4().hex[:16]
     marker = {
         "schema": 1,
@@ -32,6 +36,8 @@ def _ready_upload(org_id, *, tenant_kind="account", version=1):
         "tenant_kind": tenant_kind,
         "content_sha256": source_sha256,
         "extracted_version": version,
+        "intake_ref": intake_ref,
+        "intake_sha256": marker_intake_sha256 or intake_sha256,
     }
     with cursor() as cur:
         cur.execute(
@@ -42,16 +48,17 @@ def _ready_upload(org_id, *, tenant_kind="account", version=1):
         cur.execute(
             "INSERT INTO drawing_store_versions "
             "(tenant_id, drawing_id, version, parent_version, object_key, byte_count, "
-            "content_sha256, state, ready_at) VALUES (%s, %s, %s, NULL, %s, %s, %s, "
-            "'ready', NOW())",
-            (tenant_id, str(drawing_id), version, object_key, len(source_bytes), source_sha256),
+            "content_sha256, state, ready_at, intake_ref, intake_sha256) "
+            "VALUES (%s, %s, %s, NULL, %s, %s, %s, 'ready', NOW(), %s, %s)",
+            (tenant_id, str(drawing_id), version, object_key, len(source_bytes),
+             source_sha256, intake_ref, intake_sha256),
         )
         cur.execute(
             "INSERT INTO drawing_upload_attempts "
             "(tenant_id, drawing_id, attempt, marker, status) VALUES (%s, %s, %s, %s, 'ready')",
             (tenant_id, str(drawing_id), attempt, Jsonb(marker)),
         )
-    return drawing_id, source_sha256, object_key, attempt
+    return drawing_id, source_sha256, object_key, attempt, intake_sha256
 
 
 def _headers(org_id, binding_id, key):
@@ -84,7 +91,7 @@ def _canonical_project(make_org, name="Drawing import org"):
 def test_ready_account_upload_import_and_exact_api_replay(client, make_org):
     org, project = _canonical_project(make_org)
     binding = _binding(org.org_id)
-    drawing_id, digest, object_key, attempt = _ready_upload(org.org_id)
+    drawing_id, digest, object_key, attempt, intake_digest = _ready_upload(org.org_id)
     headers = _headers(org.org_id, binding.binding_id, "drawing-import-replay-1")
 
     first = client.post(
@@ -117,6 +124,7 @@ def test_ready_account_upload_import_and_exact_api_replay(client, make_org):
             },
             "intake": {
                 "ref": object_key[:-4] + ".intake.json",
+                "sha256": intake_digest,
                 "proof": "ready_upload_after_fenced_cache_publication",
             },
         },
@@ -187,6 +195,31 @@ def test_foreign_and_guest_sources_share_one_not_found_shape(client, make_org):
     with cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) AS count FROM drawing_artifacts WHERE org_id = %s",
+            (org.org_id,),
+        )
+        assert cur.fetchone()["count"] == 0
+
+
+def test_intake_digest_mismatch_fails_without_canonical_state(client, make_org):
+    org, project = _canonical_project(make_org, "Drawing intake proof guard")
+    binding = _binding(org.org_id)
+    drawing_id, *_ = _ready_upload(
+        org.org_id, marker_intake_sha256="0" * 64)
+
+    response = client.post(
+        f"/api/projects/{project.project_id}/drawing-versions/import",
+        headers=_headers(org.org_id, binding.binding_id, "intake-proof-mismatch"),
+        json=_body(drawing_id),
+    )
+    assert response.status_code == 404
+    with cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS count FROM drawing_artifacts WHERE org_id = %s",
+            (org.org_id,),
+        )
+        assert cur.fetchone()["count"] == 0
+        cur.execute(
+            "SELECT COUNT(*) AS count FROM drawing_versions WHERE org_id = %s",
             (org.org_id,),
         )
         assert cur.fetchone()["count"] == 0

@@ -70,11 +70,14 @@ def _resolve_upload_identity(
             import tenancy  # noqa: PLC0415
             payload = auth.verify_platform_token(authorization)
             claims = auth.extract_tenant_claims(payload)
-            ws = tenancy.get_store().resolve_workspace(claims["tenant_id"])
+            subject = payload.get("sub") if isinstance(payload.get("sub"), str) else None
+            platform_tenant_id = deps.resolve_active_platform_tenant_id(subject)
+            ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
             tenant = deps.TenantContext(
-                claims["tenant_id"], org_id=claims.get("org_id"),
+                platform_tenant_id, org_id=platform_tenant_id,
                 tier=claims.get("tier"),
-                workspace=ws.workspace_dir if ws is not None else None)
+                workspace=ws.workspace_dir if ws is not None else None,
+                subject=subject)
             return tenant, "account", False
         if x_guest_session:
             existing = guest_uploads.verify_guest_session(x_guest_session)

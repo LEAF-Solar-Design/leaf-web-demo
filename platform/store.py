@@ -611,7 +611,8 @@ def import_ready_account_upload(
 
             tenant_id = str(org_id)
             cur.execute(
-                "SELECT v.object_key, v.byte_count, v.content_sha256, u.attempt, u.marker "
+                "SELECT v.object_key, v.byte_count, v.content_sha256, "
+                "v.intake_ref, v.intake_sha256, u.attempt, u.marker "
                 "FROM drawing_store_versions v "
                 "JOIN drawing_upload_attempts u "
                 "ON u.tenant_id = v.tenant_id AND u.drawing_id = v.drawing_id "
@@ -634,12 +635,18 @@ def import_ready_account_upload(
             upload_sha256 = marker.get("content_sha256") if marker_is_object else None
             marker_status = marker.get("status") if marker_is_object else None
             marker_attempt = marker.get("attempt") if marker_is_object else None
+            marker_intake_ref = marker.get("intake_ref") if marker_is_object else None
+            marker_intake_sha256 = (
+                marker.get("intake_sha256") if marker_is_object else None)
             stored_sha256 = source["content_sha256"]
             expected_object_key = (
                 f"tenants/{tenant_id}/drawings/{source_drawing_id}/"
                 f"v/{source_version:08d}.dwg"
             )
             object_key = source["object_key"]
+            expected_intake_ref = expected_object_key[:-4] + ".intake.json"
+            intake_ref = source["intake_ref"]
+            intake_sha256 = source["intake_sha256"]
             if (
                 not isinstance(object_key, str)
                 or object_key != expected_object_key
@@ -649,10 +656,15 @@ def import_ready_account_upload(
                 or _SHA256_RE.fullmatch(upload_sha256) is None
                 or not isinstance(stored_sha256, str)
                 or _SHA256_RE.fullmatch(stored_sha256) is None
+                or not isinstance(intake_ref, str)
+                or intake_ref != expected_intake_ref
+                or marker_intake_ref != intake_ref
+                or not isinstance(intake_sha256, str)
+                or _SHA256_RE.fullmatch(intake_sha256) is None
+                or marker_intake_sha256 != intake_sha256
             ):
                 raise DrawingImportUnavailable(
                     "project or source account upload is unavailable")
-            intake_ref = object_key[:-4] + ".intake.json"
             provenance = {
                 "schema": "leaf.drawing-import.v1",
                 "source": {
@@ -669,6 +681,7 @@ def import_ready_account_upload(
                     },
                     "intake": {
                         "ref": intake_ref,
+                        "sha256": intake_sha256,
                         "proof": "ready_upload_after_fenced_cache_publication",
                     },
                 },

@@ -2,6 +2,25 @@
 -- Server-derived provenance and replay protection for adopting a ready account
 -- upload into the canonical project drawing ledger.
 
+ALTER TABLE drawing_store_versions
+  ADD COLUMN IF NOT EXISTS intake_ref TEXT;
+
+ALTER TABLE drawing_store_versions
+  ADD COLUMN IF NOT EXISTS intake_sha256 TEXT;
+
+DO $$ BEGIN
+  ALTER TABLE drawing_store_versions
+    ADD CONSTRAINT drawing_store_versions_intake_proof_complete
+    CHECK (
+      (intake_ref IS NULL AND intake_sha256 IS NULL)
+      OR (
+        intake_ref IS NOT NULL
+        AND intake_sha256 ~ '^[0-9a-f]{64}$'
+      )
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
 ALTER TABLE drawing_versions
   ADD COLUMN IF NOT EXISTS provenance JSONB;
 

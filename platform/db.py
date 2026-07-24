@@ -61,7 +61,7 @@ _REQUIRED_COLUMNS = {
     },
     "drawing_store_versions": {
         "tenant_id", "drawing_id", "version", "state", "object_key",
-        "byte_count", "content_sha256",
+        "byte_count", "content_sha256", "intake_ref", "intake_sha256",
     },
     "identity_bindings": {
         "binding_id", "platform_tenant_id", "role", "status",
