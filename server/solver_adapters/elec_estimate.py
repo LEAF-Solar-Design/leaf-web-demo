@@ -23,7 +23,10 @@ _ALLOWED_KEYS = {
     "drawing_id", "dwg_version", "modules_per_string", "string_count",
     "module", "inverter", "rate_card", "expected_adapter_sha256",
 }
-_MODULE_KEYS = {"watts", "voc", "vmp", "isc", "temperature_coefficient_pct_per_c"}
+_MODULE_KEYS = {
+    "watts", "voc", "vmp", "isc",
+    "beta_voc_pct_per_c", "beta_vmp_pct_per_c",
+}
 _INVERTER_KEYS = {
     "architecture", "topology", "mppt_min_v", "mppt_max_v", "max_dc_voltage",
     "max_dc_input_a", "optimizer_max_input_isc", "optimizer_max_input_voltage",
@@ -114,19 +117,22 @@ def _validated_input(params: Dict[str, Any]) -> Dict[str, Any]:
         "voc": _optional_number(module.get("voc"), "module.voc"),
         "vmp": _optional_number(module.get("vmp"), "module.vmp"),
         "isc": _optional_number(module.get("isc"), "module.isc"),
-        "temperature_coefficient_pct_per_c": _optional_number(
-            module.get("temperature_coefficient_pct_per_c"),
-            "module.temperature_coefficient_pct_per_c", positive=False),
+        "beta_voc_pct_per_c": _optional_number(
+            module.get("beta_voc_pct_per_c"),
+            "module.beta_voc_pct_per_c", positive=False),
+        "beta_vmp_pct_per_c": _optional_number(
+            module.get("beta_vmp_pct_per_c"),
+            "module.beta_vmp_pct_per_c", positive=False),
     }
-    coefficient = normalized_module["temperature_coefficient_pct_per_c"]
-    if coefficient is not None and coefficient >= 0:
-        raise ValueError("module.temperature_coefficient_pct_per_c must be negative")
-    if coefficient is not None and coefficient < -1.0:
-        # Real crystalline/thin-film Voc temperature coefficients are ~-0.2 to
-        # -0.5 %/degC; a magnitude beyond 1.0 is a data error that would drive a
-        # non-physical corrected voltage and a false PASS. Fail closed at input.
-        raise ValueError(
-            "module.temperature_coefficient_pct_per_c magnitude is non-physical (expected >= -1.0 %/degC)")
+    for coefficient_name in ("beta_voc_pct_per_c", "beta_vmp_pct_per_c"):
+        coefficient = normalized_module[coefficient_name]
+        if coefficient is not None and coefficient >= 0:
+            raise ValueError(f"module.{coefficient_name} must be negative")
+        if coefficient is not None and coefficient < -1.0:
+            # A magnitude beyond 1.0 %/C is treated as a data error. It can
+            # drive a corrected voltage nonpositive and produce a false pass.
+            raise ValueError(
+                f"module.{coefficient_name} magnitude is non-physical (expected >= -1.0 %/degC)")
     # Cross-field physical consistency. Individually-plausible module values can
     # be mutually contradictory (e.g. Isc below the implied Imp, or Vmp >= Voc);
     # such a module cannot exist, and feeding it to the safety checks would
@@ -239,10 +245,11 @@ def _calculate(body: Dict[str, Any]) -> Dict[str, Any]:
     """Port central and SolarEdge safety checks without fabricating passes."""
     module, inverter = body["module"], body["inverter"]
     modules, strings = body["modules_per_string"], body["string_count"]
-    coeff = module["temperature_coefficient_pct_per_c"]
+    beta_voc = module["beta_voc_pct_per_c"]
+    beta_vmp = module["beta_vmp_pct_per_c"]
     cold_voc = hot_vmp = continuous_current = ocpd_required = None
-    if not _missing(module["voc"], coeff, inverter["design_min_temp_c"]):
-        cold_voc = module["voc"] * (1.0 + coeff / 100.0 * (inverter["design_min_temp_c"] - 25.0))
+    if not _missing(module["voc"], beta_voc, inverter["design_min_temp_c"]):
+        cold_voc = module["voc"] * (1.0 + beta_voc / 100.0 * (inverter["design_min_temp_c"] - 25.0))
         # Fail closed on a non-physical correction: a real module's temperature-
         # corrected Voc is always > 0. A pathological coefficient/temperature
         # (e.g. an absurd beta magnitude, or a design "minimum" temperature that
@@ -251,8 +258,8 @@ def _calculate(body: Dict[str, Any]) -> Dict[str, Any]:
         # PASS. Drop it so the check reports insufficient_input instead.
         if cold_voc <= 0:
             cold_voc = None
-    if not _missing(module["vmp"], coeff, inverter["design_max_temp_c"]):
-        hot_vmp = module["vmp"] * (1.0 + coeff / 100.0 * (inverter["design_max_temp_c"] - 25.0))
+    if not _missing(module["vmp"], beta_vmp, inverter["design_max_temp_c"]):
+        hot_vmp = module["vmp"] * (1.0 + beta_vmp / 100.0 * (inverter["design_max_temp_c"] - 25.0))
         if hot_vmp <= 0:
             hot_vmp = None
     if module["isc"] is not None:
@@ -273,7 +280,7 @@ def _calculate(body: Dict[str, Any]) -> Dict[str, Any]:
                                  "String cold Voc compared with inverter maximum DC voltage, never MPPT maximum."))
         if _missing(string_hot_vmp, inverter["mppt_min_v"]):
             checks.append(_check("MPPT-HOT-VMP", "insufficient_input", string_hot_vmp, inverter["mppt_min_v"], "V",
-                                 "NEC 690.7(A)", "Requires module Vmp, beta Voc, design maximum temperature, and MPPT minimum."))
+                                 "NEC 690.7(A)", "Requires module Vmp, beta Vmp, design maximum temperature, and MPPT minimum."))
         else:
             checks.append(_check("MPPT-HOT-VMP", "pass" if string_hot_vmp >= inverter["mppt_min_v"] else "fail",
                                  string_hot_vmp, inverter["mppt_min_v"], "V", "NEC 690.7(A)",
@@ -295,6 +302,7 @@ def _calculate(body: Dict[str, Any]) -> Dict[str, Any]:
             note = ("Per-string Isc x 125 percent compared with one independently rated inverter input."
                     if topology == "per_string_inputs" else
                     "Aggregate Isc x 125 percent across string_count compared with the combined inverter input limit.")
+            note += " This does not size conductors or verify NEC 690.8(B) conductor ampacity."
             checks.append(_check("NEC-690.8-CONTINUOUS", "pass" if measured <= inverter["max_dc_input_a"] else "fail",
                                  measured, inverter["max_dc_input_a"], "A", "NEC 690.8(A)", note))
         if ocpd_required is None:
@@ -304,7 +312,7 @@ def _calculate(body: Dict[str, Any]) -> Dict[str, Any]:
             rating = next((item for item in _STANDARD_OCPD_A if item >= ocpd_required), None)
             checks.append(_check("NEC-690.9-OCPD", "pass" if rating is not None else "requires_engineer_review",
                                  ocpd_required, None if rating is None else float(rating), "A", "NEC 690.9(B)",
-                                 "Generic source-circuit OCPD applies only to central string-inverter topology."))
+                                 "Minimum source-circuit fuse selection only. This does not verify module maximum-series-fuse rating, conductor ampacity, or OCPD coordination."))
     else:
         if _missing(cold_voc, inverter["optimizer_max_input_voltage"]):
             checks.append(_check("NEC-690.7-VOC-COLD-OPTIMIZER", "requires_engineer_review", cold_voc,

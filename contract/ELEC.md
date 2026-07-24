@@ -10,7 +10,11 @@ or caller-provided intake files.
 
 This endpoint is fail-closed. A check with missing inputs reports
 `insufficient_input` or `requires_engineer_review`; it never reports a pass.
-The Python tier is not a replacement for the Core workbook authority.
+The Python tier is not a replacement for the Core workbook authority. All
+electrical values and both temperature coefficients are caller supplied. A
+source digest pins code only. It does not prove datasheet provenance or
+operator approval, so every result remains advisory until an independent
+electrical review verifies the inputs and design.
 
 ## Request
 
@@ -24,8 +28,9 @@ The Python tier is not a replacement for the Core workbook authority.
     "watts": 550,
     "voc": 50,
     "vmp": 42,
-    "isc": 10,
-    "temperature_coefficient_pct_per_c": -0.3
+    "isc": 14,
+    "beta_voc_pct_per_c": -0.27,
+    "beta_vmp_pct_per_c": -0.40
   },
   "inverter": {
     "architecture": "central",
@@ -48,6 +53,13 @@ All request objects reject unknown fields. `expected_adapter_sha256` is
 required to receive electrical check results. An omitted digest returns a
 structured `ADAPTER-SOURCE-PIN` `insufficient_input` result. A mismatched
 digest fails closed before calculation.
+
+`beta_voc_pct_per_c` and `beta_vmp_pct_per_c` are distinct datasheet values.
+Cold Voc uses only beta Voc. Hot Vmp uses only beta Vmp. The former ambiguous
+`temperature_coefficient_pct_per_c` field is rejected. If either coefficient
+is absent, only the checks that need that coefficient return
+`insufficient_input`; the adapter never substitutes one coefficient for the
+other.
 
 ### Central string-inverter inputs
 
@@ -86,6 +98,12 @@ Each check has one of `pass`, `fail`, `insufficient_input`,
 `requires_engineer_review`, or `requires_optimizer_model` in `status`.
 `passed` is true only for `status: "pass"`. The check summary reports
 `passed`, `failed`, and `needs_review` counts.
+
+This endpoint does not size conductors or verify conductor ampacity under NEC
+690.8(B). A `NEC-690.9-OCPD` pass means only that the minimum calculated source
+circuit OCPD fits the adapter's standard fuse list. It does not verify the
+module maximum-series-fuse rating or OCPD-to-conductor coordination. A result
+with every available row marked `pass` is not an electrical sign-off.
 
 ## Rate-card calibration, OPEN
 
