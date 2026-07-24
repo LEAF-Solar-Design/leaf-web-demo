@@ -26,12 +26,27 @@ export function redactTokens(s: string): string {
  * secrets they do not hold (e.g. a tenant grant minted elsewhere).
  */
 export function redactSecrets(s: string, secrets: readonly (string | undefined)[]): string {
+  return redactTokens(stripSecrets(s, secrets));
+}
+
+/**
+ * Literal-only removal of known secrets — NO pattern pass.
+ *
+ * Use this on USER CONTENT. `redactSecrets` finishes with TOKENISH, which
+ * matches any 40+ character alphanumeric run, so a perfectly ordinary prompt
+ * mentioning a 40-char Git SHA would have that SHA rewritten to [REDACTED]
+ * before the model ever saw it. Corrupting a log line that way is harmless;
+ * corrupting the prompt changes what the model is asked. Content therefore gets
+ * exact literal removal of values we actually hold, and nothing heuristic.
+ * (sol-critic PR #123 round 7, blocker 2.)
+ */
+export function stripSecrets(s: string, secrets: readonly (string | undefined)[]): string {
   let out = s;
   for (const secret of secrets) {
     if (!isRedactableSecret(secret)) continue;
     out = out.split(secret).join("[REDACTED]");
   }
-  return redactTokens(out);
+  return out;
 }
 
 /**

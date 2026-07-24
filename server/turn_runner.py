@@ -109,6 +109,28 @@ def _grant_secret(grant: Optional[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+def _scrub_tree(node: Any, secret: str) -> Any:
+    """Strip `secret` from every STRING VALUE in a nested structure.
+
+    `classifier_hint` is an unrestricted caller-controlled dict that this module
+    persists verbatim into the durable `turn_started` event, and it is NOT part
+    of the harness wire — so nothing downstream can repair it. A caller can put
+    the same value in `credential_grant.api_key` and `classifier_hint.rationale`
+    and have the live grant land in the transcript. (sol-critic PR #123 round 7,
+    blocker 1.)
+
+    VALUES only, never keys. Rewriting keys is what made the harness-side attempt
+    drop fields on collision; a credential used as a dict KEY here is not a
+    realistic shape, and leaving keys alone keeps this transformation total."""
+    if isinstance(node, str):
+        return node.replace(secret, "[REDACTED]")
+    if isinstance(node, list):
+        return [_scrub_tree(v, secret) for v in node]
+    if isinstance(node, dict):
+        return {k: _scrub_tree(v, secret) for k, v in node.items()}
+    return node
+
+
 def _scrub_secret(value: Optional[str], secret: Optional[str]) -> Optional[str]:
     """Remove a bring-your-own credential the user pasted into their own prompt.
 
@@ -270,6 +292,15 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     _secret = _grant_secret(credential_grant)
     if _secret:
         text = _scrub_secret(text, _secret)
+        # classifier_hint is durable-log-only and never reaches the harness, so
+        # this is the only chance to strip it (see _scrub_tree).
+        if classifier_hint is not None:
+            classifier_hint = _scrub_tree(classifier_hint, _secret)
+        # confirm carries a stored proposal, but a caller-supplied shape reaches
+        # this event too; scrub it on the same pass rather than leaving a second
+        # caller-controlled dict unhandled.
+        if confirm is not None:
+            confirm = _scrub_tree(confirm, _secret)
 
     user_data: Dict[str, Any] = {}
     if text is not None:
