@@ -770,6 +770,15 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
                     "effective_catalog_authority_unavailable", 503
                 )
             return None
+        if _shared_sqlite_path(path):
+            if enabled(5, tenant_id) or enabled(6, tenant_id):
+                raise CustomizationServiceError(
+                    "customization_shared_sqlite_unsupported", 503
+                )
+            # An unsupported shared SQLite file is never durable authority.
+            # Dark rollout must keep the legacy catalog path usable without
+            # opening that file during health checks or normal requests.
+            return None
         service = CustomizationService.configured()
         pin = service.store.get_effective_catalog(tenant_id=tenant_id)
         bare = _bare_repo(tenant_id)

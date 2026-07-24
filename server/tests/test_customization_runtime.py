@@ -159,6 +159,39 @@ def test_shared_efs_sqlite_cannot_activate(monkeypatch):
         CustomizationService.configured()
 
 
+def test_dark_rollout_ignores_existing_unsupported_shared_sqlite(tmp_path, monkeypatch):
+    database = tmp_path / "customization.db"
+    database.write_bytes(b"not a supported authority")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    monkeypatch.setattr(customization_service, "database_path", lambda: database)
+    monkeypatch.setattr(customization_service, "_shared_sqlite_path", lambda path: True)
+    monkeypatch.setattr(
+        CustomizationService,
+        "configured",
+        classmethod(lambda cls: pytest.fail("dark rollout opened shared SQLite")),
+    )
+
+    assert customization_service.effective_catalog_dir("tenant-a") is None
+
+
+def test_enabled_rollout_rejects_existing_unsupported_shared_sqlite(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "customization.db"
+    database.write_bytes(b"not a supported authority")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    monkeypatch.setattr(customization_service, "database_path", lambda: database)
+    monkeypatch.setattr(customization_service, "_shared_sqlite_path", lambda path: True)
+
+    with pytest.raises(
+        CustomizationServiceError,
+        match="customization_shared_sqlite_unsupported",
+    ):
+        customization_service.effective_catalog_dir("tenant-a")
+
+
 @pytest.mark.parametrize(
     "database",
     (
