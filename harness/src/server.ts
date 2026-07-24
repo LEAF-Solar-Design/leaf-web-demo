@@ -48,6 +48,8 @@ import { GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import { DEFAULT_TENANT } from "./ports/index.js";
 import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent } from "./ports/index.js";
+import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
+import { parseWireGrant } from "./ports/wireGrant.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 
 export { DEFAULT_TENANT };
@@ -206,6 +208,27 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
   const input: ConverseTurnInput = { tenant_id, session_id, turn_id, drawing_id, messages };
   if (hasText) input.text = body.text as string;
   if (hasConfirm) input.confirm = rawConfirm as ConverseTurnInput["confirm"];
+
+  // Per-session "mount your LLM" fields — OPTIONAL and additive. Validated here
+  // as defense in depth (the app already validates); an unknown model or a
+  // malformed credential grant is a 400, never a silent pass-through to sdk.query.
+  if (body.model !== undefined) {
+    if (!isAllowedModel(body.model)) {
+      return { ok: false, message: `model must be one of: ${ALLOWED_MODELS.join(", ")}` };
+    }
+    input.model = body.model;
+  }
+  if (body.credential_grant !== undefined) {
+    const grant = parseWireGrant(body.credential_grant);
+    if (!grant) {
+      return {
+        ok: false,
+        message:
+          "credential_grant must be {kind:'api_key',api_key} or {kind:'oauth',oauth_token}",
+      };
+    }
+    input.credential_grant = grant;
+  }
   return { ok: true, input };
 }
 

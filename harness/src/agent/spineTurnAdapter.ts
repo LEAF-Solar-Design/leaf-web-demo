@@ -44,6 +44,7 @@
  */
 
 import { ConverseLoop } from "./converseLoop.js";
+import { wireGrantToAgentGrant } from "../ports/wireGrant.js";
 import type {
   AgentGrant,
   AppRunClient,
@@ -101,9 +102,15 @@ export class SpineTurnAdapter implements ConverseRunner {
     input: ConverseTurnInput,
     opts?: ConverseRunOptions,
   ): AsyncGenerator<HarnessTurnEvent> {
-    // 1. Grant FIRST, before any yield: a missing grant must surface as the
+    // 1. Grant FIRST, before any yield. A per-session bring-your-own credential
+    //    on the wire ("mount your LLM") is used for THIS turn instead of the
+    //    tenant's linked grant — mapped to the internal AgentGrant, injected into
+    //    the runner's scrubbed env, never logged, never persisted. Otherwise the
+    //    tenant's linked grant is resolved; a missing one must surface as the
     //    non-stream 401 {grant_required:true}, never a half-open 200 stream.
-    const grant = await this.ports.oauth.getGrant(input.tenant_id);
+    const grant: AgentGrant = input.credential_grant
+      ? wireGrantToAgentGrant(input.credential_grant)
+      : await this.ports.oauth.getGrant(input.tenant_id);
 
     // 2. The loop's own session row (idempotent per tenant+drawing).
     const session = await this.ports.store.createOrGetSession(
@@ -134,7 +141,12 @@ export class SpineTurnAdapter implements ConverseRunner {
         store: this.ports.store,
       },
       {
-        ...(this.opts.model ? { model: this.opts.model } : {}),
+        // Per-session model ("mount your LLM"): the wire value wins, then the
+        // adapter default, else the loop's env default (LEAF_SPINE_MODEL) stays
+        // the fallback. Only set when non-empty so the loop keeps its env default.
+        ...((input.model ?? this.opts.model)
+          ? { model: input.model ?? this.opts.model }
+          : {}),
         ...(this.opts.confirmationTtlS
           ? { confirmationTtlS: this.opts.confirmationTtlS }
           : {}),

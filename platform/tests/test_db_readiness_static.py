@@ -46,6 +46,7 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (16, "drawing_upload_authority"),
                 (17, "harness_sessions"),
                 (18, "drawing_import_provenance"),
+                (19, "sessions_model"),
         ]
     ]
     assert all(len(item["sha256"]) == 64 for item in manifest)
