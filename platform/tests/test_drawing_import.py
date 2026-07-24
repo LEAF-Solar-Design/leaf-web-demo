@@ -353,6 +353,8 @@ def test_account_upload_receipt_imports_exact_ready_source(
     org, project = _canonical_project(make_org, "Upload receipt import")
     binding = _binding(org.org_id)
     server_dir = str(Path(__file__).parents[2] / "server")
+    da_dir = str(Path(__file__).parents[2] / "da")
+    sys.path.insert(0, da_dir)
     sys.path.insert(0, server_dir)
     try:
         monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
@@ -361,7 +363,12 @@ def test_account_upload_receipt_imports_exact_ready_source(
         monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
 
         import guest_uploads
+        import store as drawing_store
         from routers import uploads as uploads_router
+
+        assert Path(drawing_store.__file__).resolve() == (
+            Path(__file__).parents[2] / "da" / "store.py"
+        ).resolve()
 
         monkeypatch.setattr(
             guest_uploads, "start_extraction_thread",
@@ -416,6 +423,7 @@ def test_account_upload_receipt_imports_exact_ready_source(
         assert uuid.UUID(body["drawing_version"]["version_id"])
     finally:
         sys.path.remove(server_dir)
+        sys.path.remove(da_dir)
 
 
 def test_concurrent_exact_replay_creates_one_version(make_org):

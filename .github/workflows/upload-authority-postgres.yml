@@ -93,4 +93,7 @@ jobs:
           tests/test_deployment_source_identity.py
 
       - name: Run canonical drawing import gate tests
-        run: python -m pytest -q platform/tests/test_drawing_import.py
+        working-directory: server
+        run: >-
+          python -m pytest --import-mode=importlib -q
+          ../platform/tests/test_drawing_import.py
