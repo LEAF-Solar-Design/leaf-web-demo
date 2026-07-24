@@ -161,33 +161,50 @@ _MIGRATIONS = {
 _DWG_VERSION_BACKFILL_MIGRATION = "backfill_dwg_version"
 
 
-def _db() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA busy_timeout = 5000")
-        _conn.execute("PRAGMA journal_mode = WAL")
-        _conn.execute(_SCHEMA)
-        columns = {row[1] for row in _conn.execute("PRAGMA table_info(jobs)")}
+def _apply_first_connect_migrations(conn: sqlite3.Connection) -> None:
+    """Bring a freshly opened jobs DB up to the current schema, idempotently and
+    safely under CONCURRENT first-connect from a second process.
+
+    Two processes opening the same brand-new DB at once each read the same
+    "pre-migration" state (column missing, ledger marker absent) before either
+    commits, so both attempt the same DDL/INSERT. Each step tolerates the loser
+    losing that race:
+      * ``ADD COLUMN`` swallows ``duplicate column name`` (the other process
+        committed the column between our ``table_info`` read and this ALTER);
+      * the ledger marker uses ``INSERT OR IGNORE`` so a second insert of the same
+        id is a no-op, not a ``UNIQUE`` IntegrityError;
+      * any remaining write-lock error that outlasts busy_timeout is rolled back
+        for cleanup (so we never strand ``in_transaction=True``) and re-raised, so
+        the caller drops the half-migrated connection and a later start retries.
+    The backfill touches only ``dwg_version IS NULL`` rows, so both processes
+    running it converge to the same result.
+    """
+    try:
+        conn.execute(_SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
         for name, ddl in _MIGRATIONS.items():
             if name not in columns:
-                _conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
-        _conn.execute(
+                try:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
+                except sqlite3.OperationalError as exc:
+                    # A concurrent first-connect committed this column between
+                    # our table_info read and now: treat as already applied.
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             "id TEXT PRIMARY KEY, applied_at REAL NOT NULL)")
         # Backfill dwg_version for rows written by releases that stored the pin
         # only inside execution_json. The ledger is written only after the scan
         # completes, so a prior interrupted backfill is retried rather than
         # permanently skipped (the ALTER above may already have committed
-        # the column before a mid-backfill failure). Python-side parse — no
+        # the column before a mid-backfill failure). Python-side parse, no
         # JSON1 dependency; malformed or non-object payloads are skipped.
-        applied = _conn.execute(
+        applied = conn.execute(
             "SELECT 1 FROM schema_migrations WHERE id = ?",
             (_DWG_VERSION_BACKFILL_MIGRATION,)).fetchone()
         if applied is None:
-            for row in _conn.execute(
+            for row in conn.execute(
                     "SELECT job_id, execution_json FROM jobs "
                     "WHERE dwg_version IS NULL AND execution_json IS NOT NULL").fetchall():
                 try:
@@ -196,16 +213,56 @@ def _db() -> sqlite3.Connection:
                     continue
                 pin = decoded.get("dwg_version") if isinstance(decoded, dict) else None
                 if isinstance(pin, int) and not isinstance(pin, bool):
-                    _conn.execute("UPDATE jobs SET dwg_version = ? WHERE job_id = ?",
-                                  (pin, row["job_id"]))
-            _conn.execute(
-                "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+                    conn.execute("UPDATE jobs SET dwg_version = ? WHERE job_id = ?",
+                                 (pin, row["job_id"]))
+            # OR IGNORE: a concurrent first-connect that already committed the
+            # marker (both ran the idempotent backfill) must not fault the loser
+            # with UNIQUE constraint failed on schema_migrations.id.
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)",
                 (_DWG_VERSION_BACKFILL_MIGRATION, time.time()))
-        _conn.execute(
+        conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS jobs_project_idempotency_uq "
             "ON jobs(tenant_id, project_id, idempotency_key) "
             "WHERE project_id IS NOT NULL AND idempotency_key IS NOT NULL")
-        _conn.commit()
+        conn.commit()
+    except sqlite3.OperationalError:
+        # Write-lock contention (e.g. "database is locked" / "database table is
+        # locked") that outlasted busy_timeout can leave the connection
+        # in_transaction=True; roll back for cleanup so we never strand an open
+        # transaction, then re-raise for the caller to drop this connection.
+        conn.rollback()
+        raise
+
+
+def _db() -> sqlite3.Connection:
+    global _conn
+    if _conn is None:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 10.0
+        while _conn is None:
+            conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA busy_timeout = 10000")
+                # WAL negotiation itself takes a SQLite lock and can race before
+                # the migration guard runs. Retry the complete first-connect path
+                # so a losing process does not crash during startup.
+                conn.execute("PRAGMA journal_mode = WAL")
+                _apply_first_connect_migrations(conn)
+            except sqlite3.OperationalError as exc:
+                conn.close()
+                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+                continue
+            except BaseException:
+                # Don't strand a half-migrated connection as the module singleton:
+                # close it (which rolls back any open transaction and frees the
+                # write lock) and leave _conn None for a later retry.
+                conn.close()
+                raise
+            _conn = conn
     return _conn
 
 
