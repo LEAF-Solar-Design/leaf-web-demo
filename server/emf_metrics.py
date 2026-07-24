@@ -4,7 +4,7 @@ WHY EMF and not a scrape or PutMetricData:
   - The broker runs as an ephemeral Fargate task behind the ALB; there are
     multiple platform tasks and the ledger files (broker_ledger.jsonl, jobs.db)
     are per-task and disappear with the task. A file-scrape sidecar is invalid.
-  - EMF needs no AWS SDK and no network call: we print ONE JSON line to stdout,
+  - EMF needs no AWS SDK and no network call: we print ONE JSON line to stderr,
     the ECS awslogs driver ships it to CloudWatch Logs, and CloudWatch extracts
     the metrics automatically. Zero added dependency, zero added latency, and it
     survives task churn because the metric leaves the container as a log line.
@@ -72,9 +72,10 @@ def _now_ms() -> int:
 
 
 def _write(doc: Dict[str, Any]) -> None:
-    # stdout: the awslogs driver ships stdout+stderr; EMF is parsed from the stream.
-    sys.stdout.write(json.dumps(doc, separators=(",", ":"), allow_nan=False) + "\n")
-    sys.stdout.flush()
+    # The awslogs driver ships both streams. Keep stdout free for subprocess
+    # protocols whose callers parse exact result lines.
+    sys.stderr.write(json.dumps(doc, separators=(",", ":"), allow_nan=False) + "\n")
+    sys.stderr.flush()
 
 
 def _emit(directives: List[Dict[str, Any]], root: Dict[str, Any],
