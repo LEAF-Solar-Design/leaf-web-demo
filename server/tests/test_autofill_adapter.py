@@ -7,6 +7,10 @@ import pytest
 from solver_adapters import autofill
 
 
+STAGING_SOLVER_REVISION = "3ae53e274a5c6be3edeab30054234d09fdd74b41"
+STAGING_SOLVER_SHA256 = "135ddcd4f7db951a25f5e3e5a5a5761365aeda768a07406b2e60d1231438ed37"
+
+
 def _write_self_attestation(root: Path, revision: str) -> None:
     source_sha256 = autofill._source_sha256(root)
     (root / autofill.SOURCE_ATTESTATION).write_text(
@@ -29,6 +33,36 @@ def test_descriptor_uses_trusted_manifest_and_image_revision(monkeypatch, tmp_pa
     monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", revision.upper())
 
     assert autofill.descriptor(solver_root=tmp_path)["source_revision"] == revision
+
+
+def test_staging_solver_manifest_entry_authorizes_matching_worker_bytes(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    (tmp_path / autofill.SOURCE_ATTESTATION).write_text(json.dumps({
+        "revision": STAGING_SOLVER_REVISION,
+        "source_sha256": STAGING_SOLVER_SHA256,
+    }) + "\n")
+    (tmp_path / autofill.SOURCE_REVISION_MARKER).write_text(STAGING_SOLVER_REVISION + "\n")
+    monkeypatch.setattr(autofill, "_source_sha256", lambda _root: STAGING_SOLVER_SHA256)
+    monkeypatch.setattr(autofill, "_git_source_revision", lambda _root: None)
+
+    source = autofill.descriptor(solver_root=tmp_path)
+
+    assert source["source_revision"] == STAGING_SOLVER_REVISION
+    assert source["source_sha256"] == STAGING_SOLVER_SHA256
+
+
+def test_staging_solver_manifest_entry_rejects_mismatched_worker_bytes(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    (tmp_path / autofill.SOURCE_ATTESTATION).write_text(json.dumps({
+        "revision": STAGING_SOLVER_REVISION,
+        "source_sha256": STAGING_SOLVER_SHA256,
+    }) + "\n")
+    (tmp_path / autofill.SOURCE_REVISION_MARKER).write_text(STAGING_SOLVER_REVISION + "\n")
+    monkeypatch.setattr(autofill, "_source_sha256", lambda _root: "0" * 64)
+    monkeypatch.setattr(autofill, "_git_source_revision", lambda _root: None)
+
+    with pytest.raises(RuntimeError, match="bytes do not match their build attestation"):
+        autofill.descriptor(solver_root=tmp_path)
 
 
 def test_descriptor_rejects_invalid_supplied_solver_revision(monkeypatch, tmp_path):
