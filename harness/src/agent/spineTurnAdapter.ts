@@ -45,14 +45,12 @@
 
 import { ConverseLoop } from "./converseLoop.js";
 import { wireGrantToAgentGrant } from "../ports/wireGrant.js";
-import { grantSecrets, scrubDeep } from "../redact.js";
 import type {
   AgentGrant,
   AppRunClient,
   ConfirmationRecord,
   ConverseEvent,
   ConverseRunOptions,
-  ConverseEventType,
   ConverseRunner,
   ConverseTurnInput,
   GateClient,
@@ -114,54 +112,18 @@ export class SpineTurnAdapter implements ConverseRunner {
       ? wireGrantToAgentGrant(input.credential_grant)
       : await this.ports.oauth.getGrant(input.tenant_id);
 
-    // The credential must be scrubbed BEFORE it can be persisted, not after.
-    // ConverseLoop's emit() calls store.appendEvent and only then hands the event
-    // to onEvent, so any wire-level filtering is too late for the transcript —
-    // and the leak is not limited to thrown errors: an ordinary text_delta can
-    // carry the value (a user who pastes their own key into the prompt has it
-    // echoed straight back). Wrapping the store puts the scrub at the single
-    // point every durable event must pass through, whatever produced it, while
-    // keeping the secret inside this adapter — the loop stays credential-free.
-    // (sol-critic PR #117 round 3, blocker 1.)
-    // A Proxy, not a spread: a store is typically a class instance whose methods
-    // live on the prototype, so spreading would drop every one of them.
-    const secrets = grantSecrets(grant);
-    const inner = this.ports.store;
-    const store: SessionStore = secrets.length
-      ? (new Proxy(inner, {
-          get(target, prop, receiver) {
-            if (prop === "appendEvent") {
-              return (
-                sessionId: string,
-                turnId: string,
-                type: ConverseEventType,
-                data: Record<string, unknown>,
-              ) => target.appendEvent(sessionId, turnId, type, scrubDeep(data, secrets));
-            }
-            // Confirmations are a SECOND durable write, not routed through
-            // appendEvent: the loop serializes raw tool arguments into
-            // args_json and persists them (file store and the postgres
-            // args_json column). A credential echoed into a proposed tool's
-            // params would land there unscrubbed.
-            // (sol-critic PR #117 round 4, blocker 1.)
-            if (prop === "putConfirmation") {
-              return (rec: ConfirmationRecord) =>
-                target.putConfirmation(scrubDeep(rec, secrets));
-            }
-            const v = Reflect.get(target, prop, receiver);
-            // Rebind to the real store so its own state stays reachable.
-            return typeof v === "function" ? v.bind(target) : v;
-          },
-        }) as SessionStore)
-      : inner;
+    // The grant goes to the runner's env and NOWHERE else — it is never written
+    // to this store, the wire, or a log. See the scope note in ../redact.ts for
+    // why the adapter does NOT additionally scrub the credential out of turn
+    // content: doing so broke the approval flow (the app gate keeps its own raw
+    // copy, so the two hashes disagreed) and corrupted event data, without
+    // being the property this system actually owes.
+    const store = this.ports.store;
 
     // 2. The loop's own session row (idempotent per tenant+drawing).
     const session = await store.createOrGetSession(input.tenant_id, input.drawing_id);
 
-    // 3. Resilience seed for the confirm mirror (see header). Routed through the
-    //    SCRUBBING store: this seed persists the proposal's raw params, so it is
-    //    a durable write that must not carry the credential either. It is
-    //    ordered after the wrapper for exactly that reason.
+    // 3. Resilience seed for the confirm mirror (see header).
     if (input.confirm) {
       await this.seedConfirmationMirror(store, session.session_id, input);
     }
@@ -221,11 +183,7 @@ export class SpineTurnAdapter implements ConverseRunner {
     const onEvent = (ev: ConverseEvent): void => {
       const type = ev.type as HarnessTurnEvent["type"];
       if (!WIRE_EVENT_TYPES.has(type)) return;
-      // Scrubbed here too, NOT just in the store wrapper above: scrubDeep copies
-      // rather than mutates, so the loop still holds the original object and
-      // hands THAT to this callback. The store wrapper protects the transcript;
-      // this protects the wire. Both use the same deep walk, so they agree.
-      queue.push({ type, data: scrubDeep(ev.data, secrets) });
+      queue.push({ type, data: ev.data });
       push();
     };
 

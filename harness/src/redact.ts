@@ -57,34 +57,37 @@ export function isRedactableSecret(secret: string | undefined): secret is string
   );
 }
 
-/**
- * Recursively scrub every STRING LEAF of a structure, leaving shape intact.
+/*
+ * WHY THERE IS NO DEEP "scrub the whole event graph" HELPER HERE.
  *
- * Do NOT do this by serializing, replacing, and re-parsing: a credential is
- * accepted as any non-empty string, so a secret of `"` would replace every JSON
- * delimiter and make the result unparseable — which silently kills the turn
- * rather than leaking it. Walking the values never touches delimiters and is
- * correct for a secret containing quotes, backslashes, or newlines.
- * (sol-critic PR #117 round 3, blocker 2.)
+ * Rounds 2-5 of the PR #117 review chased a credential through every downstream
+ * sink: transcript events, confirmations, the app gate's pending record, usage
+ * rows, session rows. Each patch created a worse defect than the leak it closed:
+ *
+ *   - rebuilding objects with redacted KEYS silently dropped a field on
+ *     collision, and `__proto__` mutated the rebuilt object's prototype — a
+ *     prototype-pollution vector introduced BY the fix;
+ *   - scrubbing the confirmation but not the app gate's copy made the two
+ *     disagree, so approval replay failed the args hash as `args_mismatch` —
+ *     the fix broke the approval flow outright.
+ *
+ * The mistake was scope. The contract is that THIS SYSTEM must not log, echo, or
+ * persist the credential IT IS ENTRUSTED WITH. That is bounded and now holds:
+ * the app validates the grant and forwards it (server/routers/sessions.py), the
+ * harness maps it into a scrubbed child env (buildScrubbedEnv), and neither
+ * writes it to a transcript, a database, or a log. The two places it could
+ * genuinely escape are covered — the 422 validation body (server/envelopes.py)
+ * and an SDK/Node throw quoting the env value (converseSdkRunner's run()).
+ *
+ * A credential that appears in a transcript because the USER PASTED IT INTO
+ * THEIR OWN PROMPT is a different thing: it is the user's own secret, in their
+ * own tenant's session, echoed back to them. Scrubbing arbitrary user content
+ * for a value that merely looks like the grant is unbounded, and the attempt
+ * demonstrably corrupted data and broke a security flow. If that ever needs
+ * addressing, it belongs at the UI ("don't paste keys into chat") or as an
+ * explicit, separately-designed content policy — not as string surgery on every
+ * durable write.
  */
-export function scrubDeep<T>(value: T, secrets: readonly string[]): T {
-  if (!secrets.length) return value;
-  if (typeof value === "string") return redactSecrets(value, secrets) as unknown as T;
-  if (Array.isArray(value)) {
-    return value.map((v) => scrubDeep(v, secrets)) as unknown as T;
-  }
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      // KEYS too, not just values: tool parameter names are arbitrary JSON keys,
-      // so a credential used as a param name would otherwise survive in both the
-      // durable event and the wire event. (sol-critic PR #117 round 4, blocker 2.)
-      out[redactSecrets(k, secrets)] = scrubDeep(v, secrets);
-    }
-    return out as unknown as T;
-  }
-  return value;
-}
 
 /** The secret values carried by a grant, for redactSecrets(). */
 export function grantSecrets(
