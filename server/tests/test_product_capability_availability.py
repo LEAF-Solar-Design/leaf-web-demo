@@ -28,7 +28,14 @@ Run:  cd server && python -m pytest tests/test_product_capability_availability.p
 from __future__ import annotations
 
 import copy
+import re
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+SERVER_DIR = Path(__file__).resolve().parent.parent
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
 
 import pytest
 
@@ -80,9 +87,25 @@ def test_identifiers_and_gates_are_pinned():
     gates = [c.release_gate for c in PRODUCT_CAPABILITIES]
     assert gates == [2, 3, 4, 5, 6, 7, 8], "catalog order must be release-gate order"
     assert len(set(gates)) == len(gates)
-    # TTL drift is a coordinated contract event with the website's
-    # SERVER_AVAILABILITY_TTL_MS (15_000).
-    assert LEASE_TTL_SECONDS == 15
+
+
+def test_ttl_is_asserted_against_the_contract_document_not_a_local_literal():
+    """TTL drift is a coordinated contract event with the website's
+    SERVER_AVAILABILITY_TTL_MS. Asserting `LEASE_TTL_SECONDS == 15` against a
+    literal duplicated in this file proves nothing — the literal drifts with the
+    code. So read the NORMATIVE value out of the shared contract document, which
+    is what both repos cite, and fail if the code disagrees with it."""
+    contract = (SERVER_DIR.parent / "contract" / "CAPABILITY-AVAILABILITY-EMIT.md")
+    text = contract.read_text(encoding="utf-8")
+    declared = re.search(r"LEASE_TTL_SECONDS\s*=\s*(\d+)", text)
+    assert declared, "the contract document must declare the normative LEASE_TTL_SECONDS"
+    assert LEASE_TTL_SECONDS == int(declared.group(1)), (
+        f"code says {LEASE_TTL_SECONDS}s but {contract.name} declares "
+        f"{declared.group(1)}s — TTL drift must be a coordinated change")
+    # The website counterpart is stated in milliseconds in the same document.
+    declared_ms = re.search(r"SERVER_AVAILABILITY_TTL_MS\s*=\s*(\d+)", text)
+    assert declared_ms, "the contract document must state the website TTL too"
+    assert LEASE_TTL_SECONDS * 1000 == int(declared_ms.group(1))
 
 
 def test_unknown_capability_is_not_invented():
@@ -145,6 +168,62 @@ def test_degraded_needs_fallback_and_proof():
     assert is_well_formed_availability(availability, NOW) is True
     availability["fallback"] = {"mode": "read_only", "provenanceRequired": False}
     assert is_well_formed_availability(availability, NOW) is False
+    # NEGATIVE COVERAGE (sol-critic gap): a weakened validator that accepted
+    # connected_degraded with NO evidence previously passed the whole suite. A
+    # degraded capability still has to carry a receipt.
+    degraded_no_proof = _shipping("drawing.solve.strings")
+    degraded_no_proof.update({"runtimeState": "degraded", "state": "connected_degraded",
+                              "fallback": {"mode": "read_only", "provenanceRequired": True},
+                              "evidence": []})
+    assert is_well_formed_availability(degraded_no_proof, NOW) is False
+    # ...and the same rule for failed_retryable: implemented but not available.
+    failed = _shipping("drawing.solve.strings")
+    failed.update({"runtimeState": "available", "state": "failed_retryable"})
+    assert is_well_formed_availability(failed, NOW) is False
+
+
+def test_a_naive_now_fails_closed_instead_of_crashing():
+    """A validator whose whole job is to fail CLOSED must never fail by
+    exception. Passing datetime.now() rather than datetime.now(timezone.utc)
+    used to raise TypeError and take the emit path down with it."""
+    naive = NOW.replace(tzinfo=None)
+    assert is_well_formed_availability(_shipping("drawing.solve.strings"), naive) is True
+    stale = _shipping("drawing.solve.strings", NOW - timedelta(minutes=5))
+    assert is_well_formed_availability(stale, naive) is False
+    # The whole descriptor path must survive a naive clock too.
+    descriptors = build_descriptors(now=naive)
+    assert len(descriptors) == len(PINNED_IDS)
+    assert all(d["availability"]["state"] == "locked_planned" for d in descriptors)
+
+
+def test_a_validated_availability_is_snapshotted_not_aliased():
+    """Validate-then-mutate: the caller owns the `live` mapping, so keeping a
+    reference let a mutation AFTER validation change the emitted descriptor's
+    state without revalidation."""
+    live = {"drawing.solve.strings": _shipping("drawing.solve.strings")}
+    descriptors = {d["id"]: d for d in build_descriptors(live, now=NOW)}
+    assert descriptors["drawing.solve.strings"]["availability"]["state"] == "shipping"
+    live["drawing.solve.strings"]["state"] = "unknown"
+    live["drawing.solve.strings"]["evidence"].clear()
+    assert descriptors["drawing.solve.strings"]["availability"]["state"] == "shipping"
+    assert descriptors["drawing.solve.strings"]["availability"]["evidence"], "evidence must not be aliased either"
+
+
+def test_timestamps_javascript_cannot_parse_are_rejected():
+    """The mirror only holds if this validator is no more permissive than JS
+    `Date.parse`. Python's fromisoformat accepts spellings JS does not; lock the
+    rejections so a future loosening of _parse_iso is caught here."""
+    for odd in ("2026-07-24T11:59:59+00:00:30",   # sub-minute offset: NaN in JS
+                # NAIVE stamps are the subtler hazard: Python would read this as
+                # UTC while the console's Date.parse reads it as the VIEWER'S
+                # LOCAL time, so both accept and then disagree on the instant.
+                "2026-07-24 11:59:59",
+                "2026-07-24T11:59:59",
+                "20260724T115959Z",                # basic format
+                "not-a-date", "", None, 12345):
+        availability = _shipping("drawing.solve.strings")
+        availability["observedAt"] = odd
+        assert is_well_formed_availability(availability, NOW) is False, f"{odd!r} must be rejected"
 
 
 def test_no_live_measurement_locks_every_gate():

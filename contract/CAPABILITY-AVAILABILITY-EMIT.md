@@ -44,6 +44,20 @@ The backend emit must conform to these, field for field:
 4. `observedAt`/`expiresAt`: availability is a lease, not a fact. Emit short
    leases (minutes, not days); the console must treat an expired lease as
    `unavailable` and say so.
+
+   **Normative TTL: `LEASE_TTL_SECONDS = 15`** (equivalently the website's
+   `SERVER_AVAILABILITY_TTL_MS = 15000`). This line is the single source both
+   sides cite. The window between `observedAt` and `expiresAt` must never exceed
+   one TTL, and `observedAt` must not be stamped further than one TTL into the
+   future (the clock-skew bound).
+
+   Changing this number is a COORDINATED CONTRACT EVENT: the server emit and the
+   console validator must change in the same release, or every emitted
+   availability is rejected by the browser and every capability silently shows
+   locked. Both sides assert against this line —
+   `server/product_capability_availability.py` via
+   `test_product_capability_availability.py`, so a server-side edit that drifts
+   from this document fails the suite rather than shipping.
 5. Transport: availability rides the authenticated platform-registry response
    path only (types.ts:27). It is never embedded in unauthenticated or public
    payloads.

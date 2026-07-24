@@ -48,6 +48,7 @@ Run:  cd server && python -m pytest tests/test_product_capability_availability.p
 """
 from __future__ import annotations
 
+import copy
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -65,6 +66,10 @@ EVIDENCE_KINDS = ("contract_test", "security", "end_to_end", "observability", "r
 FALLBACK_MODES = ("local", "cached", "read_only")
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# The one timestamp spelling this validator and the console's Date.parse both
+# accept AND resolve to the same instant: extended date, literal T, seconds,
+# optional fractional seconds, explicit Z or +/-HH:MM offset.
+_ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$")
 
 
 class ProductCapability:
@@ -141,13 +146,48 @@ def capability(product_capability: str) -> Optional[ProductCapability]:
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:
+    """Parse a CONTRACT timestamp, requiring an explicit UTC offset.
+
+    A naive stamp is not merely sloppy here, it is a cross-runtime hazard: this
+    module would read `"2026-07-24 11:59:59"` as UTC, while the console's
+    `Date.parse` reads the very same string as the VIEWER'S LOCAL TIME. Both
+    sides "accept" it and then disagree about the instant, so a lease could look
+    fresh on one side and expired on the other. Demanding an offset makes the two
+    validators agree by construction, and it is stricter than either alone.
+    """
     if not isinstance(value, str) or not value:
+        return None
+    # Restrict to the EXACT spelling both runtimes agree on. Verified against
+    # node's Date.parse (2026-07-24):
+    #   "2026-07-24T11:59:59+00:00:30"  Python ok  / JS NaN      -> divergence
+    #   "20260724T115959Z"              Python ok  / JS NaN      -> divergence
+    #   "2026-07-24 11:59:59"           both ok, but JS resolves it as the
+    #                                   viewer's LOCAL time (16:59:59Z on a
+    #                                   UTC-5 host) while Python reads UTC
+    #                                   -> silent 5-hour disagreement
+    # Extended date + `T` + time + explicit Z/±HH:MM is the safe intersection.
+    if not _ISO_UTC_RE.match(value):
         return None
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """Treat a naive datetime as UTC.
+
+    Every internal timestamp is timezone-aware, so comparing an aware `expiresAt`
+    against a NAIVE caller-supplied `now` raises
+    `TypeError: can't compare offset-naive and offset-aware datetimes`. A
+    validator whose job is to fail CLOSED must never fail by exception — a caller
+    that passes `datetime.now()` instead of `datetime.now(timezone.utc)` would
+    take the whole emit path down instead of getting a `False`.
+    """
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
 def _is_evidence(value: Any) -> bool:
@@ -170,6 +210,7 @@ def is_well_formed_availability(value: Any, now: Optional[datetime] = None) -> b
     console WOULD reject this payload, so we must not emit it."""
     if now is None:
         now = datetime.now(timezone.utc)
+    now = _as_utc(now)
     if not isinstance(value, dict):
         return False
     if value.get("contractVersion") != CONTRACT_VERSION:
@@ -236,6 +277,7 @@ def locked_availability(product_capability: str, now: Optional[datetime] = None,
     """
     if now is None:
         now = datetime.now(timezone.utc)
+    now = _as_utc(now)
     return {
         "contractVersion": CONTRACT_VERSION,
         "authority": AUTHORITY,
@@ -282,6 +324,7 @@ def build_descriptors(live: Optional[Mapping[str, Dict[str, Any]]] = None,
     """
     if now is None:
         now = datetime.now(timezone.utc)
+    now = _as_utc(now)
     live = live or {}
     entitlements = entitlements or {}
     descriptors: List[Dict[str, Any]] = []
@@ -292,6 +335,9 @@ def build_descriptors(live: Optional[Mapping[str, Dict[str, Any]]] = None,
             and measured.get("productCapability") == entry.id
             and is_well_formed_availability(measured, now)
         )
-        availability = measured if usable else locked_availability(entry.id, now)
+        # DEEP COPY, not an alias. `measured` is caller-owned; keeping a
+        # reference means a mutation AFTER validation silently changes the emitted
+        # descriptor's state without revalidation (validate-then-mutate).
+        availability = copy.deepcopy(measured) if usable else locked_availability(entry.id, now)
         descriptors.append(descriptor_for(entry, availability, entitlements.get(entry.id, False)))
     return descriptors
