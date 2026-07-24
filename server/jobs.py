@@ -239,19 +239,30 @@ def _db() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 10000")
-        conn.execute("PRAGMA journal_mode = WAL")
-        try:
-            _apply_first_connect_migrations(conn)
-        except BaseException:
-            # Don't strand a half-migrated connection as the module singleton:
-            # close it (which rolls back any open transaction and frees the write
-            # lock) and leave _conn None so the next call retries from scratch.
-            conn.close()
-            raise
-        _conn = conn
+        deadline = time.monotonic() + 10.0
+        while _conn is None:
+            conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA busy_timeout = 10000")
+                # WAL negotiation itself takes a SQLite lock and can race before
+                # the migration guard runs. Retry the complete first-connect path
+                # so a losing process does not crash during startup.
+                conn.execute("PRAGMA journal_mode = WAL")
+                _apply_first_connect_migrations(conn)
+            except sqlite3.OperationalError as exc:
+                conn.close()
+                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+                continue
+            except BaseException:
+                # Don't strand a half-migrated connection as the module singleton:
+                # close it (which rolls back any open transaction and frees the
+                # write lock) and leave _conn None for a later retry.
+                conn.close()
+                raise
+            _conn = conn
     return _conn
 
 

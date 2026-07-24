@@ -18,11 +18,9 @@ The existing single-connection test (test_job_dwg_version_persist.py) only prove
 the uniqueness no-op on a SECOND sequential connect; it never runs first-connects
 at once. Here N real subprocesses first-connect together against an OLD predecessor
 schema (missing 13 columns), released from a tight busy-spin filesystem barrier so
-their migrations overlap in the sub-millisecond DDL window. Each opens+PRAGMAs its
-own connection (mirroring jobs._db()) BEFORE the barrier and then calls the real
-jobs._apply_first_connect_migrations, so only the migration races (not connection
-setup), which is what makes the concurrent ``duplicate column name`` race fire
-reliably. The rows carry backfillable pins, so the run doubles as the concurrent
+their complete first-connect paths overlap. Each calls ``jobs._db()`` after the
+barrier, so the test covers connection setup, WAL negotiation, migrations, and the
+backfill. The rows carry backfillable pins, so the run doubles as the concurrent
 backfill-correctness proof.
 
 Asserts: no process crashes, every child reads back the backfilled pin, and the
@@ -80,15 +78,9 @@ _OLD_SCHEMA = (
     " result_json TEXT, error_json TEXT, execution_json TEXT)"
 )
 
-# The child driver: a standalone process that first-connects jobs.db. It does the
-# heavy `import jobs` AND opens+PRAGMAs its own connection (mirroring jobs._db())
-# BEFORE the barrier, so the only thing left to race after release is the migration
-# itself. It then busy-spins until all N children are ready and calls the real
-# jobs._apply_first_connect_migrations on its connection. Racing the migration
-# function on a pre-opened connection (rather than get_job -> _db) removes
-# connection-setup timing noise, which is what makes the concurrent race fire
-# reliably. Every failure (crash included) is captured to the out-file so the
-# parent sees the real traceback rather than a bare exit code.
+# The child driver imports jobs before the barrier, then races the complete public
+# first-connect seam. Every failure is captured to the out-file so the parent sees
+# the real traceback rather than a bare exit code.
 _CHILD_SRC = r'''
 import json, os, sys, time
 
@@ -110,14 +102,6 @@ if server_dir not in sys.path:
 result = {"pid": os.getpid(), "ok": False, "error": None, "dwg_version": None}
 try:
     import jobs
-    import sqlite3
-
-    # Open + PRAGMA the connection exactly as jobs._db() does, BEFORE the barrier,
-    # so post-barrier only the migration races. (Kept in sync with jobs._db().)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 10000")
-    conn.execute("PRAGMA journal_mode = WAL")
 
     # tight filesystem barrier: announce ready, then BUSY-SPIN (no sleep) until all
     # N children are ready, so release skew stays below the migration's DDL window
@@ -128,7 +112,7 @@ try:
         if len([f for f in os.listdir(barrier_dir) if f.startswith("ready-")]) >= n_expected:
             break
 
-    jobs._apply_first_connect_migrations(conn)   # THE RACE: real code under test
+    conn = jobs._db()   # THE RACE: complete real first-connect path
 
     row = conn.execute(
         "SELECT dwg_version FROM jobs WHERE job_id = ?", (verify_job_id,)).fetchone()
