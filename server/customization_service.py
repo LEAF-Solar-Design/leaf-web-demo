@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import subprocess
 import threading
 import time
@@ -51,14 +52,37 @@ def database_path() -> Path:
     return Path(raw) if raw else DEFAULT_DB
 
 
+def _path_key(path: Path, *, resolve: bool) -> str:
+    candidate = path.expanduser()
+    if resolve:
+        candidate = candidate.resolve(strict=False)
+    normalized = os.path.normcase(os.path.abspath(os.path.normpath(str(candidate))))
+    if normalized.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + normalized[8:]
+    if normalized.startswith("\\\\?\\"):
+        return normalized[4:]
+    return normalized
+
+
+def _path_within(path: Path, root: Path, *, resolve: bool = True) -> bool:
+    candidate_key = _path_key(path, resolve=resolve)
+    root_key = _path_key(root, resolve=resolve)
+    try:
+        return os.path.commonpath((candidate_key, root_key)) == root_key
+    except ValueError:
+        return False
+
+
 def _shared_sqlite_path(path: Path) -> bool:
     """Identify the deployed shared EFS authority path.
 
     SQLite cannot coordinate overlapping ECS tasks on EFS. Customization stays
     unavailable there until the authority moves to PostgreSQL.
     """
-    normalized = str(path).replace("\\", "/").rstrip("/")
-    return normalized == "/data/state" or normalized.startswith("/data/state/")
+    shared_root = Path("/data/state")
+    return _path_within(path, shared_root, resolve=False) or _path_within(
+        path, shared_root, resolve=True
+    )
 
 
 def _canonical_database_key(path: Path) -> str:
@@ -746,8 +770,8 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
                     "effective_catalog_authority_unavailable", 503
                 )
             return None
-        store = SQLiteCustomizationStore(path)
-        pin = store.get_effective_catalog(tenant_id=tenant_id)
+        service = CustomizationService.configured()
+        pin = service.store.get_effective_catalog(tenant_id=tenant_id)
         bare = _bare_repo(tenant_id)
         registry = _git_blob(bare, f"{pin.catalog_commit}:registry.json")
         if hashlib.sha256(registry).hexdigest() != pin.catalog_digest:
@@ -764,10 +788,8 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
         resolved_root = root.resolve(strict=True)
         if target.is_symlink():
             raise CustomizationServiceError("effective_catalog_unavailable", 503)
-        try:
-            target.resolve(strict=False).relative_to(resolved_root)
-        except (OSError, ValueError) as exc:
-            raise CustomizationServiceError("effective_catalog_unavailable", 503) from exc
+        if not _path_within(target, resolved_root):
+            raise CustomizationServiceError("effective_catalog_unavailable", 503)
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -803,5 +825,5 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
         return None
     except CustomizationServiceError:
         raise
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, sqlite3.DatabaseError, subprocess.SubprocessError) as exc:
         raise CustomizationServiceError("effective_catalog_unavailable", 503) from exc

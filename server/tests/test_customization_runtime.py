@@ -159,6 +159,23 @@ def test_shared_efs_sqlite_cannot_activate(monkeypatch):
         CustomizationService.configured()
 
 
+@pytest.mark.parametrize(
+    "database",
+    (
+        "/data/state/../state/customization.db",
+        "/data/state/nested/../customization.db",
+    ),
+)
+def test_shared_efs_sqlite_rejects_normalized_paths(database, monkeypatch):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", database)
+
+    with pytest.raises(
+        CustomizationServiceError,
+        match="customization_shared_sqlite_unsupported",
+    ):
+        CustomizationService.configured()
+
+
 def test_shared_efs_sqlite_ops_routes_never_create_database(tmp_path, monkeypatch):
     shared = Path("/data/state") / f"codex-pr72-{tmp_path.name}.db"
     assert not shared.exists()

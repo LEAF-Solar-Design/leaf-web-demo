@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -243,3 +245,50 @@ def test_enabled_customization_never_falls_back_when_pin_is_absent(
 
     with pytest.raises(CustomizationServiceError, match="effective_catalog_unavailable"):
         effective_catalog_dir("tenant-a")
+
+
+def test_effective_catalog_reuses_initialized_store(tmp_path, monkeypatch):
+    database = tmp_path / "customization.db"
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    calls = []
+    original = SQLiteCustomizationStore.__init__
+
+    def construct_once(store, path):
+        calls.append(str(path))
+        original(store, path)
+
+    monkeypatch.setattr(SQLiteCustomizationStore, "__init__", construct_once)
+    CustomizationService.configured()
+
+    for _ in range(2):
+        with pytest.raises(
+            CustomizationServiceError, match="effective_catalog_unavailable"
+        ):
+            effective_catalog_dir("tenant-a")
+
+    assert calls == [str(database)]
+
+
+def test_effective_catalog_wraps_sqlite_failure(tmp_path, monkeypatch):
+    database = tmp_path / "customization.db"
+    database.touch()
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))
+
+    def fail(*, tenant_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    service = SimpleNamespace(
+        store=SimpleNamespace(get_effective_catalog=fail)
+    )
+    monkeypatch.setattr(
+        CustomizationService,
+        "configured",
+        classmethod(lambda cls: service),
+    )
+
+    with pytest.raises(CustomizationServiceError) as caught:
+        effective_catalog_dir("tenant-a")
+
+    assert caught.value.code == "effective_catalog_unavailable"
+    assert caught.value.status_code == 503
