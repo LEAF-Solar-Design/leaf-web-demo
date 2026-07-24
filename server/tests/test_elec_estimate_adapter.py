@@ -10,11 +10,11 @@ VALID_INPUT = {
     "dwg_version": 1,
     "modules_per_string": 12,
     "string_count": 2,
-    "module": {"watts": 550, "voc": 50, "vmp": 42, "isc": 10,
+    "module": {"watts": 550, "voc": 50, "vmp": 42, "isc": 14,
                "temperature_coefficient_pct_per_c": -0.3},
     "inverter": {"architecture": "central", "topology": "combined_input",
                  "mppt_min_v": 300, "mppt_max_v": 800, "max_dc_voltage": 1000,
-                 "max_dc_input_a": 30, "optimizer_max_input_isc": None,
+                 "max_dc_input_a": 40, "optimizer_max_input_isc": None,
                  "optimizer_max_input_voltage": None,
                  "design_min_temp_c": -10, "design_max_temp_c": 70},
     "rate_card": None,
@@ -81,6 +81,23 @@ def test_design_max_temp_below_stc_is_rejected():
         elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
 
 
+def test_physically_contradictory_module_isc_below_imp_is_rejected():
+    # Isc must exceed the implied Imp = watts/vmp; a lower Isc is a contradictory
+    # module that would under-state current into a false PASS. (This is exactly
+    # the class the original fixture accidentally contained.)
+    candidate = copy.deepcopy(VALID_INPUT)
+    candidate["module"]["isc"] = 10  # watts 550 / vmp 42 = 13.1 A implied Imp
+    with pytest.raises(ValueError, match="isc must exceed"):
+        elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
+
+
+def test_module_vmp_not_below_voc_is_rejected():
+    candidate = copy.deepcopy(VALID_INPUT)
+    candidate["module"]["vmp"] = 55  # >= voc 50
+    with pytest.raises(ValueError, match="vmp must be less than"):
+        elec_estimate.run(_pinned(candidate), intake_resolver=_resolver)
+
+
 def test_negative_module_voc_is_rejected():
     candidate = copy.deepcopy(VALID_INPUT)
     candidate["module"]["voc"] = -50
@@ -109,13 +126,13 @@ def test_hot_vmp_exact_mppt_minimum_is_a_pass_boundary():
 def test_central_current_is_topology_and_string_count_aware():
     per_string = copy.deepcopy(VALID_INPUT)
     per_string["inverter"]["topology"] = "per_string_inputs"
-    per_string["inverter"]["max_dc_input_a"] = 15
+    per_string["inverter"]["max_dc_input_a"] = 20
     aggregate = copy.deepcopy(per_string)
     aggregate["inverter"]["topology"] = "combined_input"
     assert _item(elec_estimate.run(_pinned(per_string), intake_resolver=_resolver), "NEC-690.8-CONTINUOUS")["status"] == "pass"
     aggregate_check = _item(elec_estimate.run(_pinned(aggregate), intake_resolver=_resolver), "NEC-690.8-CONTINUOUS")
     assert aggregate_check["status"] == "fail"
-    assert aggregate_check["measured"] == 25.0
+    assert aggregate_check["measured"] == 35.0
 
 
 def test_solaredge_never_runs_generic_module_isc_ocpd_and_requires_optimizer_model():
