@@ -235,8 +235,10 @@ def test_run_request_threads_dwg_version_through_router_to_submit_job(monkeypatc
         return "fake-job-id"
 
     monkeypatch.setattr(jobs_router.jobs, "submit_job", fake_submit_job)
-    req = jobs_router.RunRequest(tool="count-by-layer", params={}, dwg="rooftop_demo",
-                                 dwg_version=7)
+    catalog_tool = jobs_router.deps.find_tool("count-by-layer")
+    req = jobs_router.RunRequest(
+        tool="count-by-layer", params={}, dwg="rooftop_demo", dwg_version=7,
+        catalog_digest=jobs_router.deps.catalog_tool_digest(catalog_tool))
     resp = jobs_router.run(req, wait=0, tenant_id="demo-tenant",
                            x_org_id=None, x_project_id=None,
                            idempotency_key=None, authorization=None)
@@ -245,7 +247,9 @@ def test_run_request_threads_dwg_version_through_router_to_submit_job(monkeypatc
 
     # omitted dwg_version -> None threads through unchanged
     captured.clear()
-    req2 = jobs_router.RunRequest(tool="count-by-layer", params={}, dwg="rooftop_demo")
+    req2 = jobs_router.RunRequest(
+        tool="count-by-layer", params={}, dwg="rooftop_demo",
+        catalog_digest=jobs_router.deps.catalog_tool_digest(catalog_tool))
     jobs_router.run(req2, wait=0, tenant_id="demo-tenant",
                     x_org_id=None, x_project_id=None,
                     idempotency_key=None, authorization=None)

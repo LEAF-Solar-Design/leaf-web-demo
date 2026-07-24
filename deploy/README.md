@@ -56,10 +56,19 @@ The production cutover gates and the complete mutable-authority inventory are
 in [`docs/POSTGRES-CUTOVER.md`](../docs/POSTGRES-CUTOVER.md).
 
 ```bash
+export AUTOFILL_SOLVER_REVISION="$(git -C ../autofill-solver rev-parse HEAD)"
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml build app canonical-worker migrate
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml ps
 ```
+
+The canonical overlay requires the full 40-character `autofill-solver` commit.
+The commit must exist in `deploy/autofill-solver-sources.json` with the digest
+of its Python source tree. Compose uses the sibling checkout by default; set
+`AUTOFILL_SOLVER_CONTEXT` to another clean checkout or archive when needed.
+The image build rejects bytes that do not match the trusted digest, seals the
+verified identity into the image, and the container smoke rejects a missing or
+mismatched attestation.
 
 After the worker is healthy, run the clean-room real-solver receipt:
 
@@ -72,7 +81,9 @@ The overlay adds PostgreSQL 16, an idempotent migration job that applies every
 checked-in numbered migration, and a non-root canonical worker with a database-heartbeat
 healthcheck. The worker image receives `../autofill-solver` as a named BuildKit
 context; solver code is not duplicated into this repository, and the adapter hashes
-the exact source tree before and after every invocation. The local PostgreSQL password
+the exact source tree before and after every invocation. The overlay refuses to build
+unless `AUTOFILL_SOLVER_REVISION` names the exact 40-character commit supplied by that
+context. The local PostgreSQL password
 is deliberately non-secret and the database port is not published. Staging must use
 Secrets Manager and a managed PostgreSQL endpoint instead of these local credentials.
 
@@ -165,6 +176,7 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 | `LEAF_DRAWING_STORE` | app, broker | `legacy` | drawing manifest, version, checkout, and extraction authority selector |
 | `LEAF_UPLOAD_STORE` | app | `legacy` | upload-attempt and purge authority selector |
 | `LEAF_GUEST_CAP_HMAC_SECRET` | app | empty | required keyed IP pseudonymization secret in PostgreSQL guest-cap mode |
+| `LEAF_GUEST_SECRET` | app | empty | required guest-upload session signing secret; staging generates it in Secrets Manager and injects it into the app task |
 | `LEAF_BROKER_STORE` | broker | `legacy` | broker tenant and ledger authority selector |
 | `LEAF_BROKER_DATABASE_URL` | broker | empty | compose input mapped to the broker's `DATABASE_URL` only |
 | `LEAF_JOBS_STORE` | broker | `legacy` | broker callback completion uses the same async-job authority as the app |

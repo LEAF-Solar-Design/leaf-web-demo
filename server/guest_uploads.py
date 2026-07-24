@@ -19,10 +19,13 @@ the mechanism cannot drift apart:
     error, nothing else).
 
 HONESTY RULE for extraction: geometry only ever comes from the user's actual
-bytes. At APS_LIVE=1 both .dwg and .dxf go through the credential-holding
-broker (POST /broker/extract {upload: true}). At APS_LIVE=0 a .dxf is parsed
-locally by server/dxf_intake.py (a real parse of their file); a .dwg fails
-honestly (APS_UNAVAILABLE) because no local DWG reader exists.
+bytes. A .dxf is ALWAYS parsed locally by server/dxf_intake.py (a real parse
+of their file), in both modes: the live extract Activity binds HostDwg to a
+fixed `input.dwg` localName, so accoreconsole rejects DXF bytes as an invalid
+drawing — the broker path cannot extract a DXF at all. A .dwg goes through the
+credential-holding broker (POST /broker/extract {upload: true}) at APS_LIVE=1,
+and fails honestly (APS_UNAVAILABLE) at APS_LIVE=0 because no local DWG reader
+exists.
 """
 from __future__ import annotations
 
@@ -37,6 +40,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -149,9 +153,13 @@ def mint_guest_tenant_id() -> str:
 
 
 def new_upload_drawing_id() -> str:
-    """``u-<10 hex>`` — slug-safe; distinct namespace from the well-known
-    ``demo`` id and from UUID drawing ids so an upload is recognizable in logs."""
+    """Mint a random guest fallback id with the public ``u-<10 hex>`` shape."""
     return "u-" + secrets.token_hex(5)
+
+
+def new_account_upload_drawing_id() -> str:
+    """Mint the canonical UUID used for a new account upload receipt."""
+    return str(uuid.uuid4())
 
 
 def derived_upload_drawing_id(tenant_id: str, data: bytes) -> str:
@@ -206,7 +214,9 @@ def verify_guest_session(token: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
-# guest rate limiting (cost exposure: each live extraction is a paid APS run)
+# guest rate limiting (cost exposure: each live DWG extraction is a paid APS
+# run; a DXF is parsed locally, so its cost is service CPU, not an APS charge —
+# dxf_intake is linear in input size, see its layer-dedup note)
 # --------------------------------------------------------------------------- #
 _RATE_LOCK = threading.Lock()
 _RATE_STATE: Dict[str, Any] = {"day": None, "per_ip": {}, "total": 0}
@@ -589,13 +599,15 @@ def _finish_pg_attempt(
 
 def _put_intake_cache_fenced(
     backend, tenant_id: str, drawing_id: str, key: str, data: bytes,
-    attempt: str, owner: str, fence: int,
-) -> None:
-    """Publish derived intake bytes while the extraction generation owns DB."""
+    attempt: str, owner: str, fence: int, version: int = 1,
+) -> str:
+    """Publish intake and persist its server-derived proof under the same fence."""
     db = _drawing_db()
+    digest = hashlib.sha256(data).hexdigest()
     params = {
         "tenant": tenant_id, "drawing": drawing_id,
         "attempt": attempt, "owner": owner, "fence": fence,
+        "version": int(version), "intake_ref": key, "intake_sha256": digest,
     }
 
     def operation(conn):
@@ -619,6 +631,24 @@ def _put_intake_cache_fenced(
                 raise ValueError("intake cache artifact does not match reserved version")
         else:
             backend.put(key, data)
+        version_row = conn.execute(
+            """
+            UPDATE drawing_store_versions
+            SET intake_ref = %(intake_ref)s,
+                intake_sha256 = %(intake_sha256)s
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+              AND version = %(version)s AND state = 'ready'
+              AND (
+                intake_ref IS NULL
+                OR (intake_ref = %(intake_ref)s
+                    AND intake_sha256 = %(intake_sha256)s)
+              )
+            RETURNING version
+            """,
+            params,
+        ).fetchone()
+        if version_row is None:
+            raise ValueError("ready drawing version rejected intake proof")
         row = conn.execute(
             """
             SELECT 1 FROM drawing_upload_attempts
@@ -635,6 +665,7 @@ def _put_intake_cache_fenced(
                 "upload extraction lease expired during intake publication")
 
     db.run_transaction(operation, isolation="serializable")
+    return digest
 
 
 def new_marker(*, filename: str, data: bytes, tenant_kind: str,
@@ -925,12 +956,30 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             return  # purged mid-flight; nothing to report against
 
     try:
-        if deps.APS_LIVE:
-            intake = _extract_via_broker(tenant_id, drawing_id)
-        elif ext == ".dxf":
+        if ext == ".dxf":
+            # DXF is parsed LOCALLY IN BOTH MODES — the APS path cannot read it.
+            # The live extract Activity declares HostDwg with a fixed
+            # `input.dwg` localName (da/client.HOSTDWG_LOCALNAME) and runs
+            # `accoreconsole /i input.dwg`, so DXF bytes arrive wearing a .dwg
+            # extension and accoreconsole rejects the file outright
+            # ("Drawing file is not valid", ErrorStatus=434 -> the WorkItem
+            # ends failedInstructions). Sending .dxf to the broker was
+            # therefore a guaranteed paid failure, not an extraction: every
+            # live DXF upload — including the console's bundled sample —
+            # died in the failed strip. Parsing locally is the ONLY path that
+            # returns real geometry for a DXF today, and it is what
+            # policy_view() has always advertised as `dxf_local_ok: True`.
+            # Fidelity note: this parser reads LWPOLYLINE/POLYLINE + layer
+            # names, which is less than the live LISP extract pulls from a
+            # DWG (INSERT, 3DFACE, geo data, xdata). A DXF-correct Activity
+            # whose localName preserves the .dxf extension is the follow-up
+            # that would restore full fidelity; until it exists, honest
+            # partial geometry beats a guaranteed failure.
             import dxf_intake
             intake = dxf_intake.parse_dxf_file(staged_path(tenant_id, drawing_id, ext),
                                                source_name=marker.get("filename") or drawing_id)
+        elif deps.APS_LIVE:
+            intake = _extract_via_broker(tenant_id, drawing_id)
         else:
             _mark_failed(backend, tenant_id, drawing_id, marker, "APS_UNAVAILABLE",
                          "DWG extraction requires the live APS path; "
@@ -1023,12 +1072,13 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             cache_data = json.dumps(
                 intake, separators=(",", ":")).encode("utf-8")
             if upload_store_mode() == "postgres":
-                _put_intake_cache_fenced(
+                intake_sha256 = _put_intake_cache_fenced(
                     backend, tenant_id, drawing_id, cache_key, cache_data,
                     str(marker["attempt"]), extraction_owner,
                     extraction_fence)
             else:
                 backend.put(cache_key, cache_data)
+                intake_sha256 = hashlib.sha256(cache_data).hexdigest()
         except (OSError, ValueError, RuntimeError) as exc:
             _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
                          f"ingest failed: {exc}", retryable=False,
@@ -1039,6 +1089,8 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         marker = dict(marker)
         marker["status"] = "ready"
         marker["extracted_version"] = 1
+        marker["intake_ref"] = cache_key
+        marker["intake_sha256"] = intake_sha256
         if upload_store_mode() == "postgres":
             _finish_pg_attempt(
                 tenant_id, drawing_id, marker,
@@ -1143,6 +1195,7 @@ def status_view(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, 
         "uploaded_at": marker.get("uploaded_at"),
         "retention_expires_at": marker.get("retention_expires_at"),
         "tenant_kind": marker.get("tenant_kind"),
+        "extracted_version": marker.get("extracted_version"),
     }
 
 

@@ -180,7 +180,7 @@ def build_suites() -> List[Suite]:
         # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
         # by hand — same gap this branch closed for its own suites.
         Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
-              _py_pytest("tests/test_site.py"), 8),
+              _py_pytest("tests/test_site.py"), 12),
         # --- conversational agent spine (CONTRACT-ADDENDUM section 18) --- #
         # Separate suites for the same reason as the waves above: the gate/ledger
         # suites share on-disk approval + audit state and the router suites toggle
@@ -243,7 +243,7 @@ def build_suites() -> List[Suite]:
         Suite("server-adapter-combiner", "server tests/test_combiner_placement_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_combiner_placement_adapter.py"), 3),
         Suite("server-adapter-autofill", "server tests/test_autofill_adapter.py", "pytest",
-              SERVER, _py_pytest("tests/test_autofill_adapter.py"), 3),
+              SERVER, _py_pytest("tests/test_autofill_adapter.py"), 9),
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 19),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
@@ -384,6 +384,8 @@ def build_suites() -> List[Suite]:
               [_npm(), "audit", "--audit-level=high"], None),
         Suite("web-customization-check", "web customization static check", "script", WEB,
               [_npm(), "run", "check:customization"], None),
+        Suite("web-staging-fixes-check", "web staging fix regression checks", "script", WEB,
+              [_npm(), "run", "check:staging-fixes"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #

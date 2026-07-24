@@ -10,12 +10,14 @@
 // (job.result on complete; a §3-shaped error envelope on failed) — so callers
 // see the same shape the old synchronous /api/run used to return.
 
-import registry from './mock/registry.json'
+import { createRunSubmissionRequest } from './runIntent.js'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { humanizeError } from './errorHumanize.js'
 import { groupToolsByFamily } from './mock/mockCapabilities.js'
+import { listMockCatalogTools, registerMockCatalogTool } from './mock/mockCatalog.js'
+import { fetchWithBudget } from './fetchBudget.js'
 import * as mockVersions from './mock/mockVersions.js'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8130'
@@ -44,9 +46,12 @@ export function authHeaders() {
 // A tiny artificial delay so mock runs show loading states like the real thing.
 const nap = (ms) => new Promise((r) => setTimeout(r, ms))
 
-async function http(path, opts) {
+async function http(path, opts, timeoutMs = null) {
   const headers = { ...(opts?.headers || {}), ...authHeaders() }
-  const res = await fetch(`${API_BASE}${path}`, { ...opts, headers })
+  const request = timeoutMs == null
+    ? fetch(`${API_BASE}${path}`, { ...opts, headers })
+    : fetchWithBudget(fetch, `${API_BASE}${path}`, { ...opts, headers }, timeoutMs)
+  const res = await request
   if (!res.ok) {
     const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
     e.status = res.status // callers gate on 401/403 without string-matching
@@ -62,11 +67,11 @@ async function http(path, opts) {
 // (falls back to "demo" when absent).
 export async function getSession(mock, dwg = 'rooftop_demo') {
   if (mock) {
-    const res = await fetch('/sample.intake.json')
+    const res = await fetchWithBudget(fetch, '/sample.intake.json')
     if (!res.ok) throw new Error('failed to load sample.intake.json')
     return { intake: await res.json(), tenant: null, tier: null, org: null }
   }
-  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`)
+  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, 5000)
   // tier/org_id are echoed by deps.tenant_echo only when auth is live; null off-auth.
   return {
     intake: data.intake,
@@ -117,10 +122,9 @@ export async function getHealth() {
 export async function getTools(mock) {
   if (mock) {
     await nap(150)
-    // Clone so callers can safely append authored tools.
-    return registry.tools.map((t) => ({ ...t }))
+    return listMockCatalogTools()
   }
-  const data = await http('/api/tools')
+  const data = await http('/api/tools', undefined, 5000)
   return data.tools
 }
 
@@ -152,13 +156,14 @@ const normalizeFamilies = (families) =>
 export async function getCapabilities(mock) {
   if (mock) {
     await nap(150)
-    const tools = registry.tools.map((t) => ({ ...t }))
+    const tools = listMockCatalogTools()
     return { families: normalizeFamilies(groupToolsByFamily(tools)), source: 'mock' }
   }
   try {
-    const data = await http('/api/capabilities')
+    const data = await http('/api/capabilities', undefined, 5000)
     return { families: normalizeFamilies(data.families || []), source: 'endpoint' }
-  } catch {
+  } catch (error) {
+    if (error?.status !== 404) throw error
     // Endpoint unavailable — fall back calmly to the flat catalog as one family.
     const tools = await getTools(false)
     return {
@@ -520,13 +525,11 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
   // When a project is open, X-Org-Id + X-Project-Id make the backend record a
   // canonical platform Job row (spine_ref-linked) so the workspace jobs[] grows.
   // Absent -> byte-identical to the plain tenant-only run (no linkage).
-  const linkHeaders = {}
-  if (opts.orgId) linkHeaders['X-Org-Id'] = opts.orgId
-  if (opts.projectId) linkHeaders['X-Project-Id'] = opts.projectId
+  const submission = createRunSubmissionRequest(toolName, params, dwg, opts)
   const res = await fetch(`${API_BASE}/api/run`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...linkHeaders, ...authHeaders() },
-    body: JSON.stringify({ tool: toolName, params: params || {}, dwg }),
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...submission.headers, ...authHeaders() },
+    body: JSON.stringify(submission.body),
   })
   const body = await res.json().catch(() => null)
 
@@ -744,6 +747,11 @@ export async function stageAuthorTool(mock, description) {
   if (mock) {
     await nap(700)
     const authored = authorMock(description)
+    if (authored.unsupported) {
+      const error = new Error(authored.message)
+      error.unsupported = true
+      throw error
+    }
     return {
       ...authored,
       demo: true,
@@ -785,7 +793,8 @@ export async function publishStagedAuthor(mock, staged) {
   if (!staged || !staged.receipt) throw new Error('A staged tool is required before publishing.')
   if (mock) {
     await nap(250)
-    return { ...staged, published: true, demo: true }
+    registerMockCatalogTool(staged.tool)
+    return { ...staged, published: true, demo: true, demo_session_only: true }
   }
   const receipt = staged.receipt
   const confirmation_id = await issuePublishConfirmation(receipt)

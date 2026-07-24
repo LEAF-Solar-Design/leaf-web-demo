@@ -20,7 +20,9 @@ const JOB_STATE = {
   cancelled: { dot: 'dot hollow', tint: 'mut', label: 'cancelled' },
 }
 
-export default function WorkspaceSummary({ workspace, loading, onClose }) {
+export default function WorkspaceSummary({
+  workspace, loading, selectedVersionId, onSelectVersion, onClose,
+}) {
   if (!workspace) return null
   const project = workspace.project || {}
   const versions = workspace.drawing_versions || []
@@ -52,6 +54,23 @@ export default function WorkspaceSummary({ workspace, loading, onClose }) {
           {tools.length} built tool{tools.length === 1 ? '' : 's'}
         </div>
       </div>
+
+      {versions.length > 0 && onSelectVersion && (
+        <label className="ws-note">
+          Canonical drawing version
+          <select
+            value={selectedVersionId || ''}
+            onChange={(event) => onSelectVersion(event.target.value || null)}
+          >
+            <option value="">Select a drawing version</option>
+            {versions.map((version) => (
+              <option key={version.version_id} value={version.version_id}>
+                {String(version.drawing_id).slice(0, 8)} · v{version.seq}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       <div className="ws-jobs">
         <div className="ws-jobs-head">Jobs</div>

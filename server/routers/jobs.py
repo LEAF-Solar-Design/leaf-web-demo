@@ -39,6 +39,7 @@ class RunRequest(BaseModel):
     params: Dict[str, Any] = {}
     dwg: str = "rooftop_demo"
     dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
+    catalog_digest: Optional[str] = None
     # specific immutable drawing version (da/store.py resolve_version) otherwise.
 
 
@@ -125,6 +126,14 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     if tool is None:
         return error_response(ErrorCode.UNKNOWN_TOOL, f"unknown tool: {req.tool}",
                               retryable=False, tool=req.tool)
+    current_catalog_digest = deps.catalog_tool_digest(tool)
+    if not isinstance(req.catalog_digest, str) or not hmac.compare_digest(
+            req.catalog_digest, current_catalog_digest):
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            "catalog tool changed or confirmation digest is missing; refresh tools and confirm again",
+            retryable=False, tool=req.tool, status_code=409,
+        )
 
     # ENTITLEMENT GATE (§17): the tenant's tier must grant the capability this tool needs
     # (run_write for a drawing.write tool, else run_read). Enforced HERE in the execution

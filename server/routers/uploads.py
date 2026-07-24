@@ -5,7 +5,7 @@
          status: "extracting"}   (envelope-wrapped per §10)
     GET  /api/drawings/{drawing_id}/upload-status
          -> {status: extracting|ready|failed, error|null, filename, uploaded_at,
-             retention_expires_at|null}
+             retention_expires_at|null, extracted_version:int|null}
 
 AUTH IS OPTIONAL here — deliberately not `Depends(deps.require_tenant)`,
 because a signed-out visitor is this endpoint's primary caller:
@@ -39,7 +39,7 @@ from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
 
-_MINT_ATTEMPTS = 4  # 40 random bits per attempt; collision is cosmic-ray territory
+_MINT_ATTEMPTS = 4  # UUIDv4 per attempt; collision is cosmic-ray territory
 
 
 def _client_ip(request: Request) -> str:
@@ -69,12 +69,15 @@ def _resolve_upload_identity(
             import auth  # noqa: PLC0415 - lazy, mirrors deps.require_tenant
             import tenancy  # noqa: PLC0415
             payload = auth.verify_platform_token(authorization)
-            claims = auth.extract_tenant_claims(payload)
-            ws = tenancy.get_store().resolve_workspace(claims["tenant_id"])
+            subject = payload.get("sub") if isinstance(payload.get("sub"), str) else None
+            platform_tenant_id, platform_tier = (
+                deps.resolve_active_platform_tenant_authority(subject))
+            ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
             tenant = deps.TenantContext(
-                claims["tenant_id"], org_id=claims.get("org_id"),
-                tier=claims.get("tier"),
-                workspace=ws.workspace_dir if ws is not None else None)
+                platform_tenant_id, org_id=platform_tenant_id,
+                tier=platform_tier,
+                workspace=ws.workspace_dir if ws is not None else None,
+                subject=subject)
             return tenant, "account", False
         if x_guest_session:
             existing = guest_uploads.verify_guest_session(x_guest_session)
@@ -196,8 +199,10 @@ def upload_drawing(
                             ErrorCode.INTERNAL,
                             "could not reset the failed attempt's residue; "
                             "try again", retryable=True, status_code=500)
-                # Guest cost-exposure caps (each live extraction is a paid
-                # APS run). Counted AFTER validation on purpose (review round
+                # Guest cost-exposure caps (each live DWG extraction is a paid
+                # APS run; a DXF is parsed locally, so its cost is service CPU
+                # rather than an APS charge — see dxf_intake).
+                # Counted AFTER validation on purpose (review round
                 # 1, MAJOR): garbage requests must not be able to exhaust the
                 # shared daily pool — only an upload that will actually stage
                 # + extract consumes quota. A dedupe hit consumes none.
@@ -267,17 +272,21 @@ def upload_drawing(
             guest_uploads.start_extraction_thread(str(tenant), drawing_id, ext)
 
     if drawing_id is None:
-        # Account uploads (random ids: two intentional copies of one file
+        # Account uploads (random UUIDs: two intentional copies of one file
         # stay two drawings) — plus the astronomically unlikely guest case of
         # a foreign manifest squatting the derived id (quota already charged
         # above in that case).
         for _ in range(_MINT_ATTEMPTS):
-            candidate = guest_uploads.new_upload_drawing_id()
+            candidate = (
+                guest_uploads.new_account_upload_drawing_id()
+                if tenant_kind == "account"
+                else guest_uploads.new_upload_drawing_id()
+            )
             if (not backend.exists(store.manifest_key(str(tenant), candidate))
                     and guest_uploads.read_marker(backend, str(tenant), candidate) is None):
                 drawing_id = candidate
                 break
-        if drawing_id is None:  # pragma: no cover - 4 consecutive 40-bit collisions
+        if drawing_id is None:  # pragma: no cover - 4 consecutive random collisions
             return error_response(ErrorCode.INTERNAL, "could not mint a drawing id",
                                   retryable=True, status_code=500)
 

@@ -1,0 +1,62 @@
+name: Public solve proof canary
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-solve-proof-staging
+  cancel-in-progress: false
+
+jobs:
+  verify-staging-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch current staging solve proof
+        shell: bash
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-all-errors \
+            --connect-timeout 15 --max-time 300 \
+            --header "Cache-Control: no-cache" \
+            "https://platform-staging.leafdesign.ai/api/site/demo-solve?renewal_check=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --output "${RUNNER_TEMP}/solve-proof.json"
+
+      - name: Verify real proof and renewal age
+        shell: python
+        run: |
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          proof_path = Path(os.environ["RUNNER_TEMP"]) / "solve-proof.json"
+          body = json.loads(proof_path.read_text(encoding="utf-8"))
+          assert body.get("ok") is True, body.get("error")
+          assert body.get("error") is None
+
+          solve = body["solve"]
+          stats = solve["stats"]
+          receipt = solve["receipt"]
+          assert stats["panel_count"] > 0
+          assert stats["modules_stringed"] > 0
+          assert stats["string_count"] > 0
+          assert receipt["ledger_line"] is True
+          assert receipt["degraded_mode"] is False
+          assert receipt["path"] in {"broker", "memory-cache", "file-cache"}
+
+          computed_at = datetime.strptime(
+              receipt["computed_at"], "%Y-%m-%dT%H:%M:%SZ"
+          ).replace(tzinfo=timezone.utc)
+          age_hours = (datetime.now(timezone.utc) - computed_at).total_seconds() / 3600
+          assert 0 <= age_hours <= 21, f"solve proof is {age_hours:.2f} hours old"
+          print(
+              f"current real solve proof: {stats['panel_count']} panels, "
+              f"{stats['string_count']} strings, age {age_hours:.2f} hours, "
+              f"path {receipt['path']}"
+          )

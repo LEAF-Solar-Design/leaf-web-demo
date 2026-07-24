@@ -1051,7 +1051,8 @@ are built against their defaults; both are env-tunable without a code change.
   → `202 {drawing_id, tenant_id, tenant_kind, retention_expires_at|null,
   guest_session|null, status: "extracting"}` (§10-enveloped). Guest rate caps:
   `LEAF_GUEST_UPLOADS_PER_IP_PER_DAY` (10), `LEAF_GUEST_UPLOADS_PER_DAY` (100)
-  → 429 `quota_exceeded` (each live extraction is a paid APS run).
+  → 429 `quota_exceeded` (each live DWG extraction is a paid APS run; DXF is
+  parsed locally, so its cost is CPU on the service, not an APS charge).
   GUEST uploads are idempotent by content: the drawing id derives from
   (tenant, sha256(bytes)), so re-posting the same bytes as the same guest
   returns the SAME drawing's receipt (its CURRENT `status`, original
@@ -1087,8 +1088,11 @@ staged upload files, drops empty tenant dirs, and appends one
 with NO retention promise (and none is shown).
 
 **Extraction** (`guest_uploads.run_extraction`, background thread + durable
-marker — deliberately NOT the tool-shaped jobs spine): at APS_LIVE=1 both
-formats go through `POST /broker/extract {upload: true}`; the broker's
+marker — deliberately NOT the tool-shaped jobs spine): `.dxf` is ALWAYS parsed
+locally by `server/dxf_intake.py`, in both modes — the live extract Activity
+binds HostDwg to a fixed `input.dwg` localName, so `accoreconsole` rejects DXF
+bytes as an invalid drawing and the broker path cannot extract a DXF at all.
+`.dwg` at APS_LIVE=1 goes through `POST /broker/extract {upload: true}`; the broker's
 `_resolve_upload_dwg` applies the IDENTICAL strictness as the library resolver
 (bare name, no symlink, parent must BE `data/uploads/`) and the two namespaces
 never cross-resolve. At APS_LIVE=0 a .dxf is parsed locally

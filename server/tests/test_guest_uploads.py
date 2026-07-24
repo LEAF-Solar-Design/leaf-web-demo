@@ -14,14 +14,20 @@ from __future__ import annotations
 
 import io
 import json
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app as app_module
+import deps
 import guest_uploads
+import platform_link
 import write_loop
+from routers import uploads as uploads_router
 
 # A distinctive DXF nothing in the repo shares coordinates with. Rooftop demo
 # coordinates live around 14000-15500; these are nowhere near.
@@ -57,6 +63,59 @@ def _upload(client, data=DXF_BYTES, name="mine.dxf", headers=None):
                        headers=headers or {})
 
 
+def test_live_account_upload_uses_active_binding_not_stale_claims(monkeypatch):
+    import auth
+    import tenancy
+
+    canonical = "f49766b5-1e5a-4e67-a10f-4e3a9b576266"
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(
+        auth, "verify_platform_token", lambda authorization: {"sub": "auth0|bound"})
+    monkeypatch.setattr(
+        auth, "extract_tenant_claims", lambda payload: {
+            "tenant_id": "stale-claim-tenant",
+            "org_id": "stale-claim-org",
+            "tier": "demo",
+        })
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        lambda subject: (canonical, "restricted"))
+    monkeypatch.setattr(
+        tenancy, "get_store", lambda: SimpleNamespace(
+            resolve_workspace=lambda tenant_id: None))
+
+    tenant, kind, minted = uploads_router._resolve_upload_identity(
+        "forged-header-tenant", "Bearer verified", "stale-guest-session")
+    assert str(tenant) == canonical
+    assert tenant.org_id == canonical
+    assert tenant.tier == "restricted"
+    assert tenant.subject == "auth0|bound"
+    assert kind == "account"
+    assert minted is False
+
+
+def test_active_binding_resolution_fails_closed_for_unbound_subject(monkeypatch):
+    monkeypatch.setattr(
+        platform_link, "platform_store", lambda: SimpleNamespace(
+            resolve_active_identity_binding=lambda authority, subject: None))
+    with pytest.raises(HTTPException) as exc:
+        deps.resolve_active_platform_tenant_id("auth0|unbound")
+    assert exc.value.status_code == 403
+
+
+def test_active_binding_resolution_returns_server_owned_tenant(monkeypatch):
+    binding = SimpleNamespace(platform_tenant_id="canonical-org")
+    org = SimpleNamespace(tier="hosted_pro", status="active")
+    monkeypatch.setattr(
+        platform_link, "platform_store", lambda: SimpleNamespace(
+            resolve_active_identity_binding=lambda authority, subject: binding,
+            get_org=lambda org_id: org))
+    assert deps.resolve_active_platform_tenant_id(
+        "auth0|foreign-claim") == "canonical-org"
+    assert deps.resolve_active_platform_tenant_authority(
+        "auth0|foreign-claim") == ("canonical-org", "hosted_pro")
+
+
 def test_upload_dxf_happy_path_serves_their_geometry(client):
     r = _upload(client)
     assert r.status_code == 202
@@ -90,9 +149,26 @@ def test_upload_account_tenant_no_retention(client):
     assert r.status_code == 202
     body = r.json()
     assert body["tenant_kind"] == "account"
+    assert str(uuid.UUID(body["drawing_id"])) == body["drawing_id"]
     assert body["tenant_id"] == "acme-solar"
     assert body["retention_expires_at"] is None
     assert body["guest_session"] is None
+    status = client.get(
+        f"/api/drawings/{body['drawing_id']}/upload-status",
+        headers={"X-Tenant-Id": "acme-solar"},
+    ).json()
+    assert status["status"] == "ready"
+    assert status["extracted_version"] == 1
+
+
+def test_guest_and_account_upload_id_mints_keep_distinct_syntax():
+    guest_id = guest_uploads.new_upload_drawing_id()
+    assert guest_id.startswith("u-")
+    assert len(guest_id) == 12
+    int(guest_id[2:], 16)
+
+    account_id = guest_uploads.new_account_upload_drawing_id()
+    assert str(uuid.UUID(account_id)) == account_id
 
 
 def test_upload_oversize_413(client, monkeypatch):
@@ -182,6 +258,10 @@ def test_marker_records_content_identity(client):
     assert marker["filename"] == "mine.dxf"
     import hashlib
     assert marker["content_sha256"] == hashlib.sha256(DXF_BYTES).hexdigest()
+    intake_ref = write_loop.intake_cache_key(tenant, did, 1)
+    assert marker["intake_ref"] == intake_ref
+    assert marker["intake_sha256"] == hashlib.sha256(
+        backend.get(intake_ref)).hexdigest()
 
 
 def test_policy_endpoint_reads_the_one_constant(client, monkeypatch):
@@ -244,6 +324,117 @@ def test_store_representation_dxf_intake_blob_plus_cache(client):
     ckey = write_loop.intake_cache_key(tenant, did, 1)
     assert backend.exists(ckey), "parsed intake must sit at the cache sibling"
     assert json.loads(backend.get(ckey).decode("utf-8"))["layers"] == ["Panels"]
+
+
+def test_dxf_layer_dedup_stays_linear_under_adversarial_input():
+    """REGRESSION (review blocker, 2026-07-24): the layer dedup must not be
+    quadratic in the number of UNIQUE layers.
+
+    Routing live guest DXF to this parser put it on an unauthenticated path,
+    and a guest picks the layer count: a LAYER entry costs ~36 bytes, so about
+    728k unique layers fit inside LEAF_UPLOAD_MAX_BYTES. With `x not in
+    <list>` dedup that measured 9.1s at 32k layers and extrapolated past an
+    hour of pegged CPU at the cap. With set-backed membership the same cap-
+    sized input parses in ~1.6s.
+
+    The bound here is deliberately loose (100k layers, 20s) so it is a
+    complexity guard, not a machine-speed benchmark: the old code needed well
+    over a minute for this input, the new code needs a fraction of a second."""
+    import time
+
+    import dxf_intake
+    n = 100_000
+    out = ["0", "SECTION", "2", "TABLES"]
+    for i in range(n):
+        out += ["0", "LAYER", "2", f"layer_name_number_{i:07d}"]
+    out += ["0", "ENDSEC", "0", "EOF"]
+    raw = "\n".join(out).encode()
+
+    t0 = time.perf_counter()
+    parsed = dxf_intake.parse_dxf_bytes(raw, source_name="wide.dxf")
+    elapsed = time.perf_counter() - t0
+
+    assert len(parsed["layers"]) == n, "every unique layer must survive dedup"
+    assert parsed["layers"][0] == "layer_name_number_0000000", "first-seen order preserved"
+    assert parsed["layers"][-1] == f"layer_name_number_{n - 1:07d}"
+    assert elapsed < 20.0, (
+        f"parsing {n} unique layers took {elapsed:.1f}s — the TABLES layer dedup "
+        "has gone quadratic again (see dxf_intake.seen_layers)")
+
+    # The SECOND dedup site is _finish_entity, reached only through entities.
+    # Guard it separately: a quadratic regression confined there would sail
+    # past the TABLES case above (re-review, non-blocking coverage gap).
+    m = 40_000
+    ent = ["0", "SECTION", "2", "ENTITIES"]
+    for i in range(m):
+        ent += ["0", "LWPOLYLINE", "8", f"entity_layer_{i:07d}", "70", "1",
+                "10", "0", "20", "0", "10", "1", "20", "1"]
+    ent += ["0", "ENDSEC", "0", "EOF"]
+    ent_raw = "\n".join(ent).encode()
+
+    t0 = time.perf_counter()
+    ent_parsed = dxf_intake.parse_dxf_bytes(ent_raw, source_name="entities.dxf")
+    ent_elapsed = time.perf_counter() - t0
+
+    assert len(ent_parsed["polylines"]) == m
+    assert len(ent_parsed["layers"]) == m, "entity layers must dedup to all-unique"
+    assert ent_parsed["layers"][0] == "entity_layer_0000000", "first-seen order preserved"
+    assert ent_elapsed < 20.0, (
+        f"parsing {m} entities on unique layers took {ent_elapsed:.1f}s — the "
+        "_finish_entity layer dedup has gone quadratic again")
+
+
+def test_dxf_layer_dedup_preserves_first_seen_order_with_repeats():
+    """The set is a membership index only — `layers` must still be the
+    first-seen ORDER of distinct names, which is part of the intake shape."""
+    import dxf_intake
+    body = (
+        "0\nSECTION\n2\nENTITIES\n"
+        "0\nLWPOLYLINE\n8\nBeta\n70\n1\n10\n0\n20\n0\n10\n1\n20\n1\n"
+        "0\nLWPOLYLINE\n8\nAlpha\n70\n1\n10\n0\n20\n0\n10\n2\n20\n2\n"
+        "0\nLWPOLYLINE\n8\nBeta\n70\n1\n10\n0\n20\n0\n10\n3\n20\n3\n"
+        "0\nENDSEC\n0\nEOF\n"
+    ).encode()
+    assert dxf_intake.parse_dxf_bytes(body)["layers"] == ["Beta", "Alpha"]
+
+
+def test_live_mode_dxf_parses_locally_and_never_calls_the_broker(client, monkeypatch):
+    """REGRESSION (live staging, 2026-07-24): at APS_LIVE=1 a .dxf must still
+    be parsed locally and must NOT be sent to the broker.
+
+    The live extract Activity declares HostDwg with a fixed `input.dwg`
+    localName and runs `accoreconsole /i input.dwg`, so DXF bytes arrive
+    wearing a .dwg extension and AutoCAD rejects them outright ("Drawing file
+    is not valid", ErrorStatus=434 -> WorkItem status failedInstructions).
+    Routing .dxf to the broker was therefore a guaranteed PAID failure: every
+    live DXF upload — the guest console's bundled sample included — died in
+    the failed strip. This test fails the build if that routing comes back:
+    the broker seam raises, so any call to it surfaces as a failed status
+    instead of the user's own geometry."""
+    import deps
+
+    def _broker_must_not_be_called(tenant_id, drawing_id):
+        raise AssertionError("a .dxf upload must never reach the APS broker")
+
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.setattr(guest_uploads, "_extract_via_broker",
+                        _broker_must_not_be_called)
+    r = _upload(client)
+    assert r.status_code == 202
+    tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]
+
+    s = client.get(f"/api/drawings/{did}/upload-status",
+                   headers={"X-Tenant-Id": tenant})
+    assert s.status_code == 200
+    assert s.json()["status"] == "ready", s.json().get("error")
+
+    # and it is THEIR geometry, not a fabricated or cached intake
+    i = client.get(f"/api/drawings/{did}/intake", headers={"X-Tenant-Id": tenant})
+    assert i.status_code == 200
+    intake = i.json()["intake"]
+    assert intake["layers"] == ["Panels"]
+    assert any(DISTINCTIVE_COORD in pt for pl in intake["polylines"]
+               for pt in pl["pts"]), "must carry the uploaded DXF's own coordinates"
 
 
 def test_store_representation_dwg_raw_bytes_v1(client, monkeypatch):

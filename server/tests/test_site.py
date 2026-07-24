@@ -24,6 +24,8 @@ import math
 import os
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -89,6 +91,8 @@ def _fake_broker(monkeypatch, intake):
 
 def test_site_demo_run_identity_dedupes_cache_fill_and_allows_explicit_refresh(
         monkeypatch, intake, site_env):
+    now = 1_800_000_123.0
+    monkeypatch.setattr(site_demo, "_now_epoch", lambda: now)
     calls = _fake_broker(monkeypatch, intake)
     sha = site_demo.intake_sha256()
     first = site_demo.get_demo_solve()
@@ -96,7 +100,8 @@ def test_site_demo_run_identity_dedupes_cache_fill_and_allows_explicit_refresh(
     assert first["solve_id"] == second["solve_id"]
     assert calls["n"] == 1
     prefix = f"site-demo:{sha}:{site_demo.SITE_TOOL['version']}:"
-    assert calls["event_keys"] == [prefix + "cache-fill"]
+    window = site_demo._window_start(now)
+    assert calls["event_keys"] == [prefix + f"window-{window}"]
 
     site_demo.get_demo_solve(refresh_id="operator-refresh-42")
     assert calls["n"] == 2
@@ -213,7 +218,6 @@ def test_site_endpoints_public_when_auth_live(monkeypatch, intake, site_env):
 # --------------------------------------------------------------------------- #
 # 5. ETag / If-None-Match -> 304 (+ exact cache headers)
 # --------------------------------------------------------------------------- #
-@pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): this exercises a section-18 surface replaced by the section-2.1 lane (approvals resolve against session_store; site.py serves the reviewed builtin-only catalog + canned artifact). Restore at spine unification.")
 def test_etag_if_none_match_304(monkeypatch, intake, site_env):
     _fake_broker(monkeypatch, intake)
     client = _client()
@@ -221,8 +225,7 @@ def test_etag_if_none_match_304(monkeypatch, intake, site_env):
     r = client.get("/api/site/demo-solve")
     assert r.status_code == 200
     etag = r.headers["ETag"]
-    assert etag == (f'"{r.json()["solve"]["intake_sha256"][:16]}'
-                    f'-{site_demo.SITE_TOOL["version"]}"')
+    assert etag == site_demo.solve_etag(r.json()["solve"])
     assert r.headers["Cache-Control"] == "public, max-age=300, stale-while-revalidate=3600"
 
     r304 = client.get("/api/site/demo-solve", headers={"If-None-Match": etag})
@@ -244,7 +247,6 @@ def test_etag_if_none_match_304(monkeypatch, intake, site_env):
 # --------------------------------------------------------------------------- #
 # 6. capabilities projection: NO params_schema, NO provenance
 # --------------------------------------------------------------------------- #
-@pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): this exercises a section-18 surface replaced by the section-2.1 lane (approvals resolve against session_store; site.py serves the reviewed builtin-only catalog + canned artifact). Restore at spine unification.")
 def test_capabilities_projection_is_stripped(site_env):
     client = _client()
     r = client.get("/api/site/capabilities")
@@ -262,7 +264,6 @@ def test_capabilities_projection_is_stripped(site_env):
 # --------------------------------------------------------------------------- #
 # 7. cache: broker -> memory-cache -> file-cache, identical solve every time
 # --------------------------------------------------------------------------- #
-@pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): this exercises a section-18 surface replaced by the section-2.1 lane (approvals resolve against session_store; site.py serves the reviewed builtin-only catalog + canned artifact). Restore at spine unification.")
 def test_cache_paths_and_endpoint_determinism(monkeypatch, intake, site_env):
     calls = _fake_broker(monkeypatch, intake)
     client = _client()
@@ -285,7 +286,6 @@ def test_cache_paths_and_endpoint_determinism(monkeypatch, intake, site_env):
 # --------------------------------------------------------------------------- #
 # 8. broker down -> §10 error envelope, HTTP 502
 # --------------------------------------------------------------------------- #
-@pytest.mark.skip(reason="PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): this exercises a section-18 surface replaced by the section-2.1 lane (approvals resolve against session_store; site.py serves the reviewed builtin-only catalog + canned artifact). Restore at spine unification.")
 def test_broker_down_is_502_broker_unreachable(monkeypatch, site_env):
     def down(*a, **k):
         raise BrokerUnreachable("broker at http://127.0.0.1:0 unreachable: test")
@@ -298,3 +298,70 @@ def test_broker_down_is_502_broker_unreachable(monkeypatch, site_env):
     assert body["ok"] is False
     assert body["error"]["error_code"] == "BROKER_UNREACHABLE"
     assert body["error"]["retryable"] is True
+
+
+def test_expiry_renews_once_and_rotates_etag(monkeypatch, intake, site_env):
+    clock = {"now": 1_800_000_001.0}
+    monkeypatch.setattr(site_demo, "_now_epoch", lambda: clock["now"])
+    calls = _fake_broker(monkeypatch, intake)
+
+    first = site_demo.get_demo_solve()
+    first_etag = site_demo.solve_etag(first)
+    clock["now"] += site_demo.SITE_SOLVE_REFRESH_SECONDS
+    second = site_demo.get_demo_solve()
+
+    assert calls["n"] == 2
+    assert first["receipt"]["computed_at"] != second["receipt"]["computed_at"]
+    assert first_etag != site_demo.solve_etag(second)
+    assert calls["event_keys"][0] != calls["event_keys"][1]
+
+
+def test_expired_file_survives_failed_renewal(monkeypatch, intake, site_env):
+    clock = {"now": 1_800_000_001.0}
+    monkeypatch.setattr(site_demo, "_now_epoch", lambda: clock["now"])
+    _fake_broker(monkeypatch, intake)
+    site_demo.get_demo_solve()
+    cache_path = site_demo.cache_file()
+    original = cache_path.read_bytes()
+
+    site_demo.clear_cache()
+    clock["now"] += site_demo.SITE_SOLVE_REFRESH_SECONDS
+
+    def down(*args, **kwargs):
+        raise BrokerUnreachable("broker unavailable during renewal")
+
+    monkeypatch.setattr(site_demo.broker_client, "run_via_broker", down)
+    response = _client().get("/api/site/demo-solve")
+
+    assert response.status_code == 502
+    assert response.json()["error"]["error_code"] == "BROKER_UNREACHABLE"
+    assert cache_path.read_bytes() == original
+    assert not list(cache_path.parent.glob(f".{cache_path.name}.*.tmp"))
+
+
+def test_concurrent_callers_share_one_renewal(monkeypatch, intake, site_env):
+    monkeypatch.setattr(site_demo, "_now_epoch", lambda: 1_800_000_001.0)
+    started = threading.Event()
+    release = threading.Event()
+    call_lock = threading.Lock()
+    calls = {"n": 0}
+
+    def slow_broker(tenant_id, tool, params, dwg, aps_live, timeout_s=None,
+                    ledger_event_key=None):
+        with call_lock:
+            calls["n"] += 1
+        started.set()
+        assert release.wait(timeout=5)
+        return tool_loader.run_tool_dynamic(
+            tool, intake, params, aps_live=False, da=None)
+
+    monkeypatch.setattr(site_demo.broker_client, "run_via_broker", slow_broker)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [pool.submit(site_demo.get_demo_solve) for _ in range(6)]
+        assert started.wait(timeout=5)
+        release.set()
+        solves = [future.result(timeout=10) for future in futures]
+
+    assert calls["n"] == 1
+    assert sum(solve["receipt"]["path"] == "broker" for solve in solves) == 1
+    assert all(solve["solve_id"] == solves[0]["solve_id"] for solve in solves)

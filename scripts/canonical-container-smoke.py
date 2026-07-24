@@ -7,6 +7,8 @@ for the separately running worker, and verifies the immutable terminal records.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 import time
 import uuid
@@ -14,9 +16,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 import platform_link
+from solver_adapters import autofill
 
 
 def main() -> None:
+    expected_revision = os.environ.get("AUTOFILL_SOLVER_REVISION", "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_revision):
+        raise RuntimeError(
+            "AUTOFILL_SOLVER_REVISION must identify the exact solver commit in this image")
+    descriptor = autofill.descriptor()
+    if descriptor["source_revision"] != expected_revision:
+        raise AssertionError(
+            "canonical worker descriptor does not match its pinned solver revision")
+    if not (Path(os.environ["AUTOFILL_SOLVER_ROOT"]) / autofill.SOURCE_ATTESTATION).is_file():
+        raise AssertionError("canonical worker image lacks a verified solver source attestation")
+
     store, db, _deps = platform_link._load_platform()
     canonical_jobs = platform_link._canonical_jobs_module()
     suffix = uuid.uuid4().hex
@@ -133,6 +147,7 @@ def main() -> None:
         "historyHash": result["history_hash"],
         "resultSha256": result["result_sha256"],
         "snapshotKinds": sorted(result["snapshotPins"]),
+        "solverRevision": descriptor["source_revision"],
         "counts": counts,
     }, sort_keys=True))
 
