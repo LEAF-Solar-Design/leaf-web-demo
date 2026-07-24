@@ -160,6 +160,71 @@ describe("mount your LLM — bring-your-own credential", () => {
     expect(grants[0]).toEqual({ kind: "oauth", oauthToken: "TENANT-LINKED-GRANT" });
   });
 
+  it("scrubs a SHORT credential out of the DURABLE transcript, not just the wire", async () => {
+    // sol-critic PR #117 round 3, blocker 1. The round-2 version of this test
+    // asserted only on adapter output, so it stayed green even with no scrub
+    // before store.appendEvent — which is the append that actually persists.
+    // ConverseLoop persists BEFORE it calls onEvent, and the leak is not limited
+    // to thrown errors: a plain text_delta can carry the value. Assert on the
+    // STORE first; that is the assertion that fails without the scrubbing store.
+    const SHORT = "short-key!";
+    const runner = new FakeConverseRunner();
+    const store = new FakeSessionStore();
+    const adapter = new SpineTurnAdapter({
+      oauth: new UnusedOAuthProvider(),
+      appRun: new FakeAppRunClient(),
+      gate: new FakeGateClient(),
+      store,
+      runnerFor: () => runner,
+    });
+
+    // A successful turn whose ordinary streamed text quotes the credential —
+    // the runner never throws, so its error wrapper is not involved at all.
+    const origRun = runner.run.bind(runner);
+    runner.run = async function* (runInput) {
+      yield { type: "text_delta", text: `you gave me ${SHORT}` };
+      yield* origRun(runInput);
+    };
+
+    const events = await drain(
+      adapter.runTurn(
+        turnInput({ text: "hi", credential_grant: { kind: "api_key", api_key: SHORT } }),
+      ),
+    );
+
+    expect(serializedState(store)).not.toContain(SHORT); // the durable transcript
+    expect(JSON.stringify(events)).not.toContain(SHORT); // and the wire
+    expect(serializedState(store)).toContain("[REDACTED]");
+  });
+
+  it("does not corrupt events when the credential is a JSON delimiter", async () => {
+    // sol-critic PR #117 round 3, blocker 2. `"` is a credential the app accepts
+    // today. Scrubbing by serialize-replace-reparse turned every delimiter into
+    // [REDACTED] and threw on parse; ConverseLoop swallows that callback error,
+    // so the turn died silently. Scrubbing string LEAVES cannot corrupt shape.
+    const QUOTE = '"';
+    const runner = new FakeConverseRunner();
+    const store = new FakeSessionStore();
+    const adapter = new SpineTurnAdapter({
+      oauth: new UnusedOAuthProvider(),
+      appRun: new FakeAppRunClient(),
+      gate: new FakeGateClient(),
+      store,
+      runnerFor: () => runner,
+    });
+
+    const events = await drain(
+      adapter.runTurn(
+        turnInput({ text: "hi", credential_grant: { kind: "api_key", api_key: QUOTE } }),
+      ),
+    );
+
+    // The turn still produced wire events (it did not die on a parse error)…
+    expect(events.length).toBeGreaterThan(0);
+    // …and every event is a well-formed object, not corrupted text.
+    for (const ev of events) expect(typeof ev.data).toBe("object");
+  });
+
   it("scrubs a SHORT credential the pattern redactor cannot match, on the wire", async () => {
     // sol-critic PR #117 round 2, blocker 1: the app accepts ANY non-empty
     // string as a BYO credential, so TOKENISH ( sk-ant-* | 40+ chars ) misses a

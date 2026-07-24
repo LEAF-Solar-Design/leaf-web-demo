@@ -35,6 +35,32 @@ export function redactSecrets(s: string, secrets: readonly (string | undefined)[
   return redactTokens(out);
 }
 
+/**
+ * Recursively scrub every STRING LEAF of a structure, leaving shape intact.
+ *
+ * Do NOT do this by serializing, replacing, and re-parsing: a credential is
+ * accepted as any non-empty string, so a secret of `"` would replace every JSON
+ * delimiter and make the result unparseable — which silently kills the turn
+ * rather than leaking it. Walking the values never touches delimiters and is
+ * correct for a secret containing quotes, backslashes, or newlines.
+ * (sol-critic PR #117 round 3, blocker 2.)
+ */
+export function scrubDeep<T>(value: T, secrets: readonly string[]): T {
+  if (!secrets.length) return value;
+  if (typeof value === "string") return redactSecrets(value, secrets) as unknown as T;
+  if (Array.isArray(value)) {
+    return value.map((v) => scrubDeep(v, secrets)) as unknown as T;
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = scrubDeep(v, secrets);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
 /** The secret values carried by a grant, for redactSecrets(). */
 export function grantSecrets(
   grant: { kind: "api_key"; apiKey: string } | { kind: "oauth"; oauthToken: string } | null | undefined,
