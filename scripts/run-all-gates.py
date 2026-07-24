@@ -180,7 +180,7 @@ def build_suites() -> List[Suite]:
         # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
         # by hand — same gap this branch closed for its own suites.
         Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
-              _py_pytest("tests/test_site.py"), 8),
+              _py_pytest("tests/test_site.py"), 12),
         # --- conversational agent spine (CONTRACT-ADDENDUM section 18) --- #
         # Separate suites for the same reason as the waves above: the gate/ledger
         # suites share on-disk approval + audit state and the router suites toggle
