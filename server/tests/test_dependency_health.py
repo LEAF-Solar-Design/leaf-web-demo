@@ -337,3 +337,17 @@ def test_ready_route_is_separate_from_unchanged_liveness(monkeypatch):
     paths = set(app.app.openapi()["paths"])
     assert "/api/ready" in paths
     assert "/api/projects" in paths
+
+
+def test_liveness_ignores_unsupported_shared_customization_while_disabled(
+        monkeypatch):
+    import app
+
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", "/data/state/customization.db")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+
+    response = app.health()
+
+    assert response["ok"] is True
+    assert response["n_tools"] > 0
