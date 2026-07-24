@@ -869,6 +869,26 @@ def test_byo_credential_malformed_is_rejected(client, wired):
     assert state.hits == 0
 
 
+def test_byo_credential_is_never_echoed_by_the_validation_handler(client, wired):
+    """A grant of the WRONG TYPE fails pydantic PARSING, which runs before the
+    router's own checks — so the TLS gate above cannot protect it. The 422 must
+    name the offending field without mirroring the token back, or the secret rides
+    into access logs and error monitoring (envelopes.py drops pydantic's `input`
+    for exactly this reason)."""
+    url, state = wired
+    sess = _new_session()
+    for bad in (_BYO_SECRET, [{"kind": "api_key", "api_key": _BYO_SECRET}]):
+        r = client.post(
+            f"/api/sessions/{sess['session_id']}/messages",
+            json={"text": "hi", "credential_grant": bad},
+            headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+        )
+        assert r.status_code == 422, r.text
+        assert _BYO_SECRET not in r.text, "the 422 body echoed the caller's credential"
+        assert "credential_grant" in r.text, "the 422 must still name the bad field"
+    assert state.hits == 0
+
+
 # --------------------------------------------------------------------------- #
 # script runner
 # --------------------------------------------------------------------------- #

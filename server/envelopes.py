@@ -170,7 +170,15 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_handler(request, exc):  # noqa: ANN001
-        return error_response(ErrorCode.BAD_PARAMS, str(exc.errors()), retryable=False, status_code=422)
+        # Never echo the REJECTED VALUE. pydantic carries it under `input`, and a
+        # bring-your-own credential (routers/sessions.py MessageRequest's
+        # `credential_grant`) is a validated field — so a wrongly-shaped grant
+        # would mirror the caller's token into this body, and from there into
+        # access logs and error monitoring. Body parsing runs BEFORE that router's
+        # TLS gate, so it would leak over plain http too. loc/msg/type are kept:
+        # they say WHICH field and WHY, never the secret itself.
+        safe = [{k: v for k, v in err.items() if k != "input"} for err in exc.errors()]
+        return error_response(ErrorCode.BAD_PARAMS, str(safe), retryable=False, status_code=422)
 
     @app.exception_handler(HTTPException)
     async def _http_exc_handler(request, exc):  # noqa: ANN001

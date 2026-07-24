@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from starlette.requests import Request
 
 _stdlib_platform.python_implementation()
 
@@ -23,6 +24,15 @@ from routers import agent as agent_router
 from routers import author as author_router
 from routers import sessions as sessions_router
 from routers import tools as tools_router
+
+
+def _plain_request() -> Request:
+    """Minimal ASGI scope for calling `post_message` directly (it takes the live
+    `Request` so a bring-your-own credential can be TLS-gated). This path never
+    sends a credential_grant, so the transport is never actually consulted."""
+    return Request({"type": "http", "method": "POST", "path": "/", "headers": [],
+                    "query_string": b"", "scheme": "http",
+                    "server": ("testserver", 80)})
 
 
 def _assert_policy_unavailable(response, required: str) -> None:
@@ -51,7 +61,8 @@ def test_invalid_policy_returns_the_503_envelope_from_all_unfixed_paths(monkeypa
 
     monkeypatch.setattr(sessions_router, "_require_owned_session", lambda *_args: {})
     sessions_response = sessions_router.post_message(
-        "session-a", sessions_router.MessageRequest(text="hello"), tenant="tenant-a")
+        "session-a", sessions_router.MessageRequest(text="hello"), _plain_request(),
+        tenant="tenant-a")
 
     monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "dispatch-secret")
     agent_response = agent_router.internal_gate(
