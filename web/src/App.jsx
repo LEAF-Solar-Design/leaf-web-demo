@@ -26,7 +26,8 @@ import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } fro
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import {
-  confirmRunIntent, createCatalogToolSnapshot, createRunIntentState, dismissRunIntent, stageRunIntent,
+  confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
+  dismissRunIntent, stageRunIntent,
 } from './runIntent.js'
 import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
@@ -960,13 +961,14 @@ export default function App() {
       : (params || {})
   }, [selectedHandle])
 
-  const catalogRunContext = useMemo(() => ({
+  const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId: tenant || config.tenant,
-    orgId: (openProjectId && orgId) ? orgId : null,
+    orgId,
     projectId: openProjectId || null,
-    drawingId: drawingState?.drawing_id || DEFAULT_DRAWING_ID,
-    drawingVersion: drawingState?.version ?? null,
-  }), [tenant, orgId, openProjectId, drawingState])
+    workspace,
+    drawingState,
+    fallbackDrawingId: DEFAULT_DRAWING_ID,
+  }), [tenant, orgId, openProjectId, workspace, drawingState])
   const catalogRunContextRef = useRef(catalogRunContext)
   catalogRunContextRef.current = catalogRunContext
 
@@ -977,6 +979,10 @@ export default function App() {
     const catalogTool = tools.find((candidate) => candidate.name === tool?.name)
     if (!catalogTool) return
     if (!mock && !tenant) return
+    if (!catalogRunContextRef.current) {
+      setRunErr('This workspace has no canonical drawing version to run. Import a drawing first.')
+      return
+    }
     const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
     if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
     const prepared = prepareRunParams(catalogTool, params)

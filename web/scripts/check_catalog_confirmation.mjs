@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { runMock } from '../src/mock/mockEngine.js'
 import * as versions from '../src/mock/mockVersions.js'
 import {
-  confirmRunIntent, createCatalogToolSnapshot, createRunIntentState, dismissRunIntent, stageRunIntent,
+  confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
+  createRunSubmissionRequest, dismissRunIntent, stageRunIntent,
 } from '../src/runIntent.js'
 
 function assert(condition, message) {
@@ -106,6 +107,63 @@ assert(app.includes('const latestTools = await getTools(false)'), 'live confirma
 assert(app.includes('idempotencyKey: confirmed.execution.intentId'), 'confirmed intent ID is not sent to the API seam')
 assert(app.includes('runToolAsync(tool, merged, executionContext.drawingId'), 'confirmed drawing is not used for execution')
 assert(app.includes('dwgVersion: executionContext.drawingVersion'), 'confirmed drawing version is not used for execution')
-assert(api.includes("linkHeaders['Idempotency-Key'] = opts.idempotencyKey"), 'run submission omits its idempotency key')
+assert(api.includes('createRunSubmissionRequest(toolName, params, dwg, opts)'),
+  'run submission bypasses the tested request-shape authority')
+
+const canonicalContext = createCatalogRunContext({
+  tenantId: 'tenant-canonical',
+  orgId: '11111111-1111-4111-8111-111111111111',
+  projectId: '22222222-2222-4222-8222-222222222222',
+  workspace: {
+    drawing_versions: [
+      { version_id: '33333333-3333-4333-8333-333333333333', seq: 1 },
+      { version_id: '44444444-4444-4444-8444-444444444444', seq: 2 },
+    ],
+  },
+  drawingState: { drawing_id: 'legacy-drawing', version: 7 },
+  fallbackDrawingId: 'rooftop_demo',
+})
+assert(canonicalContext.drawingId === '44444444-4444-4444-8444-444444444444',
+  'canonical context did not select the latest immutable version UUID')
+assert(canonicalContext.drawingVersion === null,
+  'canonical context retained a legacy integer drawing version')
+const selectedContext = createCatalogRunContext({
+  tenantId: canonicalContext.tenantId,
+  orgId: canonicalContext.orgId,
+  projectId: canonicalContext.projectId,
+  workspace: { drawing_versions: [
+    { version_id: '33333333-3333-4333-8333-333333333333', seq: 1 },
+    { version_id: '44444444-4444-4444-8444-444444444444', seq: 2 },
+  ] },
+  selectedVersionId: '33333333-3333-4333-8333-333333333333',
+  fallbackDrawingId: 'rooftop_demo',
+})
+assert(selectedContext.drawingId === '33333333-3333-4333-8333-333333333333',
+  'canonical context ignored the selected immutable version UUID')
+assert(createCatalogRunContext({
+  tenantId: canonicalContext.tenantId,
+  orgId: canonicalContext.orgId,
+  projectId: canonicalContext.projectId,
+  workspace: { drawing_versions: [] },
+  fallbackDrawingId: 'rooftop_demo',
+}) === null, 'missing canonical drawing version did not fail closed')
+
+const runRequest = createRunSubmissionRequest('string-autofill-opt', { groups: [] }, canonicalContext.drawingId, {
+  orgId: canonicalContext.orgId,
+  projectId: canonicalContext.projectId,
+  dwgVersion: canonicalContext.drawingVersion ?? undefined,
+  idempotencyKey: 'catalog-session:1',
+})
+const runBody = runRequest.body
+const runHeaders = runRequest.headers
+assert(runBody.dwg === '44444444-4444-4444-8444-444444444444',
+  'canonical request did not send the immutable version UUID as dwg')
+assert(!Object.hasOwn(runBody, 'dwg_version'),
+  'canonical request mixed the legacy integer version into its payload')
+assert(runHeaders['X-Org-Id'] === canonicalContext.orgId
+  && runHeaders['X-Project-Id'] === canonicalContext.projectId,
+  'canonical request omitted its confirmed org/project binding')
+assert(runHeaders['Idempotency-Key'] === 'catalog-session:1',
+  'canonical request omitted the confirmed intent idempotency key')
 
 console.log('CATALOG_CONFIRMATION_OK')

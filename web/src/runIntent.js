@@ -28,6 +28,51 @@ export function normalizeRunParams(params) {
   return freeze(normalize(params || {}))
 }
 
+export function createCatalogRunContext({
+  tenantId, orgId = null, projectId = null, workspace = null,
+  selectedVersionId = null, drawingState = null, fallbackDrawingId,
+}) {
+  if (projectId) {
+    const versions = (workspace?.drawing_versions || [])
+      .filter((version) => typeof version?.version_id === 'string' && version.version_id)
+    const selected = selectedVersionId
+      ? versions.find((version) => version.version_id === selectedVersionId)
+      : null
+    const latest = selected || [...versions].sort((left, right) => {
+      const seqDelta = Number(right.seq || 0) - Number(left.seq || 0)
+      if (seqDelta) return seqDelta
+      return String(right.version_id).localeCompare(String(left.version_id))
+    })[0]
+    if (!orgId || !latest) return null
+    return freeze(normalize({
+      tenantId, orgId, projectId,
+      drawingId: latest.version_id,
+      drawingVersion: null,
+    }))
+  }
+  return freeze(normalize({
+    tenantId, orgId: null, projectId: null,
+    drawingId: drawingState?.drawing_id || fallbackDrawingId,
+    drawingVersion: drawingState?.version ?? null,
+  }))
+}
+
+export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
+  const headers = {}
+  if (opts.orgId) headers['X-Org-Id'] = opts.orgId
+  if (opts.projectId) headers['X-Project-Id'] = opts.projectId
+  if (opts.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey
+  return freeze({
+    headers,
+    body: {
+      tool: toolName,
+      params: params || {},
+      dwg,
+      ...(opts.dwgVersion != null ? { dwg_version: opts.dwgVersion } : {}),
+    },
+  })
+}
+
 function stableDigest(value) {
   const json = JSON.stringify(value)
   let hash = 0x811c9dc5
