@@ -115,6 +115,7 @@ const canonicalContext = createCatalogRunContext({
   orgId: '11111111-1111-4111-8111-111111111111',
   projectId: '22222222-2222-4222-8222-222222222222',
   workspace: {
+    project: { project_id: '22222222-2222-4222-8222-222222222222' },
     drawing_versions: [
       { version_id: '33333333-3333-4333-8333-333333333333', seq: 1 },
       { version_id: '44444444-4444-4444-8444-444444444444', seq: 2 },
@@ -131,7 +132,7 @@ const selectedContext = createCatalogRunContext({
   tenantId: canonicalContext.tenantId,
   orgId: canonicalContext.orgId,
   projectId: canonicalContext.projectId,
-  workspace: { drawing_versions: [
+  workspace: { project: { project_id: canonicalContext.projectId }, drawing_versions: [
     { version_id: '33333333-3333-4333-8333-333333333333', seq: 1 },
     { version_id: '44444444-4444-4444-8444-444444444444', seq: 2 },
   ] },
@@ -144,9 +145,19 @@ assert(createCatalogRunContext({
   tenantId: canonicalContext.tenantId,
   orgId: canonicalContext.orgId,
   projectId: canonicalContext.projectId,
-  workspace: { drawing_versions: [] },
+  workspace: { project: { project_id: canonicalContext.projectId }, drawing_versions: [] },
   fallbackDrawingId: 'rooftop_demo',
 }) === null, 'missing canonical drawing version did not fail closed')
+assert(createCatalogRunContext({
+  tenantId: canonicalContext.tenantId,
+  orgId: canonicalContext.orgId,
+  projectId: canonicalContext.projectId,
+  workspace: {
+    project: { project_id: '55555555-5555-4555-8555-555555555555' },
+    drawing_versions: [{ version_id: canonicalContext.drawingId, seq: 2 }],
+  },
+  fallbackDrawingId: 'rooftop_demo',
+}) === null, 'stale cross-project workspace hydration did not fail closed')
 
 const runRequest = createRunSubmissionRequest('string-autofill-opt', { groups: [] }, canonicalContext.drawingId, {
   orgId: canonicalContext.orgId,

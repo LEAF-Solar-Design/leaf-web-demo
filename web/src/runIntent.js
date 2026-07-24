@@ -33,6 +33,8 @@ export function createCatalogRunContext({
   selectedVersionId = null, drawingState = null, fallbackDrawingId,
 }) {
   if (projectId) {
+    const workspaceProjectId = workspace?.project?.project_id || workspace?.project?.id || null
+    if (!orgId || workspaceProjectId !== projectId) return null
     const versions = (workspace?.drawing_versions || [])
       .filter((version) => typeof version?.version_id === 'string' && version.version_id)
     const selected = selectedVersionId
@@ -43,7 +45,7 @@ export function createCatalogRunContext({
       if (seqDelta) return seqDelta
       return String(right.version_id).localeCompare(String(left.version_id))
     })[0]
-    if (!orgId || !latest) return null
+    if (!latest) return null
     return freeze(normalize({
       tenantId, orgId, projectId,
       drawingId: latest.version_id,
@@ -62,7 +64,7 @@ export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
   if (opts.orgId) headers['X-Org-Id'] = opts.orgId
   if (opts.projectId) headers['X-Project-Id'] = opts.projectId
   if (opts.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey
-  return freeze({
+  return {
     headers,
     body: {
       tool: toolName,
@@ -70,7 +72,7 @@ export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
       dwg,
       ...(opts.dwgVersion != null ? { dwg_version: opts.dwgVersion } : {}),
     },
-  })
+  }
 }
 
 function stableDigest(value) {
