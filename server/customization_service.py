@@ -11,6 +11,7 @@ import hmac
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +25,7 @@ from customization_authority import (
     HmacConfirmationSigner, PublishRequest, StaffAuthority, StagedChange,
     TenantBinding,
 )
-from customization_flags import enabled
+from customization_flags import RolloutMode, enabled, mode as customization_mode
 from customization_models import ChangeSet, ChangeSetNotFoundError, ChangeState
 from customization_store import SQLiteCustomizationStore
 from platform_release_policy import PlatformReleasePolicyError, classify_path, load_policy
@@ -46,11 +47,36 @@ def database_path() -> Path:
     return Path(raw) if raw else DEFAULT_DB
 
 
+def _activation_requested() -> bool:
+    return any(
+        customization_mode(name) is not RolloutMode.OFF
+        for name in ("LEAF_CUSTOMIZATION_R5_MODE", "LEAF_CUSTOMIZATION_R6_MODE")
+    )
+
+
+def _shared_sqlite_path(path: Path) -> bool:
+    """Identify the deployed shared EFS authority path.
+
+    SQLite cannot coordinate overlapping ECS tasks on EFS. Customization stays
+    unavailable there until the authority moves to PostgreSQL.
+    """
+    normalized = str(path).replace("\\", "/").rstrip("/")
+    return normalized == "/data/state" or normalized.startswith("/data/state/")
+
+
 def _secret(name: str) -> bytes:
     value = os.environ.get(name, "").strip()
     if not value:
         raise CustomizationServiceError("customization_not_configured", 503)
     return value.encode("utf-8")
+
+
+def _tenant_id(value: Any) -> str:
+    """Return the one canonical tenant identity used by flags, stores and paths."""
+    tenant_id = str(value).strip()
+    if not is_valid_tenant_id(tenant_id):
+        raise CustomizationServiceError("tenant_identity_invalid", 403)
+    return tenant_id
 
 
 def _git(bare: Path, *args: str) -> str:
@@ -77,8 +103,7 @@ def _git_blob(bare: Path, object_name: str) -> bytes:
 
 
 def _bare_repo(tenant_id: str) -> Path:
-    if not is_valid_tenant_id(str(tenant_id)):
-        raise CustomizationServiceError("tenant_repository_unavailable", 403)
+    tenant_id = _tenant_id(tenant_id)
     base = (
         os.environ.get("LEAF_TENANT_GIT_DIR", "").strip()
         or os.environ.get("LEAF_TENANT_BARE_BASE", "").strip()
@@ -98,9 +123,9 @@ def _bare_repo(tenant_id: str) -> Path:
 
 
 def _binding(tenant: Any) -> TenantBinding:
-    tenant_id = str(tenant)
+    tenant_id = _tenant_id(tenant)
     if not deps.auth_live():
-        return TenantBinding(tenant_id, f"auth-off:{tenant_id}", "owner", True)
+        raise CustomizationServiceError("customization_auth_required", 503)
     subject = getattr(tenant, "subject", None)
     if not subject:
         raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
@@ -152,6 +177,10 @@ class CustomizationService:
 
     @classmethod
     def configured(cls) -> "CustomizationService":
+        if _activation_requested() and _shared_sqlite_path(database_path()):
+            raise CustomizationServiceError(
+                "customization_shared_sqlite_unsupported", 503
+            )
         store = SQLiteCustomizationStore(database_path())
         store.initialize()
         return cls(store)
@@ -181,7 +210,7 @@ class CustomizationService:
         return next(iter(policy.releases.values()))
 
     def stage(self, *, tenant: Any, description: str, mode: str, idempotency_key: str) -> dict[str, Any]:
-        tenant_id = str(tenant)
+        tenant_id = _tenant_id(tenant)
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
         if mode != "build" or not isinstance(description, str) or not description.strip():
@@ -322,8 +351,13 @@ class CustomizationService:
         for entry in (item for item in tree.split("\0") if item):
             metadata, _, path = entry.partition("\t")
             mode = metadata.split(" ", 1)[0]
-            if path in changed and mode == "120000":
-                raise CustomizationServiceError("staged_symlink_denied", 403)
+            if path in changed and mode not in {"100644", "100755"}:
+                code = (
+                    "staged_symlink_denied"
+                    if mode == "120000"
+                    else "staged_file_mode_denied"
+                )
+                raise CustomizationServiceError(code, 403)
         registry_raw = _git_blob(
             bare, f"{change.staged_commit}:registry.json"
         ).decode("utf-8")
@@ -365,6 +399,9 @@ class CustomizationService:
                 raise CustomizationServiceError("invalid_staged_tool", 422)
 
     def confirm(self, *, tenant_id: str, change_set_id: str) -> dict[str, Any]:
+        tenant_id = _tenant_id(tenant_id)
+        if not deps.auth_live():
+            raise CustomizationServiceError("customization_auth_required", 503)
         if not enabled(6, tenant_id):
             raise CustomizationServiceError("customization_publish_disabled", 404)
         change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change_set_id)
@@ -385,7 +422,7 @@ class CustomizationService:
     def pending_confirmation(
         self, *, tenant: Any, receipt: Mapping[str, Any]
     ) -> dict[str, Any]:
-        tenant_id = str(tenant)
+        tenant_id = _tenant_id(tenant)
         if not enabled(6, tenant_id):
             raise CustomizationServiceError("customization_publish_disabled", 404)
         binding = _binding(tenant)
@@ -408,7 +445,7 @@ class CustomizationService:
         return {"confirmation_id": record["confirmation_id"]}
 
     def publish(self, *, tenant: Any, request: PublishRequest, confirmation_id: str, idempotency_key: str) -> dict[str, Any]:
-        tenant_id = str(tenant)
+        tenant_id = _tenant_id(tenant)
         if not enabled(6, tenant_id):
             raise CustomizationServiceError("customization_publish_disabled", 404)
         binding = _binding(tenant)
@@ -431,29 +468,21 @@ class CustomizationService:
             raise CustomizationServiceError("publish_not_available")
         self._verify_catalog(tenant_id, request.staged_commit, request.catalog_digest)
         if change.state is ChangeState.PUBLISHING:
-            durable = self.store.get_confirmation(confirmation_id=confirmation_id)
-            expected = {
-                "tenant_id": tenant_id,
-                "change_set_id": request.change_set_id,
-                "staged_commit": request.staged_commit,
-                "catalog_digest": request.catalog_digest,
-                "platform_release": request.platform_release,
-                "workspace_contract_digest": request.workspace_contract_digest,
-            }
-            payload = durable.get("payload") if durable else None
-            if (
-                not durable
-                or durable.get("consumed") is not True
-                or not isinstance(payload, Mapping)
-                or any(payload.get(key) != value for key, value in expected.items())
-                or payload.get("approver_subject") != change.approver_subject
-                or not isinstance(durable.get("signature"), str)
-            ):
+            try:
+                confirmation, signature = (
+                    self._authority().verify_publish_confirmation(
+                        tenant_id=tenant_id,
+                        request=request,
+                        confirmation_id=confirmation_id,
+                        allow_consumed=True,
+                    )
+                )
+            except AuthorityError as exc:
+                raise CustomizationServiceError(
+                    "publish_recovery_authority_invalid", 403
+                ) from exc
+            if confirmation.approver_subject != change.approver_subject:
                 raise CustomizationServiceError("publish_recovery_authority_invalid", 403)
-            confirmation = SimpleNamespace(
-                approver_subject=payload["approver_subject"]
-            )
-            signature = durable["signature"]
         else:
             confirmation, signature = self._authority().verify_publish_confirmation(
                 tenant_id=tenant_id,
@@ -503,6 +532,9 @@ class CustomizationService:
         return commit
 
     def record_staged_callback(self, *, tenant_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
+        tenant_id = _tenant_id(tenant_id)
+        if not deps.auth_live():
+            raise CustomizationServiceError("customization_auth_required", 503)
         change_id = receipt.get("change_set_id")
         if not isinstance(change_id, str):
             raise CustomizationServiceError("invalid_staged_receipt", 422)
@@ -537,6 +569,9 @@ class CustomizationService:
         receipt: Mapping[str, Any],
         expected_main_sha: str,
     ) -> dict[str, Any]:
+        tenant_id = _tenant_id(tenant_id)
+        if not deps.auth_live():
+            raise CustomizationServiceError("customization_auth_required", 503)
         change_id = receipt.get("change_set_id")
         if not isinstance(change_id, str):
             raise CustomizationServiceError("invalid_staged_receipt", 422)
@@ -633,7 +668,7 @@ class CustomizationService:
         }
 
     def rollback(self, *, tenant: Any, change_set_id: str, idempotency_key: str) -> dict[str, Any]:
-        tenant_id = str(tenant)
+        tenant_id = _tenant_id(tenant)
         if not enabled(6, tenant_id):
             raise CustomizationServiceError("customization_rollback_disabled", 404)
         binding = _binding(tenant)
@@ -674,7 +709,12 @@ class CustomizationService:
 
 
 def effective_catalog_dir(tenant_id: str) -> Path | None:
-    """Materialize the exact durable pin, never a mutable main checkout."""
+    """Materialize the durable pin, even after rollout flags are turned off.
+
+    R5/R6 flags control mutation. Once a catalog is published, its durable pin
+    remains runtime authority so a flag change cannot expose mutable ``main``.
+    """
+    tenant_id = _tenant_id(tenant_id)
     try:
         path = database_path()
         if not path.exists():
@@ -707,20 +747,30 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
             raise CustomizationServiceError("effective_catalog_unavailable", 503) from exc
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["git", "--git-dir", str(bare), "worktree", "add", "--detach", str(target), pin.catalog_commit],
-                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-        observed = subprocess.run(
-            ["git", "-C", str(target), "rev-parse", "HEAD"],
-            check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=10,
-        ).stdout.strip()
+            try:
+                subprocess.run(["git", "-c", "core.autocrlf=false", "--git-dir", str(bare), "worktree", "add", "--detach", str(target), pin.catalog_commit],
+                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+            except subprocess.SubprocessError:
+                # Another worker may have won the deterministic-path race.
+                # Accept only the fully verified target below.
+                if not target.exists():
+                    raise
+        observed = ""
+        for attempt in range(10):
+            try:
+                observed = subprocess.run(
+                    ["git", "-C", str(target), "rev-parse", "HEAD"],
+                    check=True, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, timeout=10,
+                ).stdout.strip()
+                materialized_registry = (target / "registry.json").read_bytes()
+                break
+            except (OSError, subprocess.SubprocessError):
+                if attempt == 9:
+                    raise
+                time.sleep(0.05)
         if observed != pin.catalog_commit:
             raise CustomizationServiceError("effective_catalog_commit_mismatch", 503)
-        materialized_registry = (
-            (target / "registry.json").read_text(encoding="utf-8")
-            .replace("\r\n", "\n")
-            .encode("utf-8")
-        )
         if hashlib.sha256(materialized_registry).hexdigest() != pin.catalog_digest:
             raise CustomizationServiceError("effective_catalog_digest_mismatch", 503)
         return target

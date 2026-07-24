@@ -81,6 +81,8 @@ def initialize_customization_store() -> None:
         and customization_mode("LEAF_CUSTOMIZATION_R6_MODE") is RolloutMode.OFF
     ):
         return
+    if not deps.auth_live():
+        raise RuntimeError("customization requires live authentication")
     CustomizationService.configured()
 
 # §19: byte-counting wall on the upload route — bounds multipart pre-parse

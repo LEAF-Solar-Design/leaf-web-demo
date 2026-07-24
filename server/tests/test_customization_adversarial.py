@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -129,6 +131,26 @@ def test_git_symlink_is_rejected_without_creating_an_os_symlink(tmp_path, monkey
         CustomizationService._verify_stage_policy(attacked_change, {"tool": tool})
 
 
+def test_gitlink_mode_is_rejected(tmp_path, monkeypatch):
+    source, bare_base, base, base_tool = repository(tmp_path)
+    monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(bare_base))
+    change, tool = staged_change(source, bare_base, base, base_tool)
+    git(
+        source, "update-index", "--add", "--cacheinfo",
+        f"160000,{base},tools/new-tool/gitlink",
+    )
+    git(source, "commit", "-m", "gitlink attack")
+    attacked = git(source, "rev-parse", "HEAD")
+    git(
+        source, "push", str(bare_base / "tenant-a.git"),
+        f"{attacked}:refs/leaf/changes/gitlink",
+    )
+    attacked_change = ChangeSet(**{**change.__dict__, "staged_commit": attacked})
+
+    with pytest.raises(CustomizationServiceError, match="staged_file_mode_denied"):
+        CustomizationService._verify_stage_policy(attacked_change, {"tool": tool})
+
+
 def test_materialized_runtime_rejects_tampering(tmp_path, monkeypatch):
     source, bare_base, base, _ = repository(tmp_path)
     registry = subprocess.run(
@@ -180,8 +202,20 @@ def test_materialized_runtime_rejects_tampering(tmp_path, monkeypatch):
         expected_version=publishing.version, idempotency_key="published",
         approver_subject="auth0|approver",
     )
-    path = effective_catalog_dir("tenant-a")
+    barrier = threading.Barrier(2)
+
+    def materialize():
+        barrier.wait()
+        return effective_catalog_dir("tenant-a")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        paths = list(pool.map(lambda _: materialize(), range(2)))
+    path = paths[0]
     assert path is not None
+    assert paths == [path, path]
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    assert effective_catalog_dir("tenant-a") == path
     (path / "registry.json").write_text('{"tools":[]}\n', encoding="utf-8")
     with pytest.raises(CustomizationServiceError, match="effective_catalog_digest_mismatch"):
         effective_catalog_dir("tenant-a")

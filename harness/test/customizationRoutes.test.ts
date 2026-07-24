@@ -28,12 +28,14 @@ function git(dir: string, args: string[]): string {
 class Coordination implements CustomizationCoordination {
   staged: StagedCustomizationReceipt | null = null;
   approved = false;
+  authorizeCalls = 0;
 
   async recordStaged(receipt: StagedCustomizationReceipt): Promise<void> {
     this.staged = receipt;
   }
 
   async authorizePublish(receipt: StagedCustomizationReceipt, expectedMainSha: string): Promise<void> {
+    this.authorizeCalls += 1;
     if (!this.approved || !this.staged || expectedMainSha !== receipt.base_commit ||
       JSON.stringify(this.staged) !== JSON.stringify(receipt)) {
       throw new Error("publish requires the approved exact staged receipt");
@@ -85,6 +87,27 @@ describe("customization routes", () => {
     expect(git(bareDir, ["rev-parse", "refs/heads/main"])).toBe(main);
   });
 
+  it("stops staging before any repository or coordination mutation when authored execution is off", async () => {
+    const main = git(bareDir, ["rev-parse", "refs/heads/main"]);
+    const previous = process.env.LEAF_AUTHORED_EXECUTION;
+    process.env.LEAF_AUTHORED_EXECUTION = "0";
+    try {
+      const response = await fetch(`${baseUrl}/author/stage`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-harness-secret": SECRET },
+        body: JSON.stringify(stageBody()),
+      });
+      expect(response.status).toBe(403);
+      expect(coordination.staged).toBeNull();
+      expect(git(bareDir, ["rev-parse", "refs/heads/main"])).toBe(main);
+      expect(git(bareDir, ["for-each-ref", "--format=%(refname)", "refs/leaf/changes"]))
+        .toBe("");
+    } finally {
+      if (previous === undefined) delete process.env.LEAF_AUTHORED_EXECUTION;
+      else process.env.LEAF_AUTHORED_EXECUTION = previous;
+    }
+  });
+
   it("stages through AuthorLoop without moving main", async () => {
     const main = git(bareDir, ["rev-parse", "refs/heads/main"]);
     const response = await fetch(`${baseUrl}/author/stage`, {
@@ -125,5 +148,33 @@ describe("customization routes", () => {
     });
     expect(published.status).toBe(200);
     expect(git(bareDir, ["rev-parse", "refs/heads/main"])).toBe(staged.receipt.staged_commit);
+  });
+
+  it("stops publish before authorization or main mutation when authored execution is off", async () => {
+    const stagedResponse = await fetch(`${baseUrl}/author/stage`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": SECRET },
+      body: JSON.stringify(stageBody()),
+    });
+    const staged = await stagedResponse.json() as { receipt: StagedCustomizationReceipt };
+    const main = staged.receipt.base_commit;
+    coordination.approved = true;
+    const previous = process.env.LEAF_AUTHORED_EXECUTION;
+    process.env.LEAF_AUTHORED_EXECUTION = "0";
+    try {
+      const response = await fetch(`${baseUrl}/author/publish`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-harness-secret": SECRET },
+        body: JSON.stringify({ receipt: staged.receipt, expectedMainSha: main }),
+      });
+      expect(response.status).toBe(403);
+      expect(coordination.authorizeCalls).toBe(0);
+      expect(git(bareDir, ["rev-parse", "refs/heads/main"])).toBe(main);
+      expect(git(bareDir, ["rev-parse", `refs/leaf/changes/${CHANGE}`]))
+        .toBe(staged.receipt.staged_commit);
+    } finally {
+      if (previous === undefined) delete process.env.LEAF_AUTHORED_EXECUTION;
+      else process.env.LEAF_AUTHORED_EXECUTION = previous;
+    }
   });
 });

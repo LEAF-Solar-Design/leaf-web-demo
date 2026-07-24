@@ -65,28 +65,29 @@ def resolve_tenant_repo_dir(tenant_id: Optional[str]) -> Optional[Path]:
 
     A ``None``/empty tenant_id is treated as the demo tenant (legacy no-tenant calls).
     """
+    tid = str(tenant_id).strip() if tenant_id is not None else ""
+    if not tid:
+        tid = DEFAULT_TENANT
+    comp = _safe_component(tid)
+    if comp is None:
+        return None
+    tid = comp
+
     # An effective pin, when present, is the only runtime authority. The
     # import is lazy to avoid a dependency cycle during startup. No pin keeps
     # the legacy mutable-checkout behavior exactly as before.
     from customization_service import effective_catalog_dir
-    pinned = effective_catalog_dir(str(tenant_id or DEFAULT_TENANT))
+    pinned = effective_catalog_dir(tid)
     if pinned is not None:
         return pinned
 
     single = os.environ.get("LEAF_TENANT_REPO", "").strip()
     base = os.environ.get("LEAF_TENANTS_DIR", "").strip()
 
-    tid = str(tenant_id).strip() if tenant_id is not None else ""
-    if not tid:
-        tid = DEFAULT_TENANT
-
     if base:  # multi-tenant mode
         if tid == DEFAULT_TENANT and single:
             return Path(single)  # demo-tenant back-compat override
-        comp = _safe_component(tid)
-        if comp is None:
-            return None
-        return Path(base) / comp
+        return Path(base) / tid
 
     if single:  # legacy single-repo mode: one repo for all tenants (wave-3 back-compat)
         return Path(single)

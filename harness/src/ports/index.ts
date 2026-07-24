@@ -251,6 +251,8 @@ export interface TenantRepoProvider {
     tenantId: string,
     action: (runFenced: TenantMutationFence) => Promise<T>,
   ): Promise<T>;
+  /** Read one committed snapshot while excluding a tenant writer. */
+  withTenantReadLease?<T>(tenantId: string, action: () => Promise<T>): Promise<T>;
 }
 
 /** Immutable fields bound into the leaf.customization.v1 staged receipt. */

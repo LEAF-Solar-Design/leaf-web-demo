@@ -85,6 +85,13 @@ export class FakeTenantRepoProvider implements TenantRepoProvider {
     return action(async (operation) => operation());
   }
 
+  async withTenantReadLease<T>(
+    _tenantId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    return action();
+  }
+
   async bare(tenantId: string): Promise<TenantBareRepo> {
     const existing = this.bareRepos.get(tenantId);
     if (existing) return existing;

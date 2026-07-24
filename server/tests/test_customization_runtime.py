@@ -102,6 +102,52 @@ def test_off_rollout_flags_do_not_initialize_customization_sqlite(tmp_path, monk
     assert not database.exists()
 
 
+@pytest.mark.parametrize("runtime", ["production", "staging"])
+def test_deployed_customization_refuses_auth_off(monkeypatch, runtime):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", runtime)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+
+    with pytest.raises(
+        RuntimeError, match="customization requires live authentication"
+    ):
+        app.initialize_customization_store()
+
+
+def test_rollout_off_stage_route_does_not_open_store(monkeypatch):
+    calls = []
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(lambda cls: calls.append(True)),
+    )
+
+    response = author_router.stage(
+        author_router.StageRequest(
+            description="make a tool", mode="build", idempotency_key="request"
+        ),
+        tenant="tenant-a",
+    )
+
+    assert response.status_code == 404
+    assert calls == []
+
+
+def test_shared_efs_sqlite_cannot_activate(monkeypatch):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", "/data/state/customization.db")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+
+    with pytest.raises(
+        CustomizationServiceError,
+        match="customization_shared_sqlite_unsupported",
+    ):
+        CustomizationService.configured()
+
+
 def test_durable_confirmation_is_single_use(tmp_path):
     store = SQLiteCustomizationStore(tmp_path / "customization.db")
     store.put_confirmation(confirmation_id="confirmation", payload={"bound": True}, signature="sig")
@@ -226,6 +272,7 @@ def test_independent_confirmation_rejects_the_harness_dispatch_secret(
     monkeypatch.setenv("LEAF_CUSTOMIZATION_APPROVAL_SECRET", "approval-secret")
     monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
     monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(
         author_router.CustomizationService,
         "configured",
@@ -247,6 +294,51 @@ def test_independent_confirmation_rejects_the_harness_dispatch_secret(
     assert denied.status_code == 403
     assert approved == {"confirmation_id": "ok"}
     assert calls == [{"tenant_id": "tenant-a", "change_set_id": "change"}]
+
+
+def test_independent_confirmation_rejects_non_ascii_secret(monkeypatch):
+    calls = []
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_APPROVAL_SECRET", "approval-secret")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(
+            lambda cls: SimpleNamespace(
+                confirm=lambda **kwargs: calls.append(kwargs)
+            )
+        ),
+    )
+
+    response = author_router.confirm(
+        author_router.InternalConfirmRequest(change_set_id="change"),
+        x_tenant_id="tenant-a",
+        x_approval_secret="approval-secrét",
+    )
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+def test_tenant_identity_is_trimmed_once_before_flags_and_storage(
+    tmp_path, monkeypatch
+):
+    service = CustomizationService(SQLiteCustomizationStore(tmp_path / "customization.db"))
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+
+    with pytest.raises(CustomizationServiceError, match="customization_stage_disabled"):
+        service.stage(
+            tenant=" tenant-a ", description="make a tool", mode="build",
+            idempotency_key="request-a",
+        )
+
+    with pytest.raises(CustomizationServiceError, match="tenant_identity_invalid"):
+        service.stage(
+            tenant="../tenant-a", description="make a tool", mode="build",
+            idempotency_key="request-b",
+        )
 
 
 def test_live_author_fails_closed_when_r5_is_disabled(monkeypatch):

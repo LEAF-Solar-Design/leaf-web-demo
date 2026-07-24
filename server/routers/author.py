@@ -24,6 +24,7 @@ from customization_service import CustomizationServiceError, CustomizationServic
 from customization_flags import enabled as customization_enabled
 from deps import fb
 from envelopes import error_obj, with_envelope_fields
+from tenant_id_validator import is_valid_tenant_id
 from tool_validate import static_scan
 
 router = APIRouter()
@@ -241,16 +242,36 @@ def _customization_error(exc: CustomizationServiceError) -> JSONResponse:
     }))
 
 
+def _customization_gate(wave: int, tenant: Any) -> JSONResponse | None:
+    """Reject unsafe or disabled lifecycle calls before opening SQLite."""
+    if not deps.auth_live():
+        return _customization_error(
+            CustomizationServiceError("customization_auth_required", 503)
+        )
+    tenant_id = str(tenant).strip()
+    if not is_valid_tenant_id(tenant_id):
+        return _customization_error(
+            CustomizationServiceError("tenant_identity_invalid", 403)
+        )
+    if not customization_enabled(wave, tenant_id):
+        code = (
+            "customization_stage_disabled"
+            if wave == 5
+            else "customization_publish_disabled"
+        )
+        return _customization_error(CustomizationServiceError(code, 404))
+    return None
+
+
 @router.post("/api/author")
 def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
            idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> Dict[str, Any]:
     """Use the controlled R5 path only after that tenant's rollout is enabled."""
-    if not deps.auth_live():
+    if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
         return _legacy_author(req, tenant)
-    if not customization_enabled(5, str(tenant)):
-        return _customization_error(
-            CustomizationServiceError("customization_stage_disabled", 404)
-        )
+    denied = _customization_gate(5, tenant)
+    if denied is not None:
+        return denied
     try:
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode="build",
@@ -266,6 +287,9 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
 
 @router.post("/api/author/stage")
 def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    denied = _customization_gate(5, tenant)
+    if denied is not None:
+        return denied
     try:
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode=req.mode, idempotency_key=req.idempotency_key,
@@ -280,6 +304,9 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
 
 @router.post("/api/author/register")
 def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    denied = _customization_gate(6, tenant)
+    if denied is not None:
+        return denied
     try:
         return CustomizationService.configured().publish(
             tenant=tenant,
@@ -301,6 +328,9 @@ def confirmation_lookup(
     tenant=Depends(deps.require_tenant),
 ) -> Dict[str, Any]:
     """Return only an approval that an independent trusted actor already issued."""
+    denied = _customization_gate(6, tenant)
+    if denied is not None:
+        return denied
     try:
         return CustomizationService.configured().pending_confirmation(
             tenant=tenant, receipt=req.dict()
@@ -315,6 +345,9 @@ def confirmation_lookup(
 
 @router.post("/api/author/rollback")
 def rollback(req: RollbackRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    denied = _customization_gate(6, tenant)
+    if denied is not None:
+        return denied
     try:
         return CustomizationService.configured().rollback(
             tenant=tenant, change_set_id=req.change_set_id, idempotency_key=req.idempotency_key,
@@ -334,17 +367,23 @@ def confirm(req: InternalConfirmRequest, x_tenant_id: str | None = Header(defaul
     approval_secret = os.environ.get(
         "LEAF_CUSTOMIZATION_APPROVAL_SECRET", ""
     ).strip()
+    try:
+        secrets_match = hmac.compare_digest(
+            (x_approval_secret or "").encode("ascii"),
+            approval_secret.encode("ascii"),
+        )
+    except UnicodeEncodeError:
+        secrets_match = False
     if (
         not x_tenant_id
         or not approval_secret
         or not x_approval_secret
-        or not hmac.compare_digest(x_approval_secret, approval_secret)
+        or not secrets_match
     ):
         return _customization_error(CustomizationServiceError("approval_authority_denied", 403))
-    if not customization_enabled(6, x_tenant_id):
-        return _customization_error(
-            CustomizationServiceError("customization_publish_disabled", 404)
-        )
+    denied = _customization_gate(6, x_tenant_id)
+    if denied is not None:
+        return denied
     try:
         return CustomizationService.configured().confirm(tenant_id=x_tenant_id, change_set_id=req.change_set_id)
     except (CustomizationServiceError, AuthorityError) as exc:
@@ -367,6 +406,9 @@ def customization_staged(
 ) -> Dict[str, Any]:
     try:
         tenant_id = _require_dispatch(x_tenant_id, x_dispatch_secret)
+        denied = _customization_gate(5, tenant_id)
+        if denied is not None:
+            return denied
         return CustomizationService.configured().record_staged_callback(
             tenant_id=tenant_id,
             receipt=req.receipt,
@@ -385,6 +427,9 @@ def customization_authorize_publish(
 ) -> Dict[str, Any]:
     try:
         tenant_id = _require_dispatch(x_tenant_id, x_dispatch_secret)
+        denied = _customization_gate(6, tenant_id)
+        if denied is not None:
+            return denied
         return CustomizationService.configured().authorize_publish_callback(
             tenant_id=tenant_id,
             receipt=req.receipt,

@@ -10,6 +10,7 @@ import hmac
 import hashlib
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
@@ -91,6 +92,8 @@ CREATE INDEX IF NOT EXISTS customization_recovery_idx
 
 CREATE TABLE IF NOT EXISTS customization_confirmations (
   confirmation_id TEXT PRIMARY KEY,
+  tenant_id TEXT,
+  change_set_id TEXT,
   payload_json TEXT NOT NULL,
   signature TEXT NOT NULL,
   consumed INTEGER NOT NULL DEFAULT 0 CHECK (consumed IN (0, 1)),
@@ -145,13 +148,67 @@ class CustomizationRepository:
 class SQLiteCustomizationStore(CustomizationRepository):
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = str(database_path)
+        self._initialize_lock = threading.Lock()
+        self._initialized = False
 
     def initialize(self) -> None:
-        """Create the schema safely on every startup."""
-        if self.database_path != ":memory:":
-            Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
-        with self._connection() as conn:
-            conn.executescript(_SCHEMA)
+        """Create and migrate the schema once for this store instance."""
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            if self.database_path != ":memory:":
+                Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
+            with self._connection() as conn:
+                conn.executescript(_SCHEMA)
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    self._migrate_confirmation_bindings(conn)
+                except Exception:
+                    conn.rollback()
+                    raise
+                else:
+                    conn.commit()
+            self._initialized = True
+
+    @staticmethod
+    def _migrate_confirmation_bindings(conn: sqlite3.Connection) -> None:
+        """Add indexed bindings and backfill confirmations from older schemas."""
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(customization_confirmations)")
+        }
+        for column in ("tenant_id", "change_set_id"):
+            if column not in columns:
+                conn.execute(
+                    f"ALTER TABLE customization_confirmations ADD COLUMN {column} TEXT"
+                )
+
+        legacy_rows = conn.execute(
+            "SELECT confirmation_id, payload_json FROM customization_confirmations "
+            "WHERE tenant_id IS NULL OR change_set_id IS NULL"
+        ).fetchall()
+        for row in legacy_rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            tenant_id = payload.get("tenant_id")
+            change_set_id = payload.get("change_set_id")
+            if not isinstance(tenant_id, str) or not isinstance(change_set_id, str):
+                continue
+            conn.execute(
+                "UPDATE customization_confirmations "
+                "SET tenant_id = ?, change_set_id = ? WHERE confirmation_id = ?",
+                (tenant_id, change_set_id, row["confirmation_id"]),
+            )
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS customization_confirmation_lookup_idx "
+            "ON customization_confirmations "
+            "(tenant_id, change_set_id, consumed, created_at DESC)"
+        )
 
     ensure_started = initialize
 
@@ -344,11 +401,17 @@ class SQLiteCustomizationStore(CustomizationRepository):
     # state and audit. ``consume`` is a durable compare-and-set, not an
     # in-process lock, so a retry or a second worker cannot reuse approval.
     def put_confirmation(self, *, confirmation_id: str, payload: dict, signature: str) -> None:
+        tenant_id = payload.get("tenant_id")
+        change_set_id = payload.get("change_set_id")
+        tenant_id = tenant_id if isinstance(tenant_id, str) else None
+        change_set_id = change_set_id if isinstance(change_set_id, str) else None
         with self._transaction() as conn:
             try:
                 conn.execute("INSERT INTO customization_confirmations "
-                             "(confirmation_id, payload_json, signature) VALUES (?, ?, ?)",
-                             (confirmation_id, json.dumps(payload, sort_keys=True, separators=(",", ":")), signature))
+                             "(confirmation_id, tenant_id, change_set_id, payload_json, signature) "
+                             "VALUES (?, ?, ?, ?, ?)",
+                             (confirmation_id, tenant_id, change_set_id,
+                              json.dumps(payload, sort_keys=True, separators=(",", ":")), signature))
             except sqlite3.IntegrityError as exc:
                 raise IdempotencyReplayError("confirmation already exists") from exc
 
@@ -378,25 +441,29 @@ class SQLiteCustomizationStore(CustomizationRepository):
         """Return an already-issued independent approval, never mint one."""
         self.initialize()
         with self._connection() as conn:
-            rows = conn.execute(
+            row = conn.execute(
                 "SELECT confirmation_id, payload_json, signature, consumed "
-                "FROM customization_confirmations WHERE consumed = 0 ORDER BY created_at DESC"
-            ).fetchall()
-        for row in rows:
-            try:
-                payload = json.loads(row["payload_json"])
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if (payload.get("tenant_id"), payload.get("change_set_id")) == (
-                tenant_id, change_set_id
-            ):
-                return {
-                    "confirmation_id": row["confirmation_id"],
-                    "payload": payload,
-                    "signature": row["signature"],
-                    "consumed": False,
-                }
-        return None
+                "FROM customization_confirmations "
+                "WHERE tenant_id = ? AND change_set_id = ? AND consumed = 0 "
+                "ORDER BY created_at DESC LIMIT 1",
+                (tenant_id, change_set_id),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if (payload.get("tenant_id"), payload.get("change_set_id")) != (
+            tenant_id, change_set_id
+        ):
+            return None
+        return {
+            "confirmation_id": row["confirmation_id"],
+            "payload": payload,
+            "signature": row["signature"],
+            "consumed": False,
+        }
 
     def prepare_publish(
         self,

@@ -6,8 +6,9 @@ import subprocess
 
 import pytest
 
-from customization_authority import PublishRequest
+from customization_authority import PublishRequest, TenantBinding
 from customization_models import ChangeState
+import customization_service
 from customization_service import CustomizationService, CustomizationServiceError
 from customization_store import SQLiteCustomizationStore
 
@@ -52,13 +53,20 @@ def test_publish_recovers_after_git_succeeds_before_sqlite_pointer_flip(
     monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
     monkeypatch.setenv("LEAF_CUSTOMIZATION_CONFIRMATION_KEY", "test-confirmation-key")
     monkeypatch.setenv("LEAF_CUSTOMIZATION_INTERNAL_APPROVER_SUBJECT", "staff|reviewer")
-    monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setattr(
+        customization_service,
+        "_binding",
+        lambda tenant: TenantBinding(
+            str(tenant), "auth0|author", "owner", True
+        ),
+    )
 
     store = SQLiteCustomizationStore(database)
     created = store.create_change_set(
         tenant_id="tenant-a", idempotency_key="create", base_commit=commit,
         desired_platform_release="leaf-platform-2026.07.23",
-        workspace_contract_digest=WORKSPACE, author_subject="auth-off:tenant-a",
+        workspace_contract_digest=WORKSPACE, author_subject="auth0|author",
     )
     staging = store.transition(
         tenant_id="tenant-a", change_set_id=created.change_set_id,
@@ -100,6 +108,18 @@ def test_publish_recovers_after_git_succeeds_before_sqlite_pointer_flip(
         "LEAF_CUSTOMIZATION_CONFIRMATION_KEY", "rotated-confirmation-key"
     )
     monkeypatch.setattr(service, "_harness_publish", lambda _change: commit)
+    with pytest.raises(
+        CustomizationServiceError, match="publish_recovery_authority_invalid"
+    ):
+        service.publish(
+            tenant="tenant-a", request=request,
+            confirmation_id=confirmation["confirmation_id"],
+            idempotency_key="publish",
+        )
+
+    monkeypatch.setenv(
+        "LEAF_CUSTOMIZATION_CONFIRMATION_KEY", "test-confirmation-key"
+    )
     result = service.publish(
         tenant="tenant-a", request=request,
         confirmation_id=confirmation["confirmation_id"],

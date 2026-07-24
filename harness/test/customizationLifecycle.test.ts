@@ -129,6 +129,8 @@ describe("customizationLifecycle", () => {
 
     await expect(loop.publish(staged.receipt, base)).rejects.toThrow("tenant writer lease lost");
     expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+    expect(git(bare.dir, ["rev-parse", `refs/leaf/changes/${CHANGE_A}`]))
+      .toBe(staged.receipt.staged_commit);
   });
 
   it("holds the tenant writer lease across stage and publish", async () => {

@@ -77,12 +77,11 @@ export class AuthorLoop {
     tenantId: string,
     action: () => Promise<T>,
   ): Promise<T> {
-    const provider = this.ports.tenantRepo as HarnessPorts["tenantRepo"] & {
-      withTenantReadLease?<R>(tenant: string, operation: () => Promise<R>): Promise<R>;
-    };
-    return provider.withTenantReadLease
-      ? provider.withTenantReadLease(tenantId, action)
-      : action();
+    const provider = this.ports.tenantRepo;
+    if (!provider.withTenantReadLease) {
+      return Promise.reject(new AuthorLoopError("tenant repository read lease is required", 503));
+    }
+    return provider.withTenantReadLease(tenantId, action);
   }
 
   private persistTool(

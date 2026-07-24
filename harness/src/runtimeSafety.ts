@@ -45,6 +45,11 @@ export function validateProductionHarnessEnv(env: NodeJS.ProcessEnv = process.en
     );
   }
   if (authoredExecutionEnabled(env)) {
+    if ((env.LEAF_HARNESS_SESSION_STORE ?? "").trim().toLowerCase() !== "postgres") {
+      throw new Error(
+        "production authored execution requires LEAF_HARNESS_SESSION_STORE=postgres",
+      );
+    }
     if (!(env.E2B_API_KEY ?? "").trim() && !(env.E2B_API_KEY_FILE ?? "").trim()) {
       throw new Error("production author sandbox requires an E2B credential source");
     }

@@ -29,7 +29,7 @@ import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
-import type { TenantMutationFence, TenantRepo } from "../src/ports/index.js";
+import type { TenantMutationFence, TenantRepo, TenantRepoProvider } from "../src/ports/index.js";
 import { AuthorLoop } from "../src/agent/authorLoop.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -58,7 +58,7 @@ class LeaseAwareFakeTenantRepoProvider extends FakeTenantRepoProvider {
     }
   }
 
-  async withTenantReadLease<T>(_tenantId: string, action: () => Promise<T>): Promise<T> {
+  override async withTenantReadLease<T>(_tenantId: string, action: () => Promise<T>): Promise<T> {
     this.readLeaseCalls += 1;
     this.readLeaseActive = true;
     try {
@@ -198,5 +198,25 @@ describe("POST /author (build route) - hermetic e2e", () => {
     await loop.run("tenant-read", "count-by-layer");
     expect(tenantRepo.readLeaseCalls).toBe(1);
     expect(tenantRepo.readLeaseActive).toBe(false);
+  });
+
+  it("fails closed before checkout when the read-lease port is missing", async () => {
+    let checkoutCalled = false;
+    const missingReadLease: TenantRepoProvider = {
+      async checkout(tenantId) {
+        checkoutCalled = true;
+        return tenantRepo.checkout(tenantId);
+      },
+    };
+    const loop = new AuthorLoop({
+      oauth: new FakeOAuthGrantProvider(),
+      tenantRepo: missingReadLease,
+      broker: new FakeBrokerApsClient(),
+      agentRunner: new FakeAgentRunner(),
+    });
+
+    await expect(loop.run("tenant-read", "count-by-layer"))
+      .rejects.toThrow("tenant repository read lease is required");
+    expect(checkoutCalled).toBe(false);
   });
 });

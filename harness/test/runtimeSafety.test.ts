@@ -83,12 +83,14 @@ describe("production harness runtime safety", () => {
       ...VALID,
       LEAF_AUTHORED_EXECUTION: "1",
       LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
+      LEAF_HARNESS_SESSION_STORE: "postgres",
     })).toThrow(/credential source/);
     expect(() => validateProductionHarnessEnv({
       ...VALID,
       LEAF_AUTHORED_EXECUTION: "1",
       LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
       E2B_API_KEY: "test-key",
+      LEAF_HARNESS_SESSION_STORE: "postgres",
     })).toThrow(/broker gateway host/);
     expect(() => validateProductionHarnessEnv({
       ...VALID,
@@ -96,6 +98,23 @@ describe("production harness runtime safety", () => {
       LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
       E2B_API_KEY: "test-key",
       LEAF_SANDBOX_BROKER_HOST: "broker.internal",
+      LEAF_HARNESS_SESSION_STORE: "postgres",
     })).not.toThrow();
+  });
+
+  it("requires PostgreSQL session authority for production authored execution", () => {
+    const authored = {
+      ...VALID,
+      LEAF_AUTHORED_EXECUTION: "1",
+      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
+      E2B_API_KEY: "test-key",
+      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
+    };
+    expect(() => validateProductionHarnessEnv({
+      ...authored,
+      LEAF_HARNESS_SESSION_STORE: "file",
+    })).toThrow(/LEAF_HARNESS_SESSION_STORE=postgres/);
+    expect(() => validateProductionHarnessEnv(authored))
+      .toThrow(/LEAF_HARNESS_SESSION_STORE=postgres/);
   });
 });

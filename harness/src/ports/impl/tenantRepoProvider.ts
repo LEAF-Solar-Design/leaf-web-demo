@@ -405,17 +405,35 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   ): Promise<T> {
     assertAuthoringModeSafe(this.authoringMode);
     if (!this.lease) {
-      return action(async (operation) => operation());
+      throw new Error("PostgreSQL tenant repository writer lease is required");
     }
     return this.lease.withLease(tenantId, (lease) =>
       this.leaseContext.run(lease, async () => {
         const runFenced = <R>(operation: () => R | Promise<R>) =>
           this.lease!.runFenced(lease, async () => operation());
+        let primaryError: unknown;
         try {
           return await action(runFenced);
+        } catch (error) {
+          primaryError = error;
+          throw error;
         } finally {
+          const cleanupErrors: unknown[] = [];
           for (const dir of lease.repoDirs) {
-            await this.lease!.runFenced(lease, async () => resetWorkingTree(dir));
+            try {
+              await this.lease!.runFenced(lease, async () => resetWorkingTree(dir));
+            } catch (error) {
+              cleanupErrors.push(error);
+            }
+          }
+          if (cleanupErrors.length > 0) {
+            const cleanupError = cleanupErrors.length === 1
+              ? cleanupErrors[0]
+              : new AggregateError(cleanupErrors, "tenant repository teardown failed");
+            if (primaryError === undefined) throw cleanupError;
+            if (primaryError instanceof Error && primaryError.cause === undefined) {
+              primaryError.cause = cleanupError;
+            }
           }
         }
       }),
@@ -424,7 +442,10 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
 
   /** Read a committed snapshot while excluding authoring for this tenant. */
   async withTenantReadLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
-    if (!this.lease) return action();
+    if (!this.lease) {
+      if (this.authoringMode === "disabled") return action();
+      throw new Error("PostgreSQL tenant repository read lease is required while authoring is enabled");
+    }
     return this.lease.withLease(tenantId, (lease) =>
       this.leaseContext.run(lease, action),
     );

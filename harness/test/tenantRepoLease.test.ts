@@ -31,6 +31,88 @@ describe("tenant repo lease production gate", () => {
       assertAuthoringModeSafe("fleet"),
     ).toThrow(/disabled until .* real Secrets Manager backend/);
   });
+
+  it("never substitutes an identity fence for a missing PostgreSQL writer lease", async () => {
+    let actionCalled = false;
+    const provider = new TenantRepoProviderImpl({
+      locator: { async repoRef() { return "unused"; } },
+      lease: false,
+      authoringMode: "singleton",
+    });
+
+    await expect(provider.withTenantLease("tenant-no-lease", async () => {
+      actionCalled = true;
+    })).rejects.toThrow(/PostgreSQL tenant repository writer lease is required/);
+    expect(actionCalled).toBe(false);
+  });
+
+  it("fails closed on a missing read lease when authoring is enabled", async () => {
+    let actionCalled = false;
+    const provider = new TenantRepoProviderImpl({
+      locator: { async repoRef() { return "unused"; } },
+      lease: false,
+      authoringMode: "singleton",
+    });
+
+    await expect(provider.withTenantReadLease("tenant-no-lease", async () => {
+      actionCalled = true;
+    })).rejects.toThrow(/PostgreSQL tenant repository read lease is required/);
+    expect(actionCalled).toBe(false);
+  });
+
+  it("allows an unfenced committed read only while authoring is disabled", async () => {
+    const provider = new TenantRepoProviderImpl({
+      locator: { async repoRef() { return "unused"; } },
+      lease: false,
+      authoringMode: "disabled",
+    });
+
+    await expect(provider.withTenantReadLease("tenant-read-only", async () => "read"))
+      .resolves.toBe("read");
+  });
+
+  it("preserves the primary authoring error when fenced teardown also fails", async () => {
+    const primary = new Error("authoring failed");
+    const teardown = new Error("teardown failed");
+    const lease = {
+      async withLease<T>(_tenantId: string, action: (lease: object) => Promise<T>): Promise<T> {
+        return action({ repoDirs: new Set(["unused"]), tenantId: "tenant", lost: false });
+      },
+      async runFenced(): Promise<never> {
+        throw teardown;
+      },
+    } as unknown as PgTenantRepoLeaseCoordinator;
+    const provider = new TenantRepoProviderImpl({
+      locator: { async repoRef() { return "unused"; } },
+      lease,
+      authoringMode: "singleton",
+    });
+
+    await expect(provider.withTenantLease("tenant", async () => {
+      throw primary;
+    })).rejects.toBe(primary);
+    expect(primary.cause).toBe(teardown);
+  });
+
+  it("surfaces fenced teardown failure after a successful action", async () => {
+    const teardown = new Error("teardown failed");
+    const lease = {
+      async withLease<T>(_tenantId: string, action: (lease: object) => Promise<T>): Promise<T> {
+        return action({ repoDirs: new Set(["unused"]), tenantId: "tenant", lost: false });
+      },
+      async runFenced(): Promise<never> {
+        throw teardown;
+      },
+    } as unknown as PgTenantRepoLeaseCoordinator;
+    const provider = new TenantRepoProviderImpl({
+      locator: { async repoRef() { return "unused"; } },
+      lease,
+      authoringMode: "singleton",
+    });
+
+    await expect(provider.withTenantLease("tenant", async () => "ok"))
+      .rejects.toBe(teardown);
+  });
 });
 
 describeWithPostgres("PostgreSQL tenant repo lease", () => {
