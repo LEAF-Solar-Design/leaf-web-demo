@@ -28,7 +28,7 @@ function paramsSummary(params) {
 
 export default function RoutePanel({
   route: liveRoute, tools, running, writeLocked, writeEntitled = true,
-  onRun, onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss,
+  onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss,
 }) {
   // M1 exit: on dismissal (Esc / typing / a run consuming the decision) the
   // last route is held for the 180 ms .exit fade (display-only) before unmount.
@@ -55,7 +55,7 @@ export default function RoutePanel({
   const entBlocked = isWrite && !writeEntitled
   const requestRun = () => {
     if (route.runIntent) onConfirmIntent(route.runIntent, toolObj, params)
-    else onRun(toolObj, params)
+    else if (toolObj) onPickAlternative(toolObj.name)
   }
 
   // Resolver rows (low-confidence best guess, or a tool missing from this
@@ -102,7 +102,7 @@ export default function RoutePanel({
       const row = rows[activeIdx]
       if (!row) return
       if (row.kind === 'run' && toolObj) {
-        if (!running && !locked && !entBlocked) onRun(toolObj, params)
+        if (!running && !locked && !entBlocked) requestRun()
       } else {
         onPickAlternative(row.tool)
       }
@@ -110,7 +110,7 @@ export default function RoutePanel({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [route, exiting, rows, activeIdx, confident, toolObj, params, running, locked, entBlocked,
-      onRun, onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss])
+      onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss])
 
   if (!route) return null
   const motion = exiting ? 'exit' : 'enter'
@@ -204,7 +204,7 @@ export default function RoutePanel({
           onMouseEnter={() => setActiveIdx(i)}
           onClick={() => {
             if (row.kind === 'run' && toolObj) {
-              if (!running && !locked && !entBlocked) onRun(toolObj, params)
+              if (!running && !locked && !entBlocked) requestRun()
             } else {
               onPickAlternative(row.tool)
             }

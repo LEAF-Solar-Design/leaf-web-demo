@@ -131,7 +131,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                     disabled={running || locked || entBlocked}
                     onClick={() => onRequestRun(t, params)}
                   >
-                    {isRunningThis ? 'Running on Leaf…' : 'Run'}
+                    {isRunningThis ? 'Running on Leaf…' : 'Review & run'}
                   </button>
                   {entBlocked && !locked && (
                     <p className="lock-note">Your plan doesn’t include editing tools — upgrade to run write tools. Read tools still run.</p>

@@ -1,9 +1,121 @@
+import json
 import os
 from pathlib import Path
 
 import pytest
 
 from solver_adapters import autofill
+
+
+STAGING_SOLVER_REVISION = "3ae53e274a5c6be3edeab30054234d09fdd74b41"
+STAGING_SOLVER_SHA256 = "135ddcd4f7db951a25f5e3e5a5a5761365aeda768a07406b2e60d1231438ed37"
+
+
+def _write_self_attestation(root: Path, revision: str) -> None:
+    source_sha256 = autofill._source_sha256(root)
+    (root / autofill.SOURCE_ATTESTATION).write_text(
+        '{"revision":"' + revision + '","source_sha256":"' + source_sha256 + '"}\n')
+
+
+def _seal_trusted_source(monkeypatch, root: Path, revision: str) -> Path:
+    manifest = root / "trusted-sources.json"
+    manifest.write_text(json.dumps({revision: autofill._source_sha256(root)}) + "\n")
+    monkeypatch.setattr(autofill, "TRUSTED_SOURCES_MANIFEST", manifest)
+    autofill.attest_source(root, revision, manifest)
+    (root / autofill.SOURCE_REVISION_MARKER).write_text(revision + "\n")
+    return manifest
+
+
+def test_descriptor_uses_trusted_manifest_and_image_revision(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    revision = "a" * 40
+    _seal_trusted_source(monkeypatch, tmp_path, revision)
+    monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", revision.upper())
+
+    assert autofill.descriptor(solver_root=tmp_path)["source_revision"] == revision
+
+
+def test_staging_solver_manifest_entry_authorizes_matching_worker_bytes(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    (tmp_path / autofill.SOURCE_ATTESTATION).write_text(json.dumps({
+        "revision": STAGING_SOLVER_REVISION,
+        "source_sha256": STAGING_SOLVER_SHA256,
+    }) + "\n")
+    (tmp_path / autofill.SOURCE_REVISION_MARKER).write_text(STAGING_SOLVER_REVISION + "\n")
+    monkeypatch.setattr(autofill, "_source_sha256", lambda _root: STAGING_SOLVER_SHA256)
+    monkeypatch.setattr(autofill, "_git_source_revision", lambda _root: None)
+
+    source = autofill.descriptor(solver_root=tmp_path)
+
+    assert source["source_revision"] == STAGING_SOLVER_REVISION
+    assert source["source_sha256"] == STAGING_SOLVER_SHA256
+
+
+def test_staging_solver_manifest_entry_rejects_mismatched_worker_bytes(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    (tmp_path / autofill.SOURCE_ATTESTATION).write_text(json.dumps({
+        "revision": STAGING_SOLVER_REVISION,
+        "source_sha256": STAGING_SOLVER_SHA256,
+    }) + "\n")
+    (tmp_path / autofill.SOURCE_REVISION_MARKER).write_text(STAGING_SOLVER_REVISION + "\n")
+    monkeypatch.setattr(autofill, "_source_sha256", lambda _root: "0" * 64)
+    monkeypatch.setattr(autofill, "_git_source_revision", lambda _root: None)
+
+    with pytest.raises(RuntimeError, match="bytes do not match their build attestation"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
+def test_descriptor_rejects_invalid_supplied_solver_revision(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", "latest")
+
+    with pytest.raises(RuntimeError, match="exact Git commit"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
+def test_descriptor_rejects_untrusted_self_attestation(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    revision = "a" * 40
+    _write_self_attestation(tmp_path, revision)
+    (tmp_path / autofill.SOURCE_REVISION_MARKER).write_text(revision + "\n")
+    manifest = tmp_path / "trusted-sources.json"
+    manifest.write_text("{}\n")
+    monkeypatch.setattr(autofill, "TRUSTED_SOURCES_MANIFEST", manifest)
+
+    with pytest.raises(RuntimeError, match="no trusted autofill source digest"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
+def test_descriptor_rejects_attestation_with_wrong_image_revision(monkeypatch, tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    revision = "a" * 40
+    _seal_trusted_source(monkeypatch, tmp_path, revision)
+    (tmp_path / autofill.SOURCE_REVISION_MARKER).write_text(("b" * 40) + "\n")
+
+    with pytest.raises(RuntimeError, match="image revision does not match"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
+def test_descriptor_rejects_source_changed_after_trusted_attestation(monkeypatch, tmp_path):
+    solver = tmp_path / "solver.py"
+    solver.write_text("def solve_targets(*args, **kwargs): return {}\n")
+    revision = "a" * 40
+    _seal_trusted_source(monkeypatch, tmp_path, revision)
+    monkeypatch.setenv("AUTOFILL_SOLVER_REVISION", revision)
+    solver.write_text("def solve_targets(*args, **kwargs): return {'changed': True}\n")
+
+    with pytest.raises(RuntimeError, match="bytes do not match their build attestation"):
+        autofill.descriptor(solver_root=tmp_path)
+
+
+def test_build_attestation_rejects_revision_source_digest_mismatch(tmp_path):
+    (tmp_path / "solver.py").write_text("def solve_targets(*args, **kwargs): return {}\n")
+    fake_revision = "0" * 40
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"' + fake_revision + '":"' + ("f" * 64) + '"}\n')
+
+    with pytest.raises(RuntimeError, match="source does not match revision"):
+        autofill.attest_source(tmp_path, fake_revision, manifest)
 
 
 # The adapter's default assumes leaf-web-demo and autofill-solver are sibling
@@ -71,6 +183,17 @@ def test_real_autofill_solver_smoke_is_deterministic():
     assert first["solver_input"]["panelsPerString"] == 10
     assert first["solver_revision"]
     assert first["runtime"].startswith("python-")
+
+
+def test_legacy_solver_accepts_defaults_but_rejects_geometry(tmp_path):
+    (tmp_path / "solver.py").write_text(
+        "def solve_targets(groups, n, options=None): return {'ok': True}\n")
+
+    result = autofill.run(SMOKE_INPUT, solver_root=tmp_path)
+    assert result["solver_result"] == {"ok": True}
+
+    with pytest.raises(RuntimeError, match="does not support panel geometry"):
+        autofill.run({**SMOKE_INPUT, "panelAngle": 1.0}, solver_root=tmp_path)
 
 
 def test_adapter_rejects_non_json_and_invalid_panel_count():

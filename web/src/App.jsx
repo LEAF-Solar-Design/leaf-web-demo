@@ -393,6 +393,7 @@ export default function App() {
     setDrawingState(null); setVersionBusy(false)
     setOverlayStale(false); setOpenTool(null)
     setToast(null); setDrawer(null); setRouteErr(null)
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     setRoute(null); setRouting(false); setCurrentJobId(null); setTenant(null)
     setTier(null); setOrg(null)
     setHistoryOpen(false); setHistory(null); setHistoryErr(null)
@@ -975,12 +976,21 @@ export default function App() {
   const catalogRunContextRef = useRef(catalogRunContext)
   catalogRunContextRef.current = catalogRunContext
 
-  const onRequestCatalogRun = useCallback((tool, params) => {
+  const armDecision = useCallback((decision) => {
+    if (decision?.lane !== 'run') {
+      runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+      setRoute(decision)
+      return decision
+    }
     // Family catalog entries are presentation-normalized. Resolve the canonical
     // flat-catalog record before snapshotting so confirmation compares the same
     // server-sourced definition that RoutePanel will execute.
-    const catalogTool = tools.find((candidate) => candidate.name === tool?.name)
-    if (!catalogTool) return
+    const catalogTool = tools.find((candidate) => candidate.name === decision.tool)
+    if (!catalogTool) {
+      runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+      setRoute(decision)
+      return decision
+    }
     if (!mock && !tenant) return
     if (!catalogRunContextRef.current) {
       setRunErr('This workspace has no canonical drawing version to run. Import a drawing first.')
@@ -988,7 +998,7 @@ export default function App() {
     }
     const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
     if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
-    const prepared = prepareRunParams(catalogTool, params)
+    const prepared = prepareRunParams(catalogTool, decision.params)
     const staged = stageRunIntent(runIntentStateRef.current, {
       intentId: `${runIntentSessionRef.current}:${++runIntentSeqRef.current}`,
       toolName: catalogTool.name,
@@ -998,12 +1008,24 @@ export default function App() {
     })
     runIntentStateRef.current = staged.state
     setRouteErr(null)
-    setRoute({
-      lane: 'run', tool: tool.name, params: staged.intent.params, confidence: 1,
-      rationale: 'Catalog selection. Confirm the exact tool and parameters before it runs.',
-      alternatives: [], runIntent: staged.intent,
-    })
+    const armed = {
+      ...decision,
+      tool: catalogTool.name,
+      params: staged.intent.params,
+      runIntent: staged.intent,
+    }
+    setRoute(armed)
+    return armed
   }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
+
+  const onRequestCatalogRun = useCallback((tool, params, rationale = null) => {
+    if (!tool) return
+    return armDecision({
+      lane: 'run', tool: tool.name, params, confidence: 1,
+      rationale: rationale || 'Catalog selection. Confirm the exact tool and parameters before it runs.',
+      alternatives: [],
+    })
+  }, [armDecision])
 
   const onRun = useCallback(async (tool, params, {
     intentConfirmed = false, runContext = null, idempotencyKey = null,
@@ -1015,6 +1037,7 @@ export default function App() {
     // the Run buttons for write tools are already disabled while locked.
     if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return
     const seq = ++runSeqRef.current // Esc-interrupt detaches this run's handlers
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     setRoute(null); setRouteErr(null) // the decision strip is consumed by the run
     // Race tier (wire §11): taking the chip makes the deterministic run the
     // answer — stop RENDERING the agent stream. The turn itself may complete
@@ -1239,13 +1262,13 @@ export default function App() {
   // RoutePanel resolves it and shows a single Run.
   const onUseAuthored = useCallback((tool) => {
     if (!tool) return
-    setRoute({
+    armDecision({
       lane: 'run', tool: tool.name, params: {}, confidence: 0.99,
       rationale: `Authored just now — confirm to run “${tool.name}”.`,
       alternatives: [],
     })
     setTimeout(() => document.querySelector('main')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
-  }, [])
+  }, [armDecision])
 
   // --- prompt-first dispatch (§12) -----------------------------------------
   // Live preview of which lane the text will route to (lights the hero's dots).
@@ -1305,7 +1328,7 @@ export default function App() {
       setRoute(null); setRouteErr(null)
       const t = tools.find((x) => (x.name || '').toLowerCase() === name.toLowerCase())
       if (t) {
-        setRoute({
+        armDecision({
           lane: 'run', tool: t.name, params: {}, confidence: 1,
           rationale: `Explicit /${t.name} — you picked this tool.`,
           alternatives: [], slash: true,
@@ -1352,7 +1375,7 @@ export default function App() {
       if (chipOnly) {
         // Today's behavior verbatim (also the whole story when the agent tier
         // is disabled: mock, or a plan without converse).
-        setRoute(r)
+        armDecision(r)
         if (r.lane === 'build') openAuthorFlow()
       } else {
         const hint = { lane: r.lane, tool: r.tool || null, confidence: conf, rationale: r.rationale || null }
@@ -1360,7 +1383,7 @@ export default function App() {
         if (r.lane === 'run' && !!r.tool && conf >= THRESHOLDS.RACE_MIN) {
           // RACE band: today's chip stays primary AND an agent turn starts
           // alongside. A failed agent start never degrades the chip.
-          setRoute(r)
+          armDecision(r)
           try {
             await startAgentTurn(text, hint)
             setAgentMode('race')
@@ -1374,7 +1397,7 @@ export default function App() {
             setAgentMode('primary')
           } catch (e) {
             // Degraded fallback: EXACTLY today's Tier-1 rendering + calm banner.
-            setRoute(r)
+            armDecision(r)
             if (r.lane === 'build') openAuthorFlow()
             setAgentBanner(agentBannerFor(e))
           }
@@ -1390,7 +1413,7 @@ export default function App() {
     } finally {
       setRouting(false)
     }
-  }, [prompt, routing, running, mock, tools, agentDisabled, startAgentTurn])
+  }, [prompt, routing, running, mock, tools, agentDisabled, startAgentTurn, armDecision])
 
   // Typing invalidates a shown route/failure — the decision must match the text.
   const onPromptChange = useCallback((v) => {
@@ -1403,13 +1426,14 @@ export default function App() {
   // Pick an alternative from a low-confidence / live-only route -> a user-picked
   // (high-confidence) run route for that capability.
   const onPickAlternative = useCallback((name) => {
-    setRoute((prev) => ({
+    const prev = route
+    armDecision({
       lane: 'run', tool: name, params: {}, confidence: 0.99,
       rationale: 'You picked this capability from the alternatives.',
       alternatives: (prev?.alternatives || []).filter((a) => a.tool !== name),
       stub: prev?.stub, stubReason: prev?.stubReason,
-    }))
-  }, [])
+    })
+  }, [armDecision, route])
 
   const onOpenAuthor = useCallback(() => {
     setAuthorOpen(true)
@@ -1419,8 +1443,7 @@ export default function App() {
   // --- M5 guided tour: canned prompts ride the REAL handlers ----------------
   // The tour types its beat into the real command bar, dispatches it through the
   // real nl-prompt router (onDispatch), and — for a read-only run beat — runs it
-  // through the real onRun path. NOTHING here fabricates a result: the numbers
-  // on screen come out of the same mock engine a human would have driven.
+  // through the same guarded intent path. NOTHING here fabricates a result.
   // Write beats (the versioned delete) deliberately stop at the confirm card;
   // paid/destructive actions never auto-execute, tour or not.
   const onCannedPrompt = useCallback(async (text, step) => {
@@ -1431,6 +1454,7 @@ export default function App() {
     const seq = (cannedSeq.current += 1)
     setTourLanded(false)
     // self-type into the real bar so the audience sees the sentence being written
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     setRoute(null); setRouteErr(null)
     for (let i = 1; i <= text.length; i += 1) {
       if (cannedSeq.current !== seq) return
@@ -1446,7 +1470,9 @@ export default function App() {
       if (r && r.lane === 'run' && step?.action === 'run') {
         const toolObj = tools.find((t) => t.name === r.tool)
         const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
-        if (toolObj && !isWrite) await onRun(toolObj, r.params || {})
+        if (toolObj && !isWrite) {
+          onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.')
+        }
       }
     } finally {
       // The BUILD lane hands off to AuthorPanel's auto-submit, whose onAuthor
@@ -1454,7 +1480,7 @@ export default function App() {
       // tool is actually authored, which is the whole differentiator beat.
       if (cannedSeq.current === seq && !(r && r.lane === 'build')) setTourLanded(true)
     }
-  }, [onDispatch, onRun, tools])
+  }, [onDispatch, onRequestCatalogRun, tools])
 
   const onTourExit = useCallback(() => {
     // Leaving the tour keeps you exactly where you are — in mock, on the same
@@ -2280,7 +2306,6 @@ export default function App() {
             running={running || !!previewing}
             writeLocked={writeLocked}
             writeEntitled={canRunWrite}
-            onRun={onRun}
             onConfirmIntent={onConfirmCatalogRun}
             onPickAlternative={onPickAlternative}
             onOpenAuthor={onOpenAuthor}

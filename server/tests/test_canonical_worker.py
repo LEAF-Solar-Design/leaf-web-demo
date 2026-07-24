@@ -283,17 +283,24 @@ def test_canonical_worker_container_contract_is_non_root_and_source_bound():
     assert "AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION}" in dockerfile
     assert "USER 65532:65532" in dockerfile
     assert "canonical_worker_health('string-autofill-opt')" in dockerfile
+    assert "ARG AUTOFILL_SOLVER_REVISION" in dockerfile
+    assert "AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION}" in dockerfile
+    assert "autofill-solver-sources.json" in dockerfile
+    assert "attest_source" in dockerfile
     assert 'CMD ["python", "canonical_worker.py"' in dockerfile
     assert '"--lease-seconds", "30"' not in dockerfile
 
     assert "additional_contexts:" in overlay
-    assert "autofill_solver: ../autofill-solver" in overlay
+    assert overlay.count("autofill_solver: ${AUTOFILL_SOLVER_CONTEXT:-../autofill-solver}") == 2
+    assert overlay.count("AUTOFILL_SOLVER_REVISION: ${AUTOFILL_SOLVER_REVISION:?") == 2
     assert "condition: service_completed_successfully" in overlay
     assert "db.apply_migration()" in overlay
     postgres_block = overlay.split("  postgres:", 1)[1].split("  migrate:", 1)[0]
     assert "ports:" not in postgres_block
 
     assert "idempotent resubmission created another job" in smoke
+    assert 'descriptor["source_revision"] != expected_revision' in smoke
+    assert '"solverRevision": descriptor["source_revision"]' in smoke
     assert 'expected = {"jobs": 1, "solves": 1, "history": 1, "outbox": 2, "solvePins": 3}' in smoke
 
 
