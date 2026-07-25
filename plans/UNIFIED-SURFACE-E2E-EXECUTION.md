@@ -305,8 +305,15 @@ Progress:
   cannot submit until the operator approves again. Browser proof checks a new
   idempotency key, successful recovery, unchanged drawing state on failure, and
   the absence of Retry for a nonretryable failure.
-- Provider lifting, sign-out and mid-session expiry, post-write refresh and
-  transport recovery, and the remaining accessibility ladder remain open.
+- `/try` now uses one latched platform-session controller. Any observed API or
+  conversation 401 clears the stored token, dismisses mutable proposals, stops
+  the conversation and upload work, returns both rails to the session gate, and
+  disables execution. Browser proof covers initial 401, mid-session checkout
+  expiry, stopped job polling, sign-out without Auth0 build flags, token removal,
+  and callback route ownership. Two controller tests cover latch and sign-out
+  ordering.
+- Provider lifting, post-write refresh and transport recovery, and the remaining
+  accessibility ladder remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

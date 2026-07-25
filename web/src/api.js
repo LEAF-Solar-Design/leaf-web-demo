@@ -31,6 +31,7 @@ const TENANT = import.meta.env.VITE_TENANT_ID || 'demo-tenant'
 // EVERY /api call so LEAF_AUTH_LIVE=1 works from the UI; when absent, headers are
 // byte-identical to the open-demo path (zero behavior change off-auth).
 const AUTH_KEY = 'leaf.jwt'
+const unauthorizedListeners = new Set()
 
 export const config = { apiBase: API_BASE, mockDefault: MOCK_DEFAULT, tenant: TENANT }
 
@@ -43,6 +44,24 @@ export function authHeaders() {
   } catch { return {} }
 }
 
+export function subscribeUnauthorized(listener) {
+  unauthorizedListeners.add(listener)
+  return () => unauthorizedListeners.delete(listener)
+}
+
+export function noteUnauthorized(response, source = 'api') {
+  if (response?.status !== 401) return response
+  try { localStorage.removeItem(AUTH_KEY) } catch { /* storage unavailable */ }
+  for (const listener of unauthorizedListeners) {
+    try { listener(source) } catch { /* observers cannot change transport behavior */ }
+  }
+  return response
+}
+
+async function apiFetch(input, init, source = 'api') {
+  return noteUnauthorized(await fetch(input, init), source)
+}
+
 // A tiny artificial delay so mock runs show loading states like the real thing.
 const nap = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -51,7 +70,7 @@ async function http(path, opts, timeoutMs = null) {
   const request = timeoutMs == null
     ? fetch(`${API_BASE}${path}`, { ...opts, headers })
     : fetchWithBudget(fetch, `${API_BASE}${path}`, { ...opts, headers }, timeoutMs)
-  const res = await request
+  const res = noteUnauthorized(await request, path)
   if (!res.ok) {
     const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
     e.status = res.status // callers gate on 401/403 without string-matching
@@ -91,15 +110,20 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
 export async function nlPrompt(mock, text, tools = []) {
   if (mock) return { ...matchPrompt(text, tools), stub: true }
   try {
-    const res = await fetch(`${API_BASE}/api/nl-prompt`, {
+    const res = await apiFetch(`${API_BASE}/api/nl-prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
       body: JSON.stringify({ text }),
-    })
-    if (!res.ok) throw new Error(`POST /api/nl-prompt -> ${res.status}`)
+    }, '/api/nl-prompt')
+    if (!res.ok) {
+      const error = new Error(`POST /api/nl-prompt -> ${res.status}`)
+      error.status = res.status
+      throw error
+    }
     const body = await res.json()
     return { alternatives: [], ...body, stub: false }
   } catch (e) {
+    if (e?.status === 401) throw e
     // Endpoint not live yet (sibling lands it concurrently) — route locally.
     return { ...matchPrompt(text, tools), stub: true, stubReason: humanizeError(e) }
   }
@@ -275,7 +299,7 @@ function opsHeaders() {
 }
 
 export async function getOpsTenants() {
-  const res = await fetch(`${API_BASE}/api/ops/tenants`, { headers: opsHeaders() })
+  const res = await apiFetch(`${API_BASE}/api/ops/tenants`, { headers: opsHeaders() }, '/api/ops/tenants')
   if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
   if (!res.ok) throw new Error(`GET /api/ops/tenants -> ${res.status}`)
   const body = await res.json()
@@ -284,9 +308,10 @@ export async function getOpsTenants() {
 
 export async function setTenantDisabled(tenantId, disabled) {
   const action = disabled ? 'disable' : 'enable'
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/ops/tenants/${encodeURIComponent(tenantId)}/${action}`,
     { method: 'POST', headers: opsHeaders() },
+    `/api/ops/tenants/${tenantId}/${action}`,
   )
   if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
   if (!res.ok) throw new Error(`POST /api/ops/tenants/${tenantId}/${action} -> ${res.status}`)
@@ -526,11 +551,11 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
   // canonical platform Job row (spine_ref-linked) so the workspace jobs[] grows.
   // Absent -> byte-identical to the plain tenant-only run (no linkage).
   const submission = createRunSubmissionRequest(toolName, params, dwg, opts)
-  const res = await fetch(`${API_BASE}/api/run`, {
+  const res = await apiFetch(`${API_BASE}/api/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...submission.headers, ...authHeaders() },
     body: JSON.stringify(submission.body),
-  })
+  }, '/api/run')
   const body = await res.json().catch(() => null)
 
   if (res.status !== 202 || !body || !body.job_id) {
@@ -620,7 +645,7 @@ export async function uploadDrawing(file, guestSession = null) {
   form.append('file', file)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
   if (guestSession) headers['X-Guest-Session'] = guestSession
-  const res = await fetch(`${API_BASE}/api/drawings/upload`, { method: 'POST', headers, body: form })
+  const res = await apiFetch(`${API_BASE}/api/drawings/upload`, { method: 'POST', headers, body: form }, '/api/drawings/upload')
   const body = await res.json().catch(() => null)
   if (!res.ok) {
     const error = new Error(body?.error?.message || `POST /api/drawings/upload -> ${res.status}`)
@@ -668,11 +693,11 @@ export async function takeCheckout(drawingId, holder, ttlS) {
   const payload = {}
   if (holder) payload.holder = holder
   if (ttlS) payload.ttl_s = ttlS
-  const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout`, {
+  const res = await apiFetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify(payload),
-  })
+  }, `/api/drawings/${drawingId}/checkout`)
   const data = await res.json().catch(() => null)
   if (res.status === 409) {
     return {
@@ -691,10 +716,10 @@ export async function takeCheckout(drawingId, holder, ttlS) {
 //   hold this lock" calmly. LIVE only.
 export async function releaseCheckout(drawingId, holder) {
   const q = holder ? `?holder=${encodeURIComponent(holder)}` : ''
-  const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout${q}`, {
+  const res = await apiFetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout${q}`, {
     method: 'DELETE',
     headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
-  })
+  }, `/api/drawings/${drawingId}/checkout`)
   if (res.status === 403) { const e = new Error('not the lock holder'); e.status = 403; throw e }
   const data = await res.json().catch(() => null)
   if (!res.ok) throw new Error(`DELETE /api/drawings/${drawingId}/checkout -> ${res.status}`)
@@ -730,11 +755,11 @@ export async function authorTool(mock, description) {
     await nap(700)
     return authorMock(description)
   }
-  const res = await fetch(`${API_BASE}/api/author`, {
+  const res = await apiFetch(`${API_BASE}/api/author`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify({ description }),
-  })
+  }, '/api/author')
   const body = await res.json().catch(() => null)
   if (!res.ok) {
     // The message can reach the DOM (AuthorPanel renders it), so it is
@@ -794,11 +819,11 @@ export async function stageAuthorTool(mock, description) {
     }
   }
   const path = '/api/author/stage'
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify({ description, mode: 'build', idempotency_key: requestId() }),
-  })
+  }, path)
   const body = await res.json().catch(() => null)
   if (!res.ok) throw customizationError('POST', path, res.status, body)
   return body
@@ -808,11 +833,11 @@ export async function stageAuthorTool(mock, description) {
 // endpoint without changing the frozen R6 register request below.
 async function issuePublishConfirmation(receipt) {
   const path = '/api/author/confirmations'
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify(receipt),
-  })
+  }, path)
   const body = await res.json().catch(() => null)
   if (!res.ok) throw customizationError('POST', path, res.status, body)
   if (!body || typeof body.confirmation_id !== 'string' || !body.confirmation_id) {
@@ -841,11 +866,11 @@ export async function publishStagedAuthor(mock, staged) {
     confirmation_id,
     idempotency_key: requestId(),
   }
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify(publish),
-  })
+  }, path)
   const body = await res.json().catch(() => null)
   if (!res.ok) throw customizationError('POST', path, res.status, body)
   return { ...staged, ...body, published: true }

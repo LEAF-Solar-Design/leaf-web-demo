@@ -44,6 +44,7 @@ import usePlatformTrustController from '../controllers/platform/usePlatformTrust
 import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
 import useCheckoutController from '../controllers/checkout/useCheckoutController.js'
 import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
+import useSessionController from '../controllers/session/useSessionController.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
@@ -55,7 +56,7 @@ import {
   stageRunIntent,
 } from '../runIntent.js'
 import { navigate } from './router.js'
-import { authConfigured, login, logout } from '../auth.js'
+import { authConfigured, isSignedIn, login } from '../auth.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
 const DRAWING_ID = 'cat-panels'
@@ -122,7 +123,10 @@ export default function ToolCast({
 }) {
   const [prompt, setPrompt] = useState(CAT_REQUEST)
   const { converse } = useWorkspaceControllers()
-  const { sessionId, turns, startTurn, resetCached } = converse
+  const { sessionId, turns, startTurn, clear: clearConverse, resetCached } = converse
+  const platformSession = useSessionController()
+  const sessionAuthRequired = platformSession.status === 'required'
+  const requireAuth = platformSession.actions.requireAuth
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
   const [linkedJobId, setLinkedJobId] = useState(null)
@@ -130,7 +134,6 @@ export default function ToolCast({
   const [tenantId, setTenantId] = useState('try-surface')
   const [sessionTier, setSessionTier] = useState(null)
   const [sessionOrg, setSessionOrg] = useState(null)
-  const [sessionAuthRequired, setSessionAuthRequired] = useState(false)
   const [busy, setBusy] = useState(false)
   const [leftView, setLeftView] = useState('operator')
   const [rightView, setRightView] = useState('execution')
@@ -158,7 +161,8 @@ export default function ToolCast({
     dismissDecision: () => {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     },
-  }), [])
+    onAuthRequired: () => requireAuth('catalog'),
+  }), [requireAuth])
 
   const applyIntake = useCallback((nextIntake) => {
     onIntakeChange(nextIntake)
@@ -222,6 +226,7 @@ export default function ToolCast({
   useEffect(() => {
     if (!active) return undefined
     let live = true
+    platformSession.actions.checking()
     setPhase('loading')
     getSession(false, 'cat')
       .then((data) => {
@@ -234,13 +239,13 @@ export default function ToolCast({
         setTenantId(data.tenant || 'try-surface')
         setSessionTier(data.tier || null)
         setSessionOrg(data.org || null)
-        setSessionAuthRequired(false)
+        platformSession.actions.activate(data)
         setPhase('ready')
       })
       .catch((cause) => {
         if (!live) return
         if (cause?.status === 401) {
-          setSessionAuthRequired(true)
+          requireAuth('/api/session')
           setError(null)
           setPhase('failed')
           return
@@ -249,7 +254,7 @@ export default function ToolCast({
         setPhase('failed')
       })
     return () => { live = false }
-  }, [active, seatIntake])
+  }, [active, platformSession.actions, requireAuth, seatIntake])
 
   const onCompleteVersion = useCallback(async (newVersion) => {
     const drawingId = newVersion?.drawing_id || 'cat-panels'
@@ -299,6 +304,7 @@ export default function ToolCast({
   } = useJobController({
     onCompleteVersion,
     onNotice: onJobNotice,
+    onAuthRequired: (required) => { if (required) requireAuth('jobs') },
     formatError: () => 'The panel run did not produce a readable result.',
   })
 
@@ -309,7 +315,12 @@ export default function ToolCast({
     if (!currentJob) return jobs.length
     return jobs.some((job) => job.job_id === currentJob.job_id) ? jobs.length : jobs.length + 1
   }, [currentJob, jobs])
-  const platform = usePlatformTrustController({ mock: false })
+  const platform = usePlatformTrustController({
+    mock: false,
+    onAuthRequired: (required, sources) => {
+      if (required) requireAuth(`platform:${(sources || []).join(',') || 'unknown'}`)
+    },
+  })
   const writeEntitled = platform.isEntitled('run_write')
   const checkout = useCheckoutController({
     mock: false,
@@ -338,6 +349,19 @@ export default function ToolCast({
       agentDisabled: true,
     },
   })
+
+  useEffect(() => {
+    if (!sessionAuthRequired) return
+    setLeftView('operator')
+    setRightView('execution')
+    setError(null)
+    setPhase('failed')
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+    catalog.actions.dismissRoute()
+    drawingUpload.actions.cancel()
+    clearConverse()
+    resetCached()
+  }, [catalog.actions, clearConverse, drawingUpload.actions, resetCached, sessionAuthRequired])
   const {
     tools,
     toolsError,
@@ -891,7 +915,7 @@ export default function ToolCast({
                   `tier ${sessionTier || platform.entitlements?.tier || 'unknown'}`,
                   `authentication ${sessionAuthRequired ? 'sign in required' : 'active'}`,
                 ],
-                action: authConfigured ? { label: 'Sign out', onClick: logout } : null,
+                action: isSignedIn() ? { label: 'Sign out', onClick: platformSession.actions.signOut } : null,
                 foot: 'Platform identity and Claude account credit are separate.',
               })}
             >
