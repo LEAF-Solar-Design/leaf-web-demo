@@ -148,6 +148,7 @@ export default function ToolCast({
     runIntentSessionRef.current = `try-${id}`
   }
   const runIntentStateRef = useRef(null)
+  const lastConfirmedRunRef = useRef(null)
   if (!runIntentStateRef.current) {
     runIntentStateRef.current = createRunIntentState(runIntentSessionRef.current)
   }
@@ -403,6 +404,10 @@ export default function ToolCast({
       catalog.actions.dismissRoute()
       return
     }
+    lastConfirmedRunRef.current = {
+      tool,
+      params: { ...confirmed.execution.params },
+    }
     setSelectedCatalogTool(tool)
     setBusy(true)
     setError(null)
@@ -438,6 +443,12 @@ export default function ToolCast({
     if (workspace.openProjectId) workspace.rehydrate()
     checkout.actions.refresh()
   }, [busy, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, checkout.writeLocked, jobRunning, runTrackedJob, workspace])
+
+  const retryCatalogRun = useCallback(() => {
+    const last = lastConfirmedRunRef.current
+    if (!last || busy || jobRunning) return
+    requestCatalogRun(last.tool, { ...last.params })
+  }, [busy, jobRunning, requestCatalogRun])
 
   const openWorkspaceProject = useCallback(async (projectId) => {
     const opened = await workspace.openProject(projectId)
@@ -518,7 +529,11 @@ export default function ToolCast({
         `timing ${envelope.timing_ms ?? 'unknown'} ms`,
         `cost ${Number(cost) > 0 ? `$${Number(cost).toFixed(4)}` : 'no cloud cost'}`,
         `degraded ${envelope.degraded_mode ? 'yes, local fallback' : 'no'}`,
-        ...(envelope.error ? [`error ${envelope.error.error_code || envelope.error.message || 'failed'}`] : []),
+        ...(envelope.error ? [
+          `error code ${envelope.error.error_code || 'unknown'}`,
+          `error message ${envelope.error.message || 'failed'}`,
+          `retryable ${envelope.error.retryable ? 'yes' : 'no'}`,
+        ] : []),
       ],
       foot: 'This receipt belongs to one immutable tool run.',
     })
@@ -794,6 +809,7 @@ export default function ToolCast({
             error={jobError}
             result={jobResult}
             tool={selectedCatalogTool}
+            onRetry={lastConfirmedRunRef.current ? retryCatalogRun : undefined}
           />
           {jobResult && (
             <div className="tc-result-details">

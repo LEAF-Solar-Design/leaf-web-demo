@@ -300,8 +300,13 @@ Progress:
   tenant drawer. Browser proof covers authorized list and disable, cancel before
   mutation, exact secret-header scoping, no secret leakage, calm 403 denial,
   hidden tenant data on denial, and zero ops requests without the flag.
-- Provider lifting, sign-out and mid-session expiry, deeper structured failure
-  coverage, and the remaining accessibility ladder remain open.
+- `/try` now exposes structured failure code, message, and retryability in the
+  result and details surfaces. Retry stages a fresh immutable proposal and
+  cannot submit until the operator approves again. Browser proof checks a new
+  idempotency key, successful recovery, unchanged drawing state on failure, and
+  the absence of Retry for a nonretryable failure.
+- Provider lifting, sign-out and mid-session expiry, post-write refresh and
+  transport recovery, and the remaining accessibility ladder remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
