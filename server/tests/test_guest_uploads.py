@@ -174,6 +174,20 @@ def test_live_account_upload_status_fails_closed_without_active_binding(
     assert body["error"]["message"] == "active platform binding required"
 
 
+def test_upload_status_preserves_verified_backedge_tenant(monkeypatch):
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+
+    def reject_account_resolution(subject):
+        raise AssertionError("trusted back-edge must not use Auth0 binding authority")
+
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        reject_account_resolution,
+    )
+    tenant = deps.TenantContext("broker-owned-tenant", tier="restricted")
+    assert uploads_router._resolve_upload_read_identity(tenant) is tenant
+
+
 def test_active_binding_resolution_fails_closed_for_unbound_subject(monkeypatch):
     monkeypatch.setattr(
         platform_link, "platform_store", lambda: SimpleNamespace(

@@ -106,6 +106,13 @@ def _resolve_upload_read_identity(tenant: Any) -> Any:
         return tenant
     if tenant.tier == "guest" and guest_uploads.is_guest_tenant(str(tenant)):
         return tenant
+    if tenant.subject is None and tenant.org_id is None:
+        # Verified broker/harness back-edge identities are server-owned tenant
+        # contexts without an Auth0 subject. Keep that existing trust boundary
+        # intact instead of trying to resolve it through the account binding
+        # table. A JWT-backed account without a subject still fails closed
+        # below because its claimed org is present.
+        return tenant
 
     import tenancy  # noqa: PLC0415 - lazy, mirrors upload creation
 
