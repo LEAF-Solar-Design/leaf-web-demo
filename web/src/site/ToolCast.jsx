@@ -185,6 +185,7 @@ export default function ToolCast({
   const [error, setError] = useState(null)
   const [linkedJobId, setLinkedJobId] = useState(null)
   const [tenantId, setTenantId] = useState('try-surface')
+  const [guestDrawing, setGuestDrawing] = useState(null)
   const [sessionTier, setSessionTier] = useState(null)
   const [sessionOrg, setSessionOrg] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -202,6 +203,7 @@ export default function ToolCast({
   const [tourOn, setTourOn] = useState(() => shouldStartTour(window.location.search))
   const [tourIndex, setTourIndex] = useState(0)
   const toastSeqRef = useRef(0)
+  const accountSessionObservedRef = useRef(false)
   const tourSeqRef = useRef(0)
   const catalogDecisionRef = useRef(null)
   const runIntentSessionRef = useRef(null)
@@ -294,8 +296,10 @@ export default function ToolCast({
           apply: true,
         })
         setTenantId(data.tenant || 'try-surface')
+        setGuestDrawing(null)
         setSessionTier(data.tier || null)
         setSessionOrg(data.org || null)
+        accountSessionObservedRef.current = true
         platformSession.actions.activate(data)
         setPhase('ready')
       })
@@ -336,12 +340,24 @@ export default function ToolCast({
   const onUploadReady = useCallback(async ({ receipt, view }) => {
     seatVersion(view, { drawingId: receipt.drawing_id, source: 'upload', event: 'upload' })
     setTenantId(receipt.tenant_id || tenantId)
+    setGuestDrawing(receipt.tenant_kind === 'guest' ? {
+      drawingId: receipt.drawing_id,
+      retentionExpiresAt: receipt.retention_expires_at || null,
+    } : null)
     setPhase('ready')
     setError(null)
     showToast({ text: `Drawing ready, ${view?.intake?.dwg || receipt.drawing_id}`, action: { label: 'View', onClick: () => setRightView('view') } })
   }, [seatVersion, showToast, tenantId])
 
   const drawingUpload = useDrawingUploadController({ onReady: onUploadReady })
+
+  useEffect(() => {
+    // Preserve the public policy request during the initial signed-out boot,
+    // but invalidate an account upload if an active session expires mid-flight.
+    if (!sessionAuthRequired || !accountSessionObservedRef.current) return
+    accountSessionObservedRef.current = false
+    drawingUpload.actions.cancel()
+  }, [drawingUpload.actions, sessionAuthRequired])
 
   const {
     jobs,
@@ -394,6 +410,7 @@ export default function ToolCast({
   })
   const workspace = useWorkspaceController({ mock: false, services: workspaceServices })
   const currentProjectName = selectCurrentProjectName(workspace)
+  const activeDrawingId = drawing.drawingState?.drawing_id || DRAWING_ID
   const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId,
     orgId: workspace.orgId,
@@ -423,10 +440,9 @@ export default function ToolCast({
     setPhase('failed')
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     catalog.actions.dismissRoute()
-    drawingUpload.actions.cancel()
     clearConverse()
     resetCached()
-  }, [catalog.actions, clearConverse, drawingUpload.actions, resetCached, sessionAuthRequired])
+  }, [catalog.actions, clearConverse, resetCached, sessionAuthRequired])
   const {
     tools,
     toolsError,
@@ -767,7 +783,7 @@ export default function ToolCast({
       <div className="tc-topcluster" data-cast="tool" style={{ '--rank': 3 }}>
         <ProjectSwitcher
           mock={false}
-          projectName="cat-panels"
+          projectName={activeDrawingId}
           orgId={workspace.orgId}
           projects={workspace.projects}
           openProjectId={workspace.openProjectId}
@@ -805,11 +821,18 @@ export default function ToolCast({
         </div>
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (sessionAuthRequired ? (
-            <SessionGate
-              configured={authConfigured}
-              onSignIn={login}
-              onDemo={() => { window.location.href = '/app?demo=1' }}
-            />
+            <>
+              {guestDrawing && (
+                <div className="tc-panel-note" role="status" data-testid="guest-view-only">
+                  <strong>Guest drawing ready.</strong> Inspect this drawing here. Sign in to load tools or run actions. Guest uploads are view-only.
+                </div>
+              )}
+              <SessionGate
+                configured={authConfigured}
+                onSignIn={login}
+                onDemo={() => { window.location.href = '/app?demo=1' }}
+              />
+            </>
           ) : sessionId ? (
             <ConversePanel
               sessionId={sessionId}
@@ -1152,7 +1175,7 @@ export default function ToolCast({
           <div className="tc-bar-controls">
             <span className="tc-bar-chip">Scope · this drawing</span>
             <span className="tc-bar-scopes">plan · approve · execute · version</span>
-            <span className="tc-bar-proj">cat-panels</span>
+            <span className="tc-bar-proj">{activeDrawingId}</span>
             <span className="key tc-bar-key">⌘K</span>
           </div>
         </div>

@@ -93,7 +93,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByRole('button', { name: 'Take edit lock' })).toBeVisible()
   mark('viewer and checkout')
 
-  await page.getByRole('button', { name: /Project cat-panels/ }).click()
+  await page.getByRole('button', { name: /^Project / }).click()
   await page.getByRole('menuitem', { name: /Cat Roof/ }).click()
   await expect(page.getByText('Cat Roof').first()).toBeVisible()
   await expect(page.getByText('1 drawing version')).toBeVisible()

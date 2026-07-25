@@ -31,6 +31,7 @@ const TENANT = import.meta.env.VITE_TENANT_ID || 'demo-tenant'
 // EVERY /api call so LEAF_AUTH_LIVE=1 works from the UI; when absent, headers are
 // byte-identical to the open-demo path (zero behavior change off-auth).
 const AUTH_KEY = 'leaf.jwt'
+const GUEST_SESSION_KEY = 'leaf.guest_session'
 const unauthorizedListeners = new Set()
 
 export const config = { apiBase: API_BASE, mockDefault: MOCK_DEFAULT, tenant: TENANT }
@@ -42,6 +43,30 @@ export function authHeaders() {
     const tok = localStorage.getItem(AUTH_KEY)
     return tok ? { Authorization: `Bearer ${tok}` } : {}
   } catch { return {} }
+}
+
+// Guest authority is intentionally narrower than account authority. Reuse it
+// only for the uploaded-drawing endpoints that the server guest allowlist
+// exposes. It must never flow into run, solve, author, converse, or job calls.
+function storedGuestSession() {
+  try { return localStorage.getItem(GUEST_SESSION_KEY) }
+  catch { return null }
+}
+
+function guestDrawingHeaders(drawingId) {
+  if (!String(drawingId || '').startsWith('u-')) return {}
+  const guestSession = storedGuestSession()
+  return guestSession ? { 'X-Guest-Session': guestSession } : {}
+}
+
+function rememberUploadAuthority(receipt) {
+  try {
+    if (receipt?.tenant_kind === 'guest' && receipt.guest_session) {
+      localStorage.setItem(GUEST_SESSION_KEY, receipt.guest_session)
+    } else if (receipt?.tenant_kind === 'account') {
+      localStorage.removeItem(GUEST_SESSION_KEY)
+    }
+  } catch { /* storage unavailable */ }
 }
 
 export function subscribeUnauthorized(listener) {
@@ -631,7 +656,7 @@ export async function getDrawingIntake(mock, drawingId, version = 'head') {
   if (mock) { await nap(120); return mockVersions.view(version) }
   return http(
     `/api/drawings/${encodeURIComponent(drawingId)}/intake?version=${encodeURIComponent(version)}`,
-    { headers: { 'X-Tenant-Id': TENANT } },
+    { headers: { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId) } },
   )
 }
 
@@ -644,7 +669,8 @@ export async function uploadDrawing(file, guestSession = null) {
   const form = new FormData()
   form.append('file', file)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
-  if (guestSession) headers['X-Guest-Session'] = guestSession
+  const uploadGuestSession = guestSession || storedGuestSession()
+  if (uploadGuestSession) headers['X-Guest-Session'] = uploadGuestSession
   const res = await apiFetch(`${API_BASE}/api/drawings/upload`, { method: 'POST', headers, body: form }, '/api/drawings/upload')
   const body = await res.json().catch(() => null)
   if (!res.ok) {
@@ -653,6 +679,7 @@ export async function uploadDrawing(file, guestSession = null) {
     error.body = body
     throw error
   }
+  rememberUploadAuthority(body)
   return body
 }
 
@@ -675,7 +702,7 @@ export async function getUploadedDrawingIntake(drawingId, guestSession = null, t
 export async function getDrawingVersions(mock, drawingId) {
   if (mock) { await nap(120); return mockVersions.list() }
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions`, {
-    headers: { 'X-Tenant-Id': TENANT },
+    headers: { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId) },
   })
 }
 

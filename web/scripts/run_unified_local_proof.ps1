@@ -2,14 +2,17 @@ param(
   [int]$WebPort = 5275,
   [int]$AppPort = 8230,
   [int]$BrokerPort = 8240,
-  [int]$HarnessPort = 8250
+  [int]$HarnessPort = 8250,
+  [ValidateSet('account', 'guest')]
+  [string]$Mode = 'account'
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $runId = Get-Date -Format 'yyyyMMdd-HHmmss'
-$runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "leaf-unified-e2e-$runId"
-$artifactRoot = Join-Path $repoRoot "artifacts\unified-surface-proof\local\stack-$runId"
+$artifactTier = if ($Mode -eq 'guest') { 'guest' } else { 'local' }
+$runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "leaf-unified-$artifactTier-e2e-$runId"
+$artifactRoot = Join-Path $repoRoot "artifacts\unified-surface-proof\$artifactTier\stack-$runId"
 $launcher = $null
 
 function Test-PortOpen([int]$Port) {
@@ -47,9 +50,12 @@ foreach ($name in @('drawings', 'guest-drawings', 'uploads', 'grants', 'tenants'
 
 $env:LEAF_SOURCE_SHA = (git -C $repoRoot rev-parse HEAD).Trim()
 $env:LEAF_SOURCE_COMMIT = $env:LEAF_SOURCE_SHA
-$env:LEAF_AUTH_LIVE = '0'
+$env:LEAF_AUTH_LIVE = if ($Mode -eq 'guest') { '1' } else { '0' }
 $env:LEAF_AGENT_MOCK = '1'
 $env:LEAF_GUEST_UPLOADS_ENABLED = '1'
+$env:LEAF_GUEST_SECRET = [Guid]::NewGuid().ToString('N')
+$env:LEAF_CUSTOMIZATION_R5_MODE = 'off'
+$env:LEAF_CUSTOMIZATION_R6_MODE = 'off'
 $env:LEAF_STORE_DIR = Join-Path $runRoot 'drawings'
 $env:LEAF_GUEST_STORE_DIR = Join-Path $runRoot 'guest-drawings'
 $env:LEAF_UPLOADS_DIR = Join-Path $runRoot 'uploads'
@@ -62,18 +68,29 @@ $env:LEAF_TENANTS_DIR = Join-Path $runRoot 'tenants'
 $env:LEAF_TENANT_GIT_DIR = Join-Path $runRoot 'tenant-git'
 $env:LEAF_E2E_BASE_URL = "http://127.0.0.1:$WebPort"
 $env:LEAF_E2E_API_BASE = "http://127.0.0.1:$AppPort"
+$env:LEAF_CORS_ORIGINS = $env:LEAF_E2E_BASE_URL
 
 $stdout = Join-Path $runRoot 'stack.out.log'
 $stderr = Join-Path $runRoot 'stack.err.log'
 
 try {
-  $launcher = Start-Process -FilePath python -ArgumentList @(
+  $launcherFile = 'python'
+  if ($Mode -eq 'guest') {
+    $guestVenv = Join-Path $runRoot 'python-runtime'
+    uv venv $guestVenv --python 3.13 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the guest proof Python runtime' }
+    $launcherFile = Join-Path $guestVenv 'Scripts\python.exe'
+    uv pip install --python $launcherFile -r (Join-Path $repoRoot 'server\requirements.txt') -r (Join-Path $repoRoot 'server\requirements-auth.txt') | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install the guest proof Python dependencies' }
+  }
+  $launcherArgs = @(
     'scripts/start-leaf.py', '--with-harness',
     '--broker-port', $BrokerPort,
     '--app-port', $AppPort,
     '--harness-port', $HarnessPort,
     '--web-port', $WebPort
-  ) -WorkingDirectory $repoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+  )
+  $launcher = Start-Process -FilePath $launcherFile -ArgumentList $launcherArgs -WorkingDirectory $repoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
 
   Wait-Json "http://127.0.0.1:$BrokerPort/broker/health" { param($x) $x.ok -and $x.role -eq 'aps-broker' } | Out-Null
   Wait-Json "http://127.0.0.1:$HarnessPort/health" { param($x) $x.ok } | Out-Null
@@ -82,7 +99,9 @@ try {
   Wait-Json "http://127.0.0.1:$AppPort/api/ready" { param($x) $x.ready -and $x.dependencies.durable_stores.state -eq 'ready' } | Out-Null
 
   Push-Location (Join-Path $repoRoot 'web')
-  try { npm run proof:local } finally { Pop-Location }
+  try {
+    if ($Mode -eq 'guest') { npm run proof:guest } else { npm run proof:local }
+  } finally { Pop-Location }
 } finally {
   if ($launcher -and -not $launcher.HasExited) {
     Stop-Process -Id $launcher.Id

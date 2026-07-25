@@ -373,9 +373,14 @@ Progress:
   to the uploaded drawing id and account tenant. The two-test managed gate
   passes. Fourteen live-auth guest-session tests and five upload isolation tests
   also pass, including tampered and expired session denial, bearer precedence,
-  cross-tenant denial, and refusal to bootstrap unknown guest drawings. The
-  signed-out guest browser gate remains open because guest policy is upload and
-  view only by design.
+  cross-tenant denial, and refusal to bootstrap unknown guest drawings.
+- The managed live-auth guest browser gate now passes. A signed-out operator can
+  upload and inspect a real DXF, load version 1 through the signed guest drawing
+  read path, and see the uploaded drawing id in the unified scene. Run stays
+  disabled, the browser emits no run request, and a direct run attempt with the
+  valid guest credential fails closed with 403. Guest authority is stored only
+  for the server allowlisted uploaded-drawing reads and never reaches run, job,
+  solve, author, or conversation calls.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -454,9 +459,11 @@ Observed Wave 0 results:
   catalog review, explicit confirmation, broker and worker runs, completed
   result rendering, durable job API storage, Jobs-rail recovery after page
   reload, real DXF upload and extraction, uploaded geometry replacement, and a
-  catalog run bound to the uploaded drawing and tenant. APS, Claude, Auth0,
-  PostgreSQL, the signed-out guest browser gate, mid-run reattach, Escape
-  detach, and version mutation claims remain open.
+  catalog run bound to the uploaded drawing and tenant. A separate live-auth
+  guest walk also passes for signed guest upload, extraction, viewer seating,
+  allowed version read, zero dispatch, and denied run. APS, Claude, Auth0 user
+  sign-in, PostgreSQL, mid-run reattach, Escape detach, and version mutation
+  claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:
