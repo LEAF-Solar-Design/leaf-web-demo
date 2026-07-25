@@ -260,8 +260,23 @@ Progress:
   request, publishes only the exact receipt-bound decision, refreshes the
   catalog, expands schema defaults into the immutable intent, confirms the
   authored run, and completes it through the shared job controller.
-- Provider lifting, checkout, selection, layer controls, upload, account
-  mutation, and tenant operations remain open.
+- `/try` now mounts the production viewer layer and selection controls. The
+  contract walk proves a visible canvas change when PANELS is hidden and proves
+  real pointer picking of panel P1696 through the shared selection readout.
+- `/try` now mounts checkout take and release against an extracted controller.
+  The controller ignores stale drawing reads, enforces mutation single-flight,
+  refreshes authoritative state after each mutation, and blocks write approval
+  when another holder owns the lock. Its four focused tests pass.
+- `/try` now mounts Claude account unlink and link against the shared platform
+  controller. The contract walk proves destructive confirmation, a write-only
+  token field, token-field removal after success, and the expected OAuth grant
+  request without recording a real credential.
+- The aggregate one-scene walk passes with production Playwright video capture.
+  Its receipt covers 19 capability IDs and 34 distinct API method-path pairs.
+  The 10-scenario fixture gate, 19 controller tests, production build, behavior
+  pins, customization checks, and all staging checks pass.
+- Provider lifting, upload, result details, notices, sign-in and expiry, tenant
+  operations, and the full responsive and accessibility ladder remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

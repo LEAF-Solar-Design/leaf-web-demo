@@ -47,6 +47,8 @@ export default function SiteRoot() {
   const scene = bootApp ? 'app' : sceneForPath(path)
   const stageRef = useRef(null)
   const [operatorIntake, setOperatorIntake] = useState(null)
+  const [operatorVisibleLayers, setOperatorVisibleLayers] = useState(null)
+  const [operatorSelectedHandle, setOperatorSelectedHandle] = useState(null)
 
   // Keyboard recasts — ONLY in scenes site|tool (listener not registered in
   // scene app/sheets), and never when focus is in an editable element.
@@ -105,9 +107,20 @@ export default function SiteRoot() {
       drawingId={scene === 'tool' ? 'cat-panels' : 'rooftop_demo'}
     >
       <div className="stage-root" data-scene={scene} ref={stageRef}>
-        <StageLayer intakeOverride={scene === 'tool' ? operatorIntake : null} />
+        <StageLayer
+          intakeOverride={scene === 'tool' ? operatorIntake : null}
+          visibleLayers={scene === 'tool' ? operatorVisibleLayers : null}
+          selectedHandle={scene === 'tool' ? operatorSelectedHandle : null}
+          onSelectEntity={scene === 'tool' ? setOperatorSelectedHandle : undefined}
+        />
         <LandingCast onTryTool={() => navigate('/try')} />
-        <ToolCast active={scene === 'tool'} onIntakeChange={setOperatorIntake} />
+        <ToolCast
+          active={scene === 'tool'}
+          onIntakeChange={setOperatorIntake}
+          onVisibleLayersChange={setOperatorVisibleLayers}
+          selectedHandle={operatorSelectedHandle}
+          onSelectedHandleChange={setOperatorSelectedHandle}
+        />
       </div>
     </WorkspaceControllerProvider>
   )

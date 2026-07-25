@@ -28,7 +28,12 @@ function ReadySentinel({ onReady }) {
   return null
 }
 
-export default function StageLayer({ intakeOverride = null }) {
+export default function StageLayer({
+  intakeOverride = null,
+  visibleLayers = null,
+  selectedHandle = null,
+  onSelectEntity,
+}) {
   const [intake, setIntake] = useState(null)
   const [routes, setRoutes] = useState([])
   const [fallback, setFallback] = useState(false)
@@ -67,6 +72,9 @@ export default function StageLayer({ intakeOverride = null }) {
                 <Viewer
                   intake={intakeOverride || intake}
                   colorForLayer={stageColorForLayer}
+                  visibleLayers={visibleLayers}
+                  selectedHandle={selectedHandle}
+                  onSelectEntity={onSelectEntity}
                   background="transparent"
                   controlsEnabled={false}
                   stringRoutes={intakeOverride ? [] : routes}

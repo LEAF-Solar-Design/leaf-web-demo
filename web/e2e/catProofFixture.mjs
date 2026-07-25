@@ -105,6 +105,8 @@ export function makeCatProofState() {
   return {
     base, cat, count: handles.length, head: 1, events: [], catalogJob: false,
     authorStaged: false, independentApproved: false, authorPublished: false, authorJob: false,
+    grantLinked: true, grantKind: 'oauth',
+    checkout: null,
   }
 }
 
@@ -137,7 +139,21 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
     source: 'registry',
   })
   if (path === '/api/entitlements') return json({ tier: 'proof', entitlements: { run_read: true, run_write: true, build: true, converse: true } })
-  if (path === '/api/tenant/claude-grant') return json({ linked: true, kind: 'oauth', linked_at: '2026-07-24T12:00:00Z' })
+  if (path === '/api/tenant/claude-grant' && method === 'GET') return json({
+    linked: state.grantLinked,
+    kind: state.grantLinked ? state.grantKind : null,
+    linked_at: state.grantLinked ? '2026-07-24T12:00:00Z' : null,
+  })
+  if (path === '/api/tenant/claude-grant' && method === 'DELETE') {
+    state.grantLinked = false
+    state.grantKind = null
+    return json({ linked: false, linked_at: null })
+  }
+  if (path === '/api/tenant/claude-grant' && method === 'POST') {
+    state.grantLinked = true
+    state.grantKind = body.kind || 'oauth'
+    return json({ linked: true, kind: state.grantKind, linked_at: '2026-07-24T12:10:00Z' })
+  }
   if (path === '/api/health') return json({ ok: true, aps_live: false, n_tools: 1, n_authored: 1 })
   if (path === '/api/usage') return json({
     today: { runs: state.head - 1, usd_est: 0 },
@@ -247,12 +263,24 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
     })
   }
   if (path === '/api/drawings/cat-panels/versions') return json({
-    drawing_id: 'cat-panels', head: state.head, latest: 2, checkout: null,
+    drawing_id: 'cat-panels', head: state.head, latest: 2, checkout: state.checkout,
     versions: [
       { v: 1, parent: null, tool: 'base', note: 'Original drawing' },
       { v: 2, parent: 1, tool: 'arrange-panels-as-cat', note: 'Sitting cat, oracle pass' },
     ],
   })
+  if (path === '/api/drawings/cat-panels/checkout' && method === 'POST') {
+    state.checkout = {
+      holder: body.holder || 'cat-litmus-tenant',
+      acquired: '2026-07-24T12:00:00Z',
+      expires: '2026-07-25T23:00:00Z',
+    }
+    return json({ acquired: true, checkout: state.checkout })
+  }
+  if (path === '/api/drawings/cat-panels/checkout' && method === 'DELETE') {
+    state.checkout = null
+    return json({ released: true, checkout: null })
+  }
   if (path === '/api/drawings/cat-panels/undo' && method === 'POST') {
     state.head = 1
     return json({ drawing_id: 'cat-panels', intake: state.base, version: 1, head: 1, latest: 2 })

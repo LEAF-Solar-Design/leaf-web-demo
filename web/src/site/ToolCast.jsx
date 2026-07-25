@@ -18,9 +18,13 @@ import {
 } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
 import AuthorPanel from '../components/AuthorPanel.jsx'
+import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
+import CheckoutControls from '../components/CheckoutControls.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobRail from '../components/JobRail.jsx'
+import Legend from '../components/Legend.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
+import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ToolsPanel from '../components/ToolsPanel.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
@@ -30,6 +34,7 @@ import useDrawingVersionController from '../controllers/useDrawingVersionControl
 import useJobController from '../controllers/useJobController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
+import useCheckoutController from '../controllers/checkout/useCheckoutController.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
@@ -71,7 +76,24 @@ function phaseLabel(phase) {
   return 'Drawing ready'
 }
 
-export default function ToolCast({ active, onIntakeChange }) {
+function selectedEntity(intake, handle) {
+  if (!handle) return null
+  const polyline = intake?.polylines?.find((entity) => entity.handle === handle)
+  if (polyline) return { handle, kind: 'polyline', layer: polyline.layer }
+  const insert = intake?.inserts?.find((entity) => entity.handle === handle)
+  if (insert) return { handle, kind: 'insert', layer: insert.layer, name: insert.name }
+  const face = intake?.faces3d?.find((entity) => entity.handle === handle)
+  if (face) return { handle, kind: '3dface', layer: face.layer }
+  return null
+}
+
+export default function ToolCast({
+  active,
+  onIntakeChange,
+  onVisibleLayersChange,
+  selectedHandle,
+  onSelectedHandleChange,
+}) {
   const [prompt, setPrompt] = useState(CAT_REQUEST)
   const { converse } = useWorkspaceControllers()
   const { sessionId, turns, startTurn, resetCached } = converse
@@ -85,6 +107,7 @@ export default function ToolCast({ active, onIntakeChange }) {
   const [rightView, setRightView] = useState('execution')
   const [selectedCatalogTool, setSelectedCatalogTool] = useState(null)
   const [notice, setNotice] = useState(null)
+  const [claudeOpen, setClaudeOpen] = useState(false)
   const catalogDecisionRef = useRef(null)
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
@@ -108,6 +131,10 @@ export default function ToolCast({ active, onIntakeChange }) {
     setPanelCount(nextIntake?.polylines?.length || null)
   }, [onIntakeChange])
 
+  const resetSelection = useCallback(() => {
+    onSelectedHandleChange?.(null)
+  }, [onSelectedHandleChange])
+
   const onVersionEvent = useCallback(({ event }) => {
     setPhase(event === 'undo' ? 'undone' : 'complete')
   }, [])
@@ -125,6 +152,7 @@ export default function ToolCast({ active, onIntakeChange }) {
     undoVersion,
     redoVersion,
     onApplyIntake: applyIntake,
+    onResetSelection: resetSelection,
     onVersionEvent,
     onError: onDrawingError,
     initialDrawingState: { drawing_id: DRAWING_ID, version: 1, head: 1, latest: 1 },
@@ -137,6 +165,25 @@ export default function ToolCast({ active, onIntakeChange }) {
   } = drawing.actions
   const version = drawing.head
   const { canUndo, canRedo } = drawing
+  const selection = useMemo(() => selectedEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
+  const layerCounts = useMemo(() => {
+    const counts = {}
+    for (const layer of drawing.shown?.layers || []) counts[layer] = 0
+    for (const entity of [...(drawing.shown?.polylines || []), ...(drawing.shown?.inserts || []), ...(drawing.shown?.faces3d || [])]) {
+      counts[entity.layer] = (counts[entity.layer] || 0) + 1
+    }
+    return counts
+  }, [drawing.shown])
+
+  useEffect(() => {
+    onVisibleLayersChange?.(drawing.visibleLayers)
+  }, [drawing.visibleLayers, onVisibleLayersChange])
+
+  const toggleLayer = useCallback((layer) => {
+    const next = { ...drawing.visibleLayers, [layer]: drawing.visibleLayers[layer] === false }
+    drawing.actions.setVisibleLayers(next)
+    if (selection?.layer === layer && next[layer] === false) onSelectedHandleChange?.(null)
+  }, [drawing.actions, drawing.visibleLayers, onSelectedHandleChange, selection])
 
   useEffect(() => {
     if (!active) return undefined
@@ -193,6 +240,11 @@ export default function ToolCast({ active, onIntakeChange }) {
   }, [currentJob, jobs])
   const platform = usePlatformTrustController({ mock: false })
   const writeEntitled = platform.isEntitled('run_write')
+  const checkout = useCheckoutController({
+    mock: false,
+    drawingId: drawing.drawingState?.drawing_id || DRAWING_ID,
+    holder: tenantId || 'try-surface',
+  })
   const workspace = useWorkspaceController({ mock: false, services: workspaceServices })
   const currentProjectName = selectCurrentProjectName(workspace)
   const catalogRunContext = useMemo(() => createCatalogRunContext({
@@ -224,6 +276,10 @@ export default function ToolCast({ active, onIntakeChange }) {
     if (decision?.lane !== 'run') return decision
     const tool = tools.find((candidate) => candidate.name === decision.tool)
     if (!tool) return decision
+    if ((tool.capabilities || []).includes('drawing.write') && checkout.writeLocked) {
+      setError(`Editing is locked by ${checkout.lockedByOther.holder}. Read tools still run.`)
+      return undefined
+    }
     const context = catalogRunContext
     if (!context) {
       setError('This project needs a canonical drawing version before a tool can run.')
@@ -240,7 +296,7 @@ export default function ToolCast({ active, onIntakeChange }) {
     })
     runIntentStateRef.current = staged.state
     return { ...decision, params: staged.intent.params, runIntent: staged.intent }
-  }, [catalogRunContext, tools])
+  }, [catalogRunContext, checkout.lockedByOther, checkout.writeLocked, tools])
   catalogDecisionRef.current = armCatalogDecision
 
   const requestCatalogRun = useCallback((tool, params) => {
@@ -258,6 +314,11 @@ export default function ToolCast({ active, onIntakeChange }) {
 
   const runCatalogTool = useCallback(async (intent, tool, params) => {
     if (!tool || busy || jobRunning) return
+    if ((tool.capabilities || []).includes('drawing.write') && checkout.writeLocked) {
+      setError(`Editing is locked by ${checkout.lockedByOther.holder}. The write did not run.`)
+      catalog.actions.dismissRoute()
+      return
+    }
     const confirmed = confirmRunIntent(runIntentStateRef.current, {
       intentId: intent?.intentId,
       sessionId: intent?.sessionId,
@@ -302,7 +363,8 @@ export default function ToolCast({ active, onIntakeChange }) {
     setBusy(false)
     catalog.actions.dismissRoute()
     if (workspace.openProjectId) workspace.rehydrate()
-  }, [busy, catalog.actions, catalogRunContext, jobRunning, runTrackedJob, workspace])
+    checkout.actions.refresh()
+  }, [busy, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, checkout.writeLocked, jobRunning, runTrackedJob, workspace])
 
   const openWorkspaceProject = useCallback(async (projectId) => {
     const opened = await workspace.openProject(projectId)
@@ -364,7 +426,8 @@ export default function ToolCast({ active, onIntakeChange }) {
       setError('The panel run did not produce a readable drawing version.')
     }
     if (workspace.openProjectId) workspace.rehydrate()
-  }, [attachTrackedJob, onJobLinked, workspace])
+    checkout.actions.refresh()
+  }, [attachTrackedJob, checkout.actions, onJobLinked, workspace])
 
   const runRequest = useCallback(async () => {
     const text = prompt.trim()
@@ -454,6 +517,7 @@ export default function ToolCast({ active, onIntakeChange }) {
               onLinkClaude={() => {}}
               onAttachJob={attachJob}
               onJobLinked={attachJob}
+              writeLocked={checkout.writeLocked}
             />
           ) : (
             <div className="tc-operator-empty">
@@ -471,6 +535,7 @@ export default function ToolCast({ active, onIntakeChange }) {
               onOpenTool={setSelectedCatalogTool}
               onRetry={catalog.actions.retryTools}
               writeEntitled={writeEntitled}
+              writeLocked={checkout.writeLocked}
               subtitle="Choose a registered capability, inspect its parameters, then review before it runs."
             />
           )}
@@ -516,6 +581,7 @@ export default function ToolCast({ active, onIntakeChange }) {
           <button type="button" role="tab" aria-selected={rightView === 'jobs'} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
           <button type="button" role="tab" aria-selected={rightView === 'versions'} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest || 1}</span></button>
           <button type="button" role="tab" aria-selected={rightView === 'trust'} onClick={() => { setRightView('trust'); platform.actions.refreshAll() }}>Trust</button>
+          <button type="button" role="tab" aria-selected={rightView === 'view'} onClick={() => setRightView('view')}>View</button>
         </div>
         <div className="tc-rail-body">
         {rightView === 'execution' && <><div className="tc-events">
@@ -543,6 +609,13 @@ export default function ToolCast({ active, onIntakeChange }) {
         <div className="tc-version-actions">
           <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || jobRunning || drawing.versionBusy || !canUndo}>Undo</button>
           <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || jobRunning || drawing.versionBusy || !canRedo}>Redo</button>
+          <CheckoutControls
+            lockedByOther={checkout.lockedByOther}
+            heldByUs={checkout.heldByUs}
+            busy={checkout.busy}
+            onTake={checkout.actions.take}
+            onRelease={checkout.actions.release}
+          />
         </div>
         <div className="tc-rail-note">
           <span>The request, approval, job, drawing, and version history remain in this scene.</span>
@@ -604,6 +677,29 @@ export default function ToolCast({ active, onIntakeChange }) {
               loading={platform.entLoading}
               mock={false}
             />
+            <ClaudeAccountPanel
+              mock={false}
+              grant={platform.grant}
+              loading={platform.grantLoading}
+              busy={platform.grantBusy}
+              error={platform.grantErr}
+              open={claudeOpen}
+              onToggle={setClaudeOpen}
+              onLink={platform.actions.linkClaude}
+              onUnlink={platform.actions.unlinkClaude}
+            />
+          </div>
+        )}
+        {rightView === 'view' && (
+          <div className="tc-view-panel">
+            <Legend
+              layers={drawing.shown?.layers || []}
+              counts={layerCounts}
+              colorForLayer={() => '#96a0ac'}
+              visibleLayers={drawing.visibleLayers}
+              onToggle={toggleLayer}
+            />
+            <SelectionReadout selection={selection} onDeselect={() => onSelectedHandleChange?.(null)} />
           </div>
         )}
         </div>
@@ -617,6 +713,7 @@ export default function ToolCast({ active, onIntakeChange }) {
             tools={tools}
             running={busy || jobRunning}
             writeEntitled={writeEntitled}
+            writeLocked={checkout.writeLocked}
             onConfirmIntent={runCatalogTool}
             onPickAlternative={catalog.actions.pickAlternative}
             onOpenAuthor={() => setLeftView('author')}
