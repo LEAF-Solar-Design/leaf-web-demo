@@ -317,9 +317,14 @@ Progress:
   cat version 2, recasts `/try` to the site and back, then verifies the same
   controller instance, version head, single submission, unchanged session-read
   count, and resident viewer.
+- A successful drawing write now remains a successful receipt when its head
+  refresh fails. `/try` keeps the previous drawing visible, shows one alert with
+  Retry, and uses the controller's head-read recovery without approving or
+  submitting the write again. The focused browser proof injects one 503, then
+  recovers version 2 with one submission.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
-  post-write refresh and transport recovery, and the remaining accessibility
-  ladder remain open.
+  submit and route transport recovery, and the remaining accessibility ladder
+  remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

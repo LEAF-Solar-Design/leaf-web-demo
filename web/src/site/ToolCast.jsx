@@ -231,21 +231,21 @@ export default function ToolCast({
     return () => { live = false }
   }, [active, platformSession.actions, requireAuth, seatIntake])
 
+  const showToast = useCallback((next) => {
+    toastSeqRef.current += 1
+    setToast({ id: toastSeqRef.current, ...next })
+  }, [])
+
   const onCompleteVersion = useCallback(async (newVersion) => {
     const drawingId = newVersion?.drawing_id || 'cat-panels'
     try {
       const view = await getDrawingIntake(false, drawingId, 'head')
       seatVersion(view, { drawingId, source: 'job', event: 'complete' })
     } catch {
-      setError('The panel run completed, but its drawing version could not be loaded.')
-      setPhase('failed')
+      drawing.actions.markRefreshFailure({ drawing_id: drawingId, version: newVersion?.version })
+      showToast({ text: `Version ${newVersion?.version || 'created'} created` })
     }
-  }, [seatVersion])
-
-  const showToast = useCallback((next) => {
-    toastSeqRef.current += 1
-    setToast({ id: toastSeqRef.current, ...next })
-  }, [])
+  }, [drawing.actions, seatVersion, showToast])
 
   const onJobNotice = useCallback(({ text }) => {
     showToast({ text, action: { label: 'View', onClick: () => setRightView('execution') } })
@@ -792,6 +792,14 @@ export default function ToolCast({
             onRelease={checkout.actions.release}
           />
         </div>
+        {drawing.refreshFailure && (
+          <div className="inline-error tc-refresh-failure" role="alert">
+            Couldn’t refresh the viewer. The previous version is still shown.
+            <button type="button" className="chip-act" onClick={drawing.actions.retryRefresh} disabled={drawing.refreshing}>
+              {drawing.refreshing ? 'Refreshing…' : 'Retry'}
+            </button>
+          </div>
+        )}
         <div className="tc-rail-note">
           <span>The request, approval, job, drawing, and version history remain in this scene.</span>
         </div>
