@@ -829,21 +829,24 @@ def _exclusive_materialize(bare: Path, lock_dir: Path):
                 lock_dir.mkdir()
                 break
             except FileExistsError:
+                pass
+            # Checked before every retry path below, so no branch can spin
+            # without a bound.
+            if time.monotonic() >= deadline:
+                raise _unavailable(
+                    f"materialization lock held past {_MATERIALIZE_LOCK_TIMEOUT}s: {lock_dir}"
+                )
+            try:
+                held = time.time() - lock_dir.stat().st_mtime
+            except OSError:
+                continue  # released underneath us; try to claim it now
+            if held > _MATERIALIZE_LOCK_STALE:
                 try:
-                    held = time.time() - lock_dir.stat().st_mtime
+                    lock_dir.rmdir()
                 except OSError:
-                    continue  # released underneath us; try to claim it now
-                if held > _MATERIALIZE_LOCK_STALE:
-                    try:
-                        lock_dir.rmdir()
-                    except OSError:
-                        pass
-                    continue
-                if time.monotonic() >= deadline:
-                    raise _unavailable(
-                        f"materialization lock held past {_MATERIALIZE_LOCK_TIMEOUT}s: {lock_dir}"
-                    )
-                time.sleep(0.05)
+                    pass
+                continue
+            time.sleep(0.05)
         try:
             yield
         finally:
