@@ -982,7 +982,7 @@ def test_pg_preflight_refuses_everything_the_commit_would_refuse(
 
     # (b) EXPIRED lock: same answer, not "free" as the legacy rule would say
     assert store.acquire_checkout(backend, tenant, drawing, "sess-a", 600)
-    with postgres_authority.connect() as conn:
+    with postgres_authority.connection() as conn:
         conn.execute(
             """
             UPDATE drawing_store_manifests
@@ -1033,7 +1033,7 @@ def test_pg_write_refused_against_a_persisted_anonymous_sentinel_lock(
     update = tmp_path / "update.dwg"
     update.write_bytes(b"v2")
 
-    with postgres_authority.connect() as conn:
+    with postgres_authority.connection() as conn:
         conn.execute(
             """
             UPDATE drawing_store_manifests
