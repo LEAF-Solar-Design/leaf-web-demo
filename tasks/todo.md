@@ -56,6 +56,10 @@ Current additive progress:
   reaper fails the abandoned job once.
 - [x] Prove two real drawing writes create a three-version chain, then drive two
   undos and two redos through the unified surface and authoritative API.
+- [x] Prove a real local conversation session, proposal, approval record, and
+  resume turn in the unified scene, with the scripted agent limit in the receipt.
+- [x] Make the managed proof runner return Playwright failures and isolate its
+  conversation metering ledger from the worktree.
 
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls

@@ -398,6 +398,16 @@ Progress:
   mutations, walks the authoritative head from 3 to 1 and back to 3, and shows
   all three immutable versions in history. Exactly two run, two undo, and two
   redo requests are recorded.
+- The managed local conversation gate now sends an unmatched command through
+  the real NL router, creates a durable session, streams a server-authored
+  `drawing.write` proposal, records one approval, and resumes the same session.
+  The completion stays in the unified scene and the recorded browser walk shows
+  the request and decision together. This proves CV-01 and CV-02 at local E2E
+  with `LEAF_AGENT_MOCK=1`; it does not prove Claude or product tool execution.
+- The managed proof runner now preserves Playwright's native exit code and
+  isolates conversation metering under the per-run temporary directory. A
+  failed browser test can no longer return a successful managed-run status or
+  write `data/agent_ledger.jsonl` into the worktree.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -471,21 +481,24 @@ Observed Wave 0 results:
 - Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
-- Local tier: 2 passed against an isolated real Vite, FastAPI, broker, harness,
+- Local tier: 7 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness, real drawing intake,
   catalog review, explicit confirmation, broker and worker runs, completed
   result rendering, durable job API storage, Jobs-rail recovery after page
   reload, real DXF upload and extraction, uploaded geometry replacement, and a
-  catalog run bound to the uploaded drawing and tenant. A separate live-auth
-  guest walk also passes for signed guest upload, extraction, viewer seating,
-  allowed version read, zero dispatch, and denied run. APS, Claude, Auth0 user
-  sign-in, and PostgreSQL claims remain open.
+  catalog run bound to the uploaded drawing and tenant. It also proves running
+  job reattach, Escape detach, page-hide reaping, three-version Undo and Redo
+  depth, and the scripted conversation approval round trip. A separate
+  live-auth guest walk also passes for signed guest upload, extraction, viewer
+  seating, allowed version read, zero dispatch, and denied run. APS, Claude,
+  Auth0 user sign-in, PostgreSQL, and conversation-driven product execution
+  claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:
   passed.
-- Baseline `check:staging-fixes`: still fails the pre-existing slash-route seam
-  check and remains visible.
+- `check:staging-fixes`: passed all four checks, including the repaired
+  slash-route intent seam.
 
 ## Completion rule
 

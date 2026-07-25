@@ -61,6 +61,7 @@ $env:LEAF_GUEST_STORE_DIR = Join-Path $runRoot 'guest-drawings'
 $env:LEAF_UPLOADS_DIR = Join-Path $runRoot 'uploads'
 $env:JOBS_DB = Join-Path $runRoot 'jobs.db'
 $env:SESSIONS_DB = Join-Path $runRoot 'sessions.db'
+$env:LEAF_AGENT_LEDGER = Join-Path $runRoot 'agent-ledger.jsonl'
 $env:BROKER_LEDGER = Join-Path $runRoot 'broker-ledger.jsonl'
 $env:BROKER_TENANTS = Join-Path $runRoot 'broker-tenants.json'
 $env:LEAF_GRANTS_DIR = Join-Path $runRoot 'grants'
@@ -72,6 +73,7 @@ $env:LEAF_CORS_ORIGINS = $env:LEAF_E2E_BASE_URL
 
 $stdout = Join-Path $runRoot 'stack.out.log'
 $stderr = Join-Path $runRoot 'stack.err.log'
+$proofExitCode = 1
 
 try {
   $launcherFile = 'python'
@@ -101,6 +103,7 @@ try {
   Push-Location (Join-Path $repoRoot 'web')
   try {
     if ($Mode -eq 'guest') { npm run proof:guest } else { npm run proof:local }
+    $proofExitCode = $LASTEXITCODE
   } finally { Pop-Location }
 } finally {
   if ($launcher -and -not $launcher.HasExited) {
@@ -112,3 +115,5 @@ try {
   Write-Host "Local proof runtime retained at $runRoot"
   Write-Host "Redacted stack logs copied to $artifactRoot"
 }
+
+exit $proofExitCode
