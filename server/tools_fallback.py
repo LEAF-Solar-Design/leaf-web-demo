@@ -272,9 +272,11 @@ def _slugify(s: str) -> str:
 
 
 # A header docstring (formatted) + a REAL, self-contained run() body (never
-# formatted — the bodies contain dict literals). The caller persists code to
-# server/authored/<name>.py; the dynamic loader runs THAT FILE (no re-dispatch
-# to a pre-coded primitive). `__LAYER_DEFAULT__` is injected verbatim.
+# formatted — the bodies contain dict literals). The caller persists code under the
+# AUTHORING TENANT's own directory, server/authored/<sha256(tenant_id)[:32]>/<name>.py
+# (never a flat authored/<name>.py, which every tenant would share); the dynamic
+# loader runs THAT FILE (no re-dispatch to a pre-coded primitive).
+# `__LAYER_DEFAULT__` is injected verbatim.
 _HEADER_TEMPLATE = '''"""Authored tool: {name}
 Generated (templated, no LLM) from description: {description}
 engine_op: {engine_op}  (kind: script; the FILE below IS the tool — it runs
