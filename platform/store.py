@@ -138,16 +138,36 @@ def create_org_with_identity(name: str, external_authority: str, external_subjec
         raise ValueError("verified external subject already has a platform identity binding") from exc
 
 
-def create_project(org_id: uuid.UUID, name: str) -> Project:
+def create_project(
+    org_id: uuid.UUID,
+    name: str,
+    *,
+    authority_mode: Optional[str] = None,
+) -> Project:
+    if authority_mode is not None and authority_mode not in AUTHORITY_MODES:
+        raise ValueError(f"authority_mode must be one of {AUTHORITY_MODES}")
+    project_id = new_uuid()
     with cursor() as cur:
         cur.execute(
             "INSERT INTO projects (project_id, org_id, name) "
             "VALUES (%(project_id)s, %(org_id)s, %(name)s) "
             "RETURNING project_id, org_id, name, status, created_at, updated_at, "
             "deleted_at, purge_requested_at, purge_completed_at",
-            {"project_id": new_uuid(), "org_id": org_id, "name": name},
+            {"project_id": project_id, "org_id": org_id, "name": name},
         )
-        return Project.from_row(cur.fetchone())
+        project = Project.from_row(cur.fetchone())
+        if authority_mode is not None:
+            cur.execute(
+                "INSERT INTO project_authority_modes "
+                "(org_id, project_id, authority_mode, selected_by) "
+                "VALUES (%(org_id)s, %(project_id)s, %(authority_mode)s, 'server')",
+                {
+                    "org_id": org_id,
+                    "project_id": project_id,
+                    "authority_mode": authority_mode,
+                },
+            )
+        return project
 
 
 # --------------------------------------------------------------------------- #

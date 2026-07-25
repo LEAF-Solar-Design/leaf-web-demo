@@ -167,7 +167,13 @@ def get_org(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id)):
 # --------------------------------------------------------------------------- #
 @router.post("/projects")
 def create_project(body: CreateProjectBody, org_id: uuid.UUID = Depends(get_write_org_id)):
-    project = store.create_project(org_id, body.name)
+    # This route is the canonical platform project factory. Authority remains a
+    # server policy and cannot be selected by request headers or body fields.
+    project = store.create_project(
+        org_id,
+        body.name,
+        authority_mode="postgres_canonical",
+    )
     return {"project": project.to_dict()}
 
 
