@@ -182,3 +182,108 @@ def test_a_dev_checkout_works_with_no_configuration(monkeypatch):
     monkeypatch.setattr(cc, "_EPHEMERAL_SECRET", None)
     token = cc.mint(TENANT, DRAWING, 1)
     assert cc.verify(token, TENANT, DRAWING, lock(fence=1)) == ("sess-a", 1)
+
+
+# --------------------------------------------------------------------------- #
+# sol-critic r3 BLOCKER: the generation must come from the acquire that wrote it
+#
+# The acquire route used to write the lock, RELOAD the manifest, and mint against
+# whatever generation the reload found. Those are not one operation. `ttl_s` only
+# has to be positive, so a caller can take a lease that lapses immediately, be
+# descheduled, and have a second session acquire in the gap — the reload then
+# returns the SECOND session's generation and the first caller is minted a valid
+# capability for it. The subject binding cannot catch this: verification
+# recomputes the tag with the presenter's own subject, so a capability Alice
+# minted for herself against Bob's generation verifies for Alice and returns
+# Bob's holder.
+# --------------------------------------------------------------------------- #
+def test_a_capability_minted_against_a_later_lease_would_authorize_it():
+    """The defect, stated as the property that must NOT hold.
+
+    This is what the route did when it minted from a reloaded generation. It is
+    pinned here so the binding is never mistaken for protection against it: the
+    fix is that the route no longer LEARNS this generation, not that the token
+    would somehow refuse it.
+    """
+    alice = subject_ctx("auth0|alice")
+    bobs_lease = lock(fence=2, holder="bob-session")
+    minted_against_bobs_generation = cc.mint(alice, DRAWING, 2)
+    assert cc.verify(minted_against_bobs_generation, alice, DRAWING,
+                     bobs_lease) == ("bob-session", 2)
+
+
+def test_the_generation_the_acquire_returned_is_the_only_safe_one(tmp_path):
+    """End to end over the real store: a lease that lapses before a second
+    session acquires must not yield a capability that authorizes the second
+    lease. Mirrors the route's fixed sequence — mint from the RETURNED
+    generation, never from a re-read one."""
+    da_dir = str(SERVER_DIR.parent / "da")
+    if da_dir not in sys.path:
+        sys.path.insert(0, da_dir)
+    import store  # noqa: E402
+
+    backend = store.InMemoryBackend()
+    store.save_manifest(backend, TENANT, DRAWING,
+                        store._new_manifest(TENANT, DRAWING))
+
+    alice = subject_ctx("auth0|alice")
+    granted = store.acquire_checkout_fence(
+        backend, TENANT, DRAWING, "alice-session", 1e-9,
+        expected_fence=None, strict_owner=True)
+    assert granted == 1
+
+    # Alice is descheduled here; her lease has already lapsed.
+    assert store.acquire_checkout_fence(
+        backend, TENANT, DRAWING, "bob-session", 300,
+        expected_fence=None, strict_owner=True) == 2
+    co = store.load_manifest(backend, TENANT, DRAWING)["checkout"]
+    assert co["holder"] == "bob-session"
+
+    # The route mints from `granted`, so Alice gets a capability for a lease
+    # that no longer exists — and it authorizes nothing.
+    with pytest.raises(cc.CapabilityRejected):
+        cc.verify(cc.mint(alice, DRAWING, int(granted)), alice, DRAWING, co)
+
+    # Re-reading instead would have handed her authority over Bob's lease.
+    reloaded = int(co["fence"])
+    assert reloaded != granted
+
+
+def test_acquire_reports_its_own_generation_and_none_when_refused(tmp_path):
+    da_dir = str(SERVER_DIR.parent / "da")
+    if da_dir not in sys.path:
+        sys.path.insert(0, da_dir)
+    import store  # noqa: E402
+
+    backend = store.InMemoryBackend()
+    store.save_manifest(backend, TENANT, "d1", store._new_manifest(TENANT, "d1"))
+    assert store.acquire_checkout_fence(backend, TENANT, "d1", "s1", 300) == 1
+    # a live lease refuses a second holder, and reports it as None
+    assert store.acquire_checkout_fence(backend, TENANT, "d1", "s2", 300) is None
+    # the bool view every other caller uses is unchanged
+    assert store.acquire_checkout(backend, TENANT, "d1", "s2", 300) is False
+    assert store.acquire_checkout(backend, TENANT, "d1", "s1", 300) is True
+
+
+# --------------------------------------------------------------------------- #
+# sol-critic r3: a deployment that cannot mint must refuse BEFORE it locks
+# --------------------------------------------------------------------------- #
+def test_ensure_mintable_refuses_production_without_a_secret(monkeypatch):
+    """Otherwise the route takes the lock, THEN fails to mint, and leaves an
+    active lease nobody can prove — a misconfiguration that locks the drawing
+    for its whole TTL."""
+    monkeypatch.delenv("LEAF_CHECKOUT_CAP_SECRET", raising=False)
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    with pytest.raises(cc.CapabilityUnavailable):
+        cc.ensure_mintable(TENANT)
+
+
+def test_ensure_mintable_refuses_a_subjectless_caller_when_auth_is_live(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    with pytest.raises(cc.CapabilityUnavailable, match="authenticated subject"):
+        cc.ensure_mintable(subject_ctx(None))
+
+
+def test_ensure_mintable_passes_in_the_ordinary_posture():
+    cc.ensure_mintable(subject_ctx("auth0|alice"))
+    cc.ensure_mintable(TENANT)

@@ -158,6 +158,21 @@ def _subject_of(tenant: Any) -> str:
     return ""
 
 
+def ensure_mintable(tenant: Any) -> None:
+    """Raise `CapabilityUnavailable` now if this deployment could not mint.
+
+    Called by the acquire route BEFORE it takes the lock. Both failures the mint
+    can raise — no usable signing secret, and no authenticated subject under
+    LEAF_AUTH_LIVE=1 — depend only on posture, not on the generation, so they
+    can be answered before anything is written. Discovering them afterwards
+    would leave an ACTIVE lock whose capability was never issued: nobody could
+    release, refresh or write it, and the drawing would stay locked for the
+    whole TTL on what is really a server misconfiguration.
+    """
+    _secret()
+    _subject_of(tenant)
+
+
 def mint(tenant: Any, drawing_id: str, fence: int) -> str:
     """Issue the capability for one lease. Called ONLY by the acquire route, and
     the returned value is handed to that caller alone."""

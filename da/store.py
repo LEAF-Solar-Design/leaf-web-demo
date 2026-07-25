@@ -1443,6 +1443,38 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
                      strict_owner: bool = False) -> bool:
     """Try to take the single-writer lock. Returns True if acquired/refreshed.
 
+    Thin bool view of `acquire_checkout_fence`, kept because every caller that
+    only needs "did I get it" reads better this way. A caller that will MINT a
+    capability must use `acquire_checkout_fence` instead: it needs the
+    generation this call stamped, and re-reading the manifest to find one is a
+    different question with a different answer (see that function's note).
+    """
+    return acquire_checkout_fence(
+        backend, tenant_id, drawing_id, holder, ttl_s,
+        expected_fence=expected_fence, strict_owner=strict_owner) is not None
+
+
+def acquire_checkout_fence(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                           holder: str, ttl_s: float, *,
+                           expected_fence: int | None = None,
+                           strict_owner: bool = False) -> int | None:
+    """Take the single-writer lock and return the generation THIS call stamped,
+    or None if the lock was not granted.
+
+    WHY THE GENERATION IS RETURNED RATHER THAN RE-READ. A checkout capability is
+    bound to a lock generation, and the mint has to use the generation this
+    acquire wrote. Re-loading the manifest afterwards asks "what generation is
+    current now", which is not the same question: the lease taken here can lapse
+    between the write and the re-read (the TTL is caller-supplied and only has
+    to be positive), another session can acquire in that gap, and the re-read
+    then returns THAT session's generation. Minting against it hands this caller
+    a validly-signed capability for someone else's lease — the exact ownership
+    bypass the capability exists to prevent, since verification recomputes the
+    tag with the PRESENTER's own subject and so cannot tell the two apart.
+
+    Returning it from inside the same transaction (postgres) / the same
+    load-modify-save (legacy) removes the gap: there is no second read to race.
+
     Every successful acquire stamps a NEW generation into `checkout.fence`, so no
     two leases of one drawing ever share a generation.
 
@@ -1502,12 +1534,15 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
                 # row lock the UPDATE below runs in, so a lease cannot be
                 # re-acquired between the check and the write.
                 if expected_fence is None:
-                    return False
+                    return None
                 if int(row["checkout_fence"]) != int(expected_fence):
-                    return False
+                    return None
             elif active and row["checkout_holder"] != holder:
-                return False
-            conn.execute(
+                return None
+            # RETURNING, so the generation comes back from the same statement
+            # that wrote it, inside the same row lock. Reading it afterwards
+            # would reintroduce the race this function exists to close.
+            written = conn.execute(
                 """
                 UPDATE drawing_store_manifests
                 SET checkout_holder = %(holder)s,
@@ -1517,13 +1552,14 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
                       NOW() + (%(ttl)s * INTERVAL '1 second'),
                     updated_at = NOW()
                 WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                RETURNING checkout_fence
                 """,
                 {
                     "holder": str(holder), "ttl": float(ttl_s),
                     "tenant": tid, "drawing": did,
                 },
-            )
-            return True
+            ).fetchone()
+            return int(written["checkout_fence"])
 
         return db.run_transaction(operation, isolation="serializable")
     m = load_manifest(backend, tid, did)
@@ -1533,11 +1569,11 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
     if _is_active(co, now):
         if strict_owner:
             if expected_fence is None:
-                return False
+                return None
             if int((co or {}).get("fence") or 0) != int(expected_fence):
-                return False
+                return None
         elif co.get("holder") != holder:
-            return False
+            return None
 
     fence = _next_fence(m)
     m["checkout_fence"] = fence          # monotonic; survives release (see _next_fence)
@@ -1548,7 +1584,7 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
         "fence": fence,
     }
     save_manifest(backend, tid, did, m)
-    return True
+    return fence
 
 
 def release_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
