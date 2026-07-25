@@ -926,20 +926,41 @@ def test_a_recovered_envelope_must_name_the_identity_we_tried_to_claim():
         signature=callbacks.sign_payload(wrong_semantics_body, real.timestamp,
                                          real.nonce, SECRET))
 
-    # An attempt of `True`: `True == 1`, so a plain dict comparison would let it
-    # satisfy attempt 1. Included so the exact-type pin cannot be dropped.
-    true_attempt_body = json.dumps({**json.loads(real.body), "attempt": True},
-                                   sort_keys=True, separators=(",", ":")).encode()
-    true_attempt = adapter.CallbackEnvelope(
-        body=true_attempt_body, timestamp=real.timestamp, nonce=real.nonce,
-        signature=callbacks.sign_payload(true_attempt_body, real.timestamp,
-                                         real.nonce, SECRET))
+    # CROSS-TYPE NUMERIC EQUALITY, which is what round 15 caught. Python's `==`
+    # is not type-exact over numbers, so a dict comparison accepted
+    # `output.size: true` for a one-byte output and `size: 6.0` for six bytes.
+    # Pinning `attempt`'s type did not help: the hazard is every numeric field.
+    # Both of these are signed with our own secret, so only an exact comparison
+    # can refuse them, and both are accepted by the parent commit.
+    def _resigned(**overrides):
+        body = json.dumps({**json.loads(real.body), **overrides},
+                          sort_keys=True, separators=(",", ":")).encode()
+        return adapter.CallbackEnvelope(
+            body=body, timestamp=real.timestamp, nonce=real.nonce,
+            signature=callbacks.sign_payload(body, real.timestamp, real.nonce, SECRET))
+
+    real_output = json.loads(real.body)["output"]
+    size_as_float = _resigned(output={**real_output, "size": float(real_output["size"])})
+    # `True == 1`, so a one-byte output is the case where a bool size compares
+    # equal. Built against a fresh one-byte receipt for exactly that reason.
+    one_byte = adapter.translate(_completion(nonce="nonce-one-byte"), b"x", job_id="job-1",
+                                 job_attempt=2, job_workitem_id="wi-1",
+                                 job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                                 reserve_completion=_win)
+    one_byte_payload = json.loads(one_byte.body)
+    bool_size_body = json.dumps(
+        {**one_byte_payload, "output": {**one_byte_payload["output"], "size": True}},
+        sort_keys=True, separators=(",", ":")).encode()
+    bool_size = adapter.CallbackEnvelope(
+        body=bool_size_body, timestamp=one_byte.timestamp, nonce=one_byte.nonce,
+        signature=callbacks.sign_payload(bool_size_body, one_byte.timestamp,
+                                         one_byte.nonce, SECRET))
 
     for bogus, why in ((other, "another job"), (other_attempt, "another attempt"),
                        (forged, "an unsigned body"),
                        (other_output, "different output bytes"),
                        (wrong_semantics, "a different WorkItem and status"),
-                       (true_attempt, "a bool attempt")):
+                       (size_as_float, "a float output size that == the real one")):
         with pytest.raises(adapter.AdapterError) as excinfo:
             adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
                               job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
@@ -947,6 +968,16 @@ def test_a_recovered_envelope_must_name_the_identity_we_tried_to_claim():
                               reserve_completion=lambda j, a, e=None, _b=bogus: _b)
         assert excinfo.value.reason == "bad_completion_guard", (
             f"a stored receipt for {why} must not be returned as this completion's")
+
+    # The bool-size case needs its own translate() call, because it is only a
+    # divergence for a ONE-BYTE output (`True == 1`).
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(nonce="nonce-one-byte"), b"x", job_id="job-1",
+                          job_attempt=2, job_workitem_id="wi-1",
+                          job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                          reserve_completion=lambda j, a, e=None: bool_size)
+    assert excinfo.value.reason == "bad_completion_guard", (
+        "`size: true` equals 1 under Python ==, so only an exact comparison refuses it")
 
     # The genuine receipt for this exact identity IS returned, so the recovery
     # path still works and this is a binding rather than a removal.

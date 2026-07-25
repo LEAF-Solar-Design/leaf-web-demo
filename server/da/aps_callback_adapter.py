@@ -498,14 +498,23 @@ def translate(
         # matches what the replay store may already hold. Every other field is
         # semantic and must match. A field added to `payload` later is compared
         # automatically instead of being silently trusted.
+        # COMPARED AS CANONICAL BYTES, NOT AS DICTS. Python's `==` is not
+        # type-exact over numbers, and a dict comparison inherits that everywhere
+        # at once: `True == 1` and `6.0 == 6`, so a signed receipt carrying
+        # `output.size: true` for a one-byte output, or `size: 6.0` for six bytes,
+        # compared equal and was returned as a valid receipt. Pinning the type of
+        # `attempt` did not help, because the hazard is every numeric field, not
+        # one of them.
+        #
+        # Serializing both sides through the same canonicalizer makes the
+        # comparison exact by construction: `json.dumps` writes `true`, `1` and
+        # `1.0` as three different byte strings, so no cross-type pair can pass.
+        # It also removes the need for per-field type pins, which is the same
+        # enumeration trap in a different costume.
         _RECOVERY_MAY_DIFFER = ("produced_at", "nonce")
         ours = {k: v for k, v in payload.items() if k not in _RECOVERY_MAY_DIFFER}
         theirs = {k: v for k, v in recovered.items() if k not in _RECOVERY_MAY_DIFFER}
-        # `bool` is an int subclass and `True == 1`, so a dict comparison alone
-        # would let `attempt: True` satisfy `attempt: 1`. Pin the exact type first.
-        if type(recovered.get("attempt")) is not int:
-            raise AdapterError("bad_completion_guard")
-        if theirs != ours:
+        if _canonical_body(theirs) != _canonical_body(ours):
             raise AdapterError("bad_completion_guard")
         # And it must be a receipt WE could have signed. An unverifiable body is
         # not a recovery, it is an unsigned claim wearing the envelope type.
