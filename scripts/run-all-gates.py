@@ -328,7 +328,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_da_callback.py"), 7),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
-              _py_pytest("test_store.py"), 26),
+              _py_pytest("test_store.py"), 27),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
         # --- tenant customization control plane (one process per file) --- #

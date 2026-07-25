@@ -1002,6 +1002,17 @@ def test_pg_preflight_refuses_everything_the_commit_would_refuse(
     with pytest.raises(store.CheckoutDenied, match="names no session"):
         store.authorize_checkout(backend, tenant, drawing, store.ANONYMOUS_HOLDER)
 
+    # (d) holder and fence are INDEPENDENT claims. _pg_put checks any supplied
+    # fence regardless of holder, so the pre-flight must too — otherwise a caller
+    # naming no session but presenting a stale fence passes here and is refused
+    # only after the WorkItem is paid for.
+    current = int(store.load_manifest(backend, tenant, drawing)["checkout"]["fence"])
+    store.authorize_checkout(backend, tenant, drawing, None, fence=current)
+    with pytest.raises(store.CheckoutDenied, match="stale"):
+        store.authorize_checkout(backend, tenant, drawing, None, fence=current - 1)
+    with pytest.raises(store.CheckoutDenied, match="stale"):
+        store.authorize_checkout(backend, tenant, drawing, "sess-a", fence=current - 1)
+
 
 @requires_database
 def test_pg_write_refused_against_a_persisted_anonymous_sentinel_lock(

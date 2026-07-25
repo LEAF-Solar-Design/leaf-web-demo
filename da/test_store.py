@@ -413,6 +413,37 @@ def test_anonymous_writer_refused_against_a_PERSISTED_sentinel_lock(tmp_path):
     assert [v["v"] for v in m2["versions"]] == [1]
 
 
+def test_a_stale_fence_is_refused_even_when_the_caller_names_no_holder(tmp_path):
+    """sol-critic r4 residual. `holder` and `fence` are INDEPENDENT claims.
+    Returning early on `holder is None` skipped the fence check too, so a caller
+    naming no session but presenting a stale fence passed the pre-flight and was
+    refused only at the commit — _pg_put checks any supplied fence regardless of
+    holder. A pre-flight that permits what the commit refuses is the one thing it
+    must never do, since its whole job is to refuse before the APS bill."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    # legacy locks carry no fence, so seed one that does (postgres-shaped)
+    now = datetime.now(timezone.utc)
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    m = store.load_manifest(be, "t", did)
+    m["checkout"]["fence"] = 2
+    store.save_manifest(be, "t", did, m)
+
+    with pytest.raises(store.CheckoutDenied, match="stale"):
+        store.authorize_checkout(be, "t", did, None, fence=1)
+    with pytest.raises(store.CheckoutDenied, match="stale"):
+        store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                          parent_version=1, holder=None, fence=1)
+    # the CURRENT generation passes both, and naming nothing at all still bypasses
+    store.authorize_checkout(be, "t", did, None, fence=2)
+    assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                             parent_version=1, holder=None, fence=2) == 2
+    assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v3.dwg", b"V3"),
+                             parent_version=2) == 3
+
+
 def test_reserved_holder_and_bad_ttl_raise_the_NARROW_param_error(tmp_path):
     """sol-critic r3 MINOR. The route maps this to 400, so it must not be a bare
     ValueError: acquire_checkout also decodes the stored manifest, and a corrupt

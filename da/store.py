@@ -1001,26 +1001,34 @@ def _authorize_checkout_view(co: dict | None, holder: str | None,
     already documents as best-effort (non-atomic manifest writes); it is not
     introduced by this check.
     """
-    if holder is None:
+    # `holder` and `fence` are INDEPENDENT claims, and each is checked only when
+    # made. Returning early on `holder is None` skipped the fence too, so a caller
+    # naming no session but presenting a STALE fence passed here and was refused
+    # at the commit — `_pg_put` checks any supplied fence regardless of holder.
+    # That is the pre-flight promising something the commit does not honour, which
+    # is the one thing this function must never do.
+    if holder is None and fence is None:
         return
     if not _is_active(co, datetime.now(timezone.utc)):
         return
-    # An anonymous writer NEVER publishes under an active lock, whoever holds it.
-    # Checked before the equality below rather than relying on the acquire-time
-    # refusal, because that refusal only guards NEW acquisitions: a lock taken as
-    # the sentinel under an earlier release, or restored from a backup, or written
-    # straight into a manifest, is already persisted and would compare EQUAL to
-    # the anonymous caller and let it through. The reserved id is a statement
-    # about the CALLER ("named nobody"), so it can never be a valid answer to
-    # "who owns this lock", regardless of what the stored value happens to say.
-    if str(holder) == ANONYMOUS_HOLDER:
-        raise CheckoutDenied(
-            f"drawing is checked out by {co.get('holder')!r}; "
-            f"a writer that names no session may not publish a version")
-    if str(co.get("holder")) != str(holder):
-        raise CheckoutDenied(
-            f"drawing is checked out by {co.get('holder')!r}; "
-            f"{holder!r} may not publish a version")
+    if holder is not None:
+        # An anonymous writer NEVER publishes under an active lock, whoever holds
+        # it. Checked before the equality below rather than relying on the
+        # acquire-time refusal, because that refusal only guards NEW acquisitions:
+        # a lock taken as the sentinel under an earlier release, or restored from
+        # a backup, or written straight into a manifest, is already persisted and
+        # would compare EQUAL to the anonymous caller and let it through. The
+        # reserved id is a statement about the CALLER ("named nobody"), so it can
+        # never be a valid answer to "who owns this lock", regardless of what the
+        # stored value happens to say.
+        if str(holder) == ANONYMOUS_HOLDER:
+            raise CheckoutDenied(
+                f"drawing is checked out by {co.get('holder')!r}; "
+                f"a writer that names no session may not publish a version")
+        if str(co.get("holder")) != str(holder):
+            raise CheckoutDenied(
+                f"drawing is checked out by {co.get('holder')!r}; "
+                f"{holder!r} may not publish a version")
     current = co.get("fence")
     if fence is not None and current is not None and int(current) != int(fence):
         raise CheckoutDenied(
@@ -1060,7 +1068,10 @@ def authorize_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
             raise ValueError("an active checkout is required to publish a version")
         _authorize_checkout_view(m.get("checkout"), holder, fence)
         return
-    if holder is None:
+    # Same independence as the predicate: a caller naming no session but claiming
+    # a fence still has that claim checked, or the pre-flight permits what the
+    # commit refuses. Only a caller claiming NEITHER skips the read.
+    if holder is None and fence is None:
         return
     m = load_manifest(backend, tid, did)
     _authorize_checkout_view(m.get("checkout"), holder, fence)
