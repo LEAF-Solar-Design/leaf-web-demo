@@ -938,6 +938,14 @@ def _persist_workitem_event_locked(event: str, job_id: str,
     if _sidecar_lines > _ACTIVE_WORKITEMS_COMPACT_LINES:
         # Checked at RUNTIME, not only at import: a long-lived broker would
         # otherwise cross the bound once and grow unchecked forever after.
+        # The TTL is applied HERE too, not only at replay: disowned entries are
+        # cleared by a cancel or a replacement, and without ageing them out at
+        # runtime a process that never restarts would keep every one it ever
+        # disowned, and then rewrite that growing map on every event.
+        now = time.time()
+        for stale in [job_id for job_id, entry in _active_workitems.items()
+                      if (now - entry[2]) > ACTIVE_WORKITEM_TTL_S]:
+            del _active_workitems[stale]
         _compact_persisted_workitems(dict(_active_workitems))
         _sidecar_lines = len(_active_workitems)
 
@@ -1062,6 +1070,39 @@ def _disown_active_workitem(job_id: Optional[str], run_token: Optional[str]) -> 
             return False
         _active_workitems[job_id] = (workitem_id, None, recorded_at)
         return True
+
+
+def _reap_or_disown_own_workitem(job_id: Optional[str],
+                                 run_token: Optional[str]) -> None:
+    """End-of-run cleanup for a WorkItem that may still be executing.
+
+    Waiting for a later beacon does not work here: by the time the app sees this
+    run fail it makes the job row terminal, and the orphan sweep only selects
+    submitted/running rows, so no close ever arrives for it. The broker is also
+    the only process holding the credential. So it cancels its own orphan.
+
+    Best effort, and never fatal -- this runs in broker_run's `finally`, where
+    raising would replace the real response. If the cancel does not happen the
+    correlation is disowned instead: kept, still reapable, no longer evictable by
+    this finished run.
+    """
+    if not job_id:
+        return
+    try:
+        workitem_id = active_workitem_for(job_id)
+        if not workitem_id:
+            return
+        reaper = _get_reaper()
+        if reaper is not None and reaper.reap_live_enabled():
+            outcome = reaper.cancel_client_for(
+                live=True, da_client=_get_da()).cancel(workitem_id)
+            if isinstance(outcome, dict) and outcome.get("cancelled"):
+                _settle_cancelled_workitem(job_id, workitem_id)
+                return
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-broker] could not cancel the orphaned WorkItem for job "
+              f"{job_id}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+    _disown_active_workitem(job_id, run_token)
 
 
 def _settle_cancelled_workitem(job_id: Optional[str],
@@ -2084,14 +2125,16 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         # poll that hit da/client's 900s ceiling and simply RETURNED without a
         # DELETE, a mid-poll exception, a failure -- can leave the WorkItem
         # executing and BILLING, and persisting a `close` for it would make it
-        # permanently unaddressable. Those are disowned instead: still reapable
-        # by a later beacon, but no longer evictable by this finished run.
-        # Either way the token is what stops a duplicate delivery, which
-        # registered nothing, from touching the live run's correlation.
+        # permanently unaddressable. For those the broker cancels its own orphan
+        # -- no beacon is coming, because the app makes the row terminal and the
+        # sweep only selects submitted/running rows -- and disowns it if that
+        # cancel does not happen. Either way the token is what stops a duplicate
+        # delivery, which registered nothing, from touching the live run's
+        # correlation.
         if terminal_env is not None and terminal_env.get("ok"):
             _drop_active_workitem(req.job_id, run_token)
         else:
-            _disown_active_workitem(req.job_id, run_token)
+            _reap_or_disown_own_workitem(req.job_id, run_token)
         if (
             postgres_mode and admission is not None
             and admission.get("lease_token") and not admission.get("capacity_wait")

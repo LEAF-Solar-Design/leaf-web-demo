@@ -854,6 +854,86 @@ def test_a_timed_out_poll_keeps_its_workitem_reapable(monkeypatch, tmp_path):
         "the run ended but the WorkItem may not have: keep it cancellable")
 
 
+def test_the_broker_cancels_its_own_orphan_when_a_run_ends_badly(monkeypatch, tmp_path):
+    """No beacon is coming for this one. When the broker returns non-ok the app
+    makes the row terminal, and the orphan sweep only selects submitted/running
+    rows, so nothing ever closes it. The broker holds the credential, so it
+    cancels its own orphan rather than leaving it to bill."""
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    reaper = broker._get_reaper()
+    cancels = _RecordingCancelClient(succeeds=True)
+    monkeypatch.setattr(reaper, "reap_live_enabled", lambda: True)
+    monkeypatch.setattr(reaper, "cancel_client_for", lambda **_kw: cancels)
+
+    class _DA:
+        @staticmethod
+        def run_tool(local, tool, params, on_submitted=None):
+            if on_submitted is not None:
+                on_submitted("wi-orphaned")
+            return {"ok": False, "tool": tool.get("name"), "version": "1.0.0",
+                    "result": {}, "overlay": None, "timing_ms": 1, "cost": None,
+                    "error": {"error_code": "workitem_failed",
+                              "message": "poll ceiling reached", "retryable": True},
+                    "degraded_mode": False}
+
+    monkeypatch.setattr(broker, "_get_da", lambda: _DA())
+    monkeypatch.setattr(broker, "_live_script_is_nonempty", lambda *a, **k: True)
+    monkeypatch.setattr(broker, "_resolve_live_dwg", lambda *a, **k: "demo.dwg")
+
+    TestClient(broker.app).post("/broker/run", json={
+        "tenant_id": "tenant-reap", "tool": TOOL, "params": {},
+        "dwg": "rooftop_demo", "aps_live": True, "job_id": "job-orphan"})
+
+    assert cancels.cancelled == ["wi-orphaned"], "the broker must reap its own orphan"
+    assert broker.active_workitem_for("job-orphan") is None, "cancelled: nothing left"
+
+
+def test_a_failed_self_reap_still_leaves_the_workitem_reapable(monkeypatch, tmp_path):
+    """If the broker's own cancel does not land, the correlation must survive."""
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    reaper = broker._get_reaper()
+    monkeypatch.setattr(reaper, "reap_live_enabled", lambda: True)
+    monkeypatch.setattr(reaper, "cancel_client_for",
+                        lambda **_kw: _RecordingCancelClient(succeeds=False))
+
+    class _DA:
+        @staticmethod
+        def run_tool(local, tool, params, on_submitted=None):
+            if on_submitted is not None:
+                on_submitted("wi-stubborn")
+            raise RuntimeError("connection reset mid-poll")
+
+    monkeypatch.setattr(broker, "_get_da", lambda: _DA())
+    monkeypatch.setattr(broker, "_live_script_is_nonempty", lambda *a, **k: True)
+    monkeypatch.setattr(broker, "_resolve_live_dwg", lambda *a, **k: "demo.dwg")
+
+    TestClient(broker.app).post("/broker/run", json={
+        "tenant_id": "tenant-reap", "tool": TOOL, "params": {},
+        "dwg": "rooftop_demo", "aps_live": True, "job_id": "job-stubborn"})
+
+    assert broker.active_workitem_for("job-stubborn") == "wi-stubborn"
+
+
+def test_runtime_compaction_ages_out_stale_correlations(monkeypatch, tmp_path):
+    """The TTL has to apply at RUNTIME too. A broker that never restarts would
+    otherwise keep every entry it ever disowned and rewrite that growing map on
+    every event."""
+    monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH", tmp_path / "a.jsonl")
+    monkeypatch.setattr(broker, "_ACTIVE_WORKITEMS_COMPACT_LINES", 2)
+    monkeypatch.setattr(broker, "_sidecar_lines", 0)
+
+    stale_at = time.time() - (broker.ACTIVE_WORKITEM_TTL_S + 60)
+    with broker._active_workitems_lock:
+        broker._active_workitems["job-ancient"] = ("wi-ancient", None, stale_at)
+
+    # Any further activity crosses the compaction threshold.
+    for i in range(3):
+        broker._record_active_workitem(f"job-{i}", f"wi-{i}", run_token="t")
+
+    assert "job-ancient" not in broker._active_workitems, (
+        "a correlation older than the TTL must not survive runtime compaction")
+
+
 def test_a_disowned_correlation_is_still_reapable(live_cancels):
     """Disowning must not make it unreachable -- that is the whole point."""
     broker._record_active_workitem("job-disowned", "wi-disowned", run_token="r")
