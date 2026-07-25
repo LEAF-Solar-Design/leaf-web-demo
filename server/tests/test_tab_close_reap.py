@@ -306,8 +306,13 @@ def test_registry_holds_the_workitem_mid_run_and_is_empty_after(monkeypatch, tmp
     assert broker.active_workitem_for("job-live") is None, "entry must not outlive the run"
 
 
-def test_registry_is_evicted_even_when_the_run_fails(monkeypatch, tmp_path):
-    """Eviction lives in a `finally`, so a failed/timed-out run cannot leak."""
+def test_a_run_that_dies_mid_poll_keeps_its_workitem_reapable(monkeypatch, tmp_path):
+    """A raise mid-poll ends the RUN, not necessarily the WorkItem: it was
+    submitted and nothing issued a DELETE. Closing the correlation here would
+    make something that is still billing permanently unaddressable, so the entry
+    is retained -- disowned, so the dead run can no longer evict it, and still
+    reapable by a later beacon. Bounded by the replay TTL and compaction.
+    """
     class _DA:
         @staticmethod
         def run_tool(local, tool, params, on_submitted=None):
@@ -326,7 +331,11 @@ def test_registry_is_evicted_even_when_the_run_fails(monkeypatch, tmp_path):
         "dwg": "rooftop_demo", "aps_live": True, "job_id": "job-boom"})
 
     assert resp.status_code >= 400
-    assert broker.active_workitem_for("job-boom") is None
+    assert broker.active_workitem_for("job-boom") == "wi-broker-2", (
+        "the run died, but its WorkItem may still be running and billing")
+    with broker._active_workitems_lock:
+        assert broker._active_workitems["job-boom"][1] is None, (
+            "the dead run must no longer own it")
 
 
 def test_a_run_without_job_id_registers_nothing(monkeypatch, tmp_path):
@@ -796,6 +805,81 @@ def test_a_plain_successful_cancel_is_acknowledged(live_cancels):
 
     assert resp.json()["cancelled_jobs"] == ["job-plain"]
     assert broker.active_workitem_for("job-plain") is None
+
+
+def test_a_replacement_registered_mid_settle_is_not_acknowledged_away():
+    """The interleaving, not just the ordering: a replacement run can register
+    AFTER the eviction and BEFORE the 'is anything left?' question. Deciding
+    those separately acknowledges the job while the NEW WorkItem still bills, so
+    the two must happen under one lock."""
+    broker._record_active_workitem("job-tocto", "wi-old", run_token="old-run")
+
+    # Settling the id we cancelled is what clears it...
+    assert broker._settle_cancelled_workitem("job-tocto", "wi-old") is True
+    assert broker.active_workitem_for("job-tocto") is None
+
+    # ...and a replacement present at settle time is never acknowledged.
+    broker._record_active_workitem("job-tocto", "wi-new", run_token="new-run")
+    assert broker._settle_cancelled_workitem("job-tocto", "wi-old") is False
+    assert broker.active_workitem_for("job-tocto") == "wi-new"
+
+
+def test_a_timed_out_poll_keeps_its_workitem_reapable(monkeypatch, tmp_path):
+    """da/client's poll RETURNS when its ceiling expires and issues no DELETE,
+    so the WorkItem can still be running and billing. A run ending that way must
+    not persist a close for it -- nothing could ever address it again."""
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+
+    class _DA:
+        @staticmethod
+        def run_tool(local, tool, params, on_submitted=None):
+            if on_submitted is not None:
+                on_submitted("wi-still-running")
+            # What run_tool returns when the WorkItem never reached success.
+            return {"ok": False, "tool": tool.get("name"), "version": "1.0.0",
+                    "result": {}, "overlay": None, "timing_ms": 1, "cost": None,
+                    "error": {"error_code": "workitem_failed",
+                              "message": "poll ceiling reached", "retryable": True},
+                    "degraded_mode": False}
+
+    monkeypatch.setattr(broker, "_get_da", lambda: _DA())
+    monkeypatch.setattr(broker, "_live_script_is_nonempty", lambda *a, **k: True)
+    monkeypatch.setattr(broker, "_resolve_live_dwg", lambda *a, **k: "demo.dwg")
+
+    TestClient(broker.app).post("/broker/run", json={
+        "tenant_id": "tenant-reap", "tool": TOOL, "params": {},
+        "dwg": "rooftop_demo", "aps_live": True, "job_id": "job-timedout"})
+
+    assert broker.active_workitem_for("job-timedout") == "wi-still-running", (
+        "the run ended but the WorkItem may not have: keep it cancellable")
+
+
+def test_a_disowned_correlation_is_still_reapable(live_cancels):
+    """Disowning must not make it unreachable -- that is the whole point."""
+    broker._record_active_workitem("job-disowned", "wi-disowned", run_token="r")
+    assert broker._disown_active_workitem("job-disowned", "r") is True
+
+    resp = TestClient(broker.app).post("/broker/reap", json={
+        "records": [{"job_id": "job-disowned", "session_closed": True,
+                     "status": "inprogress"}]})
+
+    assert resp.status_code == 200
+    assert live_cancels.cancelled == ["wi-disowned"]
+    assert resp.json()["cancelled_jobs"] == ["job-disowned"]
+
+
+def test_a_successful_run_still_drops_its_correlation(monkeypatch, tmp_path):
+    """The ordinary path must not start leaking entries."""
+    mid_poll = []
+    _live_da(monkeypatch, mid_poll_probe=mid_poll)
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+
+    resp = TestClient(broker.app).post("/broker/run", json={
+        "tenant_id": "tenant-reap", "tool": TOOL, "params": {},
+        "dwg": "rooftop_demo", "aps_live": True, "job_id": "job-live"})
+
+    assert resp.status_code == 200
+    assert broker.active_workitem_for("job-live") is None
 
 
 def test_the_replay_ttl_outlasts_the_poll_ceiling():

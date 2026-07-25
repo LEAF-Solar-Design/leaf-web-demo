@@ -1040,6 +1040,56 @@ def _drop_active_workitem(job_id: Optional[str],
     return workitem_id
 
 
+def _disown_active_workitem(job_id: Optional[str], run_token: Optional[str]) -> bool:
+    """Give up ownership of job_id's correlation WITHOUT closing it.
+
+    Used when a run ends but its WorkItem may still be executing: da/client's
+    poll simply RETURNS when its ceiling expires (it issues no DELETE), and a
+    mid-poll exception leaves the same state. Dropping there would persist a
+    `close` for something still running and billing, and nothing could ever
+    address it again. Disowning keeps the correlation reapable by a later beacon
+    while making sure this finished run cannot later evict it. Growth is bounded
+    by the replay TTL and sidecar compaction.
+    """
+    if not job_id:
+        return False
+    with _active_workitems_lock:
+        current = _active_workitems.get(job_id)
+        if current is None:
+            return False
+        workitem_id, owner, recorded_at = current
+        if run_token is not None and owner != run_token:
+            return False
+        _active_workitems[job_id] = (workitem_id, None, recorded_at)
+        return True
+
+
+def _settle_cancelled_workitem(job_id: Optional[str],
+                               cancelled_workitem_id: Optional[str]) -> bool:
+    """Evict `cancelled_workitem_id` and report whether the JOB is now settled.
+
+    One lock acquisition on purpose. Deciding "did anything survive?" after the
+    eviction released the lock leaves a window in which a replacement run
+    registers a fresh, live correlation and the job is acknowledged anyway --
+    telling the caller to stop retrying while the NEW WorkItem is still billing.
+
+    Settled means nothing of this job is in flight: either the entry we just
+    cancelled was the current one, or there was no correlation at all.
+    """
+    if not job_id:
+        return False
+    with _active_workitems_lock:
+        current = _active_workitems.get(job_id)
+        if current is None:
+            return True  # nothing in flight to keep retrying for
+        workitem_id, _owner, _recorded_at = current
+        if cancelled_workitem_id is not None and workitem_id != str(cancelled_workitem_id):
+            return False  # a newer WorkItem is live: do NOT acknowledge
+        del _active_workitems[job_id]
+        _persist_workitem_event_locked("close", job_id, workitem_id)
+        return True
+
+
 def active_workitem_for(job_id: Optional[str]) -> Optional[str]:
     """Read job_id's in-flight WorkItem id without evicting it."""
     if not job_id:
@@ -1567,13 +1617,10 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
         cancelled = isinstance(outcome, dict) and bool(outcome.get("cancelled"))
         if live_cancel and cancelled:
             job_id = rec.get("job_id")
-            dropped = _drop_active_workitem(
-                job_id, expected_workitem_id=rec.get("workitem_id"))
-            # Acknowledge the JOB only if nothing of it is still in flight. The
-            # drop refuses when a newer run has installed a fresh correlation
-            # while this DELETE was in the air; acknowledging then would tell the
-            # caller to stop retrying while the NEW WorkItem is still billing.
-            if job_id and (dropped is not None or active_workitem_for(job_id) is None):
+            # Evict and decide "is this job settled?" under ONE lock: a
+            # replacement run registering between the two would otherwise be
+            # acknowledged away while its WorkItem is still billing.
+            if job_id and _settle_cancelled_workitem(job_id, rec.get("workitem_id")):
                 cancelled_jobs.append(str(job_id))
     return JSONResponse(status_code=200, content=with_envelope_fields({
         "ok": True,
@@ -2031,12 +2078,20 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
         return JSONResponse(status_code=terminal_status, content=terminal_env)
     finally:
-        # This run is over (returned, raised, or timed out): its WorkItem is no
-        # longer reapable, and leaving the entry would grow the registry without
-        # bound. Runs into the same `finally` on every exit path, INCLUDING the
-        # early returns for a duplicate delivery -- which is why the token is
-        # passed: only the run that registered a correlation may evict it.
-        _drop_active_workitem(req.job_id, run_token)
+        # This run is over, but "over" is not the same as "the WorkItem stopped".
+        # A SUCCESSFUL run polled its WorkItem to a terminal state, so the
+        # correlation is genuinely dead and is dropped. Any other ending -- a
+        # poll that hit da/client's 900s ceiling and simply RETURNED without a
+        # DELETE, a mid-poll exception, a failure -- can leave the WorkItem
+        # executing and BILLING, and persisting a `close` for it would make it
+        # permanently unaddressable. Those are disowned instead: still reapable
+        # by a later beacon, but no longer evictable by this finished run.
+        # Either way the token is what stops a duplicate delivery, which
+        # registered nothing, from touching the live run's correlation.
+        if terminal_env is not None and terminal_env.get("ok"):
+            _drop_active_workitem(req.job_id, run_token)
+        else:
+            _disown_active_workitem(req.job_id, run_token)
         if (
             postgres_mode and admission is not None
             and admission.get("lease_token") and not admission.get("capacity_wait")
