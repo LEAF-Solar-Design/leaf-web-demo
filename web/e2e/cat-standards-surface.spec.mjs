@@ -220,6 +220,13 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(grantToken).toHaveCount(0)
   expect(grantLinkBody).toMatchObject({ kind: 'oauth' })
   expect(grantLinkBody?.token).toBe('sk-ant-oat01-fixture-only')
+  await page.getByRole('button', { name: 'Account details' }).click()
+  const accountDetails = page.getByRole('dialog', { name: 'Account details' })
+  await expect(accountDetails).toContainText('tenant cat-litmus-tenant')
+  await expect(accountDetails).toContainText('organization cat-proof-org')
+  await expect(accountDetails).toContainText('tier proof')
+  await page.keyboard.press('Escape')
+  await expect(accountDetails).toHaveCount(0)
   await page.screenshot({ path: join(PROOF_DIR, 'standards-02b-versions-trust.png'), fullPage: true })
   mark('versions and trust')
 
@@ -237,7 +244,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page).toHaveURL(/\/try$/)
 
   writeProofReceipt(join(UNIFIED_PROOF_DIR, 'receipt.json'), {
-    capability_ids: ['ID-02', 'ID-03', 'ID-04', 'CA-01', 'CA-02', 'CV-01', 'CV-02', 'RN-01', 'AU-01', 'JB-01', 'JB-02', 'VW-01', 'VW-02', 'VR-01', 'VR-02', 'VR-03', 'EN-01', 'HL-01', 'AC-01', 'NT-01', 'AX-02', 'RS-02', 'DS-01'],
+    capability_ids: ['ID-01', 'ID-02', 'ID-03', 'ID-04', 'CA-01', 'CA-02', 'CV-01', 'CV-02', 'RN-01', 'AU-01', 'JB-01', 'JB-02', 'VW-01', 'VW-02', 'VR-01', 'VR-02', 'VR-03', 'EN-01', 'HL-01', 'AC-01', 'NT-01', 'AX-02', 'RS-02', 'DS-01'],
     evidence_tier: 'contract',
     route: '/try',
     runtime: 'Vite with deterministic API transport',
@@ -255,6 +262,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
       'version history previews version 1 without moving the version 2 head',
       'trust shows backend health, linked account kind, usage cap, and entitlements',
       'the Claude grant surface unlinks with confirmation, links a write-only subscription token, and clears the field',
+      'account details use the session tenant, organization, and tier while keeping platform identity separate from the Claude grant',
       'undo restores version 1 and redo restores version 2',
     ],
     artifacts: [

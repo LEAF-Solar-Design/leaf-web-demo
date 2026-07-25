@@ -272,7 +272,7 @@ Progress:
   token field, token-field removal after success, and the expected OAuth grant
   request without recording a real credential.
 - The aggregate one-scene walk passes with production Playwright video capture.
-  Its receipt covers 23 capability IDs and records every observed API method-path.
+  Its receipt covers 24 capability IDs and records every observed API method-path.
   The 10-scenario fixture gate, 22 controller tests, production build, behavior
   pins, customization checks, and all staging checks pass.
 - `/try` now mounts the shared result panel, completion toast, provenance drawer,
@@ -285,7 +285,12 @@ Progress:
   extraction state, loads intake with guest identity, and seats the drawing.
   Three focused tests cover success, preflight rejection, and late-result
   suppression after cancel. The aggregate video proves both entry paths.
-- Provider lifting, sign-in and expiry, tenant operations, deeper structured
+- `/try` now binds identity from the actual session `{tenant, org, tier}`
+  response, keeps Auth0 callbacks on `/try`, renders a calm 401 gate, disables
+  execution while sign-in is required, and exposes account details separately
+  from the Claude grant. Two focused browser contracts cover the 401 gate and
+  callback route ownership.
+- Provider lifting, sign-out and mid-session expiry, tenant operations, deeper structured
   failure coverage, and the full responsive and accessibility ladder remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior

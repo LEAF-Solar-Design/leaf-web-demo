@@ -32,6 +32,7 @@ import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
 import Toast from '../components/Toast.jsx'
+import SessionGate from '../components/SessionGate.jsx'
 import ToolsPanel from '../components/ToolsPanel.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
@@ -53,6 +54,7 @@ import {
   stageRunIntent,
 } from '../runIntent.js'
 import { navigate } from './router.js'
+import { authConfigured, login, logout } from '../auth.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
 const DRAWING_ID = 'cat-panels'
@@ -110,6 +112,9 @@ export default function ToolCast({
   const [linkedJobId, setLinkedJobId] = useState(null)
   const [panelCount, setPanelCount] = useState(null)
   const [tenantId, setTenantId] = useState('try-surface')
+  const [sessionTier, setSessionTier] = useState(null)
+  const [sessionOrg, setSessionOrg] = useState(null)
+  const [sessionAuthRequired, setSessionAuthRequired] = useState(false)
   const [busy, setBusy] = useState(false)
   const [leftView, setLeftView] = useState('operator')
   const [rightView, setRightView] = useState('execution')
@@ -208,11 +213,20 @@ export default function ToolCast({
           drawingState: { drawing_id: DRAWING_ID, version: 1, head: 1, latest: 1 },
           apply: true,
         })
-        setTenantId(data.tenant_id || 'try-surface')
+        setTenantId(data.tenant || 'try-surface')
+        setSessionTier(data.tier || null)
+        setSessionOrg(data.org || null)
+        setSessionAuthRequired(false)
         setPhase('ready')
       })
-      .catch(() => {
+      .catch((cause) => {
         if (!live) return
+        if (cause?.status === 401) {
+          setSessionAuthRequired(true)
+          setError(null)
+          setPhase('failed')
+          return
+        }
         setError('The drawing backend is unavailable. Start the proof API and reload this surface.')
         setPhase('failed')
       })
@@ -612,7 +626,13 @@ export default function ToolCast({
           <button type="button" role="tab" aria-selected={leftView === 'workspace'} onClick={() => setLeftView('workspace')}>Project</button>
         </div>
         <div className="tc-rail-body">
-          {leftView === 'operator' && (sessionId ? (
+          {leftView === 'operator' && (sessionAuthRequired ? (
+            <SessionGate
+              configured={authConfigured}
+              onSignIn={login}
+              onDemo={() => { window.location.href = '/app?demo=1' }}
+            />
+          ) : sessionId ? (
             <ConversePanel
               sessionId={sessionId}
               userTurns={turns}
@@ -816,6 +836,23 @@ export default function ToolCast({
               onLink={platform.actions.linkClaude}
               onUnlink={platform.actions.unlinkClaude}
             />
+            <button
+              type="button"
+              className="chip-act tc-account-details"
+              onClick={() => setDrawer({
+                title: 'Account details',
+                rows: [
+                  `tenant ${tenantId}`,
+                  `organization ${sessionOrg || workspace.orgId || 'unknown'}`,
+                  `tier ${sessionTier || platform.entitlements?.tier || 'unknown'}`,
+                  `authentication ${sessionAuthRequired ? 'sign in required' : 'active'}`,
+                ],
+                action: authConfigured ? { label: 'Sign out', onClick: logout } : null,
+                foot: 'Platform identity and Claude account credit are separate.',
+              })}
+            >
+              Account details
+            </button>
           </div>
         )}
         {rightView === 'view' && (
@@ -871,7 +908,7 @@ export default function ToolCast({
               onKeyDown={runOnEnter}
               aria-label="Command bar"
             />
-            <button type="button" className="tc-run" onClick={runRequest} disabled={busy || jobRunning || phase === 'loading'}>Run</button>
+            <button type="button" className="tc-run" onClick={runRequest} disabled={sessionAuthRequired || busy || jobRunning || phase === 'loading'}>Run</button>
           </div>
           <div className="tc-bar-controls">
             <span className="tc-bar-chip">Scope · this drawing</span>

@@ -325,6 +325,12 @@
 .drawing-upload-note { font-size: 11px; color: #71717a; }
 .drawing-upload-error { flex: 1 1 100%; font-size: 11px; color: #e24947; }
 .drawing-upload-ready { font-size: 11px; color: #22c55e; }
+.session-gate { margin: 12px; padding: 14px; border: 1px solid #27272a; border-radius: 10px; background: #111113; }
+.session-gate h3 { margin: 0 0 8px; font-size: 14px; }
+.session-gate p { margin: 0 0 12px; color: #a1a1aa; font-size: 12px; line-height: 1.45; }
+.session-gate > div { display: flex; gap: 8px; flex-wrap: wrap; }
+.tc-account-details { margin-top: 10px; }
+.site-auth-callback { position: fixed; inset: 0; display: grid; place-items: center; background: #0a0a0a; color: #a1a1aa; }
 .tc-bar.upload-drag-active { box-shadow: 0 0 0 1px #22c55e, 0 14px 38px rgba(0, 0, 0, .48); }
 .tc-upload-drop { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; border-radius: inherit; background: rgba(4, 20, 10, .94); color: #4ade80; font-size: 13px; }
 .stage-root[data-scene="tool"] > .drawer-layer {

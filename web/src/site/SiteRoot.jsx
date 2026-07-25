@@ -13,6 +13,7 @@ import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
+import { handleRedirectCallback } from '../auth.js'
 import './landing.css'
 
 const App = React.lazy(() => import('../App.jsx'))
@@ -21,11 +22,11 @@ const SheetsPage = React.lazy(() => import('./sheets/SheetsPage.jsx'))
 
 const APP_BOOT_PARAMS = ['demo', 'fixture', 'ops', 'dev', 'drawing']
 
-function bootWantsApp(search) {
+function bootWantsApp(search, path = window.location.pathname) {
   try {
     const q = new URLSearchParams(search)
     if (APP_BOOT_PARAMS.some((k) => q.has(k))) return true
-    if (q.has('code') && q.has('state')) return true
+    if (q.has('code') && q.has('state') && path !== '/try') return true
   } catch { /* malformed search — fall through to path routing */ }
   return false
 }
@@ -42,7 +43,11 @@ const isEditable = (el) =>
 
 export default function SiteRoot() {
   // Evaluated once at boot — deep links into the console never see the site.
-  const [bootApp] = useState(() => bootWantsApp(window.location.search))
+  const [bootApp] = useState(() => bootWantsApp(window.location.search, window.location.pathname))
+  const [authCallbackPending, setAuthCallbackPending] = useState(() => {
+    const query = new URLSearchParams(window.location.search)
+    return window.location.pathname === '/try' && query.has('code') && query.has('state')
+  })
   const { path } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
   const stageRef = useRef(null)
@@ -50,6 +55,13 @@ export default function SiteRoot() {
   const [operatorVisibleLayers, setOperatorVisibleLayers] = useState(null)
   const [operatorSelectedHandle, setOperatorSelectedHandle] = useState(null)
   const [operatorOverlay, setOperatorOverlay] = useState(null)
+
+  useEffect(() => {
+    if (!authCallbackPending) return
+    let live = true
+    handleRedirectCallback().finally(() => { if (live) setAuthCallbackPending(false) })
+    return () => { live = false }
+  }, [authCallbackPending])
 
   // Keyboard recasts — ONLY in scenes site|tool (listener not registered in
   // scene app/sheets), and never when focus is in an editable element.
@@ -93,6 +105,8 @@ export default function SiteRoot() {
       </WorkspaceControllerProvider>
     )
   }
+
+  if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
 
   if (scene === 'sheets') {
     return (
