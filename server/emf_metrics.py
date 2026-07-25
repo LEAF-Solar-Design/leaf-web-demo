@@ -12,7 +12,7 @@ WHY EMF and not a scrape or PutMetricData:
 CONTRACT (owned by the unified-observability plane; see CONTRACT.md):
   Namespace  : Leaf/Platform/APS
   Metrics    : BrokerRun (Count), EngineSeconds (Seconds), UsdEst (None),
-               JobTerminal (Count).
+               JobTerminal (Count), ApprovalGiveBackFailed (Count).
   Each metric is published EXACTLY ONCE per emit, under the single dimension set
   its CloudWatch consumer uses (a metric published under two dimension sets would
   double when summed across them):
@@ -20,6 +20,10 @@ CONTRACT (owned by the unified-observability plane; see CONTRACT.md):
     EngineSeconds-> {aps_live}           (avg engine seconds on live runs)
     UsdEst       -> {aps_live}           (daily cost-cap alarm sums live spend)
     JobTerminal  -> {status}             (job outcome counts)
+    ApprovalGiveBackFailed -> {reason}   (an approval was consumed by a turn
+                                          that never ran and could NOT be
+                                          returned — the user's single approval
+                                          is destroyed. Alarm on ANY value > 0.)
   Dimensions are LOW-CARDINALITY ONLY. tenant_id, tool, engine_op, aps_endpoint,
   event_key, and execution_path are LOG FIELDS, never dimensions.
 
@@ -181,6 +185,48 @@ def emit_job_terminal(status: str, execution_path: Optional[str] = None) -> None
     except Exception as exc:  # noqa: BLE001
         try:
             print(f"[emf] emit_job_terminal failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        except Exception:  # pragma: no cover
+            pass
+
+
+GIVE_BACK_REASON_ALLOW = frozenset({"raised", "not_released"})
+
+
+def emit_approval_give_back_failed(
+    reason: str, confirmation_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> None:
+    """Emit one give-back-failure metric (routers/sessions.py's APPROVAL
+    GIVE-BACK path). Call when an approval was consumed for a turn that
+    provably never ran and could NOT be put back: the user's single approval is
+    destroyed, and without this the only trace is a stderr line nothing alarms
+    on.
+
+    `reason` is CLAMPED to GIVE_BACK_REASON_ALLOW ('raised' = the store call
+    threw, 'not_released' = it returned False and no row moved) so the
+    dimension stays bounded. confirmation_id / session_id are LOG FIELDS, never
+    dimensions — they are per-request and would make the metric unbounded."""
+    if _DISABLED:
+        return
+    try:
+        raw = str(reason or "unknown")
+        reason_s = raw if raw in GIVE_BACK_REASON_ALLOW else "unknown"
+        directives = [
+            {"Namespace": NAMESPACE, "Dimensions": [["reason"]],
+             "Metrics": [{"Name": "ApprovalGiveBackFailed", "Unit": "Count"}]}
+        ]
+        root: Dict[str, Any] = {"reason": reason_s, "ApprovalGiveBackFailed": 1}
+        if confirmation_id:
+            root["confirmation_id"] = str(confirmation_id)
+        if session_id:
+            root["session_id"] = str(session_id)
+        if reason_s != raw:
+            root["reason_raw"] = raw
+        _emit(directives, root)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            print(f"[emf] emit_approval_give_back_failed failed: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
         except Exception:  # pragma: no cover
             pass
 
