@@ -357,6 +357,45 @@ def test_write_with_no_holder_is_refused_under_a_session_lock(stack):
     assert head_version(stack, "demo", t) == 1
 
 
+def test_write_with_no_holder_is_refused_under_a_TENANT_default_lock(stack):
+    """sol-critic BLOCKER, PR #141 — the bypass the `sess-` case above missed.
+
+    POST .../checkout with an EMPTY BODY defaults its holder to the tenant id
+    (routers/drawings.py). The run route used to default an absent holder to the
+    tenant id too, so both sides landed on the same string and the unnamed writer
+    matched the lock exactly. Before the fix this published v2 under the other
+    session's lease; the run route now sends the reserved anonymous id, which no
+    lock can ever hold."""
+    t = "wl-authz-tenant-lock"
+    assert head_version(stack, "demo", t) == 1
+    # empty body -> the lock's holder IS the tenant id
+    r = requests.post(f"{stack['app']}/api/drawings/demo/checkout",
+                      json={}, headers=_h(t), timeout=30)
+    assert r.status_code == 200, r.text
+    assert r.json()["holder"] == t
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, holder=None)
+    assert r.status_code == 403, r.text
+    assert r.json()["error"]["error_code"] == "FORBIDDEN"
+    assert head_version(stack, "demo", t) == 1
+
+
+def test_reserved_anonymous_holder_cannot_be_claimed_as_a_checkout(stack):
+    """Closing the other half: if a caller could TAKE the lock as the reserved
+    id, every unnamed write would match it and the default would fail open
+    again. The route must refuse it rather than store it."""
+    t = "wl-authz-reserved"
+    assert head_version(stack, "demo", t) == 1
+    r = requests.post(f"{stack['app']}/api/drawings/demo/checkout",
+                      json={"holder": "anonymous:unnamed-writer"},
+                      headers=_h(t), timeout=30)
+    assert r.status_code != 200, r.text
+    # and no lock was recorded, so an unnamed write is still free to proceed
+    versions = requests.get(f"{stack['app']}/api/drawings/demo/versions",
+                            headers=_h(t), timeout=30).json()
+    assert versions["checkout"] is None
+
+
 def test_write_with_no_checkout_held_is_unchanged(stack):
     """Guardrail on the product flow: the UI does NOT require taking a lock
     before running a write tool (lockState suppresses writes only when someone

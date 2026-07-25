@@ -93,6 +93,25 @@ def _db():
 VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9_-]+/drawings/[a-z0-9_-]+/v/\d{8}\.dwg$")
 
 
+# RESERVED holder id for a PRODUCT write whose caller named no session.
+#
+# The route used to default an absent holder to the tenant id, on the theory that
+# a tenant-shaped id never matches a `sess-` lock. That is only true when the lock
+# was taken by a session. POST .../checkout defaults ITS holder to the tenant id
+# too, so a drawing locked with the documented empty body is held by the tenant id
+# — and an unnamed writer then MATCHED it and published under someone else's
+# lease. The tenant id was serving as both the "nobody named themselves" sentinel
+# and a real holder value; conflating the two is what reopened the hole this
+# module exists to close.
+#
+# This value can never equal a real holder because acquire_checkout refuses it
+# (see below), so an unnamed product write is refused against ANY active lock,
+# whatever shape its holder has. Distinct from `holder=None`, which means "not a
+# product write at all" (ingest, the offline harness, this module's own tests)
+# and skips the check entirely.
+ANONYMOUS_HOLDER = "anonymous:unnamed-writer"
+
+
 class CheckoutDenied(Exception):
     """A write was attempted by someone who is not the single-writer lock holder.
 
@@ -1000,6 +1019,17 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     by ITSELF, under the same holder id — carries a stale generation and is
     refused. Postgres authority only; see `_authorize_legacy_checkout`.
 
+    SCOPE, stated plainly so the guarantee is not overread. `holder` is a caller-
+    supplied label bound only to the tenant, and GET /versions publishes the
+    current holder, so a MALICIOUS same-tenant caller can read it and present it.
+    Against that caller this is a coordination lock, not an authorization
+    boundary — the same property the POST/DELETE .../checkout routes have always
+    had, and this check does not weaken it. What it does close is the accidental
+    cross-session write: no caller publishes under a lock it has not at least
+    named, and an unnamed caller (`ANONYMOUS_HOLDER`) publishes under no lock at
+    all. Making it a true boundary needs an opaque server-issued checkout
+    capability that never travels in a readable field; tracked separately.
+
     Both default to None, which preserves the pre-existing behaviour exactly:
     ingest paths, the offline harness and the store's own tests publish without
     naming a session. The product write path always names one — the authorization
@@ -1254,7 +1284,15 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
 
     A lock held by ANOTHER holder and still within TTL blocks (False). An expired
     lock (expires < now) is treated as free. The same holder re-acquiring refreshes.
+
+    `ANONYMOUS_HOLDER` is REFUSED. `holder` is caller-supplied on this route, so
+    without this a caller could take the lock AS the unnamed-writer sentinel and
+    every unnamed write would then match it — turning the fail-closed default
+    back into a fail-open one. Nothing legitimate asks for that id.
     """
+    if str(holder) == ANONYMOUS_HOLDER:
+        raise ValueError(
+            f"{ANONYMOUS_HOLDER!r} is reserved and cannot hold a checkout")
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
     if authority_mode() == "postgres":

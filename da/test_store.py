@@ -345,6 +345,55 @@ def test_authorize_checkout_preflight_matches_the_commit_decision(tmp_path):
         store.authorize_checkout(be, "t", did, "s2")
 
 
+def test_unnamed_writer_cannot_ride_a_lock_taken_with_the_default_holder(tmp_path):
+    """sol-critic BLOCKER, PR #141. The route used to default an absent holder to
+    the TENANT id, which looked fail-closed only because the lock was assumed to
+    be `sess-` shaped. POST .../checkout defaults its holder to the tenant id
+    too, so a drawing locked with the documented empty body is held by the tenant
+    id — and the unnamed writer matched it exactly. Reproduced before the fix:
+    session B published v2 under session A's lease without naming anything."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "acme", a)["drawing_id"]
+
+    # A takes the lock with the empty body -> holder IS the tenant id
+    assert store.acquire_checkout(be, "acme", did, holder="acme", ttl_s=300) is True
+    assert store.load_manifest(be, "acme", did)["checkout"]["holder"] == "acme"
+
+    # B names nobody. The route now sends the reserved anonymous id, not "acme".
+    with pytest.raises(store.CheckoutDenied):
+        store.put_drawing(be, "acme", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                          parent_version=1, holder=store.ANONYMOUS_HOLDER)
+    m = store.load_manifest(be, "acme", did)
+    assert m["head"] == 1 and m["latest"] == 1
+
+
+def test_anonymous_holder_is_reserved_and_cannot_take_a_checkout(tmp_path):
+    """The sentinel is only unforgeable while nothing can hold it. `holder` is
+    caller-supplied on POST .../checkout, so without this refusal a caller could
+    take the lock AS the anonymous id and every unnamed write would match it —
+    turning the fail-closed default straight back into a fail-open one."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    with pytest.raises(ValueError, match="reserved"):
+        store.acquire_checkout(be, "t", did, holder=store.ANONYMOUS_HOLDER, ttl_s=300)
+    assert store.load_manifest(be, "t", did).get("checkout") is None
+
+
+def test_anonymous_writer_still_publishes_on_an_unlocked_drawing(tmp_path):
+    """Fail-closed must not become fail-shut: an unnamed write to a drawing
+    nobody has locked is the ordinary case and must keep working."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                             parent_version=1,
+                             holder=store.ANONYMOUS_HOLDER) == 2
+
+
 def test_legacy_locks_carry_no_fence_so_a_supplied_one_cannot_wedge_a_write(tmp_path):
     """Legacy manifests store holder/acquired/expires and no generation. A client
     that sends a fence anyway (it holds a postgres-shaped one, or is talking to a

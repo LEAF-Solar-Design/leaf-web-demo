@@ -1082,12 +1082,15 @@ def _redispatch_record(job_id: str) -> bool:
         dwg_version = execution["dwg_version"]
         # Recover the submitting session's checkout identity so a restart-
         # recovered write is authorized as the session that asked for it.
-        # Absence is TOLERATED here, unlike dwg_version above: a row without
-        # these keys was submitted before this field existed, under the contract
-        # where the store performed no holder check at all, so recovering it as
-        # an unnamed writer reproduces exactly what that job was already
-        # promised. Nothing forgeable rides on it — only the server writes this
-        # row, and only from the identity on the original request.
+        #
+        # A row written BEFORE this field existed has no such key, and reads back
+        # as None. That is NOT an exemption: write_loop normalizes a missing
+        # identity to store.ANONYMOUS_HOLDER at the write chokepoint, so a job
+        # queued just before a rolling deploy is refused against a lock another
+        # session took while it waited, instead of publishing under it. Absence
+        # is normalized there rather than here so that EVERY route into the
+        # write path is covered — recovery, retry, local fallback, and an older
+        # app or broker that sends no identity at all.
         checkout_holder = execution.get("checkout_holder")
         checkout_fence = execution.get("checkout_fence")
     except (IndexError, KeyError, TypeError, ValueError):

@@ -380,6 +380,27 @@ def _status_for(env: Dict[str, Any]) -> int:
     return DEFAULT_HTTP_STATUS.get(code, 500)
 
 
+def _named_or_anonymous(store, holder: Optional[str]) -> str:
+    """Normalize a MISSING single-writer identity to the reserved anonymous id.
+
+    This is the one chokepoint every product write passes through, so doing it
+    here covers every way an identity can go missing rather than one caller at a
+    time: a pre-rollout job row recovered after a restart (its execution context
+    has no such key), an in-process retry or local fallback, an older app that
+    sends no `holder`, and an older broker that drops the field. Each of those
+    would otherwise arrive as None and skip the check entirely — publishing under
+    whatever lock happened to be open, which is the bug this module closes.
+
+    `None` keeps its meaning for direct `store.put_drawing` callers that are NOT
+    product writes (ingest, the offline harness, the store's own tests); they do
+    not come through here.
+
+    Anonymous is refused against any ACTIVE lock and publishes normally on an
+    unlocked drawing — the honest reading of a write whose submitter never named
+    itself."""
+    return holder if holder else store.ANONYMOUS_HOLDER
+
+
 def _checkout_denied(exc: Exception, name: Any, tool_version: Any) -> Tuple[Dict[str, Any], int]:
     """A write refused because the caller does not hold the single-writer lock.
 
@@ -405,6 +426,7 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     ``holder``/``fence`` are the caller's single-writer identity; the persist below
     is refused (403) when another session holds the checkout."""
     import store
+    holder = _named_or_anonymous(store, holder)
     name = tool.get("name")
     tool_version = tool.get("version", "1.0.0")
     drawing_id = _drawing_id(params)
@@ -464,6 +486,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     put_drawing at commit time, which is the authoritative check because it runs
     under the store's row lock."""
     import store
+    holder = _named_or_anonymous(store, holder)
     name = tool.get("name")
     tool_version = tool.get("version", "1.0.0")
     drawing_id = _drawing_id(params)
