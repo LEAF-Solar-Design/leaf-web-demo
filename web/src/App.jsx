@@ -275,6 +275,10 @@ export default function App() {
   // holding the lock, write actions were enabled. Unknown-until-answered closes
   // that window; mock mode clears it immediately in loadCheckout.
   const [checkoutUnknown, setCheckoutUnknown] = useState(true)
+  // Wording only, never the gate. `unknown` covers both "reading" and "read
+  // failed" and both must pause writes, but telling the user we COULD NOT read
+  // during a routine refetch is simply false, so this separates the message.
+  const [checkoutReadFailed, setCheckoutReadFailed] = useState(false)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
@@ -611,7 +615,7 @@ export default function App() {
   // for a lock means re-enabling writes that were correctly disabled.
   const checkoutSeqRef = useRef(0)
   const loadCheckout = useCallback(async () => {
-    if (mock) { setCheckout(null); setCheckoutUnknown(false); return }
+    if (mock) { setCheckout(null); setCheckoutUnknown(false); setCheckoutReadFailed(false); return }
     const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
     const seq = ++checkoutSeqRef.current
     // Unknown again BEFORE awaiting, not just on failure. Without this the
@@ -626,10 +630,12 @@ export default function App() {
       if (seq !== checkoutSeqRef.current) return // a newer read already answered
       setCheckout(v?.checkout || null)
       setCheckoutUnknown(false)
+      setCheckoutReadFailed(false)
     } catch {
       if (seq !== checkoutSeqRef.current) return
       setCheckout(null)
       setCheckoutUnknown(true)
+      setCheckoutReadFailed(true)
     }
   }, [mock, drawingState])
 
@@ -2104,6 +2110,7 @@ export default function App() {
                   canTake={lock.canTake}
                   heldByUs={heldByUs}
                   unknown={checkoutUnknown}
+                  readFailed={checkoutReadFailed}
                   busy={checkoutBusy}
                   onTake={onTakeCheckout}
                   onRelease={onReleaseCheckout}

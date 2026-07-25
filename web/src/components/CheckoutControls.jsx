@@ -1,26 +1,40 @@
 import CheckoutChip from './CheckoutChip.jsx'
 
 // Take / Release affordances over the single-writer checkout (3B). Wave 2 landed
-// the lock as a DISPLAY-ONLY chip; this makes it mutable. States:
-//   - unknown       — the lock read FAILED, so we do not know who holds it. The
-//     parent fails closed and suppresses write-Run, and this line is what stops
-//     that from being a silent disable: the user is told we could not read the
-//     lock and offered a retry, rather than finding Run mysteriously inert.
-//   - lockedByOther — another editor holds it: the amber square-dot CheckoutChip
-//     line, display only. Write-tool Run is already suppressed by the parent;
-//     there is nothing to take here, so no action is offered.
-//   - legacyByOther — held by a pre-session-id client (a tenant-shaped holder).
-//     Same suppression, but named, because "held by acme" with no Release button
-//     is otherwise indistinguishable from a bug. The server caps every lease at
-//     24h and frees expired locks, so these drain on their own.
+// the lock as a DISPLAY-ONLY chip; this makes it mutable. States, in the order
+// they are decided:
+//   - unknown       — we have no answer for the CURRENT drawing: either a read is
+//     in flight or the last one failed. The parent fails closed and suppresses
+//     write-Run either way, and this line is what stops that from being a silent
+//     disable. `readFailed` picks the wording, because every read now starts by
+//     going unknown, so a routine refetch also lands here and "could not read"
+//     would be a lie. Only the failed case offers a Retry.
+//   - lockedByOther — another editor holds it: the amber square-dot CheckoutChip.
+//     A Take is ALWAYS offered here, and deliberately never gated on our clock:
+//     the server decides, handing over an elapsed lease or returning 409 for a
+//     live one. `staleByOther` and `legacyByOther` only choose the wording, since
+//     gating the button on a clock-derived guess is what used to leave a wedge no
+//     user action could clear.
 //   - heldByUs      — we hold it: a green dot "You hold the edit lock" + Release.
 //   - unlocked      — a quiet "Take edit lock" chip.
 // Calm posture throughout — a checkout is an expected coordination state, never
 // an error. Live only (the parent gates on !mock).
 export default function CheckoutControls({
-  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, busy, onTake, onRelease, onRetry,
+  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, readFailed, busy, onTake, onRelease, onRetry,
 }) {
   if (unknown) {
+    // Both states pause writes, and only the wording differs. Every read now
+    // starts by going unknown (so a drawing change cannot leave the previous
+    // drawing's answer authoritative), which means a routine refetch lands here
+    // too. Saying "could not read" during a refetch that is simply in flight
+    // would be false, and a Retry button for a request already running is noise.
+    if (!readFailed) {
+      return (
+        <span className="checkout-controls" role="status">
+          <span className="checkout-checking">Checking the edit lock…</span>
+        </span>
+      )
+    }
     return (
       <span className="checkout-controls" role="status">
         <span className="checkout-unknown">
