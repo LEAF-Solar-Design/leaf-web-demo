@@ -111,6 +111,14 @@ def admit(tenant_id: str | None = None, timeout: float | None = None):
     concurrently in this process. `tenant_id` is accepted for future fair
     accounting + logging; the ceiling itself is tenant-agnostic (fairness ACROSS
     tenants is FairQueue's job). Raises QueueFull if `timeout` elapses.
+
+    Releasing here also runs the fair dispatcher. Both entry points draw from ONE
+    semaphore, so a slot this function frees may be the slot a `fair_admit` ticket
+    is waiting on, and a fair ticket only ever wakes when some dispatcher sets its
+    Event. Without that call a legacy `admit()` holder releases into an idle
+    ceiling while the fair ticket blocks forever, or raises QueueFull against a
+    free slot. (Found 2026-07-24 by review of this change; reproduced at ceiling 1
+    with an admit() holder and one waiting fair_admit ticket.)
     """
     sem = _ensure_gate()
     acquired = sem.acquire(timeout=timeout) if timeout is not None else sem.acquire()
@@ -120,6 +128,8 @@ def admit(tenant_id: str | None = None, timeout: float | None = None):
         yield
     finally:
         _release_slot(sem)
+        with _fair_lock:
+            _fair_dispatch_locked()
 
 
 def _release_slot(sem) -> None:

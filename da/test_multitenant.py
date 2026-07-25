@@ -272,6 +272,42 @@ def test_b2_fair_admit_timeout_raises_queue_full_without_leaking_a_ticket():
     assert leaf_queue.fair_pending() == 0
 
 
+def test_b2_legacy_admit_release_wakes_a_waiting_fair_ticket():
+    """A slot freed by the LEGACY admit() must wake a waiting fair_admit ticket.
+
+    Both entry points draw from one semaphore, but a fair ticket only wakes when a
+    dispatcher sets its Event. admit() used to release without dispatching, so a
+    legacy holder handed back the last slot and the fair caller sat there: forever
+    with no timeout, or QueueFull against a completely idle ceiling. That is the
+    backward compatibility admit() exists to provide, so it gets a test.
+    """
+    outcome = {}
+
+    def fair_caller():
+        try:
+            with leaf_queue.fair_admit("tenant-b", timeout=10):
+                outcome["admitted"] = True
+        except leaf_queue.QueueFull:
+            outcome["queue_full"] = True
+
+    with _ceiling(1):
+        with leaf_queue.admit("tenant-a"):          # legacy holder takes the slot
+            th = threading.Thread(target=fair_caller, daemon=True)
+            th.start()
+            deadline = time.time() + 10
+            while leaf_queue.fair_pending() < 1 and time.time() < deadline:
+                time.sleep(0.005)
+            assert leaf_queue.fair_pending() == 1, "fair ticket never registered"
+            assert not outcome, f"admitted while the ceiling was full: {outcome}"
+        # legacy holder released -> the fair ticket must be dispatched
+        th.join(timeout=10)
+
+    assert outcome.get("admitted") is True, (
+        f"fair ticket was not woken by admit()'s release: {outcome or 'still blocked'}")
+    assert "queue_full" not in outcome
+    assert leaf_queue.fair_pending() == 0
+
+
 def test_b2_live_submit_path_is_gated_by_fair_admit():
     """da/client.submit_workitem's LIVE path goes through queue.fair_admit.
 
@@ -413,6 +449,7 @@ def _run_all() -> int:
         ("b2_fair_admit_threads", test_b2_fair_admit_threads_ceiling_and_round_robin_fairness),
         ("b2_fair_admit_ceiling_n", test_b2_fair_admit_ceiling_admits_exactly_max_concurrency),
         ("b2_fair_admit_timeout", test_b2_fair_admit_timeout_raises_queue_full_without_leaking_a_ticket),
+        ("b2_legacy_admit_wakes_fair", test_b2_legacy_admit_release_wakes_a_waiting_fair_ticket),
         ("b2_live_submit_gated", test_b2_live_submit_path_is_gated_by_fair_admit),
         ("c_usage_cap", test_c_usage_cap_rejects_third_run_preflight),
         ("c_broker_ledger_attribution", test_c_broker_ledger_is_authoritative_attribution),
