@@ -102,18 +102,47 @@ def start_uvicorn(module_app: str, port: int, env_overrides: dict, log_path: Pat
     )
 
 
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 30.0) -> None:
+def log_tail(log_path: Path | None, max_lines: int = 25) -> str:
+    """Tail of a child's stdout+stderr log, for readiness failure messages.
+
+    Without it a readiness failure is a bare "not ready in Ns" — indistinguishable
+    between a slow boot and a server that is up but wedged before it can serve. The
+    child holds this file open for append; the read is best-effort and must never
+    replace the real failure with an OSError from the diagnostic itself.
+    """
+    if log_path is None:
+        return ""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return f"\n  (could not read {log_path}: {exc})"
+    if not lines:
+        return f"\n  ({log_path} is empty — the child logged nothing)"
+    body = "\n".join(f"  | {ln}" for ln in lines[-max_lines:])
+    return f"\n  last {min(len(lines), max_lines)} line(s) of {log_path}:\n{body}"
+
+
+# 90s, not 30s: these children are two uvicorn boots racing whatever else the gate
+# runner (or another agent) is doing on the box, and a cold import of the engine
+# registry is CPU-bound. 30s was tight enough to ERROR all four tests at setup under
+# sustained parallel load while an immediate re-run passed unchanged. The budget only
+# bounds a HANG — a child that dies still fails fast on the poll() branch below, so
+# raising it costs nothing on the crash path and buys headroom on the slow path.
+def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 90.0,
+               log_path: Path | None = None) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"server process exited early (rc={proc.returncode})")
+            raise RuntimeError(
+                f"server process exited early (rc={proc.returncode})"
+                f"{log_tail(log_path)}")
         try:
             if requests.get(url, timeout=2).status_code == 200:
                 return
         except requests.RequestException:
             pass
         time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s")
+    raise TimeoutError(f"server at {url} not ready in {timeout_s}s{log_tail(log_path)}")
 
 
 def stop(proc: subprocess.Popen) -> None:
@@ -142,20 +171,22 @@ def stack(tmp_path_factory):
     # tests/test_authored_execution_live_gate.py own that), so pinning removes an
     # environment dependency without removing coverage. Provider wins over
     # LEAF_SANDBOX in _sandbox_tier(), but both are pinned so neither can decide.
+    broker_log, app_log = tmp / "broker.log", tmp / "app.log"
     broker = start_uvicorn("broker:app", broker_port,
                            {"BROKER_LEDGER": tmp / "ledger.jsonl",
                             "BROKER_TENANTS": tmp / "tenants.json",
                             "LEAF_SANDBOX": "off",
                             "LEAF_TOOL_SANDBOX_PROVIDER": "off"},
-                           tmp / "broker.log")
+                           broker_log)
     app = start_uvicorn("app:app", app_port,
                         {"APS_LIVE": "0", "APS_CRED": "/nonexistent",
                          "BROKER_URL": f"http://127.0.0.1:{broker_port}",
                          "JOBS_DB": tmp / "jobs.db"},
-                        tmp / "app.log")
+                        app_log)
     try:
-        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
-        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker,
+                   log_path=broker_log)
+        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app, log_path=app_log)
         # WARM-UP: the broker's FIRST /broker/run lazily loads the engine registry +
         # the 2345-polyline intake; under sustained parallel load that cold call can be
         # CPU-starved past the poll timeout (gate-runner flake follow-up). Force it now,
