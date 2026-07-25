@@ -494,7 +494,7 @@ def build_suites() -> List[Suite]:
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
         # Both are fully offline (no APS, no network) but were never registered,
-        # so 8 tests sat outside the gate entirely.
+        # so 11 tests sat outside the gate entirely.
         Suite("da-client-credentials", "da test_client_credentials.py", "pytest", DA,
               _py_pytest("test_client_credentials.py"), 6),
         Suite("da-extract-dxf-activity", "da test_extract_dxf_activity.py", "pytest", DA,

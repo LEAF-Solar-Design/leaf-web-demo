@@ -466,9 +466,16 @@ def stop(proc: subprocess.Popen) -> None:
 def stack(tmp_path_factory):
     # Only the C2 tests need the operator's tenant repo (they assert on
     # layer-bounding-boxes, which this repo does not ship). C5b/C5c just need
-    # SOME tenant repo to fold, and count-by-layer -- both of which the shipped
-    # fixture provides -- so fall back to it rather than skipping the whole
-    # module and taking those two live regression checks off CI with it.
+    # SOME tenant repo to fold plus a resolvable count-by-layer, so fall back to
+    # the shipped fixture rather than skipping the whole module and taking those
+    # two live regression checks off CI with it.
+    #
+    # Be precise about what that buys: the shipped fixture supplies only a
+    # REGISTRY ENTRY for count-by-layer, not tool code, so execution falls
+    # through to the platform built-in. C5b/C5c still assert real behaviour
+    # (immediate tenant-state reads; real async progress to completion), but
+    # they are NOT coverage of tenant-file loading -- a regression there would
+    # leave them green.
     src = TENANT_REPO_SRC if _TENANT_REPO_PRESENT else SHIPPED_TENANT_REPO
     tmp = tmp_path_factory.mktemp("wave3")
     # Run against a COPY of the tenant repo (never mutate the live one).
