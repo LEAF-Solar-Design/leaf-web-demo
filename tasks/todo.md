@@ -175,3 +175,17 @@ Risks:
 - A tenant must not select or remove another tenant's account.
 - Removing the active account must select a deterministic survivor or report no active grant.
 - The existing v1 record and single-account API fields must remain compatible during rollout.
+
+# Orbitable 3D cat proof
+
+- [x] Add a browser assertion for real panel depth and camera orbit.
+- [x] Render the cat version as an extruded panel sculpture without changing its drawing evidence.
+- [x] Enable orbit, pan, and zoom only on the interactive cat surface.
+- [x] Keep proposal, approval, version, Undo, and Redo behavior unchanged.
+- [x] Run the browser proof, production build, focused server tests, and self-review.
+
+Risks:
+
+- The display treatment must not alter panel identity or the oracle input.
+- Default CAD viewers must retain their top-down pan and zoom controls.
+- Camera interaction must remain available without covering the operator controls.

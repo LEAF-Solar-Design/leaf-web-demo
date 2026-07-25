@@ -145,6 +145,11 @@ The run writes `artifacts/cat-operator-proof/01-request-and-approval.png`,
 proof test-results directory. These files are local test artifacts and are ignored by Git.
 The same command also exercises `/try`, where the request, approval, drawing,
 execution ledger, version head, Undo, and Redo remain visible in one standards-based scene.
+The completed cat switches that scene into an orbitable 3D panel-sculpture
+view. Left-drag orbits, right-drag pans, and the wheel zooms. The sculpture is
+an additive display treatment over the unchanged intake, so panel identities,
+drawing hashes, and oracle evidence remain the source of truth. The browser
+test asserts nonzero depth and proves that a real drag changes the camera pose.
 This browser proof does not claim a live Claude or APS run. Pair it with
 `server/tests/test_cat_litmus_offline_e2e.py` for identity, geometry, oracle,
 version, and undo assertions.

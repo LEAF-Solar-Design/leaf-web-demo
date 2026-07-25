@@ -12,13 +12,13 @@ function phaseLabel(phase) {
   if (phase === 'starting') return 'Starting request'
   if (phase === 'proposal') return 'Waiting for approval'
   if (phase === 'running') return 'Rearranging panels'
-  if (phase === 'complete') return 'Cat version ready'
+  if (phase === 'complete') return '3D cat ready'
   if (phase === 'undone') return 'Original restored'
   if (phase === 'failed') return 'Request failed'
   return 'Backend ready'
 }
 
-export default function ToolCast({ active, onIntakeChange }) {
+export default function ToolCast({ active, onIntakeChange, onViewModeChange }) {
   const [prompt, setPrompt] = useState(CAT_REQUEST)
   const [sessionId, setSessionId] = useState(null)
   const [turns, setTurns] = useState([])
@@ -37,6 +37,7 @@ export default function ToolCast({ active, onIntakeChange }) {
       .then((data) => {
         if (!live) return
         onIntakeChange(data.intake)
+        onViewModeChange('flat')
         setPanelCount(data.intake?.polylines?.length || null)
         setPhase('ready')
       })
@@ -46,7 +47,7 @@ export default function ToolCast({ active, onIntakeChange }) {
         setPhase('failed')
       })
     return () => { live = false }
-  }, [active, onIntakeChange])
+  }, [active, onIntakeChange, onViewModeChange])
 
   const seatView = useCallback((view, nextPhase) => {
     if (view?.intake) {
@@ -54,8 +55,9 @@ export default function ToolCast({ active, onIntakeChange }) {
       setPanelCount(view.intake.polylines?.length || null)
     }
     if (Number.isFinite(Number(view?.head))) setVersion(Number(view.head))
+    onViewModeChange(nextPhase === 'complete' ? 'panel-sculpture' : 'flat')
     setPhase(nextPhase)
-  }, [onIntakeChange])
+  }, [onIntakeChange, onViewModeChange])
 
   const attachJob = useCallback(async (linkedJobId) => {
     if (!linkedJobId) return
@@ -206,6 +208,11 @@ export default function ToolCast({ active, onIntakeChange }) {
           <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || version !== 2}>Undo</button>
           <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || phase !== 'undone'}>Redo</button>
         </div>
+        {phase === 'complete' && (
+          <div className="tc-camera-controls" data-testid="camera-controls">
+            Drag to orbit · right-drag to pan · scroll to zoom
+          </div>
+        )}
         <div className="tc-rail-note">
           <span>The request, approval, job, drawing, and version history remain in this scene.</span>
         </div>
