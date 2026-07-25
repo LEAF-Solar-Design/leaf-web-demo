@@ -62,8 +62,8 @@ Current additive progress:
 - [x] Bind both tablists to named tab panels and make resolver choices fully
   keyboard focusable.
 - [ ] Reconcile remaining visible and standards gaps against the capability ledger.
-- [ ] Run the expanded aggregate fixture suite, local real-stack suite, and any
-  authorized staging proof.
+- [x] Run the expanded 37-test aggregate fixture suite.
+- [ ] Run the local real-stack suite and any authorized staging proof.
 
 Files and ownership are defined in `plans/UNIFIED-SURFACE-E2E-EXECUTION.md`.
 

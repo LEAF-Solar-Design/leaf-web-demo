@@ -357,6 +357,10 @@ Progress:
   visible panel focus. Route resolver rows are focusable options with a roving
   tab stop, and arrow movement transfers focus to the active choice. The
   expanded accessibility, routing, responsive, and keyboard gates pass.
+- The expanded serial fixture gate now passes 37 of 37 tests in 9.1 minutes.
+  This aggregate run includes the full standards walk, guided cat video, all
+  negative and recovery paths, session and ops gates, responsive and motion
+  checks, viewer recovery, and the session controller contracts.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
   the remaining accessibility ladder, and full local-stack proof remain open.
 
