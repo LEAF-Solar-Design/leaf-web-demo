@@ -5,11 +5,18 @@ boot a broker and/or app uvicorn child and then poll it until it serves. They
 carried byte-identical private copies of this helper, so a fix to the budget or
 the failure message had to be applied eight times to take effect. One module,
 imported the same bare top-level way as ``_test_run_confirmation``.
+
+The budget is calibrated against the host rather than fixed, and a timeout says
+how slow the host was when it gave up, so that "the box could not start a
+process" stops being reported as "the server is broken". See ``wait_ready``.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import requests
@@ -57,17 +64,140 @@ def log_tail(log_path: Path | None, max_lines: int = 25) -> str:
     return f"\n  last {shown} line(s) of {log_path}{truncated}:\n{body}"
 
 
-# 90s, not 30s: these children are two uvicorn boots racing whatever else the gate
-# runner (or another agent) is doing on the box, and a cold import of the engine
-# registry is CPU-bound. 30s was tight enough to ERROR all four tests of
-# test_dynamic_loader.py at setup under sustained parallel load while an immediate
-# re-run passed unchanged, and PR #160 measured the same failure class in
-# tests/test_backbone.py and tests/test_wave3.py. The budget only bounds a HANG — a
-# child that dies still fails fast on the poll() branch below, so raising it costs
-# nothing on the crash path and buys headroom on the slow path.
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 90.0,
+BOOT_TIMEOUT_ENV = "LEAF_TEST_BOOT_TIMEOUT_S"
+
+# A boot budget is not a property of the code under test. It is a property of the
+# HOST. Every fixed value picked so far has been wrong on some box: 30s ERRORed all
+# four tests of test_dynamic_loader.py at setup under parallel load, and the 90s that
+# replaced it clears the worst boot actually measured on a saturated EVANS-DEKSTOP
+# (73.8s) by 16s, which is a coin-flip rather than headroom. Raising the constant
+# again just moves the cliff, so the budget is CALIBRATED against the host instead.
+#
+# The scaling unit is the cost of starting a bare Python interpreter. It is the
+# right unit because it is the same contention the boot pays (process creation,
+# then CPU-bound imports), and because it is the signal that actually moved when
+# the flake appeared: spawn latency on this host went from ~150ms idle to
+# 2697-4336ms saturated, and the suite went from 20s to 143s per iteration.
+#
+# Measured boot/spawn ratios on a saturated EVANS-DEKSTOP (4 rounds, broker + app):
+# 6.1x, 9.9x, 18.0x, 23.6x, 23.6x, 29.1x, 29.6x, 45.9x. The multiple below is ~2x
+# the worst of those, so the budget tracks load with real margin rather than
+# assuming a speed.
+_BOOT_COST_IN_SPAWNS = 90
+
+# The floor keeps a fast host from getting a TIGHTER budget than main already ships
+# (an idle 0.15s spawn would otherwise calibrate to 13.5s). The ceiling keeps a
+# genuine hang from parking the gate: at the worst spawn latency yet recorded
+# (4.336s) the formula asks for 390s, and 300s still covers the worst ratio above
+# at that latency (4.336 * 45.9 = 199s), so the clamp bounds the FORMULA without
+# cutting into the boot time actually observed.
+_BOOT_TIMEOUT_FLOOR_S = 90.0
+_BOOT_TIMEOUT_CEILING_S = 300.0
+
+# Diagnosis only, never pass/fail: the idle spawn latency this host shows when it is
+# not saturated, used to say how much slower it had become at the moment of failure.
+_HEALTHY_SPAWN_S = 0.25
+_SPAWN_PROBE_TIMEOUT_S = 30.0
+
+_calibrated: tuple[float, str] | None = None
+
+
+def spawn_latency_s() -> float | None:
+    """Cost of starting a bare Python interpreter on this host, right now.
+
+    Best-effort by contract: this only sizes a timeout and labels a failure, so
+    every failure mode returns ``None`` for "could not measure" rather than
+    raising. A probe that raised would convert a slow host into an unrelated
+    crash, which is the exact confusion this module exists to remove.
+    """
+    try:
+        started = time.perf_counter()
+        subprocess.run(
+            [sys.executable, "-c", "pass"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=_SPAWN_PROBE_TIMEOUT_S, check=True,
+        )
+        return time.perf_counter() - started
+    except Exception:  # noqa: BLE001 (a probe must never mask or become the failure)
+        return None
+
+
+def calibrate_boot_timeout_s(spawn_s: float | None,
+                             env: Mapping[str, str]) -> tuple[float, str]:
+    """Return ``(budget_s, how_it_was_derived)``. Pure, so it is directly testable.
+
+    An explicit ``LEAF_TEST_BOOT_TIMEOUT_S`` is taken EXACTLY, with no floor or
+    ceiling applied: CI and a loaded dev box need different budgets, and an
+    operator who names a number is answering this question themselves. An
+    unparseable or non-positive value is ignored rather than obeyed, because
+    silently booting with a 0s budget would look like a total suite collapse.
+    """
+    raw = env.get(BOOT_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            override = float(raw)
+        except ValueError:
+            override = -1.0
+        if override > 0:
+            return override, f"{BOOT_TIMEOUT_ENV}={raw}"
+    if spawn_s is None:
+        return _BOOT_TIMEOUT_FLOOR_S, "spawn probe unavailable, using floor"
+    scaled = spawn_s * _BOOT_COST_IN_SPAWNS
+    budget = min(max(scaled, _BOOT_TIMEOUT_FLOOR_S), _BOOT_TIMEOUT_CEILING_S)
+    how = f"{spawn_s:.3f}s/spawn * {_BOOT_COST_IN_SPAWNS} = {scaled:.0f}s"
+    if budget != scaled:
+        bound = "floor" if budget == _BOOT_TIMEOUT_FLOOR_S else "ceiling"
+        how += f", clamped to the {bound} {budget:.0f}s"
+    return budget, how
+
+
+def boot_timeout_s() -> tuple[float, str]:
+    """Calibrated budget for this process, measured once and reused.
+
+    Measured once because the probe costs a real process spawn (up to seconds on
+    the very hosts this protects) and a suite calls ``wait_ready`` up to four
+    times. The first call happens while the children are already booting, so the
+    probe sees the same contention they do.
+    """
+    global _calibrated
+    if _calibrated is None:
+        _calibrated = calibrate_boot_timeout_s(spawn_latency_s(), os.environ)
+    return _calibrated
+
+
+def _slowness_note() -> str:
+    """Re-measure at the moment of failure and say what the evidence supports.
+
+    This is the point of the whole module. A bare "not ready in Ns" is read off
+    the scoreboard as a broken server; when eleven tests error together on a
+    module-scoped fixture it looks like the backbone collapsed. Naming the host
+    speed at the moment of the timeout separates "this box could not start a
+    process" from "this server could not start".
+    """
+    spawn_s = spawn_latency_s()
+    if spawn_s is None:
+        return ("\n  host speed at timeout: could not measure (the probe itself "
+                "failed or exceeded "
+                f"{_SPAWN_PROBE_TIMEOUT_S:g}s, which is itself a sign of saturation)")
+    ratio = spawn_s / _HEALTHY_SPAWN_S
+    verdict = (
+        "the host is saturated; a boot failure would not slow down bare "
+        "interpreter startup"
+        if ratio >= 2.0 else
+        "the host is responsive, so this points at the SERVER, not at load")
+    return (f"\n  host speed at timeout: {spawn_s:.3f}s to start a bare Python "
+            f"interpreter, {ratio:.1f}x the {_HEALTHY_SPAWN_S:g}s idle baseline "
+            f"-> {verdict}")
+
+
+def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float | None = None,
                log_path: Path | None = None) -> None:
+    if timeout_s is None:
+        timeout_s, how = boot_timeout_s()
+    else:
+        how = "caller-supplied"
     deadline = time.time() + timeout_s
+    started = time.time()
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(
@@ -79,4 +209,7 @@ def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 90.0,
         except requests.RequestException:
             pass
         time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s{log_tail(log_path)}")
+    raise TimeoutError(
+        f"server at {url} not ready in {timeout_s:.0f}s "
+        f"(waited {time.time() - started:.0f}s; budget: {how})"
+        f"{_slowness_note()}{log_tail(log_path)}")

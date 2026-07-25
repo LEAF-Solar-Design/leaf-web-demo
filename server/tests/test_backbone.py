@@ -27,7 +27,8 @@ SCHEMA = json.loads((SERVER_DIR / "envelope_schema.json").read_text(encoding="ut
 
 sys.path.insert(0, str(SERVER_DIR))
 from envelopes import ErrorCode  # noqa: E402
-from _test_readiness import wait_ready  # noqa: E402
+from _test_readiness import (  # noqa: E402
+    BOOT_TIMEOUT_ENV, calibrate_boot_timeout_s, wait_ready)
 from _test_run_confirmation import confirmed_requests_payload  # noqa: E402
 
 import jsonschema  # noqa: E402
@@ -201,6 +202,49 @@ def test_stop_forced_kill_records_receipt_and_reports_failure(tmp_path):
     receipt = json.loads(Path(failure["receipt_path"]).read_text(encoding="utf-8"))
     assert receipt["schema"] == "leaf.test-shutdown-failure.v1"
     assert receipt["log_size_bytes"] == log_path.stat().st_size
+
+
+def test_boot_timeout_is_calibrated_to_host_speed_not_a_fixed_wall_clock():
+    """The boot budget must track how slow the host is, and stay bounded.
+
+    Sits next to the `stop()` test above: both pin harness helpers whose failure
+    mode is a MISLEADING gate rather than a wrong product behaviour. This one is
+    pure, because `calibrate_boot_timeout_s` takes the measured spawn latency as
+    an argument, so it exercises the arithmetic without spawning anything.
+
+    Without it the calibration could silently collapse to a constant (the clamps
+    swallowing the scaling, or a bad env parse winning) and nothing would fail;
+    the flake it exists to prevent would just come back, still wearing the
+    costume of a broken backbone.
+    """
+    idle, _ = calibrate_boot_timeout_s(0.15, {})
+    loaded, _ = calibrate_boot_timeout_s(2.4, {})
+    saturated, _ = calibrate_boot_timeout_s(4.336, {})
+
+    # Proportional where it matters: the saturated host measured on EVANS-DEKSTOP
+    # must get materially longer than the idle one, or this is a constant again.
+    assert loaded > idle, (
+        f"a 2.4s/spawn host got {loaded:.0f}s, no more than the 0.15s/spawn "
+        f"host's {idle:.0f}s: the budget is not tracking load")
+    # ...and still bounded, so a genuine hang cannot park the gate indefinitely.
+    assert saturated <= 300.0, f"budget {saturated:.0f}s exceeds the 300s ceiling"
+    # The floor holds the idle case at no less than the fixed budget main shipped.
+    assert idle == 90.0, f"idle host got {idle:.0f}s, below the 90s floor"
+
+    # An operator-supplied budget is taken exactly, floor and ceiling included:
+    # CI and a loaded dev box are allowed to disagree.
+    exact, how = calibrate_boot_timeout_s(0.15, {BOOT_TIMEOUT_ENV: "600"})
+    assert exact == 600.0 and BOOT_TIMEOUT_ENV in how
+    assert calibrate_boot_timeout_s(0.15, {BOOT_TIMEOUT_ENV: "5"})[0] == 5.0
+
+    # Garbage and non-positive values are IGNORED, not obeyed: a 0s budget would
+    # error every stack-dependent test at setup and read as a total collapse.
+    for bad in ("", "   ", "abc", "0", "-30"):
+        assert calibrate_boot_timeout_s(0.15, {BOOT_TIMEOUT_ENV: bad})[0] == 90.0, (
+            f"{bad!r} was obeyed instead of ignored")
+
+    # A probe that could not measure falls back to the floor rather than raising.
+    assert calibrate_boot_timeout_s(None, {})[0] == 90.0
 
 
 def submit(stack, tool="count-by-layer", params=None, tenant=None, wait=False):
