@@ -16,6 +16,16 @@ test('the unified scene exposes landmarks, named controls, status, and visible k
   await expect(page.getByRole('complementary', { name: 'Workspace controls' })).toHaveCount(1)
   await expect(page.getByRole('complementary', { name: 'Operations controls' })).toHaveCount(1)
   await expect(page.getByRole('status', { name: 'Run status announcements' })).toHaveCount(1)
+  for (const tablistName of ['Workspace panels', 'Operation panels']) {
+    const tabs = page.getByRole('tablist', { name: tablistName }).getByRole('tab')
+    for (let index = 0; index < await tabs.count(); index += 1) {
+      const tab = tabs.nth(index)
+      const controls = await tab.getAttribute('aria-controls')
+      await expect(page.locator(`#${controls}`)).toHaveAttribute('role', 'tabpanel')
+    }
+  }
+  await expect(page.locator('#workspace-tabpanel')).toHaveAttribute('aria-labelledby', 'workspace-tab-operator')
+  await expect(page.locator('#operations-tabpanel')).toHaveAttribute('aria-labelledby', 'operations-tab-execution')
 
   const unnamedButtons = await page.locator('button:visible').evaluateAll((buttons) => buttons
     .filter((button) => !button.disabled)
@@ -28,6 +38,7 @@ test('the unified scene exposes landmarks, named controls, status, and visible k
     page.getByRole('tab', { name: 'Execution' }),
     page.getByRole('textbox', { name: 'Command bar' }),
     page.getByRole('button', { name: 'Run', exact: true }),
+    page.locator('#workspace-tabpanel'),
   ]) {
     await locator.focus()
     const visibleFocus = await locator.evaluate((element) => {

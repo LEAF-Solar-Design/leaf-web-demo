@@ -353,6 +353,10 @@ Progress:
   routes before Claude, waits for explicit write approval and version 2, then
   opens version history and trust before exiting in place. The automated walk
   passes with a production Playwright video and a persistent Restart action.
+- Both rail tablists now expose stable tab, panel, and label relationships with
+  visible panel focus. Route resolver rows are focusable options with a roving
+  tab stop, and arrow movement transfers focus to the active choice. The
+  expanded accessibility, routing, responsive, and keyboard gates pass.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
   the remaining accessibility ladder, and full local-stack proof remain open.
 

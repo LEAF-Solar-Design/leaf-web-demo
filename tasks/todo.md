@@ -59,6 +59,8 @@ Current additive progress:
   fallback without remounting the healthy canvas.
 - [x] Move the guided cat walkthrough onto `/try?demo=tour` and record the whole
   request, approval, version, history, and trust sequence in one scene.
+- [x] Bind both tablists to named tab panels and make resolver choices fully
+  keyboard focusable.
 - [ ] Reconcile remaining visible and standards gaps against the capability ledger.
 - [ ] Run the expanded aggregate fixture suite, local real-stack suite, and any
   authorized staging proof.

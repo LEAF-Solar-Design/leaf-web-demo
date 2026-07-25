@@ -798,12 +798,12 @@ export default function ToolCast({
           <span className="tc-rail-sub">request and tools</span>
         </div>
         <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveTab}>
-          <button type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
-          <button type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
-          <button type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} onClick={() => setLeftView('author')}>Author</button>
-          <button type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} onClick={() => setLeftView('workspace')}>Project</button>
+          <button id="workspace-tab-operator" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
+          <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
+          <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} onClick={() => setLeftView('author')}>Author</button>
+          <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} onClick={() => setLeftView('workspace')}>Project</button>
         </div>
-        <div className="tc-rail-body">
+        <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (sessionAuthRequired ? (
             <SessionGate
               configured={authConfigured}
@@ -890,13 +890,13 @@ export default function ToolCast({
           <span className="tc-rail-sub">controller state</span>
         </div>
         <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveTab}>
-          <button type="button" role="tab" tabIndex={rightView === 'execution' ? 0 : -1} aria-selected={rightView === 'execution'} onClick={() => setRightView('execution')}>Execution</button>
-          <button type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
-          <button type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest || 1}</span></button>
-          <button type="button" role="tab" tabIndex={rightView === 'trust' ? 0 : -1} aria-selected={rightView === 'trust'} onClick={() => { setRightView('trust'); platform.actions.refreshAll() }}>Trust</button>
-          <button type="button" role="tab" tabIndex={rightView === 'view' ? 0 : -1} aria-selected={rightView === 'view'} onClick={() => setRightView('view')}>View</button>
+          <button id="operations-tab-execution" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'execution' ? 0 : -1} aria-selected={rightView === 'execution'} onClick={() => setRightView('execution')}>Execution</button>
+          <button id="operations-tab-jobs" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
+          <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest || 1}</span></button>
+          <button id="operations-tab-trust" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'trust' ? 0 : -1} aria-selected={rightView === 'trust'} onClick={() => { setRightView('trust'); platform.actions.refreshAll() }}>Trust</button>
+          <button id="operations-tab-view" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'view' ? 0 : -1} aria-selected={rightView === 'view'} onClick={() => setRightView('view')}>View</button>
         </div>
-        <div className="tc-rail-body">
+        <div id="operations-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`operations-tab-${rightView}`} tabIndex={0}>
         {rightView === 'execution' && <><div className="tc-events">
           <div className="tc-event current">
             <span className={`dot ${statusClass}${phase === 'running' ? ' pulse' : ''}`} />

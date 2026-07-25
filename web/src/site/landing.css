@@ -458,6 +458,10 @@
   outline: 2px solid #4ade80;
   outline-offset: 2px;
 }
+.tc-rail-body:focus-visible {
+  outline: 2px solid #4ade80;
+  outline-offset: -2px;
+}
 .tc-bar-input::placeholder { color: #52525b; }
 .tc-bar-blink {
   display: inline-block; width: 7px; height: 13px; background: #22c55e;
