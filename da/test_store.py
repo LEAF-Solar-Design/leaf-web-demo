@@ -14,6 +14,7 @@ import re
 import sys
 import time
 import urllib.parse
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -24,6 +25,18 @@ import store  # noqa: E402
 
 DWG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "rooftop_demo.dwg")
 VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9_-]+/drawings/[a-z0-9_-]+/v/\d{8}\.dwg$")
+
+# Six tests below never reach the network, but they still build a signed client,
+# so client._load_creds() runs and needs SOME credential source. It does not need
+# a REAL one: _load_creds only rejects missing/PASTE_ME values, and the only thing
+# derived from the id is bucket_key()'s suffix, which these tests assert
+# structurally (prefix / self-consistency), never by value.
+#
+# So the fixture below injects a dummy credential instead of skipping. That keeps
+# all 15 tests executing on a clean CI runner, and it also pins the operator box
+# to the SAME inputs -- previously ~/.aps/credentials.json silently fed real
+# values in here, so the suite behaved differently depending on the host.
+_DUMMY_CREDS = json.dumps({"client_id": "testclientid0000", "client_secret": "testsecret"})
 
 
 # --------------------------------------------------------------------------- #
@@ -45,6 +58,11 @@ def no_network(monkeypatch):
     monkeypatch.setattr(client, "nickname", lambda: "TESTOWNER", raising=True)
     # any code path that still tries requests.get/post/put fails the test
     monkeypatch.setattr(client, "requests", _NoNetwork(), raising=True)
+    # deterministic dummy creds everywhere: satisfies _load_creds() without a real
+    # secret, and blanks CRED_PATH so a host credential file cannot leak in.
+    monkeypatch.setenv("APS_CREDENTIALS_JSON", _DUMMY_CREDS)
+    monkeypatch.setattr(client, "CRED_PATH", str(Path(__file__).parent / "no-such-creds.json"),
+                        raising=True)
     yield
 
 

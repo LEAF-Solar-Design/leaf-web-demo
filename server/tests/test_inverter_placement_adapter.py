@@ -5,14 +5,12 @@ import pytest
 
 from solver_adapters import inverter_placement
 
-# Portable root: env override, then the autofill.py sibling-repo convention
-# (leaf-web-demo and aws-inverter-placement as siblings), then the known real
-# checkout. The suite SKIPS when neither the solver source nor its runtime deps
-# are available, so it never hard-fails on a machine without the solver.
+# Portable root: env override, then the autofill.py sibling-repo convention.
+# Only real-solver integrations skip when the source or dependencies are absent;
+# offline input-validation coverage remains mandatory.
 _CANDIDATES = [
     os.environ.get("INVERTER_SOLVER_ROOT"),
     str(Path(__file__).resolve().parents[3] / "aws-inverter-placement"),
-    r"C:\Users\ehaug\OneDrive\Documents\GitHub\aws-inverter-placement",
 ]
 SOLVER_ROOT = next((Path(c) for c in _CANDIDATES
                     if c and (Path(c) / "minimax_optimizer.py").is_file()), None)
@@ -26,7 +24,7 @@ def _solver_deps_importable():
         return False
 
 
-pytestmark = pytest.mark.skipif(
+requires_real_solver = pytest.mark.skipif(
     SOLVER_ROOT is None or not _solver_deps_importable(),
     reason="aws-inverter-placement source or its runtime deps (numpy) unavailable",
 )
@@ -57,6 +55,7 @@ def _fixed_centroid_input(capacity):
     }
 
 
+@requires_real_solver
 def test_real_minimax_solver_smoke_is_deterministic():
     params = _fixed_centroid_input(capacity=2)
     first = inverter_placement.run(params, solver_root=SOLVER_ROOT)
@@ -76,6 +75,7 @@ def test_real_minimax_solver_smoke_is_deterministic():
     assert first["runtime"].startswith("python-")
 
 
+@requires_real_solver
 def test_real_minimax_solver_reports_infeasible_details_instead_of_raising():
     params = _fixed_centroid_input(capacity=1)
     result = inverter_placement.run(params, solver_root=SOLVER_ROOT)

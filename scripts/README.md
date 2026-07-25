@@ -4,7 +4,7 @@ CI-ready entry points for the Leaf web demo:
 
 | File | What it is |
 |------|------------|
-| `run-all-gates.py` | Runs every test suite in the repo, each in its **own** subprocess, and prints one PASS/FAIL scoreboard. Exit 0 iff every non-skipped gate passes. |
+| `run-all-gates.py` | Runs every test suite in the repo, each in its **own** subprocess, and prints one PASS/FAIL scoreboard. Exit 0 only when every selected gate passes. Test-level skips require an exact allowlist and never satisfy the executed-test floor. Pytest pins reasons; Vitest pins files and counts. Run in CI by `.github/workflows/test-gate.yml` on every pull request and every push to `main`, and again by `build-platform-images.yml` before any image is pushed to ECR. |
 | `deploy-web.py` | Builds `web/` and deploys `web/dist` **itself** to the `leaf-platform-web` Vercel project, then verifies the live domain. Exit 0 iff every route returns 200 and the domain serves the asset filenames this build produced. |
 | `../server/tests/test_e2e_golden.py` | One self-contained golden-path e2e that boots the broker + app and drives the whole product over HTTP. Run by the gate runner, also runnable alone. |
 
@@ -89,6 +89,16 @@ a cleaned env, captures pass/fail + counts, and reports a single scoreboard.
 | `harness-vitest` | `harness/` | `npm test` |
 | `harness-tsc-noemit` | `harness/` | `npx tsc --noEmit` |
 | `harness-tsc-build` | `harness/` | `npx tsc -p tsconfig.build.json` |
+| `web-demo-gate` | repo root | `bash dispatch/run-local-ci.sh --only demo-gate` |
+
+`web-demo-gate` is this runner's only entry point into `web/`. It drives the
+demo-gate bucket, which runs web/'s seven golden-path node oracles
+(`test/check_routes.mjs`, `test/check_integration.mjs`,
+`scripts/check_author.mjs`, `check_writeloop.mjs`, `check_tourscript.mjs`, and
+two more), the vite build with a `>=2` JS-chunk assertion, the offline
+pre-flight, and the authored-tool registry probe. It needs a POSIX bash; on
+Windows the runner resolves Git Bash explicitly rather than the System32 WSL
+launcher, which would misread the tree as Linux.
 
 Two special behaviours, both surfaced on the scoreboard:
 
@@ -121,7 +131,9 @@ and a genuinely broken suite fails every attempt and is reported red. Use
 `--retry 0` to capture raw first-attempt results (e.g. to measure flake rate).
 
 Full per-suite output goes to `<log-dir>/<suite>.log`; only the scoreboard prints
-to stdout. Exit code is **0 iff every non-skipped gate passed**, else 1
+to stdout. Exit code is **0 only when every selected gate passed and every
+test-level skip matched an explicit reason allowlist**, else 1. A skipped test
+never counts toward a suite's minimum executed-test floor.
 (`2` if `--only` matched nothing).
 
 ---

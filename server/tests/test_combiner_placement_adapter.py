@@ -5,24 +5,22 @@ import pytest
 
 from solver_adapters import combiner_placement
 
-# The adapter's DEFAULT_SOLVER_ROOT assumes leaf-web-demo and
-# aws-combiner-placement are sibling checkouts under the same parent folder
-# (same convention as autofill.py's DEFAULT_SOLVER_ROOT).  This test worktree
-# was created outside that layout, so the real solver checkout is located
-# explicitly here rather than relying on the sibling-directory default.
+# Resolve the optional real-solver integration portably. Offline adapter
+# validation below must still execute when the sibling checkout is absent.
 SOLVER_ROOT = Path(os.environ.get(
     "COMBINER_PLACEMENT_SOLVER_ROOT",
-    r"C:\Users\ehaug\OneDrive\Documents\GitHub\aws-combiner-placement",
+    str(Path(__file__).resolve().parents[3] / "aws-combiner-placement"),
 ))
 
 SMOKE_INPUT = {"dump": {"inputs": {}}, "options": {}}
 
-pytestmark = pytest.mark.skipif(
+requires_real_solver = pytest.mark.skipif(
     not (SOLVER_ROOT / "sim" / "simulate-row-end-optimizer.js").is_file(),
     reason="aws-combiner-placement checkout is unavailable; adapter needs the real solver source",
 )
 
 
+@requires_real_solver
 def test_real_combiner_placement_solver_smoke_is_deterministic():
     first = combiner_placement.run(SMOKE_INPUT, solver_root=SOLVER_ROOT)
     second = combiner_placement.run(SMOKE_INPUT, solver_root=SOLVER_ROOT)
@@ -66,6 +64,7 @@ def test_adapter_rejects_invalid_dump_and_options():
             combiner_placement.run(invalid, solver_root=SOLVER_ROOT)
 
 
+@requires_real_solver
 def test_adapter_honors_option_overrides():
     result = combiner_placement.run(
         {"dump": {"inputs": {}},

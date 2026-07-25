@@ -927,6 +927,11 @@ def test_site_capabilities_never_leaks_an_authored_tool():
         r = site_client.get("/api/site/capabilities")
         assert r.status_code == 200, r.text
         families = r.json()["families"]
+        # The public projection in routers/site.py::_public_families deliberately
+        # renames the internal per-family "capabilities" list to "tools"; a family's
+        # public "capabilities" would be a tool's permission strings, not tools. This
+        # read used the internal key and raised KeyError before it ever reached the
+        # leak assertion below, so the probe never actually ran.
         all_names = {tool["name"] for fam in families for tool in fam["tools"]}
         # non-vacuity: the public catalog actually rendered builtin tools, so a
         # "not in" pass below means FILTERED, not "the catalog came back empty".

@@ -407,6 +407,56 @@ def test_worktree_add_failure_surfaces_git_stderr(tmp_path, monkeypatch):
     assert missing in caught.value.detail
 
 
+def test_slow_but_complete_worktree_add_is_not_a_false_503(tmp_path, monkeypatch):
+    """A timed-out add must retry from clean, not 503 and not serve a torn tree.
+
+    `_worktree_add` runs with timeout=20, and a loaded box or a cold cache can
+    blow that budget. Two wrong answers were tried before this one:
+
+      * let TimeoutExpired escape -> a materializable catalog 503s;
+      * accept the tree if the path exists -> subprocess.run KILLS git on
+        timeout, and git sets HEAD before the checkout finishes writing, so a
+        tree killed after registry.json but before tools/ passes both the commit
+        and digest checks and serves an INCOMPLETE catalog.
+
+    The contract is therefore: discard whatever the timed-out add left, and let
+    the ordinary prune+retry path rebuild it. First add times out, second
+    succeeds, tenant gets a complete catalog, nothing raises.
+    """
+    bare, effective, _base = _published_pin(tmp_path, monkeypatch)
+    settled = effective_catalog_dir("tenant-a")
+    assert settled is not None and (settled / "registry.json").exists()
+    commit = settled.name
+
+    fresh = effective / "tenant-a-slow" / commit
+    calls = {"n": 0}
+    real_add = customization_service._worktree_add
+
+    def timing_out_then_real(bare_dir, target, commit_sha):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Write a TORN tree: registry.json present, tool payload missing --
+            # exactly the shape that would pass commit+digest verification.
+            real_add(bare_dir, target, commit_sha)
+            for stray in (target / "tools").rglob("*.py"):
+                stray.unlink()
+            raise subprocess.TimeoutExpired(
+                cmd=["git", "worktree", "add", str(target)], timeout=20)
+        return real_add(bare_dir, target, commit_sha)
+
+    monkeypatch.setattr(customization_service, "_worktree_add", timing_out_then_real)
+
+    _materialize_worktree(bare, fresh, commit)   # must NOT raise
+
+    assert calls["n"] == 2, "the timed-out tree was not discarded and retried"
+    assert (fresh / "registry.json").exists()
+    # The whole point: the torn tree was thrown away, so the tool payload the
+    # first attempt lost is present again.
+    assert list((fresh / "tools").rglob("*.py")), (
+        "an incomplete catalog survived the timeout -- torn tree was accepted"
+    )
+
+
 def test_materialization_recovers_from_a_deleted_worktree(tmp_path, monkeypatch):
     """A worktree deleted underneath us must not wedge the tenant forever.
 
