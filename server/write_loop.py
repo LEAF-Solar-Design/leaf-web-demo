@@ -422,12 +422,23 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
     """
     import store
     validate_tenant_id(drawing_id, kind="drawing id")  # reject path-y / malformed ids, up front
+    upload_marker_exists = False
     if store.authority_mode() == "postgres":
         try:
             store.load_manifest(backend, tenant_id, drawing_id)
             return
         except KeyError:
             pass
+        # PostgreSQL upload authority lives in drawing_upload_attempts, not in
+        # the compatibility filesystem marker. Check the authoritative row
+        # before demo bootstrap so an intake read cannot race extraction and
+        # publish the bundled rooftop as the uploaded drawing's version 1.
+        import guest_uploads
+        if guest_uploads.upload_store_mode() == "postgres":
+            upload_marker_exists = (
+                guest_uploads.read_marker(backend, tenant_id, drawing_id)
+                is not None
+            )
     elif backend.exists(store.manifest_key(tenant_id, drawing_id)):
         return
     # FAIL-CLOSED GUARDS (guest-upload lane, CONTRACT-ADDENDUM §19): the
@@ -442,7 +453,10 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
     if str(tenant_id).startswith(GUEST_TENANT_PREFIX):
         raise KeyError(f"unknown drawing {drawing_id!r} for guest tenant "
                        f"(guest drawings exist only via upload + extraction)")
-    if backend.exists(upload_marker_key(tenant_id, drawing_id)):
+    if (
+        upload_marker_exists
+        or backend.exists(upload_marker_key(tenant_id, drawing_id))
+    ):
         raise ValueError(
             f"drawing {drawing_id!r} was uploaded but extraction has not "
             f"produced geometry (see /api/drawings/{drawing_id}/upload-status); "

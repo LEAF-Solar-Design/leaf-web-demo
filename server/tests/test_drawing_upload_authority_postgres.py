@@ -126,6 +126,43 @@ def _temp_blob(data: bytes) -> str:
 
 
 @requires_database
+def test_pending_upload_row_blocks_demo_bootstrap(postgres_authority):
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    backend = store.InMemoryBackend()
+    marker = guest_uploads.new_marker(
+        filename="drawing.dxf", data=b"dxf", tenant_kind="account",
+        source_ext=".dxf",
+    )
+    guest_uploads.write_marker(backend, tenant, drawing, marker)
+
+    with pytest.raises(ValueError, match="refusing the demo-intake bootstrap"):
+        write_loop.ensure_demo_drawing(backend, tenant, drawing)
+
+    with postgres_authority.cursor() as cur:
+        manifest = cur.execute(
+            """
+            SELECT 1 FROM drawing_store_manifests
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant, "drawing": drawing},
+        ).fetchone()
+        upload = cur.execute(
+            """
+            SELECT status FROM drawing_upload_attempts
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant, "drawing": drawing},
+        ).fetchone()
+
+    assert manifest is None
+    assert upload["status"] == "extracting"
+    assert backend.keys() == [
+        write_loop.upload_marker_key(tenant, drawing)
+    ]
+
+
+@requires_database
 def test_two_writers_reserve_unique_versions_and_one_head_wins(
     postgres_authority,
 ):
