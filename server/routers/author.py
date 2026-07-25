@@ -8,6 +8,7 @@ provenance + preview.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 from pathlib import Path
@@ -217,14 +218,37 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
         # returned tool keeps its tenant-repo-relative entry.
         pass
     else:
-        # TEMPLATE path (unchanged): PERSIST the authored file + point the registry
-        # entry at it (the FILE is the tool). entry is stored relative to server/ so
-        # the broker resolves it regardless of cwd. Register into our lane's store.
-        AUTHORED_DIR.mkdir(parents=True, exist_ok=True)
+        # TEMPLATE path: PERSIST the authored file + point the registry entry at
+        # it (the FILE is the tool). entry is stored relative to server/ so the
+        # broker resolves it regardless of cwd. Register into our lane's store.
+        #
+        # TENANT ISOLATION: the file path AND the store key must both be
+        # tenant-scoped. A flat authored/<name>.py let tenant B overwrite tenant
+        # A's file, and a dedup keyed on name alone evicted A's catalog entry, so
+        # B could hijack A's tool by name. Write under a per-tenant subdirectory
+        # and dedup on (tenant_id, name) so each tenant's authored tools are
+        # physically and logically their own.
+        tenant_id = str(tenant)
+        # Collision-resistant per-tenant directory. A lossy character-substitution
+        # slug is NOT injective ("tenant.a" and "tenant_a" would collide onto one
+        # directory and re-open the cross-tenant overwrite), so derive the
+        # directory name from a SHA-256 of the exact tenant id: distinct ids map
+        # to distinct directories, and the hex output is inherently path-safe
+        # (accepted by the loader's _is_unsafe_ref, never '.'/'..').
+        tenant_dir_name = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()[:32]
+        tenant_dir = AUTHORED_DIR / tenant_dir_name
+        tenant_dir.mkdir(parents=True, exist_ok=True)
         fname = f"{tool['name']}.py"
-        (AUTHORED_DIR / fname).write_text(code, encoding="utf-8")
-        tool["entry"] = f"authored/{fname}"
-        deps._AUTHORED[:] = [t for t in deps._AUTHORED if t["name"] != tool["name"]]
+        (tenant_dir / fname).write_text(code, encoding="utf-8")
+        tool["entry"] = f"authored/{tenant_dir_name}/{fname}"
+        # deps.all_tools() folds this global store last and only surfaces entries
+        # whose tenant_id matches the requesting tenant. str(tenant) matches how
+        # all_tools() is called by its consumers.
+        tool["tenant_id"] = tenant_id
+        deps._AUTHORED[:] = [
+            t for t in deps._AUTHORED
+            if not (t.get("tenant_id") == tenant_id and t.get("name") == tool["name"])
+        ]
         deps._AUTHORED.append(tool)
         deps.save_authored_tools(deps._AUTHORED)
 

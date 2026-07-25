@@ -10,7 +10,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "server"
-TOKEN_PATH = Path(r"C:\tmp\leaf-grants\auth0-access-token.txt")
+
+
+def _default_token_dir() -> Path:
+    """Same per-user, non-world-writable default as auth0-live-login.py, so the
+    login script's written token is found here by default. Keep both in sync."""
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return Path(base) / "leaf-grants"
+    return Path(os.path.expanduser("~")) / ".leaf-grants"
+
+
+# Mirror auth0-live-login.py exactly: the profile-based default plus the
+# LEAF_AUTH0_TOKEN_PATH override. A hardcoded C:\tmp path both broke the default
+# login->verify flow (login now writes under the profile) and, if restored via
+# the override, would reintroduce the shared-parent race.
+TOKEN_PATH = Path(
+    os.environ.get("LEAF_AUTH0_TOKEN_PATH")
+    or _default_token_dir() / "auth0-access-token.txt"
+)
 RECEIPT_PATH = ROOT / "docs" / "auth0-live-server-receipt.json"
 
 os.environ["LEAF_AUTH_LIVE"] = "1"
