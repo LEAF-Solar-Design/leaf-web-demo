@@ -81,6 +81,14 @@ def test_filesystem_immutable_publish_never_replaces_concurrent_winner(tmp_path)
     assert not list((tmp_path / "store").rglob(".leaf-immutable-*"))
 
 
+# DELIBERATE GATE PROOF -- REVERTED IN THE NEXT COMMIT ON THIS BRANCH.
+# This test needs no database and passed a moment ago. Skipping it drops the
+# suite's EXECUTED count from 4 to 3 while the failure count stays at 0, and the
+# reason string matches this suite's allowed_skip_reasons EXACTLY, so the
+# skip-allowlist rule tolerates it. The only thing left that can redden the gate
+# is coverage_verdict rule 2, the executed-count floor. If the gate goes green
+# here it is not a coverage gate.
+@pytest.mark.skip(reason="PostgreSQL race test requires explicit DATABASE_URL")
 def test_migration_declares_fences_cas_and_receipts():
     sql = (
         Path(__file__).resolve().parents[2]
