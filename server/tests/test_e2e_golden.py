@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 import requests
 
+from _test_readiness import wait_ready
 from _test_run_confirmation import confirmed_requests_payload
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
@@ -83,20 +84,6 @@ def start_uvicorn(module_app: str, port: int, env_overrides: dict, log_path: Pat
         [sys.executable, "-m", "uvicorn", module_app, "--port", str(port), "--host", "127.0.0.1"],
         cwd=str(SERVER_DIR), env=env, stdout=log, stderr=log,
     )
-
-
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 30.0) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"server process exited early (rc={proc.returncode})")
-        try:
-            if requests.get(url, timeout=2).status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s")
 
 
 def stop(proc: subprocess.Popen) -> None:
@@ -144,8 +131,10 @@ def stack(tmp_path_factory):
          "JOBS_DB": tmp / "jobs.db", "LEAF_STORE_DIR": store_dir},
         tmp / "app.log")
     try:
-        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
-        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker,
+                   log_path=tmp / "broker.log")
+        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app,
+                   log_path=tmp / "app.log")
         app_url = f"http://127.0.0.1:{app_port}"
         # WARM-UP: the broker's FIRST /broker/run lazily loads the engine registry +
         # the 2345-polyline cached intake, which on a heavily-loaded box can be slow

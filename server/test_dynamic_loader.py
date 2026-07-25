@@ -33,6 +33,7 @@ import jsonschema
 import pytest
 import requests
 
+from _test_readiness import wait_ready
 from _test_run_confirmation import confirmed_requests_payload
 from tenant_paths import DEFAULT_TENANT
 
@@ -100,49 +101,6 @@ def start_uvicorn(module_app: str, port: int, env_overrides: dict, log_path: Pat
         [sys.executable, "-m", "uvicorn", module_app, "--port", str(port), "--host", "127.0.0.1"],
         cwd=str(SERVER_DIR), env=env, stdout=log, stderr=log,
     )
-
-
-def log_tail(log_path: Path | None, max_lines: int = 25) -> str:
-    """Tail of a child's stdout+stderr log, for readiness failure messages.
-
-    Without it a readiness failure is a bare "not ready in Ns" — indistinguishable
-    between a slow boot and a server that is up but wedged before it can serve. The
-    child holds this file open for append; the read is best-effort and must never
-    replace the real failure with an OSError from the diagnostic itself.
-    """
-    if log_path is None:
-        return ""
-    try:
-        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as exc:
-        return f"\n  (could not read {log_path}: {exc})"
-    if not lines:
-        return f"\n  ({log_path} is empty — the child logged nothing)"
-    body = "\n".join(f"  | {ln}" for ln in lines[-max_lines:])
-    return f"\n  last {min(len(lines), max_lines)} line(s) of {log_path}:\n{body}"
-
-
-# 90s, not 30s: these children are two uvicorn boots racing whatever else the gate
-# runner (or another agent) is doing on the box, and a cold import of the engine
-# registry is CPU-bound. 30s was tight enough to ERROR all four tests at setup under
-# sustained parallel load while an immediate re-run passed unchanged. The budget only
-# bounds a HANG — a child that dies still fails fast on the poll() branch below, so
-# raising it costs nothing on the crash path and buys headroom on the slow path.
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 90.0,
-               log_path: Path | None = None) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"server process exited early (rc={proc.returncode})"
-                f"{log_tail(log_path)}")
-        try:
-            if requests.get(url, timeout=2).status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s{log_tail(log_path)}")
 
 
 def stop(proc: subprocess.Popen) -> None:
