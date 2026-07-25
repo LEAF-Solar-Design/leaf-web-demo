@@ -491,8 +491,13 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
         Suite("server-customization-runtime", "server customization runtime", "pytest",
               SERVER, _py_pytest("tests/test_customization_runtime.py"), 9),
+        # The two OS-file-lock probes are skipif(fcntl is None): they EXECUTE on
+        # the Linux CI runner and skip only on a Windows operator box. Named here
+        # so a Windows run stays green without the fail-closed skip rule having to
+        # tolerate an unnamed reason.
         Suite("server-customization-adversarial", "server customization adversarial", "pytest",
-              SERVER, _py_pytest("tests/test_customization_adversarial.py"), 5),
+              SERVER, _py_pytest("tests/test_customization_adversarial.py"), 5,
+              allowed_skip_reasons=(r"POSIX advisory locking only",)),
         Suite("server-customization-publish-recovery", "server customization publish recovery", "pytest",
               SERVER, _py_pytest("tests/test_customization_publish_recovery.py"), 1),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
