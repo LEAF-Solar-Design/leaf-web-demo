@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -859,6 +860,9 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                 # accepts work, a later attempt must observe the existing
                 # executing admission, never buy the same run again.
                 ledger_event_key=f"{job_id}:broker-run",
+                # Correlates this job row with the live WorkItem inside the
+                # broker, so a tab closed mid-run has an id to cancel.
+                job_id=job_id,
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -1006,6 +1010,7 @@ def _reap_orphans_once() -> int:
             "(updated_at < ? OR progress = ? OR "
             "(lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
             (stale_before, CLOSED_PROGRESS, time.time()))
+    _retry_pending_reaps()
     handled = 0
     for row in rows:
         if row["progress"] == CLOSED_PROGRESS:
@@ -1013,11 +1018,200 @@ def _reap_orphans_once() -> int:
                               error=error_obj(ErrorCode.INTERNAL,
                                               "orphaned: session closed (tab-close)", True),
                               _allow_closed=True)
+            _cancel_remote_workitem(row["job_id"], _row_get(row, "tenant_id"))
             handled += 1
             continue
         if _redispatch_record(row["job_id"]):
             handled += 1
     return handled
+
+
+def _row_get(row: Any, key: str) -> Any:
+    """Read `key` from a sqlite3.Row or a dict row, None when absent.
+
+    The two stores return different shapes for the same sweep: sqlite selects
+    whole rows, while the PostgreSQL `reclaimable` projection is job_id+progress
+    only. Missing columns must not raise -- sqlite3.Row raises IndexError and a
+    dict raises KeyError for the same lookup.
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+# Tab-close reaps the broker could not accept yet (broker down, restarting,
+# transient network). The job row is ALREADY terminal by then and will never be
+# selected by the sweep again, so without this the single failed attempt is the
+# end of it and APS bills the abandoned WorkItem to completion. Retried on every
+# later sweep until the broker takes it. Bounded so a long outage cannot grow it
+# without limit; the cap is far above any plausible burst of closed tabs.
+_pending_reaps: Dict[str, Dict[str, Any]] = {}
+_pending_reaps_lock = threading.Lock()
+PENDING_REAP_MAX = int(os.environ.get("PENDING_REAP_MAX", "512"))
+PENDING_REAP_BATCH = int(os.environ.get("PENDING_REAP_BATCH", "32"))
+# Short on purpose: every reap is a small call, and it runs inside the sweep,
+# where a slow broker would hold up the rows closing right now.
+PENDING_REAP_TIMEOUT_S = float(os.environ.get("PENDING_REAP_TIMEOUT_S", "5"))
+# A reap that has failed this many times is not going to start working. Giving
+# up LOUDLY beats retrying forever and starving the jobs behind it.
+PENDING_REAP_MAX_ATTEMPTS = int(os.environ.get("PENDING_REAP_MAX_ATTEMPTS", "20"))
+# The queue is persisted for the same reason the broker persists correlations:
+# the job row is already terminal when the reap fails, so the sweep will never
+# select it again and an app restart would otherwise lose the ONLY remaining
+# signal that a live WorkItem still needs cancelling.
+PENDING_REAPS_PATH = Path(os.environ.get(
+    "PENDING_REAPS_PATH", str(DB_PATH.parent / "pending_reaps.jsonl")))
+
+
+def _persist_pending_reaps_locked() -> None:
+    """Rewrite the queue. CALLER MUST HOLD `_pending_reaps_lock`.
+
+    The whole queue is rewritten rather than appended: it is bounded by
+    PENDING_REAP_MAX, so this stays small, and a single snapshot can never be
+    read back in an order that contradicts memory.
+    """
+    try:
+        PENDING_REAPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PENDING_REAPS_PATH.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for job_id, rec in _pending_reaps.items():
+                fh.write(json.dumps({"job_id": job_id, **rec}) + "\n")
+        tmp.replace(PENDING_REAPS_PATH)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-jobs] could not persist the pending-reap queue: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+
+def _load_pending_reaps() -> Dict[str, Dict[str, Any]]:
+    """Restore the queue left by a previous process."""
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        if not PENDING_REAPS_PATH.exists():
+            return out
+        with PENDING_REAPS_PATH.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                job_id = rec.pop("job_id", None)
+                if job_id:
+                    out[job_id] = {"tenant_id": rec.get("tenant_id"),
+                                   "attempts": int(rec.get("attempts") or 0)}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-jobs] could not restore the pending-reap queue: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+    return out
+
+
+def _remember_pending_reap(job_id: str, tenant_id: Optional[str]) -> None:
+    with _pending_reaps_lock:
+        existing = _pending_reaps.get(job_id)
+        if existing is None and len(_pending_reaps) >= PENDING_REAP_MAX:
+            print(f"[leaf-jobs] pending-reap queue full ({PENDING_REAP_MAX}); "
+                  f"dropping job {job_id} - its APS WorkItem may bill to "
+                  f"completion", file=sys.stderr, flush=True)
+            return
+        attempts = int((existing or {}).get("attempts") or 0) + 1
+        if attempts > PENDING_REAP_MAX_ATTEMPTS:
+            _pending_reaps.pop(job_id, None)
+            _persist_pending_reaps_locked()
+            print(f"[leaf-jobs] giving up on the tab-close reap for job {job_id} "
+                  f"after {PENDING_REAP_MAX_ATTEMPTS} attempts - its APS WorkItem "
+                  f"may bill to completion", file=sys.stderr, flush=True)
+            return
+        # Re-insert at the TAIL so the batch below rotates: an entry that can
+        # never succeed must not sit at the head and starve everything after it.
+        _pending_reaps.pop(job_id, None)
+        _pending_reaps[job_id] = {"tenant_id": tenant_id, "attempts": attempts}
+        _persist_pending_reaps_locked()
+
+
+def _forget_pending_reap(job_id: str) -> None:
+    with _pending_reaps_lock:
+        if _pending_reaps.pop(job_id, None) is not None:
+            _persist_pending_reaps_locked()
+
+
+_pending_reaps.update(_load_pending_reaps())
+
+
+def _retry_pending_reaps() -> None:
+    """Re-attempt reaps a previous sweep could not deliver.
+
+    Bounded three ways, because this runs INSIDE the sweep and everything behind
+    it waits: at most PENDING_REAP_BATCH per sweep, the batch is abandoned on the
+    first unreachable broker (down for one is down for all, and grinding through
+    hundreds of timeouts would stall the tabs closing right now), and each entry
+    rotates to the tail so a permanently stuck job cannot starve the queue.
+    """
+    with _pending_reaps_lock:
+        batch = [(job_id, rec.get("tenant_id"))
+                 for job_id, rec in list(_pending_reaps.items())[:PENDING_REAP_BATCH]]
+    for job_id, tenant_id in batch:
+        if not _cancel_remote_workitem(job_id, tenant_id, _retry=True):
+            break
+
+
+def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str],
+                            _retry: bool = False) -> bool:
+    """Ask the broker to cancel this job's APS WorkItem (tab-close path ONLY).
+
+    Returns whether the BROKER was reachable, which is what tells the retry loop
+    to keep going: False means the broker is down for everyone and the rest of
+    the batch would only burn timeouts.
+
+    Marking the row terminal stops US from waiting; it does NOT stop APS, which
+    keeps running and BILLING the abandoned WorkItem to completion. This is the
+    call that actually reaps it.
+
+    Restricted to the CLOSED_PROGRESS branch on purpose. A heartbeat-stale row is
+    REDISPATCHED, and its prior worker may still be mid-flight, so cancelling by
+    job_id there could kill the WorkItem the retry is about to adopt. A closed
+    tab has no such race: the row is terminal and nothing will redispatch it.
+
+    Best-effort by contract. The row is already terminal before this runs, and an
+    unreachable broker must not undo that or stop the sweep's remaining rows. It
+    is NOT silent: a failure here means real money is still burning on APS, so it
+    is reported on stderr (the convention elsewhere in this codebase).
+    """
+    try:
+        result = broker_client.reap_via_broker(
+            [{
+                "job_id": job_id,
+                "tenant_id": tenant_id,
+                "status": "inprogress",
+                "workitem_id": None,   # broker resolves it from job_id
+                "session_closed": True,
+            }],
+            timeout_s=PENDING_REAP_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001  (broker down != job not finished)
+        _remember_pending_reap(job_id, tenant_id)
+        print(f"[leaf-jobs] tab-close reap failed for job {job_id} "
+              f"(queued for retry): {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        return False
+    # A 200 means the broker ACCEPTED the reap, not that a WorkItem was
+    # cancelled. When live reaping is on, only `cancelled_jobs` says the DELETE
+    # actually succeeded; anything else is still burning money and is worth
+    # another sweep. When live reaping is off, no cancel was ever going to
+    # happen, so retrying would queue every closed tab forever.
+    # Fail CLOSED on anything short of an explicit acknowledgement. A broker that
+    # reports live reaping but names no cancelled_jobs -- an older broker mid
+    # rolling-update, for instance -- has NOT told us the WorkItem stopped, and
+    # treating that as done is how the billing quietly continues. The attempt cap
+    # in _remember_pending_reap is what stops that retrying forever.
+    if isinstance(result, dict) and result.get("live"):
+        if job_id not in (result.get("cancelled_jobs") or []):
+            _remember_pending_reap(job_id, tenant_id)
+            print(f"[leaf-jobs] tab-close reap accepted but job {job_id} was not "
+                  f"acknowledged as cancelled (queued for retry)",
+                  file=sys.stderr, flush=True)
+            return True
+    _forget_pending_reap(job_id)
+    return True
 
 
 def _redispatch_record(job_id: str) -> bool:

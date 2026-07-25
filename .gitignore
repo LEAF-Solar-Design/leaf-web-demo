@@ -7,6 +7,8 @@ web/dist/
 .serena/
 server/jobs.db
 server/broker_ledger.jsonl
+server/active_workitems.jsonl
+server/pending_reaps.jsonl
 .env.local
 platform/.env.local
 server/jobs.db-shm
