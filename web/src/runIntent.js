@@ -71,6 +71,19 @@ export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
       dwg,
       ...(opts.catalogDigest ? { catalog_digest: opts.catalogDigest } : {}),
       ...(opts.dwgVersion != null ? { dwg_version: opts.dwgVersion } : {}),
+      // Single-writer identity, same `holder` the checkout take/release calls
+      // send (api.js takeCheckout / releaseCheckout). A drawing.write run
+      // publishes a version, and the server refuses one published under another
+      // session's checkout — so naming ourselves is what distinguishes "I hold
+      // the lock" from "someone else does". Omitted when unknown; the server
+      // then falls back to the tenant id exactly as the checkout routes do,
+      // which fails CLOSED against a `sess-` holder rather than skipping the
+      // check.
+      ...(opts.holder ? { holder: opts.holder } : {}),
+      // The lock generation we believe we hold (checkout.fence from
+      // GET /versions). Optional: postgres-authority locks carry one, legacy
+      // locks do not.
+      ...(opts.fence != null ? { fence: opts.fence } : {}),
     },
   }
 }

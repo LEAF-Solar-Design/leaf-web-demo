@@ -80,6 +80,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                    dwg: str, aps_live: bool, timeout_s: Optional[float] = None,
                    dwg_version: Optional[int] = None,
                    ledger_event_key: Optional[str] = None,
+                   checkout_holder: Optional[str] = None,
+                   checkout_fence: Optional[int] = None,
                    job_id: Optional[str] = None) -> Dict[str, Any]:
     """POST /broker/run -> extended section-3 envelope (ok true OR false).
 
@@ -88,6 +90,11 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
     an older broker (that ignores unknown fields) stays compatible.
     ``ledger_event_key`` is the durable job-execution identity used by a
     PostgreSQL broker to prevent duplicate paid execution across task retries.
+    ``checkout_holder``/``checkout_fence`` carry the submitting session's
+    single-writer identity so the store refuses a write published under another
+    session's checkout. Same compatibility note as ``dwg_version``: an older
+    broker ignores the unknown fields — it simply does not enforce the check,
+    which is the pre-existing behaviour, not a new hole.
     ``job_id`` (None -> unchanged behaviour) lets the broker correlate this run's
     live WorkItem with the job row, so ``reap_via_broker`` can cancel it when the
     owning browser tab closes. An older broker ignores the unknown field.
@@ -97,7 +104,10 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             f"{broker_url()}/broker/run",
             json={"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
-                  "ledger_event_key": ledger_event_key, "job_id": job_id},
+                  "ledger_event_key": ledger_event_key,
+                  "checkout_holder": checkout_holder,
+                  "checkout_fence": checkout_fence,
+                  "job_id": job_id},
             headers=broker_headers(),
             timeout=timeout_s or 600,
         )
