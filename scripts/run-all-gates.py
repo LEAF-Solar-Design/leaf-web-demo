@@ -315,9 +315,9 @@ def build_suites() -> List[Suite]:
         # Callback-primary is isolated: it changes completion selection and holds
         # a durable replay ledger, so it must not share another broker suite.
         Suite("server-da-callback", "server tests/test_da_callback.py", "pytest",
-              SERVER, _py_pytest("tests/test_da_callback.py"), 7),
+              SERVER, _py_pytest("tests/test_da_callback.py"), 11),
         Suite("server-aps-callback-adapter", "server tests/test_aps_callback_adapter.py",
-              "pytest", SERVER, _py_pytest("tests/test_aps_callback_adapter.py"), 22),
+              "pytest", SERVER, _py_pytest("tests/test_aps_callback_adapter.py"), 33),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 14),

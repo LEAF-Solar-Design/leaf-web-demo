@@ -50,9 +50,10 @@ def callback_env(monkeypatch, tmp_path):
     monkeypatch.setenv("JOBS_DB", str(tmp_path / "jobs.db"))
 
 
-def _never(job_id, attempt):
-    """Permissive guard for tests whose subject is NOT the duplicate check."""
-    return False
+def _win(job_id, attempt):
+    """Reservation that always succeeds, for tests whose subject is NOT the
+    duplicate check. Returns True = "you won the claim"."""
+    return True
 
 
 def test_translation_without_a_completion_guard_is_refused():
@@ -60,17 +61,17 @@ def test_translation_without_a_completion_guard_is_refused():
     caller who omits it silently regains the duplicate-completion hole. No
     authority, no receipt."""
     with pytest.raises(TypeError):
-        adapter.translate(_completion(), b"out", job_attempt=2, secret=SECRET, now=NOW)
+        adapter.translate(_completion(), b"out", job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW)
     for bad in (None, "nope", 42):
         with pytest.raises(adapter.AdapterError) as excinfo:
-            adapter.translate(_completion(), b"out", job_attempt=2, secret=SECRET, now=NOW,
-                              seen_completion=bad)
+            adapter.translate(_completion(), b"out", job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW,
+                              reserve_completion=bad)
         assert excinfo.value.reason == "no_completion_guard"
 
 
 def test_a_translated_envelope_verifies_and_consumes_exactly_once():
     output = b'{"strings": 12, "banks": 3}'
-    envelope = adapter.translate(_completion(), output, job_attempt=2, secret=SECRET, now=NOW, seen_completion=_never)
+    envelope = adapter.translate(_completion(), output, job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
 
     # The real signature verifier accepts it.
     assert callbacks.verify_signature(envelope.body, envelope.timestamp, envelope.nonce,
@@ -95,7 +96,7 @@ def test_a_translated_envelope_verifies_and_consumes_exactly_once():
 
 
 def test_tampering_the_body_breaks_the_signature():
-    envelope = adapter.translate(_completion(), b"output", job_attempt=2, secret=SECRET, now=NOW, seen_completion=_never)
+    envelope = adapter.translate(_completion(), b"output", job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
     tampered = envelope.body.replace(b'"size":6', b'"size":9')
     assert tampered != envelope.body
     assert callbacks.verify_signature(tampered, envelope.timestamp, envelope.nonce,
@@ -103,7 +104,7 @@ def test_tampering_the_body_breaks_the_signature():
 
 
 def test_headers_carry_the_signed_triple():
-    envelope = adapter.translate(_completion(), b"output", job_attempt=2, secret=SECRET, now=NOW, seen_completion=_never)
+    envelope = adapter.translate(_completion(), b"output", job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
     headers = envelope.headers()
     assert headers[callbacks.SIGNATURE_HEADER] == envelope.signature
     assert headers[callbacks.TIMESTAMP_HEADER] == envelope.timestamp
@@ -132,15 +133,115 @@ def test_headers_carry_the_signed_triple():
 ])
 def test_every_fail_closed_mode_refuses_with_its_reason(mutate, output, job_attempt, reason):
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(**mutate), output, job_attempt=job_attempt, secret=SECRET, now=NOW, seen_completion=_never)
+        adapter.translate(_completion(**mutate), output, job_attempt=job_attempt, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
     assert excinfo.value.reason == reason
 
 
-def test_a_non_finite_clock_is_refused():
+@pytest.mark.parametrize("bad_now", [float("nan"), float("inf"), float("-inf"),
+                                    "1700000000", None, True])
+def test_a_bad_clock_is_refused_as_bad_clock_specifically(bad_now):
+    """The clock is validated BEFORE anything compares against it. A string or
+    None clock used to escape as an untagged TypeError out of the lease
+    comparison, and inf was mislabelled `expired_lease`. The previous test
+    accepted EITHER reason, so deleting the bad_clock check left it green."""
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(lease_expiry=float("nan")), b"out", job_attempt=2,
-                          secret=SECRET, now=float("nan"), seen_completion=_never)
-    assert excinfo.value.reason in {"expired_lease", "bad_clock"}
+        adapter.translate(_completion(), b"out", job_attempt=2, job_workitem_id="wi-1",
+                          secret=SECRET, now=bad_now, reserve_completion=_win)
+    assert excinfo.value.reason == "bad_clock"
+
+
+def test_the_receipt_must_name_the_workitem_the_job_dispatched():
+    """Nonblank is not enough: a completion for some OTHER WorkItem must not
+    close this job."""
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(workitem_id="wi-other"), b"out", job_attempt=2,
+                          job_workitem_id="wi-real", secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "wrong_workitem"
+    for absent in ("", "   ", None):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(), b"out", job_attempt=2, job_workitem_id=absent,
+                              secret=SECRET, now=NOW, reserve_completion=_win)
+        assert excinfo.value.reason == "missing_workitem"
+
+
+@pytest.mark.parametrize("attempt", [0, -1, -99])
+def test_nonpositive_attempts_are_not_real_attempts(attempt):
+    """Attempts are 1-based, so 0 and negatives never ran, even when the job
+    store agrees with them."""
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(attempt=attempt), b"out", job_attempt=attempt,
+                          job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "wrong_attempt"
+
+
+def test_an_int_subclass_cannot_lie_about_equality():
+    """An int subclass may override __eq__/__ne__ to claim equality it does not
+    have. That let attempt=3 satisfy job_attempt=2 and then serialize as 3, so
+    the compared value and the signed value disagreed. Both sides are coerced
+    with int() now, making them the same number by construction."""
+
+    class TrickInt(int):
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+        def __hash__(self):
+            return hash(int(self))
+
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(attempt=TrickInt(3)), b"out", job_attempt=2,
+                          job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "wrong_attempt"
+    # A plain subclass whose value AND serialization are both 2 is legitimate.
+    class PlainInt(int):
+        pass
+
+    envelope = adapter.translate(_completion(attempt=PlainInt(2)), b"out", job_attempt=2,
+                                 job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                                 reserve_completion=_win)
+    assert json.loads(envelope.body)["attempt"] == 2
+
+
+def test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accepted():
+    """THE RACE a read-only guard cannot close. With `seen_completion` merely
+    asking "have you seen this?", both deliveries were translated BEFORE either
+    receipt was recorded, and the real consumer accepted BOTH, completing one
+    attempt twice. An atomic reservation makes the check and the record one step,
+    so the second translation loses the claim."""
+    claimed = set()
+
+    def reserve(job_id, attempt):
+        key = (job_id, attempt)
+        if key in claimed:
+            return False
+        claimed.add(key)          # claim and record are ONE step
+        return True
+
+    envelopes = []
+    refusals = []
+    for nonce in ("n-1", "n-2"):          # translate BOTH first, record nothing
+        try:
+            envelopes.append(adapter.translate(
+                _completion(nonce=nonce), b"out", job_attempt=2, job_workitem_id="wi-1",
+                secret=SECRET, now=NOW, reserve_completion=reserve))
+        except adapter.AdapterError as exc:
+            refusals.append(exc.reason)
+
+    assert len(envelopes) == 1, "only one translation may win the reservation"
+    assert refusals == ["duplicate_completion"]
+
+    store = callbacks.CallbackReplayStore()
+    accepted = sum(
+        1 for e in envelopes
+        if callbacks.consume_callback(e.body, e.signature, e.timestamp, e.nonce,
+                                      now=NOW, replay_store=store)["ok"]
+    )
+    assert accepted == 1, "one attempt must produce exactly one accepted completion"
 
 
 def test_duplicate_completion_guard_is_keyed_on_attempt_not_nonce():
@@ -150,30 +251,36 @@ def test_duplicate_completion_guard_is_keyed_on_attempt_not_nonce():
     completed = {("job-1", 2)}
     for nonce in ("nonce-abc", "nonce-def", "totally-new-nonce"):
         with pytest.raises(adapter.AdapterError) as excinfo:
-            adapter.translate(_completion(nonce=nonce), b"out", job_attempt=2, secret=SECRET,
-                              now=NOW, seen_completion=lambda job, attempt: (job, attempt) in completed)
+            adapter.translate(_completion(nonce=nonce), b"out", job_attempt=2, job_workitem_id='wi-1', secret=SECRET,
+                              now=NOW, reserve_completion=lambda job, attempt: (job, attempt) not in completed)
         assert excinfo.value.reason == "duplicate_completion", f"nonce {nonce} must not mint a second receipt"
     # A genuinely different ATTEMPT of the same job is a distinct completion.
     envelope = adapter.translate(_completion(attempt=3, nonce="nonce-xyz"), b"out", job_attempt=3,
-                                 secret=SECRET, now=NOW,
-                                 seen_completion=lambda job, attempt: (job, attempt) in completed)
+                                 job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                                 reserve_completion=lambda job, attempt: (job, attempt) not in completed)
     assert json.loads(envelope.body)["attempt"] == 3
 
 
 def test_two_nonces_for_one_attempt_cannot_both_be_consumed():
-    """End-to-end proof against the REAL consumer, not just the guard: with the
-    adapter as the completion authority, one attempt yields one accepted receipt."""
-    completed = set()
+    """End-to-end against the REAL consumer, recording each receipt as it is
+    accepted. This is the sequential case; the harder pre-record race is covered
+    by test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accepted."""
+    claimed = set()
 
-    def guard(job, attempt):
-        return (job, attempt) in completed
+    def reserve(job, attempt):
+        key = (job, attempt)
+        if key in claimed:
+            return False
+        claimed.add(key)
+        return True
 
     store = callbacks.CallbackReplayStore()
     accepted = 0
     for nonce in ("nonce-1", "nonce-2"):
         try:
             envelope = adapter.translate(_completion(nonce=nonce), b"out", job_attempt=2,
-                                         secret=SECRET, now=NOW, seen_completion=guard)
+                                         job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                                         reserve_completion=reserve)
         except adapter.AdapterError as exc:
             assert exc.reason == "duplicate_completion"
             continue
@@ -181,14 +288,13 @@ def test_two_nonces_for_one_attempt_cannot_both_be_consumed():
                                            envelope.nonce, now=NOW, replay_store=store)
         if result["ok"]:
             accepted += 1
-            completed.add(("job-1", 2))
     assert accepted == 1, "one attempt must produce exactly one accepted completion"
 
 
 def test_a_stale_translated_envelope_is_rejected_by_the_consumer_freshness_window():
     # Adapter stamps produced_at = NOW; consuming far later exceeds max age.
     envelope = adapter.translate(_completion(lease_expiry=NOW + 10_000.0), b"out",
-                                 job_attempt=2, secret=SECRET, now=NOW, seen_completion=_never)
+                                 job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
     late = callbacks.consume_callback(envelope.body, envelope.signature, envelope.timestamp,
                                       envelope.nonce, now=NOW + 10_000.0,
                                       replay_store=callbacks.CallbackReplayStore())

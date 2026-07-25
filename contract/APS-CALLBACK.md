@@ -47,7 +47,8 @@ recomputes it.
 | `missing_workitem` | blank WorkItem id | the receipt must bind to a real WorkItem |
 | `workitem_not_success` | WorkItem not succeeded | a failure is not a completion receipt; polling reports it |
 | `missing_output` | no persisted output bytes | an empty receipt would attest a completion that produced nothing |
-| `wrong_attempt` | completion attempt ≠ job's current attempt, or either is not a real `int` | a stale retry's late callback must not complete a newer attempt. `bool` is an `int` subclass and `True == 1`, so `attempt=True` is rejected explicitly rather than satisfying `job_attempt=1` |
+| `wrong_workitem` | completion names a WorkItem other than the one the job dispatched | nonblank is not enough; a completion for another WorkItem must not close this job |
+| `wrong_attempt` | completion attempt ≠ job's current attempt, either is not a real `int`, or it is below 1 | a stale retry's late callback must not complete a newer attempt. `bool` is an `int` subclass and `True == 1`, so `attempt=True` is rejected explicitly rather than satisfying `job_attempt=1` |
 | `expired_lease` | `now` past the lease deadline, or the deadline is not finite | a late completion is untrustworthy; `NaN` defeats every comparison (`now > nan` is `False`), so non-finite deadlines are refused outright |
 | `bad_clock` | non-finite translation clock | a `NaN` clock would make the freshness stamp meaningless |
 | `bad_nonce` | empty delivery nonce | the nonce is the signed + replay key |
@@ -70,7 +71,19 @@ consumer and asserts exactly one acceptance.
 accepted by the REAL `verify_signature` and `consume_callback` exactly once, and
 that a replay is rejected by the durable nonce store, a tampered body breaks the
 signature, and a late delivery is rejected by the consumer's freshness window.
-So the adapter cannot produce an envelope the verifier would reject, and cannot
-be used to complete a job twice.
+
+**One receipt per attempt holds only because the reservation is ATOMIC.** An
+earlier version of this document claimed the tests proved a job could not be
+completed twice while the guard was still a read-only "have you seen this?"
+query. That claim was false: two deliveries could both be translated before
+either receipt was recorded, and the real consumer accepted both. The guard is
+now `reserve_completion(job_id, attempt)`, which must claim the identity and
+return False if it was already claimed, so the check and the record are one
+indivisible step. `test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accepted`
+drives that exact race against the real consumer.
+
+A caller that supplies a non-atomic reservation (for example a plain set
+membership test followed by a later insert) reintroduces the race. Back it with
+the job store's own conditional write.
 
 Run: `cd server && python -m pytest tests/test_aps_callback_adapter.py -q`

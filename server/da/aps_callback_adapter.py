@@ -30,20 +30,24 @@ evidence (sha256 + size of the persisted output). Translation refuses, raising
                                would sign a completion that produced nothing);
   * ``wrong_attempt``        — the completion's attempt disagrees with the job's
                                authoritative current attempt (a stale retry's
-                               late callback must not complete a newer attempt);
+                               late callback must not complete a newer attempt),
+                               is not a real ``int``, or is below 1 (attempts are
+                               1-based, so 0 and negatives never ran);
+  * ``wrong_workitem``       — the completion names a different WorkItem than the
+                               one this job dispatched;
   * ``expired_lease``        — the APS lease deadline has passed (a completion
                                delivered after the lease is not trustworthy);
   * ``bad_nonce``            — empty delivery nonce;
   * ``bad_clock``            — non-finite translation clock;
   * ``missing_workitem``     — no WorkItem id to bind the receipt to;
-  * ``no_completion_guard`` — no duplicate-completion authority was supplied.
-                               The guard is REQUIRED: an optional one defaulting
-                               to None is fail-open for a signing seam;
-  * ``duplicate_completion`` — this (job, ATTEMPT) already produced a receipt.
-                               Keyed on completion identity, not the nonce: a
-                               second delivery bearing a fresh nonce would
-                               otherwise complete one attempt twice, since the
-                               consumer only dedupes the same nonce.
+  * ``no_completion_guard`` — no reservation authority was supplied. REQUIRED:
+                               an optional guard defaulting to None is fail-open;
+  * ``duplicate_completion`` — the reservation for this (job, ATTEMPT) was already
+                               claimed. Keyed on completion identity, not the
+                               nonce, AND taken atomically: a read-only "have you
+                               seen this?" check let two deliveries both translate
+                               before either receipt was recorded, so both were
+                               accepted and one attempt completed twice.
 
 Run:  cd server && python -m pytest tests/test_aps_callback_adapter.py -q
 """
@@ -137,29 +141,48 @@ def translate(
     output: Optional[bytes],
     *,
     job_attempt: int,
+    job_workitem_id: str,
     secret: bytes,
     now: float,
-    seen_completion: Callable[[str, int], bool],
+    reserve_completion: Callable[[str, int], bool],
 ) -> CallbackEnvelope:
     """Translate a successful APS WorkItem completion into a signed envelope.
 
-    ``job_attempt`` is the job store's authoritative current attempt; ``now`` is
-    the epoch seconds at translation.
+    ``job_attempt`` and ``job_workitem_id`` are the job store's AUTHORITATIVE
+    current attempt and dispatched WorkItem id; the completion must match both.
+    ``now`` is the epoch seconds at translation.
 
-    ``seen_completion(job_id, attempt) -> bool`` is the REQUIRED producer-side
-    duplicate-completion guard, and it is keyed on the COMPLETION IDENTITY
-    (job, attempt), NOT on the nonce. That distinction is the whole point: the
-    consumer's durable nonce store only rejects a repeat of the SAME nonce, so a
-    second delivery of the same completion bearing a FRESH nonce would otherwise
-    mint a second envelope that ``consume_callback`` accepts, completing one
-    attempt twice. One attempt yields at most one completion receipt, and this
-    adapter is the authority for that; the consumer's nonce store remains the
-    second line of defence against a captured envelope being replayed verbatim.
+    ``reserve_completion(job_id, attempt) -> bool`` is REQUIRED and must
+    ATOMICALLY claim the completion identity: return True if this call won the
+    claim, False if it was already claimed. It is a reservation, not a question.
+
+    Why that matters, because it is subtle and this module got it wrong twice.
+    The identity is (job, attempt), NOT the nonce: the consumer's durable nonce
+    store only rejects a repeat of the SAME nonce, so a second delivery bearing a
+    FRESH nonce would otherwise mint a second envelope the consumer accepts. But
+    keying on identity is not sufficient either if the guard merely READS state:
+    two deliveries can both be translated before either receipt is recorded, and
+    both are then accepted. Only an atomic claim closes that window, because the
+    check and the record become one step. One attempt yields at most one receipt,
+    and this adapter is the authority for that; the consumer's nonce store remains
+    the second line of defence against a captured envelope replayed verbatim.
     """
+    # The CLOCK is validated FIRST. Every later check compares against `now`, so
+    # validating it late meant `now="170..."` or None raised an untagged
+    # TypeError out of the lease comparison instead of a tagged refusal, and
+    # `now=inf` was misreported as `expired_lease`.
+    if not isinstance(now, (int, float)) or isinstance(now, bool) or not math.isfinite(now):
+        raise AdapterError("bad_clock")
     if not isinstance(completion.job_id, str) or not completion.job_id.strip():
         raise AdapterError("missing_job")
     if not isinstance(completion.workitem_id, str) or not completion.workitem_id.strip():
         raise AdapterError("missing_workitem")
+    # Nonblank is not enough: the receipt must name the WorkItem the job actually
+    # dispatched, or a completion for some other WorkItem closes this job.
+    if not isinstance(job_workitem_id, str) or not job_workitem_id.strip():
+        raise AdapterError("missing_workitem")
+    if completion.workitem_id.strip() != job_workitem_id.strip():
+        raise AdapterError("wrong_workitem")
     if not isinstance(completion.status, str) or completion.status.strip().lower() not in _SUCCESS_STATUSES:
         raise AdapterError("workitem_not_success")
     if output is None or len(output) == 0:
@@ -167,8 +190,18 @@ def translate(
     # `bool` is a subclass of `int` and `True == 1`, so an unguarded isinstance
     # check lets attempt=True satisfy job_attempt=1 and sign `"attempt":true`.
     if (isinstance(completion.attempt, bool) or not isinstance(completion.attempt, int)
-            or isinstance(job_attempt, bool) or not isinstance(job_attempt, int)
-            or completion.attempt != job_attempt):
+            or isinstance(job_attempt, bool) or not isinstance(job_attempt, int)):
+        raise AdapterError("wrong_attempt")
+    # Compare and emit the COERCED ints. An int subclass may override __eq__ /
+    # __ne__ to claim equality it does not have, which previously let attempt=3
+    # satisfy job_attempt=2 and then serialize as 3. Coercing first makes the
+    # compared value and the signed value the same number by construction.
+    claimed_attempt = int(completion.attempt)
+    authoritative_attempt = int(job_attempt)
+    if claimed_attempt != authoritative_attempt:
+        raise AdapterError("wrong_attempt")
+    # Attempts are 1-based. 0 and negatives are not attempts that ever ran.
+    if claimed_attempt < 1:
         raise AdapterError("wrong_attempt")
     # NaN defeats every comparison (`now > nan` is False), so a non-finite lease
     # deadline would sail past an ordinary expiry check. callbacks.py guards its
@@ -178,24 +211,25 @@ def translate(
             or not math.isfinite(completion.lease_expiry)
             or now > completion.lease_expiry):
         raise AdapterError("expired_lease")
-    if not isinstance(now, (int, float)) or isinstance(now, bool) or not math.isfinite(now):
-        raise AdapterError("bad_clock")
     if not isinstance(completion.nonce, str) or not completion.nonce.strip():
         raise AdapterError("bad_nonce")
-    # REQUIRED, not optional. An optional guard defaulting to None is fail-OPEN
-    # for a signing seam: a caller who simply omits it gets the original
-    # duplicate-completion hole back, and nothing reports it. No authority, no
-    # receipt.
-    if not callable(seen_completion):
+    # RESERVATION, not a query. `seen_completion` used to ask "have you seen
+    # this?", which cannot prevent a race: two deliveries could both be
+    # translated BEFORE either receipt was recorded, and the consumer accepted
+    # both, completing one attempt twice. `reserve_completion` must ATOMICALLY
+    # claim (job, attempt) and return False if it was already claimed, so the
+    # check and the record are one indivisible step. Required, never optional: a
+    # caller who omits it gets no receipt at all.
+    if not callable(reserve_completion):
         raise AdapterError("no_completion_guard")
-    if seen_completion(completion.job_id, completion.attempt):
+    if not reserve_completion(completion.job_id, claimed_attempt):
         raise AdapterError("duplicate_completion")
 
     output_sha256 = hashlib.sha256(output).hexdigest()
     payload: Dict[str, Any] = {
         "job_id": completion.job_id,
         "workitem_id": completion.workitem_id,
-        "attempt": completion.attempt,
+        "attempt": claimed_attempt,
         "status": "success",
         "nonce": completion.nonce,
         "output": {"sha256": output_sha256, "size": len(output)},
