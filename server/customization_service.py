@@ -779,6 +779,11 @@ class CustomizationService:
 
 _MATERIALIZE_ATTEMPTS = 5
 _MATERIALIZE_LOCK_TIMEOUT = 60.0
+# `git worktree add` writes this into the new worktree's HEAD as a placeholder
+# and only replaces it once the checkout finishes, so a reader that arrives
+# mid-add sees it from `rev-parse HEAD` with exit status 0. Observing it means
+# "still being built", never "the wrong commit".
+_NULL_OID = "0" * 40
 # Only a crashed holder should ever be evicted, so this sits far above the 20s
 # `worktree add` timeout rather than near it.
 _MATERIALIZE_LOCK_STALE = 300.0
@@ -895,19 +900,26 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
             )
 
 
-def _verified_worktree(bare: Path, target: Path, commit: str) -> tuple[str, bytes]:
-    """Return the worktree's observed HEAD and its registry.json bytes.
+def _verified_worktree(bare: Path, target: Path, commit: str, digest: str) -> None:
+    """Block until `target` holds exactly `commit` with a matching registry.
 
-    Each attempt re-materializes when the directory is missing. The loop this
-    replaces only ever re-ran `rev-parse`, which can never recover the one
-    failure that actually happens: the directory being deleted.
+    BOTH checks live inside the retry loop on purpose. A caller that reads a
+    worktree another worker is still building sees torn state -- HEAD is the
+    null OID for part of the build, and registry.json is incomplete for longer
+    still, because git sets HEAD to the real commit BEFORE the checkout has
+    finished writing files. Checking either one after the loop, as this code
+    used to, turns a transient read into a terminal 503 and lets a race
+    masquerade as tampering.
+
+    Retrying is safe for the tamper case too: a tampered registry simply fails
+    every attempt and still raises `effective_catalog_digest_mismatch`.
     """
     detail = "no attempt completed"
+    observed = ""
     for attempt in range(_MATERIALIZE_ATTEMPTS):
-        # Attempt 0 fast-paths an already-good worktree without taking the
-        # lock. Every later attempt goes through it, so a caller that arrived
-        # mid-add blocks until the holder finishes instead of spinning on a
-        # half-written directory and exhausting its retries.
+        # Attempt 0 fast-paths a settled worktree without taking the lock.
+        # Every later attempt goes through it, so a caller that arrived mid-add
+        # blocks until the builder finishes instead of re-reading torn state.
         if attempt or not target.exists():
             _materialize_worktree(bare, target, commit)
         try:
@@ -915,15 +927,33 @@ def _verified_worktree(bare: Path, target: Path, commit: str) -> tuple[str, byte
                 ["git", "-C", str(target), "rev-parse", "HEAD"],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
             )
-            if probe.returncode == 0:
-                # A tampered registry still reads and still rev-parses; the
-                # caller's digest check is what must reject it, not a retry.
-                return probe.stdout.strip(), (target / "registry.json").read_bytes()
-            detail = f"git rev-parse HEAD rc={probe.returncode}: {_git_stderr(probe)!r}"
+            if probe.returncode != 0:
+                detail = f"git rev-parse HEAD rc={probe.returncode}: {_git_stderr(probe)!r}"
+            else:
+                observed = probe.stdout.strip()
+                if observed == _NULL_OID:
+                    detail = f"{target} is still being built (HEAD is the null OID)"
+                elif observed != commit:
+                    detail = f"{target} HEAD {observed!r} != pinned {commit!r}"
+                elif hashlib.sha256(
+                    (target / "registry.json").read_bytes()
+                ).hexdigest() != digest:
+                    detail = f"{target}/registry.json does not match the pinned digest"
+                else:
+                    return
         except (OSError, subprocess.SubprocessError) as exc:
             detail = f"{type(exc).__name__}: {exc}"
         if attempt + 1 < _MATERIALIZE_ATTEMPTS:
             time.sleep(0.05 * (attempt + 1))
+    # Settled and still wrong: report which invariant the worktree broke.
+    if observed and observed not in (commit, _NULL_OID):
+        raise CustomizationServiceError(
+            "effective_catalog_commit_mismatch", 503, detail=detail
+        )
+    if observed == commit:
+        raise CustomizationServiceError(
+            "effective_catalog_digest_mismatch", 503, detail=detail
+        )
     raise _unavailable(f"{target} @ {commit} unverifiable after "
                        f"{_MATERIALIZE_ATTEMPTS} attempts: {detail}")
 
@@ -984,19 +1014,7 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
             raise _unavailable(f"refusing symlinked catalog target {target}")
         if not _path_within(target, resolved_root):
             raise _unavailable(f"catalog target {target} escapes {resolved_root}")
-        observed, materialized_registry = _verified_worktree(
-            bare, target, pin.catalog_commit
-        )
-        if observed != pin.catalog_commit:
-            raise CustomizationServiceError(
-                "effective_catalog_commit_mismatch", 503,
-                detail=f"{target} HEAD {observed!r} != pinned {pin.catalog_commit!r}",
-            )
-        if hashlib.sha256(materialized_registry).hexdigest() != pin.catalog_digest:
-            raise CustomizationServiceError(
-                "effective_catalog_digest_mismatch", 503,
-                detail=f"{target}/registry.json does not match the pinned digest",
-            )
+        _verified_worktree(bare, target, pin.catalog_commit, pin.catalog_digest)
         return target
     except ChangeSetNotFoundError:
         if enabled(5, tenant_id) or enabled(6, tenant_id):
