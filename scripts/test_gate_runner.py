@@ -1,5 +1,6 @@
-"""Gate-runner self-test: spawn failures must be retryable FAIL rows, never
-runner-killing exceptions.
+"""Gate-runner self-test: the runner must never answer a different question
+than the one it was asked — spawn failures stay retryable FAIL rows rather than
+runner-killing exceptions, and the `--only` selection is the one that was typed.
 
 WHY: on 2026-07-23 three consecutive full-gate runs died scoreboard-less
 mid-suite (rows logged as bare EXIT:127 by the invoking wrapper). The runner
@@ -270,6 +271,97 @@ def test_vitest_floor_counts_executed_tests_not_skipped_ones(tmp_path):
 
     assert result.status == "FAIL"
     assert "executed-count regression: expected >= 4, got 2" in result.note
+
+
+# --------------------------------------------------------------------------- #
+# --only selection
+#
+# WHY: on 2026-07-25 two independent sessions typed `--only a --only b` against
+# the old single-value argparse option. It kept only `b`, ran one suite, and
+# printed a truthful-looking `suites: 1 PASS  0 FAIL  0 SKIP`. Nothing errored
+# and nothing warned; the falsehood lived entirely in the gap between the
+# command typed and the run obtained. Same shape as the skipped-test and
+# unregistered-file holes this runner was already hardened against.
+# --------------------------------------------------------------------------- #
+def _selection_suites(g):
+    return [
+        g.Suite(sid, sid, "script", SCRIPTS, [sys.executable, "-c", "pass"], None)
+        for sid in ("server-backbone", "server-jobs-terminal-mirror-atomic",
+                    "platform-static", "gate-runner-selftest")
+    ]
+
+
+def test_repeated_only_unions_instead_of_keeping_only_the_last():
+    g = _load_runner()
+    selected, dead = g.select_suites(
+        _selection_suites(g),
+        ["server-backbone", "server-jobs-terminal-mirror-atomic"])
+
+    assert [s.id for s in selected] == ["server-backbone",
+                                        "server-jobs-terminal-mirror-atomic"]
+    assert dead == []
+
+
+def test_overlapping_only_substrings_select_each_suite_once():
+    g = _load_runner()
+    selected, dead = g.select_suites(
+        _selection_suites(g), ["server", "server-backbone"])
+
+    assert [s.id for s in selected] == ["server-backbone",
+                                        "server-jobs-terminal-mirror-atomic"]
+    assert dead == []
+
+
+def test_only_substring_matching_nothing_is_named_rather_than_absorbed():
+    """A dead substring inside a union would re-open the original hole one
+    pattern at a time: the surviving patterns still produce a green scoreboard
+    for less than was asked for."""
+    g = _load_runner()
+    selected, dead = g.select_suites(
+        _selection_suites(g), ["platform-static", "no-such-suite"])
+
+    assert dead == ["no-such-suite"]
+    assert [s.id for s in selected] == ["platform-static"]
+
+
+def test_selection_description_reads_back_as_the_typed_command():
+    g = _load_runner()
+
+    assert g.describe_selection([]) == "all suites (no --only filter)"
+    assert g.describe_selection(["server"]) == "--only server"
+    assert g.describe_selection(["a", "b"]) == (
+        "--only a --only b  (union of 2 substrings)")
+
+
+def test_scoreboard_echoes_the_selection_that_produced_it(capsys, tmp_path):
+    g = _load_runner()
+    suite = g.Suite("server-backbone", "server backbone", "pytest", SCRIPTS,
+                    [sys.executable, "-c", "pass"], None)
+
+    g.print_scoreboard([g.Result(suite, "PASS", "12", 1.0)], tmp_path, 1.0,
+                       "--only server-backbone --only server-jobs  "
+                       "(union of 2 substrings)")
+
+    out = capsys.readouterr().out
+    assert "filter: --only server-backbone --only server-jobs" in out
+
+
+def test_cli_accepts_repeated_only_and_reports_every_dead_substring(tmp_path):
+    """argparse-level guard the unit tests cannot give: with the old
+    single-value `--only`, the first substring was discarded before any
+    selection logic ran, so only the second would be named here.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS / "run-all-gates.py"),
+         "--only", "no-such-suite-alpha", "--only", "no-such-suite-beta",
+         "--log-dir", str(tmp_path)],
+        cwd=str(REPO), capture_output=True, text=True, timeout=300,
+        encoding="utf-8", errors="replace",
+    )
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "no-such-suite-alpha" in proc.stdout
+    assert "no-such-suite-beta" in proc.stdout
 
 
 def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch):

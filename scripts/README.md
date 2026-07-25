@@ -116,7 +116,8 @@ Two special behaviours, both surfaced on the scoreboard:
 ```
 --fail-fast     stop at the first failing gate (default: run all)
 --continue      run every gate even if one fails (this IS the default)
---only SUBSTR   only run suites whose id contains SUBSTR (e.g. --only server)
+--only SUBSTR   only run suites whose id contains SUBSTR (e.g. --only server);
+                repeatable, and repeats UNION (--only a --only b runs a OR b)
 --retry N       re-run a FAILED suite up to N more times (default 1)
 --log-dir DIR   where per-suite logs land (default: C:/tmp/leaf-web-demo-gates)
 ```
@@ -130,11 +131,18 @@ annotated on the scoreboard (`flaked; passed on attempt 2/2`) rather than masked
 and a genuinely broken suite fails every attempt and is reported red. Use
 `--retry 0` to capture raw first-attempt results (e.g. to measure flake rate).
 
+**About `--only`.** It is repeatable and each occurrence adds to a **union**:
+`--only server-backbone --only harness-vitest` runs every suite matching either.
+A substring that matches **no** suite exits `2` and names itself instead of
+letting the surviving substrings produce a green scoreboard for less than was
+asked for. The scoreboard prints a `filter:` line echoing the exact selection,
+so a result can be checked back against the command that produced it.
+
 Full per-suite output goes to `<log-dir>/<suite>.log`; only the scoreboard prints
 to stdout. Exit code is **0 only when every selected gate passed and every
 test-level skip matched an explicit reason allowlist**, else 1. A skipped test
 never counts toward a suite's minimum executed-test floor.
-(`2` if `--only` matched nothing).
+(`2` if any `--only` substring matched nothing).
 
 ---
 
