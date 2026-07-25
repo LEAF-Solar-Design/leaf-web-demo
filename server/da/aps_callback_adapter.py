@@ -227,7 +227,7 @@ def translate(
     job_lease_expiry: float,
     secret: bytes,
     now: float,
-    reserve_completion: Callable[[str, int], bool],
+    reserve_completion: Callable[[str, int, "CallbackEnvelope"], Any],
 ) -> CallbackEnvelope:
     """Translate a successful APS WorkItem completion into a signed envelope.
 
@@ -239,9 +239,14 @@ def translate(
     the job itself was simply taken from the completion.
     ``now`` is the epoch seconds at translation.
 
-    ``reserve_completion(job_id, attempt) -> bool`` is REQUIRED and must
-    ATOMICALLY claim the completion identity: return True if this call won the
-    claim, False if it was already claimed. It is a reservation, not a question.
+    ``reserve_completion(job_id, attempt, envelope)`` is REQUIRED and must
+    ATOMICALLY claim the completion identity AND record ``envelope`` in the same
+    step. It returns True if this call won the claim, a previously stored
+    ``CallbackEnvelope`` if the claim already exists and its receipt survived, or
+    False if it exists with no recoverable receipt. It is a reservation, not a
+    question. A returned envelope is CHECKED against this completion's identity
+    and signature before it is handed back, because the guard is authority for
+    whether a claim exists, never for whose it is.
 
     Why that matters, because it is subtle and this module got it wrong twice.
     The identity is (job, attempt), NOT the nonce: the consumer's durable nonce
@@ -366,13 +371,18 @@ def translate(
         raise AdapterError("expired_lease")
     if not _is_finite_number(lease_expiry):
         raise AdapterError("malformed_lease")
-    # `>=`, NOT `>`. The job store is the other half of this boundary and it
-    # reclaims on `lease_expires_at <= now` (jobs.py, the attempt-increment
-    # clause). With a strict `>` here, the exact instant `now == job_lease_expiry`
-    # was a state the two halves DISAGREED about: this adapter signed a completion
-    # receipt for a lease the store had already released for reclaim, so the
-    # receipt could land against an attempt the store had moved on from. Match the
-    # store exactly; an off-by-one-instant window is still a window.
+    # `>=`, NOT `>`, and the reason is narrower than "match the store" — the store
+    # does not agree with ITSELF at this instant. In jobs.py, reclaim tests
+    # `lease_expires_at <= now` while owner completion and heartbeat test
+    # `lease_expires_at >= now`, so at exactly `now == lease_expiry` the row is
+    # BOTH reclaimable by a new worker AND still completable by the old owner.
+    #
+    # That overlap is the store's, not ours to resolve here. What this adapter can
+    # do is refuse to be the half that signs into an ambiguous instant: with a
+    # strict `>` it minted a completion receipt for a lease a reclaim could take in
+    # the same tick, so the receipt could land against an attempt the store had
+    # already moved past. Refusing is the fail-closed side of a boundary that is
+    # genuinely undecided, and it costs one tick of a fifteen-second lease.
     if now >= job_lease_expiry:
         raise AdapterError("expired_lease")
     # Header-safe and bounded. `.strip()` alone let control characters through, and
@@ -457,7 +467,30 @@ def translate(
     # the caller gets back the identical envelope the crashed delivery signed.
     # Returned as-is, never re-signed, so the nonce and signature still match the
     # receipt the replay store may already have seen.
+    #
+    # BUT IT MUST BE THIS COMPLETION'S RECEIPT. Returning whatever the guard hands
+    # back was the same mistake this module keeps finding in new places: a guard
+    # invoked for (job-1, 2) could return an envelope naming (other-job, 99), with
+    # any signature at all, and translate would present it as the receipt for
+    # (job-1, 2). The guard is authority for WHETHER a claim exists, never for
+    # WHOSE it is. Re-derive the identity from the returned body and refuse a
+    # receipt that does not name what we just tried to claim.
     if type(outcome) is CallbackEnvelope:
+        try:
+            recovered = json.loads(outcome.body)
+        except (AttributeError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            raise AdapterError("bad_completion_guard")
+        if type(recovered) is not dict:
+            raise AdapterError("bad_completion_guard")
+        if (recovered.get("job_id") != job_id
+                or type(recovered.get("attempt")) is not int
+                or recovered.get("attempt") != claimed_attempt):
+            raise AdapterError("bad_completion_guard")
+        # And it must be a receipt WE could have signed. An unverifiable body is
+        # not a recovery, it is an unsigned claim wearing the envelope type.
+        if not _callbacks().verify_signature(outcome.body, outcome.timestamp,
+                                             outcome.nonce, outcome.signature, secret):
+            raise AdapterError("bad_completion_guard")
         return outcome
     if outcome is False:
         raise AdapterError("duplicate_completion")

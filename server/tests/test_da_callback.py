@@ -285,7 +285,11 @@ def test_callback_completes_the_durable_job_and_poll_duplicate_is_a_noop(monkeyp
     job_id = jobs.submit_job("demo-tenant", tool, {}, "rooftop_demo", aps_live=True)
     assert jobs.claim_lease(job_id, "callback-worker") == 1
 
-    body = json.dumps({"job_id": job_id, "status": "success", "result": {"answer": 42}}).encode()
+    # `attempt` is REQUIRED on this route now: enforcing the attempt binding only
+    # when the field happened to be present was fail-open, because omitting it
+    # reopened the whole cross-attempt hole (round 12).
+    body = json.dumps({"job_id": job_id, "status": "success", "attempt": 1,
+                       "result": {"answer": 42}}).encode()
     timestamp = str(time.time())
     nonce = "nonce-complete"
     response = TestClient(broker.app).post(
@@ -398,11 +402,14 @@ def test_a_stale_attempts_callback_cannot_complete_a_newer_attempt(monkeypatch, 
         "reconciled against APS")
 
 
-def test_a_callback_without_an_attempt_still_completes(monkeypatch, tmp_path):
-    """The attempt binding is enforced when the callback SUPPLIES one. An emitter
-    that sends no attempt (everything predating the L3.1 adapter) keeps working
-    against the job's current attempt, so this is a tightening of the signed path
-    and not a new required field on the wire."""
+def test_a_callback_with_no_attempt_is_refused_outright(monkeypatch, tmp_path):
+    """ROUND-12 FINDING, and it was MY hole. Round 11 enforced the attempt binding
+    only when the callback happened to supply one, and shipped a test celebrating
+    that as back-compat. Omitting the field walked straight back through the door:
+    a delayed attempt-1 success with no `attempt`, arriving while attempt 2 ran,
+    was stamped with the job's current attempt and completed it.
+
+    "Validate it if present" is not a binding. The field is required."""
     import jobs
 
     class InertExecutor:
@@ -419,17 +426,36 @@ def test_a_callback_without_an_attempt_still_completes(monkeypatch, tmp_path):
             "capabilities": ["drawing.read"]}
     job_id = jobs.submit_job("demo-tenant", tool, {}, "rooftop_demo", aps_live=True)
     assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.claim_lease(job_id, "worker-2", now=time.time() + 86_400) == 2
 
-    body = json.dumps({"job_id": job_id, "status": "success", "result": {"answer": 7}}).encode()
-    timestamp = str(time.time())
-    nonce = "nonce-no-attempt"
-    response = TestClient(broker.app).post(
-        "/da/callback", content=body,
-        headers={"X-Leaf-Signature": _signed(body, timestamp, nonce),
-                 "X-Leaf-Timestamp": timestamp, "X-Leaf-Nonce": nonce},
-    )
-    assert response.status_code == 200, response.text
-    completed = jobs.get_job(job_id)
-    assert completed["status"] == "complete"
-    assert completed["provenance"]["attempt"] == 1
-    assert "workitem_id" not in completed["provenance"]
+    def deliver(payload, nonce):
+        body = json.dumps(payload).encode()
+        timestamp = str(time.time())
+        return TestClient(broker.app).post(
+            "/da/callback", content=body,
+            headers={"X-Leaf-Signature": _signed(body, timestamp, nonce),
+                     "X-Leaf-Timestamp": timestamp, "X-Leaf-Nonce": nonce},
+        )
+
+    # This is the exact payload that used to complete attempt 2 while describing
+    # attempt 1's run: a success carrying no attempt at all.
+    no_attempt = deliver({"job_id": job_id, "status": "success",
+                          "result": {"answer": 1}}, "nonce-no-attempt")
+    assert no_attempt.status_code == 409, no_attempt.text
+    assert "attempt" in no_attempt.json()["error"]["message"]
+    assert jobs.get_job(job_id)["status"] != "complete"
+
+    # A non-int attempt is refused by the same guard rather than coerced. `bool`
+    # matters specifically: `True == 1`, so a truthy attempt must not satisfy an
+    # int comparison against attempt 1.
+    for bad in (None, "2", 2.0, True):
+        response = deliver({"job_id": job_id, "status": "success", "attempt": bad,
+                            "result": {"answer": 1}}, f"nonce-bad-{bad!r}")
+        assert response.status_code == 409, f"{bad!r}: {response.text}"
+        assert jobs.get_job(job_id)["status"] != "complete"
+
+    # The current attempt still completes, so this is a tightening and not a wall.
+    ok = deliver({"job_id": job_id, "status": "success", "attempt": 2,
+                  "workitem_id": "wi-2", "result": {"answer": 42}}, "nonce-good")
+    assert ok.status_code == 200, ok.text
+    assert jobs.get_job(job_id)["status"] == "complete"

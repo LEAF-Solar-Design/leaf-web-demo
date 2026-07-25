@@ -50,7 +50,7 @@ def callback_env(monkeypatch, tmp_path):
     monkeypatch.setenv("JOBS_DB", str(tmp_path / "jobs.db"))
 
 
-def _win(job_id, attempt, envelope):
+def _win(job_id, attempt, envelope=None):
     """Reservation that always succeeds, for tests whose subject is NOT the
     duplicate check. Returns True = "you won the claim"."""
     return True
@@ -259,7 +259,7 @@ def test_a_failure_after_validation_does_not_burn_the_attempt():
     never be completed at all."""
     claimed = set()
 
-    def reserve(job_id, attempt, envelope):
+    def reserve(job_id, attempt, envelope=None):
         key = (job_id, attempt)
         if key in claimed:
             return False
@@ -290,7 +290,7 @@ def test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accep
     claimed = set()
     calls = []
 
-    def reserve(job_id, attempt, envelope):
+    def reserve(job_id, attempt, envelope=None):
         key = (job_id, attempt)
         calls.append(key)
         if key in claimed:
@@ -442,7 +442,7 @@ def test_a_stateful_completion_cannot_swap_identities_after_validation():
 
     claimed = set()
 
-    def reserve(job_id, attempt, envelope):
+    def reserve(job_id, attempt, envelope=None):
         key = (job_id, attempt)
         if key in claimed:
             return False
@@ -692,7 +692,7 @@ def test_a_reused_delivery_nonce_cannot_burn_a_later_attempt():
     store = callbacks.CallbackReplayStore()
     claimed = set()
 
-    def reserve(job_id, attempt, envelope):
+    def reserve(job_id, attempt, envelope=None):
         key = (job_id, attempt)
         if key in claimed:
             return False
@@ -844,7 +844,7 @@ def test_a_delivery_that_crashed_after_claiming_is_recoverable_not_burned():
     holds one hands it back, so the retry is idempotent."""
     store = {}
 
-    def reserve(job_id, attempt, envelope):
+    def reserve(job_id, attempt, envelope=None):
         key = (job_id, attempt)
         if key in store:
             return store[key]          # the stored receipt, not a refusal
@@ -871,5 +871,52 @@ def test_a_delivery_that_crashed_after_claiming_is_recoverable_not_burned():
         adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
                           job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
                           secret=SECRET, now=NOW,
-                          reserve_completion=lambda j, a, e: False)
+                          reserve_completion=lambda j, a, e=None: False)
     assert excinfo.value.reason == "duplicate_completion"
+
+
+def test_a_recovered_envelope_must_name_the_identity_we_tried_to_claim():
+    """ROUND-12 FINDING. Round 11 added crash recovery by returning whatever
+    `CallbackEnvelope` the guard handed back. That trusted the guard for the wrong
+    thing: it is authority for WHETHER a claim exists, never for WHOSE it is. A
+    guard invoked for (job-1, 2) could return an envelope naming another job and
+    another attempt, with any signature at all, and `translate` presented it as
+    this completion's receipt."""
+    real = adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                             job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                             secret=SECRET, now=NOW, reserve_completion=_win)
+
+    # A receipt for a DIFFERENT job, correctly signed for that other job.
+    other = adapter.translate(_completion(job_id="job-2", nonce="nonce-other"), b"output",
+                              job_id="job-2", job_attempt=2, job_workitem_id="wi-1",
+                              job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                              reserve_completion=_win)
+
+    # A receipt for a different ATTEMPT of the right job.
+    other_attempt = adapter.translate(_completion(attempt=3, nonce="nonce-three"), b"output",
+                                      job_id="job-1", job_attempt=3, job_workitem_id="wi-1",
+                                      job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                                      reserve_completion=_win)
+
+    # An envelope of the right shape whose body was never signed by us.
+    forged = adapter.CallbackEnvelope(
+        body=json.dumps({"job_id": "job-1", "attempt": 2}).encode(),
+        timestamp=real.timestamp, nonce=real.nonce, signature="0" * 64)
+
+    for bogus, why in ((other, "another job"), (other_attempt, "another attempt"),
+                       (forged, "an unsigned body")):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                              job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                              secret=SECRET, now=NOW,
+                              reserve_completion=lambda j, a, e=None, _b=bogus: _b)
+        assert excinfo.value.reason == "bad_completion_guard", (
+            f"a stored receipt for {why} must not be returned as this completion's")
+
+    # The genuine receipt for this exact identity IS returned, so the recovery
+    # path still works and this is a binding rather than a removal.
+    recovered = adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                                  job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                                  secret=SECRET, now=NOW,
+                                  reserve_completion=lambda j, a, e=None: real)
+    assert recovered is real
