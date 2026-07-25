@@ -899,11 +899,14 @@ ACTIVE_WORKITEMS_PATH = Path(
     os.environ.get("BROKER_ACTIVE_WORKITEMS_PATH",
                    str(Path(LEDGER_PATH).parent / "active_workitems.jsonl")))
 _ACTIVE_WORKITEMS_COMPACT_LINES = 2000
-# A WorkItem cannot outlive da/client's 900s poll ceiling by any margin like
-# this, so an hour-old replayed correlation names work that is certainly over.
-# Ageing them out at replay is what keeps the recovered set (and the sidecar)
-# from growing without bound across restarts.
-ACTIVE_WORKITEM_TTL_S = float(os.environ.get("BROKER_ACTIVE_WORKITEM_TTL_S", "3600"))
+# A garbage-collection backstop, NOT a liveness claim. da/client's 900s poll
+# ceiling does not bound the WorkItem: _poll_workitem simply returns once it
+# expires and issues no DELETE, so the run can still be executing on APS long
+# after this process stopped watching it. The TTL therefore has to sit beyond
+# any plausible WorkItem lifetime -- discarding a correlation early would throw
+# away the only means of cancelling something still billing -- and exists only
+# so the recovered set cannot grow forever across restarts.
+ACTIVE_WORKITEM_TTL_S = float(os.environ.get("BROKER_ACTIVE_WORKITEM_TTL_S", "86400"))
 _sidecar_lines = 0
 
 
@@ -1563,10 +1566,15 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
         outcome = rec.get("reap_outcome")
         cancelled = isinstance(outcome, dict) and bool(outcome.get("cancelled"))
         if live_cancel and cancelled:
-            _drop_active_workitem(rec.get("job_id"),
-                                  expected_workitem_id=rec.get("workitem_id"))
-            if rec.get("job_id"):
-                cancelled_jobs.append(str(rec["job_id"]))
+            job_id = rec.get("job_id")
+            dropped = _drop_active_workitem(
+                job_id, expected_workitem_id=rec.get("workitem_id"))
+            # Acknowledge the JOB only if nothing of it is still in flight. The
+            # drop refuses when a newer run has installed a fresh correlation
+            # while this DELETE was in the air; acknowledging then would tell the
+            # caller to stop retrying while the NEW WorkItem is still billing.
+            if job_id and (dropped is not None or active_workitem_for(job_id) is None):
+                cancelled_jobs.append(str(job_id))
     return JSONResponse(status_code=200, content=with_envelope_fields({
         "ok": True,
         "reaped": [r.get("workitem_id") for r in reaped],

@@ -1043,37 +1043,110 @@ def _row_get(row: Any, key: str) -> Any:
 # end of it and APS bills the abandoned WorkItem to completion. Retried on every
 # later sweep until the broker takes it. Bounded so a long outage cannot grow it
 # without limit; the cap is far above any plausible burst of closed tabs.
-_pending_reaps: Dict[str, Optional[str]] = {}
+_pending_reaps: Dict[str, Dict[str, Any]] = {}
 _pending_reaps_lock = threading.Lock()
 PENDING_REAP_MAX = int(os.environ.get("PENDING_REAP_MAX", "512"))
 PENDING_REAP_BATCH = int(os.environ.get("PENDING_REAP_BATCH", "32"))
-# Short on purpose: a retry runs inside the sweep, and a slow broker must not
-# hold up the rows closing right now. The first attempt keeps the normal budget.
+# Short on purpose: every reap is a small call, and it runs inside the sweep,
+# where a slow broker would hold up the rows closing right now.
 PENDING_REAP_TIMEOUT_S = float(os.environ.get("PENDING_REAP_TIMEOUT_S", "5"))
+# A reap that has failed this many times is not going to start working. Giving
+# up LOUDLY beats retrying forever and starving the jobs behind it.
+PENDING_REAP_MAX_ATTEMPTS = int(os.environ.get("PENDING_REAP_MAX_ATTEMPTS", "20"))
+# The queue is persisted for the same reason the broker persists correlations:
+# the job row is already terminal when the reap fails, so the sweep will never
+# select it again and an app restart would otherwise lose the ONLY remaining
+# signal that a live WorkItem still needs cancelling.
+PENDING_REAPS_PATH = Path(os.environ.get(
+    "PENDING_REAPS_PATH", str(DB_PATH.parent / "pending_reaps.jsonl")))
+
+
+def _persist_pending_reaps_locked() -> None:
+    """Rewrite the queue. CALLER MUST HOLD `_pending_reaps_lock`.
+
+    The whole queue is rewritten rather than appended: it is bounded by
+    PENDING_REAP_MAX, so this stays small, and a single snapshot can never be
+    read back in an order that contradicts memory.
+    """
+    try:
+        PENDING_REAPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PENDING_REAPS_PATH.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for job_id, rec in _pending_reaps.items():
+                fh.write(json.dumps({"job_id": job_id, **rec}) + "\n")
+        tmp.replace(PENDING_REAPS_PATH)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-jobs] could not persist the pending-reap queue: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+
+def _load_pending_reaps() -> Dict[str, Dict[str, Any]]:
+    """Restore the queue left by a previous process."""
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        if not PENDING_REAPS_PATH.exists():
+            return out
+        with PENDING_REAPS_PATH.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                job_id = rec.pop("job_id", None)
+                if job_id:
+                    out[job_id] = {"tenant_id": rec.get("tenant_id"),
+                                   "attempts": int(rec.get("attempts") or 0)}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-jobs] could not restore the pending-reap queue: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+    return out
 
 
 def _remember_pending_reap(job_id: str, tenant_id: Optional[str]) -> None:
     with _pending_reaps_lock:
-        if job_id in _pending_reaps or len(_pending_reaps) < PENDING_REAP_MAX:
-            _pending_reaps[job_id] = tenant_id
+        existing = _pending_reaps.get(job_id)
+        if existing is None and len(_pending_reaps) >= PENDING_REAP_MAX:
+            print(f"[leaf-jobs] pending-reap queue full ({PENDING_REAP_MAX}); "
+                  f"dropping job {job_id} - its APS WorkItem may bill to "
+                  f"completion", file=sys.stderr, flush=True)
             return
-    print(f"[leaf-jobs] pending-reap queue full ({PENDING_REAP_MAX}); dropping "
-          f"job {job_id} — its APS WorkItem may bill to completion",
-          file=sys.stderr, flush=True)
+        attempts = int((existing or {}).get("attempts") or 0) + 1
+        if attempts > PENDING_REAP_MAX_ATTEMPTS:
+            _pending_reaps.pop(job_id, None)
+            _persist_pending_reaps_locked()
+            print(f"[leaf-jobs] giving up on the tab-close reap for job {job_id} "
+                  f"after {PENDING_REAP_MAX_ATTEMPTS} attempts - its APS WorkItem "
+                  f"may bill to completion", file=sys.stderr, flush=True)
+            return
+        # Re-insert at the TAIL so the batch below rotates: an entry that can
+        # never succeed must not sit at the head and starve everything after it.
+        _pending_reaps.pop(job_id, None)
+        _pending_reaps[job_id] = {"tenant_id": tenant_id, "attempts": attempts}
+        _persist_pending_reaps_locked()
+
+
+def _forget_pending_reap(job_id: str) -> None:
+    with _pending_reaps_lock:
+        if _pending_reaps.pop(job_id, None) is not None:
+            _persist_pending_reaps_locked()
+
+
+_pending_reaps.update(_load_pending_reaps())
 
 
 def _retry_pending_reaps() -> None:
     """Re-attempt reaps a previous sweep could not deliver.
 
-    Bounded twice over, because this runs INSIDE the sweep and everything behind
-    it waits: at most PENDING_REAP_BATCH per sweep, and the whole batch is
-    abandoned on the first failure. A broker that is down is down for all of
-    them, and grinding through hundreds of timeouts would stall the reaping of
-    tabs that are closing right now.
+    Bounded three ways, because this runs INSIDE the sweep and everything behind
+    it waits: at most PENDING_REAP_BATCH per sweep, the batch is abandoned on the
+    first unreachable broker (down for one is down for all, and grinding through
+    hundreds of timeouts would stall the tabs closing right now), and each entry
+    rotates to the tail so a permanently stuck job cannot starve the queue.
     """
     with _pending_reaps_lock:
-        pending = list(_pending_reaps.items())[:PENDING_REAP_BATCH]
-    for job_id, tenant_id in pending:
+        batch = [(job_id, rec.get("tenant_id"))
+                 for job_id, rec in list(_pending_reaps.items())[:PENDING_REAP_BATCH]]
+    for job_id, tenant_id in batch:
         if not _cancel_remote_workitem(job_id, tenant_id, _retry=True):
             break
 
@@ -1109,7 +1182,7 @@ def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str],
                 "workitem_id": None,   # broker resolves it from job_id
                 "session_closed": True,
             }],
-            timeout_s=PENDING_REAP_TIMEOUT_S if _retry else None,
+            timeout_s=PENDING_REAP_TIMEOUT_S,
         )
     except Exception as exc:  # noqa: BLE001  (broker down != job not finished)
         _remember_pending_reap(job_id, tenant_id)
@@ -1122,14 +1195,19 @@ def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str],
     # actually succeeded; anything else is still burning money and is worth
     # another sweep. When live reaping is off, no cancel was ever going to
     # happen, so retrying would queue every closed tab forever.
-    if isinstance(result, dict) and result.get("live") and "cancelled_jobs" in result:
+    # Fail CLOSED on anything short of an explicit acknowledgement. A broker that
+    # reports live reaping but names no cancelled_jobs -- an older broker mid
+    # rolling-update, for instance -- has NOT told us the WorkItem stopped, and
+    # treating that as done is how the billing quietly continues. The attempt cap
+    # in _remember_pending_reap is what stops that retrying forever.
+    if isinstance(result, dict) and result.get("live"):
         if job_id not in (result.get("cancelled_jobs") or []):
             _remember_pending_reap(job_id, tenant_id)
             print(f"[leaf-jobs] tab-close reap accepted but job {job_id} was not "
-                  f"cancelled (queued for retry)", file=sys.stderr, flush=True)
+                  f"acknowledged as cancelled (queued for retry)",
+                  file=sys.stderr, flush=True)
             return True
-    with _pending_reaps_lock:
-        _pending_reaps.pop(job_id, None)
+    _forget_pending_reap(job_id)
     return True
 
 

@@ -73,6 +73,8 @@ def clean_registry(monkeypatch, tmp_path):
     write the durable sidecar into the repo."""
     monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH",
                         tmp_path / "active_workitems.jsonl")
+    monkeypatch.setattr(jobs, "PENDING_REAPS_PATH",
+                        tmp_path / "pending_reaps.jsonl")
     with broker._active_workitems_lock:
         broker._active_workitems.clear()
     with jobs._pending_reaps_lock:
@@ -503,6 +505,72 @@ def test_the_retry_batch_is_capped_per_sweep(monkeypatch):
     assert len(attempts) == 3
 
 
+def test_a_live_broker_that_names_no_cancelled_jobs_fails_closed(monkeypatch):
+    """An older broker mid rolling-update reports `live` but has no
+    cancelled_jobs key. It has NOT told us the WorkItem stopped, and treating
+    that as done is how the billing quietly continues."""
+    job_id = _submit()
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.mark_job_closed(job_id) is True
+
+    monkeypatch.setattr(broker_client, "reap_via_broker",
+                        lambda records, **_kw: {"ok": True, "live": True, "count": 1})
+
+    assert jobs._reap_orphans_once() == 1
+    assert job_id in jobs._pending_reaps, "unacknowledged means unfinished"
+
+
+def test_a_stuck_job_rotates_and_cannot_starve_the_queue(monkeypatch):
+    """Taking the first N entries every sweep without rotation lets an
+    unresolvable job sit at the head forever while later jobs are never tried."""
+    monkeypatch.setattr(jobs, "PENDING_REAP_BATCH", 2)
+    for i in range(5):
+        jobs._remember_pending_reap(f"job-{i}", "tenant-reap")
+
+    tried = []
+
+    def _accepted_but_never_cancelled(records, **_kw):
+        tried.append(records[0]["job_id"])
+        return {"ok": True, "live": True, "cancelled_jobs": []}
+
+    monkeypatch.setattr(broker_client, "reap_via_broker", _accepted_but_never_cancelled)
+
+    for _ in range(3):
+        jobs._retry_pending_reaps()
+
+    assert len(set(tried)) > 2, (
+        f"every sweep tried the same head entries: {tried}")
+
+
+def test_a_reap_that_never_succeeds_is_given_up_on_loudly(monkeypatch, capsys):
+    """Retrying forever starves the jobs behind it. Give up, but say so."""
+    monkeypatch.setattr(jobs, "PENDING_REAP_MAX_ATTEMPTS", 3)
+    for _ in range(3):
+        jobs._remember_pending_reap("job-stuck", "tenant-reap")
+    assert jobs._pending_reaps["job-stuck"]["attempts"] == 3, "still trying"
+
+    jobs._remember_pending_reap("job-stuck", "tenant-reap")   # attempt 4 of 3
+
+    assert "job-stuck" not in jobs._pending_reaps
+    assert "giving up on the tab-close reap" in capsys.readouterr().err
+
+
+def test_the_pending_queue_survives_an_app_restart(monkeypatch, tmp_path):
+    """The row is terminal when the reap fails, so the sweep never selects it
+    again: this queue is the only remaining signal that a WorkItem needs
+    cancelling. Losing it on restart loses the cancel."""
+    monkeypatch.setattr(jobs, "PENDING_REAPS_PATH", tmp_path / "pending_reaps.jsonl")
+    jobs._remember_pending_reap("job-persisted", "tenant-reap")
+
+    restored = jobs._load_pending_reaps()
+
+    assert restored["job-persisted"]["tenant_id"] == "tenant-reap"
+    assert restored["job-persisted"]["attempts"] == 1
+
+    jobs._forget_pending_reap("job-persisted")
+    assert jobs._load_pending_reaps() == {}
+
+
 def test_the_pending_reap_queue_is_bounded(monkeypatch, capsys):
     """A long outage must not grow the queue without limit."""
     monkeypatch.setattr(jobs, "PENDING_REAP_MAX", 2)
@@ -698,6 +766,43 @@ def test_a_stale_replayed_correlation_is_aged_out(monkeypatch, tmp_path):
 
     assert "job-old" not in replayed, "an hour-old correlation is certainly finished"
     assert replayed["job-fresh"][0] == "wi-fresh"
+
+
+def test_a_cancel_racing_a_new_run_is_not_acknowledged(live_cancels):
+    """The old WorkItem really was cancelled, but a newer run has already
+    installed a fresh correlation for the same job. Acknowledging the JOB there
+    tells the app to stop retrying while the NEW WorkItem is still billing."""
+    broker._record_active_workitem("job-race", "wi-new", run_token="new-run")
+
+    resp = TestClient(broker.app).post("/broker/reap", json={
+        "records": [{"job_id": "job-race", "workitem_id": "wi-old",
+                     "session_closed": True, "status": "inprogress"}]})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert live_cancels.cancelled == ["wi-old"], "the old WorkItem was cancelled"
+    assert body["cancelled_jobs"] == [], (
+        "the job is NOT settled: wi-new is still in flight")
+    assert broker.active_workitem_for("job-race") == "wi-new"
+
+
+def test_a_plain_successful_cancel_is_acknowledged(live_cancels):
+    """The ordinary case must still acknowledge, or the app retries forever."""
+    broker._record_active_workitem("job-plain", "wi-plain", run_token="r")
+
+    resp = TestClient(broker.app).post("/broker/reap", json={
+        "records": [{"job_id": "job-plain", "session_closed": True,
+                     "status": "inprogress"}]})
+
+    assert resp.json()["cancelled_jobs"] == ["job-plain"]
+    assert broker.active_workitem_for("job-plain") is None
+
+
+def test_the_replay_ttl_outlasts_the_poll_ceiling():
+    """_poll_workitem returns when its 900s ceiling expires and issues no DELETE,
+    so a WorkItem can still be executing long after this process stopped watching
+    it. A TTL at or near that ceiling would discard a live correlation."""
+    assert broker.ACTIVE_WORKITEM_TTL_S >= 86400
 
 
 def test_a_successful_cancel_does_not_evict_a_newer_correlation():
