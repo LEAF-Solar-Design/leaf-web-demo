@@ -71,6 +71,9 @@ Current additive progress:
 - [x] Render the shared controller's real capability families in the unified
   Catalog tab and prove totals, collapse, detail, review, execution, and durable
   restoration on the managed local stack.
+- [x] Prove a real natural-language catalog match from the unified command bar
+  through immutable review, exactly one dispatch, execution result, and durable
+  job truth without creating a Claude session.
 - [ ] Promote protected author stage, independent approval, publish, catalog
   refresh, and use in an authorized environment with live signed identity,
   trusted tenant binding, isolated authoring authority, and R5/R6 rollout.

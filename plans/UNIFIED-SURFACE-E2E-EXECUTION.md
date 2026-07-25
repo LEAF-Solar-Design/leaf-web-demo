@@ -444,6 +444,13 @@ Progress:
   isolated tenant repository, enabled R5 and R6 rollout, authoring authority,
   and independent approval authority. Those controls must be supplied by an
   authorized protected environment. The fixture proof remains contract-only.
+- The managed natural-language gate now sends a real operator request through
+  `/api/nl-prompt`, receives the deterministic `count-by-layer` catalog match,
+  stages immutable review with zero run requests, and submits exactly one job
+  after confirmation. The result renders in the unified execution rail and
+  matches the durable job API. CA-02 and the catalog-run slice of RN-01 are
+  local E2E proven. The receipt records that confident v1 matches do not invoke
+  Claude.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -517,7 +524,7 @@ Observed Wave 0 results:
 - Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
-- Local tier: 10 passed against an isolated real Vite, FastAPI, broker, harness,
+- Local tier: 11 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness, real drawing intake,
   catalog review, explicit confirmation, broker and worker runs, completed
   result rendering, durable job API storage, Jobs-rail recovery after page
@@ -527,11 +534,13 @@ Observed Wave 0 results:
   depth, the scripted conversation approval round trip, checkout conflict,
   expiry, take, and release, the real local Trust lifecycle, real layer
   visibility, resident zoom and Fit, entity picking, selection clearing, and
-  the real grouped capability catalog through durable execution. A separate
-  live-auth guest walk also passes for signed guest upload, extraction, viewer
-  seating, allowed version read, zero dispatch, and denied run. APS, live
-  Claude, Auth0 user sign-in, protected authoring, PostgreSQL, production
-  billing, and conversation-driven product execution claims remain open.
+  the real grouped capability catalog through durable execution. It also proves
+  natural-language catalog classification, review, single dispatch, and result
+  without creating a Claude session. A separate live-auth guest walk also
+  passes for signed guest upload, extraction, viewer seating, allowed version
+  read, zero dispatch, and denied run. APS, live Claude, Auth0 user sign-in,
+  protected authoring, PostgreSQL, production billing, and
+  conversation-driven product execution claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:
