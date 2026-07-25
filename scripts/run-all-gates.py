@@ -563,6 +563,9 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_customization_publish_recovery.py"), 1),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
+        Suite("server-postgres-authority-inventory",
+              "server PostgreSQL authority inventory contract", "pytest",
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 6),
         # --- platform (cwd=repo parent; DB-gated) --- #
         # 199 COLLECTED with a DB configured, measured on this tree 2026-07-25
         # via `cd server && DATABASE_URL=... python -m pytest ../platform/tests
@@ -609,7 +612,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
-                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 69,
+                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 78,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -627,7 +630,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 15),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 16),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #

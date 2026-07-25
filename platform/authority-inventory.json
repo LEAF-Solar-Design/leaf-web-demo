@@ -14,6 +14,13 @@
     "staging": "No current staging task-definition environment receipt exists at this commit.",
     "production": "No current production task-definition environment receipt records these selectors at this commit."
   },
+  "selector_dependencies": [
+    {
+      "when": {"name": "LEAF_UPLOAD_STORE", "value": "postgres"},
+      "requires": {"name": "LEAF_DRAWING_STORE", "value": "postgres"},
+      "reason": "The PostgreSQL upload lifecycle creates and advances drawing manifests and versions, so upload and drawing metadata must share one PostgreSQL authority."
+    }
+  ],
   "authorities": [
     {
       "id": "canonical_project_ledger",
