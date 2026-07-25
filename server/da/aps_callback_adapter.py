@@ -486,6 +486,16 @@ def translate(
                 or type(recovered.get("attempt")) is not int
                 or recovered.get("attempt") != claimed_attempt):
             raise AdapterError("bad_completion_guard")
+        # AND IT MUST ATTEST THE BYTES WE WERE ASKED TO ATTEST. Checking only the
+        # identity was still too weak: a correctly signed receipt for (job-1, 2)
+        # describing output B came back from a translate() call handed output A,
+        # so the caller received a receipt for content it never produced. The
+        # output evidence is the substance of the receipt, not decoration.
+        recovered_output = recovered.get("output")
+        if (type(recovered_output) is not dict
+                or recovered_output.get("sha256") != output_sha256
+                or recovered_output.get("size") != len(attested)):
+            raise AdapterError("bad_completion_guard")
         # And it must be a receipt WE could have signed. An unverifiable body is
         # not a recovery, it is an unsigned claim wearing the envelope type.
         if not _callbacks().verify_signature(outcome.body, outcome.timestamp,

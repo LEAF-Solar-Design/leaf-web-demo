@@ -903,8 +903,17 @@ def test_a_recovered_envelope_must_name_the_identity_we_tried_to_claim():
         body=json.dumps({"job_id": "job-1", "attempt": 2}).encode(),
         timestamp=real.timestamp, nonce=real.nonce, signature="0" * 64)
 
+    # A correctly signed receipt for the RIGHT identity that attests DIFFERENT
+    # bytes. Round 13 found this: identity plus signature was still not enough,
+    # because the output evidence is the substance of the receipt.
+    other_output = adapter.translate(_completion(nonce="nonce-other-bytes"), b"DIFFERENT BYTES",
+                                     job_id="job-1", job_attempt=2, job_workitem_id="wi-1",
+                                     job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                                     reserve_completion=_win)
+
     for bogus, why in ((other, "another job"), (other_attempt, "another attempt"),
-                       (forged, "an unsigned body")):
+                       (forged, "an unsigned body"),
+                       (other_output, "different output bytes")):
         with pytest.raises(adapter.AdapterError) as excinfo:
             adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
                               job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
