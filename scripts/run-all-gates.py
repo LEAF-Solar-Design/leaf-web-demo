@@ -235,7 +235,7 @@ def build_suites() -> List[Suite]:
         Suite("server-job-migration-thread-race", "server tests/test_job_migration_thread_race.py",
               "pytest", SERVER, _py_pytest("tests/test_job_migration_thread_race.py"), 1),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
-              SERVER, _py_pytest("tests/test_canonical_worker.py"), 13),
+              SERVER, _py_pytest("tests/test_canonical_worker.py"), 23),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
               "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 15),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
