@@ -124,6 +124,20 @@ VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9_-]+/drawings/[a-z0-9_-]+/v/\d{8}\
 ANONYMOUS_HOLDER = "anonymous:unnamed-writer"
 
 
+class CheckoutParamError(ValueError):
+    """Bad INPUT to a checkout request: a reserved holder id, or a non-positive
+    TTL. Narrow on purpose.
+
+    Subclasses ValueError so existing callers that map `(KeyError, ValueError)`
+    to 400 keep working unchanged. It exists so the route can catch THIS instead
+    of bare ValueError: `acquire_checkout` also decodes the stored manifest, and
+    a corrupt one raises JSONDecodeError — itself a ValueError — which a broad
+    catch would report to the caller as "your request was malformed" when the
+    truth is that the stored object is damaged and nothing the caller sends will
+    help.
+    """
+
+
 class CheckoutDenied(Exception):
     """A write was attempted by someone who is not the single-writer lock holder.
 
@@ -1026,10 +1040,29 @@ def authorize_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
     before it reaches the commit: run_write_live submits an APS WorkItem, waits
     for it, and only then publishes. Refusing an unauthorized writer here means
     it is refused BEFORE the engine bill, instead of after.
+
+    It must therefore refuse everything the commit would refuse, or the promise is
+    empty. Under the POSTGRES authority the commit ALSO requires a live checkout
+    (`_pg_put`), which the shared legacy predicate does not — it treats no lock
+    and an expired lock as free. Pre-flighting only the holder rule there let an
+    unlocked live write pass here, buy an APS WorkItem, and fail at publish: the
+    exact bill this function exists to avoid. So that requirement is mirrored
+    below, raising the same ValueError the commit raises, and the two authorities
+    keep their genuinely different rules rather than being forced to agree.
     """
+    tid = sanitize_id(tenant_id)
+    did = sanitize_id(drawing_id)
+    if authority_mode() == "postgres":
+        # Mirrors _pg_put's precondition, and like it applies whether or not the
+        # caller named itself.
+        m = load_manifest(backend, tid, did)
+        if not _is_active(m.get("checkout"), datetime.now(timezone.utc)):
+            raise ValueError("an active checkout is required to publish a version")
+        _authorize_checkout_view(m.get("checkout"), holder, fence)
+        return
     if holder is None:
         return
-    m = load_manifest(backend, sanitize_id(tenant_id), sanitize_id(drawing_id))
+    m = load_manifest(backend, tid, did)
     _authorize_checkout_view(m.get("checkout"), holder, fence)
 
 
@@ -1325,13 +1358,13 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
     back into a fail-open one. Nothing legitimate asks for that id.
     """
     if str(holder) == ANONYMOUS_HOLDER:
-        raise ValueError(
+        raise CheckoutParamError(
             f"{ANONYMOUS_HOLDER!r} is reserved and cannot hold a checkout")
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
     if authority_mode() == "postgres":
         if float(ttl_s) <= 0:
-            raise ValueError("checkout ttl must be positive")
+            raise CheckoutParamError("checkout ttl must be positive")
         db = _db()
 
         def operation(conn):

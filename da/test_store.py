@@ -413,6 +413,27 @@ def test_anonymous_writer_refused_against_a_PERSISTED_sentinel_lock(tmp_path):
     assert [v["v"] for v in m2["versions"]] == [1]
 
 
+def test_reserved_holder_and_bad_ttl_raise_the_NARROW_param_error(tmp_path):
+    """sol-critic r3 MINOR. The route maps this to 400, so it must not be a bare
+    ValueError: acquire_checkout also decodes the stored manifest, and a corrupt
+    one raises JSONDecodeError (itself a ValueError). A broad catch would blame
+    the caller for damaged storage. CheckoutParamError still subclasses
+    ValueError, so existing (KeyError, ValueError) callers are unaffected."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    with pytest.raises(store.CheckoutParamError):
+        store.acquire_checkout(be, "t", did, holder=store.ANONYMOUS_HOLDER, ttl_s=300)
+    assert issubclass(store.CheckoutParamError, ValueError)
+
+    # a CORRUPT manifest is a storage fault, NOT a checkout-parameter fault
+    be.put(store.manifest_key("t", did), b"{not json")
+    with pytest.raises(ValueError) as caught:
+        store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300)
+    assert not isinstance(caught.value, store.CheckoutParamError)
+
+
 def test_anonymous_writer_still_publishes_on_an_unlocked_drawing(tmp_path):
     """Fail-closed must not become fail-shut: an unnamed write to a drawing
     nobody has locked is the ordinary case and must keep working."""

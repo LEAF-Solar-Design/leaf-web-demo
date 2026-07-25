@@ -259,7 +259,7 @@ def build_suites() -> List[Suite]:
         # drawing-authority tests had been running only when someone ran them by hand.
         Suite("server-drawing-authority-postgres",
               "server tests/test_drawing_upload_authority_postgres.py", "pytest",
-              SERVER, _py_pytest("tests/test_drawing_upload_authority_postgres.py"), 19),
+              SERVER, _py_pytest("tests/test_drawing_upload_authority_postgres.py"), 20),
         Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_entitlements.py"), 26),
         Suite("server-policy-unavailable-paths", "server tests/test_policy_unavailable_paths.py",
@@ -328,7 +328,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_da_callback.py"), 7),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
-              _py_pytest("test_store.py"), 25),
+              _py_pytest("test_store.py"), 26),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
         # --- tenant customization control plane (one process per file) --- #

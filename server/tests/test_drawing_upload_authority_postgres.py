@@ -959,6 +959,51 @@ def test_pg_write_refused_for_a_session_that_does_not_hold_the_checkout(
 
 
 @requires_database
+def test_pg_preflight_refuses_everything_the_commit_would_refuse(
+    postgres_authority, tmp_path,
+):
+    """sol-critic r3 MAJOR. authorize_checkout is the pre-flight run_write_live
+    uses BEFORE submitting a paid APS WorkItem, so it has to refuse everything
+    the commit refuses or the saving is imaginary. Under postgres the commit also
+    requires a LIVE checkout (_pg_put), which the shared legacy predicate does
+    not — it treats no lock and an expired lock as free. Pre-flighting only the
+    holder rule let an unlocked live write pass here, buy the WorkItem, and fail
+    at publish: precisely the bill the pre-flight exists to avoid."""
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    backend = store.InMemoryBackend()
+    initial = tmp_path / "initial.dwg"
+    initial.write_bytes(b"v1")
+    store.ingest_drawing(backend, tenant, str(initial), drawing_id=drawing)
+
+    # (a) NO lock: commit raises ValueError, so the pre-flight must too
+    with pytest.raises(ValueError, match="active checkout is required"):
+        store.authorize_checkout(backend, tenant, drawing, "sess-a")
+
+    # (b) EXPIRED lock: same answer, not "free" as the legacy rule would say
+    assert store.acquire_checkout(backend, tenant, drawing, "sess-a", 600)
+    with postgres_authority.connect() as conn:
+        conn.execute(
+            """
+            UPDATE drawing_store_manifests
+            SET checkout_expires_at = NOW() - INTERVAL '1 second'
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            """,
+            {"tenant": tenant, "drawing": drawing},
+        )
+    with pytest.raises(ValueError, match="active checkout is required"):
+        store.authorize_checkout(backend, tenant, drawing, "sess-a")
+
+    # (c) LIVE lock: the holder passes, a non-holder is denied — same as commit
+    assert store.acquire_checkout(backend, tenant, drawing, "sess-a", 600)
+    store.authorize_checkout(backend, tenant, drawing, "sess-a")
+    with pytest.raises(store.CheckoutDenied):
+        store.authorize_checkout(backend, tenant, drawing, "sess-b")
+    with pytest.raises(store.CheckoutDenied, match="names no session"):
+        store.authorize_checkout(backend, tenant, drawing, store.ANONYMOUS_HOLDER)
+
+
+@requires_database
 def test_pg_write_refused_against_a_persisted_anonymous_sentinel_lock(
     postgres_authority, tmp_path,
 ):
