@@ -37,12 +37,14 @@ def test_required_config_manifests_fail_closed_for_postgres_authority():
 
     assert {
         "LEAF_BLOB_STORE",
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE",
         "LEAF_PLATFORM_POSTGRES_REQUIRED",
         "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED",
     }.issubset(app_environment)
     assert {
         "LEAF_BLOB_STORE",
         "LEAF_BROKER_STORE",
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE",
     }.issubset(broker_environment)
     assert "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED" not in broker_environment
 

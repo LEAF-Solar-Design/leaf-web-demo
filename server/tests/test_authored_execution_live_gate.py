@@ -22,6 +22,8 @@ def _safe_production(monkeypatch):
     monkeypatch.setenv("LEAF_UPLOAD_STORE", "postgres")
     monkeypatch.setenv("LEAF_BLOB_STORE", "filesystem")
     monkeypatch.setenv("DATABASE_URL", "postgresql://safe.example/test")
+    monkeypatch.setenv(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", "/data/state/drawing-mutations")
 
 
 def _package(path, name: str) -> dict:
