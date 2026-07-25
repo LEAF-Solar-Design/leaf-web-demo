@@ -57,6 +57,8 @@ Current additive progress:
   health refresh actions in the unified scene.
 - [x] Enable resident viewer pan and zoom, wire Fit, and expose recoverable WebGL
   fallback without remounting the healthy canvas.
+- [x] Move the guided cat walkthrough onto `/try?demo=tour` and record the whole
+  request, approval, version, history, and trust sequence in one scene.
 - [ ] Reconcile remaining visible and standards gaps against the capability ledger.
 - [ ] Run the expanded aggregate fixture suite, local real-stack suite, and any
   authorized staging proof.

@@ -33,6 +33,8 @@ export default function DemoTour({
   onExit,
   landed = false,
   busy = false,
+  bannerTitle = 'Guided demo: sample rooftop',
+  bannerSubtitle = 'Real drawing, real tools. Every number below is computed live.',
 }) {
   const [uncontrolled, setUncontrolled] = useState(0)
   const index = typeof controlledIndex === 'number' ? controlledIndex : uncontrolled
@@ -191,10 +193,8 @@ export default function DemoTour({
         : <div className="tour-dim" />}
 
       <div className="tour-banner">
-        <span className="tour-banner-title">Guided demo — sample rooftop</span>
-        <span className="tour-banner-sub">
-          Real drawing, real tools — every number below is computed live.
-        </span>
+        <span className="tour-banner-title">{bannerTitle}</span>
+        <span className="tour-banner-sub">{bannerSubtitle}</span>
         <button type="button" className="chip-neutral tour-banner-exit" onClick={onExit}>
           Exit — explore freely
         </button>

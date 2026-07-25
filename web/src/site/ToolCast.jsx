@@ -56,11 +56,61 @@ import {
 import { navigate } from './router.js'
 import { authConfigured, isSignedIn, login } from '../auth.js'
 import { classifyAgentError } from '../converse.js'
+import DemoTour from '../demo/DemoTour.jsx'
+import { shouldStartTour } from '../demo/tourEntry.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
 const DRAWING_ID = 'cat-panels'
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
 const workspaceServices = { createOrg, listProjects, createProject, openProject }
+const UNIFIED_TOUR_STEPS = [
+  {
+    id: 'welcome',
+    title: 'One operator scene',
+    body: 'The drawing, request, approval, job, result, version history, and trust state stay together here.',
+    target: '.stage-root',
+  },
+  {
+    id: 'viewer',
+    title: 'The resident drawing',
+    body: 'This canvas stays mounted while the operator moves between tools and results. Pan, zoom, select, and Fit all act on this drawing.',
+    target: '.stage-viewer',
+  },
+  {
+    id: 'request',
+    title: 'Ask Claude for the cat edit',
+    body: 'The real command bar classifies this request, sends the same text and route hint to Claude, and waits for a proposal.',
+    target: '.tc-bar',
+    prompt: CAT_REQUEST,
+    action: 'version',
+  },
+  {
+    id: 'approval',
+    title: 'Approval owns the write boundary',
+    body: 'Review the proposed drawing.write action, then select Approve. The tour will wait for the new version.',
+    target: '.converse-confirm, .tc-operator-rail',
+    action: 'version',
+  },
+  {
+    id: 'versions',
+    title: 'The cat is a new version',
+    body: 'The result, parent version, preview, Undo, and Redo remain available without leaving the scene.',
+    target: '.tc-rail-r',
+  },
+  {
+    id: 'trust',
+    title: 'Operational trust stays visible',
+    body: 'Backend health, usage, plan gates, platform identity, and the Claude grant stay separate and refreshable.',
+    target: '.tc-rail-r',
+  },
+  {
+    id: 'exit',
+    title: 'Continue in the same scene',
+    body: 'Exit the walkthrough and keep working with the cat version, job receipt, and complete operator surface still in place.',
+    target: null,
+    action: 'exit',
+  },
+]
 
 function agentBannerFor(error) {
   const kind = classifyAgentError(error)
@@ -149,7 +199,10 @@ export default function ToolCast({
   const [uploadDragActive, setUploadDragActive] = useState(false)
   const [opsOpen, setOpsOpen] = useState(() => new URLSearchParams(window.location.search).get('ops') === '1')
   const [quotaAt, setQuotaAt] = useState(0)
+  const [tourOn, setTourOn] = useState(() => shouldStartTour(window.location.search))
+  const [tourIndex, setTourIndex] = useState(0)
   const toastSeqRef = useRef(0)
+  const tourSeqRef = useRef(0)
   const catalogDecisionRef = useRef(null)
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
@@ -642,8 +695,13 @@ export default function ToolCast({
     return () => window.removeEventListener('keydown', dismissProposalOnEscape, true)
   }, [catalog.actions, route])
 
-  const runRequest = useCallback(async () => {
-    const text = prompt.trim()
+  const changePrompt = useCallback((value) => {
+    setPrompt(value)
+    catalog.actions.setPrompt(value)
+  }, [catalog.actions])
+
+  const dispatchRequest = useCallback(async (override) => {
+    const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || busy || jobRunning || routing) return
     setError(null)
     setPhase('starting')
@@ -651,12 +709,40 @@ export default function ToolCast({
     const decision = await catalog.actions.dispatch(text)
     if (decision) setPhase('proposal')
     else setPhase('failed')
+    return decision
   }, [busy, catalog.actions, jobRunning, prompt, routing])
 
-  const changePrompt = useCallback((value) => {
-    setPrompt(value)
-    catalog.actions.setPrompt(value)
-  }, [catalog.actions])
+  const runRequest = useCallback(() => dispatchRequest(), [dispatchRequest])
+
+  const runTourPrompt = useCallback(async (text) => {
+    const seq = ++tourSeqRef.current
+    changePrompt('')
+    for (let index = 16; index < text.length + 16; index += 16) {
+      if (tourSeqRef.current !== seq) return
+      changePrompt(text.slice(0, Math.min(index, text.length)))
+      await new Promise((resolve) => setTimeout(resolve, 55))
+    }
+    if (tourSeqRef.current === seq) await dispatchRequest(text)
+  }, [changePrompt, dispatchRequest])
+
+  const moveTour = useCallback((next) => {
+    setTourIndex(next)
+    const step = UNIFIED_TOUR_STEPS[next]
+    if (step?.id === 'approval') setLeftView('operator')
+    if (step?.id === 'versions') {
+      setRightView('versions')
+      drawing.actions.loadHistory()
+    }
+    if (step?.id === 'trust') {
+      setRightView('trust')
+      platform.actions.refreshAll()
+    }
+  }, [drawing.actions, platform.actions])
+
+  const exitTour = useCallback(() => {
+    tourSeqRef.current += 1
+    setTourOn(false)
+  }, [])
 
   const undo = useCallback(async () => {
     if (busy || jobRunning || !canUndo) return
@@ -700,6 +786,9 @@ export default function ToolCast({
         </span>
         <span className="tc-version" data-testid="version-head">Version {version ?? 'pending'}</span>
         <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
+        {!tourOn && shouldStartTour(window.location.search) && (
+          <button type="button" className="tc-back" onClick={() => { setTourIndex(0); setTourOn(true) }}>Restart walk</button>
+        )}
         <span className="key">Esc</span>
       </div>
 
@@ -1086,6 +1175,23 @@ export default function ToolCast({
         <div className="drawer-layer tc-ops-layer">
           <OpsDrawer onDismiss={() => setOpsOpen(false)} />
         </div>
+      )}
+      {tourOn && (
+        <DemoTour
+          steps={UNIFIED_TOUR_STEPS}
+          index={tourIndex}
+          onIndexChange={moveTour}
+          onCannedPrompt={runTourPrompt}
+          onExit={exitTour}
+          landed={UNIFIED_TOUR_STEPS[tourIndex]?.id === 'request'
+            ? phase === 'proposal'
+            : UNIFIED_TOUR_STEPS[tourIndex]?.id === 'approval'
+              ? phase === 'complete'
+              : true}
+          busy={routing || busy || jobRunning}
+          bannerTitle="Leaf operator walkthrough"
+          bannerSubtitle="One scene for request, approval, job, drawing, version, and trust."
+        />
       )}
     </>
   )

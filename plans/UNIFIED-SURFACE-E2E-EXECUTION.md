@@ -348,6 +348,11 @@ Progress:
   same canvas node when Fit restores drawing bounds. WebGL loss now leaves a 2D
   drawing visible with an operator-facing Retry action. Two browser contracts
   prove geometry restoration, canvas identity, fallback visibility, and retry.
+- `/try?demo=tour` now opens a seven-step walkthrough on the unified scene
+  instead of redirecting into the legacy console. It types the real cat request,
+  routes before Claude, waits for explicit write approval and version 2, then
+  opens version history and trust before exiting in place. The automated walk
+  passes with a production Playwright video and a persistent Restart action.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
   the remaining accessibility ladder, and full local-stack proof remain open.
 
