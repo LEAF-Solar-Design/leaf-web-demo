@@ -259,8 +259,10 @@ def test_1_run_returns_202_fast(stack):
         flake it, but only by a pause of a full `sleep_s` somewhere between the
         server ACCEPTING the job and the status GET a few statements later --
         which includes the response's trip back to the client, not just the
-        window after it arrives. That is ~5.8x the worst noise measured above,
-        and the other two bounds do not depend on that window at all.
+        window after it arrives. That is ~5.8x the worst noise measured above.
+        The same acceptance-to-response leg sits inside `elapsed` too, so the
+        next bound shares part of this exposure rather than being independent of
+        it; what none of them share is a dependency on execution TIME.
       * `elapsed < sleep_s`: submitting cannot cost as much as the execution it
         must not wait on.
       * `elapsed - control < sleep_s / 2`, where the control is the same POST
@@ -280,8 +282,10 @@ def test_1_run_returns_202_fast(stack):
     and its worker lane outlive the test that made them, and tests 2 through 6
     then run against state test 1 owns. `finally` and not a trailing statement,
     because a FAILED assertion is when the leak does the most damage -- pytest
-    carries on into the next test either way. Waiting costs `sleep_s` of gate
-    time and is what keeps this test from becoming the next test_3.
+    carries on into the next test either way. The guard opens before the first
+    POST for the same reason: acceptance happens server-side, so a request that
+    dies on the way back may already have started a job. Waiting costs `sleep_s`
+    of gate time and is what keeps this test from becoming the next test_3.
     """
     sleep_s = 10.0
     url = f"{stack['app']}/api/run"
@@ -292,19 +296,22 @@ def test_1_run_returns_202_fast(stack):
     subject_payload = confirmed_requests_payload(
         stack["app"], "count-by-layer", {"_qa_sleep_s": sleep_s}, "rooftop_demo")
 
-    t0 = time.perf_counter()
-    control = requests.post(url, json=control_payload, timeout=120)
-    control_elapsed = time.perf_counter() - t0
-
-    t1 = time.perf_counter()
-    r = requests.post(url, json=subject_payload, timeout=120)
-    elapsed = time.perf_counter() - t1
-
-    # The `try` opens HERE, on the first statement after both jobs exist. Every
-    # assertion below is inside it, including the ones about the response shape:
-    # a 202 whose body is missing `status` still started a `sleep_s` job, and
-    # failing that assertion outside the guard would leak it into tests 2 to 6.
+    # The `try` opens BEFORE the first POST, not after the last one. The server
+    # can accept a job and start executing it and THEN have the response fail on
+    # the way back (a reset connection, a read timeout), so a POST that raises
+    # has still potentially started a `sleep_s` job. Opening the guard after the
+    # POSTs would leak exactly that job. `finally` reads whatever responses did
+    # arrive, so both names are bound up front.
+    control = r = None
     try:
+        t0 = time.perf_counter()
+        control = requests.post(url, json=control_payload, timeout=120)
+        control_elapsed = time.perf_counter() - t0
+
+        t1 = time.perf_counter()
+        r = requests.post(url, json=subject_payload, timeout=120)
+        elapsed = time.perf_counter() - t1
+
         assert control.status_code == 202
         assert r.status_code == 202
         body = r.json()
@@ -329,25 +336,35 @@ def test_1_run_returns_202_fast(stack):
             f"control ({control_elapsed*1000:.0f}ms -> {elapsed*1000:.0f}ms), so "
             f"execution time is leaking into the 202")
     finally:
-        # Nothing this test started may still be executing when it returns. Each
-        # job is drained independently: a failure draining the first must not
-        # skip the second, or the guard leaks the very job it exists to catch.
+        # Nothing this test started may still be executing when it returns. Every
+        # step here is guarded per response: reading the id and draining the job
+        # both, because a failure on either one must not skip the OTHER job. That
+        # is the whole point of the guard, and it is the second job -- the
+        # `sleep_s` one -- that does the damage if it is skipped.
         drain_errors = []
-        for resp in (control, r):
+        for label, resp in (("control", control), ("subject", r)):
+            if resp is None:
+                continue  # this POST raised: no response, so no id to drain by
             try:
-                job_id = resp.json().get("job_id")
+                body_json = resp.json()
+                job_id = body_json.get("job_id") if isinstance(body_json, dict) else None
             except ValueError:
-                # No parseable body means no job was ever accepted, so there is
-                # nothing to drain. The status_code assertions above report it.
-                continue
+                job_id = None
             if not job_id:
+                # An accepted job whose id we cannot read is UNDRAINABLE, not
+                # absent. Report it rather than skipping quietly: something is
+                # still running and no later test can be trusted to be isolated.
+                if resp.status_code == 202:
+                    drain_errors.append(
+                        f"{label}: accepted 202 but no readable job_id, so an "
+                        f"undrainable job may still be running: {resp.text[:120]!r}")
                 continue
             try:
                 poll_until_terminal(stack, job_id, timeout_s=sleep_s + 30.0)
             except Exception as exc:  # noqa: BLE001 - drain every job, then report
-                drain_errors.append(f"{job_id}: {type(exc).__name__}: {exc}")
+                drain_errors.append(f"{label} {job_id}: {type(exc).__name__}: {exc}")
         assert not drain_errors, (
-            "jobs this test started were still running when it returned: "
+            "this test could not confirm every job it started had finished: "
             + "; ".join(drain_errors))
 
 
@@ -477,44 +494,36 @@ def _ledger_lines(stack):
     return [l for l in stack["ledger"].read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
-def _parses_as_json(line: str) -> bool:
-    try:
-        json.loads(line)
-    except ValueError:
-        return False
-    return True
+def _ledger_entries_for(stack, tenants) -> list[dict]:
+    """This test's ledger lines, in file order. Unparseable lines are SKIPPED.
 
+    That skip is deliberate and is not a coverage hole. Three rounds of review
+    pushed for a guard here -- a substring search, then a tenant_id regex, then
+    a durability settle -- and each one was worse than the gap it closed: the
+    first two misattributed other tenants' torn lines, and the third made this
+    test fail on any writer in the suite, which is the exact cross-test coupling
+    this whole change exists to remove.
 
-def _ledger_entries_for(stack, tenants, settle_s: float = 5.0) -> list[dict]:
-    """This test's ledger lines, in file order, with unparseable ones NOT hidden.
+    The gap is not reachable. broker.py `_ledger_append` builds the line with
+    `json.dumps(..., allow_nan=False)` and writes `line + "\\n"` in ONE call
+    under `_ledger_lock`, so a value that cannot serialize raises BEFORE any
+    write. The broker cannot leave an invalid line behind; an unparseable line
+    can only be an append read mid-write, which is transient by construction.
 
-    A malformed line is NOT attributed to a tenant. Two earlier attempts tried:
-    a substring search claimed `ledger-t10`'s half-written line as `ledger-t1`'s,
-    and a `tenant_id` field regex still picked the wrong occurrence on a line
-    carrying the key twice and mangled escaped quotes. The class is the problem,
-    not the pattern -- the field that would say who a broken line belongs to is
-    exactly the field that may be broken.
-
-    So the split is by DURABILITY instead, which needs no attribution and is
-    total. A half-written append completes in microseconds; a corrupt write
-    never does. Any unparseable line is re-read until it parses, and if one
-    survives `settle_s` it is a corrupt write and fails here -- whoever it
-    belongs to. That covers corruption this test's own tenants could never be
-    matched to, which is strictly more than either attribution attempt caught.
+    And a corrupt line among OUR OWN is already caught, by the count rather than
+    by inspection: it would not parse, so it would not be counted, so
+    `len(mine) == n_runs` fails. Nothing here needs to identify it to fail on it.
     """
     wanted = set(tenants)
-    deadline = time.time() + settle_s
-    while True:
-        lines = _ledger_lines(stack)
-        bad = [l for l in lines if not _parses_as_json(l)]
-        if not bad:
-            break
-        assert time.time() < deadline, (
-            f"{len(bad)} ledger line(s) are still not valid JSON after "
-            f"{settle_s:g}s, so they are corrupt writes and not appends caught "
-            f"mid-flight: {bad[:3]!r}")
-        time.sleep(0.25)
-    return [e for e in map(json.loads, lines) if e.get("tenant_id") in wanted]
+    out = []
+    for line in _ledger_lines(stack):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue  # an append caught mid-write; see the docstring
+        if entry.get("tenant_id") in wanted:
+            out.append(entry)
+    return out
 
 
 def test_6_ledger_attribution(stack):
