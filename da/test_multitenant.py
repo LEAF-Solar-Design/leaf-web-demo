@@ -18,10 +18,12 @@ A module-level no-network guard makes any accidental live APS call fail loudly,
 satisfying the acceptance clause 'no live APS call by importing/exercising this
 suite'.
 """
+import contextlib
 import importlib.util
 import json
 import os
 import sys
+import threading
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -136,6 +138,217 @@ def test_b_queue_ceiling_and_round_robin_fairness():
 
 
 # --------------------------------------------------------------------------- #
+# (b2) the LIVE gate: fair_admit() driven by independent caller threads.
+#
+# test_b above proves FairQueue's BATCH model (all jobs enqueued up front, drained
+# by its own worker pool). The synchronous /api/run submit path cannot use that:
+# each request arrives on its OWN thread and must block in place. These tests
+# drive queue.fair_admit — the entry point da/client.submit_workitem actually
+# calls — from real threads, and assert the same two properties.
+# --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def _ceiling(n: int):
+    """Set APS_MAX_CONCURRENCY for the block (the gate reads it at call time)."""
+    prev = os.environ.get("APS_MAX_CONCURRENCY")
+    os.environ["APS_MAX_CONCURRENCY"] = str(n)
+    try:
+        yield n
+    finally:
+        if prev is None:
+            os.environ.pop("APS_MAX_CONCURRENCY", None)
+        else:
+            os.environ["APS_MAX_CONCURRENCY"] = prev
+
+
+def test_b2_fair_admit_threads_ceiling_and_round_robin_fairness():
+    tenants = ["t0", "t1", "t2"]
+    rounds = 2
+    admissions = []                       # tenant_ids in the order the gate ADMITTED them
+    state = {"live": 0, "peak": 0}
+    lock = threading.Lock()
+    errors = []
+
+    def worker(t):
+        try:
+            with leaf_queue.fair_admit(t, timeout=30):
+                with lock:
+                    admissions.append(t)
+                    state["live"] += 1
+                    state["peak"] = max(state["peak"], state["live"])
+                time.sleep(0.01)          # real wall-clock, so overlap would show up
+                with lock:                # decrement BEFORE releasing the slot, so a
+                    state["live"] -= 1    # successor can never double-count with us
+        except BaseException as exc:      # noqa: BLE001
+            errors.append(f"{t}: {type(exc).__name__}: {exc}")
+
+    with _ceiling(1):
+        # Hold the only slot so EVERY worker has registered before dispatch starts.
+        # Without this the first thread scheduled would win slots the others have
+        # not asked for yet — not a fairness violation, just a racy test.
+        with leaf_queue.fair_admit("holder", timeout=30):
+            threads = [threading.Thread(target=worker, args=(t,), daemon=True,
+                                        name=f"fairadmit-{t}-{r}")
+                       for r in range(rounds) for t in tenants]
+            for th in threads:
+                th.start()
+            deadline = time.time() + 30
+            while leaf_queue.fair_pending() < len(threads) and time.time() < deadline:
+                time.sleep(0.005)
+            assert leaf_queue.fair_pending() == len(threads), (
+                f"only {leaf_queue.fair_pending()}/{len(threads)} tickets registered")
+        # holder released -> the fully populated ring drains round-robin
+        for th in threads:
+            th.join(timeout=30)
+
+    assert not errors, errors
+    assert len(admissions) == rounds * len(tenants) == 6, admissions
+
+    # (a) ceiling: never more than APS_MAX_CONCURRENCY threads inside the gate
+    assert state["peak"] == 1, f"peak concurrent holders {state['peak']} > ceiling 1"
+
+    # (b) round-robin fairness: the first 3 admissions are one PER TENANT, i.e. no
+    #     tenant's 2nd admission was granted before every other waiting tenant's 1st.
+    first_round = admissions[:len(tenants)]
+    second_round = admissions[len(tenants):]
+    assert sorted(first_round) == tenants, f"first 3 not one-per-tenant: {first_round}"
+    assert sorted(second_round) == tenants, f"a tenant jumped the queue: {admissions}"
+    assert leaf_queue.fair_pending() == 0
+
+
+def test_b2_fair_admit_ceiling_admits_exactly_max_concurrency():
+    """Ceiling > 1: the gate admits EXACTLY APS_MAX_CONCURRENCY at a time.
+
+    The in-gate barrier deadlocks (and fails) if the gate under-admits, and the
+    peak counter fails if it over-admits — so this pins the ceiling from both sides.
+    """
+    ceiling = 3
+    tenants = ["a", "b", "c"]
+    per_tenant = 4                        # 12 threads == exactly 4 full trios
+    state = {"live": 0, "peak": 0}
+    lock = threading.Lock()
+    errors = []
+
+    with _ceiling(ceiling):
+        assert leaf_queue.max_concurrency() == ceiling
+        barrier = threading.Barrier(ceiling)
+
+        def worker(t):
+            try:
+                with leaf_queue.fair_admit(t, timeout=30):
+                    with lock:
+                        state["live"] += 1
+                        state["peak"] = max(state["peak"], state["live"])
+                    barrier.wait(timeout=20)
+                    with lock:
+                        state["live"] -= 1
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(f"{t}: {type(exc).__name__}: {exc}")
+
+        threads = [threading.Thread(target=worker, args=(t,), daemon=True)
+                   for _ in range(per_tenant) for t in tenants]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=60)
+
+    assert not errors, errors
+    assert state["peak"] <= ceiling, f"over-admitted: peak {state['peak']} > {ceiling}"
+    assert state["peak"] == ceiling, f"under-admitted: peak {state['peak']} < {ceiling}"
+    assert leaf_queue.fair_pending() == 0
+
+
+def test_b2_fair_admit_timeout_raises_queue_full_without_leaking_a_ticket():
+    with _ceiling(1):
+        with leaf_queue.fair_admit("hog", timeout=30):
+            try:
+                with leaf_queue.fair_admit("waiter", timeout=0.05):
+                    raise AssertionError("waiter was admitted while the ceiling was full")
+            except leaf_queue.QueueFull:
+                pass
+            assert leaf_queue.fair_pending() == 0, "timed-out ticket left in the queue"
+        # the slot the hog held is back: the gate is immediately usable again
+        with leaf_queue.fair_admit("waiter", timeout=30):
+            pass
+    assert leaf_queue.fair_pending() == 0
+
+
+def test_b2_legacy_admit_release_wakes_a_waiting_fair_ticket():
+    """A slot freed by the LEGACY admit() must wake a waiting fair_admit ticket.
+
+    Both entry points draw from one semaphore, but a fair ticket only wakes when a
+    dispatcher sets its Event. admit() used to release without dispatching, so a
+    legacy holder handed back the last slot and the fair caller sat there: forever
+    with no timeout, or QueueFull against a completely idle ceiling. That is the
+    backward compatibility admit() exists to provide, so it gets a test.
+    """
+    outcome = {}
+
+    def fair_caller():
+        try:
+            with leaf_queue.fair_admit("tenant-b", timeout=10):
+                outcome["admitted"] = True
+        except leaf_queue.QueueFull:
+            outcome["queue_full"] = True
+
+    with _ceiling(1):
+        with leaf_queue.admit("tenant-a"):          # legacy holder takes the slot
+            th = threading.Thread(target=fair_caller, daemon=True)
+            th.start()
+            deadline = time.time() + 10
+            while leaf_queue.fair_pending() < 1 and time.time() < deadline:
+                time.sleep(0.005)
+            assert leaf_queue.fair_pending() == 1, "fair ticket never registered"
+            assert not outcome, f"admitted while the ceiling was full: {outcome}"
+        # legacy holder released -> the fair ticket must be dispatched
+        th.join(timeout=10)
+
+    assert outcome.get("admitted") is True, (
+        f"fair ticket was not woken by admit()'s release: {outcome or 'still blocked'}")
+    assert "queue_full" not in outcome
+    assert leaf_queue.fair_pending() == 0
+
+
+def test_b2_live_submit_path_is_gated_by_fair_admit():
+    """da/client.submit_workitem's LIVE path goes through queue.fair_admit.
+
+    Proven behaviorally against the module client actually loaded: the spy sees
+    the tenant_id, and the network guard fires INSIDE the gate (so the gate wraps
+    the real POST). dry_run must return before ever reaching it.
+    """
+    q = client._leaf_queue()
+    real_fair_admit = q.fair_admit
+    seen = []
+
+    @contextlib.contextmanager
+    def spy(tenant_id=None, timeout=None):
+        seen.append(tenant_id)
+        with real_fair_admit(tenant_id, timeout):
+            yield
+
+    q.fair_admit = spy
+    try:
+        # dry_run returns BEFORE the gate
+        out = client.submit_workitem("act.id+prod", {}, dry_run=True, tenant_id="t-dry")
+        assert out["_dry_run"] is True
+        assert seen == [], f"dry_run reached the gate: {seen}"
+
+        # the LIVE path enters the gate, then hits the no-network guard inside it
+        try:
+            client.submit_workitem("act.id+prod", {}, dry_run=False, poll=False,
+                                   tenant_id="t-live")
+        except AssertionError as exc:
+            assert "real network/APS call" in str(exc), exc
+        else:
+            raise AssertionError("live submit did not reach the network guard")
+        assert seen == ["t-live"], seen
+    finally:
+        q.fair_admit = real_fair_admit
+
+    # the slot was released even though the submit raised inside the gate
+    assert q.fair_pending() == 0
+
+
+# --------------------------------------------------------------------------- #
 # (c) usage cap: 3rd run over a $0.02 cap rejected pre-flight; other tenant ok
 # --------------------------------------------------------------------------- #
 def test_c_usage_cap_rejects_third_run_preflight():
@@ -233,6 +446,11 @@ def _run_all() -> int:
     tests = [
         ("a_key_isolation", test_a_tenant_key_isolation_disjoint_prefixes),
         ("b_queue_fair_ceiling", test_b_queue_ceiling_and_round_robin_fairness),
+        ("b2_fair_admit_threads", test_b2_fair_admit_threads_ceiling_and_round_robin_fairness),
+        ("b2_fair_admit_ceiling_n", test_b2_fair_admit_ceiling_admits_exactly_max_concurrency),
+        ("b2_fair_admit_timeout", test_b2_fair_admit_timeout_raises_queue_full_without_leaking_a_ticket),
+        ("b2_legacy_admit_wakes_fair", test_b2_legacy_admit_release_wakes_a_waiting_fair_ticket),
+        ("b2_live_submit_gated", test_b2_live_submit_path_is_gated_by_fair_admit),
         ("c_usage_cap", test_c_usage_cap_rejects_third_run_preflight),
         ("c_broker_ledger_attribution", test_c_broker_ledger_is_authoritative_attribution),
         ("d_reaper", test_d_reaper_cancels_only_orphans),

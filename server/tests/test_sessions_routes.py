@@ -203,9 +203,11 @@ def test_messages_text_success_202_calls_start_turn(client, monkeypatch):
     sess = _seed_session()
     captured = {}
 
-    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None, classifier_hint=None):
+    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
+                         classifier_hint=None, model=None, credential_grant=None):
         captured.update(tenant_id=tenant_id, session_id=session_id, text=text,
-                        confirm=confirm, classifier_hint=classifier_hint)
+                        confirm=confirm, classifier_hint=classifier_hint,
+                        model=model, credential_grant=credential_grant)
         return "turn-abc"
 
     monkeypatch.setattr(turn_runner, "start_turn", _fake_start_turn)
@@ -375,7 +377,8 @@ def test_messages_confirm_valid_builds_frozen_proposal_shape_from_approval_row(c
     session_store.decide_approval(cid, True, by=sess["tenant_id"])
     captured = {}
 
-    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None, classifier_hint=None):
+    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
+                         classifier_hint=None, model=None, credential_grant=None):
         captured["confirm"] = confirm
         return "turn-resume-1"
 
@@ -432,7 +435,8 @@ def test_messages_confirm_reverse_a_rejection_stored_approved_false_wins(client,
 
     captured = {}
 
-    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None, classifier_hint=None):
+    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
+                         classifier_hint=None, model=None, credential_grant=None):
         captured["confirm"] = confirm
         return "turn-resume-reversed"
 
@@ -477,7 +481,8 @@ def test_messages_confirm_replay_second_confirm_409_bad_params(client, monkeypat
 
     calls = []
 
-    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None, classifier_hint=None):
+    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
+                         classifier_hint=None, model=None, credential_grant=None):
         calls.append(confirm)
         return f"turn-resume-{len(calls)}"
 

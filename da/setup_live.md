@@ -64,10 +64,12 @@ scratch space are isolated from each other and per tenant.
 ### Concurrency ceiling
 
 `APS_MAX_CONCURRENCY` (env, default **1**) is the account Flex ceiling: at most
-that many WorkItems are in flight across ALL tenants. `da/queue.py` provides the
-round-robin-fair scheduler (`FairQueue`) and the process-global `admit()` gate
-that `da/client.submit_workitem` wraps around the LIVE submit. Raise it **in
-lockstep** with the Autodesk Flex-limit raise drafted in
+that many WorkItems are in flight across ALL tenants. `da/client.submit_workitem`
+wraps the LIVE submit in `da/queue.fair_admit()`, the process-global gate that
+holds that ceiling AND hands slots out round-robin across tenants, so no tenant
+can starve another. (`da/queue.py` also provides `FairQueue` for batch drains and
+the tenant-blind `admit()` for backward compatibility; neither is on the live
+submit path.) Raise it **in lockstep** with the Autodesk Flex-limit raise drafted in
 `docs/aps-concurrency-raise-request.md`.
 
 ### Orphan reaping
@@ -102,6 +104,37 @@ python da/provision_live.py --tools engine/registry.json
 no AppBundle), and adds the `prod` alias. It is idempotent (409 = already exists).
 For `--tools`, each `kind:"script"` tool needs an inline `engine_script` (LISP that
 writes `result.json`); Lane B supplies those.
+
+### DXF extraction Activity (`LeafExtractDxf`)
+
+Full-fidelity DXF needs a SECOND Activity, because a DA Activity's HostDwg
+localName is fixed at definition time and `accoreconsole` dispatches its reader
+off that extension. `LeafExtractDxf` is identical to `LeafExtract` except its
+HostDwg localName is `input.dxf` and its script ends with a save-safe QUIT (a
+DXF-opened drawing has no source `.dwg`, so a plain QUIT blocks on a SAVEAS
+prompt until the WorkItem times out). Add it WITHOUT touching anything else:
+
+```powershell
+# create ONLY LeafExtractDxf + its prod alias — no bucket, no DWG Activity, no tenant
+python da/provision_live.py --dxf-activity-only
+# or fold it into a full provision run:
+python da/provision_live.py --with-dxf-activity
+```
+
+Idempotent (409 = already exists). Rollback: delete the `prod` alias then the
+`LeafExtractDxf` Activity (`DELETE /da/us-east/v3/activities/LeafExtractDxf`);
+nothing else references it until `LEAF_GUEST_DXF_EXTRACT=aps` is set on the app.
+
+Then, to route live guest/account DXF uploads through it (paid APS run per
+upload, full INSERT/3DFACE/geo/xdata fidelity), set on the app service:
+
+```
+LEAF_GUEST_DXF_EXTRACT=aps
+```
+
+Leaving it unset (or any other value) keeps the free, instant local parser
+(LWPOLYLINE/POLYLINE + layers). The flag is a clean revert — no redeploy of the
+Activity needed to switch back.
 
 Verify, then run one real extract:
 

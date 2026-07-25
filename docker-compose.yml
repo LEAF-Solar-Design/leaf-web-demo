@@ -63,6 +63,16 @@ services:
     environment:
       HARNESS_PORT: "8150"
       BROKER_URL: http://broker:8140
+      # Dockerfile.harness bakes LEAF_RUNTIME_ENV=production, and that posture
+      # demands a nonblank LEAF_BROKER_SECRET (harness/src/runtimeSafety.ts).
+      # The demo deliberately leaves that secret empty (see the broker service
+      # above), so the baked value made serve.ts throw at startup and the
+      # container never reached healthy — which also blocked app and web, both
+      # of which wait on harness via depends_on/service_healthy.
+      # Compose is the local demo, so it runs the demo posture. Real deploys are
+      # unaffected: required-config.{harness,app}.json list LEAF_RUNTIME_ENV as
+      # REQUIRED, so a deployed task must set it explicitly.
+      LEAF_RUNTIME_ENV: ${LEAF_RUNTIME_ENV:-development}
       # §8 F4 hop — MUST match the broker's value. The harness's broker client
       # (brokerApsClient.ts) sends X-Broker-Secret only when this is set; without
       # it, enabling the secret would 401 every author/converse broker call.

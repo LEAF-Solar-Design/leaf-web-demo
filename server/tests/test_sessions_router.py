@@ -750,6 +750,274 @@ def test_entitlement_denied_403_before_any_harness_traffic_or_events(client, wir
     assert session_store.recent_events(sess["session_id"], 10) == []
 
 
+# =========================================================================== #
+# "Mount your LLM" — per-session model + bring-your-own credential on the wire
+# =========================================================================== #
+def _create_session_via_client(client, tenant: str, drawing: str, model=None):
+    body = {"drawing_id": drawing}
+    if model is not None:
+        body["model"] = model
+    return client.post("/api/sessions", json=body, headers=_h(tenant))
+
+
+def test_create_session_persists_and_returns_model(client):
+    r = _create_session_via_client(client, "tenant-model", "dwg-model-1", "claude-opus-4-8")
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "claude-opus-4-8"
+    # Re-attach (idempotent) reflects the stored model.
+    r2 = _create_session_via_client(client, "tenant-model", "dwg-model-1")
+    assert r2.json()["session_id"] == r.json()["session_id"]
+    assert r2.json()["model"] == "claude-opus-4-8"
+
+
+def test_create_session_rejects_unknown_model(client):
+    r = _create_session_via_client(client, "tenant-model", "dwg-bad-model", "gpt-4o")
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+
+
+def test_stored_session_model_reaches_the_turn_wire(client, wired):
+    """A session created with a model forwards THAT model on POST /turn even when
+    the message itself carries none — the env default is thus overridden."""
+    url, state = wired
+    r = _create_session_via_client(client, "tenant-model", "dwg-wire-1", "claude-haiku-4-5")
+    sess = {"session_id": r.json()["session_id"], "tenant_id": "tenant-model",
+            "drawing_id": "dwg-wire-1"}
+    assert _post_text(client, sess, text="hi").status_code == 202
+    _wait_terminal(sess["session_id"])
+    assert state.bodies[0]["model"] == "claude-haiku-4-5"
+
+
+def test_per_turn_model_override_wins_over_stored(client, wired):
+    url, state = wired
+    r = _create_session_via_client(client, "tenant-model", "dwg-wire-2", "claude-sonnet-5")
+    sid = r.json()["session_id"]
+    m = client.post(f"/api/sessions/{sid}/messages",
+                    json={"text": "hi", "model": "claude-opus-4-8"},
+                    headers=_h("tenant-model"))
+    assert m.status_code == 202, m.text
+    _wait_terminal(sid)
+    assert state.bodies[0]["model"] == "claude-opus-4-8"
+
+
+def test_no_model_anywhere_omits_model_on_the_wire(client, wired):
+    """A session + message with no model leaves the wire body model-free, so the
+    frozen no-model shape (and the harness env default) is preserved."""
+    url, state = wired
+    sess = _new_session()
+    assert _post_text(client, sess, text="hi").status_code == 202
+    _wait_terminal(sess["session_id"])
+    assert "model" not in state.bodies[0]
+
+
+def test_message_rejects_unknown_model(client, wired):
+    url, state = wired
+    sess = _new_session()
+    r = client.post(f"/api/sessions/{sess['session_id']}/messages",
+                    json={"text": "hi", "model": "llama-3"}, headers=_h(sess["tenant_id"]))
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert state.hits == 0  # rejected before any harness traffic
+
+
+_BYO_SECRET = "sk-ant-api-BYO-DO-NOT-LEAK-4417"
+
+
+@pytest.fixture
+def behind_trusted_proxy(monkeypatch):
+    """Deployment that genuinely sits behind a proxy which OVERWRITES
+    X-Forwarded-Proto. Only then may that header stand in for the transport."""
+    monkeypatch.setenv("LEAF_TRUST_FORWARDED_PROTO", "1")
+
+
+def test_byo_credential_over_tls_reaches_wire_but_not_session_state(
+    client, wired, behind_trusted_proxy,
+):
+    """A BYO credential on an https-forwarded request rides the POST /turn body
+    (so the runner can use it) but is NEVER written into the durable transcript."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+    # Flowed to the harness…
+    assert state.bodies[0]["credential_grant"] == {"kind": "api_key", "api_key": _BYO_SECRET}
+    # …but never into serialized session state (transcript events).
+    events = session_store.recent_events(sess["session_id"], 200)
+    assert _BYO_SECRET not in json.dumps(events)
+
+
+def test_pasted_credential_is_stripped_before_the_transcript_append(
+    client, wired, behind_trusted_proxy,
+):
+    """A user who pastes their own key into the PROMPT must not have it persisted.
+
+    sol-critic PR #123 round 6: turn_runner appends the user's text to the durable
+    transcript BEFORE the harness is called, so a harness-side scrub cannot keep
+    the value out of app storage. The strip has to happen here, and covers the
+    wire body too because both derive from the same scrubbed text."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": f"please use {_BYO_SECRET} for this",
+              "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    # Not in the durable transcript…
+    events = session_store.recent_events(sess["session_id"], 200)
+    dumped = json.dumps(events)
+    assert _BYO_SECRET not in dumped
+    assert "[REDACTED]" in dumped, "the turn_started text should be scrubbed, not dropped"
+
+    # …and not in the wire body's TEXT either (the grant field itself still
+    # carries it — that is the whole point of the mount).
+    assert _BYO_SECRET not in state.bodies[0].get("text", "")
+    assert state.bodies[0]["credential_grant"]["api_key"] == _BYO_SECRET
+
+
+def test_pasted_credential_is_stripped_from_classifier_hint_too(
+    client, wired, behind_trusted_proxy,
+):
+    """sol-critic PR #123 round 7, blocker 1. `classifier_hint` is an
+    unrestricted caller-controlled dict that turn_runner persists verbatim into
+    the durable turn_started event, and it is NOT on the harness wire — so
+    nothing downstream can repair it. Scrubbing only `text` left this open."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={
+            "text": "hello",
+            "classifier_hint": {"rationale": f"the key is {_BYO_SECRET}",
+                                "nested": [{"deep": _BYO_SECRET}]},
+            "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET},
+        },
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    events = session_store.recent_events(sess["session_id"], 200)
+    dumped = json.dumps(events)
+    assert _BYO_SECRET not in dumped, "credential survived in classifier_hint"
+    # The hint itself is still recorded — scrubbed, not dropped.
+    assert "rationale" in dumped and "[REDACTED]" in dumped
+
+
+def test_byo_credential_over_plain_http_is_rejected(client, wired):
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "oauth", "oauth_token": _BYO_SECRET}},
+        headers=_h(sess["tenant_id"]),  # no X-Forwarded-Proto: https
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert "TLS" in r.json()["error"]["message"]
+    assert state.hits == 0
+
+
+def test_byo_credential_malformed_is_rejected(client, wired, behind_trusted_proxy):
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key"}},  # no token
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert state.hits == 0
+
+
+@pytest.mark.parametrize("bad,distinctive", [
+    ("short", True),                          # below the length floor
+    ("x" * 23, True),                         # one char below the floor
+    ("has whitespace in it aaaaaaaaaaaa", True),  # long enough, not credential-shaped
+    ("error", False),      # a protocol word: redaction would corrupt transcripts
+    ('"', False),          # a JSON delimiter: redaction would corrupt shape
+    # PARITY: U+FEFF is NOT whitespace to Python's str.isspace() but IS matched
+    # by JavaScript's \s, so the old predicate accepted this here while the
+    # harness refused to redact it — accepted but unstrippable. Both sides now
+    # require printable ASCII. (sol-critic PR #123 rounds 6-8.)
+    ("abcdefghijklmnopqrstuvwx﻿", True),
+    ("abcdefghijklmnopqrstuvwxé", True),   # non-ASCII generally
+])
+def test_credential_must_look_like_a_credential(
+    client, wired, behind_trusted_proxy, bad, distinctive,
+):
+    """sol-critic PR #117 round 4, blocker 3. Accepting ANY non-empty string made
+    downstream redaction unwinnable: the harness strips the grant out of the
+    transcript by literal match, so a credential of 'error' or '"' would either
+    corrupt ordinary text and protocol values or have to be left in place. Real
+    Agent SDK credentials are long and whitespace-free, so rejecting these costs
+    nothing genuine and removes the pathological cases at the boundary."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key", "api_key": bad}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert state.hits == 0          # rejected before any harness traffic
+    # Echo check only for values that are not substrings of an ordinary error
+    # envelope — `error` and `"` occur in any JSON body, so their presence would
+    # prove nothing. The dedicated non-echo proof is
+    # test_byo_credential_is_never_echoed_by_the_validation_handler.
+    if distinctive:
+        assert bad not in r.text
+
+
+def test_forwarded_proto_header_alone_cannot_bypass_the_tls_gate(client, wired):
+    """sol-critic review of PR #117, blocker 1. docker-compose publishes this app
+    straight to :8130 with no proxy in front, so X-Forwarded-Proto is attacker
+    controlled. WITHOUT LEAF_TRUST_FORWARDED_PROTO the header must be ignored
+    entirely: a plaintext request claiming https is still refused, and the
+    credential never reaches the harness."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},  # the spoof
+    )
+    assert r.status_code == 400, r.text
+    assert "TLS" in r.json()["error"]["message"]
+    assert state.hits == 0
+    assert _BYO_SECRET not in json.dumps(state.bodies)
+
+
+def test_byo_credential_is_never_echoed_by_the_validation_handler(client, wired):
+    """A grant of the WRONG TYPE fails pydantic PARSING, which runs before the
+    router's own checks — so the TLS gate above cannot protect it. The 422 must
+    name the offending field without mirroring the token back, or the secret rides
+    into access logs and error monitoring (envelopes.py drops pydantic's `input`
+    for exactly this reason)."""
+    url, state = wired
+    sess = _new_session()
+    for bad in (_BYO_SECRET, [{"kind": "api_key", "api_key": _BYO_SECRET}]):
+        r = client.post(
+            f"/api/sessions/{sess['session_id']}/messages",
+            json={"text": "hi", "credential_grant": bad},
+            headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+        )
+        assert r.status_code == 422, r.text
+        assert _BYO_SECRET not in r.text, "the 422 body echoed the caller's credential"
+        assert "credential_grant" in r.text, "the 422 must still name the bad field"
+    assert state.hits == 0
+
+
 # --------------------------------------------------------------------------- #
 # script runner
 # --------------------------------------------------------------------------- #

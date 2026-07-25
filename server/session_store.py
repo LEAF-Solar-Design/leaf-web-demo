@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   active_turn_id  TEXT,
   turn_started_at REAL,
   active_turn_tier TEXT,
+  model           TEXT,
   UNIQUE(tenant_id, drawing_id)
 );
 
@@ -183,6 +184,11 @@ def _db() -> sqlite3.Connection:
         }
         if "active_turn_tier" not in session_cols:
             _conn.execute("ALTER TABLE sessions ADD COLUMN active_turn_tier TEXT")
+        # `model` (per-session "mount your LLM" choice) landed after the first cut
+        # of this table; CREATE TABLE IF NOT EXISTS never retrofits it. Migrate
+        # additively and idempotently, same posture as active_turn_tier above.
+        if "model" not in session_cols:
+            _conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT")
         _conn.commit()
     return _conn
 
@@ -204,8 +210,17 @@ def _query(sql: str, args: tuple = ()) -> List[sqlite3.Row]:
 def ensure_started() -> None:
     """Idempotent: open the DB (creates the schema if missing). No background
     threads live in this module — the turn engine (S3) and its watchdog own
-    their own lifecycle; this store is passive, called-into storage only."""
-    _db()
+    their own lifecycle; this store is passive, called-into storage only.
+
+    Held under `_lock` because `_db()` publishes the module-level `_conn` BEFORE
+    running the additive column retrofits below it. Every other `_db()` caller
+    already holds the lock, so this was the one unserialized entry: a racing
+    thread could take the published connection and read a row whose `model`
+    column had not been added yet, raising `IndexError: No item with that key`
+    from _row_to_session. Locking here makes first-open atomic with respect to
+    every reader. (sol-critic PR #117 round 2, blocker 2.)"""
+    with _lock:
+        _db()
 
 
 # --------------------------------------------------------------------------- #
@@ -222,6 +237,7 @@ def _row_to_session(row: sqlite3.Row) -> Dict[str, Any]:
         "last_seq": row["last_seq"],
         "active_turn_id": row["active_turn_id"],
         "turn_started_at": row["turn_started_at"],
+        "model": row["model"],
     }
 
 
@@ -262,12 +278,20 @@ def _row_to_approval(row: sqlite3.Row) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # sessions
 # --------------------------------------------------------------------------- #
-def get_or_create_session(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
+def get_or_create_session(
+    tenant_id: str, drawing_id: str, model: Optional[str] = None,
+) -> Dict[str, Any]:
     """Idempotent per (tenant_id, drawing_id): INSERT OR IGNORE a fresh candidate
     row under the lock, then SELECT the (possibly pre-existing) row by the
     UNIQUE(tenant_id, drawing_id) key. Concurrent racers all funnel through the
     same lock, so exactly one row is ever created for a given key and every
-    caller — winner or loser of the race — reads back the same session."""
+    caller — winner or loser of the race — reads back the same session.
+
+    `model` is the per-session "mount your LLM" choice (validated upstream against
+    the allowed Claude family). When supplied it is persisted on create AND, on a
+    repeat attach with a different model, updated — so re-opening a session with a
+    new model re-selects it. When None the stored model is left untouched (the
+    turn engine falls back to the env default)."""
     ensure_started()
     candidate_id = str(uuid.uuid4())
     now = time.time()
@@ -275,10 +299,17 @@ def get_or_create_session(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
         conn = _db()
         conn.execute(
             "INSERT OR IGNORE INTO sessions"
-            " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq)"
-            " VALUES (?,?,?,?,?,?,0)",
-            (candidate_id, tenant_id, drawing_id, "active", now, now),
+            " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq, model)"
+            " VALUES (?,?,?,?,?,?,0,?)",
+            (candidate_id, tenant_id, drawing_id, "active", now, now, model),
         )
+        if model is not None:
+            # Reflect an explicit model onto the (possibly pre-existing) row.
+            conn.execute(
+                "UPDATE sessions SET model = ?, updated_at = ?"
+                " WHERE tenant_id = ? AND drawing_id = ?",
+                (model, now, tenant_id, drawing_id),
+            )
         conn.commit()
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
@@ -654,6 +685,7 @@ def _pg_session(row: Dict[str, Any]) -> Dict[str, Any]:
         "last_seq": row["last_seq"],
         "active_turn_id": row["active_turn_id"],
         "turn_started_at": row["turn_started_at"],
+        "model": row["model"],
     }
 
 
@@ -709,6 +741,7 @@ def _pg_ensure_started() -> None:
 def _pg_get_or_create_session(
     tenant_id: str, drawing_id: str, *,
     session_id: Optional[str] = None, created_at: Optional[float] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     candidate_id = session_id or str(uuid.uuid4())
     now = created_at if created_at is not None else time.time()
@@ -716,11 +749,17 @@ def _pg_get_or_create_session(
     with db.transaction() as conn:
         conn.execute(
             "INSERT INTO app_sessions"
-            " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq)"
-            " VALUES (%s,%s,%s,'active',%s,%s,0)"
+            " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq, model)"
+            " VALUES (%s,%s,%s,'active',%s,%s,0,%s)"
             " ON CONFLICT (tenant_id, drawing_id) DO NOTHING",
-            (candidate_id, tenant_id, drawing_id, now, now),
+            (candidate_id, tenant_id, drawing_id, now, now, model),
         )
+        if model is not None:
+            conn.execute(
+                "UPDATE app_sessions SET model = %s, updated_at = %s"
+                " WHERE tenant_id = %s AND drawing_id = %s",
+                (model, now, tenant_id, drawing_id),
+            )
         row = conn.execute(
             "SELECT * FROM app_sessions WHERE tenant_id = %s AND drawing_id = %s",
             (tenant_id, drawing_id),
@@ -978,19 +1017,22 @@ def ensure_started() -> None:
         _pg_ensure_started()
 
 
-def get_or_create_session(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
+def get_or_create_session(
+    tenant_id: str, drawing_id: str, model: Optional[str] = None,
+) -> Dict[str, Any]:
     mode = _store_mode()
     if mode == "postgres":
-        return _pg_get_or_create_session(tenant_id, drawing_id)
+        return _pg_get_or_create_session(tenant_id, drawing_id, model=model)
     if mode in _DUAL_WRITE_MODES:
         # Do not mutate the legacy authority when its required mirror is
         # already known to be unavailable.
         _pg_ensure_started()
-    legacy = _legacy_get_or_create_session(tenant_id, drawing_id)
+    legacy = _legacy_get_or_create_session(tenant_id, drawing_id, model)
     if mode in _DUAL_WRITE_MODES:
         postgres = _pg_get_or_create_session(
             tenant_id, drawing_id,
             session_id=legacy["session_id"], created_at=legacy["created_at"],
+            model=legacy["model"],
         )
         _shadow_equal("session identity", legacy["session_id"], postgres["session_id"])
         if mode in _SHADOW_READ_MODES:

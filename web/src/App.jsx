@@ -26,6 +26,9 @@ import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } fro
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import {
+  getSessionHolderId, claimHolderId, lockState,
+} from './checkoutIdentity.js'
+import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
   dismissRunIntent, stageRunIntent,
 } from './runIntent.js'
@@ -263,6 +266,19 @@ export default function App() {
   // --- single-writer checkout lock (item 3) ---
   const [checkout, setCheckout] = useState(null)         // {holder, acquired, expires} | null (from /versions)
   const [checkoutBusy, setCheckoutBusy] = useState(false) // take/release request in flight (3B)
+  // We do not know the lock state. Distinct from `checkout === null` (answered:
+  // nothing held) so a read failure can fail CLOSED instead of reading as "free".
+  //
+  // Starts TRUE, and that is the point. Starting false meant the whole window
+  // before the first read landed was indistinguishable from "nobody holds it":
+  // on live startup, with /versions still in flight and another session actually
+  // holding the lock, write actions were enabled. Unknown-until-answered closes
+  // that window; mock mode clears it immediately in loadCheckout.
+  const [checkoutUnknown, setCheckoutUnknown] = useState(true)
+  // Wording only, never the gate. `unknown` covers both "reading" and "read
+  // failed" and both must pause writes, but telling the user we COULD NOT read
+  // during a routine refetch is simply false, so this separates the message.
+  const [checkoutReadFailed, setCheckoutReadFailed] = useState(false)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
@@ -355,19 +371,36 @@ export default function App() {
   const claudeNotLinked = !mock && !!grant && grant.linked === false
 
   // --- single-writer checkout (item 3) ---
-  // Our own holder id (best-effort): the echoed tenant, else the configured stub.
-  // A checkout held by US is not a lock; only a checkout held by ANOTHER session
-  // suppresses write-Run. `?demo=locked` injects a synthetic other-session lock.
-  const ownHolder = tenant || config.tenant || 'demo-tenant'
+  // Our own holder id: a per-SESSION id (see checkoutIdentity.js). It must not be
+  // the tenant. Every teammate in an org shares that, so each of them would read
+  // another's lock as their own. A checkout held by US is not a lock; only a
+  // checkout held by ANOTHER session suppresses write-Run. `?demo=locked` injects
+  // a synthetic other-session lock.
+  // `ownHolder` starts as the stored/minted id and can be REPLACED once the claim
+  // channel answers: a duplicated tab inherits the incumbent's id via copied
+  // sessionStorage, so it must step aside rather than impersonate the holder.
+  const [ownHolder, setOwnHolder] = useState(() => getSessionHolderId())
+  useEffect(() => {
+    const claim = claimHolderId({ id: ownHolder, onRemint: setOwnHolder })
+    return () => claim.stop()
+    // Claim once per runtime. A remint updates `ownHolder`, and re-running the
+    // claim on that change would announce the fresh id in a loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const rawCheckout = demoLocked
     ? { holder: 'another-session', acquired: new Date().toISOString(), expires: new Date(Date.now() + 3600e3).toISOString() }
     : checkout
-  const otherHeldCheckout =
-    (rawCheckout && rawCheckout.holder && rawCheckout.holder !== ownHolder) ? rawCheckout : null
-  const writeLocked = !mock && !!otherHeldCheckout
-  // We hold the single-writer lock (3B): our own holder id owns the checkout.
-  // Not a lock on us (write-Run stays enabled) — it just offers a Release.
-  const heldByUs = !mock && !!(rawCheckout && rawCheckout.holder && rawCheckout.holder === ownHolder)
+  // The whole decision lives in lockState (checkoutIdentity.js) so the oracle can
+  // exercise it rather than grep this file for a token. Expiry deliberately does
+  // NOT enter writeLocked: the browser clock is not an authority on whether a
+  // lease elapsed, so it only drives the Take offer, which the server adjudicates.
+  const lock = lockState({ mock, checkout: rawCheckout, unknown: checkoutUnknown, ownHolder })
+  const otherHeldCheckout = lock.otherHeld
+  const writeLocked = lock.writeLocked
+  const heldByUs = lock.heldByUs
+  const staleHeldCheckout = lock.stale ? lock.otherHeld : null
+  const legacyHeldCheckout = lock.legacy ? lock.otherHeld : null
 
   // Current open project's display name (from the hydration payload, else the list).
   const currentProjectName = openProjectId
@@ -567,17 +600,42 @@ export default function App() {
   useEffect(() => { loadProjects() }, [loadProjects])
 
   // Checkout lock (item 3): read the current drawing's version manifest and pick
-  // up its `checkout` (sibling contract adds it to /versions). Live only; any
-  // error -> null (no chip, no write-Run suppression). Refetched when the drawing
-  // version changes and after runs (a write may acquire/release the lock).
+  // up its `checkout` (sibling contract adds it to /versions). Live only.
+  // Refetched when the drawing version changes and after runs (a write may
+  // acquire/release the lock).
+  //
+  // A failed read sets `checkoutUnknown`, NOT `checkout = null`. Mapping an error
+  // to "no lock" is what let session B write under session A's lease: B's read
+  // fails, B concludes the drawing is free, and the server does not save us
+  // because its fenced write only checks that the checkout is unchanged and
+  // unexpired, never that the CALLER is the holder.
+  //
+  // `seqRef` drops out-of-order responses. Without it a slow early request that
+  // resolves after a newer one can overwrite fresh state with stale state, which
+  // for a lock means re-enabling writes that were correctly disabled.
+  const checkoutSeqRef = useRef(0)
   const loadCheckout = useCallback(async () => {
-    if (mock) { setCheckout(null); return }
+    if (mock) { setCheckout(null); setCheckoutUnknown(false); setCheckoutReadFailed(false); return }
     const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    const seq = ++checkoutSeqRef.current
+    // Unknown again BEFORE awaiting, not just on failure. Without this the
+    // previous drawing's answer stayed authoritative through the whole new
+    // request: switching from mock to live, or changing drawing after an
+    // answered-and-unlocked one, left writes enabled until the new response
+    // arrived, so a write could be submitted before any lock answer existed for
+    // the drawing being written.
+    setCheckoutUnknown(true)
     try {
       const v = await getDrawingVersions(mock, did)
+      if (seq !== checkoutSeqRef.current) return // a newer read already answered
       setCheckout(v?.checkout || null)
+      setCheckoutUnknown(false)
+      setCheckoutReadFailed(false)
     } catch {
+      if (seq !== checkoutSeqRef.current) return
       setCheckout(null)
+      setCheckoutUnknown(true)
+      setCheckoutReadFailed(true)
     }
   }, [mock, drawingState])
 
@@ -2047,10 +2105,16 @@ export default function App() {
               {!mock && (
                 <CheckoutControls
                   lockedByOther={otherHeldCheckout}
+                  legacyByOther={!!legacyHeldCheckout}
+                  staleByOther={!!staleHeldCheckout}
+                  canTake={lock.canTake}
                   heldByUs={heldByUs}
+                  unknown={checkoutUnknown}
+                  readFailed={checkoutReadFailed}
                   busy={checkoutBusy}
                   onTake={onTakeCheckout}
                   onRelease={onReleaseCheckout}
+                  onRetry={loadCheckout}
                 />
               )}
               {drawingState && (

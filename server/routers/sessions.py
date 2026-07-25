@@ -47,10 +47,11 @@ see that file's ``approve()``/``postMessage()`` comments — so requiring
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -61,6 +62,97 @@ import turn_runner
 from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 
 router = APIRouter()
+
+
+# --------------------------------------------------------------------------- #
+# "Mount your LLM" input validation (model allowlist + BYO credential hygiene).
+# --------------------------------------------------------------------------- #
+def _invalid_model_response(model: Any) -> JSONResponse:
+    allowed = ", ".join(sorted(turn_runner.ALLOWED_MODELS))
+    return error_response(
+        ErrorCode.BAD_PARAMS,
+        f"model {model!r} is not allowed; choose one of: {allowed}",
+        retryable=False, status_code=400,
+    )
+
+
+# A credential must actually LOOK like one. Accepting any non-empty string made
+# downstream redaction unwinnable: the harness scrubs the grant out of the
+# transcript by literal match, so a credential of "error", "a" or '"' would
+# either corrupt ordinary text and protocol values or have to be left in place
+# (sol-critic PR #117 round 4, blockers 2 and 3). Real Agent SDK credentials are
+# long, opaque, and whitespace-free — `sk-ant-...` keys and OAuth tokens run to
+# ~100 chars — so this floor rejects nothing genuine while removing every
+# pathological value at the boundary, where it is cheap and unambiguous.
+_MIN_CREDENTIAL_LEN = 24
+
+# PRINTABLE ASCII, no space. Deliberately NOT "not str.isspace()": Python's
+# isspace() and JavaScript's \s disagree (U+FEFF is whitespace to \s but not to
+# isspace()), so such a credential was ACCEPTED here yet treated as unredactable
+# by harness/src/redact.ts — accepted but unstrippable is the worst of both.
+# Keep this rule identical to that file's PRINTABLE_ASCII.
+# (sol-critic PR #123 rounds 6-8.)
+_CREDENTIAL_CHARS = frozenset(chr(c) for c in range(0x21, 0x7F))
+
+
+def _valid_credential_value(tok: Any) -> bool:
+    return (
+        isinstance(tok, str)
+        and len(tok) >= _MIN_CREDENTIAL_LEN
+        and all(ch in _CREDENTIAL_CHARS for ch in tok)
+    )
+
+
+def _validate_credential_grant(raw: Any) -> Optional[Dict[str, Any]]:
+    """Return the normalized BYO Agent SDK credential grant, or None if the shape
+    is invalid. Accepts EXACTLY {kind:'api_key', api_key:<credential>} or
+    {kind:'oauth', oauth_token:<credential>}; extra keys are dropped. A
+    <credential> is at least _MIN_CREDENTIAL_LEN characters and entirely
+    PRINTABLE ASCII (_CREDENTIAL_CHARS, 0x21-0x7E) — no space, no control
+    character, no non-ASCII codepoint. The token VALUE is never logged here
+    (nothing in this module prints it)."""
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind")
+    if kind == "api_key":
+        tok = raw.get("api_key")
+        if _valid_credential_value(tok):
+            return {"kind": "api_key", "api_key": tok}
+    elif kind == "oauth":
+        tok = raw.get("oauth_token")
+        if _valid_credential_value(tok):
+            return {"kind": "oauth", "oauth_token": tok}
+    return None
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _credential_insecure_transport(request: Request) -> bool:
+    """True when a BYO credential must be REJECTED because the request did not
+    arrive over TLS.
+
+    X-Forwarded-Proto is CALLER-CONTROLLED unless a trusted proxy actually sets
+    it. docker-compose publishes this app straight to :8130 with nothing in
+    front, so honoring that header unconditionally would let anyone bypass the
+    gate by adding one line to a plaintext request (sol-critic review of PR #117,
+    blocker 1). The header is therefore consulted ONLY when the deployment
+    asserts it sits behind a proxy that overwrites it, via
+    LEAF_TRUST_FORWARDED_PROTO=1. Unset (the default, including docker-compose)
+    means the real transport decides and the header is ignored.
+
+    LEAF_ALLOW_INSECURE_CREDENTIAL=1 remains the explicit dev/test opt-out.
+    Both flags fail CLOSED: absent or unparsable -> enforce TLS on the real
+    connection."""
+    if _truthy_env("LEAF_ALLOW_INSECURE_CREDENTIAL"):
+        return False
+    scheme = request.url.scheme.lower()
+    if _truthy_env("LEAF_TRUST_FORWARDED_PROTO"):
+        forwarded = request.headers.get("x-forwarded-proto", "")
+        if forwarded:
+            scheme = forwarded.split(",")[0].strip().lower()
+    return scheme != "https"
 
 # SSE polling cadence (§2.1.3): cheap poll of the durable event log, a ": ping"
 # comment to keep idle connections alive through proxies, and a bounded
@@ -93,12 +185,20 @@ _RETRYABLE_BY_CODE = {
 
 class CreateSessionRequest(BaseModel):
     drawing_id: str
+    # Per-session "mount your LLM" model choice (persisted). Validated against the
+    # allowlist; overrides the runner env default for this session's turns.
+    model: Optional[str] = None
 
 
 class MessageRequest(BaseModel):
     text: Optional[str] = None
     confirm: Optional[Dict[str, Any]] = None
     classifier_hint: Optional[Dict[str, Any]] = None
+    # Per-turn model override (validated); falls back to the session's stored model.
+    model: Optional[str] = None
+    # Optional bring-your-own Agent SDK credential for THIS turn only. Ephemeral:
+    # validated for shape, forwarded over TLS, never persisted, never logged.
+    credential_grant: Optional[Dict[str, Any]] = None
 
 
 def _session_not_found(session_id: str) -> JSONResponse:
@@ -134,13 +234,17 @@ def _turn_rejected_response(exc: "turn_runner.TurnRejected") -> JSONResponse:
 def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_tenant)):
     """Idempotent per (tenant, drawing_id) — a repeat POST with the same
     drawing_id returns the SAME session (session_store's UNIQUE constraint +
-    INSERT OR IGNORE, not re-derived here)."""
-    sess = session_store.get_or_create_session(str(tenant), req.drawing_id)
+    INSERT OR IGNORE, not re-derived here). An optional `model` (validated against
+    the allowlist) is persisted as the session's per-session model choice."""
+    if req.model is not None and not turn_runner.is_allowed_model(req.model):
+        return _invalid_model_response(req.model)
+    sess = session_store.get_or_create_session(str(tenant), req.drawing_id, req.model)
     return deps.tenant_echo(
         with_envelope_fields({
             "session_id": sess["session_id"],
             "status": sess["status"],
             "created_at": sess["created_at"],
+            "model": sess.get("model"),
         }),
         tenant,
     )
@@ -150,7 +254,8 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_tenant
 # POST /api/sessions/{id}/messages
 # --------------------------------------------------------------------------- #
 @router.post("/api/sessions/{session_id}/messages")
-def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.require_tenant)):
+def post_message(session_id: str, req: MessageRequest, request: Request,
+                 tenant=Depends(deps.require_tenant)):
     # 1. ownership guard (404-not-403, no existence leak).
     if _require_owned_session(session_id, tenant) is None:
         return _session_not_found(session_id)
@@ -163,6 +268,36 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
             ErrorCode.BAD_PARAMS, "exactly one of `text` or `confirm` is required",
             retryable=False, status_code=409,
         )
+
+    # 2b. "Mount your LLM" input hygiene — validated BEFORE the confirm consume,
+    # so a bad model or credential never burns an approval. Model:
+    # allowlist-checked. Credential: TLS-gated (a BYO token may only ride an
+    # encrypted request) and shape-checked; the validated (never the raw) grant
+    # is forwarded to the turn.
+    #
+    # This orders THESE inputs ahead of the consume. It is not a general
+    # no-burn guarantee: `consume_approval` below still runs before
+    # `start_turn`'s busy CAS, so a confirm that races a concurrent turn is
+    # consumed and then answered 409, and the retry fails as already-consumed.
+    # That window predates this feature (e064086) and is tracked separately.
+    if req.model is not None and not turn_runner.is_allowed_model(req.model):
+        return _invalid_model_response(req.model)
+    validated_grant: Optional[Dict[str, Any]] = None
+    if req.credential_grant is not None:
+        if _credential_insecure_transport(request):
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                "credential_grant requires a TLS (https) request",
+                retryable=False, status_code=400,
+            )
+        validated_grant = _validate_credential_grant(req.credential_grant)
+        if validated_grant is None:
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                "credential_grant must be {kind:'api_key',api_key} or "
+                "{kind:'oauth',oauth_token}",
+                retryable=False, status_code=400,
+            )
 
     # 3. entitlement gate (§17): mirrors routers/author.py:76-78 — the tenant's
     # tier must grant the `converse` capability. Off-auth/demo grants everything.
@@ -235,6 +370,7 @@ def post_message(session_id: str, req: MessageRequest, tenant=Depends(deps.requi
         turn_id = turn_runner.start_turn(
             tenant, session_id,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
+            model=req.model, credential_grant=validated_grant,
         )
     except turn_runner.TurnBusy:
         return error_response(

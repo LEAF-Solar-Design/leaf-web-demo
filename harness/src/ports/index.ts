@@ -370,7 +370,7 @@ import type { ConverseRunner } from "./converse.js";
  * dependency-free port; re-exported here so callers can import everything
  * from `ports/index.js` like the other four ports.
  */
-export type { StopReason, HarnessTurnEvent, ConverseTurnInput, ConverseRunner, ConverseRunOptions } from "./converse.js";
+export type { StopReason, HarnessTurnEvent, ConverseTurnInput, ConverseRunner, ConverseRunOptions, WireAgentGrant } from "./converse.js";
 
 // --------------------------------------------------------------------------- //
 // Conversational spine ports (section 18 / converse lane — PR #5). PARKED at

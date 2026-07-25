@@ -280,13 +280,15 @@ def test_s18_sse_vocabulary_frozen():
 
 
 def test_s21_turn_input_field_set_frozen_no_packet():
-    """The live wire is §2.1 ConverseTurnInput — NO ContextPacket field.
-    (test_sessions_router.py pins the runtime body; this pins the port type.)
-    The field SET is exact: an added field fails, not just a removed one."""
+    """The live wire is §2.1 ConverseTurnInput. The field SET is exact: an added
+    field fails, not just a removed one. `model` + `credential_grant` are the
+    ADDITIVE, OPTIONAL "mount your LLM" fields (both absent-safe on the wire); a
+    ContextPacket field remains explicitly forbidden (that is the §2.1 packet
+    decision, distinct from these per-session model/credential additions)."""
     block = _ts_balanced_block(CONVERSE_TS, "export interface ConverseTurnInput")
     assert _ts_field_names(block) == {"tenant_id", "session_id", "turn_id",
                                       "drawing_id", "messages", "text",
-                                      "confirm"}, (
+                                      "confirm", "model", "credential_grant"}, (
         f"ConverseTurnInput field set drifted: {sorted(_ts_field_names(block))}")
     assert "contextPacket" not in block and "context_packet" not in block, (
         "ConverseTurnInput grew a packet field — that is a §2.1 wire change, "

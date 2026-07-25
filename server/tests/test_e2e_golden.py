@@ -41,6 +41,8 @@ from pathlib import Path
 import pytest
 import requests
 
+from _test_run_confirmation import confirmed_requests_payload
+
 SERVER_DIR = Path(__file__).resolve().parent.parent
 AUTHORED_TOOLS = SERVER_DIR / "authored_tools.json"
 AUTHORED_DIR = SERVER_DIR / "authored"
@@ -136,9 +138,12 @@ def stack(tmp_path_factory):
         # to schedule. Do one throwaway synchronous run here (separate tenant, read
         # tool -> no version side effects) so the MEASURED async run in the test is a
         # hot path. A broker that truly can't serve fails HERE with a clear error.
+        warm_headers = {"X-Tenant-Id": "e2e-warmup"}
         warm = requests.post(f"{app_url}/api/run?wait=1",
-                             json={"tool": "count-by-layer", "params": {}, "dwg": "rooftop_demo"},
-                             headers={"X-Tenant-Id": "e2e-warmup"}, timeout=120)
+                             json=confirmed_requests_payload(
+                                 app_url, "count-by-layer", dwg="rooftop_demo",
+                                 headers=warm_headers),
+                             headers=warm_headers, timeout=120)
         assert warm.status_code == 200, f"broker warm-up failed: {warm.status_code} {warm.text[:300]}"
         yield {"app": app_url, "broker": f"http://127.0.0.1:{broker_port}"}
     finally:
@@ -197,9 +202,11 @@ def test_golden_path(stack):
     assert nl["confidence"] >= 0.8
 
     # 2) run that tool through the ASYNC job spine: 202 {job_id} -> poll -> complete
+    headers = _h()
     r = requests.post(f"{app}/api/run",
-                      json={"tool": nl["tool"], "params": {}, "dwg": "rooftop_demo"},
-                      headers=_h(), timeout=15)
+                      json=confirmed_requests_payload(
+                          app, nl["tool"], dwg="rooftop_demo", headers=headers),
+                      headers=headers, timeout=15)
     assert r.status_code == 202, r.text
     body = r.json()
     assert body["status"] == "submitted" and body["job_id"]
@@ -222,8 +229,10 @@ def test_golden_path(stack):
 
     # 4) a WRITE tool run -> a new immutable version v2 (parent v1)
     w = requests.post(f"{app}/api/run?wait=1",
-                      json={"tool": "delete-marked-panel", "params": {"drawing_id": "demo"},
-                            "dwg": "rooftop_demo"}, headers=_h(), timeout=60)
+                      json=confirmed_requests_payload(
+                          app, "delete-marked-panel", {"drawing_id": "demo"},
+                          "rooftop_demo", headers=headers),
+                      headers=headers, timeout=60)
     assert w.status_code == 200, w.text
     wenv = w.json()
     assert wenv["ok"] is True and wenv["error"] is None

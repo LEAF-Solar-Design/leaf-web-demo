@@ -74,6 +74,85 @@ from envelopes import ErrorCode
 # via monkeypatch/env without needing to re-import this module — same posture
 # as jobs.py's job_max_s()/heartbeat_stale_s()).
 # --------------------------------------------------------------------------- #
+# The per-session "mount your LLM" allowlist (the Claude family the Agent SDK
+# runner supports). Keep in lockstep with harness/src/ports/modelAllowlist.ts.
+# A true multi-provider (OpenAI/Gemini) adapter is an explicit, separate follow-up.
+ALLOWED_MODELS = frozenset({
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+    "claude-fable-5",
+})
+
+
+def is_allowed_model(model: Optional[str]) -> bool:
+    """True iff `model` is one of the allowed Claude-family ids."""
+    return isinstance(model, str) and model in ALLOWED_MODELS
+
+
+# Keep in step with harness/src/redact.ts MIN_REDACTABLE_SECRET_LEN and with
+# routers/sessions.py _MIN_CREDENTIAL_LEN.
+_MIN_REDACTABLE_SECRET_LEN = 24
+
+
+def _grant_secret(grant: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The token value carried by a validated credential grant, if it is long and
+    opaque enough to strip by literal match: at least _MIN_REDACTABLE_SECRET_LEN
+    characters, all PRINTABLE ASCII (0x21-0x7E). Anything shorter, or carrying a
+    space, a control character, or a non-ASCII codepoint, is never eligible —
+    replacing such a value would rewrite ordinary prose instead of a secret.
+    Keep this rule identical to routers/sessions.py _CREDENTIAL_CHARS and
+    harness/src/redact.ts PRINTABLE_ASCII; validation upstream enforces the
+    same one."""
+    if not isinstance(grant, dict):
+        return None
+    tok = grant.get("api_key") if grant.get("kind") == "api_key" else grant.get("oauth_token")
+    if (isinstance(tok, str) and len(tok) >= _MIN_REDACTABLE_SECRET_LEN
+            and all(0x21 <= ord(c) <= 0x7E for c in tok)):
+        return tok
+    return None
+
+
+def _scrub_tree(node: Any, secret: str) -> Any:
+    """Strip `secret` from every STRING VALUE in a nested structure.
+
+    `classifier_hint` is an unrestricted caller-controlled dict that this module
+    persists verbatim into the durable `turn_started` event, and it is NOT part
+    of the harness wire — so nothing downstream can repair it. A caller can put
+    the same value in `credential_grant.api_key` and `classifier_hint.rationale`
+    and have the live grant land in the transcript. (sol-critic PR #123 round 7,
+    blocker 1.)
+
+    VALUES only, never keys. Rewriting keys is what made the harness-side attempt
+    drop fields on collision; a credential used as a dict KEY here is not a
+    realistic shape, and leaving keys alone keeps this transformation total."""
+    if isinstance(node, str):
+        return node.replace(secret, "[REDACTED]")
+    if isinstance(node, list):
+        return [_scrub_tree(v, secret) for v in node]
+    if isinstance(node, dict):
+        return {k: _scrub_tree(v, secret) for k, v in node.items()}
+    return node
+
+
+def _scrub_secret(value: Optional[str], secret: Optional[str]) -> Optional[str]:
+    """Remove a bring-your-own credential the user pasted into their own prompt.
+
+    THIS is the boundary that matters: `append_event` below writes the user's
+    text into the durable transcript BEFORE the harness is ever called, so a
+    harness-side scrub cannot keep the value out of app storage (sol-critic PR
+    #123 round 6). Scrubbing here covers the app transcript AND the wire body,
+    and because the harness's prior-turn `messages` are read back out of this
+    same transcript, earlier turns stay clean too.
+
+    Only the BYO grant is strippable here — the tenant's linked grant is resolved
+    inside the harness and this process never sees it, which is why the harness
+    keeps its own equivalent pass."""
+    if not value or not secret:
+        return value
+    return value.replace(secret, "[REDACTED]")
+
+
 def turn_max_s() -> float:
     return float(os.environ.get("TURN_MAX_S", "300"))
 
@@ -192,7 +271,9 @@ def _safe_json(resp: "requests.Response") -> Optional[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                confirm: Optional[Dict[str, Any]] = None,
-               classifier_hint: Optional[Dict[str, Any]] = None) -> str:
+               classifier_hint: Optional[Dict[str, Any]] = None,
+               model: Optional[str] = None,
+               credential_grant: Optional[Dict[str, Any]] = None) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
     # string tenant_id used on the harness wire. Off-auth callers are plain
@@ -210,6 +291,39 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     # message OR the resume of a halted turn), plus the optional dispatcher
     # hint — classifier_hint is recorded here for the durable log ONLY, it is
     # NOT part of ConverseTurnInput (frozen shape has no such field).
+    # Strip a pasted BYO credential BEFORE the transcript append below, so it is
+    # never durable here and never rides the wire. See _scrub_secret.
+    _secret = _grant_secret(credential_grant)
+    if _secret:
+        text = _scrub_secret(text, _secret)
+        # classifier_hint is durable-log-only and never reaches the harness, so
+        # this is the only chance to strip it (see _scrub_tree).
+        if classifier_hint is not None:
+            classifier_hint = _scrub_tree(classifier_hint, _secret)
+        # `confirm` is deliberately NOT scrubbed. Its proposal is built
+        # server-side from the STORED approval row (routers/sessions.py builds
+        # {tool, params, capability} from `approval`, never from the client), so
+        # a caller cannot inject a credential into it. When the SAME grant was
+        # mounted on the propose turn, its params are clean already: this scrub
+        # ran on that turn's prompt before the model ever saw it.
+        #
+        # That invariant is NOT absolute, and deliberately so. A proposal made
+        # with NO grant, with a DIFFERENT grant, or before this code existed can
+        # contain a value later mounted as the confirm turn's grant. Scrubbing it
+        # here still would not help: that value was already user content, already
+        # seen by the model, and already persisted in the propose turn's
+        # transcript — so the approval row is a second copy of an existing leak,
+        # not a new one. Proposal-time scrubbing cannot help either, since it
+        # cannot know a future, different grant.
+        #
+        # Scrubbing it anyway is actively harmful: the app gate binds an approval
+        # to the EXACT argument hash, so rewriting the approved args makes
+        # redemption fail as `args_mismatch` on the documented store-loss
+        # recovery path, where spineTurnAdapter rebuilds its confirmation mirror
+        # from this proposal. That is the same self-inflicted break that the
+        # sink-scrubbing attempt caused in rounds 3-5.
+        # (sol-critic PR #123 round 8, blocker 1.)
+
     user_data: Dict[str, Any] = {}
     if text is not None:
         user_data["text"] = text
@@ -237,6 +351,17 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         payload["text"] = text
     if confirm is not None:
         payload["confirm"] = confirm
+
+    # "Mount your LLM" (additive wire fields, only present when in play):
+    #   - model: the per-turn override wins, else the session's stored model; an
+    #     unknown id is dropped so the harness applies its env default rather than
+    #     erroring (the app router already 400s unknown ids at the entry).
+    #   - credential_grant: forwarded verbatim, NEVER logged, NEVER persisted.
+    effective_model = model if model is not None else sess.get("model")
+    if is_allowed_model(effective_model):
+        payload["model"] = effective_model
+    if credential_grant is not None:
+        payload["credential_grant"] = credential_grant
 
     try:
         resp = requests.post(f"{harness_url}/turn", json=payload,

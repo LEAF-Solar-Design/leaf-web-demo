@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 import deps
@@ -37,13 +37,17 @@ class PromptRequest(BaseModel):
 
 
 @router.post("/api/nl-prompt")
-def nl_prompt(req: PromptRequest) -> Dict[str, Any]:
+def nl_prompt(req: PromptRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     text = (req.text or "").strip()
     if not text:
         return error_response(
             ErrorCode.BAD_PARAMS, "text must be a non-empty string", retryable=False
         )
     # Match against the live catalog at REQUEST time (dynamic — authored/write
-    # tools included, internal/QA excluded inside classify()).
-    result = classify(text, deps.all_tools())
+    # tools included, internal/QA excluded inside classify()). SCOPED to the
+    # requesting tenant: all_tools() with no argument defaults to demo-tenant and
+    # would classify against, and reveal the existence of, that tenant's authored
+    # tools to every caller. Pass the tenant so each caller sees only the shared
+    # globals plus their own authored/repo tools.
+    result = classify(text, deps.all_tools(str(tenant)))
     return with_envelope_fields(result)

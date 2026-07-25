@@ -27,6 +27,7 @@ SCHEMA = json.loads((SERVER_DIR / "envelope_schema.json").read_text(encoding="ut
 
 sys.path.insert(0, str(SERVER_DIR))
 from envelopes import ErrorCode  # noqa: E402
+from _test_run_confirmation import confirmed_requests_payload  # noqa: E402
 
 import jsonschema  # noqa: E402
 
@@ -216,8 +217,9 @@ def test_stop_forced_kill_records_receipt_and_reports_failure(tmp_path):
 def submit(stack, tool="count-by-layer", params=None, tenant=None, wait=False):
     headers = {"X-Tenant-Id": tenant} if tenant else {}
     url = f"{stack['app']}/api/run" + ("?wait=1" if wait else "")
-    return requests.post(url, json={"tool": tool, "params": params or {},
-                                    "dwg": "rooftop_demo"}, headers=headers, timeout=120)
+    payload = confirmed_requests_payload(
+        stack["app"], tool, params, "rooftop_demo", headers=headers)
+    return requests.post(url, json=payload, headers=headers, timeout=120)
 
 
 def poll_until_terminal(stack, job_id, timeout_s=30.0):
@@ -267,9 +269,9 @@ def test_2_progression_envelope_and_restart_durability(stack, tmp_path):
         wait_ready(f"{base}/api/health", app)
         assert requests.get(f"{base}/api/health", timeout=5).json()["aps_live"] is False  # APS_LIVE=0 default
 
-        r = requests.post(f"{base}/api/run", json={"tool": "count-by-layer",
-                                                   "params": {"_qa_sleep_s": 1.5},
-                                                   "dwg": "rooftop_demo"}, timeout=10)
+        payload = confirmed_requests_payload(
+            base, "count-by-layer", {"_qa_sleep_s": 1.5}, "rooftop_demo")
+        r = requests.post(f"{base}/api/run", json=payload, timeout=10)
         assert r.status_code == 202
         job_id = r.json()["job_id"]
 
@@ -318,9 +320,9 @@ def test_3_job_timeout(stack, tmp_path):
     base = f"http://127.0.0.1:{port}"
     try:
         wait_ready(f"{base}/api/health", app)
-        r = requests.post(f"{base}/api/run", json={"tool": "count-by-layer",
-                                                   "params": {"_qa_sleep_s": 6},
-                                                   "dwg": "rooftop_demo"}, timeout=10)
+        payload = confirmed_requests_payload(
+            base, "count-by-layer", {"_qa_sleep_s": 6}, "rooftop_demo")
+        r = requests.post(f"{base}/api/run", json=payload, timeout=10)
         assert r.status_code == 202
         job_id = r.json()["job_id"]
         deadline = time.time() + 20

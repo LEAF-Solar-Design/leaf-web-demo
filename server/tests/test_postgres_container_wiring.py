@@ -5,6 +5,7 @@ legacy defaults and process trust boundaries that must hold before an operator
 can run the separate migration and cutover stages.
 """
 from pathlib import Path
+import json
 import re
 
 
@@ -23,6 +24,43 @@ def _service(compose: str, name: str) -> str:
     )
     assert match is not None, f"missing compose service {name}"
     return match.group(1)
+
+
+def _required_environment(path: str) -> set[str]:
+    manifest = json.loads(_read(path))
+    return set(manifest["required"]["environment"])
+
+
+def test_required_config_manifests_fail_closed_for_postgres_authority():
+    app_environment = _required_environment("deploy/required-config.app.json")
+    broker_environment = _required_environment("deploy/required-config.broker.json")
+
+    assert {
+        "LEAF_BLOB_STORE",
+        "LEAF_PLATFORM_POSTGRES_REQUIRED",
+        "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED",
+    }.issubset(app_environment)
+    assert {
+        "LEAF_BLOB_STORE",
+        "LEAF_BROKER_STORE",
+    }.issubset(broker_environment)
+    assert "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED" not in broker_environment
+
+
+def test_upload_import_boundary_has_a_real_postgres_pr_gate():
+    workflow = _read(".github/workflows/upload-authority-postgres.yml")
+
+    for protected_path in (
+        "platform/api.py",
+        "platform/tests/test_drawing_import.py",
+        "server/routers/uploads.py",
+        "server/write_loop.py",
+        "deploy/required-config.app.json",
+    ):
+        assert f"- '{protected_path}'" in workflow
+    assert "working-directory: server" in workflow
+    assert "python -m pytest --import-mode=importlib -q" in workflow
+    assert "../platform/tests/test_drawing_import.py" in workflow
 
 
 def test_broker_image_contains_pg_runtime_without_crossing_secret_boundary():
@@ -74,6 +112,26 @@ def test_app_and_harness_images_are_ready_but_keep_legacy_defaults():
     assert "FROM pg_indexes" in harness_serve
     assert "harness_tenant_repo_leases" in harness_serve
     assert "USER 10002:10002" in harness
+
+
+def test_harness_bootstraps_tls_before_using_debian_package_sources():
+    harness = _read("deploy/Dockerfile.harness")
+
+    trust_copy = (
+        "COPY --from=trust-store /etc/ssl/certs/ca-certificates.crt "
+        "/etc/ssl/certs/ca-certificates.crt"
+    )
+    rewrite_marker = "s|http://deb.debian.org|https://deb.debian.org|g"
+    assert "FROM node:22-bookworm AS trust-store" in harness
+    assert trust_copy in harness
+    assert rewrite_marker in harness
+    assert "s|http://security.debian.org|https://security.debian.org|g" in harness
+    assert (
+        harness.index(trust_copy)
+        < harness.index(rewrite_marker)
+        < harness.index("apt-get update")
+    )
+    assert "apt-get install -y --no-install-recommends git ca-certificates" in harness
 
 
 def test_base_compose_uses_explicit_legacy_defaults_and_separate_connections():
