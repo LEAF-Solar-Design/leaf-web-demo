@@ -1249,13 +1249,23 @@ output metadata, pending-job leases and heartbeats, and concurrency accounting.
 
 ## §23 Authored-body persistence is per-tenant (supersedes §15.C)
 
-Provenance: the operator ruled on 2026-07-25 and, when review asked whether an
-independently auditable record of that ruling existed, confirmed the ruling as their
-own. That confirmation supersedes PR #174, which recorded the ruling as OWED rather
-than given. PR #174 was correct on the evidence available to it -- no auditable record
-existed when it was written -- and the confirmation is what closes the gap it found.
-The queries that prompted it were raised on PR #156 and carried forward on PR #168.
-PR #131 (merged 2026-07-25) shipped the per-tenant layout and changed no
+Provenance: NO operator ruling was made on §15.C. Asked directly on 2026-07-25
+whether they had ruled, the operator stated that no ruling was made. That answer
+is the record, and it retracts the claim PR #177 put here -- that the operator had
+"confirmed the ruling as their own" -- which was never true. It restores what PR
+#174 said: the ruling the freeze note calls for is OWED, not given.
+
+What did happen, and is auditable, is narrower: the operator instructed a session
+to land this section on 2026-07-25. Landing it ratifies the SHAPE the section uses,
+which is what the freeze note requires. That is not a ruling on §15.C.
+
+Do not restore the ruling claim without an operator statement recorded at the time
+it is made. Two prior attempts asserted one from inference -- the original bare
+"Ruling: operator, 2026-07-25", then PR #177 -- and both were wrong. A commit
+message reporting what the operator said is not the operator saying it.
+
+The queries that prompted this were raised on PR #156 and carried forward on PR
+#168. PR #131 (merged 2026-07-25) shipped the per-tenant layout and changed no
 documentation; PR #144 then left the resulting documentation gap open rather than
 closing it. The freeze requires a new section rather than an in-place edit, which is
 the shape used here: §15.C keeps its now-false sentence byte-for-byte and this
