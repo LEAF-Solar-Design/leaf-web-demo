@@ -160,7 +160,7 @@ def build_suites() -> List[Suite]:
         Suite("server-dynamic-loader", "server test_dynamic_loader.py", "pytest", SERVER,
               _py_pytest("test_dynamic_loader.py"), 4),
         Suite("server-write-loop", "server tests/test_write_loop.py", "pytest", SERVER,
-              _py_pytest("tests/test_write_loop.py"), 14),
+              _py_pytest("tests/test_write_loop.py"), 16),
         Suite("server-nl-router", "server tests/test_nl_router.py", "pytest", SERVER,
               _py_pytest("tests/test_nl_router.py"), 18, reset_authored=True),
         Suite("server-ui-wave", "server tests/test_ui_wave.py", "pytest", SERVER,
@@ -328,7 +328,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_da_callback.py"), 7),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
-              _py_pytest("test_store.py"), 21),
+              _py_pytest("test_store.py"), 24),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
         # --- tenant customization control plane (one process per file) --- #
