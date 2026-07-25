@@ -152,6 +152,12 @@ _conn_lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
 _executors: Dict[str, ThreadPoolExecutor] = {}
 _reaper_started = False
+# Serializes ensure_started()'s check-and-set of the two process singletons above.
+# Deliberately separate from _lock, which ensure_started() takes indirectly via
+# _query() for the submitted-row scan: reusing _lock would deadlock. That scan
+# stays OUTSIDE this lock, so _start_lock is never held while _lock or _conn_lock
+# is taken, and nothing holding those calls ensure_started() -- no cycle exists.
+_start_lock = threading.Lock()
 _pg_store = PostgresJobStore()
 
 
@@ -1651,14 +1657,22 @@ def ensure_started() -> None:
     else:
         _db()
     executors_started = False
-    if not _executors:
-        for lane, workers in lane_workers().items():
-            _executors[lane] = ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix=f"jobworker-{lane}")
-        executors_started = True
-    if not _reaper_started:
-        threading.Thread(target=_reaper_loop, daemon=True, name="job-reaper").start()
-        _reaper_started = True
+    # Check-and-set under _start_lock. Unsynchronized, two concurrent first
+    # submits both read _executors as empty and _reaper_started as False, so each
+    # builds its own lane pools (leaking a whole pool set) and each starts an
+    # orphan-reaper daemon. _reaper_log_lock keeps _reaper_failure_state's own
+    # updates atomic, but it cannot make two independent sweep schedules coherent:
+    # duplicate reapers interleave their log lines and reset each other's failure
+    # streak, so the log budget no longer describes one sweep history.
+    with _start_lock:
+        if not _executors:
+            for lane, workers in lane_workers().items():
+                _executors[lane] = ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix=f"jobworker-{lane}")
+            executors_started = True
+        if not _reaper_started:
+            threading.Thread(target=_reaper_loop, daemon=True, name="job-reaper").start()
+            _reaper_started = True
     if executors_started:
         # A submitted row can outlive a process before its executor starts. Scan
         # exactly once when this process creates its pools; scanning on every
