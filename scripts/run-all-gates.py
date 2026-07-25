@@ -553,13 +553,20 @@ def build_suites() -> List[Suite]:
         # being present, so every module collects, not just the *_static.py
         # proofs.
         # The floor below is NOT that number. Per coverage_verdict, `expected`
-        # is an EXECUTED-test floor, so re-baselining it needs a real run
-        # against a LIVE Postgres. Provenance of 145: commit 80e3762
+        # is an EXECUTED-test floor. Provenance of 145: commit 80e3762
         # (2026-07-23) measured 145/145 executed, zero skips, on a throwaway
-        # Neon branch. 54 more tests collect now, so the floor is likely
-        # stale-LOW -- that under-enforces (coverage_verdict PASSes it with a
-        # drift note) rather than failing the gate, and closing it needs a
-        # live-Postgres run this host cannot do.
+        # Neon branch. 54 tests have been added since.
+        # 199 is the floor this suite should carry, and the 54-test gap is a
+        # real hole, not a safe margin. This suite allowlists NO skip reason, a
+        # non-allowlisted skip fails it outright, and every skip path under
+        # platform/tests is gated on the DB being unconfigured. That is exactly
+        # why the 2026-07-23 run came back 145/145 with zero skips: on a
+        # reachable DB nothing skips, so a green run executes everything
+        # collected. At a floor of 145 the suite can therefore lose up to 54
+        # tests and still report green -- 146..198 pass with only a drift note,
+        # and exactly 145 passes silently, with no note at all.
+        # Not raised here because that is an executable change and this host has
+        # no Postgres. Re-baseline it to the collected count on a live-DB run.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests"), 145, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
