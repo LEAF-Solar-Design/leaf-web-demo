@@ -478,8 +478,11 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_jobs_callbacks_postgres.py"), 1,
               allowed_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
+        # Floor 13, re-measured after main added four offline tests. It was 9 when
+        # this suite was first registered; leaving it there would have let all
+        # four of main's new tests disappear without reddening the gate.
         Suite("server-session-store-postgres", "server tests/test_session_store_postgres.py",
-              "pytest", SERVER, _py_pytest("tests/test_session_store_postgres.py"), 9,
+              "pytest", SERVER, _py_pytest("tests/test_session_store_postgres.py"), 13,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires explicit DATABASE_URL",)),
         # The one module in the 19 with NO offline coverage: every test needs a
@@ -514,15 +517,15 @@ def build_suites() -> List[Suite]:
         # the Linux CI runner and skip only on a Windows operator box. Named here
         # so a Windows run stays green without the fail-closed skip rule having to
         # tolerate an unnamed reason.
-        # Floor is 16, the count that executes on Windows (18 collected, minus the
-        # two fcntl-gated lock probes). Linux CI executes all 18 and reports drift.
-        # The old floor of 5 let 11 tests vanish and still call the suite green.
+        # Floor is 17, the count that executes on Windows (19 collected, minus the
+        # two fcntl-gated lock probes). Linux CI executes all 19 and reports drift.
+        # The old floor of 5 let 12 tests vanish and still call the suite green.
         # RESIDUAL, deliberately not closed here: the allowlist is not
         # OS-conditional, so a Linux runner that somehow lacked fcntl would skip
         # the two lock probes and still clear 16. Catching that needs per-OS suite
         # config the runner does not have today.
         Suite("server-customization-adversarial", "server customization adversarial", "pytest",
-              SERVER, _py_pytest("tests/test_customization_adversarial.py"), 16,
+              SERVER, _py_pytest("tests/test_customization_adversarial.py"), 17,
               allowed_skip_reasons=(r"POSIX advisory locking only",)),
         Suite("server-customization-publish-recovery", "server customization publish recovery", "pytest",
               SERVER, _py_pytest("tests/test_customization_publish_recovery.py"), 1),
