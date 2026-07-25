@@ -182,18 +182,62 @@ def test_degraded_needs_fallback_and_proof():
     assert is_well_formed_availability(failed, NOW) is False
 
 
-def test_a_naive_now_fails_closed_instead_of_crashing():
-    """A validator whose whole job is to fail CLOSED must never fail by
-    exception. Passing datetime.now() rather than datetime.now(timezone.utc)
-    used to raise TypeError and take the emit path down with it."""
+def test_a_naive_now_is_refused_not_assumed_to_be_utc():
+    """Two wrong answers were tried here before this one.
+
+    First the naive clock raised TypeError deep inside a comparison. The "fix"
+    was to assume UTC, which is worse: it is fail-OPEN. At a true 17:00Z a
+    UTC-5 caller passes naive 12:00, and a lease that expired at 12:00:13Z is
+    judged still valid, five hours late. A silent wrong answer beats neither a
+    crash nor an honest refusal. So: the validator fails CLOSED, and the emit
+    path raises rather than guessing an instant it cannot know."""
     naive = NOW.replace(tzinfo=None)
-    assert is_well_formed_availability(_shipping("drawing.solve.strings"), naive) is True
-    stale = _shipping("drawing.solve.strings", NOW - timedelta(minutes=5))
-    assert is_well_formed_availability(stale, naive) is False
-    # The whole descriptor path must survive a naive clock too.
-    descriptors = build_descriptors(now=naive)
-    assert len(descriptors) == len(PINNED_IDS)
-    assert all(d["availability"]["state"] == "locked_planned" for d in descriptors)
+    # Fails closed even for a payload that IS valid against the real clock.
+    assert is_well_formed_availability(_shipping("drawing.solve.strings"), naive) is False
+    # The concrete fail-open case: a UTC-5 caller's naive wall clock, 5h stale.
+    stale_naive = (NOW - timedelta(hours=5)).replace(tzinfo=None)
+    expired = _shipping("drawing.solve.strings", NOW - timedelta(hours=5))
+    assert is_well_formed_availability(expired, NOW) is False
+    assert is_well_formed_availability(expired, stale_naive) is False, (
+        "a naive clock must never resurrect an expired lease")
+    # The emit path refuses loudly instead of stamping an unknowable instant.
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_descriptors(now=naive)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        locked_availability("drawing.inspect", naive)
+
+
+def test_an_aware_non_utc_now_is_converted_not_emitted_verbatim():
+    """Emitting isoformat() straight from an odd-offset clock produced
+    `+00:00:30`, which this module's own validator rejects, so the module emitted
+    a payload it would itself refuse."""
+    odd = timezone(timedelta(seconds=30))
+    weird_now = NOW.astimezone(odd)
+    locked = locked_availability("drawing.inspect", weird_now)
+    assert locked["observedAt"].endswith("+00:00"), locked["observedAt"]
+    assert is_well_formed_availability(locked, weird_now) is True, (
+        "the module must accept its own emitted payload from any aware clock")
+    # And ordinary whole-hour offsets round-trip identically.
+    for offset_hours in (-5, 0, 5, 13):
+        clock = NOW.astimezone(timezone(timedelta(hours=offset_hours)))
+        payload = locked_availability("drawing.inspect", clock)
+        assert is_well_formed_availability(payload, clock) is True
+
+
+def test_emitted_timestamps_carry_millisecond_precision():
+    """`Date.parse` keeps only milliseconds, so a 6-digit fraction would leave
+    Python and the console up to 0.999 ms apart. Payloads we generate remove that
+    gap; payloads we RECEIVE still accept 1 to 6 digits, since truncation is not
+    an accept/reject divergence."""
+    for micro in (0, 1, 123456, 999999):
+        payload = locked_availability("drawing.inspect", NOW.replace(microsecond=micro))
+        fraction = payload["observedAt"].split(".")[1].split("+")[0]
+        assert len(fraction) == 3, payload["observedAt"]
+        assert is_well_formed_availability(payload, NOW.replace(microsecond=micro)) is True
+    # Incoming 6-digit fractions remain acceptable.
+    incoming = _shipping("drawing.solve.strings")
+    incoming["observedAt"] = (NOW - timedelta(seconds=1)).isoformat()
+    assert "." not in incoming["observedAt"] or is_well_formed_availability(incoming, NOW) is True
 
 
 def test_a_validated_availability_is_snapshotted_not_aliased():

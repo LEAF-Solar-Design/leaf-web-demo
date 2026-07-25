@@ -41,9 +41,11 @@ The backend emit must conform to these, field for field:
    `contract_test`, live write receipt as `end_to_end`, broker ledger line as
    `observability`). Each receipt is content-addressed: `digest.value` =
    sha256 of the artifact served at `uri`.
-4. `observedAt`/`expiresAt`: availability is a lease, not a fact. Emit short
-   leases (minutes, not days); the console must treat an expired lease as
-   `unavailable` and say so.
+4. `observedAt`/`expiresAt`: availability is a lease, not a fact. Emit SHORT
+   leases; the console must treat an expired lease as `unavailable` and say so.
+   The normative length is the TTL below, 15 seconds. (An earlier draft of this
+   line said "minutes, not days", which contradicted the 15 s figure two
+   paragraphs down. Seconds is correct.)
 
    **Normative TTL: `LEASE_TTL_SECONDS = 15`** (equivalently the website's
    `SERVER_AVAILABILITY_TTL_MS = 15000`). This line is the single source both
@@ -58,6 +60,12 @@ The backend emit must conform to these, field for field:
    `server/product_capability_availability.py` via
    `test_product_capability_availability.py`, so a server-side edit that drifts
    from this document fails the suite rather than shipping.
+
+   **Known limit of that assertion:** it catches a one-sided SERVER change only.
+   Editing this document and the Python constant together still passes while the
+   website sits at a different `SERVER_AVAILABILITY_TTL_MS`. Closing that needs a
+   cross-repo contract test, which does not exist yet. Treat a TTL change as a
+   two-repo change and verify the website side by hand.
 5. Transport: availability rides the authenticated platform-registry response
    path only (types.ts:27). It is never embedded in unauthenticated or public
    payloads.

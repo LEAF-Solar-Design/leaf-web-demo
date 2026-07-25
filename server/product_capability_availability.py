@@ -41,8 +41,24 @@ Mirrored rules, kept in this order to match the TypeScript:
     `locked_planned` carries ZERO evidence — a locked capability dressed in
     receipts is fail-open by implication.
 
+CLOCKS
+  * `now` must be timezone-AWARE. A naive value is refused, never assumed to be
+    UTC: assuming UTC is fail-OPEN, because a UTC-5 caller's naive 12:00 would
+    accept a lease that expired at 12:00:13Z five hours earlier. The emit path
+    raises ValueError; the validator returns False.
+  * an aware non-UTC `now` is CONVERTED to UTC before emitting, or `isoformat()`
+    would produce spellings like `+00:00:30` that this module's own validator
+    rejects.
+  * emitted timestamps carry MILLISECOND precision, because `Date.parse` keeps
+    only milliseconds and a 6-digit fraction would put the two runtimes up to
+    0.999 ms apart. Incoming timestamps still accept 1 to 6 digits.
+
 TTL drift is a coordinated contract event: changing LEASE_TTL_SECONDS here
 without changing SERVER_AVAILABILITY_TTL_MS on the website breaks every emit.
+That coupling is asserted against contract/CAPABILITY-AVAILABILITY-EMIT.md,
+which catches a one-sided SERVER edit. It cannot catch a drift where the document
+and this constant are changed together while the website stays put; only a
+cross-repo check can, and none exists yet.
 
 Run:  cd server && python -m pytest tests/test_product_capability_availability.py -q
 """
@@ -177,17 +193,48 @@ def _parse_iso(value: Any) -> Optional[datetime]:
     return parsed
 
 
-def _as_utc(moment: datetime) -> datetime:
-    """Treat a naive datetime as UTC.
+def _is_aware(moment: Any) -> bool:
+    return (isinstance(moment, datetime) and moment.tzinfo is not None
+            and moment.utcoffset() is not None)
 
-    Every internal timestamp is timezone-aware, so comparing an aware `expiresAt`
-    against a NAIVE caller-supplied `now` raises
-    `TypeError: can't compare offset-naive and offset-aware datetimes`. A
-    validator whose job is to fail CLOSED must never fail by exception — a caller
-    that passes `datetime.now()` instead of `datetime.now(timezone.utc)` would
-    take the whole emit path down instead of getting a `False`.
+
+def _to_utc(moment: datetime) -> datetime:
+    """Normalize an AWARE datetime to UTC. Raises on a naive one.
+
+    Two lessons are baked in here, both of them mistakes this file already made.
+
+    First, a naive `now` must NOT be assumed to be UTC. That looks like a safe
+    default and is actually fail-OPEN: at a true 17:00Z a UTC-5 caller passes
+    naive 12:00, and a lease that expired at 12:00:13Z is then judged still
+    valid, five hours late. Guessing turns a loud failure into a silent wrong
+    answer, which is strictly worse. Callers of the EMIT path get a ValueError;
+    the validator, which must return a bool rather than raise, fails closed.
+
+    Second, an aware non-UTC `now` must be CONVERTED, not used as-is. Emitting
+    `isoformat()` straight from a `timezone(timedelta(seconds=30))` clock
+    produced `+00:00:30`, a spelling this module's own validator rejects, so the
+    module emitted a payload it would itself refuse.
     """
-    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+    if not _is_aware(moment):
+        raise ValueError(
+            "availability timestamps require a timezone-aware datetime; "
+            "got a naive one, which cannot be placed on the timeline. "
+            "Pass datetime.now(timezone.utc), not datetime.now()."
+        )
+    return moment.astimezone(timezone.utc)
+
+
+def _iso(moment: datetime) -> str:
+    """Emit UTC with MILLISECOND precision.
+
+    `Date.parse` keeps only milliseconds, so a 6-digit fraction means Python and
+    the console hold instants up to 0.999 ms apart. The window is tiny against a
+    15 s lease, but it costs nothing to remove for payloads we generate, so we
+    emit exactly 3 fractional digits. Incoming timestamps are still accepted with
+    1 to 6 digits: truncation is not an accept/reject divergence, and rejecting
+    otherwise-valid ISO would be a worse trade.
+    """
+    return _to_utc(moment).isoformat(timespec="milliseconds")
 
 
 def _is_evidence(value: Any) -> bool:
@@ -210,7 +257,11 @@ def is_well_formed_availability(value: Any, now: Optional[datetime] = None) -> b
     console WOULD reject this payload, so we must not emit it."""
     if now is None:
         now = datetime.now(timezone.utc)
-    now = _as_utc(now)
+    # Fail CLOSED, do not guess. A naive clock cannot be placed on the timeline,
+    # and assuming UTC would accept long-expired leases from a non-UTC caller.
+    if not _is_aware(now):
+        return False
+    now = _to_utc(now)
     if not isinstance(value, dict):
         return False
     if value.get("contractVersion") != CONTRACT_VERSION:
@@ -277,7 +328,7 @@ def locked_availability(product_capability: str, now: Optional[datetime] = None,
     """
     if now is None:
         now = datetime.now(timezone.utc)
-    now = _as_utc(now)
+    now = _to_utc(now)
     return {
         "contractVersion": CONTRACT_VERSION,
         "authority": AUTHORITY,
@@ -285,8 +336,8 @@ def locked_availability(product_capability: str, now: Optional[datetime] = None,
         "implementationState": "planned",
         "runtimeState": "unavailable",
         "state": "locked_planned",
-        "observedAt": now.isoformat(),
-        "expiresAt": (now + timedelta(seconds=LEASE_TTL_SECONDS)).isoformat(),
+        "observedAt": _iso(now),
+        "expiresAt": _iso(now + timedelta(seconds=LEASE_TTL_SECONDS)),
         "reasonCode": reason_code,
         "evidence": [],
     }
@@ -324,7 +375,7 @@ def build_descriptors(live: Optional[Mapping[str, Dict[str, Any]]] = None,
     """
     if now is None:
         now = datetime.now(timezone.utc)
-    now = _as_utc(now)
+    now = _to_utc(now)
     live = live or {}
     entitlements = entitlements or {}
     descriptors: List[Dict[str, Any]] = []
