@@ -99,7 +99,10 @@ def test_site_demo_run_identity_dedupes_cache_fill_and_allows_explicit_refresh(
     second = site_demo.get_demo_solve()
     assert first["solve_id"] == second["solve_id"]
     assert calls["n"] == 1
-    prefix = f"site-demo:{sha}:{site_demo.SITE_TOOL['version']}:"
+    prefix = (
+        f"site-demo:{sha}:{site_demo.SITE_TOOL['version']}:"
+        f"{site_demo.SITE_RUN_GENERATION}:"
+    )
     window = site_demo._window_start(now)
     assert calls["event_keys"] == [prefix + f"window-{window}"]
 

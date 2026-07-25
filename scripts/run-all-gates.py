@@ -225,7 +225,7 @@ def build_suites() -> List[Suite]:
         Suite("server-dynamic-loader", "server test_dynamic_loader.py", "pytest", SERVER,
               _py_pytest("test_dynamic_loader.py"), 4),
         Suite("server-write-loop", "server tests/test_write_loop.py", "pytest", SERVER,
-              _py_pytest("tests/test_write_loop.py"), 8),
+              _py_pytest("tests/test_write_loop.py"), 16),
         Suite("server-nl-router", "server tests/test_nl_router.py", "pytest", SERVER,
               _py_pytest("tests/test_nl_router.py"), 18, reset_authored=True),
         Suite("server-ui-wave", "server tests/test_ui_wave.py", "pytest", SERVER,
@@ -334,6 +334,16 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_approval_consume.py"), 13),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
               SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 17),
+        # NOT db_gated on purpose: this file's authority-selector and legacy-contract
+        # tests need no database, and its DB-only tests skip themselves via
+        # @requires_database. Gating the whole suite would hide the un-gated half on
+        # a clean checkout. `expected` counts COLLECTED tests (skips included), so the
+        # number is the same with and without a DB. Added 2026-07-24 with the
+        # single-writer write authorization: the file was never in the gate, so the
+        # drawing-authority tests had been running only when someone ran them by hand.
+        Suite("server-drawing-authority-postgres",
+              "server tests/test_drawing_upload_authority_postgres.py", "pytest",
+              SERVER, _py_pytest("tests/test_drawing_upload_authority_postgres.py"), 20),
         Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_entitlements.py"), 26),
         Suite("server-policy-unavailable-paths", "server tests/test_policy_unavailable_paths.py",
@@ -490,7 +500,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
-              _py_pytest("test_store.py"), 15),
+              _py_pytest("test_store.py"), 27),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
         # Both are fully offline (no APS, no network) but were never registered,

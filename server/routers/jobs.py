@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import deps
 import entitlements
@@ -29,6 +29,16 @@ import jobs
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
+
+
+def _store():
+    """da/store.py, imported lazily — same pattern as routers/drawings.py. The
+    module is on sys.path via write_loop's setup, which importing `jobs` above
+    has already performed, so this cannot run before the path is prepared."""
+    import store
+
+    return store
+
 
 PLATFORM_CONTRACT_VERSION = "leaf.platform.v1alpha1"
 AUTOFILL_TOOL = "string-autofill-opt"
@@ -41,6 +51,35 @@ class RunRequest(BaseModel):
     dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
     catalog_digest: Optional[str] = None
     # specific immutable drawing version (da/store.py resolve_version) otherwise.
+    #
+    # SINGLE-WRITER IDENTITY. `holder` is the caller's own session id — the SAME
+    # value it sends to POST/DELETE /api/drawings/{id}/checkout, so the three
+    # routes speak one vocabulary. A `drawing.write` run publishes a new version,
+    # and until this field existed the store was never told WHO was publishing:
+    # it verified that a checkout was live, not that the caller owned it, so a
+    # second session could write under the first session's lease. `fence` is the
+    # lock generation from `checkout.fence` (GET /versions); supplying it makes
+    # the token a real fencing token, rejecting a writer whose lease lapsed and
+    # was re-acquired even under the same holder id.
+    #
+    # Omitted -> the RESERVED `store.ANONYMOUS_HOLDER`, which no checkout can
+    # ever hold (acquire_checkout refuses it), so an unnamed run is refused 403
+    # against EVERY active lock and still publishes freely on an unlocked
+    # drawing. This deliberately does NOT default to the tenant id: POST
+    # .../checkout defaults ITS holder to the tenant too, so a drawing locked
+    # with an empty body is held by the tenant id and an unnamed writer matched
+    # it exactly — the fail-open sol-critic found on PR #141.
+    #
+    # SCOPE, stated plainly: `holder` is caller-supplied and bound only to the
+    # tenant (deps.require_tenant), exactly like the POST/DELETE .../checkout
+    # routes it mirrors. Against a MALICIOUS same-tenant caller this is a
+    # coordination lock, not an authorization boundary — that caller can read
+    # the holder from GET /versions and present it. Closing that needs an
+    # opaque server-issued checkout capability, tracked separately. What this
+    # does close is the cross-session write: no caller publishes under a lock
+    # it has not at least named, and none publishes anonymously under any lock.
+    holder: Optional[str] = Field(default=None, max_length=200)
+    fence: Optional[int] = Field(default=None, ge=0)
 
 
 class TerminalCallback(BaseModel):
@@ -187,6 +226,16 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                 dwg_version=req.dwg_version,
                 idempotency_key=idempotency_key, authority_mode=authority_mode,
                 platform_context=platform_context,
+                # A caller that names no session gets the RESERVED anonymous id,
+                # not the tenant id. Defaulting to the tenant looked fail-closed
+                # but was not: POST .../checkout also defaults its holder to the
+                # tenant, so a drawing locked with an empty body is held by the
+                # tenant id and an unnamed writer matched it. No lock can ever
+                # hold the reserved id (store.acquire_checkout refuses it), so
+                # this is refused against every active lock, never just `sess-`
+                # shaped ones.
+                checkout_holder=(req.holder or _store().ANONYMOUS_HOLDER),
+                checkout_fence=req.fence,
             )
     except jobs.platform_link.CanonicalEntitlementDenied as exc:
         # STORED-org entitlement denial from the canonical choke point (P1

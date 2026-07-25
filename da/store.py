@@ -93,6 +93,64 @@ def _db():
 VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9_-]+/drawings/[a-z0-9_-]+/v/\d{8}\.dwg$")
 
 
+# RESERVED holder id for a PRODUCT write whose caller named no session.
+#
+# The route used to default an absent holder to the tenant id, on the theory that
+# a tenant-shaped id never matches a `sess-` lock. That is only true when the lock
+# was taken by a session. POST .../checkout defaults ITS holder to the tenant id
+# too, so a drawing locked with the documented empty body is held by the tenant id
+# — and an unnamed writer then MATCHED it and published under someone else's
+# lease. The tenant id was serving as both the "nobody named themselves" sentinel
+# and a real holder value; conflating the two is what reopened the hole this
+# module exists to close.
+#
+# Guarded on BOTH sides, because either alone is insufficient:
+#
+#   * acquire_checkout REFUSES this id, so no NEW lock can be taken as it. Needed
+#     because `holder` is caller-supplied there — otherwise a caller could take
+#     the lock as the sentinel and every unnamed write would match it.
+#   * the write check refuses this id UNCONDITIONALLY against an active lock,
+#     without comparing it to the stored holder. Needed because the acquire-time
+#     refusal cannot see state that already exists: a lock taken as the sentinel
+#     under an earlier release, restored from a backup, or written straight into
+#     a manifest is persisted and would compare EQUAL. The reserved id is a
+#     statement about the CALLER ("named nobody"), so it is never a valid answer
+#     to "who owns this lock", whatever the stored value says.
+#
+# So an unnamed product write is refused against ANY active lock, whatever shape
+# its holder has, and publishes normally on an unlocked drawing. Distinct from
+# `holder=None`, which means "not a product write at all" (ingest, the offline
+# harness, this module's own tests) and skips the check entirely.
+ANONYMOUS_HOLDER = "anonymous:unnamed-writer"
+
+
+class CheckoutParamError(ValueError):
+    """Bad INPUT to a checkout request: a reserved holder id, or a non-positive
+    TTL. Narrow on purpose.
+
+    Subclasses ValueError so existing callers that map `(KeyError, ValueError)`
+    to 400 keep working unchanged. It exists so the route can catch THIS instead
+    of bare ValueError: `acquire_checkout` also decodes the stored manifest, and
+    a corrupt one raises JSONDecodeError — itself a ValueError — which a broad
+    catch would report to the caller as "your request was malformed" when the
+    truth is that the stored object is damaged and nothing the caller sends will
+    help.
+    """
+
+
+class CheckoutDenied(Exception):
+    """A write was attempted by someone who is not the single-writer lock holder.
+
+    Deliberately NOT a ValueError. Every caller of the write primitives already
+    maps `(KeyError, ValueError)` to a 400 BAD_PARAMS ("you asked for a drawing
+    or version that does not exist"), and this is a different answer: the request
+    is well-formed and the drawing exists, but the caller lacks authority over it.
+    A distinct type is what lets server/write_loop.py surface it as 403 FORBIDDEN,
+    matching the DELETE .../checkout route, which has always answered 403 when a
+    non-holder tries to release a lock (server/routers/drawings.py).
+    """
+
+
 def sanitize_id(raw: str) -> str:
     """Validate an id against the ONE shared tenant/opaque-id rule and return it
     UNCHANGED — REJECT-don't-collapse (server/tenant_id_validator, security-audit F13).
@@ -728,7 +786,8 @@ def _pg_ingest(
 
 def _pg_put(
     backend: StorageBackend, tenant_id: str, drawing_id: str, data: bytes,
-    parent_version: Optional[int], meta: dict,
+    parent_version: Optional[int], meta: dict, *,
+    holder: Optional[str] = None, fence: Optional[int] = None,
 ) -> int:
     db = _db()
     digest = _sha256(data)
@@ -751,6 +810,34 @@ def _pg_put(
             or row["checkout_expires_at"] <= datetime.now(timezone.utc)
         ):
             raise ValueError("an active checkout is required to publish a version")
+        # The lock is live — but WHOSE? Until this check, the answer was "nobody
+        # asked": the caller's identity never reached the store, so any request
+        # on this tenant published under whatever lease happened to be open. The
+        # comparison happens under the same FOR UPDATE row lock that the fenced
+        # finalize below re-checks, so the holder cannot change underneath it.
+        # Same unconditional refusal as the legacy path: the reserved id says the
+        # CALLER named nobody, so it is never a valid owner of an active lock. The
+        # column is free text (platform/migrations/0016), and acquire_checkout's
+        # refusal only guards NEW acquisitions, so a row that already carries the
+        # sentinel — written under an earlier release, or restored — would
+        # otherwise compare equal and admit the anonymous writer.
+        if holder is not None and str(holder) == ANONYMOUS_HOLDER:
+            raise CheckoutDenied(
+                f"drawing is checked out by {row['checkout_holder']!r}; "
+                f"a writer that names no session may not publish a version")
+        if holder is not None and str(row["checkout_holder"]) != str(holder):
+            raise CheckoutDenied(
+                f"drawing is checked out by {row['checkout_holder']!r}; "
+                f"{holder!r} may not publish a version")
+        # A caller-supplied fence is what makes this a fencing token rather than a
+        # churn detector: a writer whose lease lapsed and was re-acquired holds a
+        # stale generation and is refused here even when the holder id matches,
+        # which is exactly the resumed-after-a-pause writer the fence exists for.
+        if fence is not None and int(row["checkout_fence"]) != int(fence):
+            raise CheckoutDenied(
+                f"checkout fence {int(fence)} is stale "
+                f"(current generation {int(row['checkout_fence'])}); "
+                f"re-acquire the checkout before publishing")
         expected = int(parent_version) if parent_version is not None else None
         if int(row["head"]) != expected:
             raise ValueError(
@@ -786,6 +873,11 @@ def _pg_put(
                 "note": meta.get("note"),
             },
         )
+        # Carried to finalize as the lock this version was reserved against. When
+        # the caller named itself these are its OWN verified holder/generation
+        # (checked just above under this row lock), so the fenced UPDATE below now
+        # proves "the caller still owns the lock", not merely "the lock did not
+        # change" — the latter was true even when the writer was a bystander.
         return (
             version, key, expected, str(row["checkout_holder"]),
             int(row["checkout_fence"]),
@@ -887,13 +979,141 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
     return {"drawing_id": did, "version": 1}
 
 
+def _authorize_checkout_view(co: dict | None, holder: str | None,
+                             fence: int | None = None) -> None:
+    """The single-writer rule over a NORMALIZED checkout dict ({holder, expires,
+    fence?}) — the shape both authorities hand back from `load_manifest`.
+
+    Raises CheckoutDenied when an ACTIVE lock is held by someone other than
+    `holder`. Called only when the caller names itself (`holder is not None`).
+    Two cases stay deliberately permitted, because they are the behaviour the
+    product has always had and neither lets a caller write under another
+    session's lease:
+
+      * no lock at all, and
+      * an EXPIRED lock (the store's rule everywhere else is that an expired lock
+        is free — acquire_checkout re-grants it to anyone).
+
+    A `fence` is checked only when the lock actually carries one. Legacy locks do
+    not: acquire_checkout's legacy branch writes holder/acquired/expires and no
+    generation, so under that authority the holder comparison IS the whole
+    guarantee. The asymmetry is inherent to the legacy backend, which STORE.md
+    already documents as best-effort (non-atomic manifest writes); it is not
+    introduced by this check.
+    """
+    # `holder` and `fence` are INDEPENDENT claims, and each is checked only when
+    # made. Returning early on `holder is None` skipped the fence too, so a caller
+    # naming no session but presenting a STALE fence passed here and was refused
+    # at the commit — `_pg_put` checks any supplied fence regardless of holder.
+    # That is the pre-flight promising something the commit does not honour, which
+    # is the one thing this function must never do.
+    if holder is None and fence is None:
+        return
+    if not _is_active(co, datetime.now(timezone.utc)):
+        return
+    if holder is not None:
+        # An anonymous writer NEVER publishes under an active lock, whoever holds
+        # it. Checked before the equality below rather than relying on the
+        # acquire-time refusal, because that refusal only guards NEW acquisitions:
+        # a lock taken as the sentinel under an earlier release, or restored from
+        # a backup, or written straight into a manifest, is already persisted and
+        # would compare EQUAL to the anonymous caller and let it through. The
+        # reserved id is a statement about the CALLER ("named nobody"), so it can
+        # never be a valid answer to "who owns this lock", regardless of what the
+        # stored value happens to say.
+        if str(holder) == ANONYMOUS_HOLDER:
+            raise CheckoutDenied(
+                f"drawing is checked out by {co.get('holder')!r}; "
+                f"a writer that names no session may not publish a version")
+        if str(co.get("holder")) != str(holder):
+            raise CheckoutDenied(
+                f"drawing is checked out by {co.get('holder')!r}; "
+                f"{holder!r} may not publish a version")
+    current = co.get("fence")
+    if fence is not None and current is not None and int(current) != int(fence):
+        raise CheckoutDenied(
+            f"checkout fence {int(fence)} is stale "
+            f"(current generation {int(current)}); "
+            f"re-acquire the checkout before publishing")
+
+
+def authorize_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                       holder: str | None, fence: int | None = None) -> None:
+    """PRE-FLIGHT single-writer check: raise CheckoutDenied if `holder` may not
+    publish to this drawing right now. Read-only; no side effects.
+
+    put_drawing performs this same check at COMMIT time, and that is the
+    authoritative one (it runs under the row lock, so nothing can change between
+    the check and the write). This exists because the live path spends real money
+    before it reaches the commit: run_write_live submits an APS WorkItem, waits
+    for it, and only then publishes. Refusing an unauthorized writer here means
+    it is refused BEFORE the engine bill, instead of after.
+
+    It must therefore refuse everything the commit would refuse, or the promise is
+    empty. Under the POSTGRES authority the commit ALSO requires a live checkout
+    (`_pg_put`), which the shared legacy predicate does not — it treats no lock
+    and an expired lock as free. Pre-flighting only the holder rule there let an
+    unlocked live write pass here, buy an APS WorkItem, and fail at publish: the
+    exact bill this function exists to avoid. So that requirement is mirrored
+    below, raising the same ValueError the commit raises, and the two authorities
+    keep their genuinely different rules rather than being forced to agree.
+    """
+    tid = sanitize_id(tenant_id)
+    did = sanitize_id(drawing_id)
+    if authority_mode() == "postgres":
+        # Mirrors _pg_put's precondition, and like it applies whether or not the
+        # caller named itself.
+        m = load_manifest(backend, tid, did)
+        if not _is_active(m.get("checkout"), datetime.now(timezone.utc)):
+            raise ValueError("an active checkout is required to publish a version")
+        _authorize_checkout_view(m.get("checkout"), holder, fence)
+        return
+    # Same independence as the predicate: a caller naming no session but claiming
+    # a fence still has that claim checked, or the pre-flight permits what the
+    # commit refuses. Only a caller claiming NEITHER skips the read.
+    if holder is None and fence is None:
+        return
+    m = load_manifest(backend, tid, did)
+    _authorize_checkout_view(m.get("checkout"), holder, fence)
+
+
 def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_path: str,
-                parent_version, meta: dict | None = None) -> int:
+                parent_version, meta: dict | None = None, *,
+                holder: str | None = None, fence: int | None = None) -> int:
     """Append a NEW immutable version (v = latest+1, parent = parent_version) and
     advance head + latest. This is the primitive the DWG write path calls.
 
     Returns the new integer version. A write from a non-latest head branches the
     DAG (parent linkage is enough; we keep the model simple).
+
+    SINGLE-WRITER AUTHORIZATION (`holder`, `fence`). The lock only ever proved
+    that A checkout was live, never that the CALLER owned it, so session B could
+    publish a version under session A's lease. `holder` is the caller's own
+    identity (the same id it sent to POST/DELETE .../checkout); when given, the
+    write is refused with `CheckoutDenied` unless that identity owns the active
+    lock. `fence` is the lock generation the caller believes it holds
+    (`checkout.fence`, surfaced by GET /versions): supplying it makes this a real
+    fencing token, because a caller whose lease lapsed and was re-acquired — even
+    by ITSELF, under the same holder id — carries a stale generation and is
+    refused. Postgres authority only; see `_authorize_legacy_checkout`.
+
+    SCOPE, stated plainly so the guarantee is not overread. `holder` is a caller-
+    supplied label bound only to the tenant, and GET /versions publishes the
+    current holder, so a MALICIOUS same-tenant caller can read it and present it.
+    Against that caller this is a coordination lock, not an authorization
+    boundary — the same property the POST/DELETE .../checkout routes have always
+    had, and this check does not weaken it. What it does close is the accidental
+    cross-session write: no caller publishes under a lock it has not at least
+    named, and an unnamed caller (`ANONYMOUS_HOLDER`) publishes under no lock at
+    all. Making it a true boundary needs an opaque server-issued checkout
+    capability that never travels in a readable field; tracked separately.
+
+    Both default to None, which preserves the pre-existing behaviour exactly:
+    ingest paths, the offline harness and the store's own tests publish without
+    naming a session. The product write path always names one — the authorization
+    that matters to a tenant is applied at POST /api/run (server/routers/jobs.py)
+    and carried down to here, so it cannot be skipped by reaching the store
+    through a different route.
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
@@ -901,9 +1121,10 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         return _pg_put(
             backend, tid, did, _read(local_path),
             int(parent_version) if parent_version is not None else None,
-            meta or {},
+            meta or {}, holder=holder, fence=fence,
         )
     m = load_manifest(backend, tid, did)
+    _authorize_checkout_view(m.get("checkout"), holder, fence)
 
     new_v = int(m["latest"]) + 1
     vkey = drawing_version_key(tid, did, new_v)
@@ -1141,12 +1362,20 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
 
     A lock held by ANOTHER holder and still within TTL blocks (False). An expired
     lock (expires < now) is treated as free. The same holder re-acquiring refreshes.
+
+    `ANONYMOUS_HOLDER` is REFUSED. `holder` is caller-supplied on this route, so
+    without this a caller could take the lock AS the unnamed-writer sentinel and
+    every unnamed write would then match it — turning the fail-closed default
+    back into a fail-open one. Nothing legitimate asks for that id.
     """
+    if str(holder) == ANONYMOUS_HOLDER:
+        raise CheckoutParamError(
+            f"{ANONYMOUS_HOLDER!r} is reserved and cannot hold a checkout")
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
     if authority_mode() == "postgres":
         if float(ttl_s) <= 0:
-            raise ValueError("checkout ttl must be positive")
+            raise CheckoutParamError("checkout ttl must be positive")
         db = _db()
 
         def operation(conn):

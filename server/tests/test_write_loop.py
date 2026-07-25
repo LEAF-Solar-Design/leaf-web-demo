@@ -266,3 +266,178 @@ def test_unknown_drawing_intake_404(stack):
     r = get_intake(stack, "UPPERCASE", "head", t)
     assert r.status_code == 404
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+
+
+# --------------------------------------------------------------------------- #
+# 7. single-writer AUTHORIZATION: a write is refused unless the CALLER holds the
+#    checkout.
+#
+# The lock used to prove only that A checkout was live, never that the caller
+# owned it: reserve read the holder out of the manifest row and finalize
+# required that same value back, so the fenced write confirmed "the checkout did
+# not change", which is true for a bystander too. Session B could therefore
+# publish a version under session A's lease. DELETE .../checkout has always
+# answered 403 for a non-holder; the write path is now the same answer.
+#
+# These run over the SAME HTTP chain a browser uses (route -> jobs -> broker ->
+# write_loop -> store), so they pin the identity actually travelling end to end,
+# not just the store predicate in isolation.
+# --------------------------------------------------------------------------- #
+def take_checkout(stack, drawing_id, holder, tenant, ttl_s=600):
+    return requests.post(f"{stack['app']}/api/drawings/{drawing_id}/checkout",
+                         json={"holder": holder, "ttl_s": ttl_s},
+                         headers=_h(tenant), timeout=30)
+
+
+def run_wait_as(stack, tool, params, tenant, holder=None, fence=None):
+    """A run submitted BY a named session. `holder=None` sends no holder at all —
+    the direct-API-call case, which the server defaults to the tenant id."""
+    headers = _h(tenant)
+    payload = confirmed_requests_payload(stack["app"], tool, params, "rooftop_demo",
+                                         headers=headers)
+    if holder is not None:
+        payload["holder"] = holder
+    if fence is not None:
+        payload["fence"] = fence
+    return requests.post(f"{stack['app']}/api/run?wait=1", json=payload,
+                         headers=headers, timeout=120)
+
+
+def head_version(stack, drawing_id, tenant):
+    return get_intake(stack, drawing_id, "head", tenant).json()["head"]
+
+
+def test_write_refused_while_another_session_holds_the_checkout(stack):
+    """THE regression: B writes while A holds. Must be 403, and must not publish."""
+    t = "wl-authz-other"
+    assert head_version(stack, "demo", t) == 1              # bootstrap v1
+    assert take_checkout(stack, "demo", "sess-a", t).status_code == 200
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, holder="sess-b")
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"]["error_code"] == "FORBIDDEN"
+    assert body["error"]["retryable"] is False              # retrying changes nothing
+    assert "sess-a" in body["error"]["message"]             # names the real holder
+
+    # and NOTHING was written: head is still v1, no orphan v2 in the chain.
+    assert head_version(stack, "demo", t) == 1
+    versions = requests.get(f"{stack['app']}/api/drawings/demo/versions",
+                            headers=_h(t), timeout=30).json()
+    assert versions["head"] == 1 and versions["latest"] == 1
+    assert [v["v"] for v in versions["versions"]] == [1]
+
+
+def test_write_allowed_for_the_session_that_holds_the_checkout(stack):
+    """The other half: holding the lock must still let YOU write (no lockout)."""
+    t = "wl-authz-self"
+    assert head_version(stack, "demo", t) == 1
+    assert take_checkout(stack, "demo", "sess-a", t).status_code == 200
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, holder="sess-a")
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["new_version"] == {"drawing_id": "demo", "version": 2, "parent": 1}
+    assert head_version(stack, "demo", t) == 2
+
+
+def test_write_with_no_holder_is_refused_under_a_session_lock(stack):
+    """Fail CLOSED for a caller that names nobody — a stale tab, a direct API
+    call, or any client that ignores the lock. The server defaults an absent
+    holder to the tenant id (exactly as the checkout routes do), which never
+    matches a `sess-` holder, so omitting the field cannot be used to opt out of
+    the check."""
+    t = "wl-authz-anon"
+    assert head_version(stack, "demo", t) == 1
+    assert take_checkout(stack, "demo", "sess-a", t).status_code == 200
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, holder=None)
+    assert r.status_code == 403, r.text
+    assert r.json()["error"]["error_code"] == "FORBIDDEN"
+    assert head_version(stack, "demo", t) == 1
+
+
+def test_write_with_no_holder_is_refused_under_a_TENANT_default_lock(stack):
+    """sol-critic BLOCKER, PR #141 — the bypass the `sess-` case above missed.
+
+    POST .../checkout with an EMPTY BODY defaults its holder to the tenant id
+    (routers/drawings.py). The run route used to default an absent holder to the
+    tenant id too, so both sides landed on the same string and the unnamed writer
+    matched the lock exactly. Before the fix this published v2 under the other
+    session's lease; the run route now sends the reserved anonymous id, which no
+    lock can ever hold."""
+    t = "wl-authz-tenant-lock"
+    assert head_version(stack, "demo", t) == 1
+    # empty body -> the lock's holder IS the tenant id
+    r = requests.post(f"{stack['app']}/api/drawings/demo/checkout",
+                      json={}, headers=_h(t), timeout=30)
+    assert r.status_code == 200, r.text
+    assert r.json()["holder"] == t
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, holder=None)
+    assert r.status_code == 403, r.text
+    assert r.json()["error"]["error_code"] == "FORBIDDEN"
+    assert head_version(stack, "demo", t) == 1
+
+
+def test_reserved_anonymous_holder_cannot_be_claimed_as_a_checkout(stack):
+    """Closing the other half: if a caller could TAKE the lock as the reserved
+    id, every unnamed write would match it and the default would fail open
+    again. The route must refuse it rather than store it."""
+    t = "wl-authz-reserved"
+    assert head_version(stack, "demo", t) == 1
+    r = requests.post(f"{stack['app']}/api/drawings/demo/checkout",
+                      json={"holder": "anonymous:unnamed-writer"},
+                      headers=_h(t), timeout=30)
+    # 400, not 500: refusing a reserved id is a statement about the INPUT. The
+    # store raises ValueError and the route has to map it, or the refusal
+    # reaches the caller as a server fault that names no remedy.
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert "reserved" in r.json()["error"]["message"]
+    # and no lock was recorded, so an unnamed write is still free to proceed
+    versions = requests.get(f"{stack['app']}/api/drawings/demo/versions",
+                            headers=_h(t), timeout=30).json()
+    assert versions["checkout"] is None
+
+
+def test_write_with_no_checkout_held_is_unchanged(stack):
+    """Guardrail on the product flow: the UI does NOT require taking a lock
+    before running a write tool (lockState suppresses writes only when someone
+    ELSE holds one). An unlocked drawing must keep publishing exactly as before,
+    so this check adds authorization without adding a checkout requirement."""
+    t = "wl-authz-free"
+    assert head_version(stack, "demo", t) == 1
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, holder="sess-nobody")
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["new_version"]["version"] == 2
+
+
+def test_write_allowed_after_the_other_sessions_lease_expires(stack):
+    """An EXPIRED lock is free — the store's rule everywhere else (acquire_checkout
+    re-grants it to anyone). Authorization must honour that, or a forgotten lock
+    would wedge the drawing until MAX_CHECKOUT_TTL_S."""
+    t = "wl-authz-expired"
+    assert head_version(stack, "demo", t) == 1
+    # shortest lease the route accepts, then let it lapse
+    assert take_checkout(stack, "demo", "sess-a", t, ttl_s=1).status_code == 200
+    time.sleep(1.5)
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, holder="sess-b")
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["new_version"]["version"] == 2
+
+
+def test_cross_tenant_checkout_does_not_block_a_write(stack):
+    """Locks are per (tenant, drawing). Another TENANT's lock on the same drawing
+    id is a different manifest entirely and must not leak into this tenant's
+    authorization decision."""
+    other = "wl-authz-x-other"
+    mine = "wl-authz-x-mine"
+    assert head_version(stack, "demo", other) == 1
+    assert head_version(stack, "demo", mine) == 1
+    assert take_checkout(stack, "demo", "sess-a", other).status_code == 200
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, mine, holder="sess-b")
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["new_version"]["version"] == 2

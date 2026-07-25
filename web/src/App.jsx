@@ -1126,6 +1126,19 @@ export default function App() {
           idempotencyKey: idempotencyKey || undefined,
           catalogDigest: (runContext?.toolSnapshot?.catalogDigest
             || createCatalogToolSnapshot(tool).catalogDigest || undefined),
+          // Who we are for the single-writer lock — the SAME id sent to
+          // take/release. A drawing.write run publishes a version, and the
+          // server refuses one published under another session's checkout, so
+          // this is what proves the write is ours. Sent on every run: a read
+          // tool ignores it, and gating it on the tool's capabilities here
+          // would put a security decision in the client's hands.
+          holder: ownHolder || undefined,
+          // Only when the lock is demonstrably OURS. `rawCheckout` is whatever
+          // /versions last reported, which may be another session's lock — and
+          // sending their generation as ours would turn a stale poll into a 403
+          // on a write we are entitled to make. When it is not ours the holder
+          // check refuses us anyway, so the fence adds nothing there.
+          fence: heldByUs ? (rawCheckout?.fence ?? undefined) : undefined,
           onSubmit: (job_id) => { saveInflight(job_id, tool.name); setCurrentJobId(job_id) },
           onStatus: (st) => {
             // Richer progress string (e.g. 'executing' · 'storing version' ·
@@ -1190,7 +1203,10 @@ export default function App() {
       }
     }
   }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
-      loadCheckout, writeLocked, openProjectId, rehydrate, showToast, viewResult, prepareRunParams, catalogRunContext])
+      loadCheckout, writeLocked, openProjectId, rehydrate, showToast, viewResult, prepareRunParams, catalogRunContext,
+      // The run now carries our single-writer identity, so a stale capture would
+      // submit under a reminted holder (claimHolderId) or a superseded fence.
+      ownHolder, heldByUs, rawCheckout])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     let currentTool = tool

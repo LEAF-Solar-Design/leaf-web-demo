@@ -157,8 +157,14 @@ def _client():
 
 
 def _fake_broker_ok(tenant_id, tool, params, dwg, aps_live, timeout_s=0,
-                    dwg_version=None, ledger_event_key=None, job_id=None):
+                    dwg_version=None, ledger_event_key=None, job_id=None, **_extra):
     assert job_id
+    # **_extra absorbs run-identity fields this double does not care about
+    # (checkout_holder / checkout_fence, added with the single-writer write
+    # authorization). Without it a new kwarg raises TypeError inside the job
+    # worker, which _run_job catches as a failed job — so the job goes terminal
+    # instantly and this test fails with the confusing "no pre-terminal
+    # transition observed" instead of naming the real cause.
     time.sleep(0.7)  # spans one 0.5s SSE tick so a pre-terminal event is observable
     return {"ok": True, "degraded_mode": False,
             "result": {"counts": {"Panels": 2345}}}

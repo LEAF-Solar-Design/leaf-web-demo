@@ -278,7 +278,21 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     holder = (req.holder if req else None) or str(tenant_id)
     ttl_s = (req.ttl_s if req and req.ttl_s is not None else None) or DEFAULT_CHECKOUT_TTL_S
 
-    acquired = store.acquire_checkout(backend, str(tenant_id), drawing_id, holder, ttl_s)
+    try:
+        acquired = store.acquire_checkout(backend, str(tenant_id), drawing_id, holder, ttl_s)
+    except store.CheckoutParamError as exc:
+        # ONLY the input faults: a reserved holder (store.ANONYMOUS_HOLDER, the
+        # id a run with no `holder` presents) and a non-positive ttl. Answer 400
+        # with the reason; without this the error escaped as a 500, which reads
+        # as a server fault and tells the caller nothing about what to send.
+        #
+        # Deliberately NOT a bare `except ValueError`: acquire_checkout also
+        # decodes the stored manifest, and a corrupt one raises JSONDecodeError,
+        # which IS a ValueError. Catching broadly would blame the caller for
+        # damaged storage and hide a real fault behind a 400 nobody can act on.
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400)
+    acquired = bool(acquired)
     m = store.load_manifest(backend, str(tenant_id), drawing_id)
     co = m.get("checkout")
 
