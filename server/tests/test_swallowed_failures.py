@@ -27,8 +27,8 @@ both about making the signal USABLE, not just present:
      permanently failing sweep emitted a full traceback every 10s: 360/hour per
      process into CloudWatch, all one fault. Now the first failure of a streak
      logs in full, repeats collapse into a terse counted reminder per quiet
-     window, a NEW exception type always logs in full, and recovery is
-     announced once. Control flow is untouched.
+     window, a NEW exception type logs in full while the window's traceback
+     budget lasts, and recovery is announced once. Control flow is untouched.
 
   2. The unhandled-exception envelope carries a CORRELATION ID. The body
      deliberately withholds the failure detail, so an operator handed
@@ -163,8 +163,38 @@ def _warnings(caplog) -> list:
     return [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+def _kinds(caplog) -> list[str]:
+    """Classify each emitted line: a traceback is "verbose", a reminder is "terse"."""
+    return ["verbose" if r.exc_info else "terse" for r in _warnings(caplog)]
+
+
 def _always_boom() -> int:
     raise RuntimeError(_SWEEP_BOOM)
+
+
+class _Clock:
+    """A monotonic clock the test drives, so a window boundary is exact."""
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _driven_clock(monkeypatch) -> _Clock:
+    """Take control of the clock the throttle measures its window with.
+
+    Without this a test can only ever exercise ONE window: real time does not
+    move far enough during a run, so every branch that fires when the window has
+    elapsed is unreachable and silently untested.
+    """
+    clock = _Clock()
+    monkeypatch.setattr(jobs.time, "monotonic", clock)
+    return clock
 
 
 def test_the_default_quiet_window_is_the_documented_five_minutes(monkeypatch):
@@ -361,6 +391,60 @@ def test_a_stream_of_unique_fault_classes_is_still_bounded(caplog, monkeypatch):
         f"the per-window budget is {ceiling} regardless of class cardinality")
 
 
+def test_the_per_window_ceiling_holds_across_a_window_boundary(caplog, monkeypatch):
+    """The budget must reset at the boundary, and must not reset AND stay open.
+
+    The test above drives 200 sweeps without ever advancing the clock, so it only
+    ever exercises one window. Two branches meet at a boundary and neither runs
+    there: the elapsed-window branch that zeroes `verbose_in_window`, and the
+    in-window branch that lets an unseen fault class through while budget
+    remains. Both failure directions leave that test green:
+
+      * a budget that never re-arms makes a long outage fall silent after its
+        first window, which is the invisible-failure mode this module exists to
+        prevent, dressed up as a passing throttle test;
+      * a budget re-armed but not re-enforced ships a full traceback per sweep
+        for the rest of the outage, which is the flood it exists to stop.
+
+    The worst case is a boundary crossed by a class already seen: the line is due
+    so it emits, but the class is not new so it is TERSE and spends no budget,
+    and three unseen classes then take a full traceback each. Four lines, which
+    is exactly the documented ceiling and not one more.
+    """
+    monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+    clock = _driven_clock(monkeypatch)
+    uniq = {"n": 0}
+
+    def _known() -> int:
+        raise RuntimeError(_SWEEP_BOOM)
+
+    def _unseen() -> int:
+        uniq["n"] += 1
+        raise type(f"Fault{uniq['n']}", (RuntimeError,),
+                   {"__module__": f"mod_{uniq['n']}"})("unique-every-time")
+
+    def _sweep(probe) -> None:
+        monkeypatch.setattr(jobs, "_reap_orphans_once", probe)
+        jobs._reaper_sweep_once()
+
+    with caplog.at_level(logging.ERROR, logger=jobs.logger.name):
+        _sweep(_known)                     # opens the streak, logs in full
+        for _ in range(5):
+            _sweep(_known)                 # throttled repeats, budget untouched
+
+        caplog.clear()                     # everything below is ONE window
+        clock.advance(jobs.reaper_log_throttle_s() + 1.0)
+        _sweep(_known)                     # crosses the boundary as a REPEAT
+        for _ in range(50):
+            _sweep(_unseen)                # 50 classes never seen this streak
+
+    assert uniq["n"] == 50, "every interval still ran its sweep"
+    assert _kinds(caplog) == ["terse", "verbose", "verbose", "verbose"], (
+        f"the worst-case boundary window emitted {_kinds(caplog)}; the ceiling is "
+        f"one terse reminder plus {jobs._MAX_VERBOSE_PER_WINDOW} full tracebacks, "
+        "whatever crosses the boundary and whatever follows it")
+
+
 def test_the_fault_class_bookkeeping_cannot_grow_without_bound(monkeypatch):
     """A long outage must not leak memory through the throttle's own state.
 
@@ -394,19 +478,41 @@ def test_suppressed_failures_are_counted_in_the_next_line_and_on_recovery(
     A log line that silently stops is worse than one that floods: the operator
     cannot tell "healthy" from "throttled into invisibility". Every emitted line
     carries the suppressed count, and recovery reports what never got logged.
+
+    BOTH are asserted, because the next FAILURE line is the one an operator
+    actually reads. Recovery only arrives once the fault is already over, and a
+    still-failing sweep may not recover for hours; during those hours the terse
+    reminder is the only account of what the throttle swallowed.
     """
     monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+    clock = _driven_clock(monkeypatch)
     monkeypatch.setattr(jobs, "_reap_orphans_once", _always_boom)
 
     with caplog.at_level(logging.WARNING, logger=jobs.logger.name):
         for _ in range(9):
-            jobs._reaper_sweep_once()
+            jobs._reaper_sweep_once()      # 1 full traceback, then 8 suppressed
+
+        clock.advance(jobs.reaper_log_throttle_s() + 1.0)
+        jobs._reaper_sweep_once()          # the window lapses: terse reminder
+
+        for _ in range(4):
+            jobs._reaper_sweep_once()      # 4 more suppressed in the new window
+
         monkeypatch.setattr(jobs, "_reap_orphans_once", lambda: 0)
         jobs._reaper_sweep_once()
 
-    recovery = _warnings(caplog)[-1].getMessage()
-    assert "9 consecutive" in recovery, recovery
-    assert "8 never logged" in recovery, (
+    records = _warnings(caplog)
+    assert len(records) == 3, [r.getMessage() for r in records]
+
+    reminder = records[1].getMessage()
+    assert records[1].exc_info is None, "the reminder is the terse line, not a traceback"
+    assert "10 consecutive" in reminder, reminder
+    assert "8 suppressed since last report" in reminder, (
+        f"the next failure line did not account for what it swallowed: {reminder!r}")
+
+    recovery = records[2].getMessage()
+    assert "14 consecutive" in recovery, recovery
+    assert "4 never logged" in recovery, (
         f"recovery did not account for the suppressed failures: {recovery!r}")
 
 
@@ -468,12 +574,20 @@ def test_same_qualname_in_different_modules_are_distinct_fault_classes(
     assert all(r.exc_info is not None for r in records)
 
 
-def test_a_new_exception_type_always_logs_in_full(caplog, monkeypatch):
-    """A CHANGED fault class escapes the quiet window.
+def test_a_new_exception_type_logs_in_full_while_the_window_has_budget(
+        caplog, monkeypatch):
+    """A fault class new to the streak escapes the quiet window WHILE budget lasts.
 
-    Otherwise a streak of RuntimeErrors would swallow the first ValueError --
-    hiding a genuinely new failure behind an already-known one, which is the
-    exact silent-failure class this whole module exists to prevent.
+    The escape is a priority, not an exemption, and the name has to say so: once
+    the window's _MAX_VERBOSE_PER_WINDOW full tracebacks are spent, a new class is
+    counted and named by the next line like any repeat. That half is pinned by
+    test_a_stream_of_unique_fault_classes_is_still_bounded and
+    test_the_per_window_ceiling_holds_across_a_window_boundary.
+
+    What this pins is the other half, with budget remaining: a streak of
+    RuntimeErrors must NOT swallow the first ValueError. Hiding a genuinely new
+    failure behind an already-known one is the exact silent-failure class this
+    whole module exists to prevent.
     """
     monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
 

@@ -36,10 +36,15 @@ Env: `APS_LIVE` (default 0 = mock), `JOBS_DB`, `JOB_MAX_S` (540),
 orphan-reaper sweep may log. Per window the ceiling is at most 3 full tracebacks
 plus 1 terse reminder, **whatever the exceptions do** — the budget is on log
 lines, not on fault classes, so no stream of exception types can inflate it. At
-the defaults that is at most 48 lines/hour against the 360 it replaced. Within
-the budget a fault class not yet seen in the streak gets priority for a full
-traceback, since a new class is the highest-signal event; once the budget is
-spent it is counted and named by the next line instead.
+the defaults that is at most 48 lines/hour during a CONTINUOUS outage, against
+the 360 it replaced. The ceiling bounds a failing streak, not the wall clock: a
+sweep that alternates failure and success ends its streak on every success, and
+each new streak reports its first failure in full plus a recovery line, so an
+hour of flapping exceeds 48. That reset is deliberate, since it is what re-arms
+reporting for the next failure. Within the budget a fault class not yet seen in
+the streak gets priority for a full traceback, since a new class is the
+highest-signal event; once the budget is spent it is counted and named by the
+next line instead.
 
 Suppression is never silent: every line carries the streak length, how many
 distinct classes it spans, and how many failures were suppressed since the last
