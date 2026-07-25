@@ -1257,10 +1257,19 @@ The template author path no longer persists to a flat `server/authored/<name>.py
 A template-authored body is written to
 `server/authored/<sha256(tenant_id)[:32]>/<name>.py`, where the directory name is
 the first 32 hex characters of the SHA-256 of the exact tenant id. The registry
-entry points at that file: `tool['entry']` is `authored/<dir>/<name>.py`, still
+entry NAMES that file: `tool['entry']` is `authored/<dir>/<name>.py`, still
 stored relative to `server/` so the broker resolves it regardless of cwd. The
 tool also carries `tenant_id`, and the `authored_tools.json` store dedups on
 `(tenant_id, name)` rather than on `name`.
+
+Resolution is by PRECEDENCE, not by absolute location, and the distinction is
+load-bearing for anyone reasoning about which bytes actually execute.
+`resolve_local_file` joins `entry` onto the calling tenant's repo root FIRST and
+onto `SERVER_DIR` second, accepting only a candidate contained by that root
+(`server/tool_loader.py`). So a tenant-repo file at the same relative
+`authored/<dir>/<name>.py` takes precedence over the `server/authored/` copy
+named above. That ordering is deliberate — a tenant tool runs its OWN repo file —
+but it means the entry identifies a path to resolve, not a guaranteed location.
 
 This is a security fix, not a layout preference. A flat path let tenant B
 overwrite tenant A's file, and a name-only dedup evicted A's catalog entry, so B
