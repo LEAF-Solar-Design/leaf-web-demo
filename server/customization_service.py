@@ -818,6 +818,46 @@ def _tenant_worktree_lock(bare: Path) -> threading.Lock:
         return lock
 
 
+def _lock_holder(lock_dir: Path) -> tuple[str, float] | None:
+    """Return ``(owner token, age in seconds)``, or None if nobody holds it."""
+    owner = lock_dir / "owner"
+    try:
+        return owner.read_text(encoding="utf-8"), time.time() - owner.stat().st_mtime
+    except OSError:
+        pass
+    # Claimed but not yet stamped: a holder that died between mkdir and write.
+    # Fall back to the directory's own mtime so it stays reclaimable.
+    try:
+        return "", time.time() - lock_dir.stat().st_mtime
+    except OSError:
+        return None  # released underneath us
+
+
+def _evict_stale_lock(lock_dir: Path, expected: str) -> None:
+    """Drop a dead holder's lock, but ONLY the exact one we measured.
+
+    Renaming first means two evictors racing cannot both proceed: the loser's
+    rename fails. Re-reading the token immediately before the rename means a
+    lock already replaced by a live holder is left alone.
+    """
+    current = _lock_holder(lock_dir)
+    if current is None or current[0] != expected:
+        return
+    junk = lock_dir.with_name(f"{lock_dir.name}.stale.{uuid4().hex}")
+    try:
+        lock_dir.rename(junk)
+    except OSError:
+        return  # another evictor won, or the holder released it first
+    try:
+        (junk / "owner").unlink()
+    except OSError:
+        pass
+    try:
+        junk.rmdir()
+    except OSError:
+        pass
+
+
 @contextmanager
 def _exclusive_materialize(bare: Path, lock_dir: Path):
     """Serialize materialization for one tenant across threads AND processes.
@@ -826,12 +866,30 @@ def _exclusive_materialize(bare: Path, lock_dir: Path):
     without a platform-specific file-locking call. A lock older than
     ``_MATERIALIZE_LOCK_STALE`` is taken over, so a worker killed mid-add
     cannot wedge the tenant permanently.
+
+    Every claim is stamped with a unique owner token, because takeover alone is
+    not safe: a holder merely paused past the staleness bound is still alive,
+    and if it later released a lock it no longer owned it would admit a second
+    materializer -- exactly the concurrent `worktree add` this lock prevents.
+    A holder therefore releases only its own token, and an evictor removes only
+    the token it measured.
     """
-    with _tenant_worktree_lock(bare):
-        deadline = time.monotonic() + _MATERIALIZE_LOCK_TIMEOUT
+    deadline = time.monotonic() + _MATERIALIZE_LOCK_TIMEOUT
+    # Bounded so a queue of in-process callers cannot wait without a limit
+    # before the cross-process deadline below even starts counting.
+    lock = _tenant_worktree_lock(bare)
+    if not lock.acquire(timeout=_MATERIALIZE_LOCK_TIMEOUT):
+        raise _unavailable(
+            f"in-process materialization lock busy past "
+            f"{_MATERIALIZE_LOCK_TIMEOUT}s: {lock_dir}"
+        )
+    try:
+        token = uuid4().hex
+        owner = lock_dir / "owner"
         while True:
             try:
                 lock_dir.mkdir()
+                owner.write_text(token, encoding="utf-8")
                 break
             except FileExistsError:
                 pass
@@ -841,24 +899,32 @@ def _exclusive_materialize(bare: Path, lock_dir: Path):
                 raise _unavailable(
                     f"materialization lock held past {_MATERIALIZE_LOCK_TIMEOUT}s: {lock_dir}"
                 )
-            try:
-                held = time.time() - lock_dir.stat().st_mtime
-            except OSError:
+            held = _lock_holder(lock_dir)
+            if held is None:
                 continue  # released underneath us; try to claim it now
-            if held > _MATERIALIZE_LOCK_STALE:
-                try:
-                    lock_dir.rmdir()
-                except OSError:
-                    pass
+            other, age = held
+            if age > _MATERIALIZE_LOCK_STALE:
+                _evict_stale_lock(lock_dir, other)
                 continue
             time.sleep(0.05)
         try:
             yield
         finally:
-            try:
-                lock_dir.rmdir()
-            except OSError:
-                pass
+            # Release ONLY our own claim. If we were evicted as stale while
+            # still running, the lock now belongs to someone else and removing
+            # it would let a third caller in alongside them.
+            current = _lock_holder(lock_dir)
+            if current is not None and current[0] == token:
+                try:
+                    owner.unlink()
+                except OSError:
+                    pass
+                try:
+                    lock_dir.rmdir()
+                except OSError:
+                    pass
+    finally:
+        lock.release()
 
 
 def _worktree_add(bare: Path, target: Path, commit: str) -> subprocess.CompletedProcess:
