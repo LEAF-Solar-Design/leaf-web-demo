@@ -373,13 +373,45 @@ async function runTabs(ages, seedId) {
     fail(`checkoutUnknown starts ${initDecl[1].trim()}, not true: writes are enabled while the first read is in flight`)
   } else pass('checkoutUnknown starts true (unknown until answered)')
 
-  // Both response comparisons must survive, not merely the increment. The loose
-  // form matched `++checkoutSeqRef.current` on its own, so deleting every guard
-  // still passed.
-  const seqGuards = (app.match(/seq\s*!==\s*checkoutSeqRef\.current/g) || []).length
-  if (seqGuards < 2) {
-    fail(`only ${seqGuards} sequence comparison(s) on the checkout read; the success and failure paths each need one`)
-  } else pass(`checkout reads compare a sequence guard on both paths (${seqGuards} found)`)
+  // Everything below is scoped to the loadCheckout BODY, not the whole file. A
+  // global count would be satisfied by guards living anywhere in App.jsx, which
+  // is the kind of drift that makes an oracle stop meaning what it says.
+  const loadBody = (app.match(/const loadCheckout = useCallback\(async[\s\S]*?\n  \}, \[/) || [null])[0]
+  if (!loadBody) {
+    fail('could not locate the loadCheckout body; the assertions below cannot be scoped')
+  } else {
+    // Both response comparisons must survive, not merely the increment. The loose
+    // form matched `++checkoutSeqRef.current` on its own, so deleting every guard
+    // still passed.
+    const seqGuards = (loadBody.match(/seq\s*!==\s*checkoutSeqRef\.current/g) || []).length
+    if (seqGuards < 2) {
+      fail(`only ${seqGuards} sequence comparison(s) INSIDE loadCheckout; the success and failure paths each need one`)
+    } else pass(`loadCheckout compares a sequence guard on both paths (${seqGuards} found)`)
+
+    // Unknown must be CLEARED on the SUCCESS path, or a healthy read leaves
+    // writes paused forever and the fail-closed design becomes a permanent lock.
+    // Scoped to AFTER the await on purpose: a body-wide search matched the mock
+    // early-return branch, which also clears it, so deleting the success-path
+    // call still passed. Verified by mutation.
+    const iAwaitClear = loadBody.indexOf('await getDrawingVersions')
+    const afterAwait = iAwaitClear === -1 ? '' : loadBody.slice(iAwaitClear)
+    if (!/setCheckoutUnknown\(false\)/.test(afterAwait)) {
+      fail('loadCheckout never clears checkoutUnknown after a successful read: writes would stay paused forever')
+    } else pass('loadCheckout clears checkoutUnknown on the success path (after the await)')
+
+    // And SET on failure, which is the fail-closed half.
+    if (!/catch[\s\S]*setCheckoutUnknown\(true\)/.test(loadBody)) {
+      fail('loadCheckout does not mark unknown in its catch: a failed read would read as "no lock"')
+    } else pass('loadCheckout marks unknown when the read fails')
+  }
+
+  // The decision must actually reach the control, or lockState is computed and
+  // thrown away. Removing the prop previously passed silently.
+  for (const prop of ['canTake={lock.canTake}', 'unknown={checkoutUnknown}']) {
+    if (!app.includes(prop)) {
+      fail(`CheckoutControls is not given ${prop}: the tested decision never reaches the UI`)
+    } else pass(`CheckoutControls receives ${prop}`)
+  }
 
   // ORDER matters: the read must go unknown BEFORE awaiting, or the previous
   // drawing's answer stays authoritative for the whole new request and a write
