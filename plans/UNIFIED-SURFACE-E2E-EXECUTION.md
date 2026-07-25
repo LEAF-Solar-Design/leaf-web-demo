@@ -78,11 +78,11 @@ fixture path but not the production controller.
 | HL-01 | Health and degraded mode | health API, `DegradedBanner` | shell banner | APP ONLY | healthy, degraded, retry, recovery |
 | OP-01 | Tenant operations | ops APIs, `OpsDrawer` | standalone ops entry or drawer | APP ONLY | list, select, disable with confirmation, denied role |
 | NT-01 | Notices, errors, retry, details | toast, banners, strips, drawers | whole shell | PARTIAL | completed toast, ongoing banner, failure strip, details |
-| KB-01 | Keyboard traversal and Escape | shared interaction rules | whole shell | UNPROVEN | tab order, focus return, Escape, named back link |
+| KB-01 | Keyboard traversal and Escape | shared interaction rules | whole shell | LOCAL E2E | tab order, focus return, Escape, named back link |
 | HP-01 | Hints, keycaps, and coach | design-system micro standards | whole shell | UNPROVEN | hover/focus hints, shortcut labels, first-run coach |
-| RS-01 | Responsive layouts | design-system breakpoints | shell | UNPROVEN | desktop, narrow desktop, tablet, no hidden primary action |
-| AX-01 | Accessibility | semantic UI and focus rules | whole shell | UNPROVEN | axe scan, accessible names, live status, contrast |
-| MO-01 | Motion and reduced motion | motion standard | stage and overlays | PARTIAL | allowed transitions, stable grid, zero duration preference |
+| RS-01 | Responsive layouts | design-system breakpoints | shell | LOCAL E2E | desktop, narrow desktop, tablet, no hidden primary action |
+| AX-01 | Accessibility | semantic UI and focus rules | whole shell | PARTIAL | semantic landmarks, names, focus, and live status proven; manual screen reader and calibrated contrast remain |
+| MO-01 | Motion and reduced motion | motion standard | stage and overlays | LOCAL E2E | allowed transitions, stable grid, zero duration preference |
 | DS-01 | Visual tokens and calm rules | design-system docs and CSS | whole shell | PARTIAL | screenshot assertions for accent, status, typography, density |
 | RS-02 | Resolvers and details overlay | chevrons, `DetailsDrawer` | right overlay | APP ONLY | every resolver opens a destination, no grid reflow |
 | DC-01 | Dock projects, events, and keys | Dock Console standard | dock or ops domain | MISSING DECISION | product-owner mapping, then browser proof for accepted scope |
@@ -102,8 +102,8 @@ These rows prevent broad capability rows from hiding important failure paths.
 | JB-05 | Inflight persistence after browser reload | APP ONLY | reload mid-run and reattach once |
 | VR-04 | Undo and redo at arbitrary depth | PARTIAL | three-version chain, two undos, two redos |
 | NT-02 | Single-fire R ladder and fall-through | APP ONLY | behavior pin for every priority target |
-| AX-02 | Run and result live-region announcements | APP ONLY | accessibility tree and announcement proof |
-| MO-02 | No fill-mode snap under reduced motion | CONTRACT_PROVEN | forced reduced-motion result pane remains painted |
+| AX-02 | Run and result live-region announcements | LOCAL E2E | accessibility tree and announcement proof |
+| MO-02 | No fill-mode snap under reduced motion | LOCAL E2E | forced reduced-motion result pane remains painted |
 | MO-03 | Micro entrances use scale, never translation | CONTRACT_PROVEN | CSS pin plus visual proof |
 | DM-01 | Guided tour drives production handlers | APP ONLY | deterministic tour without copied actions |
 | FT-01 | Fetch budget and timeout seam | FOUND | unit pin and slow-response browser proof |
@@ -531,7 +531,7 @@ Observed Wave 0 results:
 - Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
-- Local tier: 12 passed against an isolated real Vite, FastAPI, broker, harness,
+- Local tier: 13 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness, real drawing intake,
   catalog review, explicit confirmation, broker and worker runs, completed
   result rendering, durable job API storage, Jobs-rail recovery after page
@@ -545,6 +545,12 @@ Observed Wave 0 results:
   natural-language catalog classification, review, single dispatch, and result
   without creating a Claude session. The internal Operations drawer also proves
   real list, cancel, disable, restore, secret scoping, and calm denial. A
+  standards walk proves named landmarks and tabs, enabled control names, visible
+  focus, roving keys, Control+K, Escape priority and focus return, live run
+  announcements, reduced-motion completion, five responsive viewports, primary
+  action reachability, and no horizontal overflow. Its recorded video and five
+  screenshots are in the local proof artifacts. Manual screen-reader review and
+  calibrated contrast measurement remain open. A
   separate live-auth guest walk passes for signed guest upload, extraction,
   viewer seating, allowed version read, zero dispatch, and denied run. APS,
   live Claude, Auth0 user sign-in, protected authoring, PostgreSQL, production

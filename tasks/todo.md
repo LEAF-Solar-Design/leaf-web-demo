@@ -77,6 +77,11 @@ Current additive progress:
 - [x] Prove the real local internal Operations drawer lists isolated tenant
   usage, cancels before mutation, disables and restores through broker
   authority, scopes its disposable credential, and fails closed after removal.
+- [x] Record one real local standards walk that proves named landmarks and tabs,
+  enabled control names, visible focus, roving keys, Control+K, Escape focus
+  return, live completion announcements, reduced motion, and desktop, narrow,
+  tablet, phone, and short-height layouts without horizontal overflow.
+- [ ] Complete manual screen-reader review and calibrated contrast measurement.
 - [ ] Promote protected author stage, independent approval, publish, catalog
   refresh, and use in an authorized environment with live signed identity,
   trusted tenant binding, isolated authoring authority, and R5/R6 rollout.
