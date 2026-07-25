@@ -62,6 +62,9 @@ Current additive progress:
   conversation metering ledger from the worktree.
 - [x] Prove real checkout conflict, non-holder denial, expiry, take, release,
   write gating, and final authoritative state in the unified browser.
+- [x] Prove real local health, usage, entitlement, refresh, Claude grant link,
+  secret non-echo, and destructive unlink in the unified Trust rail.
+- [x] Isolate managed proof runs from ambient Claude and Anthropic credentials.
 
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls

@@ -415,6 +415,17 @@ Progress:
   operator can take and release the lock, and the final manifest has no
   checkout. VR-02 is therefore local E2E proven for the legacy manifest store;
   PostgreSQL compare-and-swap authority remains a separate external gate.
+- The managed Trust gate now renders the real health classification, isolated
+  run usage, and server entitlement policy. Refresh re-reads all four trust
+  resources. A masked, explicit non-secret test value links through the real
+  app-to-harness Claude grant path, the read response never echoes it, and the
+  two-step destructive unlink returns both UI and server to not linked. AC-01,
+  EN-01, EN-02, and HL-01 are local E2E proven with the receipt's Auth0,
+  production billing, and live Claude limits.
+- The managed runner now pins its legacy grant fallback to the disposable run
+  directory and clears inherited Claude and Anthropic variables in the child
+  process. A local proof can no longer consume or report an ambient operator
+  credential.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -488,17 +499,18 @@ Observed Wave 0 results:
 - Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
-- Local tier: 8 passed against an isolated real Vite, FastAPI, broker, harness,
+- Local tier: 9 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness, real drawing intake,
   catalog review, explicit confirmation, broker and worker runs, completed
   result rendering, durable job API storage, Jobs-rail recovery after page
   reload, real DXF upload and extraction, uploaded geometry replacement, and a
   catalog run bound to the uploaded drawing and tenant. It also proves running
   job reattach, Escape detach, page-hide reaping, three-version Undo and Redo
-  depth, the scripted conversation approval round trip, and checkout conflict,
-  expiry, take, and release. A separate live-auth guest walk also passes for
-  signed guest upload, extraction, viewer seating, allowed version read, zero
-  dispatch, and denied run. APS, Claude, Auth0 user sign-in, PostgreSQL, and
+  depth, the scripted conversation approval round trip, checkout conflict,
+  expiry, take, and release, and the real local Trust lifecycle. A separate
+  live-auth guest walk also passes for signed guest upload, extraction, viewer
+  seating, allowed version read, zero dispatch, and denied run. APS, live
+  Claude, Auth0 user sign-in, PostgreSQL, production billing, and
   conversation-driven product execution claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
