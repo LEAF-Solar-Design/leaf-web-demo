@@ -278,7 +278,17 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     holder = (req.holder if req else None) or str(tenant_id)
     ttl_s = (req.ttl_s if req and req.ttl_s is not None else None) or DEFAULT_CHECKOUT_TTL_S
 
-    acquired = store.acquire_checkout(backend, str(tenant_id), drawing_id, holder, ttl_s)
+    try:
+        acquired = store.acquire_checkout(backend, str(tenant_id), drawing_id, holder, ttl_s)
+    except ValueError as exc:
+        # The store refuses a reserved holder (store.ANONYMOUS_HOLDER, the id a
+        # run with no `holder` presents) and a non-positive ttl. Both are bad
+        # INPUT, so answer 400 with the reason. Without this the ValueError
+        # escaped as a 500, which reads as a server fault and tells the caller
+        # nothing about what to send instead.
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400)
+    acquired = bool(acquired)
     m = store.load_manifest(backend, str(tenant_id), drawing_id)
     co = m.get("checkout")
 

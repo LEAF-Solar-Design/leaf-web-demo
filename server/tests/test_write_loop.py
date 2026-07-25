@@ -389,7 +389,12 @@ def test_reserved_anonymous_holder_cannot_be_claimed_as_a_checkout(stack):
     r = requests.post(f"{stack['app']}/api/drawings/demo/checkout",
                       json={"holder": "anonymous:unnamed-writer"},
                       headers=_h(t), timeout=30)
-    assert r.status_code != 200, r.text
+    # 400, not 500: refusing a reserved id is a statement about the INPUT. The
+    # store raises ValueError and the route has to map it, or the refusal
+    # reaches the caller as a server fault that names no remedy.
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert "reserved" in r.json()["error"]["message"]
     # and no lock was recorded, so an unnamed write is still free to proceed
     versions = requests.get(f"{stack['app']}/api/drawings/demo/versions",
                             headers=_h(t), timeout=30).json()

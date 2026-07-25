@@ -382,6 +382,37 @@ def test_anonymous_holder_is_reserved_and_cannot_take_a_checkout(tmp_path):
     assert store.load_manifest(be, "t", did).get("checkout") is None
 
 
+def test_anonymous_writer_refused_against_a_PERSISTED_sentinel_lock(tmp_path):
+    """sol-critic r2 BLOCKER. acquire_checkout's refusal only guards NEW
+    acquisitions. A lock taken as the sentinel under an EARLIER release — or
+    restored from a backup, or written straight into a manifest — is already
+    persisted, and comparing it to the anonymous caller matched EQUAL and let the
+    write through. Exploiting it needs no knowledge of another holder and no
+    acquisition after deploy, only pre-existing state.
+
+    Seeded directly here, bypassing acquire_checkout, because that is exactly the
+    path the acquire-time refusal cannot see."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    now = datetime.now(timezone.utc)
+    m = store.load_manifest(be, "t", did)
+    m["checkout"] = {
+        "holder": store.ANONYMOUS_HOLDER,          # pre-rule persisted state
+        "acquired": now.isoformat(),
+        "expires": (now + timedelta(seconds=600)).isoformat(),
+    }
+    store.save_manifest(be, "t", did, m)
+
+    with pytest.raises(store.CheckoutDenied, match="names no session"):
+        store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                          parent_version=1, holder=store.ANONYMOUS_HOLDER)
+    m2 = store.load_manifest(be, "t", did)
+    assert m2["head"] == 1 and m2["latest"] == 1
+    assert [v["v"] for v in m2["versions"]] == [1]
+
+
 def test_anonymous_writer_still_publishes_on_an_unlocked_drawing(tmp_path):
     """Fail-closed must not become fail-shut: an unnamed write to a drawing
     nobody has locked is the ordinary case and must keep working."""

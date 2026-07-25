@@ -959,6 +959,43 @@ def test_pg_write_refused_for_a_session_that_does_not_hold_the_checkout(
 
 
 @requires_database
+def test_pg_write_refused_against_a_persisted_anonymous_sentinel_lock(
+    postgres_authority, tmp_path,
+):
+    """sol-critic r2 BLOCKER, postgres half. `checkout_holder` is free text
+    (platform/migrations/0016), and acquire_checkout's refusal only guards NEW
+    acquisitions, so a row already carrying the sentinel — written under an
+    earlier release or restored — would compare EQUAL to the anonymous caller.
+    Seeded with a direct UPDATE, which is the path the acquire-time refusal
+    cannot see."""
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    backend = store.InMemoryBackend()
+    initial = tmp_path / "initial.dwg"
+    initial.write_bytes(b"v1")
+    store.ingest_drawing(backend, tenant, str(initial), drawing_id=drawing)
+    update = tmp_path / "update.dwg"
+    update.write_bytes(b"v2")
+
+    with postgres_authority.connect() as conn:
+        conn.execute(
+            """
+            UPDATE drawing_store_manifests
+            SET checkout_holder = %(holder)s,
+                checkout_expires_at = NOW() + INTERVAL '600 seconds',
+                checkout_acquired_at = NOW()
+            WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+            """,
+            {"holder": store.ANONYMOUS_HOLDER, "tenant": tenant, "drawing": drawing},
+        )
+
+    with pytest.raises(store.CheckoutDenied, match="names no session"):
+        store.put_drawing(backend, tenant, drawing, str(update), 1,
+                          {"tool": "anon"}, holder=store.ANONYMOUS_HOLDER)
+    assert store.load_manifest(backend, tenant, drawing)["head"] == 1
+
+
+@requires_database
 def test_pg_write_refused_for_a_stale_fence_from_the_same_holder(
     postgres_authority, tmp_path,
 ):

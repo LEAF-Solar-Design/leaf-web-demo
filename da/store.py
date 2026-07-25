@@ -104,11 +104,23 @@ VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9_-]+/drawings/[a-z0-9_-]+/v/\d{8}\
 # and a real holder value; conflating the two is what reopened the hole this
 # module exists to close.
 #
-# This value can never equal a real holder because acquire_checkout refuses it
-# (see below), so an unnamed product write is refused against ANY active lock,
-# whatever shape its holder has. Distinct from `holder=None`, which means "not a
-# product write at all" (ingest, the offline harness, this module's own tests)
-# and skips the check entirely.
+# Guarded on BOTH sides, because either alone is insufficient:
+#
+#   * acquire_checkout REFUSES this id, so no NEW lock can be taken as it. Needed
+#     because `holder` is caller-supplied there — otherwise a caller could take
+#     the lock as the sentinel and every unnamed write would match it.
+#   * the write check refuses this id UNCONDITIONALLY against an active lock,
+#     without comparing it to the stored holder. Needed because the acquire-time
+#     refusal cannot see state that already exists: a lock taken as the sentinel
+#     under an earlier release, restored from a backup, or written straight into
+#     a manifest is persisted and would compare EQUAL. The reserved id is a
+#     statement about the CALLER ("named nobody"), so it is never a valid answer
+#     to "who owns this lock", whatever the stored value says.
+#
+# So an unnamed product write is refused against ANY active lock, whatever shape
+# its holder has, and publishes normally on an unlocked drawing. Distinct from
+# `holder=None`, which means "not a product write at all" (ingest, the offline
+# harness, this module's own tests) and skips the check entirely.
 ANONYMOUS_HOLDER = "anonymous:unnamed-writer"
 
 
@@ -789,6 +801,16 @@ def _pg_put(
         # on this tenant published under whatever lease happened to be open. The
         # comparison happens under the same FOR UPDATE row lock that the fenced
         # finalize below re-checks, so the holder cannot change underneath it.
+        # Same unconditional refusal as the legacy path: the reserved id says the
+        # CALLER named nobody, so it is never a valid owner of an active lock. The
+        # column is free text (platform/migrations/0016), and acquire_checkout's
+        # refusal only guards NEW acquisitions, so a row that already carries the
+        # sentinel — written under an earlier release, or restored — would
+        # otherwise compare equal and admit the anonymous writer.
+        if holder is not None and str(holder) == ANONYMOUS_HOLDER:
+            raise CheckoutDenied(
+                f"drawing is checked out by {row['checkout_holder']!r}; "
+                f"a writer that names no session may not publish a version")
         if holder is not None and str(row["checkout_holder"]) != str(holder):
             raise CheckoutDenied(
                 f"drawing is checked out by {row['checkout_holder']!r}; "
@@ -969,6 +991,18 @@ def _authorize_checkout_view(co: dict | None, holder: str | None,
         return
     if not _is_active(co, datetime.now(timezone.utc)):
         return
+    # An anonymous writer NEVER publishes under an active lock, whoever holds it.
+    # Checked before the equality below rather than relying on the acquire-time
+    # refusal, because that refusal only guards NEW acquisitions: a lock taken as
+    # the sentinel under an earlier release, or restored from a backup, or written
+    # straight into a manifest, is already persisted and would compare EQUAL to
+    # the anonymous caller and let it through. The reserved id is a statement
+    # about the CALLER ("named nobody"), so it can never be a valid answer to
+    # "who owns this lock", regardless of what the stored value happens to say.
+    if str(holder) == ANONYMOUS_HOLDER:
+        raise CheckoutDenied(
+            f"drawing is checked out by {co.get('holder')!r}; "
+            f"a writer that names no session may not publish a version")
     if str(co.get("holder")) != str(holder):
         raise CheckoutDenied(
             f"drawing is checked out by {co.get('holder')!r}; "
