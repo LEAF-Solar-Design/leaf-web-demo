@@ -279,6 +279,16 @@ export function lockState({ mock, checkout, unknown, ownHolder, nowMs = Date.now
     writeLocked: !!otherHeld || !!unknown,
     heldByUs,
     otherHeld,
+    // A Take is offered whenever SOMEONE ELSE holds it, with no reference to the
+    // clock. Gating the offer on `stale` still let the browser clock decide, just
+    // in the other direction: a clock running two hours SLOW judged an elapsed
+    // lease live, hid the Take, and left the user unable to write or take for two
+    // hours. The server is the only authority, and it already rejects a take it
+    // disagrees with (409), after which the refetch shows the truth. So the worst
+    // case for offering a Take too eagerly is a harmless rejected request, while
+    // the worst case for hiding it is a wedge no user action can clear.
+    canTake: !!otherHeld,
+    // Display only, and clock-derived, so it must never gate an action.
     stale: !!otherHeld && looksStale(otherHeld, nowMs),
     legacy: !!otherHeld && isLegacyHolder(otherHeld.holder),
     unknown: !!unknown,

@@ -319,6 +319,25 @@ async function runTabs(ages, seedId) {
   }
   if (ok) pass(`(g) writeLocked fails closed across all ${cases.length} states`)
 
+  // canTake must be offered for ANY other-held lock, whatever our clock says.
+  // A slow clock previously judged an elapsed lease live and hid the button.
+  {
+    const now = 1_700_000_000_000
+    const slow = now - 2 * 3600_000 // our clock runs 2h behind the server
+    const elapsed = { holder: 'sess-other', expires: new Date(now - 60_000).toISOString() }
+    const byslow = lockState({ mock: false, checkout: elapsed, unknown: false, ownHolder: 'sess-me', nowMs: slow })
+    if (!byslow.writeLocked) fail('(g) a 2h-slow clock must still suppress writes')
+    if (!byslow.canTake) fail('(g) a 2h-slow clock hid the Take offer -> the UI wedges with no action available')
+    const live = { holder: 'sess-other', expires: new Date(now + 3600_000).toISOString() }
+    if (!lockState({ mock: false, checkout: live, unknown: false, ownHolder: 'sess-me', nowMs: now }).canTake) {
+      fail('(g) no Take offered for a live lock; the server should be the one to refuse it')
+    }
+    if (lockState({ mock: false, checkout: null, unknown: false, ownHolder: 'sess-me', nowMs: now }).canTake) {
+      fail('(g) Take offered when nobody holds the lock')
+    }
+    pass('(g) Take is offered for any other-held lock regardless of clock skew')
+  }
+
   // heldByUs must never be true for someone else's lock (the original tenant bug).
   if (lockState({ mock: false, checkout: { holder: 'sess-other' }, unknown: false, ownHolder: me }).heldByUs) {
     fail('(g) heldByUs true for another session -> a Release button for a lock we never took')
@@ -344,13 +363,51 @@ async function runTabs(ages, seedId) {
   if (!/claimHolderId\(/.test(app)) fail('App.jsx never calls claimHolderId, so duplicate tabs go undetected')
   else pass('App.jsx starts the holder claim')
 
-  if (!/useState\(true\)/.test(app) || !/checkoutUnknown/.test(app)) {
-    fail('checkoutUnknown does not start true, so writes are enabled while the first read is in flight')
+  // CAPTURE the initial value instead of testing whether `useState(true)` appears
+  // anywhere. The loose form matched an unrelated `tourLanded` hook, so flipping
+  // checkoutUnknown back to false still passed the check.
+  const initDecl = app.match(/\[checkoutUnknown,\s*setCheckoutUnknown\]\s*=\s*useState\(([^)]*)\)/)
+  if (!initDecl) {
+    fail('could not find the checkoutUnknown useState declaration')
+  } else if (initDecl[1].trim() !== 'true') {
+    fail(`checkoutUnknown starts ${initDecl[1].trim()}, not true: writes are enabled while the first read is in flight`)
   } else pass('checkoutUnknown starts true (unknown until answered)')
 
-  if (!/checkoutSeqRef\.current/.test(app)) {
-    fail('no sequence comparison on the checkout read: a stale response can overwrite fresh state')
-  } else pass('checkout reads compare a sequence guard against out-of-order responses')
+  // Both response comparisons must survive, not merely the increment. The loose
+  // form matched `++checkoutSeqRef.current` on its own, so deleting every guard
+  // still passed.
+  const seqGuards = (app.match(/seq\s*!==\s*checkoutSeqRef\.current/g) || []).length
+  if (seqGuards < 2) {
+    fail(`only ${seqGuards} sequence comparison(s) on the checkout read; the success and failure paths each need one`)
+  } else pass(`checkout reads compare a sequence guard on both paths (${seqGuards} found)`)
+
+  // ORDER matters: the read must go unknown BEFORE awaiting, or the previous
+  // drawing's answer stays authoritative for the whole new request and a write
+  // can be submitted before any lock answer exists for the current drawing.
+  const bodyMatch = app.match(/const loadCheckout = useCallback\(async[\s\S]*?\n  \}, \[/)
+  if (!bodyMatch) {
+    fail('could not locate the loadCheckout body')
+  } else {
+    const b = bodyMatch[0]
+    const iUnknown = b.indexOf('setCheckoutUnknown(true)')
+    const iAwait = b.indexOf('await getDrawingVersions')
+    if (iUnknown === -1) {
+      fail('loadCheckout never marks the lock unknown, so a drawing change keeps the previous answer authoritative')
+    } else if (iAwait === -1) {
+      fail('could not find the awaited read inside loadCheckout')
+    } else if (iUnknown > iAwait) {
+      fail('loadCheckout marks unknown only AFTER awaiting: writes stay enabled during the first read for a new drawing')
+    } else {
+      pass('loadCheckout marks the lock unknown BEFORE awaiting (no write-enabled window on drawing change)')
+    }
+  }
+
+  // The Take offer must not depend on the clock. Gating it on `stale` meant a
+  // clock running slow judged an elapsed lease live, hid the button, and left the
+  // user unable to either write or take.
+  if (/canTake:\s*!!otherHeld\s*&&/.test(await fs.readFile(new URL('../src/checkoutIdentity.js', import.meta.url), 'utf8'))) {
+    fail('canTake is conditioned on more than holder presence: a skewed clock can hide the Take and wedge the UI')
+  } else pass('canTake depends only on another session holding the lock, not on our clock')
 
   // Purity: node imported it, but be explicit so a future edit cannot sneak a
   // bundler-only dependency into the module (mirrors check_errors.mjs).

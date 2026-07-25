@@ -18,7 +18,7 @@ import CheckoutChip from './CheckoutChip.jsx'
 // Calm posture throughout — a checkout is an expected coordination state, never
 // an error. Live only (the parent gates on !mock).
 export default function CheckoutControls({
-  lockedByOther, legacyByOther, staleByOther, heldByUs, unknown, busy, onTake, onRelease, onRetry,
+  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, busy, onTake, onRelease, onRetry,
 }) {
   if (unknown) {
     return (
@@ -36,35 +36,26 @@ export default function CheckoutControls({
   }
 
   if (lockedByOther) {
-    // The lease looks elapsed, or its `expires` is unreadable. We do not decide
-    // that ourselves (the browser clock is not an authority), so offer a Take and
-    // let the server adjudicate: it either hands over the lock or 409s and the
-    // refetch shows the truth. Without this a stale or malformed record left the
-    // UI permanently locked with no action available.
-    if (staleByOther) {
-      return (
-        <span className="checkout-controls" role="status">
-          <CheckoutChip checkout={lockedByOther} />
-          <span className="checkout-stale">
-            {legacyByOther
-              ? 'held by an older client, and its lease looks expired'
-              : 'this lease looks expired'}
-          </span>
+    // Someone else holds it. Always offer a Take, and never gate that on our own
+    // clock: the server adjudicates, either handing over an elapsed lease or
+    // returning 409 for a live one, after which the refetch shows the truth. A
+    // rejected take costs one request; hiding the button leaves a wedge that no
+    // user action can clear, which is what a skewed clock used to produce.
+    // `staleByOther` and `legacyByOther` only choose the wording.
+    const note = staleByOther
+      ? (legacyByOther ? 'held by an older client, and its lease looks expired' : 'this lease looks expired')
+      : (legacyByOther ? 'held by an older client' : null)
+    return (
+      <span className="checkout-controls" role="status">
+        <CheckoutChip checkout={lockedByOther} />
+        {note && <span className={staleByOther ? 'checkout-stale' : 'checkout-legacy'}>{note}</span>}
+        {canTake && (
           <button className="chip-act" onClick={onTake} disabled={busy}>
             Take edit lock
           </button>
-        </span>
-      )
-    }
-    if (legacyByOther) {
-      return (
-        <span className="checkout-controls" role="status">
-          <CheckoutChip checkout={lockedByOther} />
-          <span className="checkout-legacy">held by an older client; frees when its lease expires</span>
-        </span>
-      )
-    }
-    return <CheckoutChip checkout={lockedByOther} />
+        )}
+      </span>
+    )
   }
 
   if (heldByUs) {

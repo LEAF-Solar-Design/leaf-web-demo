@@ -614,6 +614,13 @@ export default function App() {
     if (mock) { setCheckout(null); setCheckoutUnknown(false); return }
     const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
     const seq = ++checkoutSeqRef.current
+    // Unknown again BEFORE awaiting, not just on failure. Without this the
+    // previous drawing's answer stayed authoritative through the whole new
+    // request: switching from mock to live, or changing drawing after an
+    // answered-and-unlocked one, left writes enabled until the new response
+    // arrived, so a write could be submitted before any lock answer existed for
+    // the drawing being written.
+    setCheckoutUnknown(true)
     try {
       const v = await getDrawingVersions(mock, did)
       if (seq !== checkoutSeqRef.current) return // a newer read already answered
@@ -2094,6 +2101,7 @@ export default function App() {
                   lockedByOther={otherHeldCheckout}
                   legacyByOther={!!legacyHeldCheckout}
                   staleByOther={!!staleHeldCheckout}
+                  canTake={lock.canTake}
                   heldByUs={heldByUs}
                   unknown={checkoutUnknown}
                   busy={checkoutBusy}
