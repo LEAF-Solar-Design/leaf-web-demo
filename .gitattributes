@@ -1,1 +1,1 @@
-server/tests/fixtures/cat_oracle/* -text
+server/tests/fixtures/cat_oracle/* -text -diff
