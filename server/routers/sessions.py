@@ -46,6 +46,7 @@ see that file's ``approve()``/``postMessage()`` comments — so requiring
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -393,21 +394,31 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
 # GET /api/sessions/{id}/stream (SSE)
 # --------------------------------------------------------------------------- #
 @router.get("/api/sessions/{session_id}/stream")
-def stream_session(session_id: str, after_seq: int = 0, tenant=Depends(deps.require_tenant)):
+async def stream_session(session_id: str, after_seq: int = 0, tenant=Depends(deps.require_tenant)):
     """Event-per-frame SSE (the client's EventSource addEventListener's per
     type — see converse.js openStream): `event: {type}\\ndata: {envelope}\\n\\n`.
     404 guard runs BEFORE the generator is constructed (matches
     routers/jobs.py:120-126's precedent) so an unknown/foreign session never
-    starts a stream at all."""
-    if _require_owned_session(session_id, tenant) is None:
+    starts a stream at all.
+
+    Async generator (mirrors routers/jobs.py's stream_job): a sync generator
+    here is consumed via AnyIO's threadpool, pinning one of its ~40 worker
+    threads for the stream's whole lifetime — every open or abandoned tab holds
+    one for up to STREAM_DEADLINE_S, and enough of them starve every sync
+    endpoint in the app. The poll cadence now awaits on the event loop; the
+    404 pre-check and each per-tick store read hop to a thread so the loop
+    never blocks on the session_store lock. Wire format/timing unchanged."""
+    if await asyncio.to_thread(_require_owned_session, session_id, tenant) is None:
         return _session_not_found(session_id)
 
-    def event_stream():
+    async def event_stream():
         cursor = int(after_seq)
         deadline = time.time() + STREAM_DEADLINE_S
         last_activity = time.time()
         while time.time() < deadline:
-            events = session_store.events_after(session_id, cursor, limit=500)
+            events = await asyncio.to_thread(
+                session_store.events_after, session_id, cursor, 500
+            )
             if events:
                 for ev in events:
                     cursor = ev["seq"]
@@ -418,7 +429,7 @@ def stream_session(session_id: str, after_seq: int = 0, tenant=Depends(deps.requ
                 if now - last_activity >= STREAM_PING_S:
                     yield ": ping\n\n"
                     last_activity = now
-            time.sleep(STREAM_POLL_S)
+            await asyncio.sleep(STREAM_POLL_S)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

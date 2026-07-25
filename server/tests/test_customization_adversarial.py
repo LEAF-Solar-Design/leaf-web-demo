@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import customization_service
 from customization_models import ChangeSet, ChangeState
 from customization_service import (
     CustomizationService,
     CustomizationServiceError,
+    _exclusive_materialize,
+    _materialize_worktree,
     effective_catalog_dir,
 )
 from customization_store import SQLiteCustomizationStore
@@ -328,3 +335,206 @@ def test_effective_catalog_wraps_sqlite_failure(tmp_path, monkeypatch):
 
     assert caught.value.code == "effective_catalog_unavailable"
     assert caught.value.status_code == 503
+
+
+def _published_pin(tmp_path, monkeypatch):
+    """Publish one catalog pin and return (bare repo, effective root)."""
+    _source, bare_base, base, _tool = repository(tmp_path)
+    registry = subprocess.run(
+        ["git", "show", f"{base}:registry.json"],
+        cwd=bare_base / "tenant-a.git", check=True, stdout=subprocess.PIPE,
+    ).stdout
+    digest = hashlib.sha256(registry).hexdigest()
+    database = tmp_path / "customization.db"
+    effective = tmp_path / "effective"
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))
+    monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(bare_base))
+    monkeypatch.setenv("LEAF_EFFECTIVE_TENANTS_DIR", str(effective))
+    store = SQLiteCustomizationStore(database)
+    store.initialize()
+    change_set_id = "11111111-1111-4111-8111-111111111111"
+    state = store.create_change_set(
+        tenant_id="tenant-a", idempotency_key="create", base_commit=base,
+        desired_platform_release=RELEASE, workspace_contract_digest=WORKSPACE,
+        author_subject="auth0|author", change_set_id=change_set_id,
+    )
+    state = store.transition(
+        tenant_id="tenant-a", change_set_id=change_set_id,
+        next_state=ChangeState.STAGING, expected_version=state.version,
+        idempotency_key="staging",
+    )
+    state = store.record_staged(
+        tenant_id="tenant-a", change_set_id=change_set_id,
+        expected_version=state.version, idempotency_key="staged",
+        staged_commit=base, catalog_digest=digest, platform_release=RELEASE,
+        workspace_contract_digest=WORKSPACE,
+    )
+    for next_state, key in (
+        (ChangeState.AWAITING_APPROVAL, "awaiting"),
+        (ChangeState.APPROVED, "approved"),
+        (ChangeState.PUBLISHING, "publishing"),
+    ):
+        extra = {"approver_subject": "auth0|approver"} if key == "approved" else {}
+        state = store.transition(
+            tenant_id="tenant-a", change_set_id=change_set_id,
+            next_state=next_state, expected_version=state.version,
+            idempotency_key=key, **extra,
+        )
+    store.publish(
+        tenant_id="tenant-a", change_set_id=change_set_id,
+        expected_version=state.version, idempotency_key="published",
+        approver_subject="auth0|approver",
+    )
+    return bare_base / "tenant-a.git", effective, base
+
+
+def test_worktree_add_failure_surfaces_git_stderr(tmp_path, monkeypatch):
+    """git's own words must reach the operator.
+
+    These subprocesses used to run with stderr=DEVNULL, so a failure in CI
+    produced a bare 503 and nothing to diagnose it with.
+    """
+    bare, effective, _base = _published_pin(tmp_path, monkeypatch)
+    missing = "0" * 40
+
+    with pytest.raises(CustomizationServiceError) as caught:
+        _materialize_worktree(bare, effective / "tenant-a" / missing, missing)
+
+    # The client still learns only the generic code...
+    assert caught.value.code == "effective_catalog_unavailable"
+    assert caught.value.status_code == 503
+    # ...while the operator gets what git actually said.
+    assert "invalid reference" in caught.value.detail
+    assert missing in caught.value.detail
+
+
+def test_materialization_recovers_from_a_deleted_worktree(tmp_path, monkeypatch):
+    """A worktree deleted underneath us must not wedge the tenant forever.
+
+    `git worktree add` removes the target on its own failure path, and the
+    registration it leaves behind makes every later add fail with "missing but
+    already registered worktree" until something prunes it.
+    """
+    _bare, _effective, _base = _published_pin(tmp_path, monkeypatch)
+    path = effective_catalog_dir("tenant-a")
+    assert path is not None
+
+    shutil.rmtree(path)  # exactly what the losing racer used to do
+
+    assert effective_catalog_dir("tenant-a") == path
+    assert (path / "registry.json").exists()
+
+
+def test_concurrent_materialization_never_loses_the_worktree(tmp_path, monkeypatch):
+    """Many callers racing one pin all get the same materialized path.
+
+    Two concurrent `git worktree add` calls on one path let the loser delete
+    the winner's directory; this failed ~6% of contended attempts before the
+    materialization was serialized.
+    """
+    _bare, _effective, _base = _published_pin(tmp_path, monkeypatch)
+    workers = 8
+    barrier = threading.Barrier(workers)
+
+    def materialize(_):
+        barrier.wait()
+        return effective_catalog_dir("tenant-a")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        paths = list(pool.map(materialize, range(workers)))
+
+    assert paths[0] is not None
+    assert paths == [paths[0]] * workers
+    assert (paths[0] / "registry.json").exists()
+
+
+# A holder in a genuinely separate PROCESS, using the same OS primitive the
+# service uses. It takes the lock, announces it, then waits to be killed.
+_HOLD_LOCK = """
+import fcntl, sys, time
+handle = open(sys.argv[1], "a+b")
+fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+print("held", flush=True)
+time.sleep(300)
+"""
+
+
+def _spawn_lock_holder(lock_path):
+    """Start a separate process holding the lock; return it once it confirms."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_LOCK, str(lock_path)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert child.stdout.readline().strip() == "held", "holder never took the lock"
+    return child
+
+
+@pytest.mark.skipif(
+    customization_service.fcntl is None, reason="POSIX advisory locking only"
+)
+def test_materialize_lock_excludes_another_process(tmp_path, monkeypatch):
+    """A lock held by another PROCESS must block, not be walked straight past.
+
+    The in-process `threading.Lock` cannot cover this, so the holder here is a
+    real second process taking the same OS lock the service takes.
+    """
+    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 0.5)
+    lock_path = tmp_path / ".materialize.lock"
+    child = _spawn_lock_holder(lock_path)
+    try:
+        with pytest.raises(CustomizationServiceError) as caught:
+            with _exclusive_materialize(tmp_path / "tenant-a.git", lock_path):
+                pytest.fail("acquired a lock another process already holds")
+        assert caught.value.code == "effective_catalog_unavailable"
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+
+
+@pytest.mark.skipif(
+    customization_service.fcntl is None, reason="POSIX advisory locking only"
+)
+def test_killed_holder_never_wedges_the_tenant(tmp_path):
+    """A worker killed mid-add must not wedge the tenant, and must not need a
+    staleness timeout to recover.
+
+    The kernel drops an advisory lock when the holding process dies, so the
+    next caller proceeds immediately. Recovery here is not "eventually, after a
+    stale threshold" -- it is at once, with nobody having to judge whether a
+    live holder was dead.
+    """
+    lock_path = tmp_path / ".materialize.lock"
+    child = _spawn_lock_holder(lock_path)
+    child.kill()
+    child.wait(timeout=10)
+
+    entered = False
+    with _exclusive_materialize(tmp_path / "tenant-a.git", lock_path):
+        entered = True
+
+    assert entered, "a dead holder's lock was never reclaimed"
+
+
+def test_unlockable_file_reports_its_real_cause_not_a_phantom_holder(
+    tmp_path, monkeypatch
+):
+    """An error waiting cannot clear must not be retried as contention.
+
+    Reporting "held by another worker" for a bad descriptor or a filesystem
+    without locking would stall for the whole timeout and then name a holder
+    that does not exist -- the same misreporting this change set removes.
+    """
+    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 30.0)
+
+    def unlockable(handle):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(customization_service, "_try_os_lock", unlockable)
+    started = time.monotonic()
+
+    with pytest.raises(OSError) as caught:
+        with _exclusive_materialize(tmp_path / "tenant-a.git", tmp_path / "lock"):
+            pytest.fail("acquired a lock that cannot be taken")
+
+    assert caught.value.errno == errno.ENOLCK
+    assert time.monotonic() - started < 5  # reported at once, not after 30s
