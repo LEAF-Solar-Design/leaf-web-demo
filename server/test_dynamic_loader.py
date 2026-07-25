@@ -33,6 +33,7 @@ import jsonschema
 import pytest
 import requests
 
+from _test_readiness import wait_ready
 from _test_run_confirmation import confirmed_requests_payload
 from tenant_paths import DEFAULT_TENANT
 
@@ -102,20 +103,6 @@ def start_uvicorn(module_app: str, port: int, env_overrides: dict, log_path: Pat
     )
 
 
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 30.0) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"server process exited early (rc={proc.returncode})")
-        try:
-            if requests.get(url, timeout=2).status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s")
-
-
 def stop(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         proc.terminate()
@@ -142,20 +129,22 @@ def stack(tmp_path_factory):
     # tests/test_authored_execution_live_gate.py own that), so pinning removes an
     # environment dependency without removing coverage. Provider wins over
     # LEAF_SANDBOX in _sandbox_tier(), but both are pinned so neither can decide.
+    broker_log, app_log = tmp / "broker.log", tmp / "app.log"
     broker = start_uvicorn("broker:app", broker_port,
                            {"BROKER_LEDGER": tmp / "ledger.jsonl",
                             "BROKER_TENANTS": tmp / "tenants.json",
                             "LEAF_SANDBOX": "off",
                             "LEAF_TOOL_SANDBOX_PROVIDER": "off"},
-                           tmp / "broker.log")
+                           broker_log)
     app = start_uvicorn("app:app", app_port,
                         {"APS_LIVE": "0", "APS_CRED": "/nonexistent",
                          "BROKER_URL": f"http://127.0.0.1:{broker_port}",
                          "JOBS_DB": tmp / "jobs.db"},
-                        tmp / "app.log")
+                        app_log)
     try:
-        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
-        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker,
+                   log_path=broker_log)
+        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app, log_path=app_log)
         # WARM-UP: the broker's FIRST /broker/run lazily loads the engine registry +
         # the 2345-polyline intake; under sustained parallel load that cold call can be
         # CPU-starved past the poll timeout (gate-runner flake follow-up). Force it now,

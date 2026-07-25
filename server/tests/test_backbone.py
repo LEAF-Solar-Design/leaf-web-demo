@@ -27,6 +27,7 @@ SCHEMA = json.loads((SERVER_DIR / "envelope_schema.json").read_text(encoding="ut
 
 sys.path.insert(0, str(SERVER_DIR))
 from envelopes import ErrorCode  # noqa: E402
+from _test_readiness import wait_ready  # noqa: E402
 from _test_run_confirmation import confirmed_requests_payload  # noqa: E402
 
 import jsonschema  # noqa: E402
@@ -53,20 +54,6 @@ def start_uvicorn(module_app: str, port: int, env_overrides: dict, log_path: Pat
         cwd=str(SERVER_DIR), env=env, stdout=log, stderr=log,
     )
     return proc
-
-
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 30.0) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"server process exited early (rc={proc.returncode})")
-        try:
-            if requests.get(url, timeout=2).status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s")
 
 
 def stop(
@@ -144,8 +131,10 @@ def stack(tmp_path_factory):
     }
     app = start_uvicorn("app:app", app_port, app_env, tmp / "app.log")
     try:
-        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
-        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker,
+                   log_path=tmp / "broker.log")
+        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app,
+                   log_path=tmp / "app.log")
         yield {
             "app": f"http://127.0.0.1:{app_port}",
             "broker": f"http://127.0.0.1:{broker_port}",
@@ -266,7 +255,7 @@ def test_2_progression_envelope_and_restart_durability(stack, tmp_path):
     app = start_uvicorn("app:app", port, env, tmp_path / "restart_app.log")
     base = f"http://127.0.0.1:{port}"
     try:
-        wait_ready(f"{base}/api/health", app)
+        wait_ready(f"{base}/api/health", app, log_path=tmp_path / "restart_app.log")
         assert requests.get(f"{base}/api/health", timeout=5).json()["aps_live"] is False  # APS_LIVE=0 default
 
         payload = confirmed_requests_payload(
@@ -298,7 +287,7 @@ def test_2_progression_envelope_and_restart_durability(stack, tmp_path):
         # kill the app process entirely, restart, record must survive (SQLite)
         assert_stopped(app, tmp_path / "restart_app.log")
         app = start_uvicorn("app:app", port, env, tmp_path / "restart_app.log")
-        wait_ready(f"{base}/api/health", app)
+        wait_ready(f"{base}/api/health", app, log_path=tmp_path / "restart_app.log")
         r2 = requests.get(f"{base}/api/jobs/{job_id}", timeout=10)
         assert r2.status_code == 200
         rec2 = r2.json()
@@ -319,7 +308,7 @@ def test_3_job_timeout(stack, tmp_path):
     app = start_uvicorn("app:app", port, env, tmp_path / "timeout_app.log")
     base = f"http://127.0.0.1:{port}"
     try:
-        wait_ready(f"{base}/api/health", app)
+        wait_ready(f"{base}/api/health", app, log_path=tmp_path / "timeout_app.log")
         payload = confirmed_requests_payload(
             base, "count-by-layer", {"_qa_sleep_s": 6}, "rooftop_demo")
         r = requests.post(f"{base}/api/run", json=payload, timeout=10)
