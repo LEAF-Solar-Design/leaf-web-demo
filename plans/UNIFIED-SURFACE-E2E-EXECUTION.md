@@ -296,8 +296,12 @@ Progress:
   16 px. Ctrl or Command K focuses the real command bar, both tablists use a
   roving tab stop with arrow keys, visible input focus is restored, and errors
   use alert semantics. Five viewport screenshots and two browser tests pass.
-- Provider lifting, sign-out and mid-session expiry, tenant operations, deeper structured
-  failure coverage, and the full responsive and accessibility ladder remain open.
+- `/try?ops=1` now keeps the unified scene and mounts the existing internal
+  tenant drawer. Browser proof covers authorized list and disable, cancel before
+  mutation, exact secret-header scoping, no secret leakage, calm 403 denial,
+  hidden tenant data on denial, and zero ops requests without the flag.
+- Provider lifting, sign-out and mid-session expiry, deeper structured failure
+  coverage, and the remaining accessibility ladder remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

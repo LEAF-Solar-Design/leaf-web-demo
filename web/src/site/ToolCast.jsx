@@ -33,6 +33,7 @@ import RoutePanel from '../components/RoutePanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
 import Toast from '../components/Toast.jsx'
 import SessionGate from '../components/SessionGate.jsx'
+import OpsDrawer from '../components/OpsDrawer.jsx'
 import ToolsPanel from '../components/ToolsPanel.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
@@ -138,6 +139,7 @@ export default function ToolCast({
   const [toast, setToast] = useState(null)
   const [drawer, setDrawer] = useState(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
+  const [opsOpen, setOpsOpen] = useState(() => new URLSearchParams(window.location.search).get('ops') === '1')
   const toastSeqRef = useRef(0)
   const catalogDecisionRef = useRef(null)
   const runIntentSessionRef = useRef(null)
@@ -561,6 +563,17 @@ export default function ToolCast({
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [drawer])
 
+  useEffect(() => {
+    if (!opsOpen) return undefined
+    const closeOpsOnEscape = (event) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setOpsOpen(false)
+    }
+    window.addEventListener('keydown', closeOpsOnEscape)
+    return () => window.removeEventListener('keydown', closeOpsOnEscape)
+  }, [opsOpen])
+
   const runRequest = useCallback(async () => {
     const text = prompt.trim()
     if (!text || busy || jobRunning) return
@@ -947,6 +960,11 @@ export default function ToolCast({
       </div>
       <Toast toast={toast} onDone={(id) => setToast((current) => current?.id === id ? null : current)} />
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
+      {opsOpen && (
+        <div className="drawer-layer tc-ops-layer">
+          <OpsDrawer onDismiss={() => setOpsOpen(false)} />
+        </div>
+      )}
     </>
   )
 }

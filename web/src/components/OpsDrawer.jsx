@@ -156,7 +156,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
         </button>
       </div>
 
-      <div className="drawer-foot">GET /api/ops/tenants · X-Internal-Role: qa</div>
+      <div className="drawer-foot">GET /api/ops/tenants · server-authorized internal access</div>
     </aside>
   )
 }

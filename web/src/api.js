@@ -252,8 +252,8 @@ export async function openProject(projectId, orgId) {
 //
 // AUTH (1C-followup): the backend now gates ops on a real internal credential,
 // `X-Ops-Secret`, NOT the legacy `X-Internal-Role: qa` dev seam. When the
-// operator has provisioned a secret — localStorage `leaf.ops_secret` or the
-// build-time `VITE_OPS_SECRET` — we attach it; absent, we still send the legacy
+// operator has provisioned the browser-local `leaf.ops_secret` value, we
+// attach it. We still send the legacy
 // role header so an ungated LOCAL dev backend keeps working (the demo path is
 // byte-unchanged off-secret). The secret is read at call time and never logged.
 const OPS_SECRET_KEY = 'leaf.ops_secret'
@@ -264,7 +264,7 @@ function opsSecret() {
     const ls = localStorage.getItem(OPS_SECRET_KEY)
     if (ls) return ls
   } catch { /* localStorage unavailable */ }
-  return import.meta.env.VITE_OPS_SECRET || null
+  return null
 }
 
 // Ops request headers: the legacy role seam + the real secret (when present) +

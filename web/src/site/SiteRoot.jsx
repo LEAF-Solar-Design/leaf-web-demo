@@ -20,12 +20,13 @@ const App = React.lazy(() => import('../App.jsx'))
 // Built by a sibling agent (src/site/sheets/** is theirs) — referenced only.
 const SheetsPage = React.lazy(() => import('./sheets/SheetsPage.jsx'))
 
-const APP_BOOT_PARAMS = ['demo', 'fixture', 'ops', 'dev', 'drawing']
+const APP_BOOT_PARAMS = ['demo', 'fixture', 'dev', 'drawing']
 
 function bootWantsApp(search, path = window.location.pathname) {
   try {
     const q = new URLSearchParams(search)
     if (APP_BOOT_PARAMS.some((k) => q.has(k))) return true
+    if (q.has('ops') && path !== '/try') return true
     if (q.has('code') && q.has('state') && path !== '/try') return true
   } catch { /* malformed search — fall through to path routing */ }
   return false
