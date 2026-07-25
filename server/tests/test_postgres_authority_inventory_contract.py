@@ -53,6 +53,30 @@ REQUIRED_AUTHORITY_FIELDS = {
     "rollback_mode",
     "current_selection",
 }
+REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
+    "LEAF_JOBS_STORE": {"async_jobs", "async_job_terminal_conflicts"},
+    "LEAF_CALLBACK_REPLAY_STORE": {"callback_consumed_nonces"},
+    "LEAF_SESSIONS_STORE": {"app_sessions", "app_session_events", "app_approvals"},
+    "LEAF_AGENT_STORE": {
+        "agent_approvals", "agent_session_grants", "agent_rate_counters",
+        "agent_fleet_state", "agent_gate_audit_events", "agent_tenant_state",
+        "agent_usage_turns",
+    },
+    "LEAF_BROKER_STORE": {
+        "broker_tenants", "broker_usage_ledger", "broker_run_admissions",
+        "broker_aps_slots", "broker_admission_resolution_audit",
+    },
+    "LEAF_GUEST_CAP_STORE": {"guest_upload_counters"},
+    "LEAF_DRAWING_STORE": {"drawing_store_manifests", "drawing_store_versions"},
+    "LEAF_UPLOAD_STORE": {
+        "drawing_store_manifests", "drawing_store_versions",
+        "drawing_upload_attempts", "drawing_purge_receipts",
+    },
+    "LEAF_HARNESS_SESSION_STORE": {
+        "harness_sessions", "harness_turns", "harness_events",
+        "harness_confirmations", "harness_usage", "harness_tenant_repo_leases",
+    },
+}
 
 
 def _load_inventory() -> dict:
@@ -98,6 +122,13 @@ def _inventory_errors(inventory: dict) -> list[str]:
                 errors.append(f"{name}: allowed_modes is empty")
             if selector.get("repository_default") not in selector.get("allowed_modes", []):
                 errors.append(f"{name}: repository_default is not an allowed mode")
+            missing_runtime_tables = REQUIRED_RUNTIME_TABLES_BY_SELECTOR.get(
+                name, set()) - set(authority["postgres_tables"])
+            if missing_runtime_tables:
+                errors.append(
+                    f"{name}: missing runtime PostgreSQL tables "
+                    f"{sorted(missing_runtime_tables)}"
+                )
 
         missing_tables = set(authority["postgres_tables"]) - declared_tables
         if missing_tables:
@@ -207,4 +238,26 @@ def test_contract_rejects_false_complete_claims() -> None:
     assert any(
         "backfill claims complete without a command" in error
         for error in _inventory_errors(false_backfill_claim)
+    )
+
+
+def test_contract_rejects_upload_inventory_without_shared_drawing_tables() -> None:
+    inventory = _load_inventory()
+    incomplete = deepcopy(inventory)
+    upload = next(
+        authority for authority in incomplete["authorities"]
+        if authority["id"] == "upload_metadata"
+    )
+    upload["postgres_tables"] = [
+        table for table in upload["postgres_tables"]
+        if table not in {"drawing_store_manifests", "drawing_store_versions"}
+    ]
+
+    errors = _inventory_errors(incomplete)
+
+    assert any(
+        "LEAF_UPLOAD_STORE: missing runtime PostgreSQL tables" in error
+        and "drawing_store_manifests" in error
+        and "drawing_store_versions" in error
+        for error in errors
     )

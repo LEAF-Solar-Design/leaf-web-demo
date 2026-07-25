@@ -96,57 +96,199 @@ _REQUIRED_COLUMNS = {
 # still write PostgreSQL, so they require the same proof as canonical reads.
 _AUTHORITY_REQUIRED_COLUMNS = {
     "jobs": {
-        "async_jobs": {"job_id", "tenant_id", "status", "submission_fingerprint"},
-        "async_job_terminal_conflicts": {"job_id", "fingerprint", "evidence_json"},
+        "async_jobs": {
+            "job_id", "tenant_id", "tool", "params_json", "dwg", "status",
+            "progress", "created_at", "started_at", "updated_at", "finished_at",
+            "elapsed_ms", "result_json", "error_json", "execution_json", "attempt",
+            "lease_owner", "lease_expires_at", "heartbeat_at", "provenance_json",
+            "terminal_fingerprint", "terminal_conflict_json", "org_id", "project_id",
+            "authority_mode", "idempotency_key", "submission_fingerprint", "dwg_version",
+        },
+        "async_job_terminal_conflicts": {
+            "job_id", "fingerprint", "evidence_json", "received_at",
+        },
     },
     "callback_replay": {
-        "callback_consumed_nonces": {"job_id", "nonce", "expires_at"},
+        "callback_consumed_nonces": {
+            "job_id", "nonce", "expires_at", "consumed_at",
+        },
     },
     "sessions": {
-        "app_sessions": {"session_id", "tenant_id", "status", "model"},
-        "app_session_events": {"session_id", "seq", "data_json"},
-        "app_approvals": {"confirmation_id", "decided", "consumed"},
+        "app_sessions": {
+            "session_id", "tenant_id", "drawing_id", "status", "created_at",
+            "updated_at", "last_seq", "active_turn_id", "turn_started_at",
+            "active_turn_tier", "model",
+        },
+        "app_session_events": {
+            "session_id", "seq", "turn_id", "type", "data_json", "created_at",
+        },
+        "app_approvals": {
+            "confirmation_id", "session_id", "tenant_id", "turn_id", "tool",
+            "params_json", "capability", "rationale", "kind", "payload_json",
+            "decided", "approved", "decided_by", "created_at", "expires_at", "consumed",
+        },
     },
     "agent": {
-        "agent_approvals": {"confirmation_id", "tenant_id", "args_hash"},
-        "agent_session_grants": {"tenant_id", "session_id", "action", "target_key"},
-        "agent_rate_counters": {"namespace", "counter_key", "value"},
-        "agent_fleet_state": {"state_key", "active"},
-        "agent_gate_audit_events": {"event_id", "kind", "event"},
-        "agent_tenant_state": {"tenant_id", "agent_disabled", "overlay", "revision"},
-        "agent_usage_turns": {"usage_key", "tenant_id", "turn_id", "record"},
+        "agent_approvals": {
+            "confirmation_id", "tenant_id", "session_id", "turn_id", "action", "args",
+            "args_hash", "policy", "rung", "created_at", "expires_at", "granted",
+            "denied", "decided_at", "decided_by", "reason", "consumed_at",
+        },
+        "agent_session_grants": {
+            "tenant_id", "session_id", "action", "target_key", "granted_at",
+        },
+        "agent_rate_counters": {"namespace", "counter_key", "value", "updated_at"},
+        "agent_fleet_state": {"state_key", "active", "reason", "updated_at", "updated_by"},
+        "agent_gate_audit_events": {
+            "event_id", "tenant_id", "session_id", "turn_id", "kind", "event", "created_at",
+        },
+        "agent_tenant_state": {
+            "tenant_id", "agent_disabled", "overlay", "revision", "updated_at",
+        },
+        "agent_usage_turns": {
+            "usage_key", "tenant_id", "session_id", "turn_id", "ts", "record", "created_at",
+        },
     },
     "broker": {
-        "broker_tenants": {"tenant_id", "disabled"},
-        "broker_usage_ledger": {"event_key", "tenant_id", "status"},
-        "broker_run_admissions": {"event_key", "tenant_id", "state", "lease_token"},
-        "broker_aps_slots": {"event_key", "tenant_id", "state"},
-        "broker_admission_resolution_audit": {"audit_id", "event_key", "resolution"},
+        "broker_tenants": {"tenant_id", "disabled", "tier", "updated_at"},
+        "broker_usage_ledger": {
+            "event_key", "ts", "tenant_id", "tool", "engine_op", "aps_endpoint",
+            "aps_live", "engine_seconds", "usd_est", "status", "inserted_at",
+        },
+        "broker_run_admissions": {
+            "event_key", "tenant_id", "request_fingerprint", "state", "lease_token",
+            "lease_expires_at", "aps_live", "accounted_work", "reserved_usd",
+            "execution_started_at", "result_json", "http_status", "created_at",
+            "updated_at", "terminal_at",
+        },
+        "broker_aps_slots": {
+            "event_key", "tenant_id", "state", "acquired_at", "lease_expires_at",
+            "released_at", "release_reason",
+        },
+        "broker_admission_resolution_audit": {
+            "audit_id", "event_key", "tenant_id", "resolution", "operator_id", "reason",
+            "evidence_ref", "prior_state", "terminal_status", "created_at",
+        },
     },
     "guest_caps": {
-        "guest_upload_counters": {"namespace", "counter_key", "value"},
+        "guest_upload_counters": {"namespace", "counter_key", "value", "updated_at"},
     },
     "drawing": {
-        "drawing_store_manifests": {"tenant_id", "drawing_id", "head", "checkout_fence"},
+        "drawing_store_manifests": {
+            "tenant_id", "drawing_id", "head", "latest", "checkout_holder",
+            "checkout_fence", "checkout_acquired_at", "checkout_expires_at",
+            "created_at", "updated_at",
+        },
         "drawing_store_versions": {
-            "tenant_id", "drawing_id", "version", "state", "object_key",
-            "content_sha256", "intake_ref", "intake_sha256",
+            "tenant_id", "drawing_id", "version", "parent_version", "object_key",
+            "byte_count", "content_sha256", "workitem_id", "tool", "note", "state",
+            "reservation_token", "reservation_expires_at", "created_at", "ready_at",
+            "intake_ref", "intake_sha256",
         },
     },
     "upload": {
-        "drawing_store_manifests": {"tenant_id", "drawing_id", "head"},
-        "drawing_store_versions": {"tenant_id", "drawing_id", "version", "state"},
-        "drawing_upload_attempts": {"tenant_id", "drawing_id", "attempt", "status"},
-        "drawing_purge_receipts": {"tenant_id", "drawing_id", "attempt", "status"},
+        "drawing_store_manifests": {
+            "tenant_id", "drawing_id", "head", "latest", "checkout_holder",
+            "checkout_fence", "checkout_acquired_at", "checkout_expires_at",
+            "created_at", "updated_at",
+        },
+        "drawing_store_versions": {
+            "tenant_id", "drawing_id", "version", "parent_version", "object_key",
+            "byte_count", "content_sha256", "workitem_id", "tool", "note", "state",
+            "reservation_token", "reservation_expires_at", "created_at", "ready_at",
+            "intake_ref", "intake_sha256",
+        },
+        "drawing_upload_attempts": {
+            "tenant_id", "drawing_id", "attempt", "marker", "status",
+            "retention_expires_at", "extraction_owner", "extraction_fence",
+            "extraction_expires_at", "purge_owner", "purge_fence", "purge_expires_at",
+            "updated_at",
+        },
+        "drawing_purge_receipts": {
+            "tenant_id", "drawing_id", "attempt", "purge_fence", "status",
+            "freed_bytes", "detail", "created_at",
+        },
     },
     "harness_sessions": {
-        "harness_sessions": {"session_id", "tenant_id", "drawing_id", "status"},
-        "harness_turns": {"turn_id", "session_id", "status"},
-        "harness_events": {"session_id", "seq", "turn_id", "data"},
-        "harness_confirmations": {"confirmation_id", "session_id", "status"},
-        "harness_usage": {"usage_id", "session_id", "turn_id", "usage"},
-        "harness_tenant_repo_leases": {"tenant_id", "owner_token", "generation"},
+        "harness_sessions": {
+            "session_id", "tenant_id", "drawing_id", "sdk_session_id", "status",
+            "summary", "created_at", "updated_at",
+        },
+        "harness_turns": {
+            "turn_id", "session_id", "seq_start", "status", "stop_reason",
+            "started_at", "ended_at",
+        },
+        "harness_events": {"session_id", "seq", "turn_id", "type", "data", "ts"},
+        "harness_confirmations": {
+            "confirmation_id", "session_id", "turn_id", "action", "args_json", "kind",
+            "status", "created_at", "expires_at", "decided_at", "decided_by",
+        },
+        "harness_usage": {"usage_id", "session_id", "turn_id", "usage", "ts"},
+        "harness_tenant_repo_leases": {
+            "tenant_id", "owner_token", "generation", "acquired_at", "heartbeat_at", "expires_at",
+        },
     },
+}
+
+# Names below are stable database API. They enforce idempotency, fencing, state
+# shape, referential integrity, and immutable audit records used by callers.
+_AUTHORITY_REQUIRED_CONSTRAINTS = {
+    "jobs": {"async_jobs_pkey", "async_job_terminal_conflicts_pkey",
+             "async_job_terminal_conflicts_job_id_fkey"},
+    "callback_replay": {"callback_consumed_nonces_pkey"},
+    "sessions": {"app_sessions_pkey", "app_sessions_tenant_id_drawing_id_key",
+                 "app_session_events_pkey", "app_session_events_session_id_fkey",
+                 "app_approvals_pkey"},
+    "agent": {"agent_approvals_pkey", "agent_session_grants_pkey",
+              "agent_rate_counters_pkey", "agent_fleet_state_pkey",
+              "agent_gate_audit_events_pkey", "agent_tenant_state_pkey",
+              "agent_usage_turns_pkey", "agent_usage_turns_tenant_id_session_id_turn_id_key"},
+    "broker": {"broker_run_admissions_event_tenant_uq",
+               "broker_run_admissions_state_allowed", "broker_run_admissions_state_shape",
+               "broker_usage_ledger_admission_fk",
+               "broker_usage_ledger_engine_seconds_nonnegative_finite",
+               "broker_usage_ledger_usd_est_nonnegative_finite",
+               "broker_aps_slots_admission_fk", "broker_aps_slots_state_allowed",
+               "broker_aps_slots_state_shape", "broker_admission_resolution_allowed",
+               "broker_admission_resolution_prior_state",
+               "broker_admission_resolution_admission_fk"},
+    "guest_caps": {"guest_upload_counters_pkey"},
+    "drawing": {"drawing_store_manifests_pkey", "drawing_store_versions_pkey",
+                "drawing_store_versions_object_key_key",
+                "drawing_store_versions_tenant_id_drawing_id_fkey",
+                "drawing_store_versions_state_check"},
+    "upload": {"drawing_store_manifests_pkey", "drawing_store_versions_pkey",
+               "drawing_store_versions_object_key_key",
+               "drawing_store_versions_tenant_id_drawing_id_fkey",
+               "drawing_store_versions_state_check", "drawing_upload_attempts_pkey",
+               "drawing_upload_attempts_status_check", "drawing_purge_receipts_pkey",
+               "drawing_purge_receipts_status_check"},
+    "harness_sessions": {"harness_sessions_pkey", "harness_turns_pkey",
+                         "harness_turns_session_id_fkey", "harness_events_pkey",
+                         "harness_events_session_id_fkey", "harness_confirmations_pkey",
+                         "harness_confirmations_session_id_fkey", "harness_usage_pkey",
+                         "harness_usage_session_id_fkey", "harness_tenant_repo_leases_pkey"},
+}
+
+_AUTHORITY_REQUIRED_INDEXES = {
+    "jobs": {"async_jobs_project_idempotency_uq", "async_jobs_reclaim_idx"},
+    "callback_replay": {"callback_consumed_nonces_expiry_idx"},
+    "sessions": {"idx_app_session_events_recent", "idx_app_approvals_session"},
+    "agent": {"idx_agent_approvals_pending", "idx_agent_gate_audit_tenant_created",
+              "idx_agent_gate_audit_session_created", "idx_agent_usage_tenant_ts"},
+    "broker": {"broker_usage_ledger_tenant_ts_idx",
+               "broker_run_admissions_tenant_state_idx", "broker_aps_slots_held_idx"},
+    "guest_caps": {"idx_guest_upload_counters_updated"},
+    "drawing": {"drawing_store_versions_ready_idx"},
+    "upload": {"drawing_store_versions_ready_idx", "drawing_upload_expiry_idx"},
+    "harness_sessions": {"harness_one_active_session", "harness_one_active_turn",
+                         "idx_harness_events_turn", "idx_harness_confirmations_session",
+                         "idx_harness_usage_session", "idx_harness_tenant_repo_leases_expiry"},
+}
+
+_AUTHORITY_REQUIRED_TRIGGERS = {
+    "broker": {"broker_usage_ledger_immutable",
+               "broker_admission_resolution_audit_immutable"},
 }
 
 _AUTHORITY_SELECTORS = {
@@ -184,6 +326,26 @@ def required_columns_for_selected_authorities(
         for table, columns in _AUTHORITY_REQUIRED_COLUMNS[authority].items():
             required.setdefault(table, set()).update(columns)
     return required
+
+
+def required_catalog_for_selected_authorities(
+    environ: Optional[Mapping[str, str]] = None,
+) -> Dict[str, set[str]]:
+    """Return runtime-critical constraints, indexes, and triggers by selector."""
+    source = os.environ if environ is None else environ
+    catalog = {"constraints": set(), "indexes": set(), "triggers": set()}
+    contracts = {
+        "constraints": _AUTHORITY_REQUIRED_CONSTRAINTS,
+        "indexes": _AUTHORITY_REQUIRED_INDEXES,
+        "triggers": _AUTHORITY_REQUIRED_TRIGGERS,
+    }
+    for selector, values in _AUTHORITY_SELECTORS.items():
+        authority = values.get(str(source.get(selector, "")).strip().lower())
+        if authority is None:
+            continue
+        for kind, authority_contracts in contracts.items():
+            catalog[kind].update(authority_contracts.get(authority, set()))
+    return catalog
 
 
 def _load_env_local() -> None:
@@ -495,6 +657,7 @@ def _migration_proof(applied_rows: List[Mapping[str, str]]) -> Dict[str, Any]:
 def schema_status() -> Dict[str, Any]:
     """Read-only readiness result for the API and canonical worker schema."""
     required = required_columns_for_selected_authorities()
+    required_catalog = required_catalog_for_selected_authorities()
     required[_MIGRATION_LEDGER_TABLE] = set(_MIGRATION_LEDGER_COLUMNS)
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
@@ -511,6 +674,32 @@ def schema_status() -> Dict[str, Any]:
                 for table, columns in required.items()
                 if columns - found.get(table, set())
             }
+            cur.execute(
+                "SELECT conname FROM pg_constraint "
+                "WHERE connamespace = current_schema()::regnamespace "
+                "AND conname = ANY(%(constraints)s)",
+                {"constraints": list(required_catalog["constraints"])},
+            )
+            found_constraints = {str(row["conname"]) for row in cur.fetchall()}
+            cur.execute(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() "
+                "AND indexname = ANY(%(indexes)s)",
+                {"indexes": list(required_catalog["indexes"])},
+            )
+            found_indexes = {str(row["indexname"]) for row in cur.fetchall()}
+            cur.execute(
+                "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal "
+                "AND tgname = ANY(%(triggers)s)",
+                {"triggers": list(required_catalog["triggers"])},
+            )
+            found_triggers = {str(row["tgname"]) for row in cur.fetchall()}
+            missing_catalog = {
+                "missing_constraints": sorted(
+                    required_catalog["constraints"] - found_constraints),
+                "missing_indexes": sorted(required_catalog["indexes"] - found_indexes),
+                "missing_triggers": sorted(
+                    required_catalog["triggers"] - found_triggers),
+            }
             applied_rows = []
             if not (_MIGRATION_LEDGER_COLUMNS - found.get(_MIGRATION_LEDGER_TABLE, set())):
                 cur.execute(
@@ -519,7 +708,8 @@ def schema_status() -> Dict[str, Any]:
             migration_proof = _migration_proof(applied_rows)
             cur.execute("SELECT current_database() AS database, current_schema() AS schema")
             identity = cur.fetchone()
-    ok = not missing and not migration_proof["missing_migrations"] \
+    ok = not missing and not any(missing_catalog.values()) \
+        and not migration_proof["missing_migrations"] \
         and not migration_proof["migration_hash_drift"]
     return {
         "ok": ok,
@@ -527,6 +717,7 @@ def schema_status() -> Dict[str, Any]:
         "schema": identity["schema"],
         "migration_count": len(migration_manifest()),
         "missing": missing,
+        **missing_catalog,
         **migration_proof,
     }
 
@@ -545,6 +736,13 @@ def assert_schema_current() -> Dict[str, Any]:
         if status["migration_hash_drift"]:
             details.append(
                 "migration hash drift: " + ",".join(status["migration_hash_drift"]))
+        for field, label in (
+            ("missing_constraints", "missing constraints"),
+            ("missing_indexes", "missing indexes"),
+            ("missing_triggers", "missing triggers"),
+        ):
+            if status.get(field):
+                details.append(label + ": " + ",".join(status[field]))
         raise RuntimeError(
             "platform PostgreSQL schema is incomplete: " + "; ".join(details))
     return status
