@@ -102,6 +102,46 @@ def test_tab_close_reaps_exactly_once_with_the_job_correlation(monkeypatch):
     assert jobs.get_job(job_id)["status"] == "failed"
 
 
+def test_close_arriving_after_the_run_finished_is_a_clean_no_op(monkeypatch):
+    """A tab can close at any moment, including after the WorkItem is already
+    done. The beacon must not error, and the sweep must not reap a terminal row
+    -- cancelling there would issue a DELETE against work APS already finished.
+    """
+    job_id = _submit(aps_live=True)
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.complete_callback(
+        job_id, "complete",
+        result_env={"ok": True, "tool": "reap-tool"},
+        worker_id="worker-1",
+        provenance={"attempt": 1, "execution_path": "cloud"}) == "applied"
+    assert jobs.get_job(job_id)["status"] == "complete"
+
+    sent = []
+    monkeypatch.setattr(broker_client, "reap_via_broker",
+                        lambda records, **_kw: sent.append(records) or {"ok": True})
+
+    assert jobs.mark_job_closed(job_id) is False, "terminal row cannot be closed"
+    assert jobs._reap_orphans_once() == 0, "a finished row is not reclaimable"
+    assert sent == [], "no cancel may be issued against a completed WorkItem"
+    assert jobs.get_job(job_id)["status"] == "complete", "close must not un-finish it"
+
+
+def test_close_racing_a_just_finished_run_resolves_to_no_workitem(stub_cancels):
+    """The narrow race: the row is still 'running' when the beacon lands, but the
+    broker's `finally` has already evicted the correlation. The reap must resolve
+    to no id and cancel NOTHING, rather than raising or cancelling a stale id."""
+    broker._record_active_workitem("job-just-finished", "wi-just-finished")
+    assert broker._drop_active_workitem("job-just-finished") == "wi-just-finished"
+
+    resp = TestClient(broker.app).post("/broker/reap", json={
+        "records": [{"job_id": "job-just-finished", "session_closed": True,
+                     "status": "inprogress"}]})
+
+    assert resp.status_code == 200
+    assert stub_cancels.cancelled == [], "the run already ended: nothing to cancel"
+    assert resp.json()["reaped"] == [None], "row swept, but no id was cancelled"
+
+
 def test_heartbeat_stale_row_is_redispatched_and_never_reaped(monkeypatch):
     """A stale row gets REDISPATCHED, and the previous worker may still be in
     flight, so cancelling by job_id there could kill the WorkItem the retry is
