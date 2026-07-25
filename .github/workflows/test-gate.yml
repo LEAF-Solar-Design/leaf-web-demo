@@ -12,7 +12,7 @@ name: Test gate
 # It runs scripts/run-all-gates.py, the canonical runner: every suite in its
 # own subprocess with the correct cwd and a cleaned env, one scoreboard, exit 0
 # iff every selected gate passed. Test-level skips fail unless the runner has an
-# exact reason allowlist, and skipped tests never satisfy executed-count floors.
+# exact allowlist, and skipped tests never satisfy executed-count floors.
 #
 # Deliberately hermetic -- NO secret, AWS credential, or DATABASE_URL is
 # required or provided:

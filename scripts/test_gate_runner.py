@@ -196,15 +196,36 @@ def test_selected_script_environment_skip_is_a_failure(tmp_path):
 
 def test_vitest_skip_fails_gate(tmp_path):
     g = _load_runner()
+    output = (
+        "test/unexpected.test.ts (2 tests | 1 skipped)\n"
+        "Tests 1 passed | 1 skipped\n"
+    )
     suite = g.Suite(
         "vitest-skip", "vitest skip", "vitest", SCRIPTS,
-        [sys.executable, "-c", "print('Tests 1 passed | 1 skipped')"], 1,
+        [sys.executable, "-c", f"print({output!r})"], 1,
     )
 
     result = g.run_suite(suite, tmp_path)
 
     assert result.status == "FAIL"
     assert "non-allowlisted vitest skip" in result.note
+
+
+def test_exact_vitest_file_and_skip_count_allowlist_passes(tmp_path):
+    g = _load_runner()
+    output = (
+        "test/postgres.test.ts (5 tests | 4 skipped)\n"
+        "Tests 1 passed | 4 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-known-skip", "vitest known skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+        allowed_vitest_skips=(("test/postgres.test.ts", 4),),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "PASS"
 
 
 def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch):

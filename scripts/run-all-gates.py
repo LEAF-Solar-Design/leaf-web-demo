@@ -54,6 +54,10 @@ EXIT CODE
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
 printed to stdout.
+
+Pytest allowlists pin the exact reported reason. Vitest allowlists pin the
+exact test file and skipped count because Vitest's default reporter does not
+emit per-test skip reasons.
 """
 from __future__ import annotations
 
@@ -105,6 +109,9 @@ class Suite:
     # these regular expressions. This keeps environmental exceptions explicit
     # instead of letting any skipped assertion count as a passing test.
     allowed_skip_reasons: tuple[str, ...] = ()
+    # Vitest does not report skip reasons. Pin the exact skipped file and count
+    # for each deliberate environment-gated integration group instead.
+    allowed_vitest_skips: tuple[tuple[str, int], ...] = ()
     reset_authored: bool = False   # reset authored_tools.json before this suite
     db_gated: bool = False         # SKIP unless the platform DB is reachable
     opt_in_env: str = ""           # SKIP unless this env flag is truthy (opt-in suite)
@@ -440,12 +447,17 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 12),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 13),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 289),
+              [_npm(), "test"], 317,
+              allowed_vitest_skips=(
+                  ("test/tenantRepoLease.test.ts", 4),
+                  ("test/harnessSchema.pg.test.ts", 1),
+                  ("test/pgSessionStore.contract.test.ts", 5),
+              )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
@@ -629,7 +641,13 @@ def parse_vitest(text: str) -> dict:
     failed = _n("failed", line)
     skipped = _n("skipped", line)
     got = passed + failed + skipped
-    return {"passed": passed, "failed": failed, "skipped": skipped, "got": got}
+    skipped_files: list[tuple[str, int]] = []
+    for output_line in t.splitlines():
+        match = re.search(r"(\S+\.test\.ts).*?(\d+) skipped", output_line)
+        if match:
+            skipped_files.append((match.group(1).replace("\\", "/"), int(match.group(2))))
+    return {"passed": passed, "failed": failed, "skipped": skipped, "got": got,
+            "skipped_files": skipped_files}
 
 
 # --------------------------------------------------------------------------- #
@@ -773,8 +791,18 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         passed = rc == 0 and c["failed"] == 0
         note = f"{c['skipped']} skipped" if c.get("skipped") else ""
         if c.get("skipped"):
-            passed = False
-            note += "; non-allowlisted vitest skip"
+            actual = dict(c["skipped_files"])
+            allowed = dict(suite.allowed_vitest_skips)
+            reported = sum(actual.values())
+            unexpected = {path: count for path, count in actual.items()
+                          if allowed.get(path) != count}
+            if reported != c["skipped"]:
+                passed = False
+                note += (f"; skip details incomplete: vitest reported {c['skipped']} "
+                         f"but named {reported}")
+            elif unexpected:
+                passed = False
+                note += f"; non-allowlisted vitest skip: {unexpected}"
         if fail_hint and not passed:
             note = (note + " " if note else "") + fail_hint
         # Same floor rule as pytest suites.
