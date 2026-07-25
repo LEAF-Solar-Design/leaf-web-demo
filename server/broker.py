@@ -856,6 +856,17 @@ class BrokerRunRequest(BaseModel):
     dwg_version: Optional[int] = None
     # Required in PostgreSQL mode. Use one durable key across job redeliveries.
     ledger_event_key: Optional[str] = None
+    # Single-writer identity of the caller that submitted this run, carried from
+    # POST /api/run (where it is spelled `holder`/`fence`, matching the public
+    # checkout vocabulary) so the store can refuse a version published under
+    # ANOTHER session's checkout. Qualified names here because this model has no
+    # other checkout context. Both optional, so an older app that sends neither
+    # behaves exactly as before — which is also why they are absent from
+    # _broker_request_fingerprint below: the fingerprint identifies the WORK, and
+    # two sessions asking for the same tool+params are the same work even when
+    # only one of them is authorized to publish the result.
+    checkout_holder: Optional[str] = None
+    checkout_fence: Optional[int] = None
 
 
 def _broker_request_fingerprint(req: BrokerRunRequest) -> str:
@@ -1911,18 +1922,24 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 _start_admitted_execution(req, admission, aps_submission=True)
                 return write_loop.run_write_live(tool, params, req.tenant_id,
                                                  backend=backend, da=da, t0=t0,
-                                                 ledger_entry=entry, version=base_version)
+                                                 ledger_entry=entry, version=base_version,
+                                                 holder=req.checkout_holder,
+                                                 fence=req.checkout_fence)
             # requested live but no da client -> degraded pure-python write
             backend = write_loop.default_backend(aps_live=False)
             _start_admitted_execution(req, admission, aps_submission=False)
             return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
                                              t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
-                                             degraded=True, version=base_version)
+                                             degraded=True, version=base_version,
+                                             holder=req.checkout_holder,
+                                             fence=req.checkout_fence)
         backend = write_loop.default_backend(aps_live=False)
         _start_admitted_execution(req, admission, aps_submission=False)
         return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
                                          t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
-                                         version=base_version)
+                                         version=base_version,
+                                         holder=req.checkout_holder,
+                                         fence=req.checkout_fence)
 
     # 2) live path — the ONLY code path that touches da/client.py + the credential
     if req.aps_live:

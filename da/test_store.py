@@ -260,6 +260,106 @@ def test_checkout_expired_lock_is_free(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Checkout AUTHORIZATION of a write (put_drawing holder/fence)
+#
+# acquire_checkout has always refused a second holder, but put_drawing never
+# asked who was calling: it published whatever version it was handed as long as
+# the manifest was readable. So the lock stopped a second session from TAKING the
+# lock and did nothing to stop it from WRITING. These pin the caller check.
+# --------------------------------------------------------------------------- #
+def test_put_drawing_refuses_a_writer_that_does_not_hold_the_checkout(tmp_path):
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+    b = _tmpfile(tmp_path, "v2.dwg", b"V2")
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    with pytest.raises(store.CheckoutDenied):
+        store.put_drawing(be, "t", did, b, parent_version=1, holder="s2")
+    # refused means NOTHING was published: still one version, head still v1
+    m = store.load_manifest(be, "t", did)
+    assert m["head"] == 1 and m["latest"] == 1
+    assert [v["v"] for v in m["versions"]] == [1]
+
+
+def test_put_drawing_allows_the_holder_and_leaves_the_lock_intact(tmp_path):
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+    b = _tmpfile(tmp_path, "v2.dwg", b"V2")
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    assert store.put_drawing(be, "t", did, b, parent_version=1, holder="s1") == 2
+    m = store.load_manifest(be, "t", did)
+    assert m["head"] == 2
+    assert m["checkout"]["holder"] == "s1"   # writing does not consume the lock
+
+
+def test_put_drawing_unnamed_caller_keeps_the_pre_existing_contract(tmp_path):
+    """holder=None is the ingest/harness/test path and must stay permitted, or
+    every existing caller of this primitive breaks. The product write path never
+    reaches here unnamed: POST /api/run defaults an absent holder to the tenant
+    id (server/routers/jobs.py), so a real request always carries an identity."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+    b = _tmpfile(tmp_path, "v2.dwg", b"V2")
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    assert store.put_drawing(be, "t", did, b, parent_version=1) == 2
+
+
+def test_put_drawing_allowed_when_no_lock_or_an_expired_one(tmp_path):
+    """An unlocked drawing publishes as before, and an EXPIRED lock is free —
+    the same rule acquire_checkout applies. Without this a forgotten lock would
+    wedge the drawing for its whole TTL."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    # (a) no lock at all
+    assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                             parent_version=1, holder="s2") == 2
+
+    # (b) someone else's lock, forced past its TTL (deterministic, no sleep)
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    m = store.load_manifest(be, "t", did)
+    m["checkout"]["expires"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    store.save_manifest(be, "t", did, m)
+    assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v3.dwg", b"V3"),
+                             parent_version=2, holder="s2") == 3
+
+
+def test_authorize_checkout_preflight_matches_the_commit_decision(tmp_path):
+    """The pre-flight run_write_live uses before spending APS engine seconds must
+    agree with what put_drawing would decide at commit, or a caller pays for a
+    WorkItem whose result is then refused."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    store.authorize_checkout(be, "t", did, "s1")       # holder: allowed
+    store.authorize_checkout(be, "t", did, None)       # unnamed: not this check's job
+    with pytest.raises(store.CheckoutDenied):
+        store.authorize_checkout(be, "t", did, "s2")
+
+
+def test_legacy_locks_carry_no_fence_so_a_supplied_one_cannot_wedge_a_write(tmp_path):
+    """Legacy manifests store holder/acquired/expires and no generation. A client
+    that sends a fence anyway (it holds a postgres-shaped one, or is talking to a
+    legacy deployment) must not be refused for a fence the lock never had."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    assert store.load_manifest(be, "t", did)["checkout"].get("fence") is None
+    assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                             parent_version=1, holder="s1", fence=7) == 2
+
+
+# --------------------------------------------------------------------------- #
 # Version-aware extract / run_tool dry-run bodies (no network)
 # --------------------------------------------------------------------------- #
 def _hostdwg_url(dry_body: dict) -> str:

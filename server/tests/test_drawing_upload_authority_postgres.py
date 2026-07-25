@@ -920,3 +920,73 @@ def test_expired_extractor_cannot_resurrect_after_purge(
             {"tenant": tenant, "drawing": drawing},
         )
         assert int(cur.fetchone()["count"]) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Single-writer AUTHORIZATION under the PostgreSQL authority.
+#
+# _pg_put always required an ACTIVE checkout, but it read the holder and fence
+# out of the manifest row and then required those same values back at finalize.
+# That proves the lock did not change between reserve and finalize — which is
+# equally true when the writer is a bystander. The caller's own identity now has
+# to match, and a caller-supplied fence makes the token a real fencing token
+# rather than a churn detector.
+# --------------------------------------------------------------------------- #
+@requires_database
+def test_pg_write_refused_for_a_session_that_does_not_hold_the_checkout(
+    postgres_authority, tmp_path,
+):
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    backend = store.InMemoryBackend()
+    initial = tmp_path / "initial.dwg"
+    initial.write_bytes(b"v1")
+    store.ingest_drawing(backend, tenant, str(initial), drawing_id=drawing)
+    update = tmp_path / "update.dwg"
+    update.write_bytes(b"v2")
+
+    assert store.acquire_checkout(backend, tenant, drawing, "sess-a", 600)
+    with pytest.raises(store.CheckoutDenied, match="sess-a"):
+        store.put_drawing(backend, tenant, drawing, str(update), 1,
+                          {"tool": "intruder"}, holder="sess-b")
+    # nothing published: head is untouched and no version was left 'ready'
+    manifest = store.load_manifest(backend, tenant, drawing)
+    assert manifest["head"] == 1 and manifest["latest"] == 1
+
+    # the real holder still publishes normally
+    assert store.put_drawing(backend, tenant, drawing, str(update), 1,
+                             {"tool": "owner"}, holder="sess-a") == 2
+
+
+@requires_database
+def test_pg_write_refused_for_a_stale_fence_from_the_same_holder(
+    postgres_authority, tmp_path,
+):
+    """The fencing property a row-read fence cannot provide: the holder id is
+    unchanged, but this writer's lease lapsed and was re-acquired, so the
+    generation it believes it holds is stale and its write must not land."""
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    backend = store.InMemoryBackend()
+    initial = tmp_path / "initial.dwg"
+    initial.write_bytes(b"v1")
+    store.ingest_drawing(backend, tenant, str(initial), drawing_id=drawing)
+    update = tmp_path / "update.dwg"
+    update.write_bytes(b"v2")
+
+    assert store.acquire_checkout(backend, tenant, drawing, "sess-a", 600)
+    stale_fence = int(store.load_manifest(backend, tenant, drawing)["checkout"]["fence"])
+    # re-acquire bumps the generation (acquire_checkout: checkout_fence + 1)
+    assert store.acquire_checkout(backend, tenant, drawing, "sess-a", 600)
+    current_fence = int(store.load_manifest(backend, tenant, drawing)["checkout"]["fence"])
+    assert current_fence == stale_fence + 1
+
+    with pytest.raises(store.CheckoutDenied, match="stale"):
+        store.put_drawing(backend, tenant, drawing, str(update), 1,
+                          {"tool": "resumed"}, holder="sess-a", fence=stale_fence)
+    assert store.load_manifest(backend, tenant, drawing)["head"] == 1
+
+    # the CURRENT generation is accepted
+    assert store.put_drawing(backend, tenant, drawing, str(update), 1,
+                             {"tool": "resumed"}, holder="sess-a",
+                             fence=current_fence) == 2

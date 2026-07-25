@@ -391,7 +391,9 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
                project_id: Optional[str] = None,
                dwg_version: Optional[int] = None, *, idempotency_key: Optional[str] = None,
                authority_mode: str = "legacy_sqlite",
-               platform_context: Optional[Dict[str, Any]] = None) -> str:
+               platform_context: Optional[Dict[str, Any]] = None,
+               checkout_holder: Optional[str] = None,
+               checkout_fence: Optional[int] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -410,8 +412,14 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     ``execution_json`` are backfilled from it at the migration moment; rows with
     no recorded pin read back ``dwg_version: None``.
 
-    Rejects an over-cap ``params`` blob (> ``MAX_PARAMS_BYTES``) with HTTP 400 before
-    any durable row / broker payload is written (security-audit F15).
+    ``checkout_holder`` / ``checkout_fence`` carry the SUBMITTING session's
+    single-writer identity down to the store, which refuses a version published
+    under another session's checkout. They are part of the durable execution
+    context (like ``dwg_version``) so a restart-recovered job is authorized as
+    the session that actually submitted it, never as an anonymous writer. They
+    are deliberately NOT part of ``submission_fingerprint``: the fingerprint
+    identifies the WORK, and reusing an idempotency key from a different session
+    is a key-reuse question, not a different run input.
     """
     _reject_oversized_params(params)
     if project_id and not idempotency_key:
@@ -431,7 +439,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     ensure_started()
     job_id = str(uuid.uuid4())
     now = time.time()
-    execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version}
+    execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version,
+                 "checkout_holder": checkout_holder, "checkout_fence": checkout_fence}
     created = True
     if job_store_mode() == "postgres":
         job_id, created = _pg_store.submit({
@@ -493,7 +502,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
                             context=platform_context)
     executor = _executors.get(lane_for(tool, aps_live))
     assert executor is not None
-    executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live, dwg_version)
+    executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live, dwg_version,
+                    checkout_holder, checkout_fence)
     return job_id
 
 
@@ -792,7 +802,9 @@ def _finish(job_id: str, status: str, started: float,
 def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str, Any],
                      params: Dict[str, Any], dwg: str, aps_live: bool,
                      error: Dict[str, Any], provenance: Dict[str, Any],
-                     dwg_version: Optional[int] = None) -> None:
+                     dwg_version: Optional[int] = None,
+                     checkout_holder: Optional[str] = None,
+                     checkout_fence: Optional[int] = None) -> None:
     """Release a retryable attempt back to submitted, or record its final failure."""
     rec = get_job(job_id)
     if rec is None or not isinstance(rec.get("lease"), dict) or rec["lease"].get("owner") != worker_id:
@@ -823,16 +835,23 @@ def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str
             executor = _executors.get(lane_for(tool, aps_live))
             if executor is not None:
                 # Thread the pin through the in-process retry: dropping it here
-                # would silently rerun a pinned job against head.
+                # would silently rerun a pinned job against head. Same for the
+                # submitting session's checkout identity — a retry that dropped
+                # it would re-run the job as an unnamed writer and skip the
+                # single-writer check the first attempt was subject to.
                 executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live,
-                                dwg_version)
+                                dwg_version, checkout_holder, checkout_fence)
         return
     _finish(job_id, "failed", time.time(), error=error, worker_id=worker_id,
             provenance=provenance)
 
 
 def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
-             dwg: str, aps_live: bool, dwg_version: Optional[int] = None) -> None:
+             dwg: str, aps_live: bool, dwg_version: Optional[int] = None,
+             checkout_holder: Optional[str] = None,
+             checkout_fence: Optional[int] = None) -> None:
+    # NOTE: `holder` below is the thread-result box, unrelated to the checkout
+    # holder — hence the qualified `checkout_holder` name on this lane.
     worker_id = str(uuid.uuid4())
     attempt = claim_lease(job_id, worker_id)
     if attempt is None:
@@ -856,6 +875,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                 # accepts work, a later attempt must observe the existing
                 # executing admission, never buy the same run again.
                 ledger_event_key=f"{job_id}:broker-run",
+                checkout_holder=checkout_holder, checkout_fence=checkout_fence,
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -875,7 +895,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         err = error_obj(ErrorCode.TIMEOUT, f"job exceeded JOB_MAX_S={max_s:g}s", retryable=True)
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err,
                          {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
-                          "failure": "timeout"}, dwg_version=dwg_version)
+                          "failure": "timeout"}, dwg_version=dwg_version,
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
         return
 
     if "exc" in holder:
@@ -889,7 +910,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         # A transport exception may be response loss after the broker crossed
         # the irreversible execution boundary. Replay the stable cloud event
         # key through retry handling. Never buy a separate local execution.
-        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, cloud_failure, dwg_version=dwg_version)
+        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, cloud_failure, dwg_version=dwg_version,
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
         return
 
     env = holder.get("env") or {}
@@ -909,9 +931,11 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             and err.get("error_code") != ErrorCode.TURN_IN_PROGRESS
             and _allows_local_fallback(tool)
         ):
-            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance, dwg_version)
+            _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance,
+                                dwg_version, checkout_holder, checkout_fence)
             return
-        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, provenance, dwg_version=dwg_version)
+        _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, provenance, dwg_version=dwg_version,
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
 
 
 def _allows_local_fallback(tool: Dict[str, Any]) -> bool:
@@ -923,7 +947,9 @@ def _allows_local_fallback(tool: Dict[str, Any]) -> bool:
 def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str, Any],
                         params: Dict[str, Any], dwg: str, attempt: int,
                         cloud_failure: Dict[str, Any],
-                        dwg_version: Optional[int] = None) -> None:
+                        dwg_version: Optional[int] = None,
+                        checkout_holder: Optional[str] = None,
+                        checkout_fence: Optional[int] = None) -> None:
     """Run local only after recording a cloud-path failure in the success provenance."""
     holder: Dict[str, Any] = {}
 
@@ -935,6 +961,9 @@ def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[
                 # Distinct from the cloud fingerprint, stable across delivery
                 # retries of this job's one authorized fallback execution.
                 ledger_event_key=f"{job_id}:broker-fallback",
+                # The fallback publishes a version too, so it must be authorized
+                # as the same session the cloud attempt was.
+                checkout_holder=checkout_holder, checkout_fence=checkout_fence,
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -950,14 +979,16 @@ def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[
         err = error_obj(ErrorCode.TIMEOUT, "local fallback timed out", True)
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, True, err,
                          {"attempt": attempt, "execution_path": "local",
-                          "fallback_from": cloud_failure, "failure": "local fallback timeout"}, dwg_version=dwg_version)
+                          "fallback_from": cloud_failure, "failure": "local fallback timeout"}, dwg_version=dwg_version,
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
         return
     if "exc" in holder:
         exc = holder["exc"]
         err = error_obj(ErrorCode.INTERNAL, f"local fallback {type(exc).__name__}: {exc}", True)
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, True, err,
                          {"attempt": attempt, "execution_path": "local",
-                          "fallback_from": cloud_failure, "failure": "local fallback failed"}, dwg_version=dwg_version)
+                          "fallback_from": cloud_failure, "failure": "local fallback failed"}, dwg_version=dwg_version,
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
         return
     env = holder.get("env") or {}
     if env.get("ok"):
@@ -971,7 +1002,8 @@ def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[
     err = env.get("error") or error_obj(ErrorCode.INTERNAL, "local fallback returned no error", True)
     _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, True, err,
                      {"attempt": attempt, "execution_path": "local",
-                      "fallback_from": cloud_failure, "failure": "local fallback failed"}, dwg_version=dwg_version)
+                      "fallback_from": cloud_failure, "failure": "local fallback failed"}, dwg_version=dwg_version,
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
 
 
 def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -1048,6 +1080,16 @@ def _redispatch_record(job_id: str) -> bool:
         if "dwg_version" not in execution:
             raise KeyError("dwg_version")
         dwg_version = execution["dwg_version"]
+        # Recover the submitting session's checkout identity so a restart-
+        # recovered write is authorized as the session that asked for it.
+        # Absence is TOLERATED here, unlike dwg_version above: a row without
+        # these keys was submitted before this field existed, under the contract
+        # where the store performed no holder check at all, so recovering it as
+        # an unnamed writer reproduces exactly what that job was already
+        # promised. Nothing forgeable rides on it — only the server writes this
+        # row, and only from the identity on the original request.
+        checkout_holder = execution.get("checkout_holder")
+        checkout_fence = execution.get("checkout_fence")
     except (IndexError, KeyError, TypeError, ValueError):
         complete_callback(job_id, "failed", error=error_obj(
             ErrorCode.INTERNAL, "cannot recover job: missing execution context", False))
@@ -1056,7 +1098,7 @@ def _redispatch_record(job_id: str) -> bool:
     if executor is None:
         return False
     executor.submit(_run_job, job_id, rec["tenant_id"], tool, rec["params"], rec["dwg"],
-                    aps_live, dwg_version)
+                    aps_live, dwg_version, checkout_holder, checkout_fence)
     return True
 
 

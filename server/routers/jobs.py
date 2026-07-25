@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import deps
 import entitlements
@@ -41,6 +41,24 @@ class RunRequest(BaseModel):
     dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
     catalog_digest: Optional[str] = None
     # specific immutable drawing version (da/store.py resolve_version) otherwise.
+    #
+    # SINGLE-WRITER IDENTITY. `holder` is the caller's own session id — the SAME
+    # value it sends to POST/DELETE /api/drawings/{id}/checkout, so the three
+    # routes speak one vocabulary. A `drawing.write` run publishes a new version,
+    # and until this field existed the store was never told WHO was publishing:
+    # it verified that a checkout was live, not that the caller owned it, so a
+    # second session could write under the first session's lease. `fence` is the
+    # lock generation from `checkout.fence` (GET /versions); supplying it makes
+    # the token a real fencing token, rejecting a writer whose lease lapsed and
+    # was re-acquired even under the same holder id.
+    #
+    # Omitted -> defaults to the tenant id, exactly as the checkout routes do
+    # (`holder = req.holder or str(tenant_id)`). That default is what makes an
+    # unnamed caller fail CLOSED rather than open: a run with no holder does not
+    # skip the check, it presents a tenant-shaped identity, which does not match
+    # a `sess-` holder and is refused 403 while another session holds the lock.
+    holder: Optional[str] = Field(default=None, max_length=200)
+    fence: Optional[int] = Field(default=None, ge=0)
 
 
 class TerminalCallback(BaseModel):
@@ -187,6 +205,12 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                 dwg_version=req.dwg_version,
                 idempotency_key=idempotency_key, authority_mode=authority_mode,
                 platform_context=platform_context,
+                # Default to the tenant id when the caller names no session —
+                # the same rule the checkout routes use. This is the fail-closed
+                # half: an unnamed writer is not exempt from the check, it just
+                # presents a tenant-shaped identity that no `sess-` lock matches.
+                checkout_holder=(req.holder or str(tenant_id)),
+                checkout_fence=req.fence,
             )
     except jobs.platform_link.CanonicalEntitlementDenied as exc:
         # STORED-org entitlement denial from the canonical choke point (P1

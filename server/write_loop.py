@@ -248,16 +248,23 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
 
 
 def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
-                       parent_version: int, meta: Dict[str, Any]) -> int:
+                       parent_version: int, meta: Dict[str, Any], *,
+                       holder: Optional[str] = None,
+                       fence: Optional[int] = None) -> int:
     """put_drawing takes a local path (immutability + sha are computed there), so
-    stage `data` to a temp file and append the new version."""
+    stage `data` to a temp file and append the new version.
+
+    `holder`/`fence` are the caller's single-writer identity, forwarded verbatim
+    so the store can refuse a write published under another session's checkout
+    (da/store.py put_drawing)."""
     import store
     fd, tmp = tempfile.mkstemp(suffix=".blob")
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(bytes(data))
         return store.put_drawing(backend, tenant_id, drawing_id, tmp,
-                                 parent_version=parent_version, meta=meta)
+                                 parent_version=parent_version, meta=meta,
+                                 holder=holder, fence=fence)
     finally:
         try:
             os.remove(tmp)
@@ -373,12 +380,31 @@ def _status_for(env: Dict[str, Any]) -> int:
     return DEFAULT_HTTP_STATUS.get(code, 500)
 
 
+def _checkout_denied(exc: Exception, name: Any, tool_version: Any) -> Tuple[Dict[str, Any], int]:
+    """A write refused because the caller does not hold the single-writer lock.
+
+    FORBIDDEN/403 deliberately, matching DELETE .../checkout — the caller is
+    authenticated and entitled, it just does not own this drawing right now. It
+    is NOT retryable: retrying changes nothing until the lock is taken or the
+    lease lapses, so a client that treats retryable errors as transient must not
+    spin on it."""
+    return (err_envelope(ErrorCode.FORBIDDEN, str(exc), retryable=False,
+                         tool=name, version=tool_version),
+            DEFAULT_HTTP_STATUS[ErrorCode.FORBIDDEN])
+
+
 def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,
                    backend, t0: float, run_tool_dynamic_fn,
-                   degraded: bool = False, version="head") -> Tuple[Dict[str, Any], int]:
+                   degraded: bool = False, version="head",
+                   holder: Optional[str] = None,
+                   fence: Optional[int] = None) -> Tuple[Dict[str, Any], int]:
     """APS_LIVE=0 write: run the tool file for its mutations, apply them to the
     BASE version's intake (``version``; default "head", unchanged), persist a new
-    version whose parent is that base, stamp result.new_version."""
+    version whose parent is that base, stamp result.new_version.
+
+    ``holder``/``fence`` are the caller's single-writer identity; the persist below
+    is refused (403) when another session holds the checkout."""
+    import store
     name = tool.get("name")
     tool_version = tool.get("version", "1.0.0")
     drawing_id = _drawing_id(params)
@@ -403,7 +429,13 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             backend, tenant_id, drawing_id,
             json.dumps(new_intake, separators=(",", ":")).encode("utf-8"),
             parent_version=head_v,
-            meta={"tool": name, "note": "mock write (intake payload)"})
+            meta={"tool": name, "note": "mock write (intake payload)"},
+            holder=holder, fence=fence)
+    except store.CheckoutDenied as exc:
+        # Caught BEFORE the blanket handler below: publishing under another
+        # session's lock is an authorization answer (403), not a persist fault
+        # (500). The tool already ran, but nothing was written.
+        return _checkout_denied(exc, name, tool_version)
     except Exception as exc:  # noqa: BLE001
         return (err_envelope(ErrorCode.INTERNAL, f"write persist failed: {type(exc).__name__}: {exc}",
                              retryable=False, tool=name, version=tool_version),
@@ -419,11 +451,18 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
 def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,
                    backend, da: Any, t0: float,
                    ledger_entry: Optional[Dict[str, Any]] = None,
-                   version="head") -> Tuple[Dict[str, Any], int]:
+                   version="head", holder: Optional[str] = None,
+                   fence: Optional[int] = None) -> Tuple[Dict[str, Any], int]:
     """APS_LIVE=1 write: run the proven LeafWriteProbe Activity on the BASE
     version's DWG (``version``; default "head", unchanged), store output.dwg as a
     new version whose parent is that base, re-extract for the intake cache, stamp
-    result.new_version. `da` is the credential-holding client."""
+    result.new_version. `da` is the credential-holding client.
+
+    ``holder``/``fence`` are the caller's single-writer identity. They are checked
+    TWICE: once up front (below, before the WorkItem is submitted, so an
+    unauthorized writer never reaches a billable engine second) and again inside
+    put_drawing at commit time, which is the authoritative check because it runs
+    under the store's row lock."""
     import store
     name = tool.get("name")
     tool_version = tool.get("version", "1.0.0")
@@ -470,6 +509,13 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                     f"blob is the extracted intake, not DWG bytes)",
                     retryable=False, tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+        # Authorize BEFORE spending. Everything past this point costs money:
+        # scratch uploads, signed URLs, a submitted WorkItem, polled engine
+        # seconds. The commit inside _put_bytes_version re-checks under the
+        # store's row lock and is the authoritative guard; this one exists so a
+        # write published under another session's checkout is refused for free
+        # instead of billed and then rejected.
+        store.authorize_checkout(backend, tenant_id, drawing_id, holder, fence)
         ts = int(time.time())
         run_nonce = secrets.token_hex(8)
         head_v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
@@ -547,7 +593,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         new_v = _put_bytes_version(backend, tenant_id, drawing_id, out_bytes,
                                    parent_version=head_v,
                                    meta={"tool": name, "workitem_id": wi_id,
-                                         "note": "live write (output.dwg)"})
+                                         "note": "live write (output.dwg)"},
+                                   holder=holder, fence=fence)
 
         # re-extract the new version's DWG for the intake cache
         fd, tmp = tempfile.mkstemp(suffix=".dwg")
@@ -582,6 +629,12 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                           timing_ms=int((time.perf_counter() - t0) * 1000),
                           cost=cost, degraded_mode=False)
         return env, 200
+    except store.CheckoutDenied as exc:
+        # BEFORE both handlers below. CheckoutDenied is deliberately not a
+        # ValueError, but ordering it explicitly here keeps the 403 answer from
+        # depending on that fact: publishing under another session's lock is an
+        # authorization result, never a 400 bad-drawing or a 502 WorkItem fault.
+        return _checkout_denied(exc, name, tool_version)
     except FileNotFoundError as exc:  # creds missing
         return (err_envelope(ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False,
                              tool=name, version=tool_version),
