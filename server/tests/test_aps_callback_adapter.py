@@ -969,6 +969,22 @@ def test_a_recovered_envelope_must_name_the_identity_we_tried_to_claim():
         assert excinfo.value.reason == "bad_completion_guard", (
             f"a stored receipt for {why} must not be returned as this completion's")
 
+    # A body that is well-formed JSON but whose decode RAISES. A 5000-digit
+    # integer literal is valid JSON and hits CPython's int-to-str digit limit with
+    # a plain ValueError, which `json.JSONDecodeError` does not cover, so it used
+    # to escape untagged instead of failing closed.
+    huge_int_body = b'{"job_id":"job-1","attempt":' + b'1' * 5000 + b'}'
+    huge_int = adapter.CallbackEnvelope(
+        body=huge_int_body, timestamp=real.timestamp, nonce=real.nonce,
+        signature=real.signature)
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                          job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                          secret=SECRET, now=NOW,
+                          reserve_completion=lambda j, a, e=None: huge_int)
+    assert excinfo.value.reason == "bad_completion_guard", (
+        "a decode that raises must fail closed, not escape as a raw ValueError")
+
     # The bool-size case needs its own translate() call, because it is only a
     # divergence for a ONE-BYTE output (`True == 1`).
     with pytest.raises(adapter.AdapterError) as excinfo:

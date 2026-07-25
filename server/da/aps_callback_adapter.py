@@ -476,9 +476,14 @@ def translate(
     # WHOSE it is. Re-derive the identity from the returned body and refuse a
     # receipt that does not name what we just tried to claim.
     if type(outcome) is CallbackEnvelope:
+        # `ValueError`, not `json.JSONDecodeError`. Decoding a stored body is not
+        # only a syntax question: a 5000-digit integer literal is well-formed JSON
+        # that raises a plain `ValueError` from CPython's int-to-str digit limit,
+        # which JSONDecodeError does not cover, so it escaped untagged. Since
+        # JSONDecodeError IS a ValueError, the wider catch keeps both.
         try:
             recovered = json.loads(outcome.body)
-        except (AttributeError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        except (AttributeError, TypeError, UnicodeDecodeError, ValueError):
             raise AdapterError("bad_completion_guard")
         if type(recovered) is not dict:
             raise AdapterError("bad_completion_guard")
@@ -514,7 +519,13 @@ def translate(
         _RECOVERY_MAY_DIFFER = ("produced_at", "nonce")
         ours = {k: v for k, v in payload.items() if k not in _RECOVERY_MAY_DIFFER}
         theirs = {k: v for k, v in recovered.items() if k not in _RECOVERY_MAY_DIFFER}
-        if _canonical_body(theirs) != _canonical_body(ours):
+        # Serializing can raise for the same digit-limit reason as decoding, so
+        # the comparison itself fails CLOSED rather than escaping untagged.
+        try:
+            same = _canonical_body(theirs) == _canonical_body(ours)
+        except (TypeError, ValueError, RecursionError):
+            raise AdapterError("bad_completion_guard")
+        if not same:
             raise AdapterError("bad_completion_guard")
         # And it must be a receipt WE could have signed. An unverifiable body is
         # not a recovery, it is an unsigned claim wearing the envelope type.
