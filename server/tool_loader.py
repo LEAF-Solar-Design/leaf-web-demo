@@ -53,6 +53,7 @@ BUILTIN_OPS: Dict[str, str] = {
     "highlight_near_edge": "highlight_near_edge.py",
     "highlight_panels_near_edge": "highlight_near_edge.py",
     "list_layers": "list_layers.py",
+    "string_panels": "string_panels.py",
 }
 
 _MOD_CACHE: Dict[str, Any] = {}
@@ -750,6 +751,21 @@ def _resolve_within(root: Path, rel: str) -> Optional[Path]:
     return None
 
 
+def _declares_local_python(tool: Dict[str, Any]) -> bool:
+    """True if this package CLAIMS a local Python body, via ``entry`` or ``script``.
+
+    The one place that decides what "declared a local implementation" means, so
+    ``resolve_local_file`` (which must not substitute a different file for a missing
+    one) and ``is_trusted_builtin_tool`` (which must not call a dangling package
+    trusted) cannot drift apart. Case-insensitive: a ``.PY`` declaration is still a
+    Python declaration, and on Windows it names the same file as ``.py``.
+    """
+    for declared in (tool.get("entry"), tool.get("script")):
+        if isinstance(declared, str) and declared.strip().lower().endswith(".py"):
+            return True
+    return False
+
+
 def resolve_local_file(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> Optional[Path]:
     """Return the local .py file that IS this tool, or None (=> APS path).
 
@@ -780,17 +796,51 @@ def resolve_local_file(tool: Dict[str, Any], tenant_id: Optional[str] = None) ->
         if troot is not None:
             roots.append((troot, entry))       # tenant repo (absolute root, repo-relative entry)
         roots.append((SERVER_DIR, entry))       # server-dir-relative entry
-        roots.append((AUTHORED_DIR, name))      # authored/<name>
-        roots.append((BUILTIN_DIR, name))       # builtins/<name>
+        # A DECLARED LOCAL PYTHON BODY RESOLVES EXACTLY, OR THE TOOL IS A MISS.
+        #
+        # Past this block the function retries the entry's BASENAME, then probes
+        # `script`, then falls back on the BUILTIN_OPS compat table. For a package that
+        # NAMED a local .py body, every one of those is a silent SUBSTITUTION when the
+        # named file is gone, and it runs code the caller never asked for:
+        #   * a tenant-scoped ``authored/<sha256(tenant_id)[:32]>/<name>.py`` whose body
+        #     was missing (never re-authored after the pre-#131 upgrade, or a wiped
+        #     volume) landed on a LEGACY FLAT ``authored/<name>.py`` that a DIFFERENT
+        #     tenant wrote, and ran it under this tenant's identity, re-opening the exact
+        #     cross-tenant hole the per-tenant layout closed;
+        #   * a tenant-repo ``tools/<name>/tool.py`` with a lost body did the same; and
+        #   * failing those, BUILTIN_OPS[engine_op] ran the PRE-CODED PRIMITIVE (an
+        #     authored tool carries the engine_op it was templated from) and reported a
+        #     result the tool's own code never produced. That is the re-dispatch this
+        #     loader exists to prevent ("the FILE is the tool"), and BUILTIN_OPS is
+        #     already documented as never serving authored tools.
+        # So the rule keys on the DECLARATION, not on the shape of the path: any package
+        # that claims a local .py body and cannot produce it returns None (=> APS path or
+        # a visible failure). It is deliberately not special-cased to ``authored/`` or to
+        # directory-bearing entries, since a bare ``<name>.py``, an entry ``_is_unsafe_ref``
+        # rejected, and a missing ``script`` all substituted the same way.
+        # A package that never claimed local Python (an APS ``engine_script``, an
+        # appbundle, an opaque entry such as "solve_targets") is untouched: it keeps the
+        # historical BUILTIN_OPS path because nothing of its own runs in this process.
+        if len(PurePosixPath(entry.replace("\\", "/")).parts) == 1:
+            roots.append((AUTHORED_DIR, name))  # authored/<name>
+            roots.append((BUILTIN_DIR, name))   # builtins/<name>
         for root, rel in roots:
             hit = _resolve_within(root, rel)
             if hit is not None:
                 return hit
+    # A DECLARED `.py` ENTRY IS THE TOOL: if it did not resolve above, stop here rather
+    # than letting `script` (or BUILTIN_OPS below) supply a stand-in. Probing on would be
+    # the same substitution one level down, and `script` is tenant-controlled in a
+    # tenant-repo registry, so it could name a body this package does not own.
+    if isinstance(entry, str) and entry.strip().lower().endswith(".py"):
+        return None
     script = tool.get("script")
-    if script and str(script).endswith(".py") and not _is_unsafe_ref(script):
+    if script and str(script).lower().endswith(".py") and not _is_unsafe_ref(script):
         hit = _resolve_within(SERVER_DIR, script)
         if hit is not None:
             return hit
+    if _declares_local_python(tool):
+        return None   # named a local body and could not produce it: an honest miss
     op = tool.get("engine_op") or ""
     fname = BUILTIN_OPS.get(op)
     if fname:
@@ -814,7 +864,18 @@ def is_trusted_builtin_tool(tool: Dict[str, Any],
     """
     local = resolve_local_file(tool, tenant_id)
     if local is None:
-        return True
+        # "No local file" is only trustworthy when the package never CLAIMED one. A
+        # package that declares a local Python implementation which does not resolve is
+        # DANGLING, not APS-only, and must stay untrusted: before entry resolution became
+        # exact-or-miss, such a package silently resolved onto a builtin and was
+        # classified untrusted there (its identity is absent from the platform registry).
+        # Returning True here instead would hand it the opposite classification and let
+        # it past broker.py's production containment gate, which denies only UNtrusted
+        # tools, so a dangling tenant package carrying drawing.write could reach the live
+        # write Activity. A declaration that is not local Python at all (an APS
+        # `engine_script`, an appbundle, an opaque `entry` like "solve_targets") never
+        # executes a file in this process and stays trusted, as before.
+        return not _declares_local_python(tool)
     try:
         local.resolve().relative_to(BUILTIN_DIR.resolve())
     except (OSError, ValueError):

@@ -63,6 +63,12 @@ export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
   if (opts.orgId) headers['X-Org-Id'] = opts.orgId
   if (opts.projectId) headers['X-Project-Id'] = opts.projectId
   if (opts.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey
+  // Single-writer proof for a run that publishes a version. A HEADER, not a body
+  // field: it is a credential, so it must not land in the durable job record or
+  // be forwarded to the broker. The server exchanges it for the lock's own
+  // holder/generation. Sent on every run — a read tool ignores it, and deciding
+  // here which tools "need" it would put a security choice in the client.
+  if (opts.checkoutCapability) headers['X-Checkout-Capability'] = opts.checkoutCapability
   return {
     headers,
     body: {

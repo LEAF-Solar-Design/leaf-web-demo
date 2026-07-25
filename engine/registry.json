@@ -85,6 +85,67 @@
       },
       "capabilities": ["drawing.read"],
       "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    },
+    {
+      "name": "string-panels",
+      "version": "1.2.0",
+      "description": "Bank-clustered, rotation-aware serpentine DC string routing over the Panels layer with an NEC 690.7 cold-temperature string-size check.",
+      "kind": "script",
+      "engine_op": "string_panels",
+      "entry": "builtins/string_panels.py",
+      "offline_only": true,
+      "params": {
+        "type": "object",
+        "properties": {
+          "module_model": {
+            "type": "string",
+            "default": "Q.Peak DUO XL-G11.7 / 425",
+            "description": "Module model label (marketing-demo default)."
+          },
+          "voc": {
+            "type": "number",
+            "default": 48.5,
+            "description": "Module open-circuit voltage at STC, volts (demo default)."
+          },
+          "temp_coeff_pct_per_c": {
+            "type": "number",
+            "default": -0.27,
+            "description": "Voc temperature coefficient, %/degC (demo default)."
+          },
+          "design_min_temp_c": {
+            "type": "number",
+            "default": -25.0,
+            "description": "Design minimum ambient temperature, degC (demo default)."
+          },
+          "max_system_voltage": {
+            "type": "number",
+            "default": 1000.0,
+            "description": "NEC 690.7 maximum system voltage, volts (commercial-rooftop demo default)."
+          },
+          "panel_layer": {
+            "type": "string",
+            "default": "Panels",
+            "description": "Intake layer carrying the closed panel polylines."
+          },
+          "cluster_radius_factor": {
+            "type": "number",
+            "default": 3.0,
+            "description": "Bank clustering radius as a multiple of the median nearest-neighbor panel distance; strings never cross bank gaps."
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "module": { "type": "object" },
+          "electrical": { "type": "object" },
+          "strings": { "type": "array" },
+          "stats": { "type": "object" }
+        }
+      },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "site-demo-lane", "created": "2026-07-20T00:00:00Z" }
     }
   ]
 }

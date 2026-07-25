@@ -625,19 +625,37 @@ export async function getDrawingVersions(mock, drawingId) {
 // Wave-2 landed the checkout as a DISPLAY-ONLY chip (read from /versions). These
 // two calls make it MUTABLE: acquire the single-writer lock, or release it.
 //
+// THE CAPABILITY IS THE ONLY PROOF OF OWNERSHIP. Taking the lock returns an
+// opaque `checkout_capability`; every mutating call (release, refresh, undo,
+// redo, a write run) sends it back in `X-Checkout-Capability`. The `holder` we
+// send is a DISPLAY label for the "locked by X" chip — /versions publishes it,
+// so it proves nothing and the server does not accept it as proof. Hold the
+// capability in memory only: it is issued once and cannot be read back.
+export const CHECKOUT_CAPABILITY_HEADER = 'X-Checkout-Capability'
+
+export function checkoutHeaders(capability) {
+  return capability ? { [CHECKOUT_CAPABILITY_HEADER]: capability } : {}
+}
+
 // POST /api/drawings/{id}/checkout {holder?, ttl_s?}
-//   200 {acquired:true, holder, checkout:{holder,acquired,expires}}
+//   200 {acquired:true, holder, checkout_capability, checkout:{holder,acquired,expires}}
 //   409 {acquired:false, locked_by, ...}   (someone else holds it — EXPECTED)
 // The 409 is a normal coordination outcome, not an error: we fold it into the
 // resolved value (`acquired:false`) instead of throwing, so the caller just
 // refetches /versions to show the real lock. LIVE only.
-export async function takeCheckout(drawingId, holder, ttlS) {
+//
+// `capability` is only needed to REFRESH a lease we already hold — the server
+// refuses an unprovable refresh with the same 409 as any other held lock.
+export async function takeCheckout(drawingId, holder, ttlS, capability) {
   const payload = {}
   if (holder) payload.holder = holder
   if (ttlS) payload.ttl_s = ttlS
   const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    headers: {
+      'Content-Type': 'application/json', 'X-Tenant-Id': TENANT,
+      ...checkoutHeaders(capability), ...authHeaders(),
+    },
     body: JSON.stringify(payload),
   })
   const data = await res.json().catch(() => null)
@@ -652,15 +670,15 @@ export async function takeCheckout(drawingId, holder, ttlS) {
   return { acquired: true, ...(data || {}) }
 }
 
-// DELETE /api/drawings/{id}/checkout?holder=
+// DELETE /api/drawings/{id}/checkout   (X-Checkout-Capability)
 //   200 {released, checkout:null}
-//   403 (not the holder) — tagged .status=403 so the caller can say "you don't
-//   hold this lock" calmly. LIVE only.
-export async function releaseCheckout(drawingId, holder) {
-  const q = holder ? `?holder=${encodeURIComponent(holder)}` : ''
-  const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout${q}`, {
+//   403 (cannot prove we hold it) — tagged .status=403 so the caller can say
+//   "you don't hold this lock" calmly. The old `?holder=` query param is gone:
+//   it was public, so it authorized nothing. LIVE only.
+export async function releaseCheckout(drawingId, capability) {
+  const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout`, {
     method: 'DELETE',
-    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+    headers: { 'X-Tenant-Id': TENANT, ...checkoutHeaders(capability), ...authHeaders() },
   })
   if (res.status === 403) { const e = new Error('not the lock holder'); e.status = 403; throw e }
   const data = await res.json().catch(() => null)
@@ -668,19 +686,21 @@ export async function releaseCheckout(drawingId, holder) {
   return data || { released: true, checkout: null }
 }
 
-export async function undoDrawing(mock, drawingId) {
+// undo/redo MOVE HEAD, so they carry the capability too — the server gates them
+// exactly like a version publish. With no checkout held they need nothing.
+export async function undoDrawing(mock, drawingId, capability) {
   if (mock) { await nap(180); return mockVersions.undo() }
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/undo`, {
     method: 'POST',
-    headers: { 'X-Tenant-Id': TENANT },
+    headers: { 'X-Tenant-Id': TENANT, ...checkoutHeaders(capability) },
   })
 }
 
-export async function redoDrawing(mock, drawingId) {
+export async function redoDrawing(mock, drawingId, capability) {
   if (mock) { await nap(180); return mockVersions.redo() }
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/redo`, {
     method: 'POST',
-    headers: { 'X-Tenant-Id': TENANT },
+    headers: { 'X-Tenant-Id': TENANT, ...checkoutHeaders(capability) },
   })
 }
 

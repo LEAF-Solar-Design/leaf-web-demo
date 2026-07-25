@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import broker
+import site_demo
 import tool_loader
 
 
@@ -94,6 +95,45 @@ def test_production_keeps_tracked_builtin_available(monkeypatch):
     assert status == 200
     assert env["ok"] is True
     assert env["result"]["total_area"] == pytest.approx(7015420.07)
+
+
+def test_production_keeps_exact_public_site_demo_builtin_available(monkeypatch):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "0")
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+
+    registered = _package(
+        tool_loader.SERVER_DIR.parent / "engine" / "registry.json",
+        "string-panels",
+    )
+    assert registered == site_demo.SITE_TOOL
+    assert tool_loader.is_trusted_builtin_tool(
+        site_demo.SITE_TOOL, site_demo.SITE_TENANT) is True
+
+    env, status = _execute(monkeypatch, site_demo.SITE_TOOL)
+
+    assert status == 200
+    assert env["ok"] is True
+    assert env["result"]["strings"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("name", "tenant-string-panels"), ("engine_op", "tenant_string_panels")],
+)
+def test_production_denies_tampered_site_demo_builtin_identity(
+        monkeypatch, field, value):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "0")
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    tampered = {**site_demo.SITE_TOOL, field: value}
+
+    assert tool_loader.is_trusted_builtin_tool(
+        tampered, site_demo.SITE_TENANT) is False
+    env, status = _execute(monkeypatch, tampered)
+
+    assert status == 403
+    assert env["error"]["error_code"] == "TENANT_DISABLED"
 
 
 def test_production_denies_agent_seed_that_only_resolves_to_builtins(

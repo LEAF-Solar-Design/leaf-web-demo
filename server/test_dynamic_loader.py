@@ -17,6 +17,7 @@ Run:  cd server && python -m pytest test_dynamic_loader.py -q
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -31,11 +32,25 @@ import pytest
 import requests
 
 from _test_run_confirmation import confirmed_requests_payload
+from tenant_paths import DEFAULT_TENANT
 
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
 ENGINE_SCHEMA = json.loads((PROJECT_ROOT / "engine" / "envelope_schema.json").read_text(encoding="utf-8"))
 AUTHORED_DIR = SERVER_DIR / "authored"
+
+
+def authored_tenant_dir(tenant_id: str) -> Path:
+    """Where the template author path persists THIS tenant's authored tool bodies.
+
+    The layout is tenant-scoped: ``server/authored/<sha256(tenant_id)[:32]>/<name>.py``,
+    never a flat ``server/authored/<name>.py``. A flat path is one file per tool NAME
+    across every tenant, so tenant B authoring a name tenant A already used overwrote
+    A's body while A's catalog entry still pointed at it — B's code then ran under A's
+    identity. Mirrors the derivation in routers/author.py._legacy_author.
+    """
+    return AUTHORED_DIR / hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()[:32]
+
 
 FORBIDDEN_OPS = {"count_by_layer", "measure_area_by_layer", "measure_panel_area",
                  "highlight_near_edge", "highlight_panels_near_edge"}
@@ -192,9 +207,28 @@ def test_builtins_byte_identical(stack):
 # -> /api/run executes THAT FILE -> §3 envelope validates + differs from count
 # --------------------------------------------------------------------------- #
 def test_author_persist_and_run_from_file(stack):
-    a = requests.post(f"{stack['app']}/api/author",
-                      json={"description": "list all layer names in the drawing"},
-                      timeout=15).json()
+    description = "list all layer names in the drawing"
+    # STALENESS GUARD: the tool name is derived DETERMINISTICALLY from the description,
+    # so a crashed or killed prior run leaves this exact file behind and `fpath.exists()`
+    # below would pass without THIS run having persisted anything. Remove it first, so
+    # its existence afterwards is evidence, not residue. (author_tool is pure, since the
+    # router, not the templater, does the persisting — so this cannot create the file.)
+    import tools_fallback
+    stale = authored_tenant_dir(DEFAULT_TENANT) / f"{tools_fallback.author_tool(description)[0]['name']}.py"
+    stale_bytes = stale.read_bytes() if stale.exists() else None
+    stale.unlink(missing_ok=True)
+
+    try:
+        a = requests.post(f"{stack['app']}/api/author",
+                          json={"description": description},
+                          timeout=15).json()
+    except Exception:
+        # never let the guard above be the reason an operator's body went missing:
+        # if authoring did not run, put back exactly what was there.
+        if stale_bytes is not None and not stale.exists():
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_bytes(stale_bytes)
+        raise
     assert set(("tool", "code", "preview")).issubset(a.keys())
     tool = a["tool"]
     engine_op = tool["engine_op"]
@@ -213,10 +247,21 @@ def test_author_persist_and_run_from_file(stack):
     assert relative_entry.parts[0] == "authored"
     assert len(relative_entry.parts) == 3
     assert relative_entry.name == f"{tool['name']}.py"
-    fpath = SERVER_DIR / relative_entry
+    # The harness sends no X-Tenant-Id, so the authoring tenant is
+    # DEFAULT_TENANT. Resolve the expected tenant directory independently from
+    # the returned entry so the assertion cannot validate a self-consistent but
+    # incorrectly scoped path.
+    fpath = authored_tenant_dir(DEFAULT_TENANT) / f"{tool['name']}.py"
     assert fpath.resolve().is_relative_to(AUTHORED_DIR.resolve())
     assert fpath.exists(), fpath
     assert "def run(" in fpath.read_text(encoding="utf-8")
+    # the tool's own `entry` must name THAT file, server-dir-relative, so the broker
+    # resolves it regardless of cwd.
+    assert entry == f"authored/{fpath.parent.name}/{fpath.name}", entry
+    # TENANT ISOLATION regression lock: the body must NOT also land at the flat
+    # authored/<name>.py that every tenant would share. Asserting the tenant path
+    # alone would still pass if the flat write came back alongside it.
+    assert not (AUTHORED_DIR / f"{tool['name']}.py").exists()
 
     # (2) it appears in /api/tools by name
     names = {t["name"] for t in requests.get(f"{stack['app']}/api/tools", timeout=10).json()["tools"]}

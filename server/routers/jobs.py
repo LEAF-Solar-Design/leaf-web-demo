@@ -17,21 +17,152 @@ import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+import checkout_capability
 import deps
 import entitlements
 import jobs
+import write_loop
+import product_capability_availability as capability_catalog
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
 
+
+def _store():
+    """da/store.py, imported lazily — same pattern as routers/drawings.py. The
+    module is on sys.path via write_loop's setup, which importing `jobs` above
+    has already performed, so this cannot run before the path is prepared."""
+    import store
+
+    return store
+
+
 PLATFORM_CONTRACT_VERSION = "leaf.platform.v1alpha1"
 AUTOFILL_TOOL = "string-autofill-opt"
+
+# The one capability this backend can measure today. Named from the catalog, not
+# hand-typed: a typo in a capability id is invisible at runtime, because the
+# console's validator simply never matches and the capability shows locked
+# forever with nothing reporting why. That is the whole reason the catalog exists.
+SOLVE_CAPABILITY = "drawing.solve.strings"
+
+# Catalog entitlement name -> the entitlement-policy capability that grants it.
+#
+# These are two different vocabularies and they do NOT fully overlap. The policy
+# (server/entitlements.py CAPABILITIES) speaks of run_read/run_write/solve/build;
+# the catalog speaks of run_read/run/solve/review/author. Only `run_read` and
+# `solve` exist on both sides.
+#
+# Mapping the rest would mean INVENTING policy semantics — deciding whether
+# "run an approved tool" is run_read or run_write, or which policy key grants
+# "review" — and an entitlement is a security boundary, not a naming convenience.
+# So the unmapped names deny, which is the same answer `entitlements_for().get()`
+# already gives for an absent key, and `_UNMAPPED_ENTITLEMENTS` records that the
+# denial is a DECISION rather than an oversight. A test pins both sets, so adding
+# a catalog capability with a new entitlement name fails loudly here instead of
+# silently resolving to "not entitled" forever.
+_ENTITLEMENT_POLICY_KEY = {
+    "run_read": "run_read",
+    "solve": "solve",
+    # `author` -> `build` is not a guess, it is the mapping this server already
+    # enforces: `customization_service.stage` (the tool-authoring path) gates on
+    # `entitlements_for(tier).get("build")`, and the policy's own denial message
+    # for `build` reads "does not include authoring new tools (Build)". Leaving it
+    # unmapped denied `tool.author.company` to demo, self_hosted and hosted_pro,
+    # every one of which has `build: True` and can in fact author — the projection
+    # would have contradicted the enforcement.
+    "author": "build",
+}
+# `run` and `review` genuinely have no counterpart. `run` could be run_read or
+# run_write depending on the tool, and no policy capability corresponds to
+# `review` at all. Picking one would be inventing a security boundary.
+_UNMAPPED_ENTITLEMENTS = frozenset({"run", "review"})
+
+
+def _entitled_by_capability(policy: Dict[str, bool]) -> Dict[str, bool]:
+    """Resolve each catalog capability's entitlement from the tier policy.
+
+    Fail closed twice over: an entitlement name with no policy mapping denies,
+    and a mapped name absent from the policy denies (the policy's own rule is
+    that only an explicit `true` grants).
+    """
+    resolved: Dict[str, bool] = {}
+    for entry in capability_catalog.PRODUCT_CAPABILITIES:
+        if not entry.declares_entitlement:
+            continue
+        granted = True
+        for name in entry.entitlements:
+            key = _ENTITLEMENT_POLICY_KEY.get(name)
+            if key is None or policy.get(key) is not True:
+                granted = False
+                break
+        resolved[entry.id] = granted
+    return resolved
+
+
+def _measured_solve_availability(health: Optional[Dict[str, Any]],
+                                 now: datetime) -> Dict[str, Any]:
+    """Today's hand-built availability, unchanged in substance, now handed to the
+    catalog as a MEASUREMENT rather than emitted directly.
+
+    A heartbeat proves a connected runtime, not the staging G1A gate, so this
+    still refuses to claim `shipping`. What changes is who arbitrates: the
+    catalog validates this payload against the same rules the console applies,
+    so a malformed or already-expired lease becomes a locked capability carrying
+    `live_availability_rejected_by_contract_validator` instead of being emitted
+    and then silently swallowed by the browser.
+    """
+    # AN EXPIRED LEASE IS AN OFFLINE WORKER, NOT AN INTEGRATOR DEFECT. The
+    # heartbeat query admits a row on `observed_at >= now - 15s` INCLUSIVELY, and
+    # the lease this builds runs `observed + 15s`, so a row at the edge of that
+    # window yields an `expiresAt` that is already in the past. Handing that to
+    # the catalog got it refused as `live_availability_rejected_by_contract_validator`
+    # — a reason that means "the integrator emitted something malformed" and would
+    # send whoever read it hunting a wiring bug that does not exist. Ordinary lease
+    # expiry is the `canonical_worker_offline` case, so classify it here where the
+    # freshness is actually known.
+    if health:
+        lease_expiry = (datetime.fromisoformat(str(health["observed_at"]))
+                        + timedelta(seconds=capability_catalog.LEASE_TTL_SECONDS))
+        if lease_expiry <= now:
+            health = None
+    observed = str(health["observed_at"]) if health else now.isoformat()
+    expires = ((datetime.fromisoformat(observed) if health else now)
+               + timedelta(seconds=capability_catalog.LEASE_TTL_SECONDS)).isoformat()
+    evidence = []
+    if health:
+        evidence_payload = {"tool": AUTOFILL_TOOL, "runtime": health["runtime"],
+                            "sourceRevision": health["source_revision"],
+                            "sourceSha256": health["source_sha256"],
+                            "observedAt": observed}
+        digest = hashlib.sha256(json.dumps(
+            evidence_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        evidence = [{"kind": "observability", "uri": "urn:leaf:runtime:autofill-worker",
+                     "verifiedAt": observed,
+                     "digest": {"algorithm": "sha256", "value": digest}}]
+    return {
+        "contractVersion": PLATFORM_CONTRACT_VERSION,
+        "authority": "leaf-platform-registry",
+        "productCapability": SOLVE_CAPABILITY,
+        "implementationState": "implemented",
+        "runtimeState": "degraded" if health else "unavailable",
+        # A heartbeat proves a connected runtime, not the staging G1A gate.  Do
+        # not elevate the customer surface to shipping until a durable gate
+        # attestation exists and is checked here.
+        "state": "connected_degraded" if health else "failed_retryable",
+        "observedAt": observed,
+        "expiresAt": expires,
+        "reasonCode": "staging_gate_unverified" if health else "canonical_worker_offline",
+        "evidence": evidence,
+        **({"fallback": {"mode": "read_only", "provenanceRequired": True}}
+           if health else {}),
+    }
 
 
 class RunRequest(BaseModel):
@@ -41,6 +172,22 @@ class RunRequest(BaseModel):
     dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
     catalog_digest: Optional[str] = None
     # specific immutable drawing version (da/store.py resolve_version) otherwise.
+    #
+    # SINGLE-WRITER IDENTITY IS NOT A BODY FIELD. `holder`/`fence` used to live
+    # here, and a caller could choose both. That was the hole: GET /versions
+    # publishes the current holder and used to publish its fence, so any
+    # same-tenant session could read the pair and present it to publish under
+    # someone else's lease. Pydantic drops unknown fields, so a client still
+    # sending them is not rejected — its run is simply UNNAMED, which the store
+    # refuses against every active lock (`store.ANONYMOUS_HOLDER`). That is the
+    # right failure: a client that has not been issued a capability has not
+    # proven anything.
+    #
+    # The identity now arrives as the opaque `X-Checkout-Capability` header
+    # (server/checkout_capability.py), which the route exchanges for the
+    # manifest's own (holder, fence) before submitting. Header, not body, so the
+    # credential is never persisted into the durable job record and never
+    # forwarded to the broker — only the pair it proves is.
 
 
 class TerminalCallback(BaseModel):
@@ -104,18 +251,57 @@ def _canonical_tenant_id(tenant: Any, context: Dict[str, Any]) -> str:
     return canonical if context.get("authority_mode") == "postgres_canonical" else str(tenant)
 
 
+def _checkout_identity(tenant_id: Any, drawing_id: str,
+                       capability: Optional[str]) -> Tuple[str, Optional[int]]:
+    """Exchange the presented capability for the (holder, fence) the write path
+    carries. Never trusts anything the caller named.
+
+    Returns `(ANONYMOUS_HOLDER, None)` when the drawing has no ACTIVE checkout or
+    when its state cannot be read at all: the run then publishes freely on an
+    unlocked drawing and is refused against any live lease, which is the
+    fail-closed answer for a caller that has proven nothing.
+
+    A REJECTED capability is deliberately not an error here. The gate that
+    matters runs in the store, under the row lock, at the moment of publish
+    (`da/store.py put_drawing`), and a read tool with a stale header must not be
+    blocked by a lock it never consults. Presenting a bad capability therefore
+    lands the caller in exactly the unnamed case: refused against any active
+    lock, allowed on an unlocked drawing.
+    """
+    store = _store()
+    anonymous = str(store.ANONYMOUS_HOLDER)
+    try:
+        backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+        co = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
+        if not store.checkout_active(co):
+            return anonymous, None
+        holder, fence = checkout_capability.verify(
+            capability, tenant_id, drawing_id, co)
+    except Exception:  # noqa: BLE001 - unreadable state or a bad capability -> unnamed
+        return anonymous, None
+    return holder, fence
+
+
 @router.post("/api/run")
 def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_tenant),
         x_org_id: Optional[str] = Header(default=None),
         x_project_id: Optional[str] = Header(default=None),
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-        authorization: Optional[str] = Header(default=None)):
+        authorization: Optional[str] = Header(default=None),
+        x_checkout_capability: Optional[str] = Header(default=None)):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
     ``X-Project-Id``, the run is additionally recorded as a canonical platform
     Job (best-effort, env-gated — see server/platform_link.py). Absent either
     header the behaviour is byte-identical to before.
+
+    SINGLE-WRITER: a `drawing.write` run publishes a version, so it must prove it
+    owns the drawing's checkout. `X-Checkout-Capability` (from POST
+    /api/drawings/{id}/checkout) is exchanged HERE for the manifest's own
+    (holder, fence), and only that pair travels on to the broker and the store.
+    No capability, or a stale one, means the run is unnamed and is refused
+    against any active lock.
     """
     # TENANT-SCOPED resolution (wave 4): resolve the tool from the REQUESTING tenant's
     # catalog (globals + that tenant's own repo tools). A tool authored by another
@@ -154,6 +340,15 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
 
+    # Exchange the capability for the lock's OWN (holder, fence) before anything
+    # is submitted, so the identity that reaches the store was read from the
+    # manifest rather than chosen by the caller.
+    # write_loop resolves the target from `params.drawing_id`, NOT from `dwg`
+    # (which names the intake source). Asking it means the capability is verified
+    # against the drawing that will actually be published to.
+    checkout_holder, checkout_fence = _checkout_identity(
+        tenant_id, write_loop.target_drawing_id(params), x_checkout_capability)
+
     try:
         platform_context = jobs.platform_link.resolve_submission_context(
             x_org_id, x_project_id, authorization)
@@ -187,6 +382,13 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                 dwg_version=req.dwg_version,
                 idempotency_key=idempotency_key, authority_mode=authority_mode,
                 platform_context=platform_context,
+                # Derived from the VERIFIED capability, never from the request
+                # body. A caller that proved nothing gets the RESERVED anonymous
+                # id, which no lock can ever hold (store.acquire_checkout refuses
+                # it), so its run is refused against every active lock and still
+                # publishes freely on an unlocked drawing.
+                checkout_holder=checkout_holder,
+                checkout_fence=checkout_fence,
             )
     except jobs.platform_link.CanonicalEntitlementDenied as exc:
         # STORED-org entitlement denial from the canonical choke point (P1
@@ -351,49 +553,29 @@ def platform_capabilities(
     now = datetime.now(timezone.utc)
     tier = entitlements.resolve_tier(tenant)
     try:
-        entitled = entitlements.entitlements_for(tier).get("solve", False)
+        policy = entitlements.entitlements_for(tier)
     except entitlements.EntitlementsError:
         # An unreadable policy grants nothing; the projection reports
         # not-entitled while the write path answers with the structured 503.
-        entitled = False
-    observed = str(health["observed_at"]) if health else now.isoformat()
-    expires = ((datetime.fromisoformat(observed) if health else now)
-               + timedelta(seconds=15)).isoformat()
-    evidence = []
-    if health:
-        evidence_payload = {"tool": AUTOFILL_TOOL, "runtime": health["runtime"],
-                            "sourceRevision": health["source_revision"],
-                            "sourceSha256": health["source_sha256"],
-                            "observedAt": observed}
-        digest = hashlib.sha256(json.dumps(
-            evidence_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        evidence = [{"kind": "observability", "uri": "urn:leaf:runtime:autofill-worker",
-                     "verifiedAt": observed,
-                     "digest": {"algorithm": "sha256", "value": digest}}]
-    availability = {
-        "contractVersion": PLATFORM_CONTRACT_VERSION,
-        "authority": "leaf-platform-registry",
-        "productCapability": "drawing.solve.strings",
-        "implementationState": "implemented",
-        "runtimeState": "degraded" if health else "unavailable",
-        # A heartbeat proves a connected runtime, not the staging G1A gate.  Do
-        # not elevate the customer surface to shipping until a durable gate
-        # attestation exists and is checked here.
-        "state": "connected_degraded" if health else "failed_retryable",
-        "observedAt": observed,
-        "expiresAt": expires,
-        "reasonCode": "staging_gate_unverified" if health else "canonical_worker_offline",
-        "evidence": evidence,
-        **({"fallback": {"mode": "read_only", "provenanceRequired": True}}
-           if health else {}),
-    }
+        policy = {}
+    # THE CATALOG EMITS, NOT THIS ENDPOINT. Until now this route hand-built ONE
+    # descriptor inline: its id, label, description, tool capabilities and
+    # entitlements were all typed here, and the other six release-gate
+    # capabilities had no entry at all, so the console could not even name them.
+    # Every id and label now comes from the ratified catalog, which is pinned
+    # character-for-character against leaf_website's `capabilityCatalog.ts`, and
+    # the six unmeasured capabilities come back fail-closed rather than missing.
+    #
+    # The measurement below is the ONLY thing this route still owns, which is the
+    # split the catalog module was written for: it holds no routing and no health
+    # probing, and this route holds no capability vocabulary.
+    live = {SOLVE_CAPABILITY: _measured_solve_availability(health, now)}
+    descriptors = capability_catalog.build_descriptors(
+        live, _entitled_by_capability(policy), now)
     return with_envelope_fields({
         "contractVersion": PLATFORM_CONTRACT_VERSION,
         "projectId": str(context["project_id"]),
-        "capabilities": [{"id": "drawing.solve.strings", "label": "Solve strings",
-                          "description": "Run the canonical AutoFill target solver.",
-                          "availability": availability, "toolCapabilities": ["solve"],
-                          "entitlements": ["solve"], "entitled": bool(entitled)}],
+        "capabilities": descriptors,
     })
 
 

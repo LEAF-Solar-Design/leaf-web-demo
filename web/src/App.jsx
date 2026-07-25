@@ -279,6 +279,14 @@ export default function App() {
   // failed" and both must pause writes, but telling the user we COULD NOT read
   // during a routine refetch is simply false, so this separates the message.
   const [checkoutReadFailed, setCheckoutReadFailed] = useState(false)
+  // The opaque capability POST .../checkout issued us — the ONLY proof that this
+  // session owns the lock, and what release / refresh / undo / redo / a write run
+  // must present. A ref, not state: it never renders, and re-rendering on it
+  // would put a bearer credential into React DevTools for no reason. Deliberately
+  // NOT persisted anywhere — unlike the holder id (checkoutIdentity.js), which is
+  // a display label and safe in sessionStorage, this is a credential, and a lease
+  // that outlived the tab is one the user should re-take.
+  const capabilityRef = useRef(null)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
@@ -650,7 +658,15 @@ export default function App() {
     const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
     setCheckoutBusy(true)
     try {
-      await takeCheckout(did, ownHolder)
+      // Pass the capability we already hold so a REFRESH of our own live lease
+      // is provable. Without it the server (correctly) answers 409 for any
+      // active lock, including our own.
+      const res = await takeCheckout(did, ownHolder, undefined, capabilityRef.current)
+      // The capability is issued ONCE, on this response, and is unreadable
+      // afterwards. Keep it in a ref, never in localStorage: it is a bearer
+      // credential, and a lease outlives neither the tab nor its TTL.
+      if (res?.acquired && res.checkout_capability) capabilityRef.current = res.checkout_capability
+      else if (!res?.acquired) capabilityRef.current = null
     } catch { /* calm — the refetch below shows the real state */ }
     finally {
       await loadCheckout()
@@ -663,13 +679,14 @@ export default function App() {
     const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
     setCheckoutBusy(true)
     try {
-      await releaseCheckout(did, ownHolder)
+      await releaseCheckout(did, capabilityRef.current)
+      capabilityRef.current = null
     } catch { /* calm — the refetch below shows the real state */ }
     finally {
       await loadCheckout()
       setCheckoutBusy(false)
     }
-  }, [mock, drawingState, ownHolder, loadCheckout])
+  }, [mock, drawingState, loadCheckout])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -871,7 +888,9 @@ export default function App() {
     if (!drawingState || versionBusy) return
     setVersionBusy(true); setOverlayStale(true)
     try {
-      const view = await undoDrawing(mock, drawingState.drawing_id)
+      // undo moves head, so the server gates it like a publish: with a checkout
+      // held, only its owner may step the version chain.
+      const view = await undoDrawing(mock, drawingState.drawing_id, capabilityRef.current)
       seatVersion(view, drawingState.drawing_id, `Reverted to version ${view.head}`)
     } catch (e) {
       setRunErr(humanizeError(e))
@@ -884,7 +903,7 @@ export default function App() {
     if (!drawingState || versionBusy) return
     setVersionBusy(true); setOverlayStale(true)
     try {
-      const view = await redoDrawing(mock, drawingState.drawing_id)
+      const view = await redoDrawing(mock, drawingState.drawing_id, capabilityRef.current)
       seatVersion(view, drawingState.drawing_id, `Advanced to version ${view.head}`)
     } catch (e) {
       setRunErr(humanizeError(e))
@@ -1126,6 +1145,14 @@ export default function App() {
           idempotencyKey: idempotencyKey || undefined,
           catalogDigest: (runContext?.toolSnapshot?.catalogDigest
             || createCatalogToolSnapshot(tool).catalogDigest || undefined),
+          // Our proof of the single-writer lock — the capability POST
+          // .../checkout issued us. A drawing.write run publishes a version, and
+          // the server refuses one published under another session's checkout.
+          // Sent on every run: a read tool ignores it, and gating it on the
+          // tool's capabilities here would put a security decision in the
+          // client's hands. Nothing derived from /versions is sent, because
+          // everything on that read is public and therefore proves nothing.
+          checkoutCapability: capabilityRef.current || undefined,
           onSubmit: (job_id) => { saveInflight(job_id, tool.name); setCurrentJobId(job_id) },
           onStatus: (st) => {
             // Richer progress string (e.g. 'executing' · 'storing version' ·
@@ -1191,6 +1218,9 @@ export default function App() {
     }
   }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
       loadCheckout, writeLocked, openProjectId, rehydrate, showToast, viewResult, prepareRunParams, catalogRunContext])
+  // The run carries our single-writer proof, but `capabilityRef` is a ref and is
+  // read at call time, so it is deliberately NOT a dependency: a stale capture is
+  // impossible, and listing it would be a lie about what this callback closes over.
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     let currentTool = tool
