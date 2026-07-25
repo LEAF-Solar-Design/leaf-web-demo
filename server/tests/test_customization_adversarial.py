@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import shutil
@@ -7,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -511,3 +513,28 @@ def test_killed_holder_never_wedges_the_tenant(tmp_path):
         entered = True
 
     assert entered, "a dead holder's lock was never reclaimed"
+
+
+def test_unlockable_file_reports_its_real_cause_not_a_phantom_holder(
+    tmp_path, monkeypatch
+):
+    """An error waiting cannot clear must not be retried as contention.
+
+    Reporting "held by another worker" for a bad descriptor or a filesystem
+    without locking would stall for the whole timeout and then name a holder
+    that does not exist -- the same misreporting this change set removes.
+    """
+    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 30.0)
+
+    def unlockable(handle):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(customization_service, "_try_os_lock", unlockable)
+    started = time.monotonic()
+
+    with pytest.raises(OSError) as caught:
+        with _exclusive_materialize(tmp_path / "tenant-a.git", tmp_path / "lock"):
+            pytest.fail("acquired a lock that cannot be taken")
+
+    assert caught.value.errno == errno.ENOLCK
+    assert time.monotonic() - started < 5  # reported at once, not after 30s

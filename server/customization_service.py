@@ -6,6 +6,7 @@ request-supplied tenant, role, release, or digest as authority.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
@@ -823,24 +824,43 @@ def _tenant_worktree_lock(bare: Path) -> threading.Lock:
         return lock
 
 
+# The errnos that mean "someone else holds it". Everything else is a lock that
+# waiting cannot win.
+_LOCK_CONTENDED = frozenset(
+    code for code in (
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EAGAIN", None),
+        getattr(errno, "EWOULDBLOCK", None),
+        getattr(errno, "EDEADLK", None),
+        getattr(errno, "EDEADLOCK", None),
+    ) if code is not None
+)
+
+
 def _try_os_lock(handle) -> bool:
-    """Take an exclusive OS lock on an open file, without blocking."""
-    if fcntl is not None:
-        try:
+    """Take an exclusive OS lock on an open file, without blocking.
+
+    Returns False only for genuine contention. An error no amount of waiting
+    can clear -- a bad descriptor, exhausted lock resources, a filesystem that
+    does not implement locking -- is raised immediately instead, because
+    retrying it for the full timeout and then reporting "held by another
+    worker" would name a holder that does not exist. Misreporting the cause of
+    a failure is the exact fault this change set exists to remove.
+    """
+    try:
+        if fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except OSError:
-            return False
-    if msvcrt is not None:
-        try:
+        elif msvcrt is not None:
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            return True
-        except OSError:
+        # Otherwise there is no OS lock on this platform and the in-process
+        # lock is the only guard, which still covers the threaded case this was
+        # written for.
+        return True
+    except OSError as exc:
+        if exc.errno in _LOCK_CONTENDED:
             return False
-    # No OS lock on this platform: the in-process lock is the only guard, which
-    # still covers the threaded case this was written for.
-    return True
+        raise
 
 
 @contextmanager
