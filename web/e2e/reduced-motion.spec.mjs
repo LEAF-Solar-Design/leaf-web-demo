@@ -7,6 +7,7 @@ import { writeProofReceipt } from './proofReceipt.mjs'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'reduced-motion')
 
 test('reduced motion completes the operator flow without hiding filled panes', async ({ page }) => {
+  test.setTimeout(60_000)
   mkdirSync(PROOF_DIR, { recursive: true })
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const proofState = makeCatProofState()

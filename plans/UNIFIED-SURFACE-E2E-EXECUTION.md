@@ -273,7 +273,7 @@ Progress:
   request without recording a real credential.
 - The aggregate one-scene walk passes with production Playwright video capture.
   Its receipt covers 24 capability IDs and records every observed API method-path.
-  The 10-scenario fixture gate, 22 controller tests, production build, behavior
+  The 14-scenario fixture gate, 22 controller tests, production build, behavior
   pins, customization checks, and all staging checks pass.
 - `/try` now mounts the shared result panel, completion toast, provenance drawer,
   historical job selection, running status, polite live region, and result
@@ -290,6 +290,12 @@ Progress:
   execution while sign-in is required, and exposes account details separately
   from the Claude grant. Two focused browser contracts cover the 401 gate and
   callback route ownership.
+- `/try` now has explicit desktop, narrow-desktop, tablet, phone, and
+  short-height layouts. The proof checks both rails, the command input, and Run
+  remain visible without page overflow, and that phone input text stays at
+  16 px. Ctrl or Command K focuses the real command bar, both tablists use a
+  roving tab stop with arrow keys, visible input focus is restored, and errors
+  use alert semantics. Five viewport screenshots and two browser tests pass.
 - Provider lifting, sign-out and mid-session expiry, tenant operations, deeper structured
   failure coverage, and the full responsive and accessibility ladder remain open.
 

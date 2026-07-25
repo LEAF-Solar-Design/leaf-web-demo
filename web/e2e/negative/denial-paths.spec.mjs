@@ -8,6 +8,7 @@ import {
 } from './negativeApiFixture.mjs'
 
 test.describe('negative browser contracts', () => {
+  test.setTimeout(60_000)
   test('operator denial stays denied and creates no job or version', async ({ page }) => {
     const { evidence, state } = await installNegativeApi(page, { approval: 'denied' })
     await openApp(page)

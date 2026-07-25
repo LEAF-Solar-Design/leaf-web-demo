@@ -439,6 +439,7 @@
   flex: 1; border: 0; outline: none; background: none;
   font-family: inherit; font-size: 13px; color: #e4e4e7; padding: 0;
 }
+.tc-bar-input:focus-visible { outline: 2px solid #4ade80; outline-offset: 4px; border-radius: 2px; }
 .tc-bar-input::placeholder { color: #52525b; }
 .tc-bar-blink {
   display: inline-block; width: 7px; height: 13px; background: #22c55e;
@@ -472,4 +473,51 @@
 }
 .stage-root[data-scene="tool"] .tc-caption {
   transition: opacity .5s ease 1500ms !important;
+}
+
+@media (max-width: 1279px) {
+  .tc-rail { width: 250px; }
+  .tc-bar-wrap { left: 270px; right: 270px; width: auto; max-width: 720px; margin-left: 0; margin-right: auto; }
+  .tc-caption { left: 270px; }
+  .tc-topcluster { gap: 9px; padding: 0 12px; }
+}
+
+@media (max-width: 980px) {
+  .lp-brandsub, .tc-back + .key, .tc-caption { display: none; }
+  .lp-top-slot { min-width: 0; }
+  .tc-topcluster { left: 150px; overflow-x: auto; white-space: nowrap; }
+  .tc-rail { top: 54%; bottom: 0; width: 50%; }
+  .tc-rail-l { left: 0; }
+  .tc-rail-r { left: 50%; right: auto; }
+  .tc-bar-wrap { left: 16px; right: 16px; bottom: calc(46% + 12px); width: auto; max-width: none; margin: 0; }
+  .tc-rail-tabs { overflow-x: auto; }
+  .tc-rail-tabs button { flex: 0 0 auto; min-width: 72px; }
+  .stage-root[data-scene="tool"] > .drawer-layer { top: 52px; width: min(360px, 100%); }
+}
+
+@media (max-width: 600px) {
+  .lp-topbar { padding: 0 10px; }
+  .lp-wordmark { font-size: 12px; }
+  .tc-topcluster { left: 108px; gap: 8px; padding: 0 8px; }
+  .tc-topcluster .proj-switch, .tc-version { display: none; }
+  .tc-solve { font-size: 11px; }
+  .tc-rail { left: 0; right: auto; width: 100%; }
+  .tc-rail-l { top: 49%; bottom: 25.5%; }
+  .tc-rail-r { top: 74.5%; bottom: 0; }
+  .tc-rail-head { padding: 8px 12px 5px; }
+  .tc-rail-tabs { padding-bottom: 6px; }
+  .tc-rail-foot { display: none; }
+  .tc-bar-wrap { left: 8px; right: 8px; bottom: calc(51% + 8px); }
+  .tc-bar-input-row { padding: 11px 12px 8px; }
+  .tc-bar-input { min-width: 0; font-size: 16px; }
+  .tc-bar-controls { padding: 0 10px 9px; }
+  .tc-bar-scopes, .tc-bar-proj, .tc-bar-key { display: none; }
+  .toast { max-width: calc(100vw - 24px); bottom: calc(51% + 98px); }
+}
+
+@media (max-height: 650px) and (min-width: 981px) {
+  .tc-bar-wrap { bottom: 8px; }
+  .tc-caption { display: none; }
+  .tc-rail-head { padding-top: 8px; }
+  .tc-rail-tabs { padding-bottom: 6px; }
 }

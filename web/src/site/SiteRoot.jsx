@@ -69,6 +69,11 @@ export default function SiteRoot() {
     if (scene !== 'site' && scene !== 'tool') return undefined
     const onKey = (e) => {
       if (isEditable(e.target)) return
+      if (scene === 'tool' && (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        stageRef.current?.querySelector('.tc-bar-input')?.focus()
+        return
+      }
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === 'Escape' && scene === 'tool') {
         const ownedSurface = document.querySelector('.proj-menu, .route, .drawer-layer .drawer, .claude-pop')
