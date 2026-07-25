@@ -376,9 +376,26 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_sessions_e2e.py"), 9),
         Suite("server-capabilities-promotion", "server tests/test_capabilities_promotion.py",
               "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py"), 11),
+        # The two cross-repo contract checks read the website validator out of a
+        # SIBLING checkout that this deliberately hermetic workflow does not have,
+        # so they skip on CI and execute only on an operator box that has both
+        # repos. The suite's own helper documents that posture: the skip is
+        # opt-out, and LEAF_CONTRACT_STRICT=1 turns it into a hard failure in a
+        # job that HAS both checkouts.
+        # KNOWN GAP, named rather than hidden: while this reason is allowlisted,
+        # cross-repo drift between leaf-web-demo and leaf_website is NOT verified
+        # by this gate. Closing it needs a job with both repos checked out and
+        # LEAF_CONTRACT_STRICT=1, which is a credentials change beyond this suite.
         Suite("server-product-capability-catalog",
               "server tests/test_product_capability_availability.py",
-              "pytest", SERVER, _py_pytest("tests/test_product_capability_availability.py"), 56),
+              # Floor is 54, the count that executes WITHOUT the sibling repo. The
+              # old 56 was measured on an operator box that has it, so CI executed
+              # 54 and failed the floor even once the skip itself was allowlisted.
+              # An operator box still runs 56 and reports upward drift, not a pass.
+              "pytest", SERVER, _py_pytest("tests/test_product_capability_availability.py"), 54,
+              allowed_skip_reasons=(
+                  r"cannot read the website validator from origin/main: [\s\S]*"
+                  r"Cross-repo contract drift is UNVERIFIED in this run\.",)),
         # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
         # one red was a stale pre-§19 assertion (offline `dwg` no longer
         # ignored) — fixed and registered per the #29 fix-then-register rule.
