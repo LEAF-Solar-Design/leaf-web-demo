@@ -985,6 +985,33 @@ def test_a_recovered_envelope_must_name_the_identity_we_tried_to_claim():
     assert excinfo.value.reason == "bad_completion_guard", (
         "a decode that raises must fail closed, not escape as a raw ValueError")
 
+    # ROUND-16 CASES, all the same shape: an exception escaping the recovery
+    # check untagged, or an exemption that was too broad.
+    deep = adapter.CallbackEnvelope(
+        body=(b"[" * 5000) + (b"]" * 5000), timestamp=real.timestamp,
+        nonce=real.nonce, signature=real.signature)
+    str_body = adapter.CallbackEnvelope(
+        body=real.body.decode("utf-8"), timestamp=real.timestamp,
+        nonce=real.nonce, signature=real.signature)
+    missing_nonce_payload = {k: v for k, v in json.loads(real.body).items() if k != "nonce"}
+    missing_nonce_body = json.dumps(missing_nonce_payload, sort_keys=True,
+                                    separators=(",", ":")).encode()
+    missing_nonce = adapter.CallbackEnvelope(
+        body=missing_nonce_body, timestamp=real.timestamp, nonce=real.nonce,
+        signature=callbacks.sign_payload(missing_nonce_body, real.timestamp,
+                                         real.nonce, SECRET))
+
+    for bogus, why in ((deep, "5000 nested arrays (RecursionError)"),
+                       (str_body, "a str body (TypeError inside the HMAC)"),
+                       (missing_nonce, "an omitted exempt field")):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                              job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                              secret=SECRET, now=NOW,
+                              reserve_completion=lambda j, a, e=None, _b=bogus: _b)
+        assert excinfo.value.reason == "bad_completion_guard", (
+            f"{why} must fail closed, not escape untagged")
+
     # The bool-size case needs its own translate() call, because it is only a
     # divergence for a ONE-BYTE output (`True == 1`).
     with pytest.raises(adapter.AdapterError) as excinfo:

@@ -217,6 +217,65 @@ def _canonical_body(payload: Dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+# The fields a RECOVERED receipt may legitimately differ on. `produced_at` is the
+# original delivery's clock and `nonce` carries the original delivery nonce; the
+# point of returning the stored receipt verbatim is that both keep their first
+# values, so its signature still matches whatever the replay store holds. They are
+# exempt from COMPARISON, not from PRESENCE — a body missing them is not a receipt
+# this module ever produced.
+_RECOVERY_MAY_DIFFER = ("produced_at", "nonce")
+
+
+def _is_our_receipt(envelope: "CallbackEnvelope", payload: Dict[str, Any],
+                    secret: bytes) -> bool:
+    """Is this stored envelope the receipt for the completion we just built?
+
+    ONE FAIL-CLOSED BOUNDARY, and the bare `except Exception` is the point of it.
+    Four review rounds walked this check forward one leak at a time: first the
+    fields it compared (identity, then output evidence, then status/workitem),
+    then the exception types it caught (`JSONDecodeError` missed a digit-limit
+    `ValueError`, then the catch list missed `RecursionError` on a deeply nested
+    body, then signature verification sat outside the guard entirely and a `str`
+    body raised `TypeError` after passing comparison).
+
+    Both halves of that are the same losing game: an allow-list whose default is
+    ACCEPT. So both are inverted. Every field is compared unless named exempt, and
+    every failure of any kind answers NO. This function's whole job is to decide
+    acceptability, so an unexpected exception IS a no — it cannot mask a bug,
+    because the boolean it returns becomes a tagged `bad_completion_guard`
+    refusal, and it deliberately does not catch BaseException.
+    """
+    try:
+        # A body that is not bytes cannot be the body we signed, and passing one
+        # into the HMAC raised `TypeError: can't concat str to bytes` AFTER the
+        # comparison had already passed.
+        if type(envelope.body) is not bytes:
+            return False
+        recovered = json.loads(envelope.body)
+        if type(recovered) is not dict:
+            return False
+        # Exempt from comparison, NOT from presence.
+        if any(key not in recovered for key in _RECOVERY_MAY_DIFFER):
+            return False
+        ours = {k: v for k, v in payload.items() if k not in _RECOVERY_MAY_DIFFER}
+        theirs = {k: v for k, v in recovered.items() if k not in _RECOVERY_MAY_DIFFER}
+        # CANONICAL BYTES, NOT DICTS. Python's `==` is not type-exact over
+        # numbers, and a dict comparison inherits that across every field at once:
+        # `True == 1` and `6.0 == 6`, so a signed receipt carrying
+        # `output.size: true` for a one-byte output compared equal. `json.dumps`
+        # writes `true`, `1` and `1.0` as three different byte strings, so the
+        # comparison is exact by construction and no per-field type pin is needed.
+        if _canonical_body(theirs) != _canonical_body(ours):
+            return False
+        # And it must be a receipt WE could have signed. An unverifiable body is
+        # not a recovery, it is an unsigned claim wearing the envelope type.
+        return _callbacks().verify_signature(
+            envelope.body, envelope.timestamp, envelope.nonce,
+            envelope.signature, secret) is True
+    except Exception:  # noqa: BLE001 - see the docstring; any failure is a NO
+        return False
+
+
 def translate(
     completion: ApsWorkItemCompletion,
     output: Optional[bytes],
@@ -476,61 +535,7 @@ def translate(
     # WHOSE it is. Re-derive the identity from the returned body and refuse a
     # receipt that does not name what we just tried to claim.
     if type(outcome) is CallbackEnvelope:
-        # `ValueError`, not `json.JSONDecodeError`. Decoding a stored body is not
-        # only a syntax question: a 5000-digit integer literal is well-formed JSON
-        # that raises a plain `ValueError` from CPython's int-to-str digit limit,
-        # which JSONDecodeError does not cover, so it escaped untagged. Since
-        # JSONDecodeError IS a ValueError, the wider catch keeps both.
-        try:
-            recovered = json.loads(outcome.body)
-        except (AttributeError, TypeError, UnicodeDecodeError, ValueError):
-            raise AdapterError("bad_completion_guard")
-        if type(recovered) is not dict:
-            raise AdapterError("bad_completion_guard")
-        # COMPARE THE WHOLE BODY, NOT A LIST OF FIELDS. Three review rounds went
-        # the other way and each found one more field I had not thought to check:
-        # first the identity, then the output evidence, then `status` and
-        # `workitem_id` (a stored receipt saying "failed" for a different WorkItem
-        # was accepted as a successful wi-1 completion and would have failed the
-        # job with false provenance). Enumerating trusted fields is a losing game,
-        # because the default for anything unlisted is ACCEPT.
-        #
-        # Inverted: the recovered body must equal the body we just built, and only
-        # the two fields that legitimately differ between deliveries are exempt.
-        # `produced_at` is the original delivery's clock and `nonce` carries the
-        # original delivery nonce; the whole point of returning the receipt
-        # verbatim is that those keep their first values, so its signature still
-        # matches what the replay store may already hold. Every other field is
-        # semantic and must match. A field added to `payload` later is compared
-        # automatically instead of being silently trusted.
-        # COMPARED AS CANONICAL BYTES, NOT AS DICTS. Python's `==` is not
-        # type-exact over numbers, and a dict comparison inherits that everywhere
-        # at once: `True == 1` and `6.0 == 6`, so a signed receipt carrying
-        # `output.size: true` for a one-byte output, or `size: 6.0` for six bytes,
-        # compared equal and was returned as a valid receipt. Pinning the type of
-        # `attempt` did not help, because the hazard is every numeric field, not
-        # one of them.
-        #
-        # Serializing both sides through the same canonicalizer makes the
-        # comparison exact by construction: `json.dumps` writes `true`, `1` and
-        # `1.0` as three different byte strings, so no cross-type pair can pass.
-        # It also removes the need for per-field type pins, which is the same
-        # enumeration trap in a different costume.
-        _RECOVERY_MAY_DIFFER = ("produced_at", "nonce")
-        ours = {k: v for k, v in payload.items() if k not in _RECOVERY_MAY_DIFFER}
-        theirs = {k: v for k, v in recovered.items() if k not in _RECOVERY_MAY_DIFFER}
-        # Serializing can raise for the same digit-limit reason as decoding, so
-        # the comparison itself fails CLOSED rather than escaping untagged.
-        try:
-            same = _canonical_body(theirs) == _canonical_body(ours)
-        except (TypeError, ValueError, RecursionError):
-            raise AdapterError("bad_completion_guard")
-        if not same:
-            raise AdapterError("bad_completion_guard")
-        # And it must be a receipt WE could have signed. An unverifiable body is
-        # not a recovery, it is an unsigned claim wearing the envelope type.
-        if not _callbacks().verify_signature(outcome.body, outcome.timestamp,
-                                             outcome.nonce, outcome.signature, secret):
+        if not _is_our_receipt(outcome, payload, secret):
             raise AdapterError("bad_completion_guard")
         return outcome
     if outcome is False:
