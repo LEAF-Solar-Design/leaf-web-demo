@@ -24,13 +24,15 @@ the TEMPLATE path (LEAF_AUTHOR_HARNESS_URL is stripped from the child env).
 SELF-CONTAINED: authored_tools.json is reset to a clean {"tools": []} for the
 booted app (so NL routing is deterministic — gitignored authored pollution can
 otherwise outrank count-by-layer) and RESTORED byte-for-byte on teardown; any
-authored/*.py file the author step creates is removed. Both server processes are
+authored tool body the author step creates (at any depth under authored/, since
+they persist per-tenant) is removed. Both server processes are
 torn down in a finally.
 
 Run:  cd server && python -m pytest tests/test_e2e_golden.py -q
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import socket
 import subprocess
@@ -49,6 +51,10 @@ AUTHORED_DIR = SERVER_DIR / "authored"
 
 SECTION3_KEYS = {"ok", "tool", "version", "result", "overlay", "timing_ms", "cost", "error"}
 TENANT = "e2e-golden"
+# The description this suite authors from, and the one filename that produces. Naming is
+# deterministic (tools_fallback._slugify), so teardown can name exactly what it created
+# instead of sweeping whatever else appeared under authored/ while it ran.
+AUTHOR_DESCRIPTION = "measure the bounding box of every layer"
 
 
 # --------------------------------------------------------------------------- #
@@ -112,7 +118,15 @@ def stack(tmp_path_factory):
 
     # --- self-containment: snapshot + reset the shared authored store --- #
     orig_authored = AUTHORED_TOOLS.read_bytes() if AUTHORED_TOOLS.exists() else None
-    pre_authored_files = set(AUTHORED_DIR.glob("*.py")) if AUTHORED_DIR.exists() else set()
+    # rglob, not glob: the template author path persists under a per-tenant
+    # subdirectory (authored/<tenant>/<name>.py), so a top-level-only sweep would
+    # snapshot nothing and leave this suite's authored bodies behind on teardown.
+    import tools_fallback
+    global AUTHORED_BODY
+    AUTHORED_BODY = f"{tools_fallback.author_tool(AUTHOR_DESCRIPTION)[0]['name']}.py"
+    pre_authored_files = set(AUTHORED_DIR.rglob("*.py")) if AUTHORED_DIR.exists() else set()
+    pre_authored_dirs = ({d for d in AUTHORED_DIR.iterdir() if d.is_dir()}
+                         if AUTHORED_DIR.exists() else set())
     AUTHORED_TOOLS.write_text('{"tools": []}\n', encoding="utf-8")
 
     store_dir = tmp / "drawings"  # shared by broker (writes) + app (reads)
@@ -154,11 +168,26 @@ def stack(tmp_path_factory):
             AUTHORED_TOOLS.unlink(missing_ok=True)
         else:
             AUTHORED_TOOLS.write_bytes(orig_authored)
-        # remove any authored/*.py the template author step created
+        # Remove the authored tool bodies THIS suite's author step created. Scope the
+        # sweep to the directory of the tenant this suite authors as, not the whole
+        # authored/ tree: a tree-wide "anything newer than the snapshot" sweep would
+        # also delete a body some other tenant's concurrent author request wrote while
+        # this suite was running. Pre-#131 the bodies were flat, so the top level is
+        # still swept for this suite's own filenames.
         if AUTHORED_DIR.exists():
-            for f in AUTHORED_DIR.glob("*.py"):
+            own_dir = AUTHORED_DIR / hashlib.sha256(TENANT.encode("utf-8")).hexdigest()[:32]
+            # Only the ONE deterministic filename this suite's author step produces, in
+            # its own tenant directory (and at the top level, for a pre-#131 flat body).
+            # Sweeping "every .py that appeared" would delete a body some other tenant's
+            # concurrent author request wrote while this suite was running.
+            for f in (own_dir / AUTHORED_BODY, AUTHORED_DIR / AUTHORED_BODY):
                 if f not in pre_authored_files:
                     f.unlink(missing_ok=True)
+            # drop the per-tenant directory only if this suite created it and left it
+            # empty; never a recursive delete, so a directory that still holds another
+            # body is left exactly as found.
+            if own_dir.is_dir() and own_dir not in pre_authored_dirs and not any(own_dir.iterdir()):
+                own_dir.rmdir()
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +299,7 @@ def test_golden_path(stack):
     names_before = {t["name"] for t in
                     requests.get(f"{app}/api/tools", headers=_h(), timeout=10).json()["tools"]}
     author = requests.post(f"{app}/api/author",
-                           json={"description": "measure the bounding box of every layer"},
+                           json={"description": AUTHOR_DESCRIPTION},
                            headers=_h(), timeout=30)
     assert author.status_code == 200, author.text
     abody = author.json()
