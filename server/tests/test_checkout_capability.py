@@ -447,3 +447,101 @@ def test_concurrent_legacy_acquires_cannot_share_one_generation(monkeypatch):
     assert len(set(granted)) == len(granted)
     persisted = store.load_manifest(backend, TENANT, DRAWING)["checkout"]
     assert int(persisted["fence"]) == granted[0]
+
+
+def test_a_deployment_that_cannot_mint_leaves_no_lock_behind(
+        drawings_client, monkeypatch):
+    """sol-critic r3 gap: the `ensure_mintable` unit tests pin the helper, but
+    none of them fails if the ROUTE stops calling it. This drives the route in
+    the posture that used to leave a lock nobody could prove — production with
+    no signing secret — and asserts the two things that matter: the caller is
+    told it is an operator fault, and the drawing is still FREE afterwards.
+    """
+    da_dir = str(SERVER_DIR.parent / "da")
+    if da_dir not in sys.path:
+        sys.path.insert(0, da_dir)
+    import store  # noqa: E402
+    from routers import drawings as drawings_router  # noqa: E402
+
+    tenant = "no-mint-tenant"
+    monkeypatch.delenv("LEAF_CHECKOUT_CAP_SECRET", raising=False)
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+
+    res = drawings_client.post("/api/drawings/demo/checkout",
+                               json={"holder": "sess-a", "ttl_s": 300},
+                               headers={"X-Tenant-Id": tenant})
+    assert res.status_code == 503, res.text
+
+    # THE point: no lease was taken. Acquiring after the misconfiguration is
+    # fixed must still be possible, rather than blocked for the whole TTL by a
+    # lock whose capability was never issued.
+    backend = drawings_router._backend(tenant)
+    co = store.load_manifest(backend, tenant, "demo").get("checkout")
+    assert not store.checkout_active(co), (
+        "the route took the lock before discovering it could not mint")
+
+
+def test_concurrent_legacy_release_and_acquire_cannot_repeat_a_generation(
+        monkeypatch):
+    """sol-critic r3 gap: the acquire-side interleaving test still passes if only
+    the RELEASE lock is removed. A release that loads a snapshot, then saves it
+    after a concurrent acquire has written the next generation, loses that
+    write — and a repeated generation lets a capability from the earlier lease
+    verify against the later one.
+    """
+    import threading
+    import time
+
+    da_dir = str(SERVER_DIR.parent / "da")
+    if da_dir not in sys.path:
+        sys.path.insert(0, da_dir)
+    import store  # noqa: E402
+
+    backend = store.InMemoryBackend()
+    store.save_manifest(backend, TENANT, DRAWING,
+                        store._new_manifest(TENANT, DRAWING))
+    first = store.acquire_checkout_fence(backend, TENANT, DRAWING, "sess-a",
+                                         0.05, expected_fence=None,
+                                         strict_owner=True)
+    assert first == 1
+    time.sleep(0.1)                      # the lease lapses; release is now free
+
+    real_load = store.load_manifest
+    releaser_loaded = threading.Event()
+
+    def interleaved_load(*a, **k):
+        m = real_load(*a, **k)
+        if not releaser_loaded.is_set():
+            releaser_loaded.set()
+            time.sleep(0.25)             # releaser holds its stale snapshot
+        else:
+            releaser_loaded.wait(timeout=5)
+        return m
+
+    monkeypatch.setattr(store, "load_manifest", interleaved_load)
+    granted: list[int] = []
+
+    def release():
+        store.release_checkout(backend, TENANT, DRAWING, holder="sess-a")
+
+    def acquire():
+        fence = store.acquire_checkout_fence(backend, TENANT, DRAWING, "sess-b",
+                                             300, expected_fence=None,
+                                             strict_owner=True)
+        if fence is not None:
+            granted.append(fence)
+
+    threads = [threading.Thread(target=release), threading.Thread(target=acquire)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Whatever order they land in, the generation counter must never go
+    # backwards: a later acquire can never be handed a generation already used.
+    assert granted, "the second session was never granted the lapsed lock"
+    assert granted[0] > first, (
+        f"generation {granted[0]} repeats or precedes {first}: a capability "
+        f"from the earlier lease would verify against the later one")
+    m = store.load_manifest(backend, TENANT, DRAWING)
+    assert int(m.get("checkout_fence") or 0) >= granted[0]
