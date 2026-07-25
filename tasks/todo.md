@@ -55,6 +55,8 @@ Current additive progress:
   drawer focus ownership to the unified scene.
 - [x] Mount quota, degraded-result, and degraded-backend notices with usage and
   health refresh actions in the unified scene.
+- [x] Enable resident viewer pan and zoom, wire Fit, and expose recoverable WebGL
+  fallback without remounting the healthy canvas.
 - [ ] Reconcile remaining visible and standards gaps against the capability ledger.
 - [ ] Run the expanded aggregate fixture suite, local real-stack suite, and any
   authorized staging proof.

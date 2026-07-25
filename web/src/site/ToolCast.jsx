@@ -119,6 +119,7 @@ function moveTab(event) {
 
 export default function ToolCast({
   active,
+  onFitDrawing,
   onVisibleLayersChange,
   selectedHandle,
   onSelectedHandleChange,
@@ -986,6 +987,10 @@ export default function ToolCast({
         )}
         {rightView === 'view' && (
           <div className="tc-view-panel">
+            <div className="tc-panel-heading">
+              <span>Drawing view</span>
+              <button type="button" onClick={onFitDrawing}>Fit</button>
+            </div>
             <Legend
               layers={drawing.shown?.layers || []}
               counts={layerCounts}

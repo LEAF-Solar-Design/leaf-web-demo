@@ -343,6 +343,11 @@ Progress:
   Trust now shows a persistent degraded-backend notice with an explicit refresh.
   Three browser contracts cover daily quota, local solver fallback, details,
   health refresh, and zero job creation after preflight rejection.
+- The resident tool viewer is now a named region with pan and zoom enabled,
+  exposes the existing imperative Fit action in the View rail, and keeps the
+  same canvas node when Fit restores drawing bounds. WebGL loss now leaves a 2D
+  drawing visible with an operator-facing Retry action. Two browser contracts
+  prove geometry restoration, canvas identity, fallback visibility, and retry.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
   the remaining accessibility ladder, and full local-stack proof remain open.
 

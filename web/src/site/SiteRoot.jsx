@@ -65,6 +65,7 @@ export default function SiteRoot() {
   const { path } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
   const stageRef = useRef(null)
+  const stageLayerRef = useRef(null)
   const [operatorIntake, setOperatorIntake] = useState(null)
   const [operatorVisibleLayers, setOperatorVisibleLayers] = useState(null)
   const [operatorSelectedHandle, setOperatorSelectedHandle] = useState(null)
@@ -157,6 +158,7 @@ export default function SiteRoot() {
     >
       <main className="stage-root" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>
         <StageLayer
+          ref={stageLayerRef}
           intakeOverride={scene === 'tool' ? operatorIntake : null}
           visibleLayers={scene === 'tool' ? operatorVisibleLayers : null}
           selectedHandle={scene === 'tool' ? operatorSelectedHandle : null}
@@ -166,6 +168,7 @@ export default function SiteRoot() {
         <LandingCast onTryTool={() => navigate('/try')} />
         <ToolCast
           active={scene === 'tool'}
+          onFitDrawing={() => stageLayerRef.current?.fit()}
           onVisibleLayersChange={setOperatorVisibleLayers}
           selectedHandle={operatorSelectedHandle}
           onSelectedHandleChange={setOperatorSelectedHandle}
