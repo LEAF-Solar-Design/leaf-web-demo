@@ -1265,10 +1265,17 @@ on `(tenant_id, name)` rather than on `name`.
 That dedup is not retroactive. The eviction filter matches a concrete tenant id,
 so a row persisted before this change carries no `tenant_id`, never matches, and
 is not evicted. Re-authoring a demo-tenant tool that predates the change leaves
-both the legacy row and the new tenant-scoped row in the store. That is store
-bloat, not a correctness or isolation defect: `deps.all_tools` attributes an
+both the legacy row and the new tenant-scoped row in the store.
+
+The tenant-visible catalog is still correct: `deps.all_tools` attributes an
 unscoped row to the demo tenant and folds entries by name in list order, so the
-later tenant-scoped row wins and the tenant-visible catalog is correct.
+later tenant-scoped row wins, and `GET /api/tools`, digest issuance and
+`POST /api/run` all read that fold. Both rows belong to one tenant, so the
+duplicate is not an isolation defect. It is not free either. Consumers that read
+the raw store instead of the fold see both rows: `engine/selfcheck.py` resolves
+and runs every row in `authored_tools.json`, so a duplicate exercises the stale
+body alongside the current one and reddens that gate if the legacy file is gone,
+and `/api/health` counts raw rows in `n_authored`.
 
 Resolution is by PRECEDENCE, not by absolute location, and the distinction is
 load-bearing for anyone reasoning about which bytes actually execute.
@@ -1297,8 +1304,11 @@ issues and `POST /api/run` requires again. A template-authored tool's
 nothing, so a record persisted before 2026-07-25 keeps its old `entry`, carries
 no `tenant_id`, and keeps its old digest until something rewrites it. Callers
 must re-read the catalog for any tool authored or re-authored on or after
-2026-07-25. A digest cached for a record that has not been rewritten stays
-valid.
+2026-07-25. What invalidates a cached digest is a change to the entry that wins
+the tenant's catalog fold, not a rewrite of the row a caller happened to read
+from: re-authoring shadows an older row of the same name, so a digest cached
+from that older row is refused by `POST /api/run` even though the row itself was
+never rewritten. A digest for a tool that has not been re-authored stays valid.
 
 §15.C's other statements are unaffected: the harness path still does NOT persist
 to `server/authored/` or `_AUTHORED`, and `source` / `static_scan` are unchanged.
