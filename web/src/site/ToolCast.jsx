@@ -28,6 +28,8 @@ import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
+import QuotaCard from '../components/QuotaCard.jsx'
+import DegradedBanner from '../components/DegradedBanner.jsx'
 import Toast from '../components/Toast.jsx'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
@@ -145,6 +147,7 @@ export default function ToolCast({
   const [drawer, setDrawer] = useState(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
   const [opsOpen, setOpsOpen] = useState(() => new URLSearchParams(window.location.search).get('ops') === '1')
+  const [quotaAt, setQuotaAt] = useState(0)
   const toastSeqRef = useRef(0)
   const catalogDecisionRef = useRef(null)
   const runIntentSessionRef = useRef(null)
@@ -317,10 +320,18 @@ export default function ToolCast({
   }, [currentJob, jobs])
   const platform = usePlatformTrustController({
     mock: false,
+    quotaResult: jobResult,
+    quotaAt,
     onAuthRequired: (required, sources) => {
       if (required) requireAuth(`platform:${(sources || []).join(',') || 'unknown'}`)
     },
   })
+  useEffect(() => {
+    const quota = jobResult?.ok === false && (
+      jobResult.quota_kind === 'daily_runs' || jobResult.error?.error_code === 'quota_exceeded'
+    )
+    setQuotaAt(quota ? Date.now() : 0)
+  }, [jobResult])
   const writeEntitled = platform.isEntitled('run_write')
   const checkout = useCheckoutController({
     mock: false,
@@ -848,6 +859,20 @@ export default function ToolCast({
           </div>
         )}
         <div data-testid="catalog-run-result">
+          {platform.quota.visible && (
+            <QuotaCard
+              kind={platform.quota.visible.kind}
+              message={platform.quota.visible.error?.message}
+              remaining={platform.usage?.cap?.remaining}
+              tier={jobResult?.tier || platform.entitlements?.tier}
+              limit={platform.quota.visible.limit}
+              used={platform.quota.visible.used}
+              onAction={() => setRightView('trust')}
+            />
+          )}
+          {jobResult?.degraded_mode && (
+            <DegradedBanner reason={jobResult.degraded_reason || jobResult.result?.degraded_reason || jobResult.result?.reason} />
+          )}
           <ResultPanel
             running={jobRunning}
             error={jobError}
@@ -903,6 +928,22 @@ export default function ToolCast({
         )}
         {rightView === 'trust' && (
           <div className="tc-trust-panel">
+            <div className="tc-panel-heading">
+              <span>Service trust</span>
+              <button type="button" onClick={platform.actions.refreshAll} disabled={platform.healthLoading || platform.usageLoading || platform.entLoading || platform.grantLoading}>
+                {platform.healthLoading ? 'Refreshing' : 'Refresh'}
+              </button>
+            </div>
+            {platform.healthStatus.degraded && (
+              <div className="banner" role="status">
+                <b>Backend degraded</b>
+                <span className="banner-rest"> {platform.health?.aps_live === false ? 'Cloud execution is unavailable.' : 'The backend health check reports degraded operation.'} Read the result notice before relying on fallback output.</span>
+                <span className="banner-since">clears after a healthy refresh</span>
+              </div>
+            )}
+            {!platform.healthLoading && !platform.health && (
+              <div className="tc-panel-note" role="status">Health details are unavailable. Existing results remain visible.</div>
+            )}
             <div className="tc-trust-row"><span>Backend</span><b>{platform.healthStatus.status}</b></div>
             <div className="tc-trust-row"><span>Claude account</span><b>{platform.grant?.linked ? `linked${platform.grant.kind ? ` · ${platform.grant.kind}` : ''}` : 'not linked'}</b></div>
             <div className="tc-trust-row"><span>Runs today</span><b>{platform.usage?.today?.runs ?? 'unknown'}</b></div>

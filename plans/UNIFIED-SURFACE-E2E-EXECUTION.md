@@ -338,6 +338,11 @@ Progress:
   into Claude, transport loss falls back visibly to local catalog matching, and
   no match plus Claude quota loss remains a non-executing resolver. Four focused
   browser contracts prove request order, recovery, and zero preapproval runs.
+- The shared quota and degraded-result notices now render in `/try` execution,
+  preserve the result beneath them, and link quota state to freshly polled usage.
+  Trust now shows a persistent degraded-backend notice with an explicit refresh.
+  Three browser contracts cover daily quota, local solver fallback, details,
+  health refresh, and zero job creation after preflight rejection.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
   the remaining accessibility ladder, and full local-stack proof remain open.
 
