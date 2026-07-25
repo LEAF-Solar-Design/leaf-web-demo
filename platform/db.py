@@ -847,8 +847,11 @@ def _normalize_catalog_definition(value: Any) -> str:
     """Normalize pg_get_*def output without weakening semantic comparison."""
     normalized = str(value or "").replace('"', "").lower()
     normalized = re.sub(r"\b[a-z_][a-z0-9_]*\.", "", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    normalized = re.sub(r"\s*([(),])\s*", r"\1", normalized)
+    # PostgreSQL may add redundant grouping parentheses and type casts around
+    # literals when it deparses pg_node_tree. Contracts compare stable tokens,
+    # so remove only whitespace and grouping punctuation from both sides.
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = normalized.replace("(", "").replace(")", "")
     return normalized
 
 

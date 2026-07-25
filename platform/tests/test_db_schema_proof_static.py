@@ -384,6 +384,31 @@ def test_every_selected_catalog_object_has_relation_and_definition_contract():
                     assert contract["definition_fragments"]
 
 
+def test_catalog_contract_accepts_postgres_deparser_grouping_and_casts():
+    environ = {"LEAF_BROKER_STORE": "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    row = next(
+        item
+        for item in rows["constraints"]
+        if item["conname"]
+        == "broker_usage_ledger_engine_seconds_nonnegative_finite"
+    )
+    row["definition"] = (
+        "CHECK (((engine_seconds IS NULL) OR "
+        "((engine_seconds >= (0)::double precision) AND "
+        "(engine_seconds < 'Infinity'::double precision))))"
+    )
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    self_error = (
+        "broker_usage_ledger_engine_seconds_nonnegative_finite:"
+        "definition-mismatch"
+    )
+    assert self_error not in errors["invalid_constraints"]
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
