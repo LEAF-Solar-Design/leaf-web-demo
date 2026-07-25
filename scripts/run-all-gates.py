@@ -558,8 +558,9 @@ def build_suites() -> List[Suite]:
         # keeps them in the gate on a clean checkout.
         # This list must name EVERY platform/tests/*_static.py. The two db_*
         # ones were missing, and because the `platform` suite above is db_gated
-        # they ran NOWHERE on a clean checkout -- 26 dependency-free tests
-        # outside the gate entirely.
+        # they ran NOWHERE on a clean checkout -- 26 tests outside the gate
+        # entirely, 24 of them dependency-free and 2 DB-gated (both skips live
+        # in test_db_primitives_static.py).
         # Explicit file targets, not the dir, so the COLLECTED count stays
         # invariant to DB presence: 61 collected either way, measured on this
         # tree 2026-07-25. The floor below is the EXECUTED count on a host with
