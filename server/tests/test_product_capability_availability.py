@@ -237,9 +237,13 @@ def _website_validator(availability, now: datetime) -> bool:
     the real thing, which uses explicit `Array.isArray` and `!== undefined` checks
     rather than loose truthiness, so the semantics now line up exactly.
 
-    One documented mapping: JS distinguishes `undefined` (absent) from `null`,
-    Python's `.get()` returns None for both. Our payloads never contain null, so
-    the distinction cannot change a verdict here.
+    One documented mapping: JS distinguishes `undefined` (absent) from `null`, while
+    Python's `.get()` returns None for both. That IS handled, via the `_ABSENT`
+    sentinel, and it matters: an earlier version of this note claimed "our payloads
+    never contain null, so the distinction cannot change a verdict here". That was
+    wrong when written. This validator also judges LIVE measurements supplied by the
+    integrator, which are parsed JSON and can carry null, and round 6 found exactly
+    that hole running in the dangerous direction.
     """
     if not _is_record(availability):
         return False
@@ -640,10 +644,21 @@ def test_the_js_parse_model_rejects_what_node_rejects():
     assert got is not None and got.microsecond == 123000
 
 def test_a_trailing_newline_does_not_slip_past_a_python_anchor():
-    r"""Python's `$` also matches just before a trailing newline; JS `$` does not, and
-    `Date.parse` does not trim whitespace either (both verified in node). So
-    `"a"*64 + "\n"` satisfied the digest pattern here while the console refused it,
-    and the same held for timestamps. Both patterns use `\Z` now."""
+    r"""Python's `$` also matches just before a trailing newline; JS `$` does not.
+
+    THE DIGEST was a real hole: `"a"*64 + "\n"` satisfied `^[0-9a-f]{64}$` here while
+    JS `/^[0-9a-f]{64}$/` refused it, so this module accepted a digest the console
+    rejects.
+
+    THE TIMESTAMP was NOT, and an earlier version of this docstring (and of the
+    round-7 commit message) wrongly called the two "equally dangerous". A padded
+    timestamp never actually got through, because `datetime.fromisoformat` rejects it
+    regardless of the regex. Tightening `_ISO_UTC_RE` to `\Z` is defence in depth
+    against a future parser change, not a fix for a live defect. Recording the
+    difference so the next reader does not inherit an inflated claim.
+
+    Both patterns use `\Z` now, and the cases below pin both.
+    """
     for suffix in ("\n", "\r\n", " ", "\t"):
         digest_padded = _shipping("drawing.solve.strings")
         digest_padded["evidence"][0]["digest"]["value"] = "a" * 64 + suffix
