@@ -157,7 +157,9 @@ def test_pending_upload_row_blocks_demo_bootstrap(postgres_authority):
 
     assert manifest is None
     assert upload["status"] == "extracting"
-    assert backend.keys() == []
+    assert backend.keys() == [
+        write_loop.upload_marker_key(tenant, drawing)
+    ]
 
 
 @requires_database
