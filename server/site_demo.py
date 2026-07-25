@@ -51,7 +51,9 @@ SITE_TOOL: Dict[str, Any] = {
                     "over the Panels layer with an NEC 690.7 cold-temperature "
                     "string-size check."),
     "kind": "script",
+    "engine_op": "string_panels",
     "entry": "builtins/string_panels.py",
+    "offline_only": True,
     "params": {
         "type": "object",
         "properties": {

@@ -53,6 +53,7 @@ BUILTIN_OPS: Dict[str, str] = {
     "highlight_near_edge": "highlight_near_edge.py",
     "highlight_panels_near_edge": "highlight_near_edge.py",
     "list_layers": "list_layers.py",
+    "string_panels": "string_panels.py",
 }
 
 _MOD_CACHE: Dict[str, Any] = {}

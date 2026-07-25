@@ -46,11 +46,26 @@ def _live_activity_tools():
     """Return registry tools that use the Design Automation Activity path.
 
     ``canonical_only`` identifies a solver that runs through the canonical
-    worker rather than a live Activity. This preserves ADOPTION.md section 3's
-    distinct real-optimizer contract without requiring it to carry a LISP
-    script that it cannot use.
+    worker rather than a live Activity. ``offline_only`` identifies the one
+    public demo tool that is contractually submitted with APS_LIVE=0 and runs
+    its tracked Python builtin. Neither can use a live Activity.
     """
-    return [tool for tool in _registry_tools() if not tool.get("canonical_only")]
+    return [
+        tool for tool in _registry_tools()
+        if not tool.get("canonical_only") and not tool.get("offline_only")
+    ]
+
+
+def test_offline_only_registry_scope_is_exact_and_immutable():
+    offline = [tool for tool in _registry_tools() if tool.get("offline_only")]
+    assert offline == [{
+        **offline[0],
+        "name": "string-panels",
+        "engine_op": "string_panels",
+        "entry": "builtins/string_panels.py",
+        "capabilities": ["drawing.read"],
+        "offline_only": True,
+    }]
 
 
 def _emitted_script(da_mod, tool):
