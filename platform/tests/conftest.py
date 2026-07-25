@@ -26,6 +26,8 @@ import sys
 
 import pytest
 
+os.environ.setdefault("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+
 _TESTS_DIR = pathlib.Path(__file__).resolve().parent
 _PKG_DIR = _TESTS_DIR.parent            # .../platform
 _REPO_ROOT = _PKG_DIR.parent            # .../leaf-web-demo

@@ -129,7 +129,9 @@ def get_pool() -> ConnectionPool:
                     conninfo=database_url,
                     min_size=1,
                     max_size=5,
+                    max_idle=600,
                     configure=_configure,
+                    check=ConnectionPool.check_connection,
                     kwargs={"row_factory": dict_row},
                     open=True,
                 )

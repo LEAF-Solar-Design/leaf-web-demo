@@ -36,7 +36,11 @@ class UnusedOAuthProvider implements OAuthGrantProvider {
 /** Records the tenant grant it hands back so tests can assert linked-grant use. */
 class RecordingOAuthProvider implements OAuthGrantProvider {
   consulted = 0;
-  constructor(private readonly grant: AgentGrant = { kind: "oauth", oauthToken: "TENANT-LINKED-GRANT" }) {}
+  // PRODUCTION-LENGTH: clears the 24-char redaction floor, so tests that use
+  // this provider actually exercise the linked-grant scrub path. The old
+  // 19-char value sat below the floor and made one test vacuous
+  // (sol-critic PR #123 round 7).
+  constructor(private readonly grant: AgentGrant = { kind: "oauth", oauthToken: "TENANT-LINKED-GRANT-abcdefgh" }) {}
   async getGrant(_tenantId: string): Promise<AgentGrant> {
     this.consulted += 1;
     return this.grant;
@@ -156,7 +160,7 @@ describe("mount your LLM — bring-your-own credential", () => {
     await drain(adapter.runTurn(turnInput({ text: "hi" })));
 
     expect(oauth.consulted).toBe(1);
-    expect(grants[0]).toEqual({ kind: "oauth", oauthToken: "TENANT-LINKED-GRANT" });
+    expect(grants[0]).toEqual({ kind: "oauth", oauthToken: "TENANT-LINKED-GRANT-abcdefgh" });
   });
 
   it("never persists the supplied credential in serialized session state", async () => {
@@ -178,5 +182,115 @@ describe("mount your LLM — bring-your-own credential", () => {
     expect(serializedState(store)).not.toContain(SECRET);
     // The model id is NOT secret and legitimately appears (turn_started event).
     expect(serializedState(store)).toContain("claude-sonnet-5");
+  });
+});
+
+describe("mount your LLM — a credential pasted into the prompt", () => {
+  // A 26-char credential: clears the >=24 floor, but is deliberately invisible to
+  // TOKENISH (not sk-ant-*, under 40 chars), so these tests prove VALUE-based
+  // scrubbing rather than passing by accident on the pattern.
+  const PASTED = "BYO-credential-value-1234!";
+
+  function build() {
+    const runner = new FakeConverseRunner();
+    const store = new FakeSessionStore();
+    const gate = new FakeGateClient();
+    const adapter = new SpineTurnAdapter({
+      oauth: new UnusedOAuthProvider(),
+      appRun: new FakeAppRunClient(),
+      gate,
+      store,
+      runnerFor: () => runner,
+    });
+    return { adapter, runner, store, gate };
+  }
+
+  it("never reaches the model, so it cannot be echoed back", async () => {
+    const { adapter, runner } = build();
+    await drain(
+      adapter.runTurn(
+        turnInput({
+          text: `please use ${PASTED} for me`,
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+
+    // The runner is what talks to the SDK. If the prompt is clean, the model
+    // never sees the value and cannot emit it in a text_delta or a tool param.
+    expect(JSON.stringify(runner.runs)).not.toContain(PASTED);
+    expect(JSON.stringify(runner.runs)).toContain("[REDACTED]");
+  });
+
+  it("is scrubbed out of prior messages too, not just this turn's text", async () => {
+    const { adapter, runner } = build();
+    await drain(
+      adapter.runTurn(
+        turnInput({
+          text: "carry on",
+          messages: [{ role: "user", text: `earlier I said ${PASTED}` }],
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+
+    expect(JSON.stringify(runner.runs)).not.toContain(PASTED);
+  });
+
+  it("never reaches the durable transcript or the wire", async () => {
+    const { adapter, store } = build();
+    const events = await drain(
+      adapter.runTurn(
+        turnInput({
+          text: `key is ${PASTED}`,
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+
+    expect(serializedState(store)).not.toContain(PASTED);
+    expect(JSON.stringify(events)).not.toContain(PASTED);
+  });
+
+  it("keeps every downstream copy IDENTICAL, so approval hashes cannot mismatch", async () => {
+    // This is the property the round-3/4 sink-scrubbing approach could not hold:
+    // it scrubbed the harness copy while the app gate kept the raw one, so the
+    // two args hashes disagreed and approval replay failed as args_mismatch.
+    // Scrubbing the source means every copy derives from the same scrubbed text.
+    const { adapter, runner, store, gate } = build();
+    await drain(
+      adapter.runTurn(
+        turnInput({
+          text: `use ${PASTED} now`,
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+
+    for (const view of [
+      JSON.stringify(runner.runs),
+      JSON.stringify(gate.checks ?? []),
+      serializedState(store),
+    ]) {
+      expect(view).not.toContain(PASTED);
+    }
+  });
+
+  it("leaves ordinary content alone, including token-shaped strings", async () => {
+    // No wire credential, so the PRODUCTION-LENGTH linked grant is resolved and
+    // the scrub path really runs — the earlier version of this test used a
+    // below-floor grant, so it passed even with the scrub removed.
+    //
+    // The 40-char Git SHA is the load-bearing part: the input path must use
+    // LITERAL removal, not the TOKENISH pattern pass, or an ordinary prompt
+    // mentioning a commit would reach the model with it rewritten to
+    // [REDACTED]. (sol-critic PR #123 round 7, blocker 2.)
+    const { adapter, runner } = makeAdapter(new RecordingOAuthProvider());
+    const text =
+      "check commit e3b0c44298fc1c149afbf4c8996fb92427ae41e4 and key sk-ant-api03-looksreal";
+    await drain(adapter.runTurn(turnInput({ text })));
+
+    expect(JSON.stringify(runner.runs)).toContain(text);
+    expect(JSON.stringify(runner.runs)).not.toContain("[REDACTED]");
   });
 });
