@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -49,6 +50,8 @@ def _emit_job_terminal(status: str) -> None:
         emf_metrics.emit_job_terminal(status)
     except Exception:  # noqa: BLE001 - metrics must never break job completion
         pass
+
+logger = logging.getLogger(__name__)
 
 SERVER_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
@@ -1122,13 +1125,25 @@ def orphan_lease_records(tenant_id: Optional[str] = None) -> List[Dict[str, Any]
     return out
 
 
+def _reaper_sweep_once() -> None:
+    """One reaper sweep, best-effort-wrapped. NEVER raises.
+
+    A sweep failure LOGS and retries next interval; it never kills the daemon
+    thread -- the same guarantee the guest-purge daemon documents
+    (guest_uploads.start_purge_daemon). Before this logged, every sweep failure
+    was discarded silently, so the reaper could fail on every interval
+    indefinitely with nothing anywhere reporting it.
+    """
+    try:
+        _reap_orphans_once()
+    except Exception as exc:  # noqa: BLE001 - daemon must survive
+        logger.exception("job-reaper sweep failed: %s", exc)
+
+
 def _reaper_loop() -> None:
     while True:
         time.sleep(REAPER_INTERVAL_S)
-        try:
-            _reap_orphans_once()
-        except Exception:  # noqa: BLE001  pragma: no cover
-            pass
+        _reaper_sweep_once()
 
 
 def ensure_started() -> None:
