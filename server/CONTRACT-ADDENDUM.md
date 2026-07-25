@@ -1315,8 +1315,10 @@ that is never rewritten computes the same digest it did before 2026-07-25.
 Visibility is a separate axis, and it did change on deploy. The authored store
 used to be global to every tenant. `deps.all_tools` now attributes an unscoped
 row to the demo tenant, so a non-demo tenant that could previously resolve a
-legacy authored tool no longer finds it in its fold, and `POST /api/run` answers
-`UNKNOWN_TOOL` rather than a digest mismatch.
+legacy authored tool no longer finds it in its fold. If no other visible catalog
+entry carries that name, `POST /api/run` answers `UNKNOWN_TOOL` rather than a
+digest mismatch. If a lower tier does carry it, that record is what the tenant
+now resolves.
 
 §15.C's other statements are unaffected: the harness path still does NOT persist
 to `server/authored/` or `_AUTHORED`, and `source` / `static_scan` are unchanged.
