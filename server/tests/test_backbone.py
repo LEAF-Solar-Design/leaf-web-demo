@@ -255,11 +255,12 @@ def test_1_run_returns_202_fast(stack):
 
       * the job must still be NON-TERMINAL when the 202 arrives. This is a
         logical implication, not a timing budget: a response that waited for
-        execution could only return once the job was terminal. Slowness in
-        SUBMITTING makes it more certainly non-terminal. The one way load can
-        still flake it is a pause of a full `sleep_s` between the 202 and the
-        status GET two statements later, which is ~6x the worst noise measured
-        above; the other two bounds do not depend on that window at all.
+        execution could only return once the job was terminal. Load can still
+        flake it, but only by a pause of a full `sleep_s` somewhere between the
+        server ACCEPTING the job and the status GET a few statements later --
+        which includes the response's trip back to the client, not just the
+        window after it arrives. That is ~5.8x the worst noise measured above,
+        and the other two bounds do not depend on that window at all.
       * `elapsed < sleep_s`: submitting cannot cost as much as the execution it
         must not wait on.
       * `elapsed - control < sleep_s / 2`, where the control is the same POST
@@ -267,8 +268,9 @@ def test_1_run_returns_202_fast(stack):
         of execution time; load slows both measurements, so common-mode noise
         cancels and the difference stays small.
 
-    The first two bounds each sit about 3x above the worst noise measured above
-    and each fails on its own against a blocking 202 (which costs ~`sleep_s`).
+    Against the 1.72s worst noise measured above, the absolute bound sits 5.8x
+    clear and the delta bound 2.9x, and each of the two fails on its own against
+    a blocking 202 (which costs ~`sleep_s`).
     The third corroborates rather than decides: the control is subtracted
     one-sidedly, so a control that was itself slow shrinks `delta` and the bound
     can pass on a blocking implementation the first two still catch.
@@ -298,17 +300,19 @@ def test_1_run_returns_202_fast(stack):
     r = requests.post(url, json=subject_payload, timeout=120)
     elapsed = time.perf_counter() - t1
 
-    assert control.status_code == 202
-    assert r.status_code == 202
-    body = r.json()
-    assert body["status"] == "submitted"
-    assert body["job_id"]
-
-    # The 202 came back while the job was still executing. A response that
-    # blocked on execution could only return once the job was terminal. The drain
-    # is in `finally` on purpose: a FAILING assertion is exactly when the leak
-    # matters most, because pytest carries straight on into tests 2 through 6.
+    # The `try` opens HERE, on the first statement after both jobs exist. Every
+    # assertion below is inside it, including the ones about the response shape:
+    # a 202 whose body is missing `status` still started a `sleep_s` job, and
+    # failing that assertion outside the guard would leak it into tests 2 to 6.
     try:
+        assert control.status_code == 202
+        assert r.status_code == 202
+        body = r.json()
+        assert body["status"] == "submitted"
+        assert body["job_id"]
+
+        # The 202 came back while the job was still executing. A response that
+        # blocked on execution could only return once the job was terminal.
         rec = requests.get(f"{stack['app']}/api/jobs/{body['job_id']}", timeout=10).json()
         assert rec["status"] not in ("complete", "failed"), (
             f"a {sleep_s:g}s job was already terminal when the 202 arrived "
@@ -325,9 +329,26 @@ def test_1_run_returns_202_fast(stack):
             f"control ({control_elapsed*1000:.0f}ms -> {elapsed*1000:.0f}ms), so "
             f"execution time is leaking into the 202")
     finally:
-        # Nothing this test started may still be executing when it returns.
-        for job_id in (control.json()["job_id"], body["job_id"]):
-            poll_until_terminal(stack, job_id, timeout_s=sleep_s + 30.0)
+        # Nothing this test started may still be executing when it returns. Each
+        # job is drained independently: a failure draining the first must not
+        # skip the second, or the guard leaks the very job it exists to catch.
+        drain_errors = []
+        for resp in (control, r):
+            try:
+                job_id = resp.json().get("job_id")
+            except ValueError:
+                # No parseable body means no job was ever accepted, so there is
+                # nothing to drain. The status_code assertions above report it.
+                continue
+            if not job_id:
+                continue
+            try:
+                poll_until_terminal(stack, job_id, timeout_s=sleep_s + 30.0)
+            except Exception as exc:  # noqa: BLE001 - drain every job, then report
+                drain_errors.append(f"{job_id}: {type(exc).__name__}: {exc}")
+        assert not drain_errors, (
+            "jobs this test started were still running when it returned: "
+            + "; ".join(drain_errors))
 
 
 # --------------------------------------------------------------------------- #
@@ -456,40 +477,44 @@ def _ledger_lines(stack):
     return [l for l in stack["ledger"].read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
-# Reads the tenant_id FIELD out of a line that json.loads could not parse, so a
-# corrupt write can be attributed without resorting to a substring search.
-_TENANT_FIELD_RE = re.compile(r'"tenant_id"\s*:\s*"([^"]*)"')
+def _parses_as_json(line: str) -> bool:
+    try:
+        json.loads(line)
+    except ValueError:
+        return False
+    return True
 
 
-def _ledger_entries_for(stack, tenants) -> list[dict]:
+def _ledger_entries_for(stack, tenants, settle_s: float = 5.0) -> list[dict]:
     """This test's ledger lines, in file order, with unparseable ones NOT hidden.
 
-    Skipping a line that fails json.loads is only safe for lines this test does
-    not own: another tenant's append can be observed half-written. A line that
-    is OURS and is still not valid JSON is a corrupt write, so it fails here
-    instead of vanishing from the count.
+    A malformed line is NOT attributed to a tenant. Two earlier attempts tried:
+    a substring search claimed `ledger-t10`'s half-written line as `ledger-t1`'s,
+    and a `tenant_id` field regex still picked the wrong occurrence on a line
+    carrying the key twice and mangled escaped quotes. The class is the problem,
+    not the pattern -- the field that would say who a broken line belongs to is
+    exactly the field that may be broken.
 
-    Ownership of a malformed line is decided by reading its `tenant_id` FIELD,
-    not by looking for the name anywhere in the text. A substring test would
-    claim `ledger-t10`'s half-written line as `ledger-t1`'s, and would claim any
-    line that merely mentions a tenant name in some other field. A line
-    truncated before its own tenant_id value is genuinely unattributable and is
-    skipped; nothing here can do better than that.
+    So the split is by DURABILITY instead, which needs no attribution and is
+    total. A half-written append completes in microseconds; a corrupt write
+    never does. Any unparseable line is re-read until it parses, and if one
+    survives `settle_s` it is a corrupt write and fails here -- whoever it
+    belongs to. That covers corruption this test's own tenants could never be
+    matched to, which is strictly more than either attribution attempt caught.
     """
     wanted = set(tenants)
-    out = []
-    for line in _ledger_lines(stack):
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            named = _TENANT_FIELD_RE.search(line)
-            assert not (named and named.group(1) in wanted), (
-                f"a ledger line for this test's tenant {named.group(1)!r} is not "
-                f"valid JSON: {line!r}")
-            continue  # not ours, or not attributable: some other append mid-write
-        if entry.get("tenant_id") in wanted:
-            out.append(entry)
-    return out
+    deadline = time.time() + settle_s
+    while True:
+        lines = _ledger_lines(stack)
+        bad = [l for l in lines if not _parses_as_json(l)]
+        if not bad:
+            break
+        assert time.time() < deadline, (
+            f"{len(bad)} ledger line(s) are still not valid JSON after "
+            f"{settle_s:g}s, so they are corrupt writes and not appends caught "
+            f"mid-flight: {bad[:3]!r}")
+        time.sleep(0.25)
+    return [e for e in map(json.loads, lines) if e.get("tenant_id") in wanted]
 
 
 def test_6_ledger_attribution(stack):
@@ -511,7 +536,9 @@ def test_6_ledger_attribution(stack):
     unrelated concurrent work. What is asserted is the full expected SEQUENCE,
     not a per-tenant tally: the three calls are serial and `wait=1`, and the
     broker appends inside /broker/run's own `finally`, so each 200 means that
-    call's line is already on disk and no polling is needed here. That holds in
+    call's line is already on disk -- no waiting for OUR OWN lines to show up.
+    (The helper does settle briefly, but only when it sees a line that will not
+    parse, and only to tell a torn append from a corrupt one.) That holds in
     LEGACY store mode only -- under LEAF_BROKER_STORE=postgres the run completes
     into the shared authority and this file is never written -- which is why the
     `stack` fixture pins the mode rather than inheriting it. Their relative
