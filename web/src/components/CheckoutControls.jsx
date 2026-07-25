@@ -18,7 +18,7 @@ import CheckoutChip from './CheckoutChip.jsx'
 // Calm posture throughout — a checkout is an expected coordination state, never
 // an error. Live only (the parent gates on !mock).
 export default function CheckoutControls({
-  lockedByOther, legacyByOther, heldByUs, unknown, busy, onTake, onRelease, onRetry,
+  lockedByOther, legacyByOther, staleByOther, heldByUs, unknown, busy, onTake, onRelease, onRetry,
 }) {
   if (unknown) {
     return (
@@ -36,6 +36,26 @@ export default function CheckoutControls({
   }
 
   if (lockedByOther) {
+    // The lease looks elapsed, or its `expires` is unreadable. We do not decide
+    // that ourselves (the browser clock is not an authority), so offer a Take and
+    // let the server adjudicate: it either hands over the lock or 409s and the
+    // refetch shows the truth. Without this a stale or malformed record left the
+    // UI permanently locked with no action available.
+    if (staleByOther) {
+      return (
+        <span className="checkout-controls" role="status">
+          <CheckoutChip checkout={lockedByOther} />
+          <span className="checkout-stale">
+            {legacyByOther
+              ? 'held by an older client, and its lease looks expired'
+              : 'this lease looks expired'}
+          </span>
+          <button className="chip-act" onClick={onTake} disabled={busy}>
+            Take edit lock
+          </button>
+        </span>
+      )
+    }
     if (legacyByOther) {
       return (
         <span className="checkout-controls" role="status">

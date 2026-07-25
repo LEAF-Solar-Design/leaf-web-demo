@@ -145,25 +145,36 @@ export function claimHolderId({
     post({ type: 'claim', id: next, claimedAt, nonce })
   }
 
+  // Total order over runtimes: earlier claim wins, and an exact timestamp tie
+  // falls back to the random per-claim nonce. Total matters more than fair here.
+  // Any rule that can return "cannot decide" leaves two live runtimes sharing an
+  // id, which is the whole defect being fixed.
+  const isOlderThanUs = (msg) =>
+    msg.claimedAt < claimedAt ||
+    (msg.claimedAt === claimedAt && String(msg.nonce) < nonce)
+
   const onMessage = (ev) => {
     const msg = ev?.data
     if (!msg || msg.id !== currentId) return
 
     if (msg.type === 'claim') {
-      // Someone else claims an id we are holding, so we answer. We do NOT try to
-      // work out which of us is older: the invariant worth protecting is that two
-      // live runtimes never share an id, and an age tie-break cannot be decided
-      // when both started in the same millisecond. Answering unconditionally
-      // means the incumbent keeps its id in the case that actually happens (a
-      // duplicate starts long after the original), and in the pathological
-      // simultaneous start both step aside, which is wasteful but still safe.
+      // Someone else claims an id we are holding, so we say we hold it, and we
+      // include OUR age so the claimant can tell whether we outrank it.
       post({ type: 'held', id: currentId, claimedAt, nonce })
       return
     }
 
     if (msg.type === 'held') {
-      // An older live runtime owns this id. We are the duplicate: step aside.
-      remint()
+      // Step aside only for a runtime that was here BEFORE us.
+      //
+      // An earlier version reminted on any `held`, which loses the incumbent.
+      // With three tabs sharing an id, B and C claim at once; A answers both, but
+      // B answers C's claim too (B still holds the id at that instant), and A
+      // then obeys B's answer and remints. All three end up on fresh ids and the
+      // server-side lock A actually took is orphaned until it expires, with no
+      // client able to release it. Comparing age makes the outcome total and
+      // deterministic: the oldest runtime keeps the id and every newer one moves.
+      if (isOlderThanUs(msg)) remint()
     }
   }
 
@@ -202,23 +213,76 @@ export function isLegacyHolder(holder) {
 }
 
 /**
- * isCheckoutActive(checkout, nowMs?) -> is this lock still holding anything?
+ * hasHolder(checkout) -> is a holder recorded at all?
  *
- * The server is explicit that "an EXPIRED lock (expires <= now) is free,
- * re-acquirable by anyone" (routers/drawings.py) and its fenced write requires
- * `checkout_expires_at > clock_timestamp()`. A client that ignores `expires`
- * therefore disagrees with the server about who may write: it kept showing a
- * dead lock as live, suppressing writes with no way to clear it. A checkout with
- * no `expires` at all is treated as active, because absent is not the same as
- * elapsed and the safe reading of an unbounded lock is that it still holds.
+ * This, and NOT expiry, is what suppresses writes. See `looksStale` for why the
+ * browser clock is deliberately kept out of that decision.
  */
-export function isCheckoutActive(checkout, nowMs = Date.now()) {
-  if (!checkout || !checkout.holder) return false
+export function hasHolder(checkout) {
+  return !!(checkout && typeof checkout.holder === 'string' && checkout.holder.trim())
+}
+
+/**
+ * looksStale(checkout, nowMs?) -> should we OFFER to take this lock?
+ *
+ * The browser clock is not an authority on whether a lease has elapsed, and an
+ * earlier version of this file made it one: it returned "free" whenever
+ * `expires <= Date.now()`, so an editor whose clock ran two hours fast decided a
+ * live lock was free and re-enabled its own writes. Skew is not hypothetical on
+ * shared machines, and no margin fixes a two-hour error.
+ *
+ * So expiry no longer decides anything. It only decides what we OFFER: when a
+ * lease looks elapsed, or carries an `expires` we cannot read, we show a Take
+ * action and let the SERVER adjudicate. The server already owns this question
+ * ("an EXPIRED lock is free, re-acquirable by anyone", and its fenced write
+ * requires `checkout_expires_at > clock_timestamp()`), so a Take either succeeds
+ * because the server agrees, or returns 409 and the refetch shows the truth.
+ *
+ * Missing or unparseable `expires` counts as stale for this purpose. Treating it
+ * as indefinitely held is what wedged the UI: a `{holder:"legacy", expires:"bad"}`
+ * record left a permanent client-side lock with no Take and no Release. Offering
+ * a Take cannot lose data, because the server rejects a take it disagrees with.
+ */
+export function looksStale(checkout, nowMs = Date.now()) {
+  if (!hasHolder(checkout)) return false
   const raw = checkout.expires
   if (raw === undefined || raw === null || raw === '') return true
   const t = Date.parse(raw)
-  if (Number.isNaN(t)) return true // unparseable: do not silently free the lock
-  return t > nowMs
+  if (Number.isNaN(t)) return true
+  return t <= nowMs
+}
+
+/**
+ * lockState({mock, checkout, unknown, ownHolder, nowMs?}) -> the whole write-lock
+ * decision, as data.
+ *
+ * This lives here, not inline in the component, so the oracle can EXERCISE it
+ * instead of grepping App.jsx for the presence of a token. The previous check
+ * asserted things like /setCheckoutUnknown\(true\)/ against the source, which an
+ * unreachable call satisfies just as well as a correct one, so the oracle was not
+ * load-bearing. Every rule below is now a behaviour a test can pin:
+ *
+ *   - `unknown` (no answer yet, or the read failed) suppresses writes. Fail closed.
+ *   - a recorded holder that is not us suppresses writes, regardless of expiry.
+ *   - expiry never enables a write; it only sets `stale`, which offers a Take that
+ *     the server adjudicates.
+ *   - mock mode holds no locks at all.
+ */
+export function lockState({ mock, checkout, unknown, ownHolder, nowMs = Date.now() }) {
+  if (mock) {
+    return { writeLocked: false, heldByUs: false, otherHeld: null, stale: false, legacy: false, unknown: false }
+  }
+  const held = hasHolder(checkout) ? checkout : null
+  const heldByUs = !!(held && held.holder === ownHolder)
+  const otherHeld = held && !heldByUs ? held : null
+  return {
+    writeLocked: !!otherHeld || !!unknown,
+    heldByUs,
+    otherHeld,
+    stale: !!otherHeld && looksStale(otherHeld, nowMs),
+    legacy: !!otherHeld && isLegacyHolder(otherHeld.holder),
+    unknown: !!unknown,
+  }
 }
 
 export default getSessionHolderId

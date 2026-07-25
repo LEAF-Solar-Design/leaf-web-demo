@@ -8,7 +8,7 @@
 //
 // Run: node scripts/check_checkout_identity.mjs   (from web/)
 import {
-  getSessionHolderId, claimHolderId, isCheckoutActive, isLegacyHolder,
+  getSessionHolderId, claimHolderId, isLegacyHolder, lockState,
   HOLDER_STORAGE_KEY,
 } from '../src/checkoutIdentity.js'
 
@@ -112,120 +112,220 @@ const TENANTS = ['demo-tenant', 'demo', 'acme', 'acme-corp', 'leaf', 'tenant-1',
   else pass('blank stored holder id is re-minted')
 }
 
-// --- (d) a DUPLICATED tab must not keep the incumbent's id --------------------
-// The case (a) above misses entirely: it models two tabs the user OPENED, which
+// --- (d) DUPLICATED tabs must not keep the incumbent's id ---------------------
+// Case (a) above misses this entirely: it models two tabs the user OPENED, which
 // have independent storage. Duplicating a tab COPIES sessionStorage, so the new
 // tab reads the incumbent's id and both believe they hold the lock. Storage alone
 // cannot tell a duplicate from a reload, so the claim channel decides.
-{
-  // A synchronous stand-in for BroadcastChannel: delivers to every peer except
-  // the sender, which is the semantics claimHolderId relies on.
-  const makeHub = () => {
-    const peers = []
-    return {
-      connect() {
-        const listeners = []
-        const peer = {
-          addEventListener: (_t, fn) => { listeners.push(fn) },
-          removeEventListener: (_t, fn) => {
-            const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1)
-          },
-          close() { const i = peers.indexOf(peer); if (i >= 0) peers.splice(i, 1) },
-          postMessage(data) {
-            for (const other of peers) {
-              if (other === peer) continue
-              for (const fn of other._listeners) fn({ data })
-            }
-          },
-          _listeners: listeners,
-        }
-        peers.push(peer)
-        return peer
-      },
-    }
+//
+// The hub below delivers ASYNCHRONOUSLY, one task per message, like a real
+// BroadcastChannel. An earlier version of this check injected a synchronous
+// scheduler, which serialised the handshake and so could never produce the
+// interleaving that actually broke: two duplicates claiming at once.
+function makeAsyncHub() {
+  const peers = []
+  return {
+    connect() {
+      const listeners = []
+      const peer = {
+        addEventListener: (_t, fn) => { listeners.push(fn) },
+        removeEventListener: (_t, fn) => {
+          const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1)
+        },
+        close() { const i = peers.indexOf(peer); if (i >= 0) peers.splice(i, 1) },
+        postMessage(data) {
+          for (const other of peers) {
+            if (other === peer) continue
+            for (const fn of other._listeners) setTimeout(() => fn({ data }), 0)
+          }
+        },
+        _listeners: listeners,
+      }
+      peers.push(peer)
+      return peer
+    },
   }
-
-  const hub = makeHub()
-  const tabA = makeStorage()
-  const idA = getSessionHolderId(tabA)
-  let liveA = idA
-  const claimA = claimHolderId({
-    id: idA, storage: tabA, channel: hub.connect(),
-    onRemint: (n) => { liveA = n }, now: () => 1000,
-    schedule: (fn) => fn(), // sync: production defers a task (see claimHolderId)
-  })
-
-  // The duplication: tab B starts with a COPY of tab A's storage.
-  const tabB = makeStorage({ [HOLDER_STORAGE_KEY]: tabA.getItem(HOLDER_STORAGE_KEY) })
-  const idB = getSessionHolderId(tabB)
-  if (idB !== idA) {
-    fail(`(d) test setup wrong: a copied store should hand back the same id, got ${JSON.stringify(idB)}`)
-  }
-  let liveB = idB
-  const claimB = claimHolderId({
-    id: idB, storage: tabB, channel: hub.connect(),
-    onRemint: (n) => { liveB = n }, now: () => 2000,
-    schedule: (fn) => fn(),
-  })
-
-  if (!claimA.active || !claimB.active) {
-    fail('(d) claimHolderId reported inactive with a channel provided')
-  } else if (liveA === liveB) {
-    fail(`(d) a duplicated tab still shares the incumbent's holder id -> ${JSON.stringify(liveA)}`)
-  } else if (liveA !== idA) {
-    fail(`(d) the incumbent gave up its id (${JSON.stringify(idA)} -> ${JSON.stringify(liveA)}); the duplicate should be the one to remint`)
-  } else {
-    pass(`(d) duplicated tab reminted: incumbent kept ${JSON.stringify(liveA)}, duplicate moved to ${JSON.stringify(liveB)}`)
-  }
-
-  // The remint must be persisted, or the next reload of the duplicate collides again.
-  if (tabB.getItem(HOLDER_STORAGE_KEY) !== liveB) {
-    fail('(d) the duplicate did not persist its reminted holder id')
-  }
-
-  claimA.stop(); claimB.stop()
-
-  // With no channel available, the claim must degrade LOUDLY (active: false)
-  // rather than pretending duplication detection is in place.
-  const noChan = claimHolderId({ id: 'sess-x', storage: makeStorage(), channel: null })
-  if (noChan.active !== false) fail('(d) claim with no channel did not report active: false')
-  else pass('(d) no BroadcastChannel -> claim reports active:false (documented degradation)')
 }
 
-// --- (e) an EXPIRED lock is FREE (the server says so) -------------------------
+const settle = async (ms = 60) => { await new Promise((r) => setTimeout(r, ms)) }
+
+// Spin up N runtimes that all start from a COPY of one seeded store, each with a
+// distinct claim age, and report the ids they end up live on.
+async function runTabs(ages, seedId) {
+  const hub = makeAsyncHub()
+  const tabs = ages.map((age) => {
+    const storage = makeStorage({ [HOLDER_STORAGE_KEY]: seedId })
+    const id = getSessionHolderId(storage)
+    const t = { age, storage, startId: id, liveId: id }
+    t.claim = claimHolderId({
+      id, storage, channel: hub.connect(),
+      onRemint: (n) => { t.liveId = n }, now: () => age,
+    })
+    return t
+  })
+  await settle(120)
+  for (const t of tabs) t.claim.stop()
+  return tabs
+}
+
+// (d1) two tabs: the OLDER keeps the id, the newer moves.
+{
+  const seed = 'sess-SEEDED-ID'
+  const tabs = await runTabs([1000, 2000], seed)
+  const [a, b] = tabs
+  if (a.liveId === b.liveId) fail(`(d1) two duplicated tabs still share an id -> ${JSON.stringify(a.liveId)}`)
+  else if (a.liveId !== seed) fail(`(d1) the incumbent gave up its id (${seed} -> ${JSON.stringify(a.liveId)})`)
+  else if (b.liveId === seed) fail('(d1) the duplicate kept the incumbent id')
+  else pass(`(d1) duplicate stepped aside: incumbent kept ${JSON.stringify(a.liveId)}, duplicate -> ${JSON.stringify(b.liveId)}`)
+  if (b.storage.getItem(HOLDER_STORAGE_KEY) !== b.liveId) fail('(d1) the duplicate did not persist its reminted id')
+}
+
+// (d2) THREE tabs sharing one id. This is the interleaving that broke the
+// previous implementation: it reminted on ANY `held`, so the middle tab answered
+// the newest tab's claim while still holding the id, the incumbent obeyed that
+// answer, and all three ended up on fresh ids. The server-side lock the incumbent
+// actually took was then orphaned until expiry with no client able to release it.
+{
+  const seed = 'sess-THREE-WAY'
+  const tabs = await runTabs([1000, 2000, 3000], seed)
+  const live = tabs.map((t) => t.liveId)
+  const unique = new Set(live)
+  if (unique.size !== 3) fail(`(d2) three tabs did not resolve to three distinct ids -> ${JSON.stringify(live)}`)
+  else if (live[0] !== seed) fail(`(d2) the OLDEST tab lost the id; nobody holds ${seed} -> ${JSON.stringify(live)}`)
+  else pass(`(d2) three-way duplication resolved: oldest kept ${JSON.stringify(seed)}, others reminted`)
+}
+
+// (d3) SIMULTANEOUS claims (identical timestamps) must still resolve to one
+// winner. A rule that cannot decide leaves two live runtimes sharing an id, which
+// is the defect itself; the nonce tiebreak is what makes the order total.
+{
+  const seed = 'sess-SAME-MS'
+  const tabs = await runTabs([5000, 5000, 5000], seed)
+  const live = tabs.map((t) => t.liveId)
+  const unique = new Set(live)
+  if (unique.size !== 3) fail(`(d3) simultaneous claims left runtimes sharing an id -> ${JSON.stringify(live)}`)
+  else if (!live.includes(seed)) fail(`(d3) simultaneous claims orphaned the lock: nobody kept ${seed} -> ${JSON.stringify(live)}`)
+  else pass('(d3) simultaneous claims resolve to exactly one keeper, no sharing')
+}
+
+// (d4) a genuine FIRST tab (no peers) must keep its id and not remint.
+{
+  const hub = makeAsyncHub()
+  const storage = makeStorage()
+  const id = getSessionHolderId(storage)
+  let live = id
+  const claim = claimHolderId({
+    id, storage, channel: hub.connect(), onRemint: (n) => { live = n }, now: () => 1000,
+  })
+  await settle(80)
+  claim.stop()
+  if (live !== id) fail(`(d4) a lone tab reminted with no peer present (${id} -> ${live})`)
+  else pass('(d4) a lone tab keeps its id (reload stability preserved)')
+}
+
+// (d5) stop() must detach the listener, or a closed runtime keeps answering.
+{
+  const hub = makeAsyncHub()
+  const peer = hub.connect()
+  const storage = makeStorage()
+  const id = getSessionHolderId(storage)
+  const claim = claimHolderId({ id, storage, channel: peer, now: () => 1000 })
+  await settle(30)
+  const before = peer._listeners.length
+  claim.stop()
+  if (peer._listeners.length >= before && before > 0) {
+    fail(`(d5) stop() left ${peer._listeners.length} listener(s) attached`)
+  } else pass('(d5) stop() detaches the message listener')
+}
+
+// (d6) no BroadcastChannel -> the claim must degrade LOUDLY, not pretend.
+{
+  const noChan = claimHolderId({ id: 'sess-x', storage: makeStorage(), channel: null })
+  if (noChan.active !== false) fail('(d6) claim with no channel did not report active: false')
+  else pass('(d6) no BroadcastChannel -> active:false (documented degradation)')
+}
+
+// --- (e) the browser clock must NOT decide who may write ----------------------
+// The bug: `expires <= Date.now()` used to free the lock, so an editor whose
+// clock ran two hours fast re-enabled its own writes over a lease the server
+// still considered live. Expiry now only OFFERS a Take, which the server settles.
 {
   const iso = (ms) => new Date(ms).toISOString()
   const now = 1_700_000_000_000
-  const cases = [
-    [{ holder: 'sess-a', expires: iso(now + 60_000) }, true, 'unexpired lock is active'],
-    [{ holder: 'sess-a', expires: iso(now - 1) }, false, 'lock that expired 1ms ago is free'],
-    [{ holder: 'sess-a', expires: iso(now - 3600_000) }, false, 'long-expired lock is free'],
-    [{ holder: 'sess-a' }, true, 'lock with no expires is treated as active'],
-    [{ holder: 'sess-a', expires: 'not-a-date' }, true, 'unparseable expires does not silently free the lock'],
-    [null, false, 'no checkout is not active'],
-    [{ holder: '' }, false, 'checkout with a blank holder is not active'],
-  ]
-  let ok = true
-  for (const [co, want, label] of cases) {
-    const got = isCheckoutActive(co, now)
-    if (got !== want) { fail(`(e) ${label}: expected ${want}, got ${got}`); ok = false }
+  const skewedFast = now + 2 * 3600_000 // this client's clock is 2h ahead
+  const liveLease = { holder: 'sess-other', expires: iso(now + 1800_000) }
+
+  const sane = lockState({ mock: false, checkout: liveLease, unknown: false, ownHolder: 'sess-me', nowMs: now })
+  const skewed = lockState({ mock: false, checkout: liveLease, unknown: false, ownHolder: 'sess-me', nowMs: skewedFast })
+
+  if (!sane.writeLocked) fail('(e) a live lease held by another session did not suppress writes')
+  else if (!skewed.writeLocked) {
+    fail('(e) a 2h-fast clock re-enabled writes over a live lease (clock treated as authority)')
+  } else if (!skewed.stale) {
+    fail('(e) a lease that looks elapsed to this client offers no Take, so the UI can wedge')
+  } else pass('(e) clock skew cannot enable a write; it only offers a Take for the server to settle')
+
+  // Missing / malformed expires must be TAKEABLE, or the UI wedges forever.
+  for (const bad of [undefined, null, '', 'not-a-date']) {
+    const st = lockState({
+      mock: false, checkout: { holder: 'legacy-tenant', expires: bad },
+      unknown: false, ownHolder: 'sess-me', nowMs: now,
+    })
+    if (!st.writeLocked) fail(`(e) expires=${JSON.stringify(bad)} left writes enabled`)
+    if (!st.stale) fail(`(e) expires=${JSON.stringify(bad)} offers no Take -> permanent client-side lock`)
+    if (!st.legacy) fail(`(e) tenant-shaped holder with expires=${JSON.stringify(bad)} not flagged legacy`)
   }
-  if (ok) pass(`(e) expiry is honoured in all ${cases.length} cases`)
+  pass('(e) missing/malformed expires suppresses writes AND offers a Take (no wedge)')
 }
 
 // --- (f) legacy tenant-shaped holders are recognised --------------------------
 {
   let ok = true
   for (const t of TENANTS) {
-    if (!isLegacyHolder(t)) { fail(`(f) tenant-shaped holder not flagged as legacy -> ${JSON.stringify(t)}`); ok = false }
+    if (!isLegacyHolder(t)) { fail(`(f) tenant-shaped holder not flagged legacy -> ${JSON.stringify(t)}`); ok = false }
   }
-  if (isLegacyHolder('sess-abc')) { fail('(f) a session id was flagged as legacy'); ok = false }
-  if (isLegacyHolder('')) { fail('(f) blank holder flagged as legacy'); ok = false }
-  if (isLegacyHolder(null)) { fail('(f) null holder flagged as legacy'); ok = false }
+  if (isLegacyHolder('sess-abc')) { fail('(f) a session id was flagged legacy'); ok = false }
+  if (isLegacyHolder('')) { fail('(f) blank holder flagged legacy'); ok = false }
+  if (isLegacyHolder(null)) { fail('(f) null holder flagged legacy'); ok = false }
   if (ok) pass('(f) legacy tenant-shaped holders are distinguished from session ids')
 }
 
-// --- the App must no longer derive the holder from the tenant -----------------
+// --- (g) the lock must FAIL CLOSED, tested as BEHAVIOUR -----------------------
+// These were source regexes before, which an unreachable call satisfies as well
+// as a correct one. They now exercise lockState directly.
+{
+  const me = 'sess-me'
+  const cases = [
+    // [label, args, expected writeLocked]
+    ['unknown with no checkout yet (first load, request in flight)',
+      { mock: false, checkout: null, unknown: true, ownHolder: me }, true],
+    ['unknown after a failed read',
+      { mock: false, checkout: null, unknown: true, ownHolder: me }, true],
+    ['answered: nobody holds it',
+      { mock: false, checkout: null, unknown: false, ownHolder: me }, false],
+    ['another session holds it',
+      { mock: false, checkout: { holder: 'sess-other' }, unknown: false, ownHolder: me }, true],
+    ['we hold it',
+      { mock: false, checkout: { holder: me }, unknown: false, ownHolder: me }, false],
+    ['mock mode never locks',
+      { mock: true, checkout: { holder: 'sess-other' }, unknown: true, ownHolder: me }, false],
+    ['blank holder is not a lock',
+      { mock: false, checkout: { holder: '   ' }, unknown: false, ownHolder: me }, false],
+  ]
+  let ok = true
+  for (const [label, args, want] of cases) {
+    const got = lockState(args).writeLocked
+    if (got !== want) { fail(`(g) ${label}: writeLocked expected ${want}, got ${got}`); ok = false }
+  }
+  if (ok) pass(`(g) writeLocked fails closed across all ${cases.length} states`)
+
+  // heldByUs must never be true for someone else's lock (the original tenant bug).
+  if (lockState({ mock: false, checkout: { holder: 'sess-other' }, unknown: false, ownHolder: me }).heldByUs) {
+    fail('(g) heldByUs true for another session -> a Release button for a lock we never took')
+  } else pass('(g) heldByUs is false for another session (the original defect stays closed)')
+}
+
+// --- the App must delegate to lockState and start the claim -------------------
 {
   const fs = await import('node:fs/promises')
   const app = await fs.readFile(new URL('../src/App.jsx', import.meta.url), 'utf8')
@@ -234,45 +334,25 @@ const TENANTS = ['demo-tenant', 'demo', 'acme', 'acme-corp', 'leaf', 'tenant-1',
     fail('App.jsx still derives ownHolder from the tenant')
   } else if (!/getSessionHolderId\(\)/.test(app)) {
     fail('App.jsx does not compute ownHolder from getSessionHolderId()')
-  } else if (!/from\s+['"]\.\/checkoutIdentity\.js['"]/.test(app)) {
-    fail('App.jsx does not import ./checkoutIdentity.js')
-  } else {
-    pass('App.jsx computes ownHolder from getSessionHolderId(), not the tenant')
-  }
+  } else pass('App.jsx computes ownHolder from getSessionHolderId(), not the tenant')
 
-  // --- (g) the lock must FAIL CLOSED on a failed read -------------------------
-  // Source-level because the behaviour lives in a React callback, and the exact
-  // regression (an error mapping to "no lock") is a one-line edit away.
-  if (!/setCheckoutUnknown\(true\)/.test(app)) {
-    fail('(g) App.jsx never sets checkoutUnknown(true): a failed lock read cannot fail closed')
-  } else if (!/const\s+writeLocked\s*=[^\n]*checkoutUnknown/.test(app)) {
-    fail('(g) writeLocked does not consider checkoutUnknown, so a failed read re-enables writes')
-  } else {
-    pass('(g) a failed lock read sets checkoutUnknown and suppresses writes (fails closed)')
-  }
+  // Wiring assertions only. The BEHAVIOUR is covered by (d)-(g) above; these just
+  // confirm App.jsx routes through the tested code instead of re-deriving it.
+  if (!/lockState\(/.test(app)) fail('App.jsx does not use lockState, so the tested decision is bypassed')
+  else pass('App.jsx delegates the write-lock decision to lockState')
 
-  // The claim must actually be started, or duplicate detection is dead code.
-  if (!/claimHolderId\(/.test(app)) {
-    fail('(g) App.jsx never calls claimHolderId, so a duplicated tab is never detected')
-  } else {
-    pass('(g) App.jsx starts the holder claim')
-  }
+  if (!/claimHolderId\(/.test(app)) fail('App.jsx never calls claimHolderId, so duplicate tabs go undetected')
+  else pass('App.jsx starts the holder claim')
 
-  // Expiry must be applied in the App, not just available in the module.
-  if (!/isCheckoutActive\(/.test(app)) {
-    fail('(g) App.jsx never calls isCheckoutActive, so an expired lock still suppresses writes')
-  } else {
-    pass('(g) App.jsx applies isCheckoutActive to the raw checkout')
-  }
+  if (!/useState\(true\)/.test(app) || !/checkoutUnknown/.test(app)) {
+    fail('checkoutUnknown does not start true, so writes are enabled while the first read is in flight')
+  } else pass('checkoutUnknown starts true (unknown until answered)')
 
-  // Out-of-order reads must be dropped.
-  if (!/checkoutSeqRef/.test(app)) {
-    fail('(g) no sequence guard on the checkout read: a stale response can overwrite fresh lock state')
-  } else {
-    pass('(g) checkout reads carry a sequence guard against out-of-order responses')
-  }
+  if (!/checkoutSeqRef\.current/.test(app)) {
+    fail('no sequence comparison on the checkout read: a stale response can overwrite fresh state')
+  } else pass('checkout reads compare a sequence guard against out-of-order responses')
 
-  // Purity: node imported it, but be explicit so a future edit can't sneak a
+  // Purity: node imported it, but be explicit so a future edit cannot sneak a
   // bundler-only dependency into the module (mirrors check_errors.mjs).
   const src = await fs.readFile(new URL('../src/checkoutIdentity.js', import.meta.url), 'utf8')
   if (/import\.meta/.test(src)) fail('checkoutIdentity.js references import.meta')

@@ -26,7 +26,7 @@ import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } fro
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import {
-  getSessionHolderId, claimHolderId, isCheckoutActive, isLegacyHolder,
+  getSessionHolderId, claimHolderId, lockState,
 } from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
@@ -266,10 +266,15 @@ export default function App() {
   // --- single-writer checkout lock (item 3) ---
   const [checkout, setCheckout] = useState(null)         // {holder, acquired, expires} | null (from /versions)
   const [checkoutBusy, setCheckoutBusy] = useState(false) // take/release request in flight (3B)
-  // We asked for the lock state and did not get an answer. Distinct from
-  // `checkout === null` (answered: nothing held) so a read failure can fail
-  // CLOSED instead of reading as "free". See loadCheckout.
-  const [checkoutUnknown, setCheckoutUnknown] = useState(false)
+  // We do not know the lock state. Distinct from `checkout === null` (answered:
+  // nothing held) so a read failure can fail CLOSED instead of reading as "free".
+  //
+  // Starts TRUE, and that is the point. Starting false meant the whole window
+  // before the first read landed was indistinguishable from "nobody holds it":
+  // on live startup, with /versions still in flight and another session actually
+  // holding the lock, write actions were enabled. Unknown-until-answered closes
+  // that window; mock mode clears it immediately in loadCheckout.
+  const [checkoutUnknown, setCheckoutUnknown] = useState(true)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
@@ -382,27 +387,16 @@ export default function App() {
   const rawCheckout = demoLocked
     ? { holder: 'another-session', acquired: new Date().toISOString(), expires: new Date(Date.now() + 3600e3).toISOString() }
     : checkout
-  // An EXPIRED lock is free server-side ("re-acquirable by anyone", and its
-  // fenced write requires checkout_expires_at > clock_timestamp()). Treating it
-  // as live is how a dead lock used to disable writes with no way to clear it.
-  const activeCheckout = isCheckoutActive(rawCheckout) ? rawCheckout : null
-  const otherHeldCheckout =
-    (activeCheckout && activeCheckout.holder !== ownHolder) ? activeCheckout : null
-  // FAIL CLOSED. `checkoutUnknown` means we asked and did not get an answer, so
-  // we do not know whether someone else is writing. The old code mapped that to
-  // `null` (no lock) and enabled writes, which is a lock that fails open: the
-  // one failure mode with no visible symptom. Unknown suppresses writes; the
-  // banner tells the user why, so this is not a silent disable either.
-  const writeLocked = !mock && (!!otherHeldCheckout || checkoutUnknown)
-  // We hold the single-writer lock (3B): our own holder id owns the checkout.
-  // Not a lock on us (write-Run stays enabled) — it just offers a Release.
-  const heldByUs = !mock && !!(activeCheckout && activeCheckout.holder === ownHolder)
-  // A lock minted by a pre-session-id client. It is not ours and we cannot
-  // release it, but naming it beats an unexplained disabled button; the server's
-  // 24h TTL cap drains these on its own now that we honour `expires`.
-  const legacyHeldCheckout = otherHeldCheckout && isLegacyHolder(otherHeldCheckout.holder)
-    ? otherHeldCheckout
-    : null
+  // The whole decision lives in lockState (checkoutIdentity.js) so the oracle can
+  // exercise it rather than grep this file for a token. Expiry deliberately does
+  // NOT enter writeLocked: the browser clock is not an authority on whether a
+  // lease elapsed, so it only drives the Take offer, which the server adjudicates.
+  const lock = lockState({ mock, checkout: rawCheckout, unknown: checkoutUnknown, ownHolder })
+  const otherHeldCheckout = lock.otherHeld
+  const writeLocked = lock.writeLocked
+  const heldByUs = lock.heldByUs
+  const staleHeldCheckout = lock.stale ? lock.otherHeld : null
+  const legacyHeldCheckout = lock.legacy ? lock.otherHeld : null
 
   // Current open project's display name (from the hydration payload, else the list).
   const currentProjectName = openProjectId
@@ -2099,6 +2093,7 @@ export default function App() {
                 <CheckoutControls
                   lockedByOther={otherHeldCheckout}
                   legacyByOther={!!legacyHeldCheckout}
+                  staleByOther={!!staleHeldCheckout}
                   heldByUs={heldByUs}
                   unknown={checkoutUnknown}
                   busy={checkoutBusy}
