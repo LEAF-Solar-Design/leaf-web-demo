@@ -587,6 +587,8 @@ tools are ALREADY registered into the TENANT repo by the harness build route, so
 surface in `/api/tools` via §15.B's fold — the app does NOT persist them to the local
 `server/authored/` store or `_AUTHORED`. The template path (local persistence into
 `server/authored/<name>.py` + `authored_tools.json`) is UNCHANGED.
+**[SUPERSEDED: see §23. The flat path above stopped being true on 2026-07-25.
+This sentence is left unedited because §15 is frozen.]**
 
 ### D. NL-router alternatives + build-intent boost (Contract 4)
 
@@ -1244,3 +1246,36 @@ envelope. Native APS `onComplete` cannot generate it, so
 submitting a WorkItem and without silently reverting to polling. Polling remains
 the only active completion mode until an APS-to-Leaf translation adapter owns
 output metadata, pending-job leases and heartbeats, and concurrency accounting.
+
+## §23 Authored-body persistence is per-tenant (supersedes §15.C)
+
+Ruling: operator, 2026-07-25. Shipped by PR #131 (merged 2026-07-25), which
+changed no documentation. §15.C is frozen, so its now-false sentence stays as
+written and this section carries the correct contract.
+
+The template author path no longer persists to a flat `server/authored/<name>.py`.
+A template-authored body is written to
+`server/authored/<sha256(tenant_id)[:32]>/<name>.py`, where the directory name is
+the first 32 hex characters of the SHA-256 of the exact tenant id. The registry
+entry points at that file: `tool['entry']` is `authored/<dir>/<name>.py`, still
+stored relative to `server/` so the broker resolves it regardless of cwd. The
+tool also carries `tenant_id`, and the `authored_tools.json` store dedups on
+`(tenant_id, name)` rather than on `name`.
+
+This is a security fix, not a layout preference. A flat path let tenant B
+overwrite tenant A's file, and a name-only dedup evicted A's catalog entry, so B
+could hijack A's tool by name. The directory name is a hash rather than a slug
+because character substitution is not injective: `tenant.a` and `tenant_a` would
+collide onto one directory and re-open the same overwrite. Hex output is also
+inherently path-safe and can never be `.` or `..`.
+
+Wire consequence, and the reason this warranted a ruling: `entry` is not
+internal. `deps.catalog_tool_view` spreads the whole tool, so `entry` is
+serialized by `GET /api/tools`, and `deps.catalog_tool_digest` hashes every key
+except `catalog_digest`, so the `entry` value is inside the digest that GET
+issues and `POST /api/run` requires again. A template-authored tool's
+`catalog_digest` therefore changed. Callers that cached a digest across the
+2026-07-25 boundary must re-read the catalog.
+
+§15.C's other statements are unaffected: the harness path still does NOT persist
+to `server/authored/` or `_AUTHORED`, and `source` / `static_scan` are unchanged.
