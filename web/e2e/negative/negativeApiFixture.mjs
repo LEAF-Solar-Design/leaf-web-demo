@@ -108,7 +108,7 @@ export async function installNegativeApi(page, { approval = null, run = null } =
         result = json({ turn_id: 'turn-2', status: 'started' }, 202)
       }
     } else {
-      result = catProofResponse({ method, path, body }, state)
+      result = catProofResponse({ method, path, body, query: Object.fromEntries(url.searchParams) }, state)
     }
 
     if (result.body?.job_id) evidence.returnedJobIds.push(result.body.job_id)

@@ -29,7 +29,7 @@ test('real local stack opens the unified surface without fixture interception', 
   await page.goto('/try')
   await expect(page).toHaveURL(/\/try$/)
   await expect(page.getByTestId('operator-surface')).toBeVisible()
-  await expect(page.getByTestId('operator-phase')).toContainText('Backend ready', { timeout: 15_000 })
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   await expect(page.getByText('Panels preserved').locator('..')).not.toContainText('pending')
   expect(observed).toContain('GET /api/session 200')
 

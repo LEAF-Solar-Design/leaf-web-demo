@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useSyncExternalStore } from 'react'
 
 import {
   getClaudeGrant,
@@ -36,17 +36,24 @@ export default function usePlatformTrustController({
   quotaAt = 0,
   quotaPollIntervalMs = 60_000,
 } = {}) {
-  const controller = useMemo(() => createPlatformTrustController({
-    mock,
-    services: { ...defaultServices, ...services },
-    formatError,
-    now,
-    onAuthRequired,
-  }), [formatError, now, onAuthRequired, services])
+  const controllerRef = useRef(null)
+  if (!controllerRef.current) {
+    controllerRef.current = createPlatformTrustController({
+      mock,
+      services: { ...defaultServices, ...services },
+      formatError,
+      now,
+      onAuthRequired,
+    })
+  }
+  const controller = controllerRef.current
 
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
 
-  useEffect(() => () => controller.destroy(), [controller])
+  useEffect(() => {
+    controller.start()
+    return () => controller.destroy()
+  }, [controller])
 
   useEffect(() => {
     controller.setMock(mock)

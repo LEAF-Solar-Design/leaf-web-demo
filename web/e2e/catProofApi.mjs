@@ -10,7 +10,7 @@ const server = createServer(async (request, response) => {
   let body = {}
   try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') } catch { body = {} }
   const url = new URL(request.url || '/', `http://127.0.0.1:${port}`)
-  const result = catProofResponse({ method: request.method || 'GET', path: url.pathname, body }, state)
+  const result = catProofResponse({ method: request.method || 'GET', path: url.pathname, body, query: Object.fromEntries(url.searchParams) }, state)
   response.statusCode = result.status
   response.setHeader('Access-Control-Allow-Origin', '*')
   response.setHeader('Access-Control-Allow-Headers', '*')

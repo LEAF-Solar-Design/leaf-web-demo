@@ -23,7 +23,7 @@ test('shared conversation controller reattaches once after a stale session', asy
         return
       }
     }
-    const result = catProofResponse({ method: request.method(), path: url.pathname, body }, proofState)
+    const result = catProofResponse({ method: request.method(), path: url.pathname, body, query: Object.fromEntries(url.searchParams) }, proofState)
     await route.fulfill({
       status: result.status,
       contentType: result.body == null ? undefined : 'application/json',

@@ -240,8 +240,18 @@ Progress:
   interfaces and now own the corresponding `/app` state. Their 22 focused tests,
   the 10-test fixture suite, the managed real-stack smoke, production build,
   behavior pins, customization checks, and all four staging-fix checks pass.
-- Provider lifting and mounting the capability panels on `/try` remain open
-  before Wave 1 and the capability-panel wave are complete.
+- `/try` now mounts the registered catalog, immutable run-intent review, shared
+  job rail, version history and read-only preview, backend health, Claude grant
+  kind, usage cap, and entitlement gate in the persistent three-column scene.
+  The aggregate contract walk covers a catalog read run followed by proposal,
+  approval, cat write, version preview, trust refresh, undo, and redo. The
+  10-test fixture suite, focused trust lifecycle tests, production build,
+  behavior pins, customization checks, and all staging-fix checks pass.
+- The shared platform-trust adapter is now safe under React Strict Mode's
+  setup-cleanup-setup lifecycle. This fixed a real state-loss defect found by
+  the aggregate browser walk.
+- Provider lifting, projects, authoring, checkout, selection, layer controls,
+  upload, account mutation, and tenant operations remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

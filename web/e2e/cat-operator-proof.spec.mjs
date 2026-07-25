@@ -28,7 +28,7 @@ test('operator request produces an approved cat version and undo restores its pa
     const url = new URL(request.url())
     apiEndpoints.push(`${request.method()} ${url.pathname}`)
     const body = request.postData() ? request.postDataJSON() : {}
-    const result = catProofResponse({ method: request.method(), path: url.pathname, body }, proofState)
+    const result = catProofResponse({ method: request.method(), path: url.pathname, body, query: Object.fromEntries(url.searchParams) }, proofState)
     return route.fulfill({
       status: result.status,
       contentType: result.body == null ? undefined : 'application/json',

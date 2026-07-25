@@ -192,3 +192,22 @@ test('unknown policy stays permissive while explicit denials and degraded health
   expect(classifyHealth({ ok: false })).toEqual({ status: 'degraded', degraded: true })
   expect(classifyHealth({ ok: true })).toEqual({ status: 'healthy', degraded: false })
 })
+
+test('controller restarts after a framework lifecycle cleanup', async () => {
+  let healthReads = 0
+  const controller = createPlatformTrustController({
+    services: {
+      getHealth: async () => {
+        healthReads += 1
+        return { ok: true }
+      },
+    },
+  })
+
+  controller.destroy()
+  controller.start()
+  await controller.loadHealth()
+
+  expect(healthReads).toBe(1)
+  expect(controller.getSnapshot().health).toEqual({ ok: true })
+})

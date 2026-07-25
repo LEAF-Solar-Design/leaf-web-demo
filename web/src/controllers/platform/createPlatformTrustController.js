@@ -248,6 +248,9 @@ export function createPlatformTrustController({
     refreshAll,
     isEntitled: (key, fallback = true) => entitlementAllowed(state.entitlements, key, fallback),
     getHealthStatus: () => classifyHealth(state.health),
+    start() {
+      destroyed = false
+    },
     destroy() {
       destroyed = true
       for (const name of RESOURCE_NAMES) begin(name)

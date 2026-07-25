@@ -6,6 +6,31 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..', '..')
 
 export const REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
+export const CAT_TOOL = {
+  name: 'arrange-panels-as-cat',
+  version: '1.0.0',
+  description: 'Rearrange existing panels into a sitting cat.',
+  kind: 'script',
+  capabilities: ['drawing.write'],
+  params: {
+    type: 'object',
+    properties: {
+      template: { type: 'string', default: 'sitting-v1' },
+      drawing_id: { type: 'string', default: 'cat-panels' },
+      expected_head: { type: 'number', default: 1 },
+    },
+  },
+  provenance: { author: 'user' },
+}
+export const COUNT_TOOL = {
+  name: 'count-panels',
+  version: '1.0.0',
+  description: 'Count every panel in the current drawing.',
+  kind: 'script',
+  capabilities: ['drawing.read'],
+  params: { type: 'object', properties: {} },
+  provenance: { author: 'user' },
+}
 
 function readPbm(path) {
   const tokens = readFileSync(path, 'utf8')
@@ -50,20 +75,49 @@ export function makeCatProofState() {
     ...base,
     polylines: handles.map((handle, index) => panel(handle, points[index][0], points[index][1])),
   }
-  return { base, cat, count: handles.length, head: 1, events: [] }
+  return { base, cat, count: handles.length, head: 1, events: [], catalogJob: false }
 }
 
-export function catProofResponse({ method, path, body = {} }, state) {
+export function catProofResponse({ method, path, body = {}, query = {} }, state) {
   const json = (value, status = 200) => ({ status, body: value })
   if (method === 'OPTIONS') return { status: 204, body: null }
   if (path === '/api/session') return json({ intake: state.base, tenant_id: 'cat-litmus-tenant', tier: 'proof', org_id: 'cat-proof-org' })
-  if (path === '/api/tools') return json({ tools: [] })
-  if (path === '/api/capabilities') return json({ families: [] })
+  if (path === '/api/tools') return json({ tools: [COUNT_TOOL, CAT_TOOL] })
+  if (path === '/api/capabilities') return json({
+    families: [{
+      family_id: 'drawing-tools',
+      label: 'Drawing tools',
+      description: 'Read and transform the current drawing.',
+      capabilities: [COUNT_TOOL, CAT_TOOL],
+    }],
+    source: 'registry',
+  })
   if (path === '/api/entitlements') return json({ tier: 'proof', entitlements: { run_read: true, run_write: true, build: true, converse: true } })
-  if (path === '/api/tenant/claude-grant') return json({ linked: true, linked_at: '2026-07-24T12:00:00Z' })
+  if (path === '/api/tenant/claude-grant') return json({ linked: true, kind: 'oauth', linked_at: '2026-07-24T12:00:00Z' })
   if (path === '/api/health') return json({ ok: true, aps_live: false, n_tools: 1, n_authored: 1 })
-  if (path === '/api/usage') return json({ today: { runs: state.head - 1, usd_est: 0 }, total: { runs: state.head - 1, usd_est: 0 } })
-  if (path === '/api/jobs') return json({ jobs: [] })
+  if (path === '/api/usage') return json({
+    today: { runs: state.head - 1, usd_est: 0 },
+    total: { runs: state.head - 1, usd_est: 0 },
+    cap: { usd_cap: 10, remaining: 10, enabled: true },
+  })
+  if (path === '/api/jobs') return json({
+    jobs: state.catalogJob
+      ? [{ job_id: 'catalog-job-0001', status: 'complete', tool: 'count-panels', elapsed_ms: 120 }]
+      : [],
+  })
+  if (path === '/api/run' && method === 'POST' && body.tool === 'count-panels') {
+    state.catalogJob = true
+    return json({ job_id: 'catalog-job-0001' }, 202)
+  }
+  if (path === '/api/jobs/catalog-job-0001' && method === 'GET') return json({
+    job_id: 'catalog-job-0001', status: 'complete', tool: 'count-panels', elapsed_ms: 120,
+    result: {
+      ok: true, tool: 'count-panels', version: '1.0.0', timing_ms: 120,
+      cost: null, error: null, degraded_mode: false, overlay: null,
+      result: { count: state.count, layers: { PANELS: state.count } },
+    },
+  })
+  if (path === '/api/jobs/catalog-job-0001/stream') return { status: 204, body: null }
   if (path === '/api/nl-prompt' && method === 'POST') return json({ lane: 'build', tool: null, params: {}, confidence: 0.42, rationale: 'The assistant must plan a controlled drawing write.', alternatives: [] })
   if (path === '/api/sessions' && method === 'POST') return json({ session_id: 'cat-session', status: 'idle', created_at: '2026-07-24T12:00:00Z' })
   if (path === '/api/sessions/cat-session/messages' && method === 'POST') {
@@ -97,7 +151,17 @@ export function catProofResponse({ method, path, body = {} }, state) {
       result: { ok: true, tool: 'arrange-panels-as-cat', version: '1.0.0', timing_ms: 5240, cost: null, error: null, degraded_mode: false, overlay: null, result: { panels_preserved: state.count, cat_oracle: { verdict: 'pass', template: 'sitting-v1', iou: 1, outline_chamfer_px: 0, overlap_pixels: 0 }, new_version: { drawing_id: 'cat-panels', version: 2, parent: 1 } } },
     })
   }
-  if (path === '/api/drawings/cat-panels/intake') return json({ drawing_id: 'cat-panels', intake: state.head === 2 ? state.cat : state.base, version: state.head, head: state.head, latest: 2 })
+  if (path === '/api/drawings/cat-panels/intake') {
+    const requested = query.version
+    const shownVersion = requested && requested !== 'head' ? Number(requested) : state.head
+    return json({
+      drawing_id: 'cat-panels',
+      intake: shownVersion === 2 ? state.cat : state.base,
+      version: shownVersion,
+      head: state.head,
+      latest: 2,
+    })
+  }
   if (path === '/api/drawings/cat-panels/versions') return json({
     drawing_id: 'cat-panels', head: state.head, latest: 2, checkout: null,
     versions: [
