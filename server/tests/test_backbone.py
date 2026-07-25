@@ -257,8 +257,17 @@ def test_1_run_returns_202_fast(stack):
         of execution time; load slows both measurements, so common-mode noise
         cancels and the difference stays small.
 
-    Each bound sits about 3x above the worst noise measured above and fails hard
-    on the regression it exists to catch (a blocking 202 costs ~`sleep_s`).
+    The first two bounds each sit about 3x above the worst noise measured above
+    and each fails on its own against a blocking 202 (which costs ~`sleep_s`).
+    The third corroborates rather than decides: the control is subtracted
+    one-sidedly, so a control that was itself slow shrinks `delta` and the bound
+    can pass on a blocking implementation the first two still catch.
+
+    The test DRAINS its own job before returning. A `sleep_s` job left executing
+    is exactly the leak this file was flaking on: its ledger line and its worker
+    lane outlive the test that made them, and tests 2 through 6 then run against
+    state test 1 owns. Waiting costs `sleep_s` of gate time and is what keeps
+    this test from becoming the next test_3.
     """
     sleep_s = 10.0
     url = f"{stack['app']}/api/run"
@@ -300,6 +309,12 @@ def test_1_run_returns_202_fast(stack):
         f"submitting a {sleep_s:g}s job cost {delta*1000:.0f}ms more than the 0s "
         f"control ({control_elapsed*1000:.0f}ms -> {elapsed*1000:.0f}ms), so "
         f"execution time is leaking into the 202")
+
+    # Drain both jobs so nothing this test started is still executing when it
+    # returns. Without this, the `sleep_s` job holds a worker lane and appends
+    # its ledger line while tests 2 through 6 are running.
+    for job_id in (control.json()["job_id"], body["job_id"]):
+        poll_until_terminal(stack, job_id, timeout_s=sleep_s + 30.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -429,13 +444,22 @@ def _ledger_lines(stack):
 
 
 def _ledger_entries_for(stack, tenants) -> list[dict]:
+    """This test's ledger lines, in file order, with unparseable ones NOT hidden.
+
+    Skipping a line that fails json.loads is only safe for lines this test does
+    not own: another tenant's append can be observed half-written. A line that
+    names one of OUR tenants and is still not valid JSON is a corrupt write, so
+    it fails here instead of vanishing from the count.
+    """
     wanted = set(tenants)
     out = []
     for line in _ledger_lines(stack):
         try:
             entry = json.loads(line)
-        except ValueError:  # a partially flushed line is not this test's business
-            continue
+        except ValueError:
+            assert not any(t in line for t in wanted), (
+                f"a ledger line naming this test's tenants is not valid JSON: {line!r}")
+            continue  # some other tenant's append, caught mid-write
         if entry.get("tenant_id") in wanted:
             out.append(entry)
     return out
@@ -448,20 +472,23 @@ def test_6_ledger_attribution(stack):
     line count. Earlier tests leave real /broker/run calls IN FLIGHT: test_3 runs
     a 6s job under JOB_MAX_S=2, and the app abandons each timed-out attempt while
     the broker keeps executing it (jobs.py `_run_job`: the inner thread is a
-    daemon and the retry path re-dispatches, so one test_3 job makes
-    JOB_MAX_ATTEMPTS=3 distinct broker runs, each appending its own line ~6s
-    later). Those are correct writes, one per run, but they land AFTER test_3
+    daemon and the retry path re-dispatches, so one test_3 job makes up to
+    JOB_MAX_ATTEMPTS distinct broker runs -- 3 by default, and the env can raise
+    it -- each appending its own line ~6s later). Those are correct writes, one
+    per run, but they land AFTER test_3
     returned. A global count therefore reads them as extra lines and fails
     nondeterministically: CI showed `assert 10 == (6 + 3)`, and a local serial
     baseline of this file reproduced the same shape 3 times in 25 runs.
 
-    Filtering by tenant keeps the invariant EXACT (an extra write for a tenant,
-    a missing one, or a misattributed one all still fail) while making it immune
-    to unrelated concurrent work. It also drops the old positional check, which
-    assumed this test's three lines were contiguous and in order; a straggler
-    landing between them was observed to break that too. The broker appends the
-    line inside /broker/run's own `finally`, so a `wait=1` 200 means the line is
-    already on disk and no polling is needed here.
+    Filtering by tenant keeps the invariant EXACT while making it immune to
+    unrelated concurrent work. What is asserted is the full expected SEQUENCE,
+    not a per-tenant tally: the three calls are serial and `wait=1`, and the
+    broker appends inside /broker/run's own `finally`, so each 200 means that
+    call's line is already on disk and no polling is needed here. Their relative
+    order is therefore fixed, and checking it is what catches two runs whose
+    attribution was SWAPPED -- a tally still sees one line per tenant and passes.
+    Only the old GLOBAL contiguity assumption was an accident of scheduling;
+    order WITHIN the filtered lines is real coverage and is kept.
     """
     n_runs = 3
     tenants = [f"ledger-t{i}" for i in range(n_runs)]
@@ -475,16 +502,15 @@ def test_6_ledger_attribution(stack):
     assert len(mine) == n_runs, (
         f"exactly one line per /broker/run: {n_runs} runs produced {len(mine)} "
         f"line(s) for {tenants}")
-    by_tenant: dict[str, list[dict]] = {}
+    # One equality covers all four ways attribution can be wrong: an extra line,
+    # a missing line, a misattributed line, and two lines whose tenants were
+    # swapped. A per-tenant tally would pass the swap.
+    assert [e["tenant_id"] for e in mine] == tenants, (
+        f"ledger attribution does not match the order the runs were made: "
+        f"expected {tenants}, got {[e['tenant_id'] for e in mine]}")
     for entry in mine:
-        by_tenant.setdefault(entry["tenant_id"], []).append(entry)
-    for tenant in tenants:
-        entries = by_tenant.get(tenant, [])
-        assert len(entries) == 1, (
-            f"exactly one line per /broker/run: tenant {tenant} ran once but has "
-            f"{len(entries)} ledger line(s)")
-        assert entries[0]["tool"] == "count-by-layer"
-        assert entries[0]["engine_op"] == "count_by_layer"
+        assert entry["tool"] == "count-by-layer"
+        assert entry["engine_op"] == "count_by_layer"
 
 
 # --------------------------------------------------------------------------- #
