@@ -124,16 +124,40 @@ def test_all_success_is_ready_and_preserves_dependency_order():
 
 
 def test_required_timeout_is_bounded_and_not_ready():
+    # The bound is asserted as an ordering fact, not a stopwatch reading: the
+    # probe blocks until this test releases it, so a report that comes back
+    # while the probe is still blocked proves readiness_report did not wait for
+    # it. A small wall-clock threshold cannot state that on its own -- a bare
+    # Event().wait(0.05) has been measured overshooting 0.35s on Windows, so any
+    # constant near the timeout budget tests the scheduler, not the code.
+    probe_hold_s = 5.0
     release = threading.Event()
+    entered = threading.Event()
+    finished = threading.Event()
+
+    def blocked_probe():
+        entered.set()
+        release.wait(probe_hold_s)
+        finished.set()
+
     started = time.monotonic()
     report = dependency_health.readiness_report(
         {"LEAF_READINESS_TIMEOUT_S": "0.05"},
-        [_spec("broker", probe=lambda: release.wait(0.5))],
+        [_spec("broker", probe=blocked_probe)],
     )
+    elapsed = time.monotonic() - started
+    returned_while_probe_blocked = not finished.is_set()
     release.set()
-    assert time.monotonic() - started < 0.2
+
+    assert entered.wait(probe_hold_s), "the probe never reached the executor"
+    assert returned_while_probe_blocked
+    assert elapsed < probe_hold_s / 2
     assert report["ready"] is False
     assert report["dependencies"]["broker"]["state"] == "timeout"
+    deadline = time.monotonic() + probe_hold_s
+    while dependency_health._probe_slot_snapshot()[0] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert dependency_health._probe_slot_snapshot()[0] == 0
 
 
 def test_required_unavailable_is_not_ready_without_exception_text():
