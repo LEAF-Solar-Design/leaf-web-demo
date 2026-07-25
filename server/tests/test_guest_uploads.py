@@ -145,6 +145,59 @@ def test_live_account_upload_status_uses_active_binding_not_stale_claims(
     assert body["tier"] == "hosted_pro"
 
 
+def test_live_account_intake_uses_active_binding_not_stale_claims(
+        client, monkeypatch):
+    """The intake route must read the same tenant key the upload wrote."""
+    import auth
+    import tenancy
+
+    canonical = "f49766b5-1e5a-4e67-a10f-4e3a9b576266"
+    stale = "stale-claim-tenant"
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(
+        auth, "verify_platform_token", lambda authorization: {"sub": "auth0|bound"})
+    monkeypatch.setattr(
+        auth, "extract_tenant_claims", lambda payload: {
+            "tenant_id": stale,
+            "org_id": "stale-claim-org",
+            "tier": "demo",
+        })
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        lambda subject: (canonical, "hosted_pro"))
+    monkeypatch.setattr(
+        tenancy, "get_store", lambda: SimpleNamespace(
+            resolve_workspace=lambda tenant_id: None))
+    monkeypatch.setattr(
+        entitlements, "entitlements_for", lambda tier: {"upload": True})
+
+    upload = _upload(client, headers={"Authorization": "Bearer verified"})
+    assert upload.status_code == 202, upload.text
+    drawing_id = upload.json()["drawing_id"]
+
+    response = client.get(
+        f"/api/drawings/{drawing_id}/intake",
+        headers={"Authorization": "Bearer verified"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    coords = [
+        coordinate
+        for polyline in body["intake"]["polylines"]
+        for point in polyline["pts"]
+        for coordinate in point
+    ]
+    assert DISTINCTIVE_COORD in coords
+    assert ROOFTOP_COORD not in coords
+    assert body["tenant_id"] == canonical
+    assert body["org_id"] == canonical
+    assert body["tier"] == "hosted_pro"
+
+    import store
+    stale_backend = write_loop.upload_backend_for_tenant(stale)
+    assert not stale_backend.exists(store.manifest_key(stale, drawing_id))
+
+
 def test_live_account_upload_status_fails_closed_without_active_binding(
         client, monkeypatch):
     import auth
