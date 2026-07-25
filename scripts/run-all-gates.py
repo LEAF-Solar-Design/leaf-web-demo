@@ -213,11 +213,24 @@ def normalize_spawn_command(
 def build_suites() -> List[Suite]:
     repo_name = REPO.name  # "leaf-web-demo"
     suites: List[Suite] = [
+        # Executed-count floors: seventeen were re-baselined on 2026-07-25
+        # because they sat BELOW their suite's real executed count. A low floor
+        # is legal, coverage_verdict PASSes it with an "(executed-count drift:
+        # ...)" note, which is exactly the hazard: such a suite can silently
+        # lose tests down to the floor and still report green. Every
+        # replacement is a MEASURED executed count (passed, skips excluded),
+        # taken one file per pytest subprocess from the suite's registered cwd
+        # and re-confirmed through this runner at --retry 0.
+        # Two were deliberately left alone, each for a reason recorded at its
+        # own Suite(...) below: `platform` (re-baselining it needs a live
+        # Postgres, and the test-gate workflow is hermetic) and
+        # `server-customization-adversarial` (Linux and Windows execute
+        # different counts, so no single number is honest for both).
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 11),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
-              SERVER, _py_pytest("tests/test_dependency_health.py"), 13),
+              SERVER, _py_pytest("tests/test_dependency_health.py"), 17),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 11),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
@@ -267,7 +280,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_router.py"), 26,
               allowed_skip_reasons=(_PARKED_AGENT_ROUTER_REASON,)),
         Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
-              _py_pytest("tests/test_sessions_router.py"), 25),
+              _py_pytest("tests/test_sessions_router.py"), 45),
         Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
               _py_pytest("tests/test_context_packet.py"), 16),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
@@ -285,9 +298,9 @@ def build_suites() -> List[Suite]:
         # these toggle LEAF_AUTH_LIVE / LEAF_GUEST_* env and share the guest
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_uploads.py"), 33),
+              _py_pytest("tests/test_guest_uploads.py"), 57),
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
-              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 11),
+              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 18),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_purge.py"), 9),
         Suite("server-guest-session-auth", "server tests/test_guest_session_auth.py", "pytest",
@@ -312,9 +325,9 @@ def build_suites() -> List[Suite]:
         Suite("server-jobs-reaper-start-race", "server tests/test_jobs_reaper_start_race.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_reaper_start_race.py"), 2),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
-              SERVER, _py_pytest("tests/test_canonical_worker.py"), 23),
+              SERVER, _py_pytest("tests/test_canonical_worker.py"), 24),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
-              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 15),
+              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 17),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_inverter_placement_adapter.py"), 1,
               allowed_skip_reasons=(
@@ -333,9 +346,9 @@ def build_suites() -> List[Suite]:
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 19),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
-              SERVER, _py_pytest("tests/test_approval_consume.py"), 13),
+              SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
-              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 17),
+              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 18),
         # NOT db_gated on purpose: this file's authority-selector and legacy-contract
         # tests need no database, and its DB-only tests skip themselves via
         # @requires_database. Gating the whole suite would hide the un-gated half on
@@ -366,7 +379,7 @@ def build_suites() -> List[Suite]:
         # HTTP suites because the SUBJECT binding only exists with auth live, and
         # those suites run against the LEAF_AUTH_LIVE=0 header stub.
         Suite("server-checkout-capability", "server tests/test_checkout_capability.py",
-              "pytest", SERVER, _py_pytest("tests/test_checkout_capability.py"), 15),
+              "pytest", SERVER, _py_pytest("tests/test_checkout_capability.py"), 29),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
@@ -374,15 +387,15 @@ def build_suites() -> List[Suite]:
         Suite("server-session-store", "server tests/test_session_store.py", "pytest", SERVER,
               _py_pytest("tests/test_session_store.py"), 20),
         Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
-              SERVER, _py_pytest("tests/test_sessions_routes.py"), 33),
+              SERVER, _py_pytest("tests/test_sessions_routes.py"), 41),
         Suite("server-turn-runner", "server tests/test_turn_runner.py", "pytest", SERVER,
-              _py_pytest("tests/test_turn_runner.py"), 16),
+              _py_pytest("tests/test_turn_runner.py"), 21),
         # g1a canonical e2e self-skips without a reachable Postgres; gate it the
         # same way as the platform suite so the skip is visible, not silent.
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
               SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
         Suite("server-engine-registry-scripts", "server tests/test_engine_registry_scripts.py",
-              "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 4),
+              "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 5),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
         # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
         # were purely its module `harness` fixture failing `npm run build` in a
@@ -419,16 +432,16 @@ def build_suites() -> List[Suite]:
         # The no-da-imports static invariant + §8 ledger-line schema freeze
         # gates ride the same lane.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_boundary.py"), 45),
+              SERVER, _py_pytest("tests/test_broker_boundary.py"), 46),
         Suite("server-authored-execution-live-gate",
               "server tests/test_authored_execution_live_gate.py", "pytest",
-              SERVER, _py_pytest("tests/test_authored_execution_live_gate.py"), 10),
+              SERVER, _py_pytest("tests/test_authored_execution_live_gate.py"), 13),
         Suite("server-authored-tenant-isolation",
               "server tests/test_authored_tenant_isolation.py", "pytest",
               SERVER, _py_pytest("tests/test_authored_tenant_isolation.py"), 5),
         Suite("server-wave2-trust-boundary",
               "server tests/test_wave2_trust_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_wave2_trust_boundary.py"), 8),
+              SERVER, _py_pytest("tests/test_wave2_trust_boundary.py"), 13),
         Suite("server-no-da-imports", "server tests/test_no_da_imports_static.py", "pytest",
               SERVER, _py_pytest("tests/test_no_da_imports_static.py"), 8),
         Suite("server-broker-ledger-schema", "server tests/test_broker_ledger_schema_static.py",
@@ -511,7 +524,7 @@ def build_suites() -> List[Suite]:
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
-              _py_pytest("test_multitenant.py"), 5),
+              _py_pytest("test_multitenant.py"), 10),
         # Both are fully offline (no APS, no network) but were never registered,
         # so 11 tests sat outside the gate entirely.
         Suite("da-client-credentials", "da test_client_credentials.py", "pytest", DA,
@@ -528,7 +541,7 @@ def build_suites() -> List[Suite]:
         Suite("server-customization-contract", "server customization contract freeze", "pytest",
               SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
         Suite("server-customization-runtime", "server customization runtime", "pytest",
-              SERVER, _py_pytest("tests/test_customization_runtime.py"), 9),
+              SERVER, _py_pytest("tests/test_customization_runtime.py"), 23),
         # The two OS-file-lock probes are skipif(fcntl is None): they EXECUTE on
         # the Linux CI runner and skip only on a Windows operator box. Named here
         # so a Windows run stays green without the fail-closed skip rule having to
