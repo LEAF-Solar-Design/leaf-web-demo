@@ -124,21 +124,26 @@ def test_all_success_is_ready_and_preserves_dependency_order():
 
 
 def test_required_timeout_is_bounded_and_not_ready(monkeypatch):
-    # The budget is asserted at the seam, not with a stopwatch. A wall-clock
-    # bound cannot decide this on Windows: a 0.05s wait has been measured
-    # returning at 0.61s, so a bound tight enough to catch a regression that
-    # waits 1s is also tight enough to fail on scheduler noise. Calibrating the
-    # bound against measured noise only moves the problem -- a noisy sample
-    # yields a bound that hides the regression, a quiet one yields a bound the
-    # next stall trips. Observing the timeout handed to wait() settles it with
-    # no clock at all. The cost is coupling to the fact that readiness_report
-    # collects through concurrent.futures.wait.
+    # A plain wall-clock bound cannot decide this on Windows: a 0.05s wait has
+    # been measured returning at 0.61s, so a bound tight enough to catch a
+    # regression that waits 1s also fails on scheduler noise, and calibrating
+    # the bound against that noise only moves the problem.
+    #
+    # The way out is that the noise is confined to the blocking collection
+    # itself. Everything readiness_report does on its own thread -- resolving
+    # the budget, taking a slot, submitting, assembling the result -- is
+    # microseconds of CPU. So time the collection separately and bound only the
+    # overhead outside it. Scheduler overshoot lands in collecting_s and is
+    # forgiven; a regression that sleeps, retries, or blocks anywhere else
+    # lands in overhead and is caught, however quiet or noisy the host is.
     budget_s = 0.05
     probe_hold_s = 5.0
+    overhead_bound_s = 0.5
     release = threading.Event()
     entered = threading.Event()
     finished = threading.Event()
     observed_timeouts = []
+    collecting_s = []
 
     def blocked_probe():
         entered.set()
@@ -149,7 +154,11 @@ def test_required_timeout_is_bounded_and_not_ready(monkeypatch):
 
     def spy_wait(futures, timeout=None, **kwargs):
         observed_timeouts.append(timeout)
-        return real_wait(futures, timeout=timeout, **kwargs)
+        wait_started = time.monotonic()
+        try:
+            return real_wait(futures, timeout=timeout, **kwargs)
+        finally:
+            collecting_s.append(time.monotonic() - wait_started)
 
     monkeypatch.setattr(dependency_health, "wait", spy_wait)
 
@@ -172,11 +181,18 @@ def test_required_timeout_is_bounded_and_not_ready(monkeypatch):
 
     assert entered.wait(probe_hold_s), "the probe never reached the executor"
     assert returned_before_probe_finished
-    # The load-bearing budget check: the configured 0.05s, exactly, is what the
-    # collection actually waited on.
-    assert observed_timeouts == [budget_s]
-    # A coarse guard that the call returned at all. It carries no part of the
-    # budget claim, so it is deliberately far outside any scheduler jitter.
+    # No collection was granted more than the configured budget. Stated as a
+    # ceiling rather than an exact call list so that polling in remaining-budget
+    # slices stays a legal refactor, while an inflated budget does not.
+    assert observed_timeouts, "readiness_report never collected through wait()"
+    assert max(observed_timeouts) <= budget_s
+    # End-to-end: whatever readiness_report did outside blocking collection is
+    # microseconds of real work, so anything approaching overhead_bound_s is a
+    # regression that added a sleep, a retry, or a second blocking call.
+    overhead_s = elapsed - sum(collecting_s)
+    assert overhead_s < overhead_bound_s, (
+        f"readiness_report spent {overhead_s:.3f}s outside collection "
+        f"(total {elapsed:.3f}s, collecting {sum(collecting_s):.3f}s)")
     assert elapsed < probe_hold_s / 2
     assert report["ready"] is False
     assert report["dependencies"]["broker"]["state"] == "timeout"
