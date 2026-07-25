@@ -56,9 +56,11 @@ SHIPPED_TENANT_REPO = PROJECT_ROOT / "harness" / "test" / "fixtures" / "tenant-r
 # runner the default path does not exist and only those tests skip.
 #
 # Everything else that folds a tenant repo (C5b/C5c) needs only SOME repo plus
-# count-by-layer, which harness/test/fixtures/tenant-repo does ship, so the
-# `stack` fixture falls back to it instead of skipping the whole module. Guarding
-# at the module level instead would drop C5b/C5c off CI as collateral.
+# count-by-layer, so the `stack` fixture falls back to the shipped registry
+# fixture instead of skipping the whole module. The fixture's historical entry
+# names a Python file it does not ship; the stack removes only that dangling
+# declaration from its disposable copy so the engine-registry built-in remains
+# the honest implementation.
 _TENANT_REPO_PRESENT = TENANT_REPO_SRC.is_dir()
 _NO_TENANT_REPO_REASON = (
     f"tenant tool repo absent at {TENANT_REPO_SRC} (set LEAF_TENANT_REPO_SRC to one)"
@@ -470,18 +472,30 @@ def stack(tmp_path_factory):
     # the shipped fixture rather than skipping the whole module and taking those
     # two live regression checks off CI with it.
     #
-    # Be precise about what that buys: the shipped fixture supplies only a
-    # REGISTRY ENTRY for count-by-layer, not tool code, so execution falls
-    # through to the platform built-in. C5b/C5c still assert real behaviour
-    # (immediate tenant-state reads; real async progress to completion), but
-    # they are NOT coverage of tenant-file loading -- a regression there would
-    # leave them green.
+    # Be precise about what that buys: the shipped fixture supplies a registry
+    # package for count-by-layer but not its declared Python body. A missing
+    # declared body must fail closed, so the disposable copy below removes the
+    # dangling declaration and lets the package use the platform built-in.
+    # C5b/C5c still assert real behaviour but are not tenant-file-loading
+    # coverage.
     src = TENANT_REPO_SRC if _TENANT_REPO_PRESENT else SHIPPED_TENANT_REPO
     tmp = tmp_path_factory.mktemp("wave3")
     # Run against a COPY of the tenant repo (never mutate the live one).
     tenant_copy = tmp / "tenant"
     shutil.copytree(src, tenant_copy,
                     ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    if not _TENANT_REPO_PRESENT:
+        registry_path = tenant_copy / "registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        count_by_layer = next(
+            tool for tool in registry["tools"]
+            if tool.get("name") == "count-by-layer"
+        )
+        assert count_by_layer.get("entry") == "tools/count-by-layer/tool.py"
+        count_by_layer.pop("entry")
+        registry_path.write_text(
+            json.dumps(registry, indent=2) + "\n", encoding="utf-8"
+        )
     store_dir = tmp / "drawings"
     ledger = tmp / "ledger.jsonl"
     broker_port, app_port = free_port(), free_port()
