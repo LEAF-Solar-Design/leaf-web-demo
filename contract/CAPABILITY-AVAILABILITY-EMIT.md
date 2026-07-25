@@ -73,6 +73,13 @@ The backend emit must conform to these, field for field:
    cross-repo claims by CONTENT against `origin/<branch>`, never against a local
    checkout and never by SHA ancestry.
 
+   **CI requirement.** The two cross-repo tests SKIP when the sibling repo is not
+   checked out, which keeps the suite portable but makes a skipped contract check a
+   false green: nothing else in this repo can detect drift. Set
+   `LEAF_CONTRACT_STRICT=1` in a job that checks out BOTH repositories and the skip
+   becomes a hard failure. Until such a job exists, treat cross-repo drift as
+   unverified in ordinary runs.
+
    `test_the_website_still_enforces_the_rules_this_module_mirrors` now pins the
    PREMISE too: if the website ever drops one of these rules, that test fails here
    instead of this module's strictness quietly becoming arbitrary.

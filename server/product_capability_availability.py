@@ -100,6 +100,15 @@ AUTHORITY = "leaf-platform-registry"
 # Must equal leaf_website lib/leaf-platform/projection.ts SERVER_AVAILABILITY_TTL_MS.
 LEASE_TTL_SECONDS = 15
 
+# Why a capability is locked. These ride out as `reasonCode`, so a rejected live
+# measurement is DISTINGUISHABLE from having no measurement at all. Without that
+# distinction an integrator defect is invisible: the console shows an ordinary
+# locked capability and nothing reports that a payload was refused.
+REASON_NO_MEASUREMENT = "no_verified_registry_response"
+REASON_REJECTED_MEASUREMENT = "live_availability_rejected_by_contract_validator"
+REASON_FOREIGN_CAPABILITY = "live_availability_named_a_different_capability"
+REASON_KEY_MISMATCH = "live_availability_key_disagreed_with_its_payload"
+
 CAPABILITY_STATES = ("shipping", "connected_degraded", "locked_planned", "failed_retryable")
 RUNTIME_STATES = ("available", "degraded", "unavailable")
 IMPLEMENTATION_STATES = ("implemented", "planned")
@@ -107,6 +116,18 @@ EVIDENCE_KINDS = ("contract_test", "security", "end_to_end", "observability", "r
 FALLBACK_MODES = ("local", "cached", "read_only")
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# Absent is NOT the same as JSON `null`, and conflating them was a hole in the
+# DANGEROUS direction (accepting what the console refuses). The console tests
+# `!== undefined`, so `reasonCode: null` still reaches its `typeof !== 'string'`
+# check and is REJECTED, and `fallback: null` still reaches `isRecord(null)` and is
+# REJECTED. Python's `.get()` returns None for absent AND for null, so both were
+# accepted here. A sentinel keeps them apart.
+#
+# An earlier note in this module dismissed this as unreachable "because our
+# payloads never contain null". That was wrong: this validator also judges LIVE
+# measurements handed in by the integrator, which are parsed JSON and can.
+_MISSING = object()
 # The one timestamp spelling this validator and the console's Date.parse both
 # accept AND resolve to the same instant: extended date, literal T, seconds,
 # optional fractional seconds, explicit Z or +/-HH:MM offset.
@@ -322,11 +343,11 @@ def is_well_formed_availability(value: Any, now: Optional[datetime] = None) -> b
         return False
     if observed > now + timedelta(seconds=LEASE_TTL_SECONDS):
         return False
-    reason_code = value.get("reasonCode")
-    if reason_code is not None and not isinstance(reason_code, str):
+    reason_code = value.get("reasonCode", _MISSING)
+    if reason_code is not _MISSING and not isinstance(reason_code, str):
         return False
-    fallback = value.get("fallback")
-    if fallback is not None:
+    fallback = value.get("fallback", _MISSING)
+    if fallback is not _MISSING:
         if not isinstance(fallback, dict):
             return False
         if fallback.get("mode") not in FALLBACK_MODES:
@@ -342,14 +363,14 @@ def is_well_formed_availability(value: Any, now: Optional[datetime] = None) -> b
         return implementation_state == "implemented" and runtime_state == "available" and len(evidence) > 0
     if state == "connected_degraded":
         return (implementation_state == "implemented" and runtime_state == "degraded"
-                and fallback is not None and len(evidence) > 0)
+                and fallback is not _MISSING and len(evidence) > 0)
     if state == "locked_planned":
         return implementation_state == "planned" and runtime_state == "unavailable" and len(evidence) == 0
     return implementation_state == "implemented" and runtime_state != "available"
 
 
 def locked_availability(product_capability: str, now: Optional[datetime] = None,
-                        reason_code: str = "no_verified_registry_response") -> Dict[str, Any]:
+                        reason_code: str = REASON_NO_MEASUREMENT) -> Dict[str, Any]:
     """The fail-closed answer: planned, unavailable, locked, zero evidence.
 
     Unlike the website's static placeholder, this carries a REAL current lease
@@ -395,10 +416,14 @@ def descriptor_for(entry: ProductCapability, availability: Dict[str, Any],
     # `drawing.solve.strings` descriptor was accepted, producing a descriptor whose
     # id and whose availability.productCapability disagreed. `build_descriptors`
     # checked the mapping key; this path did not.
-    if (not isinstance(availability, dict)
-            or availability.get("productCapability") != entry.id
-            or not is_well_formed_availability(availability, now)):
-        availability = locked_availability(entry.id, now)
+    if not isinstance(availability, dict):
+        availability = locked_availability(entry.id, now, REASON_NO_MEASUREMENT)
+    elif availability.get("productCapability") != entry.id:
+        # Names another capability. Distinct code: this is an integrator wiring
+        # bug, not an absent measurement, and the two must not look alike.
+        availability = locked_availability(entry.id, now, REASON_FOREIGN_CAPABILITY)
+    elif not is_well_formed_availability(availability, now):
+        availability = locked_availability(entry.id, now, REASON_REJECTED_MEASUREMENT)
     else:
         availability = copy.deepcopy(availability)
     descriptor: Dict[str, Any] = {
@@ -436,14 +461,22 @@ def build_descriptors(live: Optional[Mapping[str, Dict[str, Any]]] = None,
     descriptors: List[Dict[str, Any]] = []
     for entry in PRODUCT_CAPABILITIES:
         measured = live.get(entry.id)
-        usable = (
-            isinstance(measured, dict)
-            and measured.get("productCapability") == entry.id
-            and is_well_formed_availability(measured, now)
-        )
+        # Distinguish WHY a live entry is unusable, so a refused measurement never
+        # looks like an absent one. The reason rides out as `reasonCode`.
+        if measured is None:
+            usable, reason = False, REASON_NO_MEASUREMENT
+        elif not isinstance(measured, dict):
+            usable, reason = False, REASON_REJECTED_MEASUREMENT
+        elif measured.get("productCapability") != entry.id:
+            usable, reason = False, REASON_KEY_MISMATCH
+        elif not is_well_formed_availability(measured, now):
+            usable, reason = False, REASON_REJECTED_MEASUREMENT
+        else:
+            usable, reason = True, None
         # DEEP COPY, not an alias. `measured` is caller-owned; keeping a
         # reference means a mutation AFTER validation silently changes the emitted
         # descriptor's state without revalidation (validate-then-mutate).
-        availability = copy.deepcopy(measured) if usable else locked_availability(entry.id, now)
+        availability = (copy.deepcopy(measured) if usable
+                        else locked_availability(entry.id, now, reason))
         descriptors.append(descriptor_for(entry, availability, entitlements.get(entry.id, False), now))
     return descriptors

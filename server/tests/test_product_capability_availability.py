@@ -99,6 +99,13 @@ _EVIDENCE_KINDS = ("contract_test", "security", "end_to_end", "observability", "
 _FALLBACK_MODES = ("local", "cached", "read_only")
 _WEBSITE_TTL_MS = 15_000
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# Distinguishes an ABSENT key from an explicit JSON null, because the console does.
+_ABSENT = object()
+# The extended-ISO subset `Date.parse` actually accepts. Node returns NaN for the
+# basic format ("20260724T115959Z"), so a helper that accepted it was claiming the
+# console tolerates something it does not.
+_JS_PARSEABLE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$")
 
 
 def _website_source() -> str:
@@ -108,15 +115,28 @@ def _website_source() -> str:
     "this constant does not exist" conclusion in round 4; squash merges rewrite
     SHAs, so a change can be merged while its commit is not an ancestor of main.
     """
+    import os
     import subprocess
+
+    def unavailable(detail: str):
+        """Skipping keeps this suite portable, but a skipped CONTRACT check is a
+        false green: nothing else in this repo can catch cross-repo drift. So the
+        skip is opt-out, not the default posture. Set LEAF_CONTRACT_STRICT=1 in the
+        job that has both repos checked out and this becomes a hard failure."""
+        message = (f"cannot read the website validator from origin/main: {detail}. "
+                   f"Cross-repo contract drift is UNVERIFIED in this run.")
+        if os.environ.get("LEAF_CONTRACT_STRICT") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+
     try:
         out = subprocess.run(
             ["git", "show", f"origin/main:{WEBSITE_VALIDATOR_PATH}"],
             cwd=str(WEBSITE_REPO), capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
-        pytest.skip(f"cannot read the website validator from origin/main: {exc}")
+        unavailable(str(exc))
     if out.returncode != 0:  # pragma: no cover
-        pytest.skip(f"cannot read the website validator from origin/main: {out.stderr.strip()[:120]}")
+        unavailable(out.stderr.strip()[:120])
     return out.stdout
 
 
@@ -150,28 +170,53 @@ def test_the_website_still_enforces_the_rules_this_module_mirrors():
     """Pin the PREMISE of the mirror, so a website-side removal is caught here
     rather than silently making this module's strictness arbitrary."""
     source = _website_source()
+    # Each needle is a RETURN-BEARING guard, not a definition. Round 6 showed the
+    # difference matters: deleting `evidence.every(isCapabilityEvidence)` while
+    # leaving the helper function defined kept the old pin green, so it was checking
+    # that a name exists rather than that a rule is applied.
     for needle, why in (
-        ("expiresMs - observedMs > SERVER_AVAILABILITY_TTL_MS", "window no longer than one TTL"),
-        ("observedMs > now.getTime() + SERVER_AVAILABILITY_TTL_MS", "observedAt clock-skew bound"),
-        ("provenanceRequired !== true", "fallback must declare provenanceRequired"),
-        ("Array.isArray(evidence)", "evidence must be an array"),
-        ("isCapabilityEvidence", "every evidence member is validated"),
+        ("if (expiresMs - observedMs > SERVER_AVAILABILITY_TTL_MS) return false",
+         "window no longer than one TTL"),
+        ("if (observedMs > now.getTime() + SERVER_AVAILABILITY_TTL_MS) return false",
+         "observedAt clock-skew bound"),
+        ("if (availability.fallback.provenanceRequired !== true) return false",
+         "fallback must declare provenanceRequired"),
+        ("if (!Array.isArray(evidence) || !evidence.every(isCapabilityEvidence)) return false",
+         "evidence is an array AND every member is validated"),
+        ("if (expiresMs <= now.getTime()) return false", "expired lease refused"),
+        ("if (expiresMs <= observedMs) return false", "expiry must follow observation"),
     ):
-        assert needle in source, f"origin/main no longer enforces: {why}"
+        normalized = " ".join(source.split())
+        assert " ".join(needle.split()) in normalized, (
+            f"origin/main no longer enforces: {why}. If the website deliberately "
+            f"dropped this rule, this module's corresponding check becomes local "
+            f"policy and must be relabelled, not silently left in place")
 
 
 def _js_date_parse(value):
-    """`Date.parse` semantics: any parseable string, millisecond resolution.
-    Deliberately permissive, because the console's `isIsoDate` is."""
+    """Model of `Date.parse` for the spellings these tests exercise.
+
+    Two fidelity bugs were fixed here after round 6 measured the real runtime:
+      * the basic format `20260724T115959Z` parses in Python but is NaN in Node, so
+        accepting it made this helper claim the console tolerates something it does
+        not. `_JS_PARSEABLE` restricts the shape.
+      * a NAIVE stamp is read by Node as the VIEWER'S LOCAL time, not UTC. Modelling
+        it as UTC was simply wrong, and modelling it as local would make these tests
+        depend on the machine's timezone. It is treated as UNPARSEABLE instead:
+        deterministic, and stricter than the console rather than looser, which is
+        the safe direction for a mirror. The module under test refuses naive stamps
+        outright, so no case here needs it.
+    """
     if not isinstance(value, str):
         return None
-    candidate = value.strip()
+    if not _JS_PARSEABLE.match(value):
+        return None
     try:
-        parsed = datetime.fromisoformat(candidate)
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        return None
     return parsed.replace(microsecond=(parsed.microsecond // 1000) * 1000)
 
 
@@ -233,11 +278,16 @@ def _website_validator(availability, now: datetime) -> bool:
         return False
     if observed > now + timedelta(milliseconds=_WEBSITE_TTL_MS):
         return False
-    reason = availability.get("reasonCode")
-    if reason is not None and not isinstance(reason, str):
+    # `!== undefined`, NOT "is not None". JS treats null as PRESENT, so
+    # `reasonCode: null` reaches the typeof test and is rejected, and
+    # `fallback: null` reaches isRecord(null) and is rejected. Modelling both as
+    # absent made this port accept payloads the console refuses, which is the
+    # dangerous direction for a mirror.
+    reason = availability.get("reasonCode", _ABSENT)
+    if reason is not _ABSENT and not isinstance(reason, str):
         return False
-    fallback = availability.get("fallback")
-    if fallback is not None:
+    fallback = availability.get("fallback", _ABSENT)
+    if fallback is not _ABSENT:
         if not _is_record(fallback):
             return False
         if fallback.get("mode") not in _FALLBACK_MODES:
@@ -254,7 +304,7 @@ def _website_validator(availability, now: datetime) -> bool:
         return impl == "implemented" and runtime == "available" and len(evidence) > 0
     if state == "connected_degraded":
         return (impl == "implemented" and runtime == "degraded"
-                and fallback is not None and len(evidence) > 0)
+                and fallback is not _ABSENT and len(evidence) > 0)
     if state == "locked_planned":
         return impl == "planned" and runtime == "unavailable" and len(evidence) == 0
     return impl == "implemented" and runtime != "available"
@@ -566,3 +616,59 @@ def test_descriptor_shape_matches_the_website_type():
                                "toolCapabilities", "entitlements", "entitled"}
     assert descriptor["toolCapabilities"] == ["solve"]
     assert descriptor["entitlements"] == ["solve"]
+
+
+@pytest.mark.parametrize("field", ["reasonCode", "fallback"])
+def test_an_explicit_json_null_is_refused_like_the_console_refuses_it(field):
+    """JS treats null as PRESENT (`!== undefined`), so the console rejects both of
+    these. Reading them with a bare `.get()` made this module ACCEPT them, which is
+    the dangerous direction. Live measurements are parsed JSON and can contain null,
+    so this is reachable, contrary to an earlier note in the module."""
+    availability = _shipping("drawing.solve.strings")
+    availability[field] = None
+    assert _website_validator(availability, NOW) is False, "console refuses it"
+    assert is_well_formed_availability(availability, NOW) is False, "so must we"
+
+
+def test_a_refused_live_measurement_is_distinguishable_from_no_measurement():
+    """Fail-closed is right, but silent fail-closed hides the integrator's bug: a
+    rejected payload used to become a lock identical to having no payload at all."""
+    from product_capability_availability import (
+        REASON_NO_MEASUREMENT, REASON_REJECTED_MEASUREMENT, REASON_KEY_MISMATCH,
+        REASON_FOREIGN_CAPABILITY,
+    )
+    absent = {d["id"]: d for d in build_descriptors(now=NOW)}
+    assert absent["drawing.inspect"]["availability"]["reasonCode"] == REASON_NO_MEASUREMENT
+
+    expired = _shipping("drawing.solve.strings", NOW - timedelta(hours=1))
+    rejected = {d["id"]: d for d in build_descriptors(
+        {"drawing.solve.strings": expired}, now=NOW)}
+    assert rejected["drawing.solve.strings"]["availability"]["reasonCode"] == \
+        REASON_REJECTED_MEASUREMENT, "a refused payload must say so"
+
+    mismatched = _shipping("drawing.inspect")
+    keyed = {d["id"]: d for d in build_descriptors(
+        {"drawing.solve.strings": mismatched}, now=NOW)}
+    assert keyed["drawing.solve.strings"]["availability"]["reasonCode"] == \
+        REASON_KEY_MISMATCH
+
+    foreign = descriptor_for(capability("drawing.solve.strings"),
+                             locked_availability("drawing.inspect", NOW), now=NOW)
+    assert foreign["availability"]["reasonCode"] == REASON_FOREIGN_CAPABILITY
+
+    # And every one of those substituted locks still satisfies the console.
+    for descriptor in list(absent.values()) + list(rejected.values()) + list(keyed.values()):
+        assert _website_validator(descriptor["availability"], NOW) is True
+
+
+def test_the_js_parse_model_rejects_what_node_rejects():
+    """Pins the helper's fidelity, measured against the real runtime in round 6."""
+    assert _js_date_parse("20260724T115959Z") is None, "Node returns NaN for basic format"
+    assert _js_date_parse("2026-07-24T11:59:59") is None, "naive is not modelled as UTC"
+    assert _js_date_parse("not-a-date") is None
+    assert _js_date_parse(12345) is None
+    assert _js_date_parse("2026-07-24T11:59:59Z") is not None
+    assert _js_date_parse("2026-07-24T11:59:59+00:00") is not None
+    # Millisecond truncation, as Date.parse does.
+    got = _js_date_parse("2026-07-24T11:59:59.123999+00:00")
+    assert got is not None and got.microsecond == 123000
