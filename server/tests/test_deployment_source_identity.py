@@ -52,6 +52,41 @@ def test_required_deployment_manifests_include_runtime_auth_secrets():
         assert required_secrets <= set(manifest["required"]["secrets"])
 
 
+def test_broker_manifest_requires_explicit_production_posture():
+    """The broker's fail-closed guards all key off LEAF_RUNTIME_ENV.
+
+    ``_production_runtime`` gates ``validate_runtime_safety`` and the authored-
+    execution refusal in ``_execute``, and ``_authored_execution_enabled``
+    DEFAULTS TO ON when the posture is absent. A broker deployed without this
+    variable therefore runs every guard in the permissive branch and loads
+    tenant-authored Python in the credential-holding process. The harness and
+    app manifests already require it; the broker must too, so a deploy cannot
+    omit the posture silently.
+    """
+    manifest = json.loads(
+        (ROOT / "deploy" / "required-config.broker.json").read_text(encoding="utf-8")
+    )
+    required = set(manifest["required"]["environment"])
+    assert {
+        "LEAF_AUTHORED_EXECUTION",
+        "LEAF_RUNTIME_ENV",
+        "LEAF_SANDBOX",
+    } <= required
+
+
+def test_credential_holding_services_require_runtime_posture():
+    """LEAF_RUNTIME_ENV must be a required env on every service that enforces it."""
+    for service in ("app", "broker", "harness"):
+        manifest = json.loads(
+            (ROOT / "deploy" / f"required-config.{service}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert "LEAF_RUNTIME_ENV" in set(manifest["required"]["environment"]), (
+            f"{service} manifest omits LEAF_RUNTIME_ENV"
+        )
+
+
 def test_app_manifest_requires_durable_runtime_and_build_identity():
     manifest = json.loads(
         (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
