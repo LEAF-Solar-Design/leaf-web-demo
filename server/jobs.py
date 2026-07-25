@@ -1046,6 +1046,10 @@ def _row_get(row: Any, key: str) -> Any:
 _pending_reaps: Dict[str, Optional[str]] = {}
 _pending_reaps_lock = threading.Lock()
 PENDING_REAP_MAX = int(os.environ.get("PENDING_REAP_MAX", "512"))
+PENDING_REAP_BATCH = int(os.environ.get("PENDING_REAP_BATCH", "32"))
+# Short on purpose: a retry runs inside the sweep, and a slow broker must not
+# hold up the rows closing right now. The first attempt keeps the normal budget.
+PENDING_REAP_TIMEOUT_S = float(os.environ.get("PENDING_REAP_TIMEOUT_S", "5"))
 
 
 def _remember_pending_reap(job_id: str, tenant_id: Optional[str]) -> None:
@@ -1059,16 +1063,28 @@ def _remember_pending_reap(job_id: str, tenant_id: Optional[str]) -> None:
 
 
 def _retry_pending_reaps() -> None:
-    """Re-attempt every reap a previous sweep could not deliver."""
+    """Re-attempt reaps a previous sweep could not deliver.
+
+    Bounded twice over, because this runs INSIDE the sweep and everything behind
+    it waits: at most PENDING_REAP_BATCH per sweep, and the whole batch is
+    abandoned on the first failure. A broker that is down is down for all of
+    them, and grinding through hundreds of timeouts would stall the reaping of
+    tabs that are closing right now.
+    """
     with _pending_reaps_lock:
-        pending = list(_pending_reaps.items())
+        pending = list(_pending_reaps.items())[:PENDING_REAP_BATCH]
     for job_id, tenant_id in pending:
-        _cancel_remote_workitem(job_id, tenant_id, _retry=True)
+        if not _cancel_remote_workitem(job_id, tenant_id, _retry=True):
+            break
 
 
 def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str],
-                            _retry: bool = False) -> None:
+                            _retry: bool = False) -> bool:
     """Ask the broker to cancel this job's APS WorkItem (tab-close path ONLY).
+
+    Returns whether the BROKER was reachable, which is what tells the retry loop
+    to keep going: False means the broker is down for everyone and the rest of
+    the batch would only burn timeouts.
 
     Marking the row terminal stops US from waiting; it does NOT stop APS, which
     keeps running and BILLING the abandoned WorkItem to completion. This is the
@@ -1085,21 +1101,36 @@ def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str],
     is reported on stderr (the convention elsewhere in this codebase).
     """
     try:
-        broker_client.reap_via_broker([{
-            "job_id": job_id,
-            "tenant_id": tenant_id,
-            "status": "inprogress",
-            "workitem_id": None,   # broker resolves it from job_id
-            "session_closed": True,
-        }])
+        result = broker_client.reap_via_broker(
+            [{
+                "job_id": job_id,
+                "tenant_id": tenant_id,
+                "status": "inprogress",
+                "workitem_id": None,   # broker resolves it from job_id
+                "session_closed": True,
+            }],
+            timeout_s=PENDING_REAP_TIMEOUT_S if _retry else None,
+        )
     except Exception as exc:  # noqa: BLE001  (broker down != job not finished)
         _remember_pending_reap(job_id, tenant_id)
         print(f"[leaf-jobs] tab-close reap failed for job {job_id} "
               f"(queued for retry): {type(exc).__name__}: {exc}",
               file=sys.stderr, flush=True)
-        return
+        return False
+    # A 200 means the broker ACCEPTED the reap, not that a WorkItem was
+    # cancelled. When live reaping is on, only `cancelled_jobs` says the DELETE
+    # actually succeeded; anything else is still burning money and is worth
+    # another sweep. When live reaping is off, no cancel was ever going to
+    # happen, so retrying would queue every closed tab forever.
+    if isinstance(result, dict) and result.get("live") and "cancelled_jobs" in result:
+        if job_id not in (result.get("cancelled_jobs") or []):
+            _remember_pending_reap(job_id, tenant_id)
+            print(f"[leaf-jobs] tab-close reap accepted but job {job_id} was not "
+                  f"cancelled (queued for retry)", file=sys.stderr, flush=True)
+            return True
     with _pending_reaps_lock:
         _pending_reaps.pop(job_id, None)
+    return True
 
 
 def _redispatch_record(job_id: str) -> bool:

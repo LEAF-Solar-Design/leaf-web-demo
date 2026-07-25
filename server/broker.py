@@ -881,12 +881,14 @@ def _tenant_tier(tenant_id: str) -> str:
 # submitted, dropped when broker_run leaves (success, failure, or timeout), so it
 # only ever holds genuinely in-flight runs.
 #
-# Each entry is (workitem_id, owner_token). The OWNER matters: a redelivery of
-# the same job POSTs the same job_id, is rejected as already leased/executing,
-# and then runs the same `finally` as a real run. Without ownership that
-# duplicate would evict the ORIGINAL run's correlation and make a live,
-# billing WorkItem permanently unreapable. A token of None means "unowned"
-# (replayed from disk after a restart): anyone may evict it.
+# Each entry is (workitem_id, owner_token, recorded_at). The OWNER matters: a
+# redelivery of the same job POSTs the same job_id, is rejected as already
+# leased/executing, and then runs the same `finally` as a real run. Without
+# ownership that duplicate would evict the ORIGINAL run's correlation and make a
+# live, billing WorkItem permanently unreapable. A run therefore evicts ONLY the
+# entry it registered itself -- an EXACT token match. Entries replayed from disk
+# after a restart carry no owner, so no run can evict them; they are cleared by a
+# successful cancel, replaced when the job runs again, or aged out at replay.
 _active_workitems: Dict[str, tuple] = {}
 _active_workitems_lock = threading.Lock()
 
@@ -897,28 +899,57 @@ ACTIVE_WORKITEMS_PATH = Path(
     os.environ.get("BROKER_ACTIVE_WORKITEMS_PATH",
                    str(Path(LEDGER_PATH).parent / "active_workitems.jsonl")))
 _ACTIVE_WORKITEMS_COMPACT_LINES = 2000
+# A WorkItem cannot outlive da/client's 900s poll ceiling by any margin like
+# this, so an hour-old replayed correlation names work that is certainly over.
+# Ageing them out at replay is what keeps the recovered set (and the sidecar)
+# from growing without bound across restarts.
+ACTIVE_WORKITEM_TTL_S = float(os.environ.get("BROKER_ACTIVE_WORKITEM_TTL_S", "3600"))
+_sidecar_lines = 0
 
 
-def _persist_workitem_event(event: str, job_id: str, workitem_id: Optional[str]) -> None:
-    """Append one open/close event. Best-effort: a broken sidecar must never
-    fail a paid run, it only costs restart recovery."""
+def _persist_workitem_event_locked(event: str, job_id: str,
+                                   workitem_id: Optional[str]) -> None:
+    """Append one open/close event. CALLER MUST HOLD `_active_workitems_lock`.
+
+    The append is ordered with the in-memory mutation on purpose: appending
+    outside the lock lets two threads write in the opposite order from the
+    order they mutated memory, so a `close` can land before the `open` it
+    closes and a restart resurrects a WorkItem that already finished.
+
+    Best-effort: a broken sidecar must never fail a paid run, it only costs
+    restart recovery.
+    """
+    global _sidecar_lines
     try:
         ACTIVE_WORKITEMS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with ACTIVE_WORKITEMS_PATH.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"event": event, "job_id": job_id,
-                                 "workitem_id": workitem_id}) + "\n")
+                                 "workitem_id": workitem_id,
+                                 "ts": time.time()}) + "\n")
+        _sidecar_lines += 1
     except Exception as exc:  # noqa: BLE001
         print(f"[leaf-broker] could not persist workitem correlation "
               f"({event} {job_id}): {type(exc).__name__}: {exc}",
               file=sys.stderr, flush=True)
+        return
+    if _sidecar_lines > _ACTIVE_WORKITEMS_COMPACT_LINES:
+        # Checked at RUNTIME, not only at import: a long-lived broker would
+        # otherwise cross the bound once and grow unchecked forever after.
+        _compact_persisted_workitems(dict(_active_workitems))
+        _sidecar_lines = len(_active_workitems)
 
 
 def _replay_persisted_workitems() -> Dict[str, tuple]:
-    """Rebuild the open correlations from the sidecar. Entries come back UNOWNED
-    (token None): the process that owned them is gone, so any later run or reap
-    may evict them."""
+    """Rebuild the open correlations from the sidecar.
+
+    Entries come back UNOWNED (token None): the process that owned them is gone.
+    Anything older than ACTIVE_WORKITEM_TTL_S is discarded -- that WorkItem has
+    certainly finished, and keeping it would only grow the set forever.
+    """
+    global _sidecar_lines
     open_map: Dict[str, tuple] = {}
     lines = 0
+    now = time.time()
     try:
         if not ACTIVE_WORKITEMS_PATH.exists():
             return open_map
@@ -933,15 +964,20 @@ def _replay_persisted_workitems() -> Dict[str, tuple]:
                 if not job_id:
                     continue
                 if rec.get("event") == "open" and rec.get("workitem_id"):
-                    open_map[job_id] = (str(rec["workitem_id"]), None)
+                    open_map[job_id] = (str(rec["workitem_id"]), None,
+                                        float(rec.get("ts") or now))
                 else:
                     open_map.pop(job_id, None)
     except Exception as exc:  # noqa: BLE001
         print(f"[leaf-broker] could not replay workitem correlations: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return open_map
+    open_map = {job_id: entry for job_id, entry in open_map.items()
+                if (now - entry[2]) <= ACTIVE_WORKITEM_TTL_S}
+    _sidecar_lines = lines
     if lines > _ACTIVE_WORKITEMS_COMPACT_LINES:
         _compact_persisted_workitems(open_map)
+        _sidecar_lines = len(open_map)
     return open_map
 
 
@@ -950,9 +986,10 @@ def _compact_persisted_workitems(open_map: Dict[str, tuple]) -> None:
     try:
         tmp = ACTIVE_WORKITEMS_PATH.with_suffix(".jsonl.tmp")
         with tmp.open("w", encoding="utf-8") as fh:
-            for job_id, (wid, _owner) in open_map.items():
+            for job_id, entry in open_map.items():
                 fh.write(json.dumps({"event": "open", "job_id": job_id,
-                                     "workitem_id": wid}) + "\n")
+                                     "workitem_id": entry[0],
+                                     "ts": entry[2]}) + "\n")
         tmp.replace(ACTIVE_WORKITEMS_PATH)
     except Exception as exc:  # noqa: BLE001
         print(f"[leaf-broker] could not compact workitem correlations: "
@@ -964,18 +1001,25 @@ def _record_active_workitem(job_id: str, workitem_id: Optional[str],
     if not job_id or not workitem_id:
         return
     with _active_workitems_lock:
-        _active_workitems[job_id] = (str(workitem_id), run_token)
-    _persist_workitem_event("open", job_id, str(workitem_id))
+        _active_workitems[job_id] = (str(workitem_id), run_token, time.time())
+        _persist_workitem_event_locked("open", job_id, str(workitem_id))
 
 
 def _drop_active_workitem(job_id: Optional[str],
-                          run_token: Optional[str] = None) -> Optional[str]:
-    """Evict and return job_id's WorkItem id, but ONLY if `run_token` owns it.
+                          run_token: Optional[str] = None,
+                          expected_workitem_id: Optional[str] = None) -> Optional[str]:
+    """Evict and return job_id's WorkItem id, subject to two guards.
 
-    `run_token=None` is the unconditional evict used by the reap path, which owns
-    any correlation it has just cancelled. A run passes its own token, so a
-    duplicate delivery -- which never registered anything -- cannot evict the
-    correlation belonging to the run that is actually in flight.
+    `run_token` (a run leaving): evicts ONLY on an exact owner match, so neither
+    a duplicate delivery nor a run that registered nothing can drop a correlation
+    it does not own -- including one recovered from disk after a restart, which
+    has no owner and must survive until it is cancelled or replaced.
+
+    `expected_workitem_id` (the reap path): evicts only if the entry still names
+    the WorkItem that was actually cancelled. Resolution snapshots an id before
+    the DELETE; a new run for the same job can install a fresh correlation while
+    that DELETE is in flight, and dropping by job_id alone would throw away the
+    NEW, live WorkItem's only means of cancellation.
     """
     if not job_id:
         return None
@@ -983,11 +1027,13 @@ def _drop_active_workitem(job_id: Optional[str],
         current = _active_workitems.get(job_id)
         if current is None:
             return None
-        workitem_id, owner = current
-        if run_token is not None and owner is not None and owner != run_token:
-            return None  # a different run owns this correlation: leave it alone
+        workitem_id, owner, _recorded_at = current
+        if run_token is not None and owner != run_token:
+            return None  # not this run's correlation: leave it alone
+        if expected_workitem_id is not None and workitem_id != str(expected_workitem_id):
+            return None  # a newer correlation replaced the one we cancelled
         del _active_workitems[job_id]
-    _persist_workitem_event("close", job_id, workitem_id)
+        _persist_workitem_event_locked("close", job_id, workitem_id)
     return workitem_id
 
 
@@ -1505,6 +1551,7 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
     records = _resolve_reap_workitems(req.records)
     reaped = reaper.sweep(records, cancel_client=cc)
     live_cancel = not isinstance(cc, reaper.StubCancelClient)
+    cancelled_jobs: List[str] = []
     for rec in reaped:
         # Drop the correlation ONLY when a real cancel really succeeded. sweep()
         # marks a row reaped regardless of outcome, so evicting on that alone
@@ -1516,12 +1563,21 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
         outcome = rec.get("reap_outcome")
         cancelled = isinstance(outcome, dict) and bool(outcome.get("cancelled"))
         if live_cancel and cancelled:
-            _drop_active_workitem(rec.get("job_id"))
+            _drop_active_workitem(rec.get("job_id"),
+                                  expected_workitem_id=rec.get("workitem_id"))
+            if rec.get("job_id"):
+                cancelled_jobs.append(str(rec["job_id"]))
     return JSONResponse(status_code=200, content=with_envelope_fields({
         "ok": True,
         "reaped": [r.get("workitem_id") for r in reaped],
         "count": len(reaped),
-        "live": not isinstance(cc, reaper.StubCancelClient),
+        "live": live_cancel,
+        # Which jobs a REAL cancel really succeeded for. "reaped" says a row was
+        # swept, which is not the same thing: a refused DELETE, an id that could
+        # not be resolved, or an inert stub all sweep a row while cancelling
+        # nothing. The caller needs the difference to know whether to retry, and
+        # it never learns the WorkItem id, so this is keyed by job.
+        "cancelled_jobs": cancelled_jobs,
     }))
 
 

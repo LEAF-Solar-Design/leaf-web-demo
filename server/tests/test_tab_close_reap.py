@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -423,6 +424,85 @@ def test_a_failed_reap_is_retried_on_the_next_sweep(monkeypatch):
     assert job_id not in jobs._pending_reaps, "a delivered reap is dequeued"
 
 
+def test_a_non_200_reap_response_is_not_read_as_success(monkeypatch):
+    """A 401/500/503 still carries a JSON body. Returning it would report a
+    cancel that never happened and drop the job from the retry queue."""
+    class _Resp:
+        status_code = 503
+
+        @staticmethod
+        def json():
+            return {"ok": False, "detail": "broker reconciling"}
+
+    monkeypatch.setattr(broker_client.requests, "post",
+                        lambda *a, **k: _Resp())
+
+    with pytest.raises(broker_client.BrokerReapRejected):
+        broker_client.reap_via_broker([{"job_id": "j1", "session_closed": True}])
+
+
+def test_an_accepted_but_uncancelled_reap_is_queued_for_retry(monkeypatch):
+    """HTTP 200 means the broker took the request, not that APS stopped billing.
+    Only cancelled_jobs says the DELETE actually succeeded."""
+    job_id = _submit()
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.mark_job_closed(job_id) is True
+
+    monkeypatch.setattr(broker_client, "reap_via_broker",
+                        lambda records, **_kw: {"ok": True, "live": True,
+                                                "cancelled_jobs": [], "count": 1})
+
+    assert jobs._reap_orphans_once() == 1
+    assert job_id in jobs._pending_reaps, (
+        "live reaping was on and the cancel did not land: try again")
+
+
+def test_reaping_off_does_not_queue_every_closed_tab_forever(monkeypatch):
+    """With live reaping disabled no cancel was ever going to happen, so retrying
+    would grow the queue with work that can never succeed."""
+    job_id = _submit()
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.mark_job_closed(job_id) is True
+
+    monkeypatch.setattr(broker_client, "reap_via_broker",
+                        lambda records, **_kw: {"ok": True, "live": False,
+                                                "cancelled_jobs": [], "count": 1})
+
+    assert jobs._reap_orphans_once() == 1
+    assert job_id not in jobs._pending_reaps
+
+
+def test_the_retry_batch_stops_at_the_first_unreachable_broker(monkeypatch):
+    """The retry runs INSIDE the sweep. A broker that is down is down for all of
+    them, so grinding through the whole queue would stall the tabs closing now."""
+    for i in range(5):
+        jobs._remember_pending_reap(f"job-{i}", "tenant-reap")
+
+    attempts = []
+
+    def _down(records, **_kw):
+        attempts.append(records[0]["job_id"])
+        raise broker_client.BrokerUnreachable("down")
+
+    monkeypatch.setattr(broker_client, "reap_via_broker", _down)
+    jobs._retry_pending_reaps()
+
+    assert len(attempts) == 1, f"must abandon the batch after one failure, tried {attempts}"
+
+
+def test_the_retry_batch_is_capped_per_sweep(monkeypatch):
+    monkeypatch.setattr(jobs, "PENDING_REAP_BATCH", 3)
+    for i in range(10):
+        jobs._remember_pending_reap(f"job-{i}", "tenant-reap")
+
+    attempts = []
+    monkeypatch.setattr(broker_client, "reap_via_broker",
+                        lambda records, **_kw: attempts.append(records) or {"ok": True})
+
+    jobs._retry_pending_reaps()
+    assert len(attempts) == 3
+
+
 def test_the_pending_reap_queue_is_bounded(monkeypatch, capsys):
     """A long outage must not grow the queue without limit."""
     monkeypatch.setattr(jobs, "PENDING_REAP_MAX", 2)
@@ -580,18 +660,93 @@ def test_correlations_are_recoverable_after_a_broker_restart(monkeypatch, tmp_pa
 
     replayed = broker._replay_persisted_workitems()
 
-    assert replayed["job-survivor"] == ("wi-survivor", None), (
+    assert replayed["job-survivor"][0] == "wi-survivor"
+    assert replayed["job-survivor"][1] is None, (
         "replayed entries are UNOWNED: the process that owned them is gone")
     assert "job-finished" not in replayed, "a closed correlation must not come back"
 
 
-def test_a_replayed_correlation_can_be_evicted_by_any_later_run(monkeypatch, tmp_path):
-    """Replayed entries carry no owner, so they can never become unevictable."""
-    monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH", tmp_path / "a.jsonl")
+def test_a_redelivery_cannot_erase_a_correlation_recovered_from_disk():
+    """Restart recovery is only worth anything if the recovered entry survives.
+    A replayed entry has no owner, so a redelivery -- which registers nothing but
+    still runs the same `finally` -- must not be able to delete it."""
     with broker._active_workitems_lock:
-        broker._active_workitems["job-replayed"] = ("wi-replayed", None)
+        broker._active_workitems["job-recovered"] = ("wi-recovered", None, time.time())
 
-    assert broker._drop_active_workitem("job-replayed", "any-new-token") == "wi-replayed"
+    assert broker._drop_active_workitem("job-recovered", "some-new-run-token") is None
+    assert broker.active_workitem_for("job-recovered") == "wi-recovered"
+
+    # A successful cancel still clears it (the reap passes no run token).
+    assert broker._drop_active_workitem(
+        "job-recovered", expected_workitem_id="wi-recovered") == "wi-recovered"
+
+
+def test_a_stale_replayed_correlation_is_aged_out(monkeypatch, tmp_path):
+    """A WorkItem cannot outlive the 900s poll ceiling, so an hour-old entry names
+    finished work. Keeping it would grow the recovered set across every restart."""
+    sidecar = tmp_path / "active_workitems.jsonl"
+    monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH", sidecar)
+    old = time.time() - (broker.ACTIVE_WORKITEM_TTL_S + 60)
+    sidecar.write_text(
+        json.dumps({"event": "open", "job_id": "job-old",
+                    "workitem_id": "wi-old", "ts": old}) + "\n"
+        + json.dumps({"event": "open", "job_id": "job-fresh",
+                      "workitem_id": "wi-fresh", "ts": time.time()}) + "\n",
+        encoding="utf-8")
+
+    replayed = broker._replay_persisted_workitems()
+
+    assert "job-old" not in replayed, "an hour-old correlation is certainly finished"
+    assert replayed["job-fresh"][0] == "wi-fresh"
+
+
+def test_a_successful_cancel_does_not_evict_a_newer_correlation():
+    """A new run can install a fresh correlation for the same job while the
+    DELETE for the old one is still in flight. Dropping by job_id alone would
+    throw away the NEW, live WorkItem's only means of cancellation."""
+    broker._record_active_workitem("job-recycled", "wi-new", run_token="new-run")
+
+    dropped = broker._drop_active_workitem("job-recycled",
+                                           expected_workitem_id="wi-old")
+
+    assert dropped is None
+    assert broker.active_workitem_for("job-recycled") == "wi-new"
+
+
+def test_the_sidecar_is_written_under_the_registry_lock(monkeypatch, tmp_path):
+    """Appending outside the lock lets two threads persist in the opposite order
+    from the order they mutated memory, so a `close` can land before its `open`
+    and a restart resurrects a finished WorkItem."""
+    monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH", tmp_path / "a.jsonl")
+    held = []
+
+    real_persist = broker._persist_workitem_event_locked
+
+    def _checking_persist(event, job_id, workitem_id):
+        held.append(broker._active_workitems_lock.locked())
+        return real_persist(event, job_id, workitem_id)
+
+    monkeypatch.setattr(broker, "_persist_workitem_event_locked", _checking_persist)
+
+    broker._record_active_workitem("job-ordered", "wi-ordered", run_token="t")
+    broker._drop_active_workitem("job-ordered", "t")
+
+    assert held == [True, True], "both appends must happen under the registry lock"
+
+
+def test_the_sidecar_compacts_at_runtime_not_only_at_import(monkeypatch, tmp_path):
+    """A long-lived broker would otherwise cross the bound once and grow forever."""
+    sidecar = tmp_path / "active_workitems.jsonl"
+    monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH", sidecar)
+    monkeypatch.setattr(broker, "_ACTIVE_WORKITEMS_COMPACT_LINES", 4)
+    monkeypatch.setattr(broker, "_sidecar_lines", 0)
+
+    for i in range(6):
+        broker._record_active_workitem(f"job-{i}", f"wi-{i}", run_token="t")
+        broker._drop_active_workitem(f"job-{i}", "t")
+
+    lines = [ln for ln in sidecar.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) <= 4, f"sidecar must be compacted at runtime, got {len(lines)} lines"
 
 
 # --------------------------------------------------------------------------- #

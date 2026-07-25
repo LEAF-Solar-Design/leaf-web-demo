@@ -42,6 +42,14 @@ class BrokerUnreachable(Exception):
     """The broker process could not be reached (connection/timeout)."""
 
 
+class BrokerReapRejected(Exception):
+    """The broker was reached but refused the reap (auth, 5xx, malformed body).
+
+    Distinct from BrokerUnreachable only for readability: both mean the cancel
+    did NOT happen, and both must leave the caller's retry queue intact.
+    """
+
+
 def extract_event_key(
     tenant_id: str,
     dwg: str,
@@ -121,8 +129,18 @@ def reap_via_broker(records: list, timeout_s: Optional[float] = None) -> Dict[st
             headers=broker_headers(),
             timeout=timeout_s or 30,
         )
-        return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:
         raise BrokerUnreachable(f"broker at {broker_url()} unreachable: {exc}") from exc
+    # A 401/500/503 still carries a JSON body. Returning it would report a
+    # cancel that never happened, and the caller would drop the job from its
+    # retry queue while APS keeps billing.
+    if resp.status_code != 200:
+        raise BrokerReapRejected(
+            f"broker at {broker_url()} refused the reap: HTTP {resp.status_code}")
+    try:
+        body = resp.json()
     except ValueError as exc:  # non-JSON body
         raise BrokerUnreachable(f"broker at {broker_url()} returned non-JSON: {exc}") from exc
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        raise BrokerReapRejected(f"broker at {broker_url()} returned a non-ok reap body")
+    return body
