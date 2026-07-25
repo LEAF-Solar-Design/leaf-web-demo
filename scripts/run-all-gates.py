@@ -546,11 +546,20 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # Expected 118 = the full DB-configured collection, measured on this
-        # tree 2026-07-22 via `DATABASE_URL=... pytest --collect-only -q
-        # platform/tests` (the conftest ignore-hook only prunes when NO
-        # DATABASE_URL is set, so with a DB every module collects, not just the
-        # *_static.py proofs).
+        # 199 COLLECTED with a DB configured, measured on this tree 2026-07-25
+        # via `cd server && DATABASE_URL=... python -m pytest ../platform/tests
+        # --collect-only -q`. Collecting needs no reachable server: the conftest
+        # ignore-hook keys off DATABASE_URL (or platform/.env.local) merely
+        # being present, so every module collects, not just the *_static.py
+        # proofs.
+        # The floor below is NOT that number. Per coverage_verdict, `expected`
+        # is an EXECUTED-test floor, so re-baselining it needs a real run
+        # against a LIVE Postgres. Provenance of 145: commit 80e3762
+        # (2026-07-23) measured 145/145 executed, zero skips, on a throwaway
+        # Neon branch. 54 more tests collect now, so the floor is likely
+        # stale-LOW -- that under-enforces (coverage_verdict PASSes it with a
+        # drift note) rather than failing the gate, and closing it needs a
+        # live-Postgres run this host cannot do.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests"), 145, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
