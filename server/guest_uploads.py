@@ -1101,6 +1101,27 @@ def staged_path(tenant_id: str, drawing_id: str, ext: str) -> Path:
     return uploads_dir() / f"{tenant_id}--{drawing_id}{ext}"
 
 
+def _verify_staged_source(
+    tenant_id: str, drawing_id: str, ext: str, marker: Dict[str, Any],
+) -> Path:
+    """Bind extraction to the exact bytes reserved by the upload marker."""
+    path = staged_path(tenant_id, drawing_id, ext)
+    data = path.read_bytes()
+    expected_bytes = marker.get("bytes")
+    expected_digest = marker.get("content_sha256")
+    if (
+        isinstance(expected_bytes, bool)
+        or not isinstance(expected_bytes, int)
+        or expected_bytes != len(data)
+        or not isinstance(expected_digest, str)
+        or not hmac.compare_digest(
+            expected_digest, hashlib.sha256(data).hexdigest())
+    ):
+        raise ValueError(
+            "staged upload does not match its reserved source bytes")
+    return path
+
+
 def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     """Synchronous extraction body (the thread target calls this; tests call it
     directly). Reads the staged file, produces intake, ingests it as v1 under
@@ -1121,6 +1142,8 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             return  # purged mid-flight; nothing to report against
 
     try:
+        source_path = _verify_staged_source(
+            tenant_id, drawing_id, ext, marker)
         if ext == ".dxf" and _dxf_extract_mode() == "aps" and deps.APS_LIVE:
             # FULL-FIDELITY DXF via APS. Reachable only when the DXF-correct
             # Activity (da.client.EXTRACT_DXF_ACTIVITY, localName `input.dxf`
@@ -1144,7 +1167,7 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             # `dxf_local_ok: True`. Fidelity: LWPOLYLINE/POLYLINE + layer names
             # only, less than the APS extract's INSERT/3DFACE/geo/xdata.
             import dxf_intake
-            intake = dxf_intake.parse_dxf_file(staged_path(tenant_id, drawing_id, ext),
+            intake = dxf_intake.parse_dxf_file(source_path,
                                                source_name=marker.get("filename") or drawing_id)
         elif deps.APS_LIVE:
             intake = _extract_via_broker(

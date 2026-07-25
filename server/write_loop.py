@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -235,7 +236,31 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
     import store
     v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
     ckey = intake_cache_key(tenant_id, drawing_id, v)
-    raw = backend.get(ckey) if backend.exists(ckey) else backend.get(vkey)
+    raw = None
+    if store.authority_mode() == "postgres":
+        import guest_uploads
+        if guest_uploads.upload_store_mode() == "postgres":
+            marker = guest_uploads.read_marker(
+                backend, tenant_id, drawing_id)
+            if marker is not None and marker.get("extracted_version") == v:
+                ref = marker.get("intake_ref")
+                digest = marker.get("intake_sha256")
+                if (
+                    marker.get("status") != "ready"
+                    or ref != ckey
+                    or not isinstance(digest, str)
+                    or len(digest) != 64
+                ):
+                    raise ValueError(
+                        "ready upload has no source-bound intake proof")
+                candidate = backend.get(ref)
+                if not hmac.compare_digest(
+                    hashlib.sha256(candidate).hexdigest(), digest):
+                    raise ValueError(
+                        "ready upload intake does not match its source proof")
+                raw = candidate
+    if raw is None:
+        raw = backend.get(ckey) if backend.exists(ckey) else backend.get(vkey)
     return v, json.loads(raw.decode("utf-8"))
 
 

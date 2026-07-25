@@ -128,6 +128,35 @@ def test_ensure_demo_drawing_postgres_upload_row_guard_raises(monkeypatch):
     assert backend.keys() == []
 
 
+def test_postgres_upload_intake_read_rejects_cache_without_matching_proof(
+        monkeypatch):
+    import store
+
+    backend = _in_memory_backend()
+    tenant, drawing = "acme-solar", "source-drawing"
+    cache_key = write_loop.intake_cache_key(tenant, drawing, 1)
+    backend.put(cache_key, b'{"layers":["wrong"],"polylines":[]}')
+    monkeypatch.setattr(store, "authority_mode", lambda: "postgres")
+    monkeypatch.setattr(
+        store, "resolve_version",
+        lambda *_args, **_kwargs: (
+            1, store.drawing_version_key(tenant, drawing, 1)),
+    )
+    monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "postgres")
+    monkeypatch.setattr(
+        guest_uploads, "read_marker",
+        lambda *_args, **_kwargs: {
+            "status": "ready",
+            "extracted_version": 1,
+            "intake_ref": cache_key,
+            "intake_sha256": "0" * 64,
+        },
+    )
+
+    with pytest.raises(ValueError, match="does not match its source proof"):
+        write_loop.read_intake(backend, tenant, drawing, 1)
+
+
 def test_guest_unknown_drawing_404_no_bootstrap(client, tmp_path):
     r = client.get("/api/drawings/some-drawing/intake",
                    headers={"X-Tenant-Id": "guest-abc123"})
