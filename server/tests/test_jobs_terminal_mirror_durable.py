@@ -63,15 +63,16 @@ class MirrorBoundary:
         return self
 
 
-def _seed(job_id: str, *, status: str = "running") -> None:
+def _seed(job_id: str, *, status: str = "running", linked: bool = True) -> None:
     """Insert a nonterminal job row straight into the authority."""
     now = time.time()
     conn = jobs._db()
     conn.execute(
         "INSERT INTO jobs (job_id, tenant_id, tool, params_json, dwg, status, progress, "
-        "created_at, updated_at, attempt, execution_json) "
-        "VALUES (?, 't-1', 'demo', '{}', 'd.dwg', ?, 'running', ?, ?, 1, '{}')",
-        (job_id, status, now, now))
+        "created_at, updated_at, attempt, execution_json, org_id, project_id) "
+        "VALUES (?, 't-1', 'demo', '{}', 'd.dwg', ?, 'running', ?, ?, 1, '{}', ?, ?)",
+        (job_id, status, now, now, "org-1" if linked else None,
+         "project-1" if linked else None))
     conn.commit()
 
 
@@ -113,7 +114,7 @@ def test_a_delivered_mirror_clears_the_marker(isolated_jobs, monkeypatch):
 def test_an_unlinked_process_never_writes_a_marker(isolated_jobs, monkeypatch):
     """The DB-less demo must not take a marker write and an immediate clearing write."""
     MirrorBoundary().install(monkeypatch, configured=False)
-    _seed("job-3")
+    _seed("job-3", linked=False)
 
     assert _fail("job-3") == "applied"
     assert _marker("job-3") == 0
@@ -222,10 +223,27 @@ def test_the_sweep_is_wired_into_the_reaper(isolated_jobs, monkeypatch):
 # --------------------------------------------------------------------------- #
 # the boundary contract
 # --------------------------------------------------------------------------- #
-def test_try_terminal_reports_failure_instead_of_raising(monkeypatch):
+def test_try_terminal_raises_when_delivery_fails(monkeypatch):
     MirrorBoundary(failing=True).install(monkeypatch)
 
-    assert platform_link.try_terminal("job-x", "complete", {"ok": True}) is False
+    with pytest.raises(RuntimeError, match="platform pool unreachable"):
+        platform_link.try_terminal("job-x", "complete", {"ok": True})
+
+
+def test_legacy_on_terminal_still_swallows_delivery_failure(monkeypatch):
+    MirrorBoundary(failing=True).install(monkeypatch)
+
+    platform_link.on_terminal("job-x", "complete", {"ok": True})
+
+
+def test_linked_marker_survives_temporarily_missing_configuration(
+        isolated_jobs, monkeypatch):
+    """A restart without DATABASE_URL must not erase durable retry intent."""
+    MirrorBoundary().install(monkeypatch, configured=False)
+    _seed("job-restart", linked=True)
+
+    assert _fail("job-restart") == "applied"
+    assert _marker("job-restart") == 1
 
 
 def test_try_terminal_reports_success_when_unlinked(monkeypatch):

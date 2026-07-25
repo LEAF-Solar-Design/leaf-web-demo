@@ -346,14 +346,13 @@ def mirror_configured() -> bool:
 def try_terminal(spine_job_id: str, spine_status: str,
                  result_env: Optional[Dict[str, Any]] = None,
                  error: Optional[Dict[str, Any]] = None) -> bool:
-    """Attempt the terminal mirror and REPORT whether it landed. Never raises.
+    """Attempt the terminal mirror and raise when delivery fails.
 
     Returns True when no mirror is needed (no linkage configured) or the UPDATE
-    committed, and False when it failed. That return is the whole point: the
-    SQLite authority cannot share a transaction with PostgreSQL, so it instead
-    records an outstanding-mirror marker in its OWN terminal transaction and
-    clears it only on a True here. A False is durable work the sweep retries, not
-    a silently dropped write.
+    committed. The SQLite authority cannot share a transaction with PostgreSQL,
+    so it records an outstanding-mirror marker in its OWN terminal transaction
+    and clears it only after this call returns. A raised failure leaves durable
+    work for the sweep to retry.
 
     Contrast ``terminal_in_transaction``, which CAN share the authority's
     transaction because there both tables live in the same database.
@@ -361,13 +360,9 @@ def try_terminal(spine_job_id: str, spine_status: str,
     _pop(spine_job_id)  # housekeeping only: drop any in-process correlation (not depended on)
     if not _db_configured():
         return True
-    try:
-        status, result_json, cost_usd = _terminal_fields(spine_status, result_env)
-        _update_by_spine(spine_job_id, status=status, result=result_json, cost_usd=cost_usd)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        _log(f"terminal mirror deferred, queued for retry: {type(exc).__name__}: {exc}")
-        return False
+    status, result_json, cost_usd = _terminal_fields(spine_status, result_env)
+    _update_by_spine(spine_job_id, status=status, result=result_json, cost_usd=cost_usd)
+    return True
 
 
 def on_terminal(spine_job_id: str, spine_status: str,
@@ -381,11 +376,14 @@ def on_terminal(spine_job_id: str, spine_status: str,
     dropped the in-process map (the durable-sync property, Contract 5a). Best-effort +
     env-gated; a spine_ref with no matching row is a harmless 0-row UPDATE. Never raises.
 
-    Delegates to ``try_terminal`` and discards the verdict, so the two cannot drift.
-    Callers that must not lose the mirror take ``try_terminal`` and persist the
-    outstanding marker themselves.
+    Delegates to the raising ``try_terminal`` boundary and swallows only here,
+    so legacy callers stay best-effort while durable callers can retain retry
+    work on failure.
     """
-    try_terminal(spine_job_id, spine_status, result_env, error)
+    try:
+        try_terminal(spine_job_id, spine_status, result_env, error)
+    except Exception as exc:  # noqa: BLE001
+        _log(f"terminal link failed (run unaffected): {type(exc).__name__}: {exc}")
 
 
 def forget(spine_job_id: str) -> None:

@@ -537,7 +537,7 @@ def build_suites() -> List[Suite]:
         # mirror could silently go back to being lost.
         Suite("server-jobs-terminal-mirror-durable",
               "server tests/test_jobs_terminal_mirror_durable.py", "pytest", SERVER,
-              _py_pytest("tests/test_jobs_terminal_mirror_durable.py"), 12),
+              _py_pytest("tests/test_jobs_terminal_mirror_durable.py"), 14),
         # Floor 13, re-measured after main added four offline tests. It was 9 when
         # this suite was first registered; leaving it there would have let all
         # four of main's new tests disappear without reddening the gate.

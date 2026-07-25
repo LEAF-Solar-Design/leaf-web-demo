@@ -794,7 +794,8 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
     with _lock:
         conn = _db()
         durable = conn.execute(
-            "SELECT attempt, execution_json FROM jobs WHERE job_id = ?", (job_id,)
+            "SELECT attempt, execution_json, org_id, project_id "
+            "FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
         if durable is None:
             return "missing"
@@ -809,7 +810,11 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         # outstanding-mirror marker WITH the terminal row instead: an undelivered
         # mirror then survives as durable state that the sweep drains, rather than
         # as a swallowed exception that leaves the platform Job nonterminal forever.
-        mirror_pending = 1 if platform_link.mirror_configured() else 0
+        # Project linkage is durable job state. Do not derive retry intent from
+        # the current process configuration: a restart with a temporarily
+        # missing DATABASE_URL must not erase a mirror that becomes deliverable
+        # after configuration is restored.
+        mirror_pending = 1 if durable["org_id"] and durable["project_id"] else 0
         owner_clause = "" if _allow_closed else " AND progress <> ?"
         args: List[Any] = [
             status, "done" if status == "complete" else "error", now, now, now, now,
@@ -853,11 +858,21 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             conn.commit()
             return "conflict"
     if applied:
-        # Clear the marker only on a CONFIRMED mirror. A False here leaves the
-        # committed marker in place and the sweep retries it; raising instead
-        # would double-report a run whose authority write really did land.
-        if platform_link.try_terminal(job_id, status, result_env, error) and mirror_pending:
-            _clear_platform_mirror_pending(job_id)
+        # Clear the marker only on a confirmed mirror. A missing configuration
+        # or raised delivery failure leaves durable work for the sweep; neither
+        # may escape and double-report a run whose authority write did land.
+        if not mirror_pending:
+            platform_link.forget(job_id)
+        elif not platform_link.mirror_configured():
+            pass  # durable marker remains until configuration is restored
+        else:
+            try:
+                platform_link.try_terminal(job_id, status, result_env, error)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[leaf-jobs] terminal platform mirror deferred for {job_id}: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            else:
+                _clear_platform_mirror_pending(job_id)
         _emit_job_terminal(status)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
@@ -1314,7 +1329,12 @@ def _retry_pending_platform_mirrors() -> None:
                   file=sys.stderr, flush=True)
             _clear_platform_mirror_pending(row["job_id"])
             continue
-        if not platform_link.try_terminal(row["job_id"], row["status"], result_env, error):
+        try:
+            platform_link.try_terminal(row["job_id"], row["status"], result_env, error)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[leaf-jobs] deferred platform mirror still unavailable for "
+                  f"{row['job_id']}: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
             break
         _clear_platform_mirror_pending(row["job_id"])
 
