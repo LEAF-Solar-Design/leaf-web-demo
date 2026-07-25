@@ -275,6 +275,52 @@ def test_boot_timeout_is_calibrated_to_host_speed_not_a_fixed_wall_clock():
         "start a process that is the smallest budget at the worst moment")
 
 
+def test_wait_ready_re_measures_once_when_the_host_degrades_mid_wait(monkeypatch):
+    """A budget sized at launch must not condemn a host that got slower since.
+
+    Observed on 2026-07-25: the budget was calibrated at 1.316s/spawn and the
+    deadline arrived when the box had degraded to 16.781s/spawn, 12x worse. The
+    server was fine; the machine changed underneath it. Uses a fake process and a
+    dead port so no server is booted, and shrinks the constants so it is fast.
+    """
+    import _test_readiness as rd
+
+    class NeverExits:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    # The ceiling must comfortably exceed ONE poll iteration (a requests timeout
+    # of 2s plus the sleep), or the re-measure can never buy time it has not
+    # already spent and the extension correctly declines. That is real behaviour,
+    # not a quirk: an extension is only worth taking if it beats the clock.
+    monkeypatch.setattr(rd, "_BOOT_TIMEOUT_FLOOR_S", 0.5)
+    monkeypatch.setattr(rd, "_BOOT_TIMEOUT_CEILING_S", 8.0)
+    monkeypatch.setattr(rd, "_BOOT_COST_IN_SPAWNS", 10)
+    monkeypatch.setattr(rd, "_calibrated", None)  # defeat the per-process cache
+
+    probes = []
+
+    def degrading_probe():
+        probes.append(1)
+        return 0.02 if len(probes) == 1 else 5.0
+
+    monkeypatch.setattr(rd, "spawn_latency_s", degrading_probe)
+
+    dead_url = f"http://127.0.0.1:{free_port()}/api/health"  # nothing is listening
+    with pytest.raises(TimeoutError) as exc:
+        rd.wait_ready(dead_url, NeverExits())
+    message = str(exc.value)
+
+    # Asserted as implications, not as a wall-clock window, so this cannot become
+    # a timing flake of its own on the very slow hosts it describes.
+    assert "re-measured mid-wait" in message, message
+    assert len(probes) >= 2, "the host was never re-measured at the deadline"
+    # Still bounded by the ceiling: a true hang must not park the gate.
+    assert "not ready in 8s" in message, message
+
+
 def submit(stack, tool="count-by-layer", params=None, tenant=None, wait=False):
     headers = {"X-Tenant-Id": tenant} if tenant else {}
     url = f"{stack['app']}/api/run" + ("?wait=1" if wait else "")

@@ -188,7 +188,7 @@ def boot_timeout_s() -> tuple[float, str]:
     return _calibrated
 
 
-def _slowness_note() -> str:
+def _slowness_note(spawn_s: float | None) -> str:
     """Re-measure at the moment of failure and say what the evidence supports.
 
     This is the point of the whole module. A bare "not ready in Ns" is read off
@@ -197,7 +197,6 @@ def _slowness_note() -> str:
     speed at the moment of the timeout separates "this box could not start a
     process" from "this server could not start".
     """
-    spawn_s = spawn_latency_s()
     if spawn_s is None:
         return ("\n  host speed at timeout: could not measure (the probe itself "
                 "failed or exceeded "
@@ -215,13 +214,43 @@ def _slowness_note() -> str:
 
 def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float | None = None,
                log_path: Path | None = None) -> None:
+    """Poll ``url`` until it serves, within a budget sized for THIS host.
+
+    The budget is re-measured once if it runs out. A single up-front sample
+    describes the host at the moment the children were launched, and that is not
+    the host they finish booting on: an observed run here sized the budget at
+    1.316s/spawn and hit the deadline when the box had degraded to 16.781s/spawn,
+    12x slower. Failing there would blame the server for a machine that changed
+    underneath it. The re-measure is bounded by the same ceiling, so the total
+    wait still cannot exceed it and a true hang still cannot park the gate.
+    """
+    recalibrated = timeout_s is None
     if timeout_s is None:
         timeout_s, how = boot_timeout_s()
     else:
         how = "caller-supplied"
-    deadline = time.time() + timeout_s
     started = time.time()
-    while time.time() < deadline:
+    budget_s = timeout_s
+    deadline = started + budget_s
+    extended = False
+    while True:
+        if time.time() >= deadline:
+            waited = time.time() - started
+            if recalibrated and not extended:
+                extended = True
+                fresh_spawn_s = spawn_latency_s()
+                regraded, how_now = calibrate_boot_timeout_s(
+                    lambda: fresh_spawn_s, os.environ)
+                if regraded > waited:
+                    budget_s = regraded
+                    deadline = started + budget_s
+                    how = f"{how}; re-measured mid-wait as {how_now}"
+                    continue
+            raise TimeoutError(
+                f"server at {url} not ready in {budget_s:.0f}s "
+                f"(waited {waited:.0f}s; budget: {how})"
+                f"{_slowness_note(spawn_latency_s())}"
+                f"{log_tail(log_path)}")
         if proc.poll() is not None:
             raise RuntimeError(
                 f"server process exited early (rc={proc.returncode})"
@@ -232,7 +261,3 @@ def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float | None = None,
         except requests.RequestException:
             pass
         time.sleep(0.25)
-    raise TimeoutError(
-        f"server at {url} not ready in {timeout_s:.0f}s "
-        f"(waited {time.time() - started:.0f}s; budget: {how})"
-        f"{_slowness_note()}{log_tail(log_path)}")
