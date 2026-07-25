@@ -25,7 +25,7 @@ if str(SERVER_DIR) not in sys.path:
 import checkout_capability as cc  # noqa: E402
 import deps  # noqa: E402
 
-SECRET = "test-checkout-capability-secret"
+SECRET = "test-checkout-capability-secret-32-bytes"
 TENANT = "acme"
 DRAWING = "demo"
 
@@ -110,6 +110,25 @@ def test_a_colleagues_capability_is_refused_when_auth_is_live():
         cc.verify(alices, bob, DRAWING, lock(fence=3))
 
 
+def test_auth_live_subjectless_callers_cannot_share_one_capability(monkeypatch):
+    """A verified token without ``sub`` must not collapse every member of a
+    tenant onto the anonymous binding used only when authentication is off."""
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    first = subject_ctx(None)
+    second = subject_ctx(None)
+
+    with pytest.raises(cc.CapabilityUnavailable, match="authenticated subject"):
+        cc.mint(first, DRAWING, 3)
+
+    # Verification must fail closed too, including for a token minted while
+    # authentication was off before the posture changed.
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    anonymous = cc.mint(first, DRAWING, 3)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    with pytest.raises(cc.CapabilityUnavailable, match="authenticated subject"):
+        cc.verify(anonymous, second, DRAWING, lock(fence=3))
+
+
 def test_an_unfenced_lock_cannot_be_proven():
     """A lock taken before generations were stamped. Nothing can verify against
     it, and inventing a generation would make every capability for the drawing
@@ -140,6 +159,20 @@ def test_production_without_a_configured_secret_fails_closed(monkeypatch):
     monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
     with pytest.raises(cc.CapabilityUnavailable, match="LEAF_CHECKOUT_CAP_SECRET"):
         cc.mint(TENANT, DRAWING, 1)
+
+
+def test_production_rejects_a_short_configured_secret(monkeypatch):
+    monkeypatch.setenv("LEAF_CHECKOUT_CAP_SECRET", "short-secret")
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    with pytest.raises(cc.CapabilityUnavailable, match="at least 32 bytes"):
+        cc.mint(TENANT, DRAWING, 1)
+
+
+def test_production_accepts_a_32_byte_configured_secret(monkeypatch):
+    monkeypatch.setenv("LEAF_CHECKOUT_CAP_SECRET", "x" * 32)
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    token = cc.mint(TENANT, DRAWING, 1)
+    assert cc.verify(token, TENANT, DRAWING, lock(fence=1)) == ("sess-a", 1)
 
 
 def test_a_dev_checkout_works_with_no_configuration(monkeypatch):

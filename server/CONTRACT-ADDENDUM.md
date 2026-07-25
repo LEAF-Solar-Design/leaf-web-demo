@@ -518,8 +518,12 @@ header — never a body field or query parameter — on:
 Unchanged in every case where no lease is live: an absent or EXPIRED lock is free,
 needs no capability, and is re-acquirable by anyone — so a forgotten lock still
 cannot wedge a drawing. Operators running more than one app process must set
-`LEAF_CHECKOUT_CAP_SECRET` (required outright when `LEAF_RUNTIME_ENV=production`);
-unset off production means a per-process secret that does not survive a restart.
+`LEAF_CHECKOUT_CAP_SECRET` (required outright, with at least 32 bytes, when
+`LEAF_RUNTIME_ENV=production`); unset off production means a per-process secret
+that does not survive a restart. When `LEAF_AUTH_LIVE=1`, mint and verification
+also require the verified token's nonempty `sub`; a subjectless authenticated
+caller receives a fail-closed operator error rather than sharing an anonymous
+capability identity with every other tenant member.
 
 > **FREEZE (census #13, NL-build lane, 2026-07-22): §15, §16, and §17 are FROZEN.**
 > The frozen surface is the contracts, not the prose: every wire shape, env name,

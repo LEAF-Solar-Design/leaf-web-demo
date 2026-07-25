@@ -66,6 +66,8 @@ _FIELD_SEP = "\x1f"  # ASCII unit separator: cannot occur in any bound component
 
 _SECRET_ENV = "LEAF_CHECKOUT_CAP_SECRET"
 _RUNTIME_ENV = "LEAF_RUNTIME_ENV"
+_AUTH_LIVE_ENV = "LEAF_AUTH_LIVE"
+_MIN_PRODUCTION_SECRET_BYTES = 32
 
 _EPHEMERAL_SECRET: Optional[str] = None
 
@@ -93,6 +95,10 @@ def _production_posture() -> bool:
     return os.environ.get(_RUNTIME_ENV, "").strip().lower() == "production"
 
 
+def _auth_live_posture() -> bool:
+    return os.environ.get(_AUTH_LIVE_ENV, "0") == "1"
+
+
 def _secret() -> str:
     """The HMAC signing secret.
 
@@ -114,6 +120,12 @@ def _secret() -> str:
     global _EPHEMERAL_SECRET
     configured = os.environ.get(_SECRET_ENV, "").strip()
     if configured:
+        if (_production_posture()
+                and len(configured.encode("utf-8")) < _MIN_PRODUCTION_SECRET_BYTES):
+            raise CapabilityUnavailable(
+                f"{_SECRET_ENV} must contain at least "
+                f"{_MIN_PRODUCTION_SECRET_BYTES} bytes when "
+                f"{_RUNTIME_ENV}=production")
         return configured
     if _production_posture():
         raise CapabilityUnavailable(
@@ -137,7 +149,13 @@ def _subject_of(tenant: Any) -> str:
     value: a subject a caller can choose binds the capability to nothing.
     """
     subject = getattr(tenant, "subject", None)
-    return subject if isinstance(subject, str) and subject else ""
+    if isinstance(subject, str) and subject:
+        return subject
+    if _auth_live_posture():
+        raise CapabilityUnavailable(
+            "an authenticated subject is required to mint or verify a checkout "
+            "capability when LEAF_AUTH_LIVE=1")
+    return ""
 
 
 def mint(tenant: Any, drawing_id: str, fence: int) -> str:
