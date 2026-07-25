@@ -241,17 +241,76 @@ SECTION3_KEYS = {"ok", "tool", "version", "result", "overlay", "timing_ms", "cos
 
 
 # --------------------------------------------------------------------------- #
-# 1. POST /api/run -> 202 {job_id, status:"submitted"} in <200ms, non-blocking
+# 1. POST /api/run -> 202 {job_id, status:"submitted"}, non-blocking
 # --------------------------------------------------------------------------- #
 def test_1_run_returns_202_fast(stack):
+    """A long job execution must NOT block the 202.
+
+    Proved by IMPLICATION and by COMPARISON on the same runner in the same
+    moment, not by a bare wall-clock budget. The old form timed `submit()`
+    (which also does a GET /api/tools) against a hard `< 200ms` and flaked on
+    loaded shared runners: CI hit 510ms, and a local baseline of this file
+    reproduced it 8 times in 89 runs, ranging 210ms to 1720ms. That is
+    scheduling noise, not a blocking response.
+
+    So the signal is raised instead of the tolerance. The job sleeps `sleep_s`,
+    and the bounds stay tied to `sleep_s` rather than to a fixed millisecond
+    budget:
+
+      * the job must still be NON-TERMINAL when the 202 arrives. This is a
+        logical implication, not a timing budget: a response that waited for
+        execution could only return once the job was terminal. Slowness makes it
+        MORE certainly non-terminal, so load cannot flake it.
+      * `elapsed < sleep_s`: submitting cannot cost as much as the execution it
+        must not wait on.
+      * `elapsed - control < sleep_s / 2`, where the control is the same POST
+        with a 0s job taken moments earlier. Submit latency must be INDEPENDENT
+        of execution time; load slows both measurements, so common-mode noise
+        cancels and the difference stays small.
+
+    Each bound sits about 3x above the worst noise measured above and fails hard
+    on the regression it exists to catch (a blocking 202 costs ~`sleep_s`).
+    """
+    sleep_s = 10.0
+    url = f"{stack['app']}/api/run"
+    # Build both payloads OUTSIDE the timed windows: the catalog GET is not part
+    # of the property under test, and it was previously inflating the measurement.
+    control_payload = confirmed_requests_payload(
+        stack["app"], "count-by-layer", {}, "rooftop_demo")
+    subject_payload = confirmed_requests_payload(
+        stack["app"], "count-by-layer", {"_qa_sleep_s": sleep_s}, "rooftop_demo")
+
     t0 = time.perf_counter()
-    r = submit(stack, params={"_qa_sleep_s": 3})  # 3s of execution must NOT block the 202
-    elapsed = time.perf_counter() - t0
+    control = requests.post(url, json=control_payload, timeout=120)
+    control_elapsed = time.perf_counter() - t0
+
+    t1 = time.perf_counter()
+    r = requests.post(url, json=subject_payload, timeout=120)
+    elapsed = time.perf_counter() - t1
+
+    assert control.status_code == 202
     assert r.status_code == 202
     body = r.json()
     assert body["status"] == "submitted"
     assert body["job_id"]
-    assert elapsed < 0.2, f"submit took {elapsed*1000:.0f}ms (must be <200ms)"
+
+    # The 202 came back while the job was still executing. A response that
+    # blocked on execution could only return once the job was terminal.
+    rec = requests.get(f"{stack['app']}/api/jobs/{body['job_id']}", timeout=10).json()
+    assert rec["status"] not in ("complete", "failed"), (
+        f"a {sleep_s:g}s job was already terminal when the 202 arrived "
+        f"(status={rec['status']!r}): the response blocked on execution")
+
+    # Absolute floor: submitting cannot cost as much as the job it must not wait on.
+    assert elapsed < sleep_s, (
+        f"submit took {elapsed*1000:.0f}ms, not less than the {sleep_s:g}s job "
+        f"execution it must not block on")
+    # Independence: the extra execution time must not show up in the response.
+    delta = elapsed - control_elapsed
+    assert delta < sleep_s / 2, (
+        f"submitting a {sleep_s:g}s job cost {delta*1000:.0f}ms more than the 0s "
+        f"control ({control_elapsed*1000:.0f}ms -> {elapsed*1000:.0f}ms), so "
+        f"execution time is leaking into the 202")
 
 
 # --------------------------------------------------------------------------- #
@@ -380,18 +439,63 @@ def _ledger_lines(stack):
     return [l for l in stack["ledger"].read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
+def _ledger_entries_for(stack, tenants) -> list[dict]:
+    wanted = set(tenants)
+    out = []
+    for line in _ledger_lines(stack):
+        try:
+            entry = json.loads(line)
+        except ValueError:  # a partially flushed line is not this test's business
+            continue
+        if entry.get("tenant_id") in wanted:
+            out.append(entry)
+    return out
+
+
 def test_6_ledger_attribution(stack):
-    before = _ledger_lines(stack)
+    """Exactly one ledger line per /broker/run, carrying the caller's attribution.
+
+    Scoped to the tenants THIS test owns rather than to a global before/after
+    line count. Earlier tests leave real /broker/run calls IN FLIGHT: test_3 runs
+    a 6s job under JOB_MAX_S=2, and the app abandons each timed-out attempt while
+    the broker keeps executing it (jobs.py `_run_job`: the inner thread is a
+    daemon and the retry path re-dispatches, so one test_3 job makes
+    JOB_MAX_ATTEMPTS=3 distinct broker runs, each appending its own line ~6s
+    later). Those are correct writes, one per run, but they land AFTER test_3
+    returned. A global count therefore reads them as extra lines and fails
+    nondeterministically: CI showed `assert 10 == (6 + 3)`, and a local serial
+    baseline of this file reproduced the same shape 3 times in 25 runs.
+
+    Filtering by tenant keeps the invariant EXACT (an extra write for a tenant,
+    a missing one, or a misattributed one all still fail) while making it immune
+    to unrelated concurrent work. It also drops the old positional check, which
+    assumed this test's three lines were contiguous and in order; a straggler
+    landing between them was observed to break that too. The broker appends the
+    line inside /broker/run's own `finally`, so a `wait=1` 200 means the line is
+    already on disk and no polling is needed here.
+    """
     n_runs = 3
-    for i in range(n_runs):
-        assert submit(stack, tenant=f"ledger-t{i}", wait=True).status_code == 200
-    after = _ledger_lines(stack)
-    assert len(after) == len(before) + n_runs, "exactly one line per /broker/run"
-    new = [json.loads(l) for l in after[len(before):]]
-    for i, entry in enumerate(new):
-        assert entry["tenant_id"] == f"ledger-t{i}"
-        assert entry["tool"] == "count-by-layer"
-        assert entry["engine_op"] == "count_by_layer"
+    tenants = [f"ledger-t{i}" for i in range(n_runs)]
+    assert not _ledger_entries_for(stack, tenants), \
+        "ledger already carries lines for this test's tenants before it ran"
+
+    for tenant in tenants:
+        assert submit(stack, tenant=tenant, wait=True).status_code == 200
+
+    mine = _ledger_entries_for(stack, tenants)
+    assert len(mine) == n_runs, (
+        f"exactly one line per /broker/run: {n_runs} runs produced {len(mine)} "
+        f"line(s) for {tenants}")
+    by_tenant: dict[str, list[dict]] = {}
+    for entry in mine:
+        by_tenant.setdefault(entry["tenant_id"], []).append(entry)
+    for tenant in tenants:
+        entries = by_tenant.get(tenant, [])
+        assert len(entries) == 1, (
+            f"exactly one line per /broker/run: tenant {tenant} ran once but has "
+            f"{len(entries)} ledger line(s)")
+        assert entries[0]["tool"] == "count-by-layer"
+        assert entries[0]["engine_op"] == "count_by_layer"
 
 
 # --------------------------------------------------------------------------- #
