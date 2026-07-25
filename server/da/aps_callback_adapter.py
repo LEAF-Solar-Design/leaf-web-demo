@@ -63,11 +63,30 @@ evidence (sha256 + size of the persisted output). Translation refuses, raising
   * ``no_completion_guard`` — no reservation authority was supplied. REQUIRED:
                                an optional guard defaulting to None is fail-open;
   * ``duplicate_completion`` — the reservation for this (job, ATTEMPT) was already
-                               claimed. Keyed on completion identity, not the
-                               nonce, AND taken atomically: a read-only "have you
-                               seen this?" check let two deliveries both translate
+                               claimed and the guard holds no stored receipt for
+                               it. Keyed on completion identity, not the nonce,
+                               AND taken atomically: a read-only "have you seen
+                               this?" check let two deliveries both translate
                                before either receipt was recorded, so both were
                                accepted and one attempt completed twice.
+
+THE RESERVATION CONTRACT
+------------------------
+``reserve_completion(job_id, attempt, envelope)`` must atomically claim
+``(job_id, attempt)`` AND record ``envelope`` in the same indivisible step, then
+return:
+
+  * ``True``              — freshly claimed; the adapter returns the new envelope;
+  * a ``CallbackEnvelope`` — already claimed, and this is the receipt stored with
+                            that claim. The adapter returns it VERBATIM, so a
+                            delivery that crashed after claiming is recoverable
+                            and the retry is idempotent;
+  * ``False``             — already claimed with no recoverable receipt;
+                            ``duplicate_completion``.
+
+Anything else is ``bad_completion_guard``. Storing the envelope with the claim is
+what makes a crash between the claim and the POST survivable: reserving the
+identity alone burned the attempt and left the receipt nowhere.
 
 Run:  cd server && python -m pytest tests/test_aps_callback_adapter.py -q
 """
@@ -119,6 +138,28 @@ _NONCE_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{1,128}\Z")
 # to their input, so an enormous but otherwise valid string could raise MemoryError
 # before a cheap refusal was reported. Cap first, then normalize.
 _MAX_ID_LEN = 512
+
+# The attempt is a NUMBER, so `_MAX_ID_LEN` never bounded it. That gap was real:
+# the derived nonce is built as `f"{claimed_attempt}:{delivery_nonce}"`, and
+# formatting a huge int raises a raw `ValueError` from CPython's int-to-str digit
+# limit BEFORE the reservation, in place of a tagged refusal. A job store whose
+# attempt counter has reached this bound is corrupt, not busy: attempts increment
+# once per lease reclaim, so refusing is the correct reading either way.
+_MAX_ATTEMPT = 1_000_000
+
+
+def _is_finite_number(value: Any) -> bool:
+    """`math.isfinite` on an exact int is not total: it converts to float first,
+    so `math.isfinite(10**5000)` raises `OverflowError` rather than returning
+    False. A guard that raises is not a guard — an oversized exact integer
+    escaped as a raw `OverflowError` instead of the tagged `malformed_lease`
+    refusal. Exact types only, and the conversion itself is caught."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, ValueError):
+        return False
 
 
 class AdapterError(Exception):
@@ -298,6 +339,13 @@ def translate(
     # Attempts are 1-based. 0 and negatives are not attempts that ever ran.
     if claimed_attempt < 1:
         raise AdapterError("wrong_attempt")
+    # BOUND IT ABOVE TOO. Round 8 capped every string but left this number free,
+    # so the derived nonce below (`f"{claimed_attempt}:..."`) raised a raw
+    # ValueError from the int-to-str digit limit before the reservation was ever
+    # reached. Equality with authority does not save us: it only means a corrupt
+    # attempt counter is refused here rather than in the middle of formatting.
+    if claimed_attempt > _MAX_ATTEMPT:
+        raise AdapterError("wrong_attempt")
     # NaN defeats every comparison (`now > nan` is False), so a non-finite lease
     # deadline would sail past an ordinary expiry check. callbacks.py guards its
     # own timestamp with math.isfinite for the same reason.
@@ -314,13 +362,18 @@ def translate(
     #
     # So the completion's `lease_expiry` is INFORMATIONAL: still type-checked, so a
     # malformed record is caught, but never compared and never decisive.
-    if (type(job_lease_expiry) not in (int, float)
-            or not math.isfinite(job_lease_expiry)):
+    if not _is_finite_number(job_lease_expiry):
         raise AdapterError("expired_lease")
-    if (type(lease_expiry) not in (int, float)
-            or not math.isfinite(lease_expiry)):
+    if not _is_finite_number(lease_expiry):
         raise AdapterError("malformed_lease")
-    if now > job_lease_expiry:
+    # `>=`, NOT `>`. The job store is the other half of this boundary and it
+    # reclaims on `lease_expires_at <= now` (jobs.py, the attempt-increment
+    # clause). With a strict `>` here, the exact instant `now == job_lease_expiry`
+    # was a state the two halves DISAGREED about: this adapter signed a completion
+    # receipt for a lease the store had already released for reclaim, so the
+    # receipt could land against an attempt the store had moved on from. Match the
+    # store exactly; an off-by-one-instant window is still a window.
+    if now >= job_lease_expiry:
         raise AdapterError("expired_lease")
     # Header-safe and bounded. `.strip()` alone let control characters through, and
     # the nonce is both signed AND sent as the `X-Leaf-Nonce` header value.
@@ -388,9 +441,24 @@ def translate(
     # __bool__ raises produced a RuntimeError AFTER the identity was already
     # recorded, burning the attempt. Compare against the exact singletons instead,
     # so nothing after the claim can raise.
-    outcome = reserve_completion(job_id, claimed_attempt)
+    # THE ENVELOPE GOES IN WITH THE CLAIM. Reserving the identity alone left the
+    # receipt only in this function's return value: claim succeeds, then the
+    # process dies before the caller returns or POSTs, and the honest retry gets
+    # `duplicate_completion` for an envelope that now exists nowhere. The attempt
+    # was burned with nothing to show for it — the same unclosable-job failure
+    # round 7 fixed from the other direction. Handing the envelope to the guard
+    # makes claiming and recording one indivisible step, so whatever survives the
+    # crash holds a receipt, not just a tombstone.
+    outcome = reserve_completion(job_id, claimed_attempt, envelope)
     if outcome is True:
         return envelope
+    # A STORED ENVELOPE IS A RECOVERY, NOT A REFUSAL. A guard that already holds a
+    # receipt for this (job, attempt) returns it, and the retry is idempotent:
+    # the caller gets back the identical envelope the crashed delivery signed.
+    # Returned as-is, never re-signed, so the nonce and signature still match the
+    # receipt the replay store may already have seen.
+    if type(outcome) is CallbackEnvelope:
+        return outcome
     if outcome is False:
         raise AdapterError("duplicate_completion")
     # A guard that returns anything else is violating its contract. It may already

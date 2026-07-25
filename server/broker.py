@@ -1319,20 +1319,69 @@ def _complete_callback_job(job_id: str, callback: Dict[str, Any]) -> str:
     record = jobs.get_job(job_id)
     if record is None:
         return "missing"
+    job_attempt = int(record.get("attempt") or 0)
+    # THE CALLBACK'S SIGNED ATTEMPT DECIDES WHETHER THIS COMPLETION STILL APPLIES.
+    #
+    # This function used to read the attempt off the JOB RECORD and stamp it onto
+    # the provenance, discarding the attempt the adapter had signed. That turned a
+    # late delivery into a cross-attempt completion: attempt 1's envelope is
+    # delayed, attempt 1's lease expires, the store reclaims and starts attempt 2,
+    # then attempt 1's envelope lands and is stamped `attempt: 2` and used to
+    # complete attempt 2. The receipt names an attempt whose output it does not
+    # describe, and the signature over `attempt: 1` no longer matches the claim the
+    # spine recorded. The adapter binds the attempt to authority precisely so this
+    # side can rely on it, and then this side threw it away.
+    #
+    # A callback that names a different attempt than the one currently running is
+    # STALE, not applicable. Refuse it rather than retargeting it.
+    claimed_attempt = callback.get("attempt")
+    if claimed_attempt is not None:
+        if type(claimed_attempt) is not int:
+            raise ValueError("callback attempt must be an int")
+        if claimed_attempt != job_attempt:
+            raise ValueError(
+                f"callback names attempt {claimed_attempt} but the job is on attempt "
+                f"{job_attempt}; a stale attempt's callback cannot complete a newer one")
+    # The WorkItem id is signed too, so carry it into the receipt instead of
+    # dropping it: provenance that cannot name the WorkItem it came from cannot be
+    # reconciled against APS afterwards. There is deliberately NO cross-check
+    # against the job record here, because there is nothing to check it against —
+    # the jobs table has no `workitem_id` column. The binding that matters already
+    # happened in the adapter, which refuses `wrong_workitem` by comparing the
+    # completion against the dispatched id handed to it as authority.
+    claimed_workitem = callback.get("workitem_id")
+    if claimed_workitem is not None and type(claimed_workitem) is not str:
+        raise ValueError("callback workitem_id must be a string")
+
+    def _provenance(**extra: Any) -> Dict[str, Any]:
+        # `attempt` is the one the callback SIGNED when it supplied one, and it has
+        # already been proven equal to the job's current attempt above.
+        base: Dict[str, Any] = {
+            "attempt": claimed_attempt if claimed_attempt is not None else job_attempt,
+            "execution_path": "cloud",
+        }
+        if claimed_workitem:
+            base["workitem_id"] = claimed_workitem
+        base.update(extra)
+        return base
+
     raw_status = str(callback.get("status", "")).strip().lower()
     if raw_status in {"success", "complete"}:
         result = callback.get("result")
         result_env = dict(result) if isinstance(result, dict) else {"result": result}
         result_env["ok"] = True
-        provenance = {"attempt": int(record.get("attempt") or 0), "execution_path": "cloud"}
+        provenance = _provenance()
         result_env.setdefault("execution_provenance", provenance)
         return jobs.complete_callback(job_id, "complete", result_env=result_env,
                                       provenance=provenance)
     if raw_status in {"failed", "failure", "cancelled", "canceled"}:
         message = str(callback.get("message") or f"Design Automation callback status: {raw_status}")
+        # The failure branch carried NO attempt at all, so a stale attempt's failure
+        # callback could fail a newer attempt with no record of which attempt failed.
+        # It runs through the same guard and the same provenance builder.
         return jobs.complete_callback(job_id, "failed", error={
             "error_code": ErrorCode.WORKITEM_FAILED, "message": message, "retryable": False,
-        }, provenance={"execution_path": "cloud", "callback_status": raw_status})
+        }, provenance=_provenance(callback_status=raw_status))
     raise ValueError("callback status must be a terminal Design Automation status")
 
 

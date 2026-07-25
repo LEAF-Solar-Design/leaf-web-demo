@@ -50,7 +50,7 @@ def callback_env(monkeypatch, tmp_path):
     monkeypatch.setenv("JOBS_DB", str(tmp_path / "jobs.db"))
 
 
-def _win(job_id, attempt):
+def _win(job_id, attempt, envelope):
     """Reservation that always succeeds, for tests whose subject is NOT the
     duplicate check. Returns True = "you won the claim"."""
     return True
@@ -259,7 +259,7 @@ def test_a_failure_after_validation_does_not_burn_the_attempt():
     never be completed at all."""
     claimed = set()
 
-    def reserve(job_id, attempt):
+    def reserve(job_id, attempt, envelope):
         key = (job_id, attempt)
         if key in claimed:
             return False
@@ -290,7 +290,7 @@ def test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accep
     claimed = set()
     calls = []
 
-    def reserve(job_id, attempt):
+    def reserve(job_id, attempt, envelope):
         key = (job_id, attempt)
         calls.append(key)
         if key in claimed:
@@ -346,12 +346,12 @@ def test_duplicate_completion_guard_is_keyed_on_attempt_not_nonce():
     for nonce in ("nonce-abc", "nonce-def", "totally-new-nonce"):
         with pytest.raises(adapter.AdapterError) as excinfo:
             adapter.translate(_completion(nonce=nonce), b"out", job_id='job-1', job_attempt=2, job_workitem_id='wi-1', job_lease_expiry=NOW + 60.0, secret=SECRET,
-                              now=NOW, reserve_completion=lambda job, attempt: (job, attempt) not in completed)
+                              now=NOW, reserve_completion=lambda job, attempt, envelope: (job, attempt) not in completed)
         assert excinfo.value.reason == "duplicate_completion", f"nonce {nonce} must not mint a second receipt"
     # A genuinely different ATTEMPT of the same job is a distinct completion.
     envelope = adapter.translate(_completion(attempt=3, nonce="nonce-xyz"), b"out", job_id='job-1', job_attempt=3,
                                  job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
-                                 reserve_completion=lambda job, attempt: (job, attempt) not in completed)
+                                 reserve_completion=lambda job, attempt, envelope: (job, attempt) not in completed)
     assert json.loads(envelope.body)["attempt"] == 3
 
 
@@ -361,7 +361,7 @@ def test_two_nonces_for_one_attempt_cannot_both_be_consumed():
     by test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accepted."""
     claimed = set()
 
-    def reserve(job, attempt):
+    def reserve(job, attempt, envelope):
         key = (job, attempt)
         if key in claimed:
             return False
@@ -442,7 +442,7 @@ def test_a_stateful_completion_cannot_swap_identities_after_validation():
 
     claimed = set()
 
-    def reserve(job_id, attempt):
+    def reserve(job_id, attempt, envelope):
         key = (job_id, attempt)
         if key in claimed:
             return False
@@ -468,7 +468,7 @@ def test_the_completion_must_name_the_job_whose_state_was_supplied():
     signed envelope AND reserved `("victim-job", 2)`."""
     claimed = []
 
-    def reserve(job, attempt):
+    def reserve(job, attempt, envelope):
         claimed.append((job, attempt))
         return True
 
@@ -502,7 +502,7 @@ def test_a_guard_whose_result_cannot_be_truth_tested_does_not_crash_after_claimi
     # aspect was never exercised and the reason assertion passed either way.
     recorded = set()
 
-    def records_then_misbehaves(job_id, attempt):
+    def records_then_misbehaves(job_id, attempt, envelope):
         recorded.add((job_id, attempt))
         return Unusable()
 
@@ -525,7 +525,7 @@ def test_a_guard_whose_result_cannot_be_truth_tested_does_not_crash_after_claimi
         with pytest.raises(adapter.AdapterError) as excinfo:
             adapter.translate(_completion(), b"out", job_id="job-1", job_attempt=2,
                               job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
-                              reserve_completion=lambda j, a: sloppy)
+                              reserve_completion=lambda j, a, e: sloppy)
         assert excinfo.value.reason == "bad_completion_guard", f"{sloppy!r} is not True/False"
 
 
@@ -692,7 +692,7 @@ def test_a_reused_delivery_nonce_cannot_burn_a_later_attempt():
     store = callbacks.CallbackReplayStore()
     claimed = set()
 
-    def reserve(job_id, attempt):
+    def reserve(job_id, attempt, envelope):
         key = (job_id, attempt)
         if key in claimed:
             return False
@@ -760,3 +760,116 @@ def test_a_cheap_refusal_is_reported_before_the_output_is_copied():
                           job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
                           secret=SECRET, now=NOW, reserve_completion=_win)
     assert excinfo.value.reason == "missing_output"
+
+
+# ---------------------------------------------------------------------------
+# Round-10 findings. Each of these fails against the pre-fix adapter, and the
+# failure is a RAW exception escaping in place of a tagged refusal, or a signed
+# receipt that should never have been produced.
+# ---------------------------------------------------------------------------
+
+def test_an_oversized_exact_integer_lease_is_a_tagged_refusal_not_an_overflow():
+    """`math.isfinite` is not total over `int`: it converts to float first, so
+    `math.isfinite(10**5000)` RAISES OverflowError instead of returning False.
+    The guard meant to reject a malformed lease was therefore the thing that
+    blew up, and the caller saw a raw OverflowError rather than
+    `malformed_lease`. A guard that raises is not a guard."""
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(lease_expiry=10 ** 5000), b"output",
+                          job_id="job-1", job_attempt=2, job_workitem_id="wi-1",
+                          job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "malformed_lease"
+
+    # The same hazard on the AUTHORITY side reports as an expired lease, since
+    # that is the field's own refusal tag.
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                          job_workitem_id="wi-1", job_lease_expiry=10 ** 5000,
+                          secret=SECRET, now=NOW, reserve_completion=_win)
+    assert excinfo.value.reason == "expired_lease"
+
+
+def test_an_unbounded_attempt_is_refused_before_the_derived_nonce_is_built():
+    """Every STRING field was capped; the attempt is a NUMBER and was not. The
+    derived nonce is `f"{attempt}:{delivery_nonce}"`, and formatting an integer
+    past CPython's int-to-str digit limit raises a raw ValueError — after the
+    identity checks but BEFORE the reservation, so the caller got an exception
+    with no reason tag."""
+    huge = 10 ** 5000
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(attempt=huge), b"output", job_id="job-1",
+                          job_attempt=huge, job_workitem_id="wi-1",
+                          job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "wrong_attempt"
+
+    # The bound is the only thing being added; an ordinary attempt still works.
+    envelope = adapter.translate(_completion(attempt=2), b"output", job_id="job-1",
+                                 job_attempt=2, job_workitem_id="wi-1",
+                                 job_lease_expiry=NOW + 60.0, secret=SECRET,
+                                 now=NOW, reserve_completion=_win)
+    assert json.loads(envelope.body)["attempt"] == 2
+
+
+def test_the_lease_boundary_agrees_with_the_job_stores_reclaim_rule():
+    """`jobs.py` reclaims a lease on `lease_expires_at <= now`. The adapter used
+    a strict `now > job_lease_expiry`, so at the exact instant `now ==
+    lease_expiry` the two halves disagreed: the store had already released the
+    lease for reclaim while the adapter still signed a completion receipt for
+    it. Match the store."""
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                          job_workitem_id="wi-1", job_lease_expiry=NOW,
+                          secret=SECRET, now=NOW, reserve_completion=_win)
+    assert excinfo.value.reason == "expired_lease"
+
+    # One tick of headroom is still a live lease, so this is a boundary move and
+    # not a blanket tightening that would refuse every valid completion.
+    envelope = adapter.translate(_completion(), b"output", job_id="job-1",
+                                 job_attempt=2, job_workitem_id="wi-1",
+                                 job_lease_expiry=NOW + 1e-6, secret=SECRET,
+                                 now=NOW, reserve_completion=_win)
+    assert json.loads(envelope.body)["job_id"] == "job-1"
+
+
+def test_a_delivery_that_crashed_after_claiming_is_recoverable_not_burned():
+    """The reservation used to claim the IDENTITY only, so the envelope existed
+    solely as this function's return value. Claim succeeds, the process dies
+    before the caller returns or POSTs, and the honest retry then gets
+    `duplicate_completion` for a receipt that exists nowhere — the attempt is
+    burned and the job can never close.
+
+    The guard now receives the envelope with the claim, and a guard that already
+    holds one hands it back, so the retry is idempotent."""
+    store = {}
+
+    def reserve(job_id, attempt, envelope):
+        key = (job_id, attempt)
+        if key in store:
+            return store[key]          # the stored receipt, not a refusal
+        store[key] = envelope
+        return True
+
+    first = adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                              job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                              secret=SECRET, now=NOW, reserve_completion=reserve)
+    assert store[("job-1", 2)] is first, "the claim must record the envelope, not just the identity"
+
+    # The retry after the simulated crash returns the IDENTICAL envelope, byte
+    # for byte, so its signature and nonce still match what the replay store may
+    # already have seen. A re-signed envelope would be a different receipt.
+    again = adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                              job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                              secret=SECRET, now=NOW, reserve_completion=reserve)
+    assert again is first
+    assert (again.body, again.nonce, again.signature, again.timestamp) == (
+        first.body, first.nonce, first.signature, first.timestamp)
+
+    # A guard with no recoverable receipt is still a hard duplicate refusal.
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
+                          job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                          secret=SECRET, now=NOW,
+                          reserve_completion=lambda j, a, e: False)
+    assert excinfo.value.reason == "duplicate_completion"
