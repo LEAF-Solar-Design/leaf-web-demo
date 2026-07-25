@@ -65,6 +65,9 @@ Current additive progress:
 - [x] Prove real local health, usage, entitlement, refresh, Claude grant link,
   secret non-echo, and destructive unlink in the unified Trust rail.
 - [x] Isolate managed proof runs from ambient Claude and Anthropic credentials.
+- [x] Prove the real local drawing's layer count, zoom, Fit, resident canvas,
+  entity picking, layer visibility, and selection clearing in the unified View
+  rail.
 
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls

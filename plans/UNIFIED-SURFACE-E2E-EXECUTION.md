@@ -426,6 +426,12 @@ Progress:
   directory and clears inherited Claude and Anthropic variables in the child
   process. A local proof can no longer consume or report an ambient operator
   credential.
+- The managed resident-viewer gate now loads the real local intake and renders
+  its 2,345 panels in the unified scene. It proves the real layer count, wheel
+  zoom, Fit restoration, same-canvas retention, coordinate-based picking of a
+  real panel handle, canvas change on layer hide, automatic selection clearing,
+  and layer restoration. VW-01 and VW-02 are local E2E proven with the
+  receipt's APS, headless WebGL, and Auth0 limits.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -499,7 +505,7 @@ Observed Wave 0 results:
 - Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
-- Local tier: 9 passed against an isolated real Vite, FastAPI, broker, harness,
+- Local tier: 10 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness, real drawing intake,
   catalog review, explicit confirmation, broker and worker runs, completed
   result rendering, durable job API storage, Jobs-rail recovery after page
@@ -507,11 +513,12 @@ Observed Wave 0 results:
   catalog run bound to the uploaded drawing and tenant. It also proves running
   job reattach, Escape detach, page-hide reaping, three-version Undo and Redo
   depth, the scripted conversation approval round trip, checkout conflict,
-  expiry, take, and release, and the real local Trust lifecycle. A separate
-  live-auth guest walk also passes for signed guest upload, extraction, viewer
-  seating, allowed version read, zero dispatch, and denied run. APS, live
-  Claude, Auth0 user sign-in, PostgreSQL, production billing, and
-  conversation-driven product execution claims remain open.
+  expiry, take, and release, the real local Trust lifecycle, real layer
+  visibility, resident zoom and Fit, entity picking, and selection clearing. A
+  separate live-auth guest walk also passes for signed guest upload,
+  extraction, viewer seating, allowed version read, zero dispatch, and denied
+  run. APS, live Claude, Auth0 user sign-in, PostgreSQL, production billing,
+  and conversation-driven product execution claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:
