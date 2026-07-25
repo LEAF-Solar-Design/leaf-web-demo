@@ -7,7 +7,10 @@
 // button) and could release a lock they never took.
 //
 // Run: node scripts/check_checkout_identity.mjs   (from web/)
-import { getSessionHolderId, HOLDER_STORAGE_KEY } from '../src/checkoutIdentity.js'
+import {
+  getSessionHolderId, claimHolderId, isCheckoutActive, isLegacyHolder,
+  HOLDER_STORAGE_KEY,
+} from '../src/checkoutIdentity.js'
 
 let failures = 0
 const fail = (msg) => { failures++; console.error('FAIL:', msg) }
@@ -109,6 +112,119 @@ const TENANTS = ['demo-tenant', 'demo', 'acme', 'acme-corp', 'leaf', 'tenant-1',
   else pass('blank stored holder id is re-minted')
 }
 
+// --- (d) a DUPLICATED tab must not keep the incumbent's id --------------------
+// The case (a) above misses entirely: it models two tabs the user OPENED, which
+// have independent storage. Duplicating a tab COPIES sessionStorage, so the new
+// tab reads the incumbent's id and both believe they hold the lock. Storage alone
+// cannot tell a duplicate from a reload, so the claim channel decides.
+{
+  // A synchronous stand-in for BroadcastChannel: delivers to every peer except
+  // the sender, which is the semantics claimHolderId relies on.
+  const makeHub = () => {
+    const peers = []
+    return {
+      connect() {
+        const listeners = []
+        const peer = {
+          addEventListener: (_t, fn) => { listeners.push(fn) },
+          removeEventListener: (_t, fn) => {
+            const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1)
+          },
+          close() { const i = peers.indexOf(peer); if (i >= 0) peers.splice(i, 1) },
+          postMessage(data) {
+            for (const other of peers) {
+              if (other === peer) continue
+              for (const fn of other._listeners) fn({ data })
+            }
+          },
+          _listeners: listeners,
+        }
+        peers.push(peer)
+        return peer
+      },
+    }
+  }
+
+  const hub = makeHub()
+  const tabA = makeStorage()
+  const idA = getSessionHolderId(tabA)
+  let liveA = idA
+  const claimA = claimHolderId({
+    id: idA, storage: tabA, channel: hub.connect(),
+    onRemint: (n) => { liveA = n }, now: () => 1000,
+    schedule: (fn) => fn(), // sync: production defers a task (see claimHolderId)
+  })
+
+  // The duplication: tab B starts with a COPY of tab A's storage.
+  const tabB = makeStorage({ [HOLDER_STORAGE_KEY]: tabA.getItem(HOLDER_STORAGE_KEY) })
+  const idB = getSessionHolderId(tabB)
+  if (idB !== idA) {
+    fail(`(d) test setup wrong: a copied store should hand back the same id, got ${JSON.stringify(idB)}`)
+  }
+  let liveB = idB
+  const claimB = claimHolderId({
+    id: idB, storage: tabB, channel: hub.connect(),
+    onRemint: (n) => { liveB = n }, now: () => 2000,
+    schedule: (fn) => fn(),
+  })
+
+  if (!claimA.active || !claimB.active) {
+    fail('(d) claimHolderId reported inactive with a channel provided')
+  } else if (liveA === liveB) {
+    fail(`(d) a duplicated tab still shares the incumbent's holder id -> ${JSON.stringify(liveA)}`)
+  } else if (liveA !== idA) {
+    fail(`(d) the incumbent gave up its id (${JSON.stringify(idA)} -> ${JSON.stringify(liveA)}); the duplicate should be the one to remint`)
+  } else {
+    pass(`(d) duplicated tab reminted: incumbent kept ${JSON.stringify(liveA)}, duplicate moved to ${JSON.stringify(liveB)}`)
+  }
+
+  // The remint must be persisted, or the next reload of the duplicate collides again.
+  if (tabB.getItem(HOLDER_STORAGE_KEY) !== liveB) {
+    fail('(d) the duplicate did not persist its reminted holder id')
+  }
+
+  claimA.stop(); claimB.stop()
+
+  // With no channel available, the claim must degrade LOUDLY (active: false)
+  // rather than pretending duplication detection is in place.
+  const noChan = claimHolderId({ id: 'sess-x', storage: makeStorage(), channel: null })
+  if (noChan.active !== false) fail('(d) claim with no channel did not report active: false')
+  else pass('(d) no BroadcastChannel -> claim reports active:false (documented degradation)')
+}
+
+// --- (e) an EXPIRED lock is FREE (the server says so) -------------------------
+{
+  const iso = (ms) => new Date(ms).toISOString()
+  const now = 1_700_000_000_000
+  const cases = [
+    [{ holder: 'sess-a', expires: iso(now + 60_000) }, true, 'unexpired lock is active'],
+    [{ holder: 'sess-a', expires: iso(now - 1) }, false, 'lock that expired 1ms ago is free'],
+    [{ holder: 'sess-a', expires: iso(now - 3600_000) }, false, 'long-expired lock is free'],
+    [{ holder: 'sess-a' }, true, 'lock with no expires is treated as active'],
+    [{ holder: 'sess-a', expires: 'not-a-date' }, true, 'unparseable expires does not silently free the lock'],
+    [null, false, 'no checkout is not active'],
+    [{ holder: '' }, false, 'checkout with a blank holder is not active'],
+  ]
+  let ok = true
+  for (const [co, want, label] of cases) {
+    const got = isCheckoutActive(co, now)
+    if (got !== want) { fail(`(e) ${label}: expected ${want}, got ${got}`); ok = false }
+  }
+  if (ok) pass(`(e) expiry is honoured in all ${cases.length} cases`)
+}
+
+// --- (f) legacy tenant-shaped holders are recognised --------------------------
+{
+  let ok = true
+  for (const t of TENANTS) {
+    if (!isLegacyHolder(t)) { fail(`(f) tenant-shaped holder not flagged as legacy -> ${JSON.stringify(t)}`); ok = false }
+  }
+  if (isLegacyHolder('sess-abc')) { fail('(f) a session id was flagged as legacy'); ok = false }
+  if (isLegacyHolder('')) { fail('(f) blank holder flagged as legacy'); ok = false }
+  if (isLegacyHolder(null)) { fail('(f) null holder flagged as legacy'); ok = false }
+  if (ok) pass('(f) legacy tenant-shaped holders are distinguished from session ids')
+}
+
 // --- the App must no longer derive the holder from the tenant -----------------
 {
   const fs = await import('node:fs/promises')
@@ -116,12 +232,44 @@ const TENANTS = ['demo-tenant', 'demo', 'acme', 'acme-corp', 'leaf', 'tenant-1',
 
   if (/const\s+ownHolder\s*=\s*tenant\s*\|\|/.test(app)) {
     fail('App.jsx still derives ownHolder from the tenant')
-  } else if (!/const\s+ownHolder\s*=\s*useMemo\(\s*\(\)\s*=>\s*getSessionHolderId\(\)/.test(app)) {
+  } else if (!/getSessionHolderId\(\)/.test(app)) {
     fail('App.jsx does not compute ownHolder from getSessionHolderId()')
   } else if (!/from\s+['"]\.\/checkoutIdentity\.js['"]/.test(app)) {
     fail('App.jsx does not import ./checkoutIdentity.js')
   } else {
     pass('App.jsx computes ownHolder from getSessionHolderId(), not the tenant')
+  }
+
+  // --- (g) the lock must FAIL CLOSED on a failed read -------------------------
+  // Source-level because the behaviour lives in a React callback, and the exact
+  // regression (an error mapping to "no lock") is a one-line edit away.
+  if (!/setCheckoutUnknown\(true\)/.test(app)) {
+    fail('(g) App.jsx never sets checkoutUnknown(true): a failed lock read cannot fail closed')
+  } else if (!/const\s+writeLocked\s*=[^\n]*checkoutUnknown/.test(app)) {
+    fail('(g) writeLocked does not consider checkoutUnknown, so a failed read re-enables writes')
+  } else {
+    pass('(g) a failed lock read sets checkoutUnknown and suppresses writes (fails closed)')
+  }
+
+  // The claim must actually be started, or duplicate detection is dead code.
+  if (!/claimHolderId\(/.test(app)) {
+    fail('(g) App.jsx never calls claimHolderId, so a duplicated tab is never detected')
+  } else {
+    pass('(g) App.jsx starts the holder claim')
+  }
+
+  // Expiry must be applied in the App, not just available in the module.
+  if (!/isCheckoutActive\(/.test(app)) {
+    fail('(g) App.jsx never calls isCheckoutActive, so an expired lock still suppresses writes')
+  } else {
+    pass('(g) App.jsx applies isCheckoutActive to the raw checkout')
+  }
+
+  // Out-of-order reads must be dropped.
+  if (!/checkoutSeqRef/.test(app)) {
+    fail('(g) no sequence guard on the checkout read: a stale response can overwrite fresh lock state')
+  } else {
+    pass('(g) checkout reads carry a sequence guard against out-of-order responses')
   }
 
   // Purity: node imported it, but be explicit so a future edit can't sneak a

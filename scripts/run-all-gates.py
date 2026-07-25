@@ -386,6 +386,10 @@ def build_suites() -> List[Suite]:
               [_npm(), "run", "check:customization"], None),
         Suite("web-staging-fixes-check", "web staging fix regression checks", "script", WEB,
               [_npm(), "run", "check:staging-fixes"], None),
+        # Named separately as well as inside check:staging-fixes, so a failure
+        # reports as the checkout lock rather than as a generic staging-fix chain.
+        Suite("web-checkout-identity-check", "web single-writer checkout lock identity", "script", WEB,
+              [_npm(), "run", "check:checkout-identity"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #

@@ -25,7 +25,9 @@ import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
-import { getSessionHolderId } from './checkoutIdentity.js'
+import {
+  getSessionHolderId, claimHolderId, isCheckoutActive, isLegacyHolder,
+} from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
   dismissRunIntent, stageRunIntent,
@@ -264,6 +266,10 @@ export default function App() {
   // --- single-writer checkout lock (item 3) ---
   const [checkout, setCheckout] = useState(null)         // {holder, acquired, expires} | null (from /versions)
   const [checkoutBusy, setCheckoutBusy] = useState(false) // take/release request in flight (3B)
+  // We asked for the lock state and did not get an answer. Distinct from
+  // `checkout === null` (answered: nothing held) so a read failure can fail
+  // CLOSED instead of reading as "free". See loadCheckout.
+  const [checkoutUnknown, setCheckoutUnknown] = useState(false)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
@@ -361,16 +367,42 @@ export default function App() {
   // another's lock as their own. A checkout held by US is not a lock; only a
   // checkout held by ANOTHER session suppresses write-Run. `?demo=locked` injects
   // a synthetic other-session lock.
-  const ownHolder = useMemo(() => getSessionHolderId(), [])
+  // `ownHolder` starts as the stored/minted id and can be REPLACED once the claim
+  // channel answers: a duplicated tab inherits the incumbent's id via copied
+  // sessionStorage, so it must step aside rather than impersonate the holder.
+  const [ownHolder, setOwnHolder] = useState(() => getSessionHolderId())
+  useEffect(() => {
+    const claim = claimHolderId({ id: ownHolder, onRemint: setOwnHolder })
+    return () => claim.stop()
+    // Claim once per runtime. A remint updates `ownHolder`, and re-running the
+    // claim on that change would announce the fresh id in a loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const rawCheckout = demoLocked
     ? { holder: 'another-session', acquired: new Date().toISOString(), expires: new Date(Date.now() + 3600e3).toISOString() }
     : checkout
+  // An EXPIRED lock is free server-side ("re-acquirable by anyone", and its
+  // fenced write requires checkout_expires_at > clock_timestamp()). Treating it
+  // as live is how a dead lock used to disable writes with no way to clear it.
+  const activeCheckout = isCheckoutActive(rawCheckout) ? rawCheckout : null
   const otherHeldCheckout =
-    (rawCheckout && rawCheckout.holder && rawCheckout.holder !== ownHolder) ? rawCheckout : null
-  const writeLocked = !mock && !!otherHeldCheckout
+    (activeCheckout && activeCheckout.holder !== ownHolder) ? activeCheckout : null
+  // FAIL CLOSED. `checkoutUnknown` means we asked and did not get an answer, so
+  // we do not know whether someone else is writing. The old code mapped that to
+  // `null` (no lock) and enabled writes, which is a lock that fails open: the
+  // one failure mode with no visible symptom. Unknown suppresses writes; the
+  // banner tells the user why, so this is not a silent disable either.
+  const writeLocked = !mock && (!!otherHeldCheckout || checkoutUnknown)
   // We hold the single-writer lock (3B): our own holder id owns the checkout.
   // Not a lock on us (write-Run stays enabled) — it just offers a Release.
-  const heldByUs = !mock && !!(rawCheckout && rawCheckout.holder && rawCheckout.holder === ownHolder)
+  const heldByUs = !mock && !!(activeCheckout && activeCheckout.holder === ownHolder)
+  // A lock minted by a pre-session-id client. It is not ours and we cannot
+  // release it, but naming it beats an unexplained disabled button; the server's
+  // 24h TTL cap drains these on its own now that we honour `expires`.
+  const legacyHeldCheckout = otherHeldCheckout && isLegacyHolder(otherHeldCheckout.holder)
+    ? otherHeldCheckout
+    : null
 
   // Current open project's display name (from the hydration payload, else the list).
   const currentProjectName = openProjectId
@@ -570,17 +602,33 @@ export default function App() {
   useEffect(() => { loadProjects() }, [loadProjects])
 
   // Checkout lock (item 3): read the current drawing's version manifest and pick
-  // up its `checkout` (sibling contract adds it to /versions). Live only; any
-  // error -> null (no chip, no write-Run suppression). Refetched when the drawing
-  // version changes and after runs (a write may acquire/release the lock).
+  // up its `checkout` (sibling contract adds it to /versions). Live only.
+  // Refetched when the drawing version changes and after runs (a write may
+  // acquire/release the lock).
+  //
+  // A failed read sets `checkoutUnknown`, NOT `checkout = null`. Mapping an error
+  // to "no lock" is what let session B write under session A's lease: B's read
+  // fails, B concludes the drawing is free, and the server does not save us
+  // because its fenced write only checks that the checkout is unchanged and
+  // unexpired, never that the CALLER is the holder.
+  //
+  // `seqRef` drops out-of-order responses. Without it a slow early request that
+  // resolves after a newer one can overwrite fresh state with stale state, which
+  // for a lock means re-enabling writes that were correctly disabled.
+  const checkoutSeqRef = useRef(0)
   const loadCheckout = useCallback(async () => {
-    if (mock) { setCheckout(null); return }
+    if (mock) { setCheckout(null); setCheckoutUnknown(false); return }
     const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    const seq = ++checkoutSeqRef.current
     try {
       const v = await getDrawingVersions(mock, did)
+      if (seq !== checkoutSeqRef.current) return // a newer read already answered
       setCheckout(v?.checkout || null)
+      setCheckoutUnknown(false)
     } catch {
+      if (seq !== checkoutSeqRef.current) return
       setCheckout(null)
+      setCheckoutUnknown(true)
     }
   }, [mock, drawingState])
 
@@ -2050,10 +2098,13 @@ export default function App() {
               {!mock && (
                 <CheckoutControls
                   lockedByOther={otherHeldCheckout}
+                  legacyByOther={!!legacyHeldCheckout}
                   heldByUs={heldByUs}
+                  unknown={checkoutUnknown}
                   busy={checkoutBusy}
                   onTake={onTakeCheckout}
                   onRelease={onReleaseCheckout}
+                  onRetry={loadCheckout}
                 />
               )}
               {drawingState && (
