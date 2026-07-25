@@ -62,9 +62,21 @@ tenants/{tenant_id}/drawings/{drawing_id}/manifest.json         # version index 
     {"v":2,"parent":1,   "created":"<iso>","bytes":N,"sha256":"...","workitem_id":"...","tool":"add-panel-row","note":null},
     {"v":3,"parent":2, ...}
   ],
-  "checkout": {"holder":"<session-id>","acquired":"<iso>","expires":"<iso>"}   // or null
+  "checkout": {"holder":"<session-id>","acquired":"<iso>","expires":"<iso>","fence":N}, // or null
+  "checkout_fence": N                        // monotonic lock generation; survives release
 }
 ```
+
+- **`checkout.holder` is a DISPLAY LABEL, never proof.** It is caller-supplied and
+  `GET /api/drawings/{id}/versions` publishes it, so anyone who can read the drawing can
+  name it. Ownership is proved by the opaque capability the acquire route mints
+  (`server/checkout_capability.py`), which is bound to tenant + authenticated subject +
+  drawing + `fence` and never appears on any read.
+- **`checkout_fence` is monotonic and lives at the MANIFEST level**, not inside `checkout`,
+  because `release_checkout` clears that dict. A counter that restarted at 1 on the next
+  acquire would repeat a generation, and a capability minted for the earlier lease would
+  verify against the later one. The postgres authority stores this as a manifest column
+  release leaves untouched; the legacy authority mirrors it here.
 
 - **`head` vs `latest`:** `undo` sets `head=2` but `latest` stays `3` (v3's object still
   exists → **redo** is possible). A new write from `head=2` creates `v=latest+1` with
@@ -91,9 +103,11 @@ path injects OSS.
 | `ingest_drawing(be, tenant_id, local_path, drawing_id=None)` | PUT v1 + write initial manifest → `{"drawing_id","version":1}`. Refuses to clobber an existing drawing. |
 | `put_drawing(be, tenant_id, drawing_id, local_path, parent_version, meta=None)` | Append immutable `v=latest+1` (parent=`parent_version`), advance head+latest → `int`. **The write-path primitive.** |
 | `resolve_version(be, tenant_id, drawing_id, version="head")` | `version` = int, `"head"`, or `"latest"` → `(version_int, object_key)`. |
-| `undo(be, tenant_id, drawing_id)` | Repoint head → head's parent (no deletion; redo-able) → new head `int`. Raises at root. |
-| `acquire_checkout(be, tenant_id, drawing_id, holder, ttl_s)` | Single-writer lock. Held-by-other-and-active → `False`; same holder refreshes; expired lock is free → `True`. |
-| `release_checkout(be, tenant_id, drawing_id, holder=None)` | Clear the lock; a given `holder` may only release an active lock it owns. |
+| `undo(be, tenant_id, drawing_id, *, holder=None, fence=None)` | Repoint head → head's parent (no deletion; redo-able) → new head `int`. Raises at root. `holder`/`fence` apply the SAME single-writer check as `put_drawing`: head is drawing state every session reads, so moving it is not a lesser act than publishing. |
+| `redo(be, tenant_id, drawing_id, *, holder=None, fence=None)` | Inverse of `undo`; same single-writer check. |
+| `acquire_checkout(be, tenant_id, drawing_id, holder, ttl_s, *, expected_fence=None, strict_owner=False)` | Single-writer lock; every acquire stamps a NEW `fence`. Default: held-by-other-and-active → `False`, same holder refreshes. `strict_owner=True` ignores the holder label and refreshes a LIVE lease only when `expected_fence` matches — the rule the routes use, so taking over a live lease needs proof of it rather than knowledge of a public string. Expired lock is free under both → `True`. |
+| `release_checkout(be, tenant_id, drawing_id, holder=None, *, expected_fence=None)` | Clear the lock. `expected_fence` (the generation a capability proved) REPLACES the holder comparison, so a release cannot land on a lease that started after the check. |
+| `checkout_active(co)` | Is a manifest `checkout` dict a live lease right now? The one "expired means free" rule, read rather than re-implemented. |
 | `drawing_version_key`, `manifest_key`, `sanitize_id`, `new_drawing_id`, `load_manifest`, `save_manifest` | key + manifest helpers. |
 
 ## client.py changes (additive, FROZEN §5 preserved)

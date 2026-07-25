@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -923,6 +924,33 @@ def _worktree_add(bare: Path, target: Path, commit: str) -> subprocess.Completed
     )
 
 
+def _discard_timed_out_add(target: Path) -> SimpleNamespace:
+    """Throw away the tree a timed-out `git worktree add` may have left behind.
+
+    Neither accepting nor immediately 503-ing is right here.
+
+    Accepting is unsafe: subprocess.run KILLS git on timeout, and git sets HEAD
+    before the checkout has finished writing files, while the digest check only
+    covers registry.json. A tree killed after registry.json but before tools/
+    would verify perfectly clean and serve an incomplete catalog.
+
+    Raising straight out is also wrong: a slow-but-otherwise-fine box then turns
+    a materializable catalog into a false 503.
+
+    So discard and hand back a synthetic failure, letting the SAME prune+retry
+    path a hard failure gets try again from a clean slate. A tenant on a slow box
+    still gets its catalog; a torn tree is never served. Only when the retry also
+    blows the budget does this become a 503, which by then is honest.
+
+    Safe to delete: the caller holds the exclusive materialize lock and checked
+    that `target` did not exist on entry, so this tree is ours. The stale
+    worktree registration it leaves behind is exactly what the prune step below
+    already exists to clear.
+    """
+    shutil.rmtree(target, ignore_errors=True)
+    return SimpleNamespace(returncode=124, stderr="git worktree add timed out")
+
+
 def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
     """Ensure `target` holds `commit`, serialized against every other worker."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -930,7 +958,10 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
     with _exclusive_materialize(bare, lock_path):
         if target.exists():
             return  # another holder materialized it while we waited
-        first = _worktree_add(bare, target, commit)
+        try:
+            first = _worktree_add(bare, target, commit)
+        except subprocess.TimeoutExpired:
+            first = _discard_timed_out_add(target)
         if first.returncode == 0 or target.exists():
             return
         # A lost race or a crash can leave the path registered but absent, and
@@ -939,7 +970,12 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
             ["git", "--git-dir", str(bare), "worktree", "prune"],
             text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
         )
-        retry = _worktree_add(bare, target, commit)
+        try:
+            retry = _worktree_add(bare, target, commit)
+        except subprocess.TimeoutExpired:
+            # Twice over budget is a real environment problem, not a blip. Discard
+            # so no torn tree is left for the next caller to find, then 503.
+            retry = _discard_timed_out_add(target)
         if retry.returncode != 0 and not target.exists():
             raise _unavailable(
                 f"git worktree add {target} @ {commit}: rc={first.returncode} "

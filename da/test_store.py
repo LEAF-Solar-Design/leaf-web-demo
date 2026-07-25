@@ -12,7 +12,9 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,6 +25,18 @@ import store  # noqa: E402
 
 DWG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "rooftop_demo.dwg")
 VERSION_KEY_RE = re.compile(r"^tenants/[a-z0-9_-]+/drawings/[a-z0-9_-]+/v/\d{8}\.dwg$")
+
+# Six tests below never reach the network, but they still build a signed client,
+# so client._load_creds() runs and needs SOME credential source. It does not need
+# a REAL one: _load_creds only rejects missing/PASTE_ME values, and the only thing
+# derived from the id is bucket_key()'s suffix, which these tests assert
+# structurally (prefix / self-consistency), never by value.
+#
+# So the fixture below injects a dummy credential instead of skipping. That keeps
+# all 15 tests executing on a clean CI runner, and it also pins the operator box
+# to the SAME inputs -- previously ~/.aps/credentials.json silently fed real
+# values in here, so the suite behaved differently depending on the host.
+_DUMMY_CREDS = json.dumps({"client_id": "testclientid0000", "client_secret": "testsecret"})
 
 
 # --------------------------------------------------------------------------- #
@@ -44,6 +58,11 @@ def no_network(monkeypatch):
     monkeypatch.setattr(client, "nickname", lambda: "TESTOWNER", raising=True)
     # any code path that still tries requests.get/post/put fails the test
     monkeypatch.setattr(client, "requests", _NoNetwork(), raising=True)
+    # deterministic dummy creds everywhere: satisfies _load_creds() without a real
+    # secret, and blanks CRED_PATH so a host credential file cannot leak in.
+    monkeypatch.setenv("APS_CREDENTIALS_JSON", _DUMMY_CREDS)
+    monkeypatch.setattr(client, "CRED_PATH", str(Path(__file__).parent / "no-such-creds.json"),
+                        raising=True)
     yield
 
 
@@ -477,18 +496,168 @@ def test_anonymous_writer_still_publishes_on_an_unlocked_drawing(tmp_path):
                              holder=store.ANONYMOUS_HOLDER) == 2
 
 
-def test_legacy_locks_carry_no_fence_so_a_supplied_one_cannot_wedge_a_write(tmp_path):
-    """Legacy manifests store holder/acquired/expires and no generation. A client
-    that sends a fence anyway (it holds a postgres-shaped one, or is talking to a
-    legacy deployment) must not be refused for a fence the lock never had."""
+def test_legacy_locks_now_carry_a_fence_and_a_stale_one_is_refused(tmp_path):
+    """The legacy authority stamps a generation too, so the checkout capability
+    rotates under BOTH authorities. The current generation publishes; a stale one
+    is refused even though the holder id matches."""
     be = store.InMemoryBackend()
     a = _tmpfile(tmp_path, "v1.dwg", b"V1")
     did = store.ingest_drawing(be, "t", a)["drawing_id"]
 
     assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
-    assert store.load_manifest(be, "t", did)["checkout"].get("fence") is None
+    fence = store.load_manifest(be, "t", did)["checkout"]["fence"]
+    assert isinstance(fence, int)
+
+    with pytest.raises(store.CheckoutDenied, match="stale"):
+        store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                          parent_version=1, holder="s1", fence=fence + 1)
     assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
-                             parent_version=1, holder="s1", fence=7) == 2
+                             parent_version=1, holder="s1", fence=fence) == 2
+
+
+def test_legacy_fence_survives_release_so_a_generation_is_never_reused(tmp_path):
+    """The generation counter lives on the MANIFEST, not inside the checkout dict
+    that release clears. A counter that restarted at 1 on the next acquire would
+    let a capability minted for the earlier lease verify against the later one."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    seen = []
+    for holder in ("s1", "s2", "s3"):
+        assert store.acquire_checkout(be, "t", did, holder=holder, ttl_s=300) is True
+        seen.append(store.load_manifest(be, "t", did)["checkout"]["fence"])
+        assert store.release_checkout(be, "t", did, holder=holder) is True
+
+    assert seen == sorted(set(seen)), f"generations repeated or went backwards: {seen}"
+
+
+def test_strict_owner_acquire_refuses_a_live_lease_without_the_generation(tmp_path):
+    """The refresh path is how the readable holder id leaked authority: session B
+    reads A's holder from GET /versions, re-acquires as A, and the store called it
+    a refresh. Under strict_owner the holder label is not consulted at all — only
+    the generation, which B cannot read from any public surface."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300,
+                                  strict_owner=True) is True
+    fence = store.load_manifest(be, "t", did)["checkout"]["fence"]
+
+    # B knows the holder id and still cannot refresh: no generation, wrong generation.
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300,
+                                  strict_owner=True) is False
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300,
+                                  strict_owner=True,
+                                  expected_fence=fence + 1) is False
+    # the real owner refreshes, and the generation advances
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300,
+                                  strict_owner=True, expected_fence=fence) is True
+    assert store.load_manifest(be, "t", did)["checkout"]["fence"] > fence
+
+
+def test_strict_owner_acquire_still_grants_a_free_or_expired_lock(tmp_path):
+    """strict_owner tightens who may take over a LIVE lease, nothing else: an
+    unlocked drawing and an expired lock stay freely acquirable, or a forgotten
+    lock would wedge the drawing forever."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=0.05,
+                                  strict_owner=True) is True
+    time.sleep(0.2)
+    assert store.acquire_checkout(be, "t", did, holder="s2", ttl_s=300,
+                                  strict_owner=True) is True
+    assert store.load_manifest(be, "t", did)["checkout"]["holder"] == "s2"
+
+
+def test_release_by_generation_refuses_a_lease_that_moved_on(tmp_path):
+    """A release that carries a proven generation must not land on a DIFFERENT
+    lease: between the capability check and the release, the old lease can expire
+    and someone else can take the lock."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    stale = store.load_manifest(be, "t", did)["checkout"]["fence"]
+    assert store.release_checkout(be, "t", did, holder="s1") is True
+    assert store.acquire_checkout(be, "t", did, holder="s2", ttl_s=300) is True
+
+    assert store.release_checkout(be, "t", did, expected_fence=stale) is False
+    assert store.load_manifest(be, "t", did)["checkout"]["holder"] == "s2"
+    current = store.load_manifest(be, "t", did)["checkout"]["fence"]
+    assert store.release_checkout(be, "t", did, expected_fence=current) is True
+
+
+def test_undo_and_redo_refuse_a_caller_that_does_not_hold_the_lock(tmp_path):
+    """undo/redo move head, which every other session reads, so they are subject
+    to the SAME single-writer rule as a publish. Without it they were the way
+    around it: a caller refused at put_drawing could still walk head backwards."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=300) is True
+    fence = store.load_manifest(be, "t", did)["checkout"]["fence"]
+    assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                             parent_version=1, holder="s1", fence=fence) == 2
+
+    with pytest.raises(store.CheckoutDenied, match="may not undo"):
+        store.undo(be, "t", did, holder="s2")
+    with pytest.raises(store.CheckoutDenied, match="names no session"):
+        store.undo(be, "t", did, holder=store.ANONYMOUS_HOLDER)
+    with pytest.raises(store.CheckoutDenied, match="stale"):
+        store.undo(be, "t", did, holder="s1", fence=fence + 1)
+    assert store.load_manifest(be, "t", did)["head"] == 2   # nothing moved
+
+    assert store.undo(be, "t", did, holder="s1", fence=fence) == 1
+    with pytest.raises(store.CheckoutDenied, match="may not redo"):
+        store.redo(be, "t", did, holder="s2")
+    assert store.redo(be, "t", did, holder="s1", fence=fence) == 2
+
+
+def test_pg_row_authorization_matches_the_legacy_rule(tmp_path):
+    """The postgres branches of put/undo/redo authorize against a `FOR UPDATE`
+    manifest ROW, not a manifest dict, and those branches only execute with a
+    live database (their suite skips without one). The predicate itself needs no
+    database, so it is pinned here — otherwise the rule that guards the postgres
+    authority would be covered on the legacy authority alone."""
+    now = store.datetime.now(store.timezone.utc)
+    live = {"checkout_holder": "s1", "checkout_fence": 4,
+            "checkout_expires_at": now + timedelta(seconds=300)}
+    lapsed = {**live, "checkout_expires_at": now - timedelta(seconds=1)}
+    free = {"checkout_holder": None, "checkout_fence": 4,
+            "checkout_expires_at": None}
+
+    # permitted: caller names nobody at all, no lock, an expired lock, the owner
+    store._authorize_checkout_row(live, None, None, "publish a version")
+    store._authorize_checkout_row(free, "s2", None, "publish a version")
+    store._authorize_checkout_row(lapsed, "s2", None, "publish a version")
+    store._authorize_checkout_row(live, "s1", 4, "publish a version")
+
+    # refused: another holder, the reserved sentinel, a stale generation
+    for holder, fence in (("s2", None), (store.ANONYMOUS_HOLDER, None), ("s1", 3)):
+        with pytest.raises(store.CheckoutDenied):
+            store._authorize_checkout_row(live, holder, fence, "publish a version")
+
+
+def test_undo_and_redo_are_unrestricted_when_no_lock_is_held(tmp_path):
+    """Same permitted cases as a publish: no lock at all, and an expired lock.
+    The demo's undo/redo buttons never take a checkout, and must keep working."""
+    be = store.InMemoryBackend()
+    a = _tmpfile(tmp_path, "v1.dwg", b"V1")
+    did = store.ingest_drawing(be, "t", a)["drawing_id"]
+    assert store.put_drawing(be, "t", did, _tmpfile(tmp_path, "v2.dwg", b"V2"),
+                             parent_version=1) == 2
+
+    assert store.undo(be, "t", did, holder="s2") == 1        # unlocked
+    assert store.redo(be, "t", did, holder="s2") == 2
+
+    assert store.acquire_checkout(be, "t", did, holder="s1", ttl_s=0.05) is True
+    time.sleep(0.2)
+    assert store.undo(be, "t", did, holder="s2") == 1        # lease expired
 
 
 # --------------------------------------------------------------------------- #

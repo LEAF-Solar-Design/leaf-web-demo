@@ -240,18 +240,34 @@ def test_canonical_identity_prefers_verified_subject_binding(monkeypatch):
             raise AssertionError("mismatched platform identity was accepted")
 
 
+def _fresh_heartbeat():
+    """A heartbeat stamped NOW. The old fixture used `2099-01-01`, which made the
+    lease look permanently fresh; the catalog's clock-skew bound refuses an
+    observation more than one TTL into the future, so that stamp now (correctly)
+    reports a REJECTED measurement rather than a live one. See the dedicated test
+    below: that refusal is the point of this lane, not a casualty of it."""
+    from datetime import datetime, timezone
+    return {"runtime": "python-test", "source_revision": "abc123",
+            "source_sha256": "c" * 64,
+            "observed_at": datetime.now(timezone.utc).isoformat()}
+
+
+def _by_id(response):
+    return {c["id"]: c for c in response["capabilities"]}
+
+
 def test_capability_projection_requires_live_worker_and_reports_entitlement(monkeypatch):
     context = {"org_id": "org-1", "project_id": "project-1",
                "authority_mode": "postgres_canonical"}
     monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
                         lambda *_args: context)
     monkeypatch.setattr(jobs_router.jobs.platform_link, "canonical_worker_health",
-                        lambda _tool: {"runtime": "python-test", "source_revision": "abc123",
-                                       "source_sha256": "c" * 64,
-                                       "observed_at": "2099-01-01T00:00:00+00:00"})
+                        lambda _tool: _fresh_heartbeat())
     available = jobs_router.platform_capabilities(
         tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None)
-    capability = available["capabilities"][0]
+    # Selected BY ID, not by index: the route now emits all seven release-gate
+    # capabilities in gate order, so `[0]` is `drawing.inspect`, not the solver.
+    capability = _by_id(available)[jobs_router.SOLVE_CAPABILITY]
     assert capability["availability"]["state"] == "connected_degraded"
     assert capability["availability"]["reasonCode"] == "staging_gate_unverified"
     assert capability["availability"]["runtimeState"] == "degraded"
@@ -263,14 +279,217 @@ def test_capability_projection_requires_live_worker_and_reports_entitlement(monk
     restricted = jobs_router.platform_capabilities(
         tenant=jobs_router.deps.TenantContext("tenant", tier="restricted"),
         x_org_id="org-1", x_project_id="project-1", authorization=None)
-    assert restricted["capabilities"][0]["entitled"] is False
+    assert _by_id(restricted)[jobs_router.SOLVE_CAPABILITY]["entitled"] is False
 
     monkeypatch.setattr(jobs_router.jobs.platform_link, "canonical_worker_health",
                         lambda _tool: None)
     offline = jobs_router.platform_capabilities(
         tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None)
-    assert offline["capabilities"][0]["availability"]["state"] == "failed_retryable"
-    assert offline["capabilities"][0]["availability"]["evidence"] == []
+    offline_solve = _by_id(offline)[jobs_router.SOLVE_CAPABILITY]
+    assert offline_solve["availability"]["state"] == "failed_retryable"
+    assert offline_solve["availability"]["evidence"] == []
+
+
+def test_the_route_emits_every_release_gate_capability_fail_closed(monkeypatch):
+    """L1.5. This route hand-built ONE descriptor inline and emitted nothing for
+    the other six release gates, so the console could not even name them. All
+    seven now come from the ratified catalog, and the six with no measurement come
+    back LOCKED rather than missing: absent and locked are different answers and
+    only one of them is honest."""
+    import product_capability_availability as catalog
+
+    context = {"org_id": "org-1", "project_id": "project-1",
+               "authority_mode": "postgres_canonical"}
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
+                        lambda *_args: context)
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "canonical_worker_health",
+                        lambda _tool: _fresh_heartbeat())
+    response = jobs_router.platform_capabilities(
+        tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None)
+
+    # Exact ids, in exact release-gate order, straight from the catalog.
+    assert [c["id"] for c in response["capabilities"]] == [
+        entry.id for entry in catalog.PRODUCT_CAPABILITIES]
+
+    # Labels and descriptions come from the catalog too, not from this route. The
+    # solver's description was the one place server and console DISAGREED before
+    # this lane: the route said "Run the canonical AutoFill target solver." while
+    # leaf_website capabilityCatalog.ts said the catalog text.
+    solve_entry = catalog.capability(jobs_router.SOLVE_CAPABILITY)
+    solve = _by_id(response)[jobs_router.SOLVE_CAPABILITY]
+    assert solve["label"] == solve_entry.label
+    assert solve["description"] == solve_entry.description
+
+    for descriptor in response["capabilities"]:
+        if descriptor["id"] == jobs_router.SOLVE_CAPABILITY:
+            continue
+        availability = descriptor["availability"]
+        assert availability["state"] == "locked_planned", descriptor["id"]
+        assert availability["reasonCode"] == catalog.REASON_NO_MEASUREMENT
+        assert availability["evidence"] == []
+        # Round trip: everything emitted passes the validator that mirrors the
+        # console's, so the browser cannot silently swallow any of it.
+        assert catalog.is_well_formed_availability(availability) is True
+
+    assert catalog.is_well_formed_availability(solve["availability"]) is True
+
+
+def test_a_measurement_the_console_would_refuse_locks_with_a_distinct_reason(monkeypatch):
+    """The silent failure this lane closes. A future-dated observation is exactly
+    what the console clock-skew bound refuses, so emitting it produced a capability
+    the browser dropped on the floor with NOTHING reporting why.
+
+    Routed through the catalog the same payload becomes a locked capability
+    carrying `live_availability_rejected_by_contract_validator`, distinguishable
+    from having no measurement at all. That distinction is the point: an
+    integrator defect must not look like an idle worker."""
+    import product_capability_availability as catalog
+
+    context = {"org_id": "org-1", "project_id": "project-1",
+               "authority_mode": "postgres_canonical"}
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
+                        lambda *_args: context)
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "canonical_worker_health",
+                        lambda _tool: {"runtime": "python-test", "source_revision": "abc123",
+                                       "source_sha256": "c" * 64,
+                                       "observed_at": "2099-01-01T00:00:00+00:00"})
+    response = jobs_router.platform_capabilities(
+        tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None)
+    solve = _by_id(response)[jobs_router.SOLVE_CAPABILITY]
+    assert solve["availability"]["state"] == "locked_planned"
+    assert solve["availability"]["reasonCode"] == catalog.REASON_REJECTED_MEASUREMENT
+    # NOT the absent-measurement reason: a refused payload and no payload must
+    # never be reported the same way.
+    assert solve["availability"]["reasonCode"] != catalog.REASON_NO_MEASUREMENT
+
+
+def test_every_catalog_entitlement_name_is_mapped_or_explicitly_unmapped():
+    """The two vocabularies do not overlap. `server/entitlements.py` speaks of
+    run_read/run_write/solve/build; the catalog speaks of
+    run_read/run/solve/review/author. An unmapped name resolves to False, which is
+    fail-closed and correct, but it is INDISTINGUISHABLE from a real denial, so a
+    capability whose entitlement nobody wired would read "not entitled" forever
+    with nothing reporting why. Same silent-failure shape this lane exists to
+    remove, so the gap is pinned here instead of left to drift."""
+    import entitlements
+    import product_capability_availability as catalog
+
+    declared = {name for entry in catalog.PRODUCT_CAPABILITIES
+                for name in entry.entitlements}
+    mapped = set(jobs_router._ENTITLEMENT_POLICY_KEY)
+    assert declared == mapped | jobs_router._UNMAPPED_ENTITLEMENTS, (
+        "a catalog entitlement name is neither mapped to a policy capability nor "
+        "recorded as deliberately unmapped; wire it or record it")
+    # Every MAPPED name must name a real policy capability, or the mapping is a
+    # typo that silently denies.
+    for policy_key in jobs_router._ENTITLEMENT_POLICY_KEY.values():
+        assert policy_key in entitlements.CAPABILITIES, policy_key
+    # And no unmapped name may quietly become real without updating the map.
+    assert jobs_router._UNMAPPED_ENTITLEMENTS.isdisjoint(entitlements.CAPABILITIES)
+
+
+def test_entitlement_resolves_per_capability_not_from_one_hardcoded_key(monkeypatch):
+    """The route used to read a single `solve` boolean and stamp it on the one
+    descriptor it emitted. Seven capabilities declare four different entitlement
+    names, so one key cannot answer for all of them."""
+    context = {"org_id": "org-1", "project_id": "project-1",
+               "authority_mode": "postgres_canonical"}
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
+                        lambda *_args: context)
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "canonical_worker_health",
+                        lambda _tool: None)
+
+    # `hosted_starter` grants run_read but NOT solve, so the two must differ.
+    starter = _by_id(jobs_router.platform_capabilities(
+        tenant=jobs_router.deps.TenantContext("tenant", tier="hosted_starter"),
+        x_org_id="org-1", x_project_id="project-1", authorization=None))
+    assert starter[jobs_router.SOLVE_CAPABILITY]["entitled"] is False
+    assert starter["drawing.check.electrical"]["entitled"] is False
+
+    demo = _by_id(jobs_router.platform_capabilities(
+        tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None))
+    assert demo[jobs_router.SOLVE_CAPABILITY]["entitled"] is True
+
+    # `author` maps to the `build` policy capability, which demo holds, and which
+    # `customization_service.stage` already enforces on the authoring path. A
+    # projection that said "not entitled" here would have contradicted the
+    # enforcement.
+    assert demo["tool.author.company"]["entitled"] is True
+    starter_authoring = _by_id(jobs_router.platform_capabilities(
+        tenant=jobs_router.deps.TenantContext("tenant", tier="hosted_starter"),
+        x_org_id="org-1", x_project_id="project-1", authorization=None))
+    assert starter_authoring["tool.author.company"]["entitled"] is False, (
+        "hosted_starter has build: False, so authoring must read not-entitled")
+
+    # An unmapped entitlement name denies for EVERY tier, including full-access
+    # demo. Fail-closed by decision, pinned so it cannot drift open unnoticed.
+    for capability_id in ("drawing.run.approved", "evidence.generate"):
+        assert demo[capability_id]["entitled"] is False, capability_id
+
+    # A capability that does not declare an entitlement carries no `entitled` key
+    # at all: absent is not the same as false.
+    assert "entitled" not in demo["drawing.inspect"]
+    assert "entitled" not in demo["review.evidence"]
+
+
+def test_a_lease_that_has_already_expired_reads_as_offline_not_malformed(monkeypatch):
+    """The heartbeat query admits a row on `observed_at >= now - 15s`
+    INCLUSIVELY, and the lease runs `observed + 15s`, so a row at the edge of the
+    window has an `expiresAt` already in the past.
+
+    Handing that to the catalog got it refused as
+    `live_availability_rejected_by_contract_validator`, which means "the
+    integrator emitted something malformed" and would send whoever read it hunting
+    a wiring bug that does not exist. Ordinary lease expiry is the
+    `canonical_worker_offline` case."""
+    import product_capability_availability as catalog
+    from datetime import datetime, timedelta, timezone
+
+    context = {"org_id": "org-1", "project_id": "project-1",
+               "authority_mode": "postgres_canonical"}
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
+                        lambda *_args: context)
+    stale = (datetime.now(timezone.utc)
+             - timedelta(seconds=catalog.LEASE_TTL_SECONDS)).isoformat()
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "canonical_worker_health",
+                        lambda _tool: {"runtime": "python-test", "source_revision": "abc123",
+                                       "source_sha256": "c" * 64, "observed_at": stale})
+    response = jobs_router.platform_capabilities(
+        tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None)
+    solve = _by_id(response)[jobs_router.SOLVE_CAPABILITY]
+    assert solve["availability"]["state"] == "failed_retryable"
+    assert solve["availability"]["reasonCode"] == "canonical_worker_offline"
+    # And specifically NOT the integrator-defect reason.
+    assert solve["availability"]["reasonCode"] != catalog.REASON_REJECTED_MEASUREMENT
+    assert catalog.is_well_formed_availability(solve["availability"]) is True
+
+
+def test_an_unreadable_entitlement_policy_denies_every_capability(monkeypatch):
+    """Fail closed on a broken policy, and do it for all seven rather than for the
+    one key the route used to read."""
+    context = {"org_id": "org-1", "project_id": "project-1",
+               "authority_mode": "postgres_canonical"}
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
+                        lambda *_args: context)
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "canonical_worker_health",
+                        lambda _tool: None)
+
+    import entitlements
+
+    def boom(_tier):
+        raise entitlements.EntitlementsError("policy unreadable")
+
+    monkeypatch.setattr(entitlements, "entitlements_for", boom)
+    response = jobs_router.platform_capabilities(
+        tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None)
+    # COUNT FIRST. Looping over "whatever descriptors exist" passed against the
+    # parent too, because a route emitting ONE descriptor trivially satisfies it.
+    # The claim is denial across every capability that declares an entitlement,
+    # so the number of them is part of the claim.
+    declaring = [d for d in response["capabilities"] if "entitled" in d]
+    assert len(declaring) == 5, [d["id"] for d in declaring]
+    for descriptor in declaring:
+        assert descriptor["entitled"] is False, descriptor["id"]
 
 
 def test_canonical_worker_container_contract_is_non_root_and_source_bound():

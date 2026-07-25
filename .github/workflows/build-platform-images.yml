@@ -170,8 +170,21 @@ jobs:
           echo "cache_value=$current_cache_tag" >> "$GITHUB_OUTPUT"
           echo "previous_cache_value=$previous_cache_tag" >> "$GITHUB_OUTPUT"
 
-  build:
+  test:
+    # An untested image must never reach ECR. Branch protection is unavailable
+    # on this repository's GitHub plan (the branch-protection API answers 403),
+    # so this workflow-internal dependency is the ONLY enforceable gate: build
+    # cannot start until the full run-all-gates.py scoreboard is green for the
+    # exact commit `prepare` resolved -- not merely for the branch tip.
     needs: prepare
+    uses: ./.github/workflows/test-gate.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.prepare.outputs.source_sha }}
+
+  build:
+    needs: [prepare, test]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:

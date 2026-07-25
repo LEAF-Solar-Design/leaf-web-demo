@@ -241,10 +241,20 @@ def test_author_persist_and_run_from_file(stack):
     assert entry not in FORBIDDEN_OPS
     assert not any(op in str(entry) for op in FORBIDDEN_OPS), entry
 
-    # (1) the code is persisted to a real file that exists on disk, inside the
-    #     AUTHORING tenant's own subdirectory (the harness sends no X-Tenant-Id, so
-    #     that tenant is DEFAULT_TENANT).
+    # (1) the code is persisted to the tenant-scoped file named by the returned
+    # entry. The path must stay below server/authored and must not fall back to
+    # the legacy flat store, which allowed two tenants to overwrite each other.
+    relative_entry = Path(entry)
+    assert not relative_entry.is_absolute()
+    assert relative_entry.parts[0] == "authored"
+    assert len(relative_entry.parts) == 3
+    assert relative_entry.name == f"{tool['name']}.py"
+    # The harness sends no X-Tenant-Id, so the authoring tenant is
+    # DEFAULT_TENANT. Resolve the expected tenant directory independently from
+    # the returned entry so the assertion cannot validate a self-consistent but
+    # incorrectly scoped path.
     fpath = authored_tenant_dir(DEFAULT_TENANT) / f"{tool['name']}.py"
+    assert fpath.resolve().is_relative_to(AUTHORED_DIR.resolve())
     assert fpath.exists(), fpath
     assert "def run(" in fpath.read_text(encoding="utf-8")
     # the tool's own `entry` must name THAT file, server-dir-relative, so the broker

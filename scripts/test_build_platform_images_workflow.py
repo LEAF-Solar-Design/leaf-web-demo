@@ -49,6 +49,13 @@ def main() -> None:
     assert "needs.prepare.outputs.source_mode == 'main'" in text
     assert text.count("id-token: write") == 2
 
+    # An untested image can never reach ECR: the build job waits on the full
+    # gate, run against the exact commit `prepare` resolved. Branch protection
+    # is unavailable on this repository's plan, so this workflow-internal
+    # dependency is the only enforceable gate and must not be loosened.
+    assert "uses: ./.github/workflows/test-gate.yml" in text
+    assert "needs: [prepare, test]" in text
+
     # The matrix isolates all three images and does not cancel siblings after
     # one failure. A failed matrix entry still blocks the verification job.
     assert re.search(r"image:\s*\[app, broker, harness\]", text)

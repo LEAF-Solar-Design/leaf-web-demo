@@ -52,7 +52,15 @@ def test_shipped_policy_classifies_existing_tenant_tool_paths_and_protected_file
 def test_shipped_workspace_contract_digest_matches_the_frozen_schema():
     policy = policy_module.load_policy()
     schema = SERVER_DIR.parent / "contract" / "customization.v1.schema.json"
-    digest = hashlib.sha256(schema.read_bytes()).hexdigest()
+    # Hash the CANONICAL (LF) bytes, not the working copy's. Hashing raw bytes
+    # makes this digest depend on the checkout's line endings, so a single
+    # frozen constant cannot match on both a core.autocrlf=true clone and a
+    # Linux runner: the shipped constant was frozen from a CRLF working copy
+    # and could never match in CI. No runtime code recomputes this digest --
+    # workspace_contract_sha256 is only passed through -- so this test is its
+    # sole verifier, and anchoring it to the committed bytes is what makes the
+    # drift guard mean the same thing on every host.
+    digest = hashlib.sha256(schema.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     assert policy.workspace_contracts["leaf.workspace.v1"] == digest
 
 
