@@ -286,6 +286,13 @@ class PostgresJobStore:
                 },
             ).fetchone()
             if row is not None:
+                # The linked platform Job is synced HERE, on this same connection, so
+                # the authority row and its mirror commit or roll back together. Doing
+                # it after this transaction closed is what left a caller polling a
+                # nonterminal platform Job forever when the mirror write failed.
+                import platform_link  # noqa: PLC0415  (late: avoids an import cycle)
+                platform_link.terminal_in_transaction(
+                    conn, job_id, status, result, error)
                 return "applied"
             current = conn.execute(
                 "SELECT status, terminal_fingerprint FROM async_jobs WHERE job_id = %s "

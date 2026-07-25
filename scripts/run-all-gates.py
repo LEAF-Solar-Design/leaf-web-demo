@@ -246,6 +246,23 @@ def build_suites() -> List[Suite]:
         Suite("server-wave2", "server tests/test_wave2.py", "pytest", SERVER,
               _py_pytest("tests/test_wave2.py"), 6,
               allowed_skip_reasons=(r"platform DB unreachable: .+",)),
+        # Floor 13 is the count that EXECUTES on the CI runner. It is NOT the
+        # collected count and NOT the local count. 19 tests collect in both
+        # environments (19 `def test_` functions, zero parametrize). CI run
+        # 30161760318 reported `got 19, 6 skipped`, so CI executes 13. This dev
+        # host executes 18 with 1 skip (`platform DB unreachable: DATABASE_URL
+        # is not set`), measured 2026-07-25 from server/ via `python -m pytest
+        # tests/test_wave3.py -q --color=no -r s -p no:cacheprovider`.
+        # The 5-test gap is INFERRED, not confirmed: CI's per-test skip list is
+        # not in the job log. Exactly 5 tests carry @requires_tenant_repo, whose
+        # repo (default C:/tmp/leaf-tenants/demo-tenant) is present here and
+        # absent on a clean runner, which accounts for 1 DB + 5 tenant = 6.
+        # `expected` is a MIN across environments because the gate must pass
+        # where it runs, and CI is the binding environment. PR #178 raised this
+        # to the local 18 and CI red-failed: `executed-count regression:
+        # expected >= 18, got 13`. A local `(executed-count drift: expected 13)`
+        # note is this host overshooting the CI floor and is correct, not stale.
+        # server-wave2 above uses the same convention: pinned 6, CI executes 6.
         Suite("server-wave3", "server tests/test_wave3.py", "pytest", SERVER,
               _py_pytest("tests/test_wave3.py"), 13,
               allowed_skip_reasons=(
@@ -507,6 +524,13 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_jobs_callbacks_postgres.py"), 1,
               allowed_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
+        # No allowed_skip_reasons ON PURPOSE. This suite proves the terminal write
+        # and its platform mirror share one transaction, using a fake connection
+        # rather than DATABASE_URL, so every test must execute on every runner. A
+        # skip here means the atomicity guarantee went unchecked.
+        Suite("server-jobs-terminal-mirror-atomic",
+              "server tests/test_jobs_terminal_mirror_atomic.py", "pytest", SERVER,
+              _py_pytest("tests/test_jobs_terminal_mirror_atomic.py"), 5),
         # Floor 13, re-measured after main added four offline tests. It was 9 when
         # this suite was first registered; leaving it there would have let all
         # four of main's new tests disappear without reddening the gate.
