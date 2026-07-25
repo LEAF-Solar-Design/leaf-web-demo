@@ -1309,8 +1309,14 @@ must re-read the catalog for any tool authored or re-authored on or after
 the tenant's catalog fold, not a rewrite of the row a caller happened to read
 from: re-authoring shadows an older row of the same name, so a digest cached
 from that older row is refused by `POST /api/run` even though the row itself was
-never rewritten. What this change does not do is invalidate anything on its own:
-a record that is never rewritten keeps the digest it had before 2026-07-25.
+never rewritten. A record's own digest is a function of its content, so a record
+that is never rewritten computes the same digest it did before 2026-07-25.
+
+Visibility is a separate axis, and it did change on deploy. The authored store
+used to be global to every tenant. `deps.all_tools` now attributes an unscoped
+row to the demo tenant, so a non-demo tenant that could previously resolve a
+legacy authored tool no longer finds it in its fold, and `POST /api/run` answers
+`UNKNOWN_TOOL` rather than a digest mismatch.
 
 §15.C's other statements are unaffected: the harness path still does NOT persist
 to `server/authored/` or `_AUTHORED`, and `source` / `static_scan` are unchanged.
