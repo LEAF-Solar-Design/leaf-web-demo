@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -447,97 +446,68 @@ def test_concurrent_materialization_never_loses_the_worktree(tmp_path, monkeypat
     assert (paths[0] / "registry.json").exists()
 
 
+# A holder in a genuinely separate PROCESS, using the same OS primitive the
+# service uses. It takes the lock, announces it, then waits to be killed.
+_HOLD_LOCK = """
+import fcntl, sys, time
+handle = open(sys.argv[1], "a+b")
+fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+print("held", flush=True)
+time.sleep(300)
+"""
+
+
+def _spawn_lock_holder(lock_path):
+    """Start a separate process holding the lock; return it once it confirms."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_LOCK, str(lock_path)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert child.stdout.readline().strip() == "held", "holder never took the lock"
+    return child
+
+
+@pytest.mark.skipif(
+    customization_service.fcntl is None, reason="POSIX advisory locking only"
+)
 def test_materialize_lock_excludes_another_process(tmp_path, monkeypatch):
-    """A lock left by another process must block, not be walked straight past.
+    """A lock held by another PROCESS must block, not be walked straight past.
 
-    The held lock directory here is exactly what a second process leaves behind,
-    so this exercises the cross-process half of the lock rather than the
-    in-process `threading.Lock`.
+    The in-process `threading.Lock` cannot cover this, so the holder here is a
+    real second process taking the same OS lock the service takes.
     """
-    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 0.3)
-    bare = tmp_path / "tenant-a.git"
-    lock_dir = tmp_path / ".materialize.lock"
-    lock_dir.mkdir()
-    (lock_dir / "owner").write_text("another-process", encoding="utf-8")
-
-    started = time.monotonic()
-    with pytest.raises(CustomizationServiceError) as caught:
-        with _exclusive_materialize(bare, lock_dir):
-            pytest.fail("acquired a lock another process already holds")
-
-    assert caught.value.code == "effective_catalog_unavailable"
-    assert time.monotonic() - started >= 0.3  # waited, then gave up bounded
-    assert (lock_dir / "owner").read_text(encoding="utf-8") == "another-process"
-
-
-def test_materialize_lock_reclaims_a_dead_holders_lock(tmp_path, monkeypatch):
-    """A worker killed mid-add must not wedge the tenant forever."""
-    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 5.0)
-    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_STALE", 1.0)
-    bare = tmp_path / "tenant-a.git"
-    lock_dir = tmp_path / ".materialize.lock"
-    lock_dir.mkdir()
-    owner = lock_dir / "owner"
-    owner.write_text("dead-worker", encoding="utf-8")
-    # Backdate the directory as well as the stamp, so staleness is judged the
-    # same way whichever of the two the implementation reads.
-    stale = time.time() - 3600
-    os.utime(owner, (stale, stale))
-    os.utime(lock_dir, (stale, stale))
-
-    entered = False
-    with _exclusive_materialize(bare, lock_dir):
-        entered = True  # took the dead holder's lock over instead of timing out
-
-    assert entered
-    assert not lock_dir.exists()  # and released cleanly
-
-
-def test_evicted_holder_never_releases_the_new_holders_lock(tmp_path, monkeypatch):
-    """The ownership invariant: releasing is scoped to your own claim.
-
-    A holder only paused past the staleness bound is still alive. If, on exit,
-    it deleted whatever lock happened to be present, it would free a lock now
-    owned by a live successor and admit a second concurrent `git worktree add`
-    -- reopening the very race this lock exists to close.
-
-    The successor acquires through the module's own API rather than a hand-built
-    lock directory, so the assertion holds whatever on-disk shape the lock takes.
-    It uses a different `bare` path only to get a different in-process lock,
-    which is what makes it stand in for a second PROCESS contending on the one
-    lock directory; that in-process lock is why this cannot happen between two
-    threads. Exclusion is then asserted by a third acquire, not by inspecting
-    files.
-    """
-    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 0.3)
-    lock_dir = tmp_path / ".materialize.lock"
-    holder_bare = tmp_path / "holder.git"
-    successor_bare = tmp_path / "successor.git"
-    holds = threading.Event()
-    may_exit = threading.Event()
-    failures: list[BaseException] = []
-
-    def successor():
-        try:
-            with _exclusive_materialize(successor_bare, lock_dir):
-                holds.set()
-                may_exit.wait(10)
-        except BaseException as exc:  # noqa: BLE001 - reported to the main thread
-            failures.append(exc)
-            holds.set()
-
-    worker = threading.Thread(target=successor)
+    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 0.5)
+    lock_path = tmp_path / ".materialize.lock"
+    child = _spawn_lock_holder(lock_path)
     try:
-        with _exclusive_materialize(holder_bare, lock_dir):
-            shutil.rmtree(lock_dir)  # evicted as stale while still alive
-            worker.start()
-            assert holds.wait(10), "successor never acquired the freed lock"
-        # The evicted holder has now exited. The successor must still hold.
-        assert not failures, failures
         with pytest.raises(CustomizationServiceError) as caught:
-            with _exclusive_materialize(holder_bare, lock_dir):
-                pytest.fail("acquired the lock while the successor still holds it")
+            with _exclusive_materialize(tmp_path / "tenant-a.git", lock_path):
+                pytest.fail("acquired a lock another process already holds")
         assert caught.value.code == "effective_catalog_unavailable"
     finally:
-        may_exit.set()
-        worker.join(10)
+        child.kill()
+        child.wait(timeout=10)
+
+
+@pytest.mark.skipif(
+    customization_service.fcntl is None, reason="POSIX advisory locking only"
+)
+def test_killed_holder_never_wedges_the_tenant(tmp_path):
+    """A worker killed mid-add must not wedge the tenant, and must not need a
+    staleness timeout to recover.
+
+    The kernel drops an advisory lock when the holding process dies, so the
+    next caller proceeds immediately. Recovery here is not "eventually, after a
+    stale threshold" -- it is at once, with nobody having to judge whether a
+    live holder was dead.
+    """
+    lock_path = tmp_path / ".materialize.lock"
+    child = _spawn_lock_holder(lock_path)
+    child.kill()
+    child.wait(timeout=10)
+
+    entered = False
+    with _exclusive_materialize(tmp_path / "tenant-a.git", lock_path):
+        entered = True
+
+    assert entered, "a dead holder's lock was never reclaimed"
