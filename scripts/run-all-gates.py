@@ -531,6 +531,13 @@ def build_suites() -> List[Suite]:
         Suite("server-jobs-terminal-mirror-atomic",
               "server tests/test_jobs_terminal_mirror_atomic.py", "pytest", SERVER,
               _py_pytest("tests/test_jobs_terminal_mirror_atomic.py"), 5),
+        # The SQLite half of the same guarantee. No allowed_skip_reasons for the same
+        # reason: the platform boundary is faked at _update_by_spine, never DATABASE_URL,
+        # so every test must execute on every runner. A skip here means an undelivered
+        # mirror could silently go back to being lost.
+        Suite("server-jobs-terminal-mirror-durable",
+              "server tests/test_jobs_terminal_mirror_durable.py", "pytest", SERVER,
+              _py_pytest("tests/test_jobs_terminal_mirror_durable.py"), 12),
         # Floor 13, re-measured after main added four offline tests. It was 9 when
         # this suite was first registered; leaving it there would have let all
         # four of main's new tests disappear without reddening the gate.
