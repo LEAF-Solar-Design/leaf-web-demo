@@ -106,6 +106,28 @@ def test_ensure_demo_drawing_marker_guard_raises():
     assert all("manifest" not in k and "/v/" not in k for k in backend.keys())
 
 
+def test_ensure_demo_drawing_postgres_upload_row_guard_raises(monkeypatch):
+    import store
+
+    backend = _in_memory_backend()
+    monkeypatch.setattr(store, "authority_mode", lambda: "postgres")
+    monkeypatch.setattr(
+        store, "load_manifest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("missing")),
+    )
+    monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "postgres")
+    monkeypatch.setattr(
+        guest_uploads, "read_marker",
+        lambda *_args, **_kwargs: {"status": "extracting"},
+    )
+
+    with pytest.raises(ValueError) as exc:
+        write_loop.ensure_demo_drawing(backend, "acme-solar", "u-cafe")
+
+    assert "upload-status" in str(exc.value)
+    assert backend.keys() == []
+
+
 def test_guest_unknown_drawing_404_no_bootstrap(client, tmp_path):
     r = client.get("/api/drawings/some-drawing/intake",
                    headers={"X-Tenant-Id": "guest-abc123"})
