@@ -9,7 +9,9 @@ tests/test_backbone.py) and drives the HTTP surface end to end:
     /api/tools -> /api/run returns a §3 envelope whose `result` is produced by
     THAT FILE (proven with a sentinel rewrite) and differs from count-by-layer.
   * the produced envelope schema-validates against engine/envelope_schema.json.
-  * bad params -> ok:false BAD_PARAMS envelope, tool body never runs.
+  * bad params -> ok:false BAD_PARAMS envelope, and the tool body never runs
+    (proven by an instrumented body that stamps marker files on import and on
+    run(), with a valid-params positive control proving the markers work).
   * no OPS/OP_ALIASES/MIRRORS entry exists for the authored engine_op.
   * the 3 built-ins return the recorded byte-identical result/overlay.
 
@@ -128,9 +130,23 @@ def stop(proc: subprocess.Popen) -> None:
 def stack(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("dynloader")
     broker_port, app_port = free_port(), free_port()
+    # PIN THE SANDBOX OFF. start_uvicorn seeds the child from dict(os.environ), so
+    # an ambient LEAF_SANDBOX / LEAF_TOOL_SANDBOX_PROVIDER would ride into the broker
+    # and tool_loader._sandbox_tier() reads BOTH at call time. That is not a style
+    # nit here: this file's tests assert on what the tool BODY does. The subprocess
+    # tier's audit hook denies the body's file writes and the microvm tier cannot
+    # reach a host tmp_path at all, so an inherited sandbox would silently disarm the
+    # marker instrument in test_bad_params_pre_validation_gate — its negative
+    # assertions would pass for the wrong reason. Nothing in this file covers the
+    # sandbox (tests/test_hardening_2b.py, tests/test_hardening_2c_microvm.py and
+    # tests/test_authored_execution_live_gate.py own that), so pinning removes an
+    # environment dependency without removing coverage. Provider wins over
+    # LEAF_SANDBOX in _sandbox_tier(), but both are pinned so neither can decide.
     broker = start_uvicorn("broker:app", broker_port,
                            {"BROKER_LEDGER": tmp / "ledger.jsonl",
-                            "BROKER_TENANTS": tmp / "tenants.json"},
+                            "BROKER_TENANTS": tmp / "tenants.json",
+                            "LEAF_SANDBOX": "off",
+                            "LEAF_TOOL_SANDBOX_PROVIDER": "off"},
                            tmp / "broker.log")
     app = start_uvicorn("app:app", app_port,
                         {"APS_LIVE": "0", "APS_CRED": "/nonexistent",
@@ -295,18 +311,89 @@ def test_author_persist_and_run_from_file(stack):
 # --------------------------------------------------------------------------- #
 # ACCEPTANCE 6: bad params -> ok:false BAD_PARAMS envelope, body never runs
 # --------------------------------------------------------------------------- #
-def test_bad_params_pre_validation_gate(stack):
+def test_bad_params_pre_validation_gate(stack, tmp_path):
+    """Params are pre-validated and the tool BODY IS NEVER REACHED.
+
+    The envelope alone cannot prove the second half. A regression that resolved
+    the tool, executed its ``run(intake, params)`` for the side effect, threw the
+    output away and then returned the same BAD_PARAMS envelope would satisfy
+    every assertion on the response. So the persisted body is INSTRUMENTED first:
+    it stamps one marker file at module import and a second inside ``run()``. The
+    bad-params call must leave neither behind.
+
+    Marker paths are absolute and baked into the body text because the body
+    executes in the BROKER subprocess (broker.py ``_execute`` ->
+    ``tool_loader.run_tool_dynamic``, which is also where the ``validate_params``
+    gate this test covers sits), not in this process: an in-process monkeypatch
+    would never see that call, and the broker's cwd is not this test's. A file
+    crosses the process boundary; a spy does not.
+
+    ORDER IS LOAD-BEARING. The bad-params call runs FIRST, against bytes that
+    have never been loaded — ``tool_loader._MOD_CACHE`` keys on path+mtime+size,
+    so a module already executed once is handed back without re-executing its top
+    level, and an import marker checked after a prior run would not restamp. The
+    positive control then runs the SAME bytes with valid params: both markers
+    must appear. That is what makes their absence above evidence rather than an
+    instrument that never worked.
+
+    THE INSTRUMENT REQUIRES THE SANDBOX OFF, which the ``stack`` fixture pins on
+    the broker (see the note there). The subprocess tier's audit hook denies the
+    body's marker write outright ("sandbox: filesystem write denied") and the
+    microvm tier cannot reach this process's tmp_path, so under an inherited
+    LEAF_SANDBOX the negative assertions below would pass because the write was
+    blocked rather than because the body never ran. The positive control is what
+    surfaces that, and the pin is what prevents it.
+
+    This test rewrites the SHARED authored body at a deterministic path, so it is
+    safe only under serial execution of this file (the restore in ``finally`` puts
+    the real list-layers body back for the other tests).
+    """
     a = requests.post(f"{stack['app']}/api/author",
                       json={"description": "list all layer names in the drawing"},
                       timeout=15).json()
     name = a["tool"]["name"]
-    # prefix must be a string; sending a number violates the tool's own schema
-    r = run_wait(stack, name, {"prefix": 123})
-    env = r.json()
-    assert env["ok"] is False
-    assert env["error"]["error_code"] == "BAD_PARAMS", env["error"]
-    # body never ran: no result payload leaked through
-    assert env.get("result") in (None, {}), env.get("result")
+    fpath = authored_tenant_dir(DEFAULT_TENANT) / f"{name}.py"
+    assert fpath.exists(), fpath
+    original = fpath.read_text(encoding="utf-8")
+
+    import_marker = tmp_path / "import-marker.txt"
+    run_marker = tmp_path / "run-marker.txt"
+    instrumented = (
+        "import pathlib\n"
+        f"pathlib.Path({str(import_marker)!r}).write_text('IMPORTED', encoding='utf-8')\n"
+        "\n"
+        "\n"
+        "def run(intake, params):\n"
+        f"    pathlib.Path({str(run_marker)!r}).write_text('RAN', encoding='utf-8')\n"
+        "    return ({'layers': [], 'count': 0}, None)\n"
+    )
+    try:
+        fpath.write_text(instrumented, encoding="utf-8")
+
+        # prefix must be a string; sending a number violates the tool's own schema
+        r = run_wait(stack, name, {"prefix": 123})
+        env = r.json()
+        assert env["ok"] is False
+        assert env["error"]["error_code"] == "BAD_PARAMS", env["error"]
+        # body never ran: no result payload leaked through
+        assert env.get("result") in (None, {}), env.get("result")
+        # ...and it left no trace on disk either — the part the envelope can't show
+        assert not run_marker.exists(), \
+            "tool body run() executed despite BAD_PARAMS (marker stamped)"
+        assert not import_marker.exists(), \
+            "tool file was imported despite BAD_PARAMS (marker stamped)"
+
+        # POSITIVE CONTROL — same instrumented bytes, VALID params. Both markers
+        # must now appear, or the two assertions above proved nothing.
+        ok_env = run_wait(stack, name, {}).json()
+        assert ok_env["ok"] is True, ok_env
+        assert import_marker.exists(), \
+            "instrument is dead: import marker never stamped even on a good run"
+        assert run_marker.exists(), \
+            "instrument is dead: run() marker never stamped even on a good run"
+    finally:
+        # restore the real list-layers body so the persisted tool stays meaningful
+        fpath.write_text(original, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
