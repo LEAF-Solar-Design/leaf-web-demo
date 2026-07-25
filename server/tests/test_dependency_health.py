@@ -123,17 +123,85 @@ def test_all_success_is_ready_and_preserves_dependency_order():
     assert {item["state"] for item in report["dependencies"].values()} == {"ready"}
 
 
-def test_required_timeout_is_bounded_and_not_ready():
+def test_required_timeout_is_bounded_and_not_ready(monkeypatch):
+    # A plain wall-clock bound cannot decide this on Windows: a 0.05s wait has
+    # been measured returning at 0.61s, so a bound tight enough to catch a
+    # regression that waits 1s also fails on scheduler noise, and calibrating
+    # the bound against that noise only moves the problem.
+    #
+    # The way out is that the noise is confined to the blocking collection
+    # itself. Everything readiness_report does on its own thread -- resolving
+    # the budget, taking a slot, submitting, assembling the result -- is
+    # microseconds of CPU. So time the collection separately and bound only the
+    # overhead outside it. Scheduler overshoot lands in collecting_s and is
+    # forgiven; a regression that sleeps, retries, or blocks anywhere else
+    # lands in overhead and is caught, however quiet or noisy the host is.
+    budget_s = 0.05
+    probe_hold_s = 5.0
+    overhead_bound_s = 0.5
     release = threading.Event()
-    started = time.monotonic()
-    report = dependency_health.readiness_report(
-        {"LEAF_READINESS_TIMEOUT_S": "0.05"},
-        [_spec("broker", probe=lambda: release.wait(0.5))],
-    )
-    release.set()
-    assert time.monotonic() - started < 0.2
+    entered = threading.Event()
+    finished = threading.Event()
+    observed_timeouts = []
+    collecting_s = []
+
+    def blocked_probe():
+        entered.set()
+        release.wait(probe_hold_s)
+        finished.set()
+
+    real_wait = dependency_health.wait
+
+    def spy_wait(futures, timeout=None, **kwargs):
+        observed_timeouts.append(timeout)
+        wait_started = time.monotonic()
+        try:
+            return real_wait(futures, timeout=timeout, **kwargs)
+        finally:
+            collecting_s.append(time.monotonic() - wait_started)
+
+    monkeypatch.setattr(dependency_health, "wait", spy_wait)
+
+    # The counter is module-global, so compare against entry, not zero.
+    slots_before = dependency_health._probe_slot_snapshot()[0]
+    try:
+        started = time.monotonic()
+        report = dependency_health.readiness_report(
+            {"LEAF_READINESS_TIMEOUT_S": str(budget_s)},
+            [_spec("broker", probe=blocked_probe)],
+        )
+        elapsed = time.monotonic() - started
+        # Sampled before the probe is released. The probe cannot finish for
+        # probe_hold_s, so an unset flag proves readiness_report returned
+        # without waiting for it. It does not prove the probe had already been
+        # scheduled -- `entered` below proves only that it was really submitted.
+        returned_before_probe_finished = not finished.is_set()
+    finally:
+        release.set()
+
+    assert entered.wait(probe_hold_s), "the probe never reached the executor"
+    assert returned_before_probe_finished
+    # No collection was granted more than the configured budget. Stated as a
+    # ceiling rather than an exact call list so that polling in remaining-budget
+    # slices stays a legal refactor, while an inflated budget does not.
+    assert observed_timeouts, "readiness_report never collected through wait()"
+    assert max(observed_timeouts) <= budget_s
+    # End-to-end: whatever readiness_report did outside blocking collection is
+    # microseconds of real work, so anything approaching overhead_bound_s is a
+    # regression that added a sleep, a retry, or a second blocking call.
+    overhead_s = elapsed - sum(collecting_s)
+    assert overhead_s < overhead_bound_s, (
+        f"readiness_report spent {overhead_s:.3f}s outside collection "
+        f"(total {elapsed:.3f}s, collecting {sum(collecting_s):.3f}s)")
+    assert elapsed < probe_hold_s / 2
     assert report["ready"] is False
     assert report["dependencies"]["broker"]["state"] == "timeout"
+    assert report["dependencies"]["broker"]["latency_ms"] == int(budget_s * 1000)
+    deadline = time.monotonic() + probe_hold_s
+    while (dependency_health._probe_slot_snapshot()[0] > slots_before
+           and time.monotonic() < deadline):
+        time.sleep(0.01)
+    assert dependency_health._probe_slot_snapshot()[0] == slots_before
 
 
 def test_required_unavailable_is_not_ready_without_exception_text():
