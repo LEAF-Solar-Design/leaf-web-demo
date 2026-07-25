@@ -55,7 +55,10 @@ export default function SiteRoot() {
     const onKey = (e) => {
       if (isEditable(e.target)) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
-      if (e.key === 'Escape' && scene === 'tool') navigate('/')
+      if (e.key === 'Escape' && scene === 'tool') {
+        const ownedSurface = document.querySelector('.proj-menu, .route, .drawer-layer .drawer, .claude-pop')
+        if (!ownedSurface) navigate('/')
+      }
       else if ((e.key === 't' || e.key === 'T') && scene === 'site') navigate('/try')
     }
     window.addEventListener('keydown', onKey)

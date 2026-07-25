@@ -299,6 +299,10 @@
 .tc-rail .tool-name { font-size: 11.5px; }
 .tc-rail .tool-desc { font-size: 11px; }
 .tc-rail .tool-body { padding: 8px 10px 10px; }
+.tc-rail .author-inner { min-width: 0; }
+.tc-rail .authored-head { align-items: flex-start; flex-wrap: wrap; }
+.tc-rail .authored-head .tool-name { flex: 1 1 100%; overflow-wrap: anywhere; }
+.tc-rail .author-inner .prov-line { overflow-wrap: anywhere; }
 .tc-rail .rail { padding: 10px 12px 16px; min-height: 0; overflow: auto; }
 .tc-rail .rail h2 { display: flex; margin: 0 0 10px; font-size: 12px; }
 .tc-rail .rail h2 .n { margin-left: auto; color: #71717a; font-weight: 400; }

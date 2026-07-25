@@ -1,25 +1,36 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   getCapabilities,
+  createOrg,
+  createProject,
   getDrawingIntake,
   getDrawingVersions,
   getSession,
   getTools,
+  listProjects,
   nlPrompt,
+  openProject,
   redoDrawing,
   runToolAsync,
+  stageAuthorTool,
+  publishStagedAuthor,
   undoDrawing,
 } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
+import AuthorPanel from '../components/AuthorPanel.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobRail from '../components/JobRail.jsx'
+import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ToolsPanel from '../components/ToolsPanel.jsx'
+import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 import useJobController from '../controllers/useJobController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
+import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
+import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
   confirmRunIntent,
@@ -39,6 +50,15 @@ const loadVersions = (drawingId) => getDrawingVersions(false, drawingId)
 const undoVersion = (drawingId) => undoDrawing(false, drawingId)
 const redoVersion = (drawingId) => redoDrawing(false, drawingId)
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
+const workspaceServices = { createOrg, listProjects, createProject, openProject }
+
+function defaultsOf(schema) {
+  const defaults = {}
+  for (const [key, property] of Object.entries(schema?.properties || {})) {
+    if (property.default !== undefined) defaults[key] = property.default
+  }
+  return defaults
+}
 
 function phaseLabel(phase) {
   if (phase === 'starting') return 'Starting request'
@@ -59,10 +79,12 @@ export default function ToolCast({ active, onIntakeChange }) {
   const [error, setError] = useState(null)
   const [linkedJobId, setLinkedJobId] = useState(null)
   const [panelCount, setPanelCount] = useState(null)
+  const [tenantId, setTenantId] = useState('try-surface')
   const [busy, setBusy] = useState(false)
   const [leftView, setLeftView] = useState('operator')
   const [rightView, setRightView] = useState('execution')
   const [selectedCatalogTool, setSelectedCatalogTool] = useState(null)
+  const [notice, setNotice] = useState(null)
   const catalogDecisionRef = useRef(null)
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
@@ -128,6 +150,7 @@ export default function ToolCast({ active, onIntakeChange }) {
           drawingState: { drawing_id: DRAWING_ID, version: 1, head: 1, latest: 1 },
           apply: true,
         })
+        setTenantId(data.tenant_id || 'try-surface')
         setPhase('ready')
       })
       .catch(() => {
@@ -170,6 +193,17 @@ export default function ToolCast({ active, onIntakeChange }) {
   }, [currentJob, jobs])
   const platform = usePlatformTrustController({ mock: false })
   const writeEntitled = platform.isEntitled('run_write')
+  const workspace = useWorkspaceController({ mock: false, services: workspaceServices })
+  const currentProjectName = selectCurrentProjectName(workspace)
+  const catalogRunContext = useMemo(() => createCatalogRunContext({
+    tenantId,
+    orgId: workspace.orgId,
+    projectId: workspace.openProjectId || null,
+    workspace: workspace.workspace,
+    selectedVersionId: workspace.canonicalVersionId,
+    drawingState: drawing.drawingState,
+    fallbackDrawingId: DRAWING_ID,
+  }), [drawing.drawingState, tenantId, workspace.canonicalVersionId, workspace.openProjectId, workspace.orgId, workspace.workspace])
 
   const catalog = useCatalogController({
     services: catalogServices,
@@ -190,22 +224,23 @@ export default function ToolCast({ active, onIntakeChange }) {
     if (decision?.lane !== 'run') return decision
     const tool = tools.find((candidate) => candidate.name === decision.tool)
     if (!tool) return decision
-    const context = createCatalogRunContext({
-      tenantId: 'try-surface',
-      drawingState: drawing.drawingState,
-      fallbackDrawingId: DRAWING_ID,
-    })
+    const context = catalogRunContext
+    if (!context) {
+      setError('This project needs a canonical drawing version before a tool can run.')
+      return undefined
+    }
     const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
+    const effectiveParams = { ...defaultsOf(tool.params), ...(decision.params || {}) }
     const staged = stageRunIntent(runIntentStateRef.current, {
       intentId: `try-intent-${id}`,
       toolName: tool.name,
-      params: decision.params || {},
+      params: effectiveParams,
       context,
       toolSnapshot: createCatalogToolSnapshot(tool),
     })
     runIntentStateRef.current = staged.state
     return { ...decision, params: staged.intent.params, runIntent: staged.intent }
-  }, [drawing.drawingState, tools])
+  }, [catalogRunContext, tools])
   catalogDecisionRef.current = armCatalogDecision
 
   const requestCatalogRun = useCallback((tool, params) => {
@@ -228,11 +263,7 @@ export default function ToolCast({ active, onIntakeChange }) {
       sessionId: intent?.sessionId,
       toolName: tool.name,
       params,
-      context: createCatalogRunContext({
-        tenantId: 'try-surface',
-        drawingState: drawing.drawingState,
-        fallbackDrawingId: DRAWING_ID,
-      }),
+      context: catalogRunContext,
       toolSnapshot: createCatalogToolSnapshot(tool),
     })
     runIntentStateRef.current = confirmed.state
@@ -250,9 +281,11 @@ export default function ToolCast({ active, onIntakeChange }) {
       toolName: tool.name,
       execute: ({ onSubmit, onStatus }) => runToolAsync(
         tool,
-        confirmed.execution.params,
-        confirmed.execution.context.drawingId,
-        {
+          confirmed.execution.params,
+          confirmed.execution.context.drawingId,
+          {
+          orgId: confirmed.execution.context.orgId || undefined,
+          projectId: confirmed.execution.context.projectId || undefined,
           idempotencyKey: confirmed.execution.intentId,
           catalogDigest: confirmed.execution.toolSnapshot.catalogDigest || undefined,
           dwgVersion: confirmed.execution.context.drawingVersion ?? undefined,
@@ -268,7 +301,49 @@ export default function ToolCast({ active, onIntakeChange }) {
     }
     setBusy(false)
     catalog.actions.dismissRoute()
-  }, [busy, catalog.actions, drawing.drawingState, jobRunning, runTrackedJob])
+    if (workspace.openProjectId) workspace.rehydrate()
+  }, [busy, catalog.actions, catalogRunContext, jobRunning, runTrackedJob, workspace])
+
+  const openWorkspaceProject = useCallback(async (projectId) => {
+    const opened = await workspace.openProject(projectId)
+    const canonical = opened?.drawing_versions?.[0]?.version_id || null
+    workspace.selectCanonicalVersion(canonical)
+    setLeftView('workspace')
+  }, [workspace])
+
+  const createWorkspaceOrg = useCallback(async (name) => {
+    if (name != null) await workspace.createOrg(name)
+  }, [workspace])
+
+  const createWorkspaceProject = useCallback(async (name) => {
+    if (name == null || !name.trim()) return
+    const project = await workspace.createProject(name)
+    if (project) setLeftView('workspace')
+  }, [workspace])
+
+  const authorTool = useCallback((description) => stageAuthorTool(false, description), [])
+
+  const publishAuthoredTool = useCallback(async (staged) => {
+    const published = await publishStagedAuthor(false, staged)
+    const tool = published.tool || staged.tool
+    catalog.actions.upsertTool(tool)
+    await catalog.actions.loadCatalog()
+    setNotice(`Tool published, ${tool.name}`)
+    return { ...published, tool }
+  }, [catalog.actions])
+
+  const useAuthoredTool = useCallback((tool) => {
+    if (!tool) return
+    setSelectedCatalogTool(tool)
+    catalog.actions.commitDecision({
+      lane: 'run',
+      tool: tool.name,
+      params: {},
+      confidence: 0.99,
+      rationale: `Authored just now. Confirm to run ${tool.name}.`,
+      alternatives: [],
+    })
+  }, [catalog.actions])
 
   const onJobLinked = useCallback((nextJobId) => {
     if (!nextJobId) return
@@ -288,7 +363,8 @@ export default function ToolCast({ active, onIntakeChange }) {
       setPhase('failed')
       setError('The panel run did not produce a readable drawing version.')
     }
-  }, [attachTrackedJob, onJobLinked])
+    if (workspace.openProjectId) workspace.rehydrate()
+  }, [attachTrackedJob, onJobLinked, workspace])
 
   const runRequest = useCallback(async () => {
     const text = prompt.trim()
@@ -334,6 +410,21 @@ export default function ToolCast({ active, onIntakeChange }) {
   return (
     <>
       <div className="tc-topcluster" data-cast="tool" style={{ '--rank': 3 }}>
+        <ProjectSwitcher
+          mock={false}
+          projectName="cat-panels"
+          orgId={workspace.orgId}
+          projects={workspace.projects}
+          openProjectId={workspace.openProjectId}
+          currentName={currentProjectName}
+          unavailable={workspace.projectsError}
+          loading={workspace.projectsLoading}
+          orgBusy={workspace.orgBusy}
+          projectBusy={workspace.projectBusy}
+          onCreateOrg={createWorkspaceOrg}
+          onCreateProject={createWorkspaceProject}
+          onOpenProject={openWorkspaceProject}
+        />
         <span className="tc-solve" data-testid="operator-phase">
           <span className={`dot ${statusClass}${phase === 'running' ? ' pulse' : ''}`} />
           {phaseLabel(phase)}
@@ -351,6 +442,8 @@ export default function ToolCast({ active, onIntakeChange }) {
         <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels">
           <button type="button" role="tab" aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
           <button type="button" role="tab" aria-selected={leftView === 'catalog'} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
+          <button type="button" role="tab" aria-selected={leftView === 'author'} onClick={() => setLeftView('author')}>Author</button>
+          <button type="button" role="tab" aria-selected={leftView === 'workspace'} onClick={() => setLeftView('workspace')}>Project</button>
         </div>
         <div className="tc-rail-body">
           {leftView === 'operator' && (sessionId ? (
@@ -381,11 +474,35 @@ export default function ToolCast({ active, onIntakeChange }) {
               subtitle="Choose a registered capability, inspect its parameters, then review before it runs."
             />
           )}
+          {leftView === 'workspace' && (
+            workspace.workspace ? (
+              <WorkspaceSummary
+                workspace={workspace.workspace}
+                loading={workspace.workspaceLoading}
+                selectedVersionId={workspace.canonicalVersionId}
+                onSelectVersion={workspace.selectCanonicalVersion}
+                onClose={() => { workspace.closeProject(); setLeftView('operator') }}
+              />
+            ) : (
+              <div className="tc-panel-note">Choose a project from the header to load its drawing versions, jobs, and built tools.</div>
+            )
+          )}
+          {leftView === 'author' && (
+            <AuthorPanel
+              onAuthor={authorTool}
+              onPublish={publishAuthoredTool}
+              onUseAuthored={useAuthoredTool}
+              notLinked={platform.grant?.linked === false}
+              onLinkClaude={() => setRightView('trust')}
+              buildEntitled={platform.isEntitled('build')}
+            />
+          )}
           {(error || jobError) && <div className="tc-operator-error"><span className="dot red" />{error || jobError}</div>}
+          {notice && <div className="tc-result-summary" role="status"><span className="dot" />{notice}</div>}
         </div>
         <div className="tc-rail-foot">
-          <span className="tc-link">{leftView === 'operator' ? 'Drawing operator' : 'Registered catalog'}</span>
-          <span className="tc-link muted">{leftView === 'operator' ? 'Claude plans, tools act' : `${tools.length} tools`}</span>
+          <span className="tc-link">{leftView === 'operator' ? 'Drawing operator' : leftView === 'catalog' ? 'Registered catalog' : leftView === 'author' ? 'Tool authoring' : 'Project workspace'}</span>
+          <span className="tc-link muted">{leftView === 'operator' ? 'Claude plans, tools act' : leftView === 'catalog' ? `${tools.length} tools` : leftView === 'author' ? 'Stage, review, publish' : currentProjectName || 'No project open'}</span>
         </div>
       </aside>
 
@@ -502,7 +619,7 @@ export default function ToolCast({ active, onIntakeChange }) {
             writeEntitled={writeEntitled}
             onConfirmIntent={runCatalogTool}
             onPickAlternative={catalog.actions.pickAlternative}
-            onOpenAuthor={() => setError('Open the Author panel to build this capability.')}
+            onOpenAuthor={() => setLeftView('author')}
             onDismiss={catalog.actions.dismissRoute}
           />
           <div className="tc-bar-input-row">

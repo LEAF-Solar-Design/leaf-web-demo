@@ -10,16 +10,24 @@ const PROOF_DIR = join(HERE, '..', '..', 'artifacts', 'cat-operator-proof')
 const UNIFIED_PROOF_DIR = join(HERE, '..', '..', 'artifacts', 'unified-surface-proof', 'wave0-route')
 
 test('standards surface keeps the complete cat operator flow in one scene', async ({ page }) => {
-  test.setTimeout(60_000)
+  test.setTimeout(90_000)
   mkdirSync(PROOF_DIR, { recursive: true })
   const proofState = makeCatProofState()
   const apiEndpoints = []
+  let catalogRunHeaders = null
+  let authorStageBody = null
+  let authorRegisterBody = null
+
+  await page.addInitScript(() => localStorage.setItem('leaf.org_id', 'cat-proof-org'))
 
   await page.route('http://leaf-proof.invalid/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
     apiEndpoints.push(`${request.method()} ${url.pathname}`)
     const body = request.postData() ? request.postDataJSON() : {}
+    if (url.pathname === '/api/run' && body.tool === 'count-panels') catalogRunHeaders = await request.allHeaders()
+    if (url.pathname === '/api/author/stage') authorStageBody = body
+    if (url.pathname === '/api/author/register') authorRegisterBody = body
     const result = catProofResponse({ method: request.method(), path: url.pathname, body, query: Object.fromEntries(url.searchParams) }, proofState)
     await route.fulfill({
       status: result.status,
@@ -34,6 +42,12 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready')
   await page.waitForTimeout(2_600)
 
+  await page.getByRole('button', { name: /Project cat-panels/ }).click()
+  await page.getByRole('menuitem', { name: /Cat Roof/ }).click()
+  await expect(page.getByText('Cat Roof').first()).toBeVisible()
+  await expect(page.getByText('1 drawing version')).toBeVisible()
+  await expect(page.getByText('0 built tools')).toBeVisible()
+
   await page.getByRole('tab', { name: /Catalog/ }).click()
   const countTool = page.getByRole('button', { name: /count-panels/i })
   await expect(countTool).toBeVisible()
@@ -44,7 +58,52 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByText('count-panels').first()).toBeVisible({ timeout: 12_000 })
   await page.getByRole('tab', { name: 'Execution' }).click()
   await expect(page.getByTestId('catalog-run-result')).toContainText('count-panels completed')
+  expect(catalogRunHeaders?.['x-org-id']).toBe('cat-proof-org')
+  expect(catalogRunHeaders?.['x-project-id']).toBe('cat-project')
   await page.screenshot({ path: join(PROOF_DIR, 'standards-00-catalog-run.png'), fullPage: true })
+  await page.getByRole('tab', { name: 'Project' }).click()
+  const workspaceSummary = page.locator('.workspace-summary')
+  await expect(workspaceSummary).toContainText('1')
+  await expect(workspaceSummary).toContainText('job')
+  await expect(workspaceSummary).toContainText('count-panels')
+  await expect(workspaceSummary).toContainText('succeeded')
+
+  await page.getByRole('tab', { name: 'Author' }).click()
+  await page.getByLabel('What should the tool do?').fill('count panels within 24in of the roof edge')
+  await page.getByRole('button', { name: 'Generate tool' }).click()
+  await expect(page.getByText('count-panels-near-edge')).toBeVisible()
+  await expect(page.getByText(/Staged and awaiting approval/)).toBeVisible()
+  expect(authorStageBody).toMatchObject({ description: 'count panels within 24in of the roof edge', mode: 'build' })
+  expect(authorStageBody?.idempotency_key).toBeTruthy()
+
+  await page.getByRole('button', { name: 'Publish tool' }).click()
+  await expect(page.getByText(/independent reviewer has not approved/)).toBeVisible()
+  expect(authorRegisterBody).toBeNull()
+  proofState.independentApproved = true
+  await page.getByRole('button', { name: 'Publish tool' }).click()
+  await expect(page.getByRole('button', { name: 'Run it now' })).toBeVisible()
+  await expect(page.getByText('Tool published, count-panels-near-edge')).toBeVisible()
+  expect(authorRegisterBody).toMatchObject({
+    change_set_id: '11111111-1111-4111-8111-111111111111',
+    confirmation_id: 'publish-confirmation-0001',
+    staged_commit: 'c'.repeat(40),
+    catalog_digest: 'd'.repeat(64),
+    workspace_contract_digest: 'e'.repeat(64),
+  })
+  expect(authorRegisterBody?.idempotency_key).toBeTruthy()
+  expect(authorRegisterBody.idempotency_key).not.toBe(authorStageBody.idempotency_key)
+  expect(Object.keys(authorRegisterBody).sort()).toEqual([
+    'catalog_digest', 'change_set_id', 'confirmation_id', 'idempotency_key',
+    'platform_release', 'staged_commit', 'workspace_contract_digest',
+  ].sort())
+
+  await page.getByRole('button', { name: 'Run it now' }).click()
+  await expect(page.getByRole('button', { name: 'Run count-panels-near-edge' })).toBeVisible()
+  expect(proofState.authorJob).toBe(false)
+  await page.getByRole('button', { name: 'Run count-panels-near-edge' }).click()
+  await page.getByRole('tab', { name: 'Execution' }).click()
+  await expect(page.getByTestId('catalog-run-result')).toContainText('count-panels-near-edge completed')
+  await page.screenshot({ path: join(PROOF_DIR, 'standards-00b-author-publish-run.png'), fullPage: true })
   await page.getByRole('tab', { name: 'Operator' }).click()
 
   const command = page.getByRole('textbox', { name: 'Command bar' })
@@ -96,7 +155,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page).toHaveURL(/\/try$/)
 
   writeProofReceipt(join(UNIFIED_PROOF_DIR, 'receipt.json'), {
-    capability_ids: ['CA-01', 'CV-01', 'CV-02', 'RN-01', 'JB-01', 'JB-02', 'VW-01', 'VR-01', 'VR-02', 'VR-03', 'EN-01', 'HL-01', 'AC-01', 'DS-01'],
+    capability_ids: ['ID-02', 'ID-03', 'CA-01', 'CA-02', 'CV-01', 'CV-02', 'RN-01', 'AU-01', 'JB-01', 'JB-02', 'VW-01', 'VR-01', 'VR-02', 'VR-03', 'EN-01', 'HL-01', 'AC-01', 'DS-01'],
     evidence_tier: 'contract',
     route: '/try',
     runtime: 'Vite with deterministic API transport',
@@ -104,6 +163,8 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
     assertions: [
       'the request, approval, job, drawing result, version, undo, and redo stay on /try',
       'the registered catalog stages, confirms, and completes count-panels through the shared job controller',
+      'the project resolver hydrates Cat Roof and binds its canonical drawing version into the run intent',
+      'authoring stages a non-runnable tool, preserves it through pending independent review, publishes the exact receipt, refreshes the catalog, and routes its first run through confirmation',
       'the operator scene remains mounted through the complete flow',
       'version history previews version 1 without moving the version 2 head',
       'trust shows backend health, linked account kind, usage cap, and entitlements',
@@ -111,6 +172,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
     ],
     artifacts: [
       '../../cat-operator-proof/standards-00-catalog-run.png',
+      '../../cat-operator-proof/standards-00b-author-publish-run.png',
       '../../cat-operator-proof/standards-01-approval.png',
       '../../cat-operator-proof/standards-02-cat-complete.png',
       '../../cat-operator-proof/standards-02b-versions-trust.png',

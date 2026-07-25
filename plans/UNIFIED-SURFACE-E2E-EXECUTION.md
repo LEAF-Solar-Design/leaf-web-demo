@@ -250,8 +250,18 @@ Progress:
 - The shared platform-trust adapter is now safe under React Strict Mode's
   setup-cleanup-setup lifecycle. This fixed a real state-loss defect found by
   the aggregate browser walk.
-- Provider lifting, projects, authoring, checkout, selection, layer controls,
-  upload, account mutation, and tenant operations remain open.
+- `/try` now mounts the real project resolver and workspace hydration summary.
+  A selected canonical drawing version is bound into the immutable run intent,
+  project runs carry both scope headers, and terminal runs refresh the project
+  job ledger. Org and project creation use inline named forms, not native
+  prompts or no-argument controller calls.
+- `/try` now mounts the protected authoring lifecycle. The contract walk stages
+  a non-runnable tool, proves pending independent review creates no register
+  request, publishes only the exact receipt-bound decision, refreshes the
+  catalog, expands schema defaults into the immutable intent, confirms the
+  authored run, and completes it through the shared job controller.
+- Provider lifting, checkout, selection, layer controls, upload, account
+  mutation, and tenant operations remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
