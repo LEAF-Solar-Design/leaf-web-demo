@@ -217,34 +217,56 @@ def test_boot_timeout_is_calibrated_to_host_speed_not_a_fixed_wall_clock():
     the flake it exists to prevent would just come back, still wearing the
     costume of a broken backbone.
     """
-    idle, _ = calibrate_boot_timeout_s(0.15, {})
-    loaded, _ = calibrate_boot_timeout_s(2.4, {})
-    saturated, _ = calibrate_boot_timeout_s(4.336, {})
+    # The slowest boot/spawn ratio actually measured on a saturated EVANS-DEKSTOP
+    # (73.8s broker boot at 1.610s/spawn). The budget must COVER this ratio, which
+    # is the real property: "a host this slow still gets enough time". Asserting
+    # that instead of `loaded > idle` is what makes a weakened multiple or a
+    # lowered ceiling fail here rather than pass while quietly losing the headroom.
+    worst_ratio = 45.9
 
-    # Proportional where it matters: the saturated host measured on EVANS-DEKSTOP
-    # must get materially longer than the idle one, or this is a constant again.
-    assert loaded > idle, (
-        f"a 2.4s/spawn host got {loaded:.0f}s, no more than the 0.15s/spawn "
-        f"host's {idle:.0f}s: the budget is not tracking load")
+    def budget(spawn_s, env=None):
+        return calibrate_boot_timeout_s(lambda: spawn_s, env or {})[0]
+
+    for spawn_s in (2.4, 4.336, 1.610):
+        got = budget(spawn_s)
+        assert got >= spawn_s * worst_ratio, (
+            f"a {spawn_s}s/spawn host got {got:.0f}s, under the {worst_ratio}x "
+            f"ratio already measured on this box ({spawn_s * worst_ratio:.0f}s): "
+            f"the budget no longer covers a boot we have actually seen")
     # ...and still bounded, so a genuine hang cannot park the gate indefinitely.
-    assert saturated <= 300.0, f"budget {saturated:.0f}s exceeds the 300s ceiling"
+    assert budget(4.336) <= 300.0, f"budget {budget(4.336):.0f}s exceeds the 300s ceiling"
     # The floor holds the idle case at no less than the fixed budget main shipped.
-    assert idle == 90.0, f"idle host got {idle:.0f}s, below the 90s floor"
+    assert budget(0.15) == 90.0, f"idle host got {budget(0.15):.0f}s, below the 90s floor"
 
     # An operator-supplied budget is taken exactly, floor and ceiling included:
     # CI and a loaded dev box are allowed to disagree.
-    exact, how = calibrate_boot_timeout_s(0.15, {BOOT_TIMEOUT_ENV: "600"})
+    exact, how = calibrate_boot_timeout_s(lambda: 0.15, {BOOT_TIMEOUT_ENV: "600"})
     assert exact == 600.0 and BOOT_TIMEOUT_ENV in how
-    assert calibrate_boot_timeout_s(0.15, {BOOT_TIMEOUT_ENV: "5"})[0] == 5.0
+    assert budget(0.15, {BOOT_TIMEOUT_ENV: "5"}) == 5.0
 
-    # Garbage and non-positive values are IGNORED, not obeyed: a 0s budget would
-    # error every stack-dependent test at setup and read as a total collapse.
-    for bad in ("", "   ", "abc", "0", "-30"):
-        assert calibrate_boot_timeout_s(0.15, {BOOT_TIMEOUT_ENV: bad})[0] == 90.0, (
+    # An override that settles the budget must not pay for a probe it cannot use.
+    calls = []
+
+    def counted_probe():
+        calls.append(1)
+        return 0.15
+
+    calibrate_boot_timeout_s(counted_probe, {BOOT_TIMEOUT_ENV: "600"})
+    assert calls == [], "a valid override still spawned a spawn-latency probe"
+    calibrate_boot_timeout_s(counted_probe, {})
+    assert calls == [1], "the probe was not used when there was no override"
+
+    # Garbage and non-finite values are IGNORED, not obeyed. A 0s budget would
+    # error every stack-dependent test at setup and read as a total collapse; an
+    # INFINITE one is the mirror hazard, making the deadline infinite so the wait
+    # loop never exits and the gate hangs on a boot that will never come. Note
+    # `float()` yields inf for "inf" AND for any literal that overflows (1e309).
+    for bad in ("", "   ", "abc", "0", "-30", "nan", "inf", "-inf", "1e309"):
+        assert budget(0.15, {BOOT_TIMEOUT_ENV: bad}) == 90.0, (
             f"{bad!r} was obeyed instead of ignored")
 
     # A probe that could not measure falls back to the floor rather than raising.
-    assert calibrate_boot_timeout_s(None, {})[0] == 90.0
+    assert budget(None) == 90.0
 
 
 def submit(stack, tool="count-by-layer", params=None, tenant=None, wait=False):

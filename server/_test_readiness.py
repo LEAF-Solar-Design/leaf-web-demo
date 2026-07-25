@@ -12,11 +12,12 @@ process" stops being reported as "the server is broken". See ``wait_ready``.
 """
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import requests
@@ -122,15 +123,25 @@ def spawn_latency_s() -> float | None:
         return None
 
 
-def calibrate_boot_timeout_s(spawn_s: float | None,
+def calibrate_boot_timeout_s(measure_spawn: Callable[[], float | None],
                              env: Mapping[str, str]) -> tuple[float, str]:
-    """Return ``(budget_s, how_it_was_derived)``. Pure, so it is directly testable.
+    """Return ``(budget_s, how_it_was_derived)``. Pure given its probe, so testable.
+
+    ``measure_spawn`` is a callable rather than a value so it is only invoked when
+    it can change the answer. An operator-pinned budget therefore costs no
+    subprocess at all, which matters most in CI, the case most likely to pin one.
 
     An explicit ``LEAF_TEST_BOOT_TIMEOUT_S`` is taken EXACTLY, with no floor or
     ceiling applied: CI and a loaded dev box need different budgets, and an
-    operator who names a number is answering this question themselves. An
-    unparseable or non-positive value is ignored rather than obeyed, because
-    silently booting with a 0s budget would look like a total suite collapse.
+    operator who names a number is answering this question themselves. It must
+    still be a FINITE positive number. `float()` happily returns `inf` for "inf"
+    and for any literal that overflows (`1e309`), and an infinite budget makes
+    `deadline` infinite, so the wait loop never exits and the gate hangs forever
+    on a boot that will never succeed. That is the precise failure the ceiling
+    exists to prevent, so it cannot be reachable through the override. Values
+    that are unparseable, non-positive, NaN or infinite are ignored rather than
+    obeyed: silently running with a 0s budget would error every stack-dependent
+    test and read as a total collapse, which is the confusion this module is for.
     """
     raw = env.get(BOOT_TIMEOUT_ENV, "").strip()
     if raw:
@@ -138,8 +149,9 @@ def calibrate_boot_timeout_s(spawn_s: float | None,
             override = float(raw)
         except ValueError:
             override = -1.0
-        if override > 0:
+        if math.isfinite(override) and override > 0:
             return override, f"{BOOT_TIMEOUT_ENV}={raw}"
+    spawn_s = measure_spawn()
     if spawn_s is None:
         return _BOOT_TIMEOUT_FLOOR_S, "spawn probe unavailable, using floor"
     scaled = spawn_s * _BOOT_COST_IN_SPAWNS
@@ -157,11 +169,12 @@ def boot_timeout_s() -> tuple[float, str]:
     Measured once because the probe costs a real process spawn (up to seconds on
     the very hosts this protects) and a suite calls ``wait_ready`` up to four
     times. The first call happens while the children are already booting, so the
-    probe sees the same contention they do.
+    probe sees the same contention they do, and it is skipped entirely when an
+    override already settles the budget.
     """
     global _calibrated
     if _calibrated is None:
-        _calibrated = calibrate_boot_timeout_s(spawn_latency_s(), os.environ)
+        _calibrated = calibrate_boot_timeout_s(spawn_latency_s, os.environ)
     return _calibrated
 
 
