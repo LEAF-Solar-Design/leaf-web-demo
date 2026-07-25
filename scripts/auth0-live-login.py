@@ -1,7 +1,12 @@
 """Interactive Auth0 Authorization Code + PKCE login for the Leaf SPA.
 
-The access token is written to C:\\tmp\\leaf-grants and is never printed.  The
-receipt contains only non-secret verification metadata and namespaced claims.
+The access token is written under the current user's own profile directory
+(``%LOCALAPPDATA%\\leaf-grants`` on Windows, ``~/.leaf-grants`` elsewhere) and is
+never printed. That location is owned by the user and is NOT a world-writable
+directory like ``C:\\tmp``, so no other local principal can pre-plant the
+directory, replace it via ``DELETE_CHILD`` on the parent, or hold an open read
+handle through a permission window -- the races that a token under ``C:\\tmp``
+was exposed to. The receipt contains only non-secret verification metadata.
 """
 
 from __future__ import annotations
@@ -24,11 +29,23 @@ ISSUER = "https://leafautomation.us.auth0.com"
 AUDIENCE = "https://api.leafdesign.ai"
 CLIENT_ID = "zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O"
 REDIRECT_URI = os.environ.get("LEAF_AUTH0_REDIRECT_URI", "http://localhost:8080")
+def _default_token_dir() -> Path:
+    """Per-user, non-world-writable directory for the token.
+
+    ``%LOCALAPPDATA%`` (Windows) and ``~`` (POSIX) are owned by the current user,
+    so no other local principal can pre-plant the directory, replace it via
+    ``DELETE_CHILD`` on the parent, or otherwise race the token write -- unlike a
+    shared root such as ``C:\\tmp``.
+    """
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return Path(base) / "leaf-grants"
+    return Path(os.path.expanduser("~")) / ".leaf-grants"
+
+
 TOKEN_PATH = Path(
-    os.environ.get(
-        "LEAF_AUTH0_TOKEN_PATH",
-        r"C:\tmp\leaf-grants\auth0-access-token.txt",
-    )
+    os.environ.get("LEAF_AUTH0_TOKEN_PATH")
+    or _default_token_dir() / "auth0-access-token.txt"
 )
 RECEIPT_PATH = Path(
     os.environ.get(
@@ -55,6 +72,11 @@ def _lock_dir_owner_only(directory: Path) -> None:
         user = os.environ.get("USERNAME") or ""
         if not user:
             raise RuntimeError("USERNAME not set; cannot scope ACL to owner")
+        # /inheritance:r severs inherited ACEs and /grant:r sets the current user
+        # as the only principal, inheritable by files (OI) and subdirs (CI). The
+        # directory lives under the user's own profile, so it cannot be
+        # pre-planted with third-party ACEs by another local principal; the
+        # read-back below still fails closed if any broad principal survives.
         res = subprocess.run(
             ["icacls", str(directory), "/inheritance:r",
              "/grant:r", f"{user}:(OI)(CI)F"],
@@ -64,8 +86,33 @@ def _lock_dir_owner_only(directory: Path) -> None:
             raise RuntimeError(
                 "icacls (dir) failed: " + res.stderr.decode("utf-8", "replace").strip()
             )
+        _assert_no_broad_access(directory)
     else:
         os.chmod(directory, 0o700)
+
+
+# Well-known principals that must never retain access to the token directory.
+_BROAD_PRINCIPALS = ("Everyone", "BUILTIN\\Users", "Authenticated Users",
+                     "NT AUTHORITY\\Authenticated Users", "Users")
+
+
+def _assert_no_broad_access(directory: Path) -> None:
+    """Read the DACL back and FAIL CLOSED if any broad principal still has access.
+
+    ``/grant:r`` only replaces the named user's ACE, so this verifies the DACL we
+    intended is the DACL that is actually in force before a secret is written.
+    """
+    res = subprocess.run(["icacls", str(directory)], capture_output=True)
+    if res.returncode != 0:
+        raise RuntimeError(
+            "icacls (verify) failed: " + res.stderr.decode("utf-8", "replace").strip()
+        )
+    out = res.stdout.decode("utf-8", "replace")
+    for principal in _BROAD_PRINCIPALS:
+        if principal + ":" in out:
+            raise RuntimeError(
+                f"token directory DACL still grants access to {principal!r}: {out.strip()}"
+            )
 
 
 def write_token_owner_only(path: Path, token: str) -> None:
