@@ -537,6 +537,10 @@ class _FakeFcntl:
         self.calls = 0
 
     def flock(self, fileno: int, flags: int) -> None:
+        # Checked, not ignored: dropping LOCK_NB would make the real call BLOCK
+        # instead of returning EAGAIN, which is a defect no errno assertion can
+        # see -- a fake that accepted any flags would pass straight over it.
+        assert flags == self.LOCK_EX | self.LOCK_NB, f"non-blocking lock expected: {flags}"
         self.calls += 1
         if self._forever or self.calls == 1:
             raise OSError(self._code, "injected lock failure")
@@ -553,8 +557,9 @@ def test_unlockable_file_reports_its_real_cause_not_a_phantom_holder(
 
     The fake keeps failing, because ENOLCK does not heal on a retry. One call
     is therefore the whole claim: the service was handed an error it cannot
-    wait out and did not wait. The timeout below bounds only a BROKEN run --
-    a correct one never consults it, so no wall clock is ever read.
+    wait out and did not wait. The timeout below is not what makes that hold;
+    it only caps how long a BROKEN run takes to fail. No elapsed time is ever
+    read to decide whether this test passed.
     """
     monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 0.5)
     unlockable = _FakeFcntl(errno.ENOLCK, forever=True)
@@ -576,10 +581,15 @@ def test_contended_lock_is_waited_out_and_then_taken(tmp_path, monkeypatch):
     ordinary busy holder into a hard failure and drop the retry the lock
     depends on.
 
-    The fake fails once and then succeeds, so this case needs no deadline and
-    no sleep budget of its own: the loop ends because the second attempt wins,
-    not because a clock ran out.
+    The fake fails once and then succeeds, so the loop ends because the second
+    attempt wins, not because a clock ran out. The one clock production does
+    read between attempts is its own deadline, so that is raised out of reach
+    here: at the default 60s a host that suspended this process mid-retry could
+    cut the retry short and fail the test for a reason that has nothing to do
+    with locking. An hour cannot be reached by a stall, and nothing waits on it
+    -- the second attempt succeeds either way.
     """
+    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 3600.0)
     contended = _FakeFcntl(errno.EAGAIN)
     monkeypatch.setattr(customization_service, "fcntl", contended)
 
