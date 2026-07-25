@@ -33,6 +33,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1414,6 +1415,39 @@ def checkout_active(co: dict | None) -> bool:
     return _is_active(co, datetime.now(timezone.utc))
 
 
+_LEGACY_CHECKOUT_LOCKS: dict[str, threading.Lock] = {}
+_LEGACY_CHECKOUT_LOCKS_GUARD = threading.Lock()
+
+
+def _legacy_checkout_lock(tid: str, did: str) -> threading.Lock:
+    """Serialize the legacy authority's checkout read-modify-write, per drawing.
+
+    The legacy manifest is a load, edit, save with nothing holding the record in
+    between (see the module note on non-atomic writes). Two concurrent acquires
+    of a FREE drawing therefore both read generation N, both compute N+1, and
+    the second save wins — leaving ONE persisted lease that two callers were
+    each told they had taken. Both then hold a capability that verifies against
+    it, because the capability binds the generation and the generations are
+    equal, which is the ownership bypass the fence exists to prevent. A release
+    racing an acquire loses the same update in the other direction and lets a
+    generation repeat.
+
+    The postgres authority does not need this: it reads `FOR UPDATE` and
+    increments in the same statement. This closes the window for the DOCUMENTED
+    legacy deployment, which is a single app process (docker-compose pins one
+    for the SQLite write path). It does NOT make the legacy manifest atomic
+    across processes — two app replicas on the legacy store can still lose an
+    update, and the fix for that is postgres, which is what production runs.
+    """
+    key = f"{tid}/{did}"
+    with _LEGACY_CHECKOUT_LOCKS_GUARD:
+        lock = _LEGACY_CHECKOUT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LEGACY_CHECKOUT_LOCKS[key] = lock
+        return lock
+
+
 def _next_fence(m: dict) -> int:
     """The next legacy lock generation — monotonic ACROSS release.
 
@@ -1442,6 +1476,38 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
                      expected_fence: int | None = None,
                      strict_owner: bool = False) -> bool:
     """Try to take the single-writer lock. Returns True if acquired/refreshed.
+
+    Thin bool view of `acquire_checkout_fence`, kept because every caller that
+    only needs "did I get it" reads better this way. A caller that will MINT a
+    capability must use `acquire_checkout_fence` instead: it needs the
+    generation this call stamped, and re-reading the manifest to find one is a
+    different question with a different answer (see that function's note).
+    """
+    return acquire_checkout_fence(
+        backend, tenant_id, drawing_id, holder, ttl_s,
+        expected_fence=expected_fence, strict_owner=strict_owner) is not None
+
+
+def acquire_checkout_fence(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                           holder: str, ttl_s: float, *,
+                           expected_fence: int | None = None,
+                           strict_owner: bool = False) -> int | None:
+    """Take the single-writer lock and return the generation THIS call stamped,
+    or None if the lock was not granted.
+
+    WHY THE GENERATION IS RETURNED RATHER THAN RE-READ. A checkout capability is
+    bound to a lock generation, and the mint has to use the generation this
+    acquire wrote. Re-loading the manifest afterwards asks "what generation is
+    current now", which is not the same question: the lease taken here can lapse
+    between the write and the re-read (the TTL is caller-supplied and only has
+    to be positive), another session can acquire in that gap, and the re-read
+    then returns THAT session's generation. Minting against it hands this caller
+    a validly-signed capability for someone else's lease — the exact ownership
+    bypass the capability exists to prevent, since verification recomputes the
+    tag with the PRESENTER's own subject and so cannot tell the two apart.
+
+    Returning it from inside the same transaction (postgres) / the same
+    load-modify-save (legacy) removes the gap: there is no second read to race.
 
     Every successful acquire stamps a NEW generation into `checkout.fence`, so no
     two leases of one drawing ever share a generation.
@@ -1502,12 +1568,15 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
                 # row lock the UPDATE below runs in, so a lease cannot be
                 # re-acquired between the check and the write.
                 if expected_fence is None:
-                    return False
+                    return None
                 if int(row["checkout_fence"]) != int(expected_fence):
-                    return False
+                    return None
             elif active and row["checkout_holder"] != holder:
-                return False
-            conn.execute(
+                return None
+            # RETURNING, so the generation comes back from the same statement
+            # that wrote it, inside the same row lock. Reading it afterwards
+            # would reintroduce the race this function exists to close.
+            written = conn.execute(
                 """
                 UPDATE drawing_store_manifests
                 SET checkout_holder = %(holder)s,
@@ -1517,38 +1586,40 @@ def acquire_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
                       NOW() + (%(ttl)s * INTERVAL '1 second'),
                     updated_at = NOW()
                 WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                RETURNING checkout_fence
                 """,
                 {
                     "holder": str(holder), "ttl": float(ttl_s),
                     "tenant": tid, "drawing": did,
                 },
-            )
-            return True
+            ).fetchone()
+            return int(written["checkout_fence"])
 
         return db.run_transaction(operation, isolation="serializable")
-    m = load_manifest(backend, tid, did)
-    now = datetime.now(timezone.utc)
-    co = m.get("checkout")
+    with _legacy_checkout_lock(tid, did):
+        m = load_manifest(backend, tid, did)
+        now = datetime.now(timezone.utc)
+        co = m.get("checkout")
 
-    if _is_active(co, now):
-        if strict_owner:
-            if expected_fence is None:
-                return False
-            if int((co or {}).get("fence") or 0) != int(expected_fence):
-                return False
-        elif co.get("holder") != holder:
-            return False
+        if _is_active(co, now):
+            if strict_owner:
+                if expected_fence is None:
+                    return None
+                if int((co or {}).get("fence") or 0) != int(expected_fence):
+                    return None
+            elif co.get("holder") != holder:
+                return None
 
-    fence = _next_fence(m)
-    m["checkout_fence"] = fence          # monotonic; survives release (see _next_fence)
-    m["checkout"] = {
-        "holder": holder,
-        "acquired": now.isoformat(),
-        "expires": (now + timedelta(seconds=float(ttl_s))).isoformat(),
-        "fence": fence,
-    }
-    save_manifest(backend, tid, did, m)
-    return True
+        fence = _next_fence(m)
+        m["checkout_fence"] = fence      # monotonic; survives release (see _next_fence)
+        m["checkout"] = {
+            "holder": holder,
+            "acquired": now.isoformat(),
+            "expires": (now + timedelta(seconds=float(ttl_s))).isoformat(),
+            "fence": fence,
+        }
+        save_manifest(backend, tid, did, m)
+        return fence
 
 
 def release_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
@@ -1609,20 +1680,21 @@ def release_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
             return True
 
         return db.run_transaction(operation, isolation="serializable")
-    m = load_manifest(backend, tid, did)
-    co = m.get("checkout")
-    if not co:
-        return False
-
-    if _is_active(co, datetime.now(timezone.utc)):
-        # refuse to steal an ACTIVE lock: by proven generation when the caller
-        # has one, else by the caller-supplied holder label.
-        if expected_fence is not None:
-            if int(co.get("fence") or 0) != int(expected_fence):
-                return False
-        elif holder is not None and co.get("holder") != holder:
+    with _legacy_checkout_lock(tid, did):
+        m = load_manifest(backend, tid, did)
+        co = m.get("checkout")
+        if not co:
             return False
 
-    m["checkout"] = None
-    save_manifest(backend, tid, did, m)
-    return True
+        if _is_active(co, datetime.now(timezone.utc)):
+            # refuse to steal an ACTIVE lock: by proven generation when the caller
+            # has one, else by the caller-supplied holder label.
+            if expected_fence is not None:
+                if int(co.get("fence") or 0) != int(expected_fence):
+                    return False
+            elif holder is not None and co.get("holder") != holder:
+                return False
+
+        m["checkout"] = None
+        save_manifest(backend, tid, did, m)
+        return True

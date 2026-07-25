@@ -429,8 +429,22 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
         except checkout_capability.CapabilityRejected:
             expected_fence = None
 
+    # Refuse a deployment that could not mint BEFORE taking the lock. Doing it
+    # after would leave an active lease with no capability ever issued, which
+    # nobody can then release or write — a server misconfiguration turning into
+    # a locked drawing for the whole TTL.
     try:
-        acquired = store.acquire_checkout(
+        checkout_capability.ensure_mintable(tenant_id, drawing_id)
+    except checkout_capability.CapabilityUnavailable as exc:
+        return _denied(exc)
+
+    try:
+        # The generation comes back from the acquire ITSELF. Re-reading the
+        # manifest to find one would ask what is current now, not what this call
+        # wrote: with a short ttl_s this lease can already have lapsed and
+        # another session acquired, and minting against that generation would
+        # hand this caller a valid capability for someone else's lease.
+        granted_fence = store.acquire_checkout_fence(
             backend, str(tenant_id), drawing_id, holder, ttl_s,
             expected_fence=expected_fence, strict_owner=True)
     except store.CheckoutParamError as exc:
@@ -445,7 +459,7 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
         # damaged storage and hide a real fault behind a 400 nobody can act on.
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
                               status_code=400)
-    acquired = bool(acquired)
+    acquired = granted_fence is not None
     m = store.load_manifest(backend, str(tenant_id), drawing_id)
     co = m.get("checkout")
 
@@ -469,7 +483,7 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
 
     try:
         capability = checkout_capability.mint(
-            tenant_id, drawing_id, int((co or {}).get("fence")))
+            tenant_id, drawing_id, int(granted_fence))
     except checkout_capability.CapabilityUnavailable as exc:
         return _denied(exc)
 
