@@ -130,9 +130,23 @@ def stop(proc: subprocess.Popen) -> None:
 def stack(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("dynloader")
     broker_port, app_port = free_port(), free_port()
+    # PIN THE SANDBOX OFF. start_uvicorn seeds the child from dict(os.environ), so
+    # an ambient LEAF_SANDBOX / LEAF_TOOL_SANDBOX_PROVIDER would ride into the broker
+    # and tool_loader._sandbox_tier() reads BOTH at call time. That is not a style
+    # nit here: this file's tests assert on what the tool BODY does. The subprocess
+    # tier's audit hook denies the body's file writes and the microvm tier cannot
+    # reach a host tmp_path at all, so an inherited sandbox would silently disarm the
+    # marker instrument in test_bad_params_pre_validation_gate — its negative
+    # assertions would pass for the wrong reason. Nothing in this file covers the
+    # sandbox (tests/test_hardening_2b.py, tests/test_hardening_2c_microvm.py and
+    # tests/test_authored_execution_live_gate.py own that), so pinning removes an
+    # environment dependency without removing coverage. Provider wins over
+    # LEAF_SANDBOX in _sandbox_tier(), but both are pinned so neither can decide.
     broker = start_uvicorn("broker:app", broker_port,
                            {"BROKER_LEDGER": tmp / "ledger.jsonl",
-                            "BROKER_TENANTS": tmp / "tenants.json"},
+                            "BROKER_TENANTS": tmp / "tenants.json",
+                            "LEAF_SANDBOX": "off",
+                            "LEAF_TOOL_SANDBOX_PROVIDER": "off"},
                            tmp / "broker.log")
     app = start_uvicorn("app:app", app_port,
                         {"APS_LIVE": "0", "APS_CRED": "/nonexistent",
@@ -320,6 +334,18 @@ def test_bad_params_pre_validation_gate(stack, tmp_path):
     positive control then runs the SAME bytes with valid params: both markers
     must appear. That is what makes their absence above evidence rather than an
     instrument that never worked.
+
+    THE INSTRUMENT REQUIRES THE SANDBOX OFF, which the ``stack`` fixture pins on
+    the broker (see the note there). The subprocess tier's audit hook denies the
+    body's marker write outright ("sandbox: filesystem write denied") and the
+    microvm tier cannot reach this process's tmp_path, so under an inherited
+    LEAF_SANDBOX the negative assertions below would pass because the write was
+    blocked rather than because the body never ran. The positive control is what
+    surfaces that, and the pin is what prevents it.
+
+    This test rewrites the SHARED authored body at a deterministic path, so it is
+    safe only under serial execution of this file (the restore in ``finally`` puts
+    the real list-layers body back for the other tests).
     """
     a = requests.post(f"{stack['app']}/api/author",
                       json={"description": "list all layer names in the drawing"},
