@@ -555,13 +555,16 @@ def build_suites() -> List[Suite]:
               _py_pytest(f"{repo_name}/platform/tests"), 145, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
-        # keeps them in the gate on a clean checkout. Explicit file targets, not
-        # the dir, so the collected count (35) is invariant to DB presence.
+        # keeps them in the gate on a clean checkout.
         # This list must name EVERY platform/tests/*_static.py. The two db_*
         # ones were missing, and because the `platform` suite above is db_gated
         # they ran NOWHERE on a clean checkout -- 26 dependency-free tests
-        # outside the gate entirely. Explicit file targets, not the dir, so the
-        # count stays invariant to DB presence.
+        # outside the gate entirely.
+        # Explicit file targets, not the dir, so the COLLECTED count stays
+        # invariant to DB presence: 61 collected either way, measured on this
+        # tree 2026-07-25. The floor below is the EXECUTED count on a host with
+        # no DATABASE_URL -- 61 collected minus the 2 DB-gated skips named in
+        # allowed_skip_reasons = 59.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
