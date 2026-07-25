@@ -8,7 +8,6 @@ import sqlite3
 import subprocess
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -515,6 +514,34 @@ def test_killed_holder_never_wedges_the_tenant(tmp_path):
     assert entered, "a dead holder's lock was never reclaimed"
 
 
+class _FakeFcntl:
+    """Stand-in for the `fcntl` MODULE whose `flock` fails on command.
+
+    Injected in place of the module rather than in place of `_try_os_lock`, so
+    that the errno classification inside `_try_os_lock` is the thing under
+    test. Replacing `_try_os_lock` itself would leave that classification
+    unexercised and let a regression back to "every OSError is contention"
+    pass.
+
+    Counting calls is what replaces reading a stopwatch: the property being
+    asserted is how many attempts the service made, which is exact and does
+    not depend on how fast the machine is.
+    """
+
+    LOCK_EX = 2
+    LOCK_NB = 4
+
+    def __init__(self, code: int, *, forever: bool = False) -> None:
+        self._code = code
+        self._forever = forever
+        self.calls = 0
+
+    def flock(self, fileno: int, flags: int) -> None:
+        self.calls += 1
+        if self._forever or self.calls == 1:
+            raise OSError(self._code, "injected lock failure")
+
+
 def test_unlockable_file_reports_its_real_cause_not_a_phantom_holder(
     tmp_path, monkeypatch
 ):
@@ -523,18 +550,42 @@ def test_unlockable_file_reports_its_real_cause_not_a_phantom_holder(
     Reporting "held by another worker" for a bad descriptor or a filesystem
     without locking would stall for the whole timeout and then name a holder
     that does not exist -- the same misreporting this change set removes.
+
+    The fake keeps failing, because ENOLCK does not heal on a retry. One call
+    is therefore the whole claim: the service was handed an error it cannot
+    wait out and did not wait. The timeout below bounds only a BROKEN run --
+    a correct one never consults it, so no wall clock is ever read.
     """
-    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 30.0)
-
-    def unlockable(handle):
-        raise OSError(errno.ENOLCK, "no locks available")
-
-    monkeypatch.setattr(customization_service, "_try_os_lock", unlockable)
-    started = time.monotonic()
+    monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 0.5)
+    unlockable = _FakeFcntl(errno.ENOLCK, forever=True)
+    monkeypatch.setattr(customization_service, "fcntl", unlockable)
 
     with pytest.raises(OSError) as caught:
         with _exclusive_materialize(tmp_path / "tenant-a.git", tmp_path / "lock"):
             pytest.fail("acquired a lock that cannot be taken")
 
     assert caught.value.errno == errno.ENOLCK
-    assert time.monotonic() - started < 5  # reported at once, not after 30s
+    assert unlockable.calls == 1, "a hard lock error was retried as contention"
+
+
+def test_contended_lock_is_waited_out_and_then_taken(tmp_path, monkeypatch):
+    """The other side of the same classification: EAGAIN IS contention.
+
+    Pinning only the hard-error side would let the classification collapse the
+    other way -- every OSError raised straight out -- which would turn an
+    ordinary busy holder into a hard failure and drop the retry the lock
+    depends on.
+
+    The fake fails once and then succeeds, so this case needs no deadline and
+    no sleep budget of its own: the loop ends because the second attempt wins,
+    not because a clock ran out.
+    """
+    contended = _FakeFcntl(errno.EAGAIN)
+    monkeypatch.setattr(customization_service, "fcntl", contended)
+
+    entered = False
+    with _exclusive_materialize(tmp_path / "tenant-a.git", tmp_path / "lock"):
+        entered = True
+
+    assert entered, "contention was reported as a hard error instead of retried"
+    assert contended.calls == 2, "a busy holder was not retried exactly once"
