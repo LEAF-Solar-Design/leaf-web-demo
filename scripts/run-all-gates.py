@@ -56,6 +56,7 @@ USAGE
 EXIT CODE
 ---------
     0  iff every gate passed and every test-level skip was explicitly allowlisted
+    2  nothing ran: an --only substring matched no suite (never a gate verdict)
     1  otherwise
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
@@ -657,7 +658,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 21),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 22),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #

@@ -346,6 +346,45 @@ def test_scoreboard_echoes_the_selection_that_produced_it(capsys, tmp_path):
     assert "filter: --only server-backbone --only server-jobs" in out
 
 
+def test_main_runs_the_union_and_carries_the_selection_into_both_outputs(
+        tmp_path, monkeypatch, capsys):
+    """The successful path, wired end to end through main().
+
+    The tests above each hold one piece: select_suites is called directly, and
+    the repeated-CLI test exits at the dead-substring guard before any header
+    or scoreboard prints. A regression that computed the union correctly but
+    stopped forwarding `selection` to either output would slip past all of
+    them, which is exactly the class of silence this change exists to close.
+    """
+    g = _load_runner()
+    stubs = _selection_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    ran: list[str] = []
+
+    def fake_run(suite, log_dir, attempt):
+        ran.append(suite.id)
+        return g.Result(suite, "PASS", "1", 0.0)
+
+    monkeypatch.setattr(g, "run_suite_guarded", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "run-all-gates.py",
+        "--only", "server-backbone",
+        "--only", "server-jobs-terminal-mirror-atomic",
+        "--log-dir", str(tmp_path),
+    ])
+
+    rc = g.main()
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert ran == ["server-backbone", "server-jobs-terminal-mirror-atomic"]
+    echoed = ("--only server-backbone --only server-jobs-terminal-mirror-atomic"
+              "  (union of 2 substrings)  -> 2 of 4 suites")
+    assert f"selection: {echoed}" in out      # pre-run header
+    assert f"filter: {echoed}" in out         # scoreboard
+    assert "suites: 2 PASS  0 FAIL  0 SKIP" in out
+
+
 def test_cli_accepts_repeated_only_and_reports_every_dead_substring(tmp_path):
     """argparse-level guard the unit tests cannot give: with the old
     single-value `--only`, the first substring was discarded before any
