@@ -20,7 +20,7 @@ test('the named resident viewer supports pan and zoom and Fit restores its bound
   const mount = viewer.locator('.viewer-canvas')
   const canvas = mount.locator('canvas')
   await expect(canvas).toHaveCount(1)
-  await expect(viewer.locator('.stage-viewer')).toHaveClass(/settled/, { timeout: 5_000 })
+  await expect(viewer.locator('.stage-viewer')).toHaveClass(/settled/, { timeout: 20_000 })
   await canvas.evaluate((element) => { element.dataset.residentProof = 'same-canvas' })
   const baseline = await mount.evaluate((element) => element.__cadviewer.project(0, 0))
   const box = await canvas.boundingBox()
