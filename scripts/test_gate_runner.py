@@ -228,6 +228,50 @@ def test_exact_vitest_file_and_skip_count_allowlist_passes(tmp_path):
     assert result.status == "PASS"
 
 
+def test_all_skipped_vitest_suite_fails_even_when_every_skip_is_allowlisted(tmp_path):
+    """The pytest-path twin of this rule shipped first and the vitest path kept
+    the hole: parse_vitest reports `got` as passed+failed+skipped, so a suite
+    whose every test skipped still cleared its floor and reported PASS. Both
+    paths now share coverage_verdict, so this cannot regress on one side only.
+    """
+    g = _load_runner()
+    output = (
+        "test/postgres.test.ts (4 tests | 4 skipped)\n"
+        "Tests 0 passed | 4 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-all-skip", "vitest all skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+        allowed_vitest_skips=(("test/postgres.test.ts", 4),),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "ALL skipped: no coverage" in result.note
+
+
+def test_vitest_floor_counts_executed_tests_not_skipped_ones(tmp_path):
+    """A vitest suite must not buy its way to the floor with skips: 2 executed
+    against a floor of 4 is a coverage regression even though got == 5.
+    """
+    g = _load_runner()
+    output = (
+        "test/postgres.test.ts (5 tests | 3 skipped)\n"
+        "Tests 2 passed | 3 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-short-floor", "vitest short floor", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 4,
+        allowed_vitest_skips=(("test/postgres.test.ts", 3),),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "executed-count regression: expected >= 4, got 2" in result.note
+
+
 def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch):
     g = _load_runner()
     monkeypatch.setattr(g.os, "name", "nt")

@@ -399,6 +399,73 @@ def build_suites() -> List[Suite]:
         # a durable replay ledger, so it must not share another broker suite.
         Suite("server-da-callback", "server tests/test_da_callback.py", "pytest",
               SERVER, _py_pytest("tests/test_da_callback.py"), 7),
+        # --- modules that were registered in NO suite at all --- #
+        # These 19 files existed in server/tests and ran nowhere: not in this
+        # runner, not in any directory-target suite. A "*_postgres" name is not
+        # a reason to leave one out -- none of them gate at module level, so
+        # each carries offline structural tests that simply never ran. Every
+        # floor below is the EXECUTED count measured on a host with no DATABASE_URL,
+        # so the gate is honest about what it proves on a DB-less checkout, and
+        # every environmental skip is named rather than tolerated.
+        Suite("server-agent-metering-hook", "server tests/test_agent_metering_hook.py",
+              "pytest", SERVER, _py_pytest("tests/test_agent_metering_hook.py"), 2),
+        Suite("server-broker-migration-static", "server tests/test_broker_migration_static.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_migration_static.py"), 1),
+        Suite("server-canonical-worker-deploy-contract",
+              "server tests/test_canonical_worker_deploy_contract.py", "pytest", SERVER,
+              _py_pytest("tests/test_canonical_worker_deploy_contract.py"), 3),
+        Suite("server-catalog-digest-boundary", "server tests/test_catalog_digest_boundary.py",
+              "pytest", SERVER, _py_pytest("tests/test_catalog_digest_boundary.py"), 2),
+        Suite("server-customization-store-scaling",
+              "server tests/test_customization_store_scaling.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_store_scaling.py"), 3),
+        Suite("server-deployment-source-identity",
+              "server tests/test_deployment_source_identity.py", "pytest", SERVER,
+              _py_pytest("tests/test_deployment_source_identity.py"), 7),
+        Suite("server-emf-metrics-stream", "server tests/test_emf_metrics_stream.py",
+              "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
+        Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
+              SERVER, _py_pytest("tests/test_ops_metrics.py"), 13),
+        Suite("server-platform-postgres-startup",
+              "server tests/test_platform_postgres_startup.py", "pytest", SERVER,
+              _py_pytest("tests/test_platform_postgres_startup.py"), 12),
+        Suite("server-postgres-container-wiring",
+              "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
+              _py_pytest("tests/test_postgres_container_wiring.py"), 7),
+        Suite("server-agent-gate-postgres", "server tests/test_agent_gate_postgres.py",
+              "pytest", SERVER, _py_pytest("tests/test_agent_gate_postgres.py"), 14,
+              allowed_skip_reasons=(r"DATABASE_URL is not set",)),
+        Suite("server-agent-ops-postgres", "server tests/test_agent_ops_postgres.py",
+              "pytest", SERVER, _py_pytest("tests/test_agent_ops_postgres.py"), 6,
+              allowed_skip_reasons=(r"DATABASE_URL is not set",)),
+        Suite("server-broker-pg-store", "server tests/test_broker_pg_store.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_pg_store.py"), 28,
+              allowed_skip_reasons=(r"DATABASE_URL is not configured",)),
+        Suite("server-broker-usage-postgres", "server tests/test_broker_usage_postgres.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_usage_postgres.py"), 4),
+        Suite("server-drawing-upload-authority-postgres",
+              "server tests/test_drawing_upload_authority_postgres.py", "pytest", SERVER,
+              _py_pytest("tests/test_drawing_upload_authority_postgres.py"), 4,
+              allowed_skip_reasons=(r"PostgreSQL race test requires explicit DATABASE_URL",)),
+        Suite("server-guest-caps-postgres", "server tests/test_guest_caps_postgres.py",
+              "pytest", SERVER, _py_pytest("tests/test_guest_caps_postgres.py"), 11,
+              allowed_skip_reasons=(
+                  r"DATABASE_URL is required for PostgreSQL concurrency tests",)),
+        Suite("server-jobs-callbacks-postgres",
+              "server tests/test_jobs_callbacks_postgres.py", "pytest", SERVER,
+              _py_pytest("tests/test_jobs_callbacks_postgres.py"), 1,
+              allowed_skip_reasons=(
+                  r"DATABASE_URL is required for PostgreSQL job tests",)),
+        Suite("server-session-store-postgres", "server tests/test_session_store_postgres.py",
+              "pytest", SERVER, _py_pytest("tests/test_session_store_postgres.py"), 9,
+              allowed_skip_reasons=(
+                  r"PostgreSQL integration test requires explicit DATABASE_URL",)),
+        # The one module in the 19 with NO offline coverage: every test needs a
+        # live DB. Registering it plain would report "1 skipped" as a PASS -- the
+        # exact vacuous-green this gate exists to stop -- so it is db_gated and
+        # reports an explicit SKIP row until a DB is reachable, then executes.
+        Suite("server-ops-metrics-pg", "server tests/test_ops_metrics_pg.py", "pytest",
+              SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 15),
@@ -439,11 +506,20 @@ def build_suites() -> List[Suite]:
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout. Explicit file targets, not
         # the dir, so the collected count (35) is invariant to DB presence.
+        # This list must name EVERY platform/tests/*_static.py. The two db_*
+        # ones were missing, and because the `platform` suite above is db_gated
+        # they ran NOWHERE on a clean checkout -- 26 dependency-free tests
+        # outside the gate entirely. Explicit file targets, not the dir, so the
+        # count stays invariant to DB presence.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
                  f"{repo_name}/platform/tests/test_replay_static.py",
-                 f"{repo_name}/platform/tests/test_evidence_freeze_static.py"], 35),
+                 f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
+                 f"{repo_name}/platform/tests/test_db_primitives_static.py",
+                 f"{repo_name}/platform/tests/test_db_readiness_static.py"], 59,
+              allowed_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
         # replay drift before a PR reaches the GitHub simulator-gate workflow.
         Suite("platform-simgate-self-test", "platform simulator-gate self-test", "script",
@@ -459,7 +535,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 13),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 15),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
@@ -643,6 +719,35 @@ def parse_pytest(text: str) -> dict:
             "skipped": skipped, "got": got, "skip_reasons": skip_reasons}
 
 
+def coverage_verdict(c: dict, expected: Optional[int], passed: bool,
+                     note: str) -> tuple[bool, str]:
+    """Apply the executed-coverage rules shared by the pytest AND vitest paths.
+
+    Both parsers report `got` as passed+failed+skipped, so both are vulnerable
+    to the same lie, and only the pytest path was fixed the first time. One
+    implementation, two call sites, so a future fix cannot land on one path and
+    silently miss the other.
+
+    Rule 1 -- a suite where EVERY test skipped asserted nothing, so it proves
+    nothing. Reporting PASS there makes a green scoreboard mean "did not run",
+    which is the one thing a merge gate must never say.
+
+    Rule 2 -- `expected` is an EXECUTED-test floor, never a collected-test
+    floor. A skipped test proves no assertion, so counting it toward the floor
+    lets a suite trade real coverage for skips and stay green.
+    """
+    executed = c["got"] - c.get("skipped", 0)
+    if passed and c["got"] and executed == 0:
+        return False, (note + " " if note else "") + "ALL skipped: no coverage"
+    if expected is not None and passed and executed < expected:
+        return False, (note + " " if note else "") + \
+            f"executed-count regression: expected >= {expected}, got {executed}"
+    if expected is not None and passed and executed > expected:
+        return True, (note + " " if note else "") + \
+            f"(executed-count drift: expected {expected})"
+    return passed, note
+
+
 def parse_vitest(text: str) -> dict:
     t = strip_ansi(text)
     line = ""
@@ -772,7 +877,6 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         note = pre_note
         if fail_hint and not passed:
             note = (note + " " if note else "") + fail_hint
-        executed = c["got"] - c["skipped"]
         if c["skipped"]:
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
             reported = sum(count for count, _ in c["skip_reasons"])
@@ -786,19 +890,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
             elif unexpected:
                 passed = False
                 note += "; non-allowlisted skip: " + "; ".join(unexpected)
-        if passed and c["got"] and executed == 0:
-            passed = False
-            note = (note + " " if note else "") + "ALL skipped: no coverage"
-        # Expected counts are an EXECUTED-test floor. A skipped test proves no
-        # assertion, so it can never satisfy this floor even when its reason is
-        # an explicit environmental exception.
-        if suite.expected is not None and passed and executed < suite.expected:
-            passed = False
-            note = (note + " " if note else "") + \
-                f"executed-count regression: expected >= {suite.expected}, got {executed}"
-        elif suite.expected is not None and executed > suite.expected and passed:
-            note = (note + " " if note else "") + \
-                f"(executed-count drift: expected {suite.expected})"
+        passed, note = coverage_verdict(c, suite.expected, passed, note)
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
                       note=note.strip(), log_path=log_path, counts=c)
 
@@ -821,11 +913,10 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                 note += f"; non-allowlisted vitest skip: {unexpected}"
         if fail_hint and not passed:
             note = (note + " " if note else "") + fail_hint
-        # Same floor rule as pytest suites.
-        if suite.expected is not None and passed and c["got"] < suite.expected:
-            passed = False
-            note = (note + " " if note else "") + \
-                f"count regression: expected >= {suite.expected}, got {c['got']}"
+        # Same zero-coverage and executed-floor rules as pytest suites, through
+        # the same helper: vitest's `got` counts skips too, so an all-skipped
+        # run used to clear its floor here and report a vacuous PASS.
+        passed, note = coverage_verdict(c, suite.expected, passed, note)
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
                       note=note.strip(), log_path=log_path, counts=c)
 
