@@ -79,10 +79,23 @@ def _fresh_reaper_log_state():
     would leak its streak into the next one -- e.g. leaving `consecutive` > 0
     makes the very next successful sweep emit a recovery line and break
     test_reaper_sweep_is_quiet_on_the_success_path.
+
+    The bad-value warning flags are part of that state and are reset for the
+    same reason. `reaper_log_throttle_s()` records a rejected value as a side
+    effect, and the warning it arms fires ONCE per process on the next failure.
+    A test that merely calls the parser with junk therefore leaves a log line
+    owed to whichever test sweeps next, which lands in that test's caplog and
+    breaks any exact record count. Ordering hid it: a test capturing at ERROR
+    drops the WARNING at the logger while still marking it spent, so the leak
+    only surfaced under `-k` subsets that skip the consuming test.
     """
     jobs._reset_reaper_failure_state()
+    jobs._reaper_throttle_bad_raw = None
+    jobs._reaper_throttle_warned = False
     yield
     jobs._reset_reaper_failure_state()
+    jobs._reaper_throttle_bad_raw = None
+    jobs._reaper_throttle_warned = False
 
 
 # --------------------------------------------------------------------------- #
@@ -156,8 +169,9 @@ def test_reaper_loop_runs_the_sweep_and_lets_baseexception_escape(monkeypatch):
 # The fix in (1) traded a silent failure for a loud one: at REAPER_INTERVAL_S=10
 # a permanently failing sweep shipped 6 full tracebacks a minute, 8,640 a day per
 # process, to CloudWatch. These tests pin the throttle that bounds the VOLUME and
-# the three things that must still escape it -- first sighting of each fault
-# class, and recovery -- plus the control-flow guarantee that survives both.
+# the things that must still escape it -- the first failure of a streak, a fault
+# class new to the streak WHILE the window's traceback budget lasts, and recovery
+# -- plus the control-flow guarantee that survives all of them.
 # --------------------------------------------------------------------------- #
 def _warnings(caplog) -> list:
     return [r for r in caplog.records if r.levelno >= logging.WARNING]
