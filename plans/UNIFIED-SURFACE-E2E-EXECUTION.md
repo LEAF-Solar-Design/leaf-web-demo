@@ -361,8 +361,12 @@ Progress:
   This aggregate run includes the full standards walk, guided cat video, all
   negative and recovery paths, session and ops gates, responsive and motion
   checks, viewer recovery, and the session controller contracts.
-- Job, catalog, platform, checkout, upload, and project provider lifting,
-  the remaining accessibility ladder, and full local-stack proof remain open.
+- The managed local proof now selects `count-by-layer` from the real catalog,
+  stages the proposal without dispatch, confirms it once, receives a real 202
+  job id, renders the completed result, reloads `/try`, and restores the
+  completed job from the durable API and Jobs rail. The isolated run passed in
+  14.0 seconds. APS, Claude, Auth0, PostgreSQL, mid-run reattach, Escape detach,
+  and staging proof remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -437,9 +441,11 @@ Observed Wave 0 results:
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
 - Local tier: 1 passed against an isolated real Vite, FastAPI, broker, harness,
-  SQLite, and job-worker stack. It proves readiness and a real drawing session
-  only. APS, Claude, Auth0, PostgreSQL, catalog, run, and version claims remain
-  open.
+  SQLite, and job-worker stack. It proves readiness, real drawing intake,
+  catalog review, explicit confirmation, one broker and worker run, completed
+  result rendering, durable job API storage, and Jobs-rail recovery after page
+  reload. APS, Claude, Auth0, PostgreSQL, mid-run reattach, Escape detach, and
+  version mutation claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:

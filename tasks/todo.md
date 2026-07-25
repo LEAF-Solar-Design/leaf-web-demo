@@ -63,7 +63,9 @@ Current additive progress:
   keyboard focusable.
 - [ ] Reconcile remaining visible and standards gaps against the capability ledger.
 - [x] Run the expanded 37-test aggregate fixture suite.
-- [ ] Run the local real-stack suite and any authorized staging proof.
+- [x] Run the managed local real-stack catalog, confirm, dispatch, receipt, and
+  reload-persistence proof.
+- [ ] Run any authorized staging proof.
 
 Files and ownership are defined in `plans/UNIFIED-SURFACE-E2E-EXECUTION.md`.
 
