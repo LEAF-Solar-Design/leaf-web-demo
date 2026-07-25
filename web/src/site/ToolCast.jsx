@@ -5,6 +5,7 @@ import {
   createProject,
   getDrawingIntake,
   getDrawingVersions,
+  getJob,
   getSession,
   getTools,
   listProjects,
@@ -14,6 +15,7 @@ import {
   runToolAsync,
   stageAuthorTool,
   publishStagedAuthor,
+  recordToEnvelope,
   undoDrawing,
 } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
@@ -21,11 +23,15 @@ import AuthorPanel from '../components/AuthorPanel.jsx'
 import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
 import CheckoutControls from '../components/CheckoutControls.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
+import DetailsDrawer from '../components/DetailsDrawer.jsx'
+import DrawingUploadControl from '../components/DrawingUploadControl.jsx'
 import JobRail from '../components/JobRail.jsx'
 import Legend from '../components/Legend.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
+import ResultPanel from '../components/ResultPanel.jsx'
+import Toast from '../components/Toast.jsx'
 import ToolsPanel from '../components/ToolsPanel.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
@@ -35,6 +41,7 @@ import useJobController from '../controllers/useJobController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
 import useCheckoutController from '../controllers/checkout/useCheckoutController.js'
+import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
@@ -93,6 +100,7 @@ export default function ToolCast({
   onVisibleLayersChange,
   selectedHandle,
   onSelectedHandleChange,
+  onResultOverlayChange,
 }) {
   const [prompt, setPrompt] = useState(CAT_REQUEST)
   const { converse } = useWorkspaceControllers()
@@ -106,8 +114,11 @@ export default function ToolCast({
   const [leftView, setLeftView] = useState('operator')
   const [rightView, setRightView] = useState('execution')
   const [selectedCatalogTool, setSelectedCatalogTool] = useState(null)
-  const [notice, setNotice] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false)
+  const [toast, setToast] = useState(null)
+  const [drawer, setDrawer] = useState(null)
+  const [uploadDragActive, setUploadDragActive] = useState(false)
+  const toastSeqRef = useRef(0)
   const catalogDecisionRef = useRef(null)
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
@@ -219,6 +230,25 @@ export default function ToolCast({
     }
   }, [seatVersion])
 
+  const showToast = useCallback((next) => {
+    toastSeqRef.current += 1
+    setToast({ id: toastSeqRef.current, ...next })
+  }, [])
+
+  const onJobNotice = useCallback(({ text }) => {
+    showToast({ text, action: { label: 'View', onClick: () => setRightView('execution') } })
+  }, [showToast])
+
+  const onUploadReady = useCallback(async ({ receipt, view }) => {
+    seatVersion(view, { drawingId: receipt.drawing_id, source: 'upload', event: 'upload' })
+    setTenantId(receipt.tenant_id || tenantId)
+    setPhase('ready')
+    setError(null)
+    showToast({ text: `Drawing ready, ${view?.intake?.dwg || receipt.drawing_id}`, action: { label: 'View', onClick: () => setRightView('view') } })
+  }, [seatVersion, showToast, tenantId])
+
+  const drawingUpload = useDrawingUploadController({ onReady: onUploadReady })
+
   const {
     jobs,
     currentJob,
@@ -228,12 +258,21 @@ export default function ToolCast({
     running: jobRunning,
     result: jobResult,
     error: jobError,
+    status: jobStatus,
+    progress: jobProgress,
+    elapsedMs: jobElapsedMs,
     runJob: runTrackedJob,
     attachJob: attachTrackedJob,
+    adoptEnvelope,
   } = useJobController({
     onCompleteVersion,
+    onNotice: onJobNotice,
     formatError: () => 'The panel run did not produce a readable result.',
   })
+
+  useEffect(() => {
+    onResultOverlayChange?.(drawing.overlayStale ? null : (jobResult?.overlay || null))
+  }, [drawing.overlayStale, jobResult, onResultOverlayChange])
   const visibleJobCount = useMemo(() => {
     if (!currentJob) return jobs.length
     return jobs.some((job) => job.job_id === currentJob.job_id) ? jobs.length : jobs.length + 1
@@ -356,7 +395,10 @@ export default function ToolCast({
       ),
     })
     if (envelope?.ok) setPhase(envelope.result?.new_version ? 'complete' : 'tool-complete')
-    else {
+    else if (envelope) {
+      setPhase('failed')
+      setError(null)
+    } else {
       setPhase('failed')
       setError('The catalog run did not produce a readable result.')
     }
@@ -390,9 +432,10 @@ export default function ToolCast({
     const tool = published.tool || staged.tool
     catalog.actions.upsertTool(tool)
     await catalog.actions.loadCatalog()
-    setNotice(`Tool published, ${tool.name}`)
+    const message = `Tool published, ${tool.name}`
+    showToast({ text: message, action: { label: 'View', onClick: () => setLeftView('author') } })
     return { ...published, tool }
-  }, [catalog.actions])
+  }, [catalog.actions, showToast])
 
   const useAuthoredTool = useCallback((tool) => {
     if (!tool) return
@@ -421,13 +464,73 @@ export default function ToolCast({
       toolName: toolName || 'arrange-panels-as-cat',
       persist: true,
     })
-    if (!envelope?.ok) {
+    if (envelope && !envelope.ok) {
+      setPhase('failed')
+      setError(null)
+    } else if (!envelope) {
       setPhase('failed')
       setError('The panel run did not produce a readable drawing version.')
     }
     if (workspace.openProjectId) workspace.rehydrate()
     checkout.actions.refresh()
   }, [attachTrackedJob, checkout.actions, onJobLinked, workspace])
+
+  const openResultDetails = useCallback((envelope = jobResult, jobId = currentJobId) => {
+    if (!envelope) return
+    const cost = envelope.cost?.usd_est
+    setDrawer({
+      title: 'Run details',
+      rows: [
+        `job ${jobId || 'not recorded'}`,
+        `tool ${envelope.tool || 'unknown'}`,
+        `version ${envelope.version || 'unknown'}`,
+        `timing ${envelope.timing_ms ?? 'unknown'} ms`,
+        `cost ${Number(cost) > 0 ? `$${Number(cost).toFixed(4)}` : 'no cloud cost'}`,
+        `degraded ${envelope.degraded_mode ? 'yes, local fallback' : 'no'}`,
+        ...(envelope.error ? [`error ${envelope.error.error_code || envelope.error.message || 'failed'}`] : []),
+      ],
+      foot: 'This receipt belongs to one immutable tool run.',
+    })
+  }, [currentJobId, jobResult])
+
+  const inspectHistoricalJob = useCallback(async (job) => {
+    if (!job?.job_id) return
+    try {
+      const record = await getJob(job.job_id)
+      const envelope = recordToEnvelope(record)
+      setDrawer({
+        title: 'Job details',
+        rows: [
+          `job ${job.job_id}`,
+          `tool ${envelope.tool || job.tool || 'unknown'}`,
+          `status ${record.status || 'unknown'}`,
+          `timing ${envelope.timing_ms ?? 'unknown'} ms`,
+        ],
+        action: {
+          label: 'Show in result pane',
+          onClick: () => {
+            adoptEnvelope(envelope, { jobId: job.job_id, toolName: envelope.tool || job.tool })
+            setRightView('execution')
+            setDrawer(null)
+          },
+        },
+        foot: 'Selecting details does not rerun the tool.',
+      })
+    } catch {
+      setError('The stored job details could not be loaded.')
+    }
+  }, [adoptEnvelope])
+
+  useEffect(() => {
+    if (!drawer) return undefined
+    const closeOnEscape = (event) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setDrawer(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [drawer])
 
   const runRequest = useCallback(async () => {
     const text = prompt.trim()
@@ -563,7 +666,17 @@ export default function ToolCast({
             />
           )}
           {(error || jobError) && <div className="tc-operator-error"><span className="dot red" />{error || jobError}</div>}
-          {notice && <div className="tc-result-summary" role="status"><span className="dot" />{notice}</div>}
+          {leftView === 'operator' && (
+            <DrawingUploadControl
+              policy={drawingUpload.policy}
+              policyLoading={drawingUpload.policyLoading}
+              busy={drawingUpload.busy}
+              phase={drawingUpload.phase}
+              error={drawingUpload.error}
+              onUpload={drawingUpload.actions.upload}
+              onCancel={drawingUpload.actions.cancel}
+            />
+          )}
         </div>
         <div className="tc-rail-foot">
           <span className="tc-link">{leftView === 'operator' ? 'Drawing operator' : leftView === 'catalog' ? 'Registered catalog' : leftView === 'author' ? 'Tool authoring' : 'Project workspace'}</span>
@@ -620,12 +733,26 @@ export default function ToolCast({
         <div className="tc-rail-note">
           <span>The request, approval, job, drawing, and version history remain in this scene.</span>
         </div>
-        {jobResult && (
-          <div className="tc-result-summary" data-testid="catalog-run-result">
-            <span className="dot" />
-            <span>{jobResult.tool || selectedCatalogTool?.name || 'Tool'} completed</span>
+        {jobRunning && (
+          <div className="tc-running" role="status">
+            <span className="dot live pulse" />
+            <span>{jobProgress || jobStatus || 'Running tool'}</span>
+            {jobElapsedMs != null && <b>{(jobElapsedMs / 1000).toFixed(1)}s</b>}
           </div>
-        )}</>}
+        )}
+        <div data-testid="catalog-run-result">
+          <ResultPanel
+            running={jobRunning}
+            error={jobError}
+            result={jobResult}
+            tool={selectedCatalogTool}
+          />
+          {jobResult && (
+            <div className="tc-result-details">
+              <button type="button" className="chip-act" onClick={() => openResultDetails()}>Details</button>
+            </div>
+          )}
+        </div></>}
         {rightView === 'jobs' && (
           <JobRail
             mock={false}
@@ -633,6 +760,7 @@ export default function ToolCast({
             currentJob={currentJob}
             inflight={inflight}
             reattaching={reattaching}
+            onSelectJob={inspectHistoricalJob}
           />
         )}
         {rightView === 'versions' && (
@@ -707,7 +835,21 @@ export default function ToolCast({
       </aside>
 
       <div className="tc-bar-wrap" data-cast="tool" style={{ '--rank': 2 }}>
-        <div className="tc-bar">
+        <div
+          className={`tc-bar ${uploadDragActive ? 'upload-drag-active' : ''}`}
+          onDragEnter={(event) => { event.preventDefault(); setUploadDragActive(true) }}
+          onDragOver={(event) => { event.preventDefault(); setUploadDragActive(true) }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setUploadDragActive(false)
+          }}
+          onDrop={(event) => {
+            event.preventDefault()
+            setUploadDragActive(false)
+            const file = event.dataTransfer?.files?.[0]
+            if (file) drawingUpload.actions.upload(file)
+          }}
+        >
+          {uploadDragActive && <div className="tc-upload-drop" role="status">Drop a DWG or DXF to open it here</div>}
           <RoutePanel
             route={route}
             tools={tools}
@@ -743,6 +885,16 @@ export default function ToolCast({
       <div className="tc-caption" data-cast="tool">
         Deterministic browser proof. This surface does not claim a live Claude or APS run.
       </div>
+
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {jobRunning
+          ? `Running ${selectedCatalogTool?.name || currentJob?.tool || 'tool'}`
+          : jobResult?.ok
+            ? `${jobResult.tool || 'Tool'} complete`
+            : jobResult?.error?.message || ''}
+      </div>
+      <Toast toast={toast} onDone={(id) => setToast((current) => current?.id === id ? null : current)} />
+      <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
     </>
   )
 }

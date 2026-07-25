@@ -610,6 +610,39 @@ export async function getDrawingIntake(mock, drawingId, version = 'head') {
   )
 }
 
+// --- Drawing upload and extraction (CONTRACT-ADDENDUM section 19) -------
+export async function getGuestUploadPolicy() {
+  return http('/api/site/guest-upload-policy', undefined, 5000)
+}
+
+export async function uploadDrawing(file, guestSession = null) {
+  const form = new FormData()
+  form.append('file', file)
+  const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
+  if (guestSession) headers['X-Guest-Session'] = guestSession
+  const res = await fetch(`${API_BASE}/api/drawings/upload`, { method: 'POST', headers, body: form })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error?.message || `POST /api/drawings/upload -> ${res.status}`)
+    error.status = res.status
+    error.body = body
+    throw error
+  }
+  return body
+}
+
+export async function getDrawingUploadStatus(drawingId, guestSession = null, tenantId = null) {
+  const headers = { 'X-Tenant-Id': tenantId || TENANT, ...authHeaders() }
+  if (guestSession) headers['X-Guest-Session'] = guestSession
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/upload-status`, { headers }, 5000)
+}
+
+export async function getUploadedDrawingIntake(drawingId, guestSession = null, tenantId = null) {
+  const headers = { 'X-Tenant-Id': tenantId || TENANT, ...authHeaders() }
+  if (guestSession) headers['X-Guest-Session'] = guestSession
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/intake?version=head`, { headers }, 8000)
+}
+
 // Version-history chain (sibling contract): GET /api/drawings/{id}/versions ->
 // {drawing_id, head, latest, versions:[{v, parent, created, bytes, sha256, tool,
 // workitem_id, note}]}. LIVE only. Throws if the sibling endpoint isn't live yet

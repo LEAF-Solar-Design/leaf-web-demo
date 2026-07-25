@@ -272,11 +272,21 @@ Progress:
   token field, token-field removal after success, and the expected OAuth grant
   request without recording a real credential.
 - The aggregate one-scene walk passes with production Playwright video capture.
-  Its receipt covers 19 capability IDs and 34 distinct API method-path pairs.
-  The 10-scenario fixture gate, 19 controller tests, production build, behavior
+  Its receipt covers 23 capability IDs and records every observed API method-path.
+  The 10-scenario fixture gate, 22 controller tests, production build, behavior
   pins, customization checks, and all staging checks pass.
-- Provider lifting, upload, result details, notices, sign-in and expiry, tenant
-  operations, and the full responsive and accessibility ladder remain open.
+- `/try` now mounts the shared result panel, completion toast, provenance drawer,
+  historical job selection, running status, polite live region, and result
+  overlays on the resident viewer. Structured terminal failures remain result
+  envelopes instead of being flattened into transport errors.
+- `/try` now uses the server's existing DWG/DXF upload contract. Both the
+  accessible picker and command-bar drop target call one controller that reads
+  public policy, validates type and size, posts multipart bytes, polls honest
+  extraction state, loads intake with guest identity, and seats the drawing.
+  Three focused tests cover success, preflight rejection, and late-result
+  suppression after cancel. The aggregate video proves both entry paths.
+- Provider lifting, sign-in and expiry, tenant operations, deeper structured
+  failure coverage, and the full responsive and accessibility ladder remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

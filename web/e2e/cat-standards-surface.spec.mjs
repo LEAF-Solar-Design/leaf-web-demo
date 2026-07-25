@@ -27,7 +27,10 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
     const request = route.request()
     const url = new URL(request.url())
     apiEndpoints.push(`${request.method()} ${url.pathname}`)
-    const body = request.postData() ? request.postDataJSON() : {}
+    let body = {}
+    if (request.postData()) {
+      try { body = request.postDataJSON() } catch { body = {} }
+    }
     if (url.pathname === '/api/run' && body.tool === 'count-panels') catalogRunHeaders = await request.allHeaders()
     if (url.pathname === '/api/author/stage') authorStageBody = body
     if (url.pathname === '/api/author/register') authorRegisterBody = body
@@ -45,6 +48,22 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page).toHaveURL(/\/try$/)
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   await page.waitForTimeout(2_600)
+
+  const uploadInput = page.getByLabel('Drawing file')
+  await uploadInput.setInputFiles({
+    name: 'cat-proof.dxf',
+    mimeType: 'application/dxf',
+    buffer: Buffer.from('0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'),
+  })
+  await expect(page.locator('.drawing-upload')).toContainText('Drawing ready')
+  expect(proofState.uploaded).toBe(true)
+  await expect(page.locator('.toast')).toContainText('Drawing ready, cat.dwg')
+  await page.locator('.tc-bar').evaluate((bar) => {
+    const transfer = new DataTransfer()
+    transfer.items.add(new File(['0\nEOF\n'], 'cat-drop.dxf', { type: 'application/dxf' }))
+    bar.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }))
+  })
+  await expect.poll(() => proofState.uploadCount).toBe(2)
 
   await page.getByRole('tab', { name: 'View' }).click()
   const viewerCanvas = page.locator('.viewer-canvas canvas')
@@ -88,8 +107,20 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByRole('button', { name: 'Run count-panels' })).toBeVisible()
   await page.getByRole('button', { name: 'Run count-panels' }).click()
   await expect(page.getByText('count-panels').first()).toBeVisible({ timeout: 12_000 })
-  await page.getByRole('tab', { name: 'Execution' }).click()
-  await expect(page.getByTestId('catalog-run-result')).toContainText('count-panels completed')
+  await expect(page.locator('.toast')).toContainText('count-panels complete')
+  await page.locator('.toast').getByRole('button', { name: 'View' }).click()
+  const catalogResult = page.getByTestId('catalog-run-result')
+  await expect(catalogResult).toContainText('Passed')
+  await expect(catalogResult).toContainText('count-panels')
+  await expect(catalogResult).toContainText('3,328')
+  await expect(catalogResult).toContainText('1 panel highlighted')
+  await expect(catalogResult).toContainText('no cloud cost')
+  await page.getByRole('button', { name: 'Details' }).click()
+  await expect(page.getByRole('dialog', { name: 'Run details' })).toContainText('catalog-job-0001')
+  await expect(page.getByRole('dialog', { name: 'Run details' })).toContainText('timing 120 ms')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Run details' })).toHaveCount(0)
+  await expect(page).toHaveURL(/\/try$/)
   expect(catalogRunHeaders?.['x-org-id']).toBe('cat-proof-org')
   expect(catalogRunHeaders?.['x-project-id']).toBe('cat-project')
   await page.screenshot({ path: join(PROOF_DIR, 'standards-00-catalog-run.png'), fullPage: true })
@@ -117,7 +148,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   proofState.independentApproved = true
   await page.getByRole('button', { name: 'Publish tool' }).click()
   await expect(page.getByRole('button', { name: 'Run it now' })).toBeVisible()
-  await expect(page.getByText('Tool published, count-panels-near-edge')).toBeVisible()
+  await expect(page.locator('.toast')).toContainText('Tool published, count-panels-near-edge')
   expect(authorRegisterBody).toMatchObject({
     change_set_id: '11111111-1111-4111-8111-111111111111',
     confirmation_id: 'publish-confirmation-0001',
@@ -137,7 +168,8 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   expect(proofState.authorJob).toBe(false)
   await page.getByRole('button', { name: 'Run count-panels-near-edge' }).click()
   await page.getByRole('tab', { name: 'Execution' }).click()
-  await expect(page.getByTestId('catalog-run-result')).toContainText('count-panels-near-edge completed')
+  await expect(page.getByTestId('catalog-run-result')).toContainText('count-panels-near-edge')
+  await expect(page.getByTestId('catalog-run-result')).toContainText('Passed')
   await page.screenshot({ path: join(PROOF_DIR, 'standards-00b-author-publish-run.png'), fullPage: true })
   mark('author published and run')
   await page.getByRole('tab', { name: 'Operator' }).click()
@@ -155,8 +187,9 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await surface.getByRole('button', { name: 'Approve' }).click()
   await expect(page.getByTestId('operator-phase')).toContainText('Cat version ready', { timeout: 15_000 })
   await expect(page.getByTestId('version-head')).toContainText('Version 2')
-  await expect(page.getByText('Panels preserved')).toBeVisible()
-  await expect(page.getByText('3,328')).toBeVisible()
+  const executionEvents = page.locator('.tc-events')
+  await expect(executionEvents.getByText('Panels preserved', { exact: true })).toBeVisible()
+  await expect(executionEvents.getByText('3,328', { exact: true })).toBeVisible()
   await page.screenshot({ path: join(PROOF_DIR, 'standards-02-cat-complete.png'), fullPage: true })
   mark('cat complete')
   await expect(page).toHaveURL(/\/try$/)
@@ -204,14 +237,16 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page).toHaveURL(/\/try$/)
 
   writeProofReceipt(join(UNIFIED_PROOF_DIR, 'receipt.json'), {
-    capability_ids: ['ID-02', 'ID-03', 'CA-01', 'CA-02', 'CV-01', 'CV-02', 'RN-01', 'AU-01', 'JB-01', 'JB-02', 'VW-01', 'VW-02', 'VR-01', 'VR-02', 'VR-03', 'EN-01', 'HL-01', 'AC-01', 'DS-01'],
+    capability_ids: ['ID-02', 'ID-03', 'ID-04', 'CA-01', 'CA-02', 'CV-01', 'CV-02', 'RN-01', 'AU-01', 'JB-01', 'JB-02', 'VW-01', 'VW-02', 'VR-01', 'VR-02', 'VR-03', 'EN-01', 'HL-01', 'AC-01', 'NT-01', 'AX-02', 'RS-02', 'DS-01'],
     evidence_tier: 'contract',
     route: '/try',
     runtime: 'Vite with deterministic API transport',
     api_endpoints: apiEndpoints,
     assertions: [
       'the request, approval, job, drawing result, version, undo, and redo stay on /try',
+      'the accessible picker and command-bar drop target use the same multipart upload, extraction-status, intake-load, and viewer-seating controller',
       'the production viewer layer control changes the canvas and entity picking drives the shared selection readout',
+      'the shared result panel renders envelope data, overlay summary, timing, and cost while the toast and provenance drawer keep the same job identity',
       'checkout take and release refresh the authoritative version manifest before write controls update',
       'the registered catalog stages, confirms, and completes count-panels through the shared job controller',
       'the project resolver hydrates Cat Roof and binds its canonical drawing version into the run intent',

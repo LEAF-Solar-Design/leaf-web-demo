@@ -49,6 +49,7 @@ export default function SiteRoot() {
   const [operatorIntake, setOperatorIntake] = useState(null)
   const [operatorVisibleLayers, setOperatorVisibleLayers] = useState(null)
   const [operatorSelectedHandle, setOperatorSelectedHandle] = useState(null)
+  const [operatorOverlay, setOperatorOverlay] = useState(null)
 
   // Keyboard recasts — ONLY in scenes site|tool (listener not registered in
   // scene app/sheets), and never when focus is in an editable element.
@@ -112,6 +113,7 @@ export default function SiteRoot() {
           visibleLayers={scene === 'tool' ? operatorVisibleLayers : null}
           selectedHandle={scene === 'tool' ? operatorSelectedHandle : null}
           onSelectEntity={scene === 'tool' ? setOperatorSelectedHandle : undefined}
+          overlay={scene === 'tool' ? operatorOverlay : null}
         />
         <LandingCast onTryTool={() => navigate('/try')} />
         <ToolCast
@@ -120,6 +122,7 @@ export default function SiteRoot() {
           onVisibleLayersChange={setOperatorVisibleLayers}
           selectedHandle={operatorSelectedHandle}
           onSelectedHandleChange={setOperatorSelectedHandle}
+          onResultOverlayChange={setOperatorOverlay}
         />
       </div>
     </WorkspaceControllerProvider>

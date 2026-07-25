@@ -33,6 +33,7 @@ export default function StageLayer({
   visibleLayers = null,
   selectedHandle = null,
   onSelectEntity,
+  overlay = null,
 }) {
   const [intake, setIntake] = useState(null)
   const [routes, setRoutes] = useState([])
@@ -75,6 +76,9 @@ export default function StageLayer({
                   visibleLayers={visibleLayers}
                   selectedHandle={selectedHandle}
                   onSelectEntity={onSelectEntity}
+                  highlightHandles={overlay?.highlight_handles}
+                  markers={overlay?.markers}
+                  overlayPolylines={overlay?.polylines}
                   background="transparent"
                   controlsEnabled={false}
                   stringRoutes={intakeOverride ? [] : routes}

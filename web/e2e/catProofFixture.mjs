@@ -107,12 +107,36 @@ export function makeCatProofState() {
     authorStaged: false, independentApproved: false, authorPublished: false, authorJob: false,
     grantLinked: true, grantKind: 'oauth',
     checkout: null,
+    uploaded: false, uploadCount: 0,
   }
 }
 
 export function catProofResponse({ method, path, body = {}, query = {} }, state) {
   const json = (value, status = 200) => ({ status, body: value })
   if (method === 'OPTIONS') return { status: 204, body: null }
+  if (path === '/api/site/guest-upload-policy') return json({
+    enabled: true, retention_hours: 24, max_bytes: 1024 * 1024,
+    accepted: ['.dwg', '.dxf'], extract_live: false, dxf_local_ok: true,
+  })
+  if (path === '/api/drawings/upload' && method === 'POST') {
+    state.uploaded = true
+    state.uploadCount += 1
+    return json({
+      drawing_id: 'uploaded-cat', tenant_id: 'cat-litmus-tenant', tenant_kind: 'account',
+      retention_expires_at: null, guest_session: null, status: 'extracting',
+    }, 202)
+  }
+  if (path === '/api/drawings/uploaded-cat/upload-status') return json({
+    status: 'ready', error: null, filename: 'cat-proof.dxf', uploaded_at: '2026-07-24T12:00:00Z',
+    retention_expires_at: null,
+  })
+  if (path === '/api/drawings/uploaded-cat/intake') return json({
+    drawing_id: 'uploaded-cat', intake: state.base, version: 1, head: 1, latest: 1,
+  })
+  if (path === '/api/drawings/uploaded-cat/versions') return json({
+    drawing_id: 'uploaded-cat', head: 1, latest: 1, checkout: state.checkout,
+    versions: [{ v: 1, parent: null, tool: 'upload', note: 'Uploaded drawing' }],
+  })
   if (path === '/api/session') return json({ intake: state.base, tenant_id: 'cat-litmus-tenant', tier: 'proof', org_id: 'cat-proof-org' })
   if (path === '/api/projects' && method === 'GET') return json({ projects: [CAT_PROJECT] })
   if (path === '/api/projects/cat-project' && method === 'GET') return json({
@@ -204,7 +228,8 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
     job_id: 'catalog-job-0001', status: 'complete', tool: 'count-panels', elapsed_ms: 120,
     result: {
       ok: true, tool: 'count-panels', version: '1.0.0', timing_ms: 120,
-      cost: null, error: null, degraded_mode: false, overlay: null,
+      cost: { engine_seconds: 0.12, usd_est: 0 }, error: null, degraded_mode: false,
+      overlay: { highlight_handles: ['P0000'], markers: [], polylines: [] },
       result: { count: state.count, layers: { PANELS: state.count } },
     },
   })
@@ -269,7 +294,7 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
       { v: 2, parent: 1, tool: 'arrange-panels-as-cat', note: 'Sitting cat, oracle pass' },
     ],
   })
-  if (path === '/api/drawings/cat-panels/checkout' && method === 'POST') {
+  if (/^\/api\/drawings\/(cat-panels|uploaded-cat)\/checkout$/.test(path) && method === 'POST') {
     state.checkout = {
       holder: body.holder || 'cat-litmus-tenant',
       acquired: '2026-07-24T12:00:00Z',
@@ -277,7 +302,7 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
     }
     return json({ acquired: true, checkout: state.checkout })
   }
-  if (path === '/api/drawings/cat-panels/checkout' && method === 'DELETE') {
+  if (/^\/api\/drawings\/(cat-panels|uploaded-cat)\/checkout$/.test(path) && method === 'DELETE') {
     state.checkout = null
     return json({ released: true, checkout: null })
   }
