@@ -332,9 +332,14 @@ Progress:
   Escape before the scene ladder, and restore their opener. Four focused browser
   contracts cover these semantics and the combined ops proof caught and fixed a
   real double-Escape navigation defect.
+- Ordinary language in `/try` now passes through the shared catalog router
+  before it can reach Claude. High-confidence catalog matches stage immutable
+  review, low-confidence and build requests carry the server classifier hint
+  into Claude, transport loss falls back visibly to local catalog matching, and
+  no match plus Claude quota loss remains a non-executing resolver. Four focused
+  browser contracts prove request order, recovery, and zero preapproval runs.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
-  natural-language catalog routing, and the remaining accessibility ladder
-  remain open.
+  the remaining accessibility ladder, and full local-stack proof remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

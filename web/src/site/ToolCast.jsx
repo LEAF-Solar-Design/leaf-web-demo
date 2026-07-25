@@ -53,11 +53,22 @@ import {
 } from '../runIntent.js'
 import { navigate } from './router.js'
 import { authConfigured, isSignedIn, login } from '../auth.js'
+import { classifyAgentError } from '../converse.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
 const DRAWING_ID = 'cat-panels'
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
 const workspaceServices = { createOrg, listProjects, createProject, openProject }
+
+function agentBannerFor(error) {
+  const kind = classifyAgentError(error)
+  if (kind === 'quota') return { kind, message: 'AI paused. Your built tools keep working.' }
+  if (kind === 'grant') return { kind, message: 'Chat needs a linked Claude account.' }
+  if (kind === 'entitlement') return { kind, message: 'Chat is not included in your plan. Your built tools keep working.' }
+  if (kind === 'busy') return { kind, message: 'The assistant is mid-turn. The catalog route is still available.' }
+  if (kind === 'rate_limited') return { kind, message: 'AI is rate-limited. The catalog route is still available; retry shortly.' }
+  return { kind: 'unreachable', message: 'AI assistant unavailable. The catalog route is still available.' }
+}
 
 function defaultsOf(schema) {
   const defaults = {}
@@ -127,6 +138,8 @@ export default function ToolCast({
   const [leftView, setLeftView] = useState('operator')
   const [rightView, setRightView] = useState('execution')
   const [selectedCatalogTool, setSelectedCatalogTool] = useState(null)
+  const [authorSeed, setAuthorSeed] = useState('')
+  const [authorSeedSignal, setAuthorSeedSignal] = useState(0)
   const [claudeOpen, setClaudeOpen] = useState(false)
   const [toast, setToast] = useState(null)
   const [drawer, setDrawer] = useState(null)
@@ -151,7 +164,19 @@ export default function ToolCast({
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     },
     onAuthRequired: () => requireAuth('catalog'),
-  }), [requireAuth])
+    openAuthor: (text) => {
+      setAuthorSeed(text || '')
+      setAuthorSeedSignal((current) => current + 1)
+      setLeftView('author')
+    },
+    startAgentTurn: async (text, hint) => {
+      const response = await startTurn(text, hint)
+      setLeftView('operator')
+      setPhase('proposal')
+      return response
+    },
+    agentBannerFor,
+  }), [requireAuth, startTurn])
 
   useEffect(() => {
     if (!drawingEvent) return
@@ -321,7 +346,7 @@ export default function ToolCast({
       mock: false,
       entitlements: null,
       running: busy || jobRunning,
-      agentDisabled: true,
+      agentDisabled: !platform.isEntitled('converse'),
     },
   })
 
@@ -341,6 +366,9 @@ export default function ToolCast({
     tools,
     toolsError,
     route,
+    routing,
+    routeError,
+    agentBanner,
   } = catalog.state
   const armCatalogDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') return decision
@@ -604,26 +632,19 @@ export default function ToolCast({
 
   const runRequest = useCallback(async () => {
     const text = prompt.trim()
-    if (!text || busy || jobRunning) return
-    if (text.startsWith('/')) {
-      setLeftView('catalog')
-      await catalog.actions.dispatch(text)
-      return
-    }
-    setBusy(true)
+    if (!text || busy || jobRunning || routing) return
     setError(null)
     setPhase('starting')
-    try {
-      await startTurn(text, { lane: 'build', tool: null, confidence: 0.42 })
-      setPhase('proposal')
-    } catch {
-      resetCached()
-      setError('The assistant could not start this request. The drawing is unchanged.')
-      setPhase('failed')
-    } finally {
-      setBusy(false)
-    }
-  }, [busy, catalog.actions, jobRunning, prompt, resetCached, startTurn])
+    if (text.startsWith('/')) setLeftView('catalog')
+    const decision = await catalog.actions.dispatch(text)
+    if (decision) setPhase('proposal')
+    else setPhase('failed')
+  }, [busy, catalog.actions, jobRunning, prompt, routing])
+
+  const changePrompt = useCallback((value) => {
+    setPrompt(value)
+    catalog.actions.setPrompt(value)
+  }, [catalog.actions])
 
   const undo = useCallback(async () => {
     if (busy || jobRunning || !canUndo) return
@@ -739,6 +760,8 @@ export default function ToolCast({
               notLinked={platform.grant?.linked === false}
               onLinkClaude={() => setRightView('trust')}
               buildEntitled={platform.isEntitled('build')}
+              seed={authorSeed}
+              seedSignal={authorSeedSignal}
             />
           )}
           {(error || jobError) && <div className="tc-operator-error" role="alert"><span className="dot red" />{error || jobError}</div>}
@@ -952,6 +975,22 @@ export default function ToolCast({
           }}
         >
           {uploadDragActive && <div className="tc-upload-drop" role="status">Drop a DWG or DXF to open it here</div>}
+          {routeError && (
+            <div className="strip-decision enter error" role="alert">
+              <span className="dot red" aria-hidden="true" />
+              <span className="strip-sentence">Could not route the request. {routeError}<span className="dim"> The drawing is unchanged.</span></span>
+              <button type="button" className="chip-act" onClick={runRequest}>Retry</button>
+              <span className="key">R</span>
+            </div>
+          )}
+          {agentBanner && (
+            <div className="strip-decision enter" role="status">
+              <span className="dot square" aria-hidden="true" />
+              <span className="strip-sentence">{agentBanner.message}</span>
+              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => setRightView('trust')}>Link account</button>}
+              <button type="button" className="chip-neutral" onClick={catalog.actions.clearAgentBanner}>Dismiss</button>
+            </div>
+          )}
           <RoutePanel
             route={route}
             tools={tools}
@@ -969,11 +1008,11 @@ export default function ToolCast({
               type="text"
               className="tc-bar-input"
               value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => changePrompt(event.target.value)}
               onKeyDown={runOnEnter}
               aria-label="Command bar"
             />
-            <button type="button" className="tc-run" onClick={runRequest} disabled={sessionAuthRequired || busy || jobRunning || phase === 'loading'}>Run</button>
+            <button type="button" className="tc-run" onClick={runRequest} disabled={sessionAuthRequired || busy || jobRunning || routing || phase === 'loading'}>{routing ? 'Routing' : 'Run'}</button>
           </div>
           <div className="tc-bar-controls">
             <span className="tc-bar-chip">Scope · this drawing</span>

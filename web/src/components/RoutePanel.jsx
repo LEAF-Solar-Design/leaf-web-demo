@@ -169,6 +169,7 @@ export default function RoutePanel({
                   : 'you confirm before it runs.'}
           </span>
         </span>
+        {route.stub && <span className="dim">Routing service unavailable. Using local catalog matching.</span>}
         <button
           type="button"
           className="chip-act"
@@ -189,6 +190,7 @@ export default function RoutePanel({
   return (
     <div className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
       <div className="resolver-header">
+        {route.stub && <span>Routing service unavailable. Using local catalog matching. </span>}
         {toolObj
           ? <>Run · best guess {conf}% match</>
           : route.slash

@@ -49,6 +49,10 @@ Current additive progress:
 - [x] Prove initial and mid-session 401, sign-out, token clearing, and poll stop.
 - [x] Persist drawing controller state across `/try` to site to `/try` recasts.
 - [x] Recover a failed post-write viewer refresh without rerunning the write.
+- [x] Route ordinary language through catalog classification before Claude, with
+  visible local fallback and honest no-match recovery.
+- [x] Add named landmarks, visible focus, proposal Escape priority, and modal
+  drawer focus ownership to the unified scene.
 - [ ] Reconcile remaining visible and standards gaps against the capability ledger.
 - [ ] Run the expanded aggregate fixture suite, local real-stack suite, and any
   authorized staging proof.
