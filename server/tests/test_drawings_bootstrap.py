@@ -255,3 +255,46 @@ def test_path_y_id_never_created_a_manifest_on_disk(client, tmp_path):
     client.get("/api/drawings/foo.bar/versions", headers=_h(t))
     tenant_dir = _store_root(tmp_path) / "tenants" / t
     assert not tenant_dir.exists()  # rejected before any store write happened
+
+
+def _corrupt_manifest(client, tmp_path, tenant: str, drawing_id: str) -> None:
+    created = client.get(
+        f"/api/drawings/{drawing_id}/versions",
+        headers=_h(tenant),
+    )
+    assert created.status_code == 200, created.text
+    manifest_path = (
+        _store_root(tmp_path)
+        / "tenants"
+        / tenant
+        / "drawings"
+        / drawing_id
+        / "manifest.json"
+    )
+    manifest_path.write_text("{truncated", encoding="utf-8")
+
+
+def test_versions_reports_corrupt_manifest_as_server_fault(client, tmp_path):
+    tenant, drawing_id = "bootstrap-corrupt-read", "damaged-drawing"
+    _corrupt_manifest(client, tmp_path, tenant, drawing_id)
+
+    response = client.get(
+        f"/api/drawings/{drawing_id}/versions",
+        headers=_h(tenant),
+    )
+
+    assert response.status_code == 500, response.text
+    assert response.json()["error"]["error_code"] == "INTERNAL"
+
+
+def test_release_reports_corrupt_manifest_as_server_fault(client, tmp_path):
+    tenant, drawing_id = "bootstrap-corrupt-release", "damaged-drawing"
+    _corrupt_manifest(client, tmp_path, tenant, drawing_id)
+
+    response = client.delete(
+        f"/api/drawings/{drawing_id}/checkout",
+        headers=_h(tenant),
+    )
+
+    assert response.status_code == 500, response.text
+    assert response.json()["error"]["error_code"] == "INTERNAL"
