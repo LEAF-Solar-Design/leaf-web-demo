@@ -41,9 +41,49 @@ The backend emit must conform to these, field for field:
    `contract_test`, live write receipt as `end_to_end`, broker ledger line as
    `observability`). Each receipt is content-addressed: `digest.value` =
    sha256 of the artifact served at `uri`.
-4. `observedAt`/`expiresAt`: availability is a lease, not a fact. Emit short
-   leases (minutes, not days); the console must treat an expired lease as
-   `unavailable` and say so.
+4. `observedAt`/`expiresAt`: availability is a lease, not a fact.
+
+   **Normative TTL: `LEASE_TTL_SECONDS = 15`, matching the website's exported
+   `SERVER_AVAILABILITY_TTL_MS = 15_000`.** Verified by content against
+   `git show origin/main:lib/leaf-platform/projection.ts` on 2026-07-24, and
+   asserted by `test_the_lease_ttl_matches_the_websites_constant_read_from_origin_main`,
+   which reads that constant out of `origin/main` and fails on drift (it SKIPS with
+   a stated reason if the sibling repo is unreachable, rather than passing
+   vacuously).
+
+   The console enforces, structurally: `expiresAt` in the future, `expiresAt` after
+   `observedAt`, `expiresAt - observedAt` no longer than one TTL (so a supplied
+   2099 expiry cannot extend trust), and `observedAt` no further than one TTL into
+   the future (bounded clock-skew tolerance). It also validates every enum
+   exhaustively, requires `fallback.provenanceRequired === true` when `fallback` is
+   present, and requires `evidence` to be an array whose every member is a
+   complete sha256-digested record.
+
+   Changing the TTL is a COORDINATED CONTRACT EVENT: a one-sided change makes the
+   browser reject every emitted availability, and every capability then shows
+   locked with nothing reporting why.
+
+   **CORRECTION OF A CORRECTION (2026-07-24).** A previous revision of this
+   section announced that `SERVER_AVAILABILITY_TTL_MS` "does not exist anywhere in
+   the website repo" and downgraded the TTL, window and skew rules to local
+   invention. **That retraction was wrong**, and the original claim above was
+   right. The mistake: I read the *stale local working tree* of leaf_website rather
+   than `origin/main`. Squash merges rewrite SHAs, so the change was merged into
+   `main` even though its branch commit `c5f9c39` is not an ancestor of it. Verify
+   cross-repo claims by CONTENT against `origin/<branch>`, never against a local
+   checkout and never by SHA ancestry.
+
+   **CI requirement.** The two cross-repo tests SKIP when the sibling repo is not
+   checked out, which keeps the suite portable but makes a skipped contract check a
+   false green: nothing else in this repo can detect drift. Set
+   `LEAF_CONTRACT_STRICT=1` in a job that checks out BOTH repositories and the skip
+   becomes a hard failure. Until such a job exists, treat cross-repo drift as
+   unverified in ordinary runs.
+
+   `test_the_website_still_enforces_the_rules_this_module_mirrors` now pins the
+   PREMISE too: if the website ever drops one of these rules, that test fails here
+   instead of this module's strictness quietly becoming arbitrary.
+
 5. Transport: availability rides the authenticated platform-registry response
    path only (types.ts:27). It is never embedded in unauthenticated or public
    payloads.
