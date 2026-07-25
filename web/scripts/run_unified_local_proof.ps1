@@ -81,15 +81,20 @@ $stderr = Join-Path $runRoot 'stack.err.log'
 $proofExitCode = 1
 
 try {
-  $launcherFile = 'python'
+  $managedVenv = Join-Path $runRoot 'python-runtime'
+  uv venv $managedVenv --python 3.13 | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not create the managed proof Python runtime' }
+  $launcherFile = Join-Path $managedVenv 'Scripts\python.exe'
+  $requirementArgs = @(
+    'pip', 'install', '--python', $launcherFile,
+    '-r', (Join-Path $repoRoot 'server\requirements.txt'),
+    '-r', (Join-Path $repoRoot 'platform\requirements.txt')
+  )
   if ($Mode -eq 'guest') {
-    $guestVenv = Join-Path $runRoot 'python-runtime'
-    uv venv $guestVenv --python 3.13 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create the guest proof Python runtime' }
-    $launcherFile = Join-Path $guestVenv 'Scripts\python.exe'
-    uv pip install --python $launcherFile -r (Join-Path $repoRoot 'server\requirements.txt') -r (Join-Path $repoRoot 'server\requirements-auth.txt') | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not install the guest proof Python dependencies' }
+    $requirementArgs += @('-r', (Join-Path $repoRoot 'server\requirements-auth.txt'))
   }
+  & uv @requirementArgs | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not install the managed proof Python dependencies' }
   $launcherArgs = @(
     'scripts/start-leaf.py', '--with-harness',
     '--broker-port', $BrokerPort,
