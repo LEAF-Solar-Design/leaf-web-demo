@@ -49,6 +49,25 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SERVER_DIR.parent
 PLATFORM_DIR = PROJECT_ROOT / "platform"
 TENANT_REPO_SRC = Path(os.environ.get("LEAF_TENANT_REPO_SRC", "C:/tmp/leaf-tenants/demo-tenant"))
+SHIPPED_TENANT_REPO = PROJECT_ROOT / "harness" / "test" / "fixtures" / "tenant-repo"
+
+# The C2 tests assert on `layer-bounding-boxes`, which lives in a real tenant tool
+# repo -- an operator-host artifact this repo does not ship -- so on a clean CI
+# runner the default path does not exist and only those tests skip.
+#
+# Everything else that folds a tenant repo (C5b/C5c) needs only SOME repo plus
+# count-by-layer, so the `stack` fixture falls back to the shipped registry
+# fixture instead of skipping the whole module. The fixture's historical entry
+# names a Python file it does not ship; the stack removes only that dangling
+# declaration from its disposable copy so the engine-registry built-in remains
+# the honest implementation.
+_TENANT_REPO_PRESENT = TENANT_REPO_SRC.is_dir()
+_NO_TENANT_REPO_REASON = (
+    f"tenant tool repo absent at {TENANT_REPO_SRC} (set LEAF_TENANT_REPO_SRC to one)"
+)
+requires_tenant_repo = pytest.mark.skipif(
+    not _TENANT_REPO_PRESENT, reason=_NO_TENANT_REPO_REASON
+)
 INTAKE_PATH = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
 
 # route the jobs SQLite DB to a throwaway dir BEFORE `jobs` is imported anywhere.
@@ -57,6 +76,7 @@ os.environ.setdefault("JOBS_DB", str(Path(tempfile.mkdtemp(prefix="wave3-jobs-")
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+from _test_readiness import wait_ready  # noqa: E402
 from _test_run_confirmation import confirmed_requests_payload  # noqa: E402
 
 ENVELOPE_SCHEMA = json.loads((SERVER_DIR / "envelope_schema.json").read_text(encoding="utf-8"))
@@ -89,6 +109,7 @@ def test_C2_fold_off_by_default_is_byte_identical(monkeypatch):
     assert "layer-bounding-boxes" not in names  # tenant fold OFF -> not present
 
 
+@requires_tenant_repo
 def test_C2_fold_precedence_tenant_over_engine_authored_over_both(monkeypatch):
     import deps
     monkeypatch.setenv("LEAF_TENANT_REPO", str(TENANT_REPO_SRC))
@@ -107,6 +128,7 @@ def test_C2_fold_precedence_tenant_over_engine_authored_over_both(monkeypatch):
     assert deps.find_tool("layer-bounding-boxes").get("_which") == "authored"
 
 
+@requires_tenant_repo
 def test_C2_entry_resolves_against_tenant_root_absolute(monkeypatch):
     import deps
     from tool_loader import resolve_local_file
@@ -122,6 +144,7 @@ def test_C2_entry_resolves_against_tenant_root_absolute(monkeypatch):
     assert resolve_local_file({"name": "x", "entry": "tools/layer-bounding-boxes/tool.py"}) is None
 
 
+@requires_tenant_repo
 def test_C2_run_matches_receipt_bbox_in_process(monkeypatch):
     import deps
     from tool_loader import run_tool_dynamic
@@ -418,20 +441,6 @@ def start_uvicorn(module_app: str, port: int, env_overrides: dict, log_path: Pat
     )
 
 
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 30.0) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"server process exited early (rc={proc.returncode})")
-        try:
-            if requests.get(url, timeout=2).status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s")
-
-
 def stop(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         proc.terminate()
@@ -444,11 +453,36 @@ def stop(proc: subprocess.Popen) -> None:
 
 @pytest.fixture(scope="module")
 def stack(tmp_path_factory):
+    # Only the C2 tests need the operator's tenant repo (they assert on
+    # layer-bounding-boxes, which this repo does not ship). C5b/C5c just need
+    # SOME tenant repo to fold plus a resolvable count-by-layer, so fall back to
+    # the shipped fixture rather than skipping the whole module and taking those
+    # two live regression checks off CI with it.
+    #
+    # Be precise about what that buys: the shipped fixture supplies a registry
+    # package for count-by-layer but not its declared Python body. A missing
+    # declared body must fail closed, so the disposable copy below removes the
+    # dangling declaration and lets the package use the platform built-in.
+    # C5b/C5c still assert real behaviour but are not tenant-file-loading
+    # coverage.
+    src = TENANT_REPO_SRC if _TENANT_REPO_PRESENT else SHIPPED_TENANT_REPO
     tmp = tmp_path_factory.mktemp("wave3")
     # Run against a COPY of the tenant repo (never mutate the live one).
     tenant_copy = tmp / "tenant"
-    shutil.copytree(TENANT_REPO_SRC, tenant_copy,
+    shutil.copytree(src, tenant_copy,
                     ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    if not _TENANT_REPO_PRESENT:
+        registry_path = tenant_copy / "registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        count_by_layer = next(
+            tool for tool in registry["tools"]
+            if tool.get("name") == "count-by-layer"
+        )
+        assert count_by_layer.get("entry") == "tools/count-by-layer/tool.py"
+        count_by_layer.pop("entry")
+        registry_path.write_text(
+            json.dumps(registry, indent=2) + "\n", encoding="utf-8"
+        )
     store_dir = tmp / "drawings"
     ledger = tmp / "ledger.jsonl"
     broker_port, app_port = free_port(), free_port()
@@ -465,8 +499,10 @@ def stack(tmp_path_factory):
                          "LEAF_USAGE_LEDGER": ledger},
                         tmp / "app.log")
     try:
-        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
-        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker,
+                   log_path=tmp / "broker.log")
+        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app,
+                   log_path=tmp / "app.log")
         # WARM-UP: the broker's FIRST /broker/run lazily loads the engine registry +
         # the 2345-polyline intake; under sustained parallel load that cold call can be
         # CPU-starved past the poll timeout (gate-runner flake follow-up). Force it now,
@@ -499,6 +535,7 @@ def _run_payload(stack, tool, params, headers, dwg=None):
 
 
 # --- Contract 2 (through the real broker) ---------------------------------- #
+@requires_tenant_repo
 def test_C2_layer_bounding_boxes_in_api_tools(stack):
     r = requests.get(f"{stack['app']}/api/tools", timeout=15)
     assert r.status_code == 200, r.text
@@ -506,6 +543,7 @@ def test_C2_layer_bounding_boxes_in_api_tools(stack):
     assert "layer-bounding-boxes" in names
 
 
+@requires_tenant_repo
 def test_C2_run_through_broker_matches_receipt_bbox(stack):
     headers = _h("wave3-c2")
     r = requests.post(f"{stack['app']}/api/run?wait=1",

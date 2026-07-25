@@ -123,17 +123,115 @@ def test_all_success_is_ready_and_preserves_dependency_order():
     assert {item["state"] for item in report["dependencies"].values()} == {"ready"}
 
 
-def test_required_timeout_is_bounded_and_not_ready():
+def _settle_probe_slots(timeout_s, target=0):
+    """Block until the module-global probe-slot count falls back to target."""
+    deadline = time.monotonic() + timeout_s
+    while (dependency_health._probe_slot_snapshot()[0] > target
+           and time.monotonic() < deadline):
+        time.sleep(0.01)
+    return dependency_health._probe_slot_snapshot()[0]
+
+
+def test_required_timeout_is_bounded_and_not_ready(monkeypatch):
+    # A plain wall-clock bound cannot decide this on Windows: a 0.05s wait has
+    # been measured returning at 0.61s, so a bound tight enough to catch a
+    # regression that waits 1s also fails on scheduler noise, and calibrating
+    # the bound against that noise only moves the problem.
+    #
+    # The way out is to forgive only the overshoot, not the whole wait. Time
+    # each collection and compare it to the budget it asked for: anything past
+    # that budget is the OS scheduler and is excused, but the budget itself is
+    # time the code chose to spend and stays on its bill. What remains --
+    # elapsed minus overshoot -- is the time readiness_report is accountable
+    # for, and it is bounded tightly. A 0.61s stall on a 0.05s wait excuses
+    # 0.56s and still bills 0.05s. Twenty 0.05s waits excuse nothing and bill a
+    # full second, so repeated collection cannot hide in the excused term.
+    budget_s = 0.05
+    probe_hold_s = 5.0
+    # Chosen so budget_s + overhead_bound_s is exactly the 0.2s the original
+    # assertion allowed. The bound is unchanged; what changed is that scheduler
+    # overshoot no longer counts against it.
+    overhead_bound_s = 0.15
     release = threading.Event()
-    started = time.monotonic()
-    report = dependency_health.readiness_report(
-        {"LEAF_READINESS_TIMEOUT_S": "0.05"},
-        [_spec("broker", probe=lambda: release.wait(0.5))],
-    )
-    release.set()
-    assert time.monotonic() - started < 0.2
+    entered = threading.Event()
+    finished = threading.Event()
+    collections = []
+
+    def blocked_probe():
+        entered.set()
+        release.wait(probe_hold_s)
+        finished.set()
+
+    # Baseline the module-global slot count before anything in this test runs,
+    # so the warmup below cannot launder a leak into the accepted baseline.
+    # Settling returns whatever it has at the deadline, so pin the expected
+    # value: every earlier probe has had probe_hold_s to give its slot back,
+    # and a count still above zero here is a leak, not a baseline.
+    slots_before = _settle_probe_slots(probe_hold_s)
+    assert slots_before == 0, (
+        f"{slots_before} probe slot(s) still held on entry; an earlier probe "
+        f"did not release")
+
+    # Warm the shared executor. Its worker threads are created on first submit,
+    # and that one-time cost lands outside wait(), so an isolated run of this
+    # test alone would otherwise bill thread creation to readiness_report.
+    dependency_health.readiness_report(
+        {"LEAF_READINESS_TIMEOUT_S": str(budget_s)}, [_spec("warmup")])
+    assert _settle_probe_slots(probe_hold_s, slots_before) == slots_before, (
+        "the warmup probe did not return its executor slot")
+
+    real_wait = dependency_health.wait
+
+    def spy_wait(futures, timeout=None, **kwargs):
+        wait_started = time.monotonic()
+        try:
+            return real_wait(futures, timeout=timeout, **kwargs)
+        finally:
+            collections.append(
+                (timeout, time.monotonic() - wait_started, len(futures)))
+
+    monkeypatch.setattr(dependency_health, "wait", spy_wait)
+
+    try:
+        started = time.monotonic()
+        report = dependency_health.readiness_report(
+            {"LEAF_READINESS_TIMEOUT_S": str(budget_s)},
+            [_spec("broker", probe=blocked_probe)],
+        )
+        elapsed = time.monotonic() - started
+        # Sampled before the probe is released. The probe cannot finish for
+        # probe_hold_s, so an unset flag proves readiness_report returned
+        # without waiting for it. It does not prove the probe had already been
+        # scheduled -- `entered` below proves only that it was really submitted.
+        returned_before_probe_finished = not finished.is_set()
+    finally:
+        release.set()
+
+    assert entered.wait(probe_hold_s), "the probe never reached the executor"
+    assert returned_before_probe_finished
+    assert collections, "readiness_report never collected through wait()"
+    # Every collection was granted a real budget, and none more than the
+    # configured one. A ceiling rather than an exact call list, so polling in
+    # remaining-budget slices stays a legal refactor while an inflated budget
+    # does not. The lower bound matters as much: a negative grant would make
+    # the excused term below absorb arbitrary delay.
+    granted_budgets = [granted for granted, _, _ in collections]
+    assert all(g is not None and 0 <= g <= budget_s for g in granted_budgets), (
+        f"collections were granted {granted_budgets}, outside "
+        f"[0, {budget_s}]")
+    # The bounded-return contract. Excuse each wait only past the budget it
+    # asked for; bill the rest. This is what the original `< 0.2` meant to
+    # assert, minus the scheduler tail that made it fail 4 of 20 runs.
+    excused_s = sum(max(0.0, took - granted) for granted, took, _ in collections)
+    accountable_s = elapsed - excused_s
+    assert accountable_s < budget_s + overhead_bound_s, (
+        f"readiness_report is accountable for {accountable_s:.3f}s on a "
+        f"{budget_s}s budget (total {elapsed:.3f}s, {len(collections)} "
+        f"collection(s), {excused_s:.3f}s excused as scheduler overshoot)")
     assert report["ready"] is False
     assert report["dependencies"]["broker"]["state"] == "timeout"
+    assert report["dependencies"]["broker"]["latency_ms"] == int(budget_s * 1000)
+    assert _settle_probe_slots(probe_hold_s, slots_before) == slots_before
 
 
 def test_required_unavailable_is_not_ready_without_exception_text():

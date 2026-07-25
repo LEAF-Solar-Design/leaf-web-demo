@@ -496,6 +496,35 @@ straight from the store manifest's single-writer lock — read-only (no
 acquire/release endpoints this wave), for a calm "someone else is editing" chip.
 Ownership: extends `server/routers/drawings.py` (`da/store.py` unchanged).
 
+**Update (checkout capability, 2026-07-25).** `holder` on this read is a DISPLAY
+LABEL only. It is public to every member of the tenant, so it cannot also be the
+thing that proves ownership: a second session could read it and present it to
+publish, release, undo or redo under the first session's lease. The lock
+GENERATION is no longer published here at all (it was half of that same replay).
+
+Ownership is now proved by an opaque capability, minted once by
+`POST /api/drawings/{id}/checkout` and returned as `checkout_capability`, bound to
+tenant + authenticated subject + drawing + lock generation
+(`server/checkout_capability.py`). Present it in the `X-Checkout-Capability`
+header — never a body field or query parameter — on:
+
+| Route | Without a valid capability |
+|---|---|
+| `DELETE /api/drawings/{id}/checkout` | 403; the lock is left intact. The old `?holder=` parameter is GONE. |
+| `POST /api/drawings/{id}/checkout` (refreshing a LIVE lease) | 409 not-acquired, as for any held lock |
+| `POST /api/drawings/{id}/undo`, `.../redo` | 403; head does not move |
+| `POST /api/run` for a `drawing.write` tool | the run is unnamed → 403 at the publish gate |
+
+Unchanged in every case where no lease is live: an absent or EXPIRED lock is free,
+needs no capability, and is re-acquirable by anyone — so a forgotten lock still
+cannot wedge a drawing. Operators running more than one app process must set
+`LEAF_CHECKOUT_CAP_SECRET` (required outright, with at least 32 bytes, when
+`LEAF_RUNTIME_ENV=production`); unset off production means a per-process secret
+that does not survive a restart. When `LEAF_AUTH_LIVE=1`, mint and verification
+also require the verified token's nonempty `sub`; a subjectless authenticated
+caller receives a fail-closed operator error rather than sharing an anonymous
+capability identity with every other tenant member.
+
 > **FREEZE (census #13, NL-build lane, 2026-07-22): §15, §16, and §17 are FROZEN.**
 > The frozen surface is the contracts, not the prose: every wire shape, env name,
 > route, status code, and law these three sections define — the §15 sidecar API and
@@ -558,6 +587,8 @@ tools are ALREADY registered into the TENANT repo by the harness build route, so
 surface in `/api/tools` via §15.B's fold — the app does NOT persist them to the local
 `server/authored/` store or `_AUTHORED`. The template path (local persistence into
 `server/authored/<name>.py` + `authored_tools.json`) is UNCHANGED.
+**[SUPERSEDED: see §23. The flat path above stopped being true on 2026-07-25.
+This sentence is left unedited because §15 is frozen.]**
 
 ### D. NL-router alternatives + build-intent boost (Contract 4)
 
@@ -1215,3 +1246,87 @@ envelope. Native APS `onComplete` cannot generate it, so
 submitting a WorkItem and without silently reverting to polling. Polling remains
 the only active completion mode until an APS-to-Leaf translation adapter owns
 output metadata, pending-job leases and heartbeats, and concurrency accounting.
+
+## §23 Authored-body persistence is per-tenant (supersedes §15.C)
+
+Provenance: the operator ruled on 2026-07-25 and, when review asked whether an
+independently auditable record of that ruling existed, confirmed the ruling as their
+own. That confirmation supersedes PR #174, which recorded the ruling as OWED rather
+than given. PR #174 was correct on the evidence available to it -- no auditable record
+existed when it was written -- and the confirmation is what closes the gap it found.
+The queries that prompted it were raised on PR #156 and carried forward on PR #168.
+PR #131 (merged 2026-07-25) shipped the per-tenant layout and changed no
+documentation; PR #144 then left the resulting documentation gap open rather than
+closing it. The freeze requires a new section rather than an in-place edit, which is
+the shape used here: §15.C keeps its now-false sentence byte-for-byte and this
+section carries the correct contract.
+
+The template author path no longer persists to a flat `server/authored/<name>.py`.
+A template-authored body is written to
+`server/authored/<sha256(tenant_id)[:32]>/<name>.py`, where the directory name is
+the first 32 hex characters of the SHA-256 of the exact tenant id. The registry
+entry NAMES that file: `tool['entry']` is `authored/<dir>/<name>.py`, still
+stored relative to `server/` so the broker resolves it regardless of cwd. The
+tool also carries `tenant_id`, and the `authored_tools.json` store keys its dedup
+on `(tenant_id, name)` rather than on `name`.
+
+That dedup is not retroactive. The eviction filter matches a concrete tenant id,
+so a row persisted before this change carries no `tenant_id`, never matches, and
+is not evicted. Re-authoring a demo-tenant tool that predates the change leaves
+both the legacy row and the new tenant-scoped row in the store.
+
+The tenant-visible catalog is still correct: `deps.all_tools` attributes an
+unscoped row to the demo tenant and folds entries by name in list order, so the
+later tenant-scoped row wins, and `GET /api/tools`, digest issuance and
+`POST /api/run` all read that fold. The leftover row is not invisible, though.
+Consumers that read the raw store instead of the fold still see it:
+`engine/selfcheck.py`'s effective-registry gate iterates every row of
+`authored_tools.json` and reddens if a row's referenced file is gone, and
+`/api/health` counts raw rows in `n_authored`. A leftover row also predates
+`tenant_id`, so its original author is unrecorded. The demo tenant inherits it
+by default, which is not evidence that the demo tenant wrote it.
+
+Resolution is by PRECEDENCE, not by absolute location, and the distinction is
+load-bearing for anyone reasoning about which bytes actually execute.
+`resolve_local_file` joins `entry` onto the calling tenant's repo root FIRST and
+onto `SERVER_DIR` second, accepting only a candidate contained by that root
+(`server/tool_loader.py`). So a tenant-repo file at the same relative
+`authored/<dir>/<name>.py` takes precedence over the `server/authored/` copy
+named above. That ordering is deliberate — a tenant tool runs its OWN repo file —
+but it means the entry identifies a path to resolve, not a guaranteed location.
+
+This is a security fix, not a layout preference. A flat path let tenant B
+overwrite tenant A's file, and a name-only dedup evicted A's catalog entry, so B
+could hijack A's tool by name. The directory name is a hash rather than a slug
+because character substitution is not injective: `tenant.a` and `tenant_a` would
+collide onto one directory and re-open the same overwrite. Hex output is also
+inherently path-safe and can never be `.` or `..`.
+
+Wire consequence, and the reason this warranted a ruling: `entry` is not
+internal. `deps.catalog_tool_view` spreads the whole tool, so `entry` is
+serialized by `GET /api/tools`, and `deps.catalog_tool_digest` hashes every key
+except `catalog_digest`, so the `entry` value is inside the digest that GET
+issues and `POST /api/run` requires again. A template-authored tool's
+`catalog_digest` therefore changes as soon as its record is written with the new
+`entry` and the added `tenant_id`. It does not change on deploy alone:
+`deps.load_authored_tools` reads `authored_tools.json` verbatim and migrates
+nothing, so a record persisted before 2026-07-25 keeps its old `entry`, carries
+no `tenant_id`, and keeps its old digest until something rewrites it. Callers
+must re-read the catalog for any tool authored or re-authored on or after
+2026-07-25. What invalidates a cached digest is a change to the entry that wins
+the tenant's catalog fold, not a rewrite of the row a caller happened to read
+from: re-authoring shadows an older row of the same name, so a digest cached
+from that older row is refused by `POST /api/run` even though the row itself was
+never rewritten. A record's own digest is a function of its content, so a record
+that is never rewritten computes the same digest it did before 2026-07-25.
+
+Visibility is a separate axis, and it did change on deploy. The authored store
+used to be global to every tenant. `deps.all_tools` now attributes an unscoped
+row to the demo tenant, so a non-demo tenant that could previously resolve a
+legacy authored tool no longer finds it in its fold. If no other visible catalog
+entry carries that name, `POST /api/run` answers `UNKNOWN_TOOL` rather than a
+digest mismatch. If a lower tier does carry it, that record is what the tenant
+now resolves.
+
+§15.C's other statements are unaffected: the harness path still does NOT persist
+to `server/authored/` or `_AUTHORED`, and `source` / `static_scan` are unchanged.

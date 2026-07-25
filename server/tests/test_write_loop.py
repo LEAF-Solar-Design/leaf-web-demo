@@ -30,6 +30,7 @@ import jsonschema
 import pytest
 import requests
 
+from _test_readiness import wait_ready
 from _test_run_confirmation import confirmed_requests_payload
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
@@ -61,20 +62,6 @@ def start_uvicorn(module_app: str, port: int, env_overrides: dict, log_path: Pat
     )
 
 
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 30.0) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"server process exited early (rc={proc.returncode})")
-        try:
-            if requests.get(url, timeout=2).status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s")
-
-
 def stop(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         proc.terminate()
@@ -103,8 +90,10 @@ def stack(tmp_path_factory):
                          "LEAF_STORE_DIR": store_dir},
                         tmp / "app.log")
     try:
-        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
-        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker,
+                   log_path=tmp / "broker.log")
+        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app,
+                   log_path=tmp / "app.log")
         yield {"app": f"http://127.0.0.1:{app_port}", "broker": f"http://127.0.0.1:{broker_port}"}
     finally:
         stop(app)
@@ -289,9 +278,22 @@ def take_checkout(stack, drawing_id, holder, tenant, ttl_s=600):
                          headers=_h(tenant), timeout=30)
 
 
-def run_wait_as(stack, tool, params, tenant, holder=None, fence=None):
-    """A run submitted BY a named session. `holder=None` sends no holder at all —
-    the direct-API-call case, which the server defaults to the tenant id."""
+def capability_of(response):
+    """The opaque capability from a successful acquire — the ONLY proof of
+    ownership a caller ever gets, and the only thing the write path accepts."""
+    return response.json()["checkout_capability"]
+
+
+def run_wait_as(stack, tool, params, tenant, holder=None, fence=None,
+                capability=None):
+    """A run submitted BY a session.
+
+    `capability` is what actually authorizes it. `holder`/`fence` are still
+    accepted here and still sent in the BODY on purpose: they are what a client
+    written against the old contract sends, and every test that passes them is
+    pinning that they now authorize NOTHING (the server drops unknown body
+    fields, so such a run is unnamed and refused against any active lock).
+    """
     headers = _h(tenant)
     payload = confirmed_requests_payload(stack["app"], tool, params, "rooftop_demo",
                                          headers=headers)
@@ -299,6 +301,8 @@ def run_wait_as(stack, tool, params, tenant, holder=None, fence=None):
         payload["holder"] = holder
     if fence is not None:
         payload["fence"] = fence
+    if capability is not None:
+        headers = {**headers, "X-Checkout-Capability": capability}
     return requests.post(f"{stack['app']}/api/run?wait=1", json=payload,
                          headers=headers, timeout=120)
 
@@ -330,15 +334,142 @@ def test_write_refused_while_another_session_holds_the_checkout(stack):
 
 
 def test_write_allowed_for_the_session_that_holds_the_checkout(stack):
-    """The other half: holding the lock must still let YOU write (no lockout)."""
+    """The other half: holding the lock must still let YOU write (no lockout).
+
+    What proves it is the CAPABILITY the acquire issued, not the holder label."""
     t = "wl-authz-self"
     assert head_version(stack, "demo", t) == 1
-    assert take_checkout(stack, "demo", "sess-a", t).status_code == 200
+    took = take_checkout(stack, "demo", "sess-a", t)
+    assert took.status_code == 200
 
-    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, holder="sess-a")
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t,
+                    capability=capability_of(took))
     assert r.status_code == 200, r.text
     assert r.json()["result"]["new_version"] == {"drawing_id": "demo", "version": 2, "parent": 1}
     assert head_version(stack, "demo", t) == 2
+
+
+# --------------------------------------------------------------------------- #
+# 7b. The capability is what closes the SAME-TENANT replay. Everything session B
+#     can READ about session A's lock must be useless to it.
+# --------------------------------------------------------------------------- #
+def test_replaying_the_published_holder_does_not_authorize_a_write(stack):
+    """THE reported hole. GET /versions publishes the holder so the UI can render
+    a "locked by X" chip. Session B, authenticated on the same tenant, reads it
+    and sends it back as its own identity. That used to be the whole ownership
+    test; it must now buy nothing."""
+    t = "wl-cap-replay"
+    assert head_version(stack, "demo", t) == 1
+    assert take_checkout(stack, "demo", "sess-a", t).status_code == 200
+
+    # B reads the lock exactly as any tenant member may.
+    published = requests.get(f"{stack['app']}/api/drawings/demo/versions",
+                             headers=_h(t), timeout=30).json()["checkout"]
+    assert published["holder"] == "sess-a", published
+    # ...and the generation is no longer published at all, so there is nothing
+    # else on this read to replay either.
+    assert "fence" not in published, published
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t,
+                    holder=published["holder"], fence=1)
+    assert r.status_code == 403, r.text
+    assert r.json()["error"]["error_code"] == "FORBIDDEN"
+    assert head_version(stack, "demo", t) == 1
+
+
+def test_a_forged_capability_does_not_authorize_a_write(stack):
+    """Unforgeable, not merely unguessable-in-shape: a syntactically plausible
+    token that was not minted by this server is refused."""
+    t = "wl-cap-forged"
+    assert head_version(stack, "demo", t) == 1
+    assert take_checkout(stack, "demo", "sess-a", t).status_code == 200
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t,
+                    capability="lco1." + "a" * 64)
+    assert r.status_code == 403, r.text
+    assert r.json()["error"]["error_code"] == "FORBIDDEN"
+    assert head_version(stack, "demo", t) == 1
+
+
+def test_a_capability_for_another_drawing_does_not_authorize_this_one(stack):
+    """Bound to the drawing. Holding a lock on one drawing must not be a licence
+    to publish to a different one.
+
+    Both locks are taken by the SAME holder id, and each drawing has its own
+    manifest, so both leases are generation 1. Tenant, subject, holder and
+    generation therefore all match — the drawing is the ONLY component that
+    differs, which is what makes this a test of the drawing binding rather than
+    of the holder comparison behind it."""
+    t = "wl-cap-other-drawing"
+    on_demo = take_checkout(stack, "demo", "sess-a", t)
+    assert on_demo.status_code == 200
+    # a second drawing in the same tenant (any first-seen id bootstraps), same holder
+    assert requests.get(f"{stack['app']}/api/drawings/scratch/versions",
+                        headers=_h(t), timeout=30).status_code == 200
+    on_scratch = take_checkout(stack, "scratch", "sess-a", t)
+    assert on_scratch.status_code == 200
+    assert capability_of(on_scratch) != capability_of(on_demo)
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "scratch"}, t,
+                    capability=capability_of(on_demo))
+    assert r.status_code == 403, r.text
+    assert r.json()["error"]["error_code"] == "FORBIDDEN"
+
+    # ...and scratch's OWN capability publishes to scratch
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "scratch"}, t,
+                    capability=capability_of(on_scratch))
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["new_version"]["drawing_id"] == "scratch"
+
+
+def test_a_capability_from_a_superseded_lease_is_refused(stack):
+    """Fencing. Re-acquiring mints a NEW generation, and everything issued for the
+    previous one stops verifying — including the previous holder's own token."""
+    t = "wl-cap-superseded"
+    assert head_version(stack, "demo", t) == 1
+    first = take_checkout(stack, "demo", "sess-a", t)
+    assert first.status_code == 200
+    old = capability_of(first)
+
+    # the SAME session refreshes its lease, proving ownership with the current token
+    refreshed = requests.post(f"{stack['app']}/api/drawings/demo/checkout",
+                              json={"holder": "sess-a", "ttl_s": 600},
+                              headers={**_h(t), "X-Checkout-Capability": old},
+                              timeout=30)
+    assert refreshed.status_code == 200, refreshed.text
+    assert capability_of(refreshed) != old
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t, capability=old)
+    assert r.status_code == 403, r.text
+    assert head_version(stack, "demo", t) == 1
+
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "demo"}, t,
+                    capability=capability_of(refreshed))
+    assert r.status_code == 200, r.text
+    assert head_version(stack, "demo", t) == 2
+
+
+def test_refreshing_someone_elses_lease_by_naming_them_is_a_conflict(stack):
+    """The acquire-side half of the replay. `acquire_checkout` used to treat a
+    matching holder as a refresh, so B could read A's holder, "refresh" A's lock
+    as A, and be handed a capability of its own. Now a live lease can only be
+    refreshed by presenting its current capability."""
+    t = "wl-cap-refresh-steal"
+    assert take_checkout(stack, "demo", "sess-a", t).status_code == 200
+
+    stolen = requests.post(f"{stack['app']}/api/drawings/demo/checkout",
+                           json={"holder": "sess-a", "ttl_s": 600},
+                           headers=_h(t), timeout=30)
+    assert stolen.status_code == 409, stolen.text
+    assert stolen.json()["acquired"] is False
+    assert stolen.json()["locked_by"] == "sess-a"
+    assert "checkout_capability" not in stolen.json()
+
+    forged = requests.post(f"{stack['app']}/api/drawings/demo/checkout",
+                           json={"holder": "sess-a", "ttl_s": 600},
+                           headers={**_h(t), "X-Checkout-Capability": "lco1." + "b" * 64},
+                           timeout=30)
+    assert forged.status_code == 409, forged.text
 
 
 def test_write_with_no_holder_is_refused_under_a_session_lock(stack):

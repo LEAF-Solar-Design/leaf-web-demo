@@ -126,6 +126,152 @@ def test_spawn_normalization_leaves_linux_and_native_windows_commands_unchanged(
     )
 
 
+def _summary_suite(g, *, expected, reason, allowed=()):
+    output = (
+        f"SKIPPED [1] fake_test.py:7: {reason}\n"
+        "1 passed, 1 skipped in 0.01s\n"
+    )
+    return g.Suite(
+        "skip-victim", "skip victim", "pytest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], expected,
+        allowed_skip_reasons=allowed,
+    )
+
+
+def test_non_allowlisted_pytest_skip_fails_gate(tmp_path):
+    g = _load_runner()
+    result = g.run_suite(
+        _summary_suite(g, expected=1, reason="unexpected dependency gap"),
+        tmp_path,
+    )
+    assert result.status == "FAIL"
+    assert "non-allowlisted skip" in result.note
+
+
+def test_allowlisted_skip_passes_only_when_executed_floor_is_met(tmp_path):
+    g = _load_runner()
+    reason = "known optional integration unavailable"
+    allowed = (r"known optional integration unavailable",)
+
+    passing = g.run_suite(
+        _summary_suite(g, expected=1, reason=reason, allowed=allowed), tmp_path)
+    deficient = g.run_suite(
+        _summary_suite(g, expected=2, reason=reason, allowed=allowed), tmp_path)
+
+    assert passing.status == "PASS"
+    assert deficient.status == "FAIL"
+    assert "executed-count regression: expected >= 2, got 1" in deficient.note
+
+
+def test_all_skipped_pytest_suite_fails_even_when_reason_is_allowlisted(tmp_path):
+    g = _load_runner()
+    output = (
+        "SKIPPED [1] fake_test.py:7: known optional integration unavailable\n"
+        "1 skipped in 0.01s\n"
+    )
+    suite = g.Suite(
+        "all-skip", "all skip", "pytest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 0,
+        allowed_skip_reasons=(r"known optional integration unavailable",),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "ALL skipped: no coverage" in result.note
+
+
+def test_selected_script_environment_skip_is_a_failure(tmp_path):
+    g = _load_runner()
+    suite = g.Suite(
+        "required-smoke", "required smoke", "script", SCRIPTS,
+        [sys.executable, "-c", "print('SKIP no runtime'); raise SystemExit(3)"], None,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert result.got == "err"
+
+
+def test_vitest_skip_fails_gate(tmp_path):
+    g = _load_runner()
+    output = (
+        "test/unexpected.test.ts (2 tests | 1 skipped)\n"
+        "Tests 1 passed | 1 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-skip", "vitest skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "non-allowlisted vitest skip" in result.note
+
+
+def test_exact_vitest_file_and_skip_count_allowlist_passes(tmp_path):
+    g = _load_runner()
+    output = (
+        "test/postgres.test.ts (5 tests | 4 skipped)\n"
+        "Tests 1 passed | 4 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-known-skip", "vitest known skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+        allowed_vitest_skips=(("test/postgres.test.ts", 4),),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "PASS"
+
+
+def test_all_skipped_vitest_suite_fails_even_when_every_skip_is_allowlisted(tmp_path):
+    """The pytest-path twin of this rule shipped first and the vitest path kept
+    the hole: parse_vitest reports `got` as passed+failed+skipped, so a suite
+    whose every test skipped still cleared its floor and reported PASS. Both
+    paths now share coverage_verdict, so this cannot regress on one side only.
+    """
+    g = _load_runner()
+    output = (
+        "test/postgres.test.ts (4 tests | 4 skipped)\n"
+        "Tests 0 passed | 4 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-all-skip", "vitest all skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+        allowed_vitest_skips=(("test/postgres.test.ts", 4),),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "ALL skipped: no coverage" in result.note
+
+
+def test_vitest_floor_counts_executed_tests_not_skipped_ones(tmp_path):
+    """A vitest suite must not buy its way to the floor with skips: 2 executed
+    against a floor of 4 is a coverage regression even though got == 5.
+    """
+    g = _load_runner()
+    output = (
+        "test/postgres.test.ts (5 tests | 3 skipped)\n"
+        "Tests 2 passed | 3 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-short-floor", "vitest short floor", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 4,
+        allowed_vitest_skips=(("test/postgres.test.ts", 3),),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "executed-count regression: expected >= 4, got 2" in result.note
+
+
 def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch):
     g = _load_runner()
     monkeypatch.setattr(g.os, "name", "nt")

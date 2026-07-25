@@ -342,7 +342,8 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
   const explicitAuth = opts?.auth ?? null;
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const path = (req.url ?? "").split("?")[0];
+    const requestUrl = new URL(req.url ?? "/", "http://leaf-harness.internal");
+    const path = requestUrl.pathname;
     const method = req.method ?? "GET";
     try {
       if (method === "GET" && path === "/health") {
@@ -389,14 +390,22 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
             // token prefix (§17). Only the two valid literals are forwarded.
             const rawKind = typeof gbody.kind === "string" ? gbody.kind.trim() : "";
             const kind = rawKind === "oauth" || rawKind === "api_key" ? rawKind : undefined;
-            const st = await ports.grantAdmin.put(tenantId, token, kind);
+            const label = typeof gbody.label === "string" ? gbody.label : undefined;
+            const st = await ports.grantAdmin.put(tenantId, token, kind, label);
             return send(res, 200, st); // {linked, linked_at, kind} — token never echoed
+          }
+          if (method === "PATCH") {
+            const gbody = await readJsonBody(req);
+            const accountId = typeof gbody.account_id === "string" ? gbody.account_id.trim() : "";
+            if (!accountId) return send(res, 400, { error: { message: "account_id is required" } });
+            return send(res, 200, await ports.grantAdmin.activate(tenantId, accountId));
           }
           if (method === "GET") {
             return send(res, 200, await ports.grantAdmin.status(tenantId));
           }
           if (method === "DELETE") {
-            await ports.grantAdmin.remove(tenantId);
+            const accountId = requestUrl.searchParams.get("account_id")?.trim() || undefined;
+            await ports.grantAdmin.remove(tenantId, accountId);
             // Honest post-remove state (sol-critic F2): the demo tenant's documented
             // §16 env/file fallback can still be active after the per-tenant files are
             // gone — report the store's actual status, never a hardcoded linked:false.

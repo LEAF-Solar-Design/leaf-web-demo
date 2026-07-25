@@ -166,6 +166,18 @@ export interface GrantStatus {
    * when unlinked. NEVER the token value itself.
    */
   kind?: GrantKind;
+  /** Stable opaque identifier for the account used by the authoring runner. */
+  active_account_id?: string;
+  /** Token-free account inventory. Omitted by legacy store implementations. */
+  accounts?: GrantAccountStatus[];
+}
+
+export interface GrantAccountStatus {
+  id: string;
+  label: string;
+  kind: GrantKind;
+  linked_at: string | null;
+  active: boolean;
 }
 
 /** Token-free operational facts about one tenant grant record. */
@@ -176,7 +188,7 @@ export interface GrantDiagnostic {
   linked_at: string | null;
   backend: "file";
   path_class: "efs_access_point" | "local_file" | "environment";
-  record_format: "v1" | "legacy" | "environment" | "missing" | "invalid";
+  record_format: "v1" | "v2" | "legacy" | "environment" | "missing" | "invalid";
   legacy_fallback_present: boolean;
   owner: { uid: number | null; gid: number | null; mode: string | null };
   persistence: {
@@ -200,11 +212,13 @@ export interface TenantGrantAdminStore {
    * oauth; otherwise oauth). The kind is persisted alongside the token (never logged).
    * Returns the resulting link status (carrying `kind`, never the token).
    */
-  put(tenantId: string, token: string, kind?: GrantKind): Promise<GrantStatus>;
+  put(tenantId: string, token: string, kind?: GrantKind, label?: string): Promise<GrantStatus>;
+  /** Select one of this tenant's linked accounts for subsequent authoring runs. */
+  activate(tenantId: string, accountId: string): Promise<GrantStatus>;
   /** Report link status + kind only — never the token. */
   status(tenantId: string): Promise<GrantStatus>;
   /** Remove the tenant's stored token (idempotent). */
-  remove(tenantId: string): Promise<void>;
+  remove(tenantId: string, accountId?: string): Promise<void>;
   /** Report token-free storage and ownership facts for operator diagnosis. */
   diagnostic?(tenantId: string): Promise<GrantDiagnostic>;
 }

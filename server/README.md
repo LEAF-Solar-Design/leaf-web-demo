@@ -28,9 +28,34 @@ finds the broker via `BROKER_URL`, default `http://127.0.0.1:8140`). CORS is
 permissive for localhost dev.
 
 Env: `APS_LIVE` (default 0 = mock), `JOBS_DB`, `JOB_MAX_S` (540),
-`HEARTBEAT_STALE_S` (60), `JOB_WORKERS` (4), `BROKER_URL`, `BROKER_LEDGER`,
-`BROKER_TENANTS`, `BROKER_EGRESS_EXTRA`, `APS_CRED` (broker only),
-`LEAF_AUTHOR_LLM` (default 0).
+`HEARTBEAT_STALE_S` (60), `JOB_WORKERS` (4), `REAPER_LOG_THROTTLE_S` (300),
+`BROKER_URL`, `BROKER_LEDGER`, `BROKER_TENANTS`, `BROKER_EGRESS_EXTRA`,
+`APS_CRED` (broker only), `LEAF_AUTHOR_LLM` (default 0).
+
+`REAPER_LOG_THROTTLE_S` is the quiet window bounding how much a still-failing
+orphan-reaper sweep may log. Per window the ceiling is at most 3 full tracebacks
+plus 1 terse reminder, **whatever the exceptions do** — the budget is on log
+lines, not on fault classes, so no stream of exception types can inflate it. At
+the defaults that is at most 48 lines/hour during a CONTINUOUS outage, against
+the 360 it replaced. The ceiling bounds a failing streak, not the wall clock: a
+sweep that alternates failure and success ends its streak on every success, and
+each new streak reports its first failure in full plus a recovery line, so an
+hour of flapping exceeds 48. That reset is deliberate, since it is what re-arms
+reporting for the next failure. Within the budget a fault class not yet seen in
+the streak gets priority for a full traceback, since a new class is the
+highest-signal event; once the budget is spent it is counted and named by the
+next line instead.
+
+Suppression is never silent: every line carries the streak length, how many
+distinct classes it spans, and how many failures were suppressed since the last
+line, and recovery reports the whole streak plus what never got logged. Only the
+log VOLUME is throttled — a failing sweep is still swallowed and still retried
+every `REAPER_INTERVAL_S`.
+
+Set to 0 to log every failure. A missing or empty value uses the 300s default. A
+value that is unparseable, negative, NaN, or infinite also falls back to 300s and
+says so once, rather than raising (which the daemon's swallow would absorb into
+silence) or clamping to 0 (which would turn one bad character into the flood).
 
 ## Endpoints
 

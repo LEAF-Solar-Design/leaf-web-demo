@@ -49,8 +49,16 @@ for (const [label, change] of [
 assert(!confirmRunIntent(staged.state, request, { now: 1000 + 5 * 60 * 1000 + 1 }).ok,
   'an expired confirmation must fail closed')
 
-const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
-const routePanel = readFileSync(new URL('../src/components/RoutePanel.jsx', import.meta.url), 'utf8')
+// Normalize newlines before matching. The assertions below are exact source
+// substrings and one of them spans a line break, so on a checkout made with
+// core.autocrlf=true (any default Windows clone) the CRLF in the working copy
+// missed the '\n' in the needle and this check failed on Windows only. The
+// committed blobs are LF, so this is a no-op on a Linux CI runner.
+const readSource = (rel) =>
+  readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+
+const app = readSource('../src/App.jsx')
+const routePanel = readSource('../src/components/RoutePanel.jsx')
 assert(app.includes('const armDecision = useCallback((decision) =>'),
   'all route decisions must cross the shared intent staging seam')
 assert(app.includes('armDecision(r)'), 'NL routes do not use the shared intent seam')

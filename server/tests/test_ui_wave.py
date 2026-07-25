@@ -38,6 +38,7 @@ os.environ.setdefault("JOBS_DB", str(Path(tempfile.mkdtemp(prefix="uiwave-jobs-"
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+from _test_readiness import wait_ready  # noqa: E402
 from _test_run_confirmation import confirmed_requests_payload  # noqa: E402
 
 # §10 envelope schema (the app's, matching test_backbone).
@@ -257,20 +258,6 @@ def start_uvicorn(module_app: str, port: int, env_overrides: dict, log_path: Pat
     )
 
 
-def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float = 30.0) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"server process exited early (rc={proc.returncode})")
-        try:
-            if requests.get(url, timeout=2).status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.25)
-    raise TimeoutError(f"server at {url} not ready in {timeout_s}s")
-
-
 def stop(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         proc.terminate()
@@ -299,8 +286,10 @@ def stack(tmp_path_factory):
                          "LEAF_STORE_DIR": store_dir},
                         tmp / "app.log")
     try:
-        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker)
-        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app)
+        wait_ready(f"http://127.0.0.1:{broker_port}/broker/health", broker,
+                   log_path=tmp / "broker.log")
+        wait_ready(f"http://127.0.0.1:{app_port}/api/health", app,
+                   log_path=tmp / "app.log")
         yield {"app": f"http://127.0.0.1:{app_port}", "broker": f"http://127.0.0.1:{broker_port}"}
     finally:
         stop(app)
