@@ -160,7 +160,7 @@ def build_suites() -> List[Suite]:
         Suite("server-dynamic-loader", "server test_dynamic_loader.py", "pytest", SERVER,
               _py_pytest("test_dynamic_loader.py"), 4),
         Suite("server-write-loop", "server tests/test_write_loop.py", "pytest", SERVER,
-              _py_pytest("tests/test_write_loop.py"), 16),
+              _py_pytest("tests/test_write_loop.py"), 21),
         Suite("server-nl-router", "server tests/test_nl_router.py", "pytest", SERVER,
               _py_pytest("tests/test_nl_router.py"), 18, reset_authored=True),
         Suite("server-ui-wave", "server tests/test_ui_wave.py", "pytest", SERVER,
@@ -276,7 +276,12 @@ def build_suites() -> List[Suite]:
               "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 14),
         Suite("server-hardening-3b", "server tests/test_hardening_3b.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_3b.py"), 9),
+              _py_pytest("tests/test_hardening_3b.py"), 14),
+        # The opaque checkout capability's own unit acceptance. Separate from the
+        # HTTP suites because the SUBJECT binding only exists with auth live, and
+        # those suites run against the LEAF_AUTH_LIVE=0 header stub.
+        Suite("server-checkout-capability", "server tests/test_checkout_capability.py",
+              "pytest", SERVER, _py_pytest("tests/test_checkout_capability.py"), 15),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
@@ -336,7 +341,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_aps_callback_adapter.py"), 50),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
-              _py_pytest("test_store.py"), 27),
+              _py_pytest("test_store.py"), 34),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
         # --- tenant customization control plane (one process per file) --- #

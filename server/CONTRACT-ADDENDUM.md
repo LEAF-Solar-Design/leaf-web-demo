@@ -496,6 +496,35 @@ straight from the store manifest's single-writer lock — read-only (no
 acquire/release endpoints this wave), for a calm "someone else is editing" chip.
 Ownership: extends `server/routers/drawings.py` (`da/store.py` unchanged).
 
+**Update (checkout capability, 2026-07-25).** `holder` on this read is a DISPLAY
+LABEL only. It is public to every member of the tenant, so it cannot also be the
+thing that proves ownership: a second session could read it and present it to
+publish, release, undo or redo under the first session's lease. The lock
+GENERATION is no longer published here at all (it was half of that same replay).
+
+Ownership is now proved by an opaque capability, minted once by
+`POST /api/drawings/{id}/checkout` and returned as `checkout_capability`, bound to
+tenant + authenticated subject + drawing + lock generation
+(`server/checkout_capability.py`). Present it in the `X-Checkout-Capability`
+header — never a body field or query parameter — on:
+
+| Route | Without a valid capability |
+|---|---|
+| `DELETE /api/drawings/{id}/checkout` | 403; the lock is left intact. The old `?holder=` parameter is GONE. |
+| `POST /api/drawings/{id}/checkout` (refreshing a LIVE lease) | 409 not-acquired, as for any held lock |
+| `POST /api/drawings/{id}/undo`, `.../redo` | 403; head does not move |
+| `POST /api/run` for a `drawing.write` tool | the run is unnamed → 403 at the publish gate |
+
+Unchanged in every case where no lease is live: an absent or EXPIRED lock is free,
+needs no capability, and is re-acquirable by anyone — so a forgotten lock still
+cannot wedge a drawing. Operators running more than one app process must set
+`LEAF_CHECKOUT_CAP_SECRET` (required outright, with at least 32 bytes, when
+`LEAF_RUNTIME_ENV=production`); unset off production means a per-process secret
+that does not survive a restart. When `LEAF_AUTH_LIVE=1`, mint and verification
+also require the verified token's nonempty `sub`; a subjectless authenticated
+caller receives a fail-closed operator error rather than sharing an anonymous
+capability identity with every other tenant member.
+
 > **FREEZE (census #13, NL-build lane, 2026-07-22): §15, §16, and §17 are FROZEN.**
 > The frozen surface is the contracts, not the prose: every wire shape, env name,
 > route, status code, and law these three sections define — the §15 sidecar API and

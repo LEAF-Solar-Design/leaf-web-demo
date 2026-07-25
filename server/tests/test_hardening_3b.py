@@ -30,6 +30,7 @@ Run:  cd server && python -m pytest tests/test_hardening_3b.py tests/test_write_
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -43,6 +44,9 @@ import requests
 from _test_run_confirmation import confirmed_requests_payload
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
+CAP_HEADER = "X-Checkout-Capability"
+FORGED_CAP = "lco1." + "f" * 64        # right shape, never minted by this server
+WRITE_TOOL = "delete-marked-panel"     # the seeded drawing.write tool (write_tools.json)
 
 
 # --------------------------------------------------------------------------- #
@@ -123,20 +127,47 @@ def _h(tenant: str) -> dict:
     return {"X-Tenant-Id": tenant}
 
 
-def acquire(stack, tenant, drawing="demo", holder=None, ttl_s=None):
+def acquire(stack, tenant, drawing="demo", holder=None, ttl_s=None, capability=None):
     body = {}
     if holder is not None:
         body["holder"] = holder
     if ttl_s is not None:
         body["ttl_s"] = ttl_s
+    headers = _h(tenant)
+    if capability is not None:
+        headers = {**headers, CAP_HEADER: capability}
     return requests.post(f"{stack['app']}/api/drawings/{drawing}/checkout",
-                         json=body if body else None, headers=_h(tenant), timeout=30)
+                         json=body if body else None, headers=headers, timeout=30)
 
 
-def release(stack, tenant, drawing="demo", holder=None):
-    params = {"holder": holder} if holder is not None else None
+def cap(response):
+    """The opaque capability from a successful acquire — the only proof of
+    ownership the caller ever receives."""
+    return response.json()["checkout_capability"]
+
+
+def release(stack, tenant, drawing="demo", capability=None):
+    headers = _h(tenant)
+    if capability is not None:
+        headers = {**headers, CAP_HEADER: capability}
     return requests.delete(f"{stack['app']}/api/drawings/{drawing}/checkout",
-                           params=params, headers=_h(tenant), timeout=30)
+                           headers=headers, timeout=30)
+
+
+def undo(stack, tenant, drawing="demo", capability=None):
+    headers = _h(tenant)
+    if capability is not None:
+        headers = {**headers, CAP_HEADER: capability}
+    return requests.post(f"{stack['app']}/api/drawings/{drawing}/undo",
+                         headers=headers, timeout=30)
+
+
+def redo(stack, tenant, drawing="demo", capability=None):
+    headers = _h(tenant)
+    if capability is not None:
+        headers = {**headers, CAP_HEADER: capability}
+    return requests.post(f"{stack['app']}/api/drawings/{drawing}/redo",
+                         headers=headers, timeout=30)
 
 
 def versions(stack, tenant, drawing="demo"):
@@ -201,18 +232,21 @@ def test_second_holder_conflict_409(stack):
 
 
 # --------------------------------------------------------------------------- #
-# 3. the same holder re-acquiring REFRESHES (not a conflict)
+# 3. the holder re-acquiring REFRESHES — when it can PROVE the lease is its own
 # --------------------------------------------------------------------------- #
-def test_same_holder_reacquire_refreshes(stack):
+def test_holder_reacquire_with_its_capability_refreshes(stack):
     t = "co-refresh"
-    first = acquire(stack, t, holder="alice", ttl_s=10).json()
+    took = acquire(stack, t, holder="alice", ttl_s=10)
+    first = took.json()
     time.sleep(1.1)
-    second = acquire(stack, t, holder="alice", ttl_s=3600)
+    second = acquire(stack, t, holder="alice", ttl_s=3600, capability=cap(took))
     assert second.status_code == 200, second.text
     body = second.json()
     assert body["acquired"] is True
     # the lease was refreshed -> a strictly later expiry than the first grab
     assert body["checkout"]["expires"] > first["checkout"]["expires"]
+    # ...and a NEW capability, so the previous generation stops working
+    assert cap(second) != cap(took)
 
 
 # --------------------------------------------------------------------------- #
@@ -220,9 +254,10 @@ def test_same_holder_reacquire_refreshes(stack):
 # --------------------------------------------------------------------------- #
 def test_release_by_holder_clears(stack):
     t = "co-release"
-    assert acquire(stack, t, holder="alice").status_code == 200
+    took = acquire(stack, t, holder="alice")
+    assert took.status_code == 200
 
-    r = release(stack, t, holder="alice")
+    r = release(stack, t, capability=cap(took))
     assert r.status_code == 200, r.text
     body = r.json()
     _envelope_ok(body)
@@ -234,19 +269,32 @@ def test_release_by_holder_clears(stack):
 
 
 # --------------------------------------------------------------------------- #
-# 5. release by a NON-holder -> 403 and the lock is left intact
+# 5. release by anyone who cannot PROVE they hold it -> 403, lock left intact
 # --------------------------------------------------------------------------- #
-def test_release_by_non_holder_forbidden(stack):
+def test_release_without_a_valid_capability_forbidden(stack):
+    """Knowing the holder is not holding the lock. The `?holder=` parameter this
+    route used to authorize with came straight off the public /versions read, so
+    any tenant member could release anyone's lock by naming them."""
     t = "co-nonholder"
     assert acquire(stack, t, holder="alice").status_code == 200
 
-    r = release(stack, t, holder="mallory")
-    assert r.status_code == 403, r.text
-    body = r.json()
-    _envelope_ok(body)
-    assert body["error"]["error_code"] == "BAD_PARAMS"
+    for label, kwargs in (
+        ("no capability at all", {}),
+        ("a forged capability", {"capability": FORGED_CAP}),
+    ):
+        r = release(stack, t, **kwargs)
+        assert r.status_code == 403, f"{label}: {r.text}"
+        body = r.json()
+        _envelope_ok(body)
+        assert body["error"]["error_code"] == "BAD_PARAMS"
+        # the active lock is untouched — still alice's
+        assert versions(stack, t).json()["checkout"]["holder"] == "alice"
 
-    # the active lock is untouched — still alice's
+    # naming the holder read off the public surface buys nothing either
+    published = versions(stack, t).json()["checkout"]["holder"]
+    r = requests.delete(f"{stack['app']}/api/drawings/demo/checkout",
+                        params={"holder": published}, headers=_h(t), timeout=30)
+    assert r.status_code == 403, r.text
     assert versions(stack, t).json()["checkout"]["holder"] == "alice"
 
 
@@ -283,7 +331,8 @@ def test_expired_lock_is_reacquirable(stack):
 
 
 # --------------------------------------------------------------------------- #
-# 8. the default holder is the tenant id (bodyless POST / no-holder DELETE)
+# 8. the default holder is the tenant id (bodyless POST); releasing it still
+#    needs the capability that acquire issued
 # --------------------------------------------------------------------------- #
 def test_default_holder_is_tenant(stack):
     t = "co-default"
@@ -291,8 +340,7 @@ def test_default_holder_is_tenant(stack):
     assert r.status_code == 200, r.text
     assert r.json()["checkout"]["holder"] == t
 
-    # a no-holder release uses the same default (tenant) -> succeeds
-    rel = release(stack, t)
+    rel = release(stack, t, capability=cap(r))
     assert rel.status_code == 200, rel.text
     assert rel.json()["released"] is True
     assert rel.json()["checkout"] is None
@@ -311,3 +359,98 @@ def test_release_when_free_is_idempotent(stack):
     body = r.json()
     assert body["released"] is False                               # nothing was held
     assert body["checkout"] is None
+
+
+# --------------------------------------------------------------------------- #
+# 10. the capability, and only the capability, is proof of ownership
+# --------------------------------------------------------------------------- #
+def test_versions_never_publishes_the_capability_or_the_generation(stack):
+    """The read every tenant member may make must not carry anything that
+    authorizes. `holder` stays — the UI's "locked by X" chip needs a name — and
+    that is exactly why it cannot be the proof."""
+    t = "co-nopublish"
+    took = acquire(stack, t, holder="alice")
+    assert took.status_code == 200
+    issued = cap(took)
+
+    body = versions(stack, t).json()
+    assert body["checkout"]["holder"] == "alice"         # display label, still public
+    assert "fence" not in body["checkout"], body         # generation withdrawn
+    assert issued not in json.dumps(body)                # capability never echoed
+    assert "capability" not in json.dumps(body).lower()
+
+
+def test_a_capability_from_another_tenant_is_refused(stack):
+    """Bound to the tenant: two workspaces have separate manifests, and a token
+    minted in one must not act in the other."""
+    mine, theirs = "co-x-mine", "co-x-theirs"
+    ours = acquire(stack, mine, holder="alice")
+    assert ours.status_code == 200
+    assert acquire(stack, theirs, holder="bob").status_code == 200
+
+    r = release(stack, theirs, capability=cap(ours))
+    assert r.status_code == 403, r.text
+    assert versions(stack, theirs).json()["checkout"]["holder"] == "bob"
+
+
+def test_a_released_capability_cannot_be_replayed_onto_the_next_lease(stack):
+    """The generation counter is monotonic ACROSS release, so a token from a
+    finished lease never verifies against the lock that follows it — even when
+    the same holder takes it again."""
+    t = "co-replay-next"
+    first = acquire(stack, t, holder="alice")
+    assert first.status_code == 200
+    stale = cap(first)
+    assert release(stack, t, capability=stale).status_code == 200
+
+    second = acquire(stack, t, holder="alice")
+    assert second.status_code == 200
+    assert cap(second) != stale
+
+    r = release(stack, t, capability=stale)
+    assert r.status_code == 403, r.text
+    assert versions(stack, t).json()["checkout"]["holder"] == "alice"
+    assert release(stack, t, capability=cap(second)).status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# 11. undo / redo are gated exactly like a version publish
+# --------------------------------------------------------------------------- #
+def test_undo_redo_need_the_capability_while_a_lock_is_held(stack):
+    """They MUTATE head, which every other session reads, so they were the way
+    around the write check: a caller refused at the publish gate could still walk
+    the same drawing's head backwards under someone else's lease."""
+    t = "co-undo-locked"
+    # publish a v2 to have something to undo, BEFORE any lock exists
+    r = run_wait(stack, WRITE_TOOL, {"drawing_id": "demo"}, tenant=t)
+    assert r.status_code == 200, r.text
+    assert versions(stack, t).json()["head"] == 2
+
+    took = acquire(stack, t, holder="alice")
+    assert took.status_code == 200
+
+    for label, kwargs in (("no capability", {}),
+                          ("forged capability", {"capability": FORGED_CAP})):
+        got = undo(stack, t, **kwargs)
+        assert got.status_code == 403, f"{label}: {got.text}"
+        assert got.json()["error"]["error_code"] == "BAD_PARAMS"
+        assert versions(stack, t).json()["head"] == 2      # head did not move
+
+    # the real holder still undoes and redoes
+    assert undo(stack, t, capability=cap(took)).status_code == 200
+    assert versions(stack, t).json()["head"] == 1
+    assert redo(stack, t, capability=cap(took)).status_code == 200
+    assert versions(stack, t).json()["head"] == 2
+
+
+def test_undo_redo_need_no_capability_when_no_lock_is_held(stack):
+    """The demo's undo/redo buttons never take a checkout. Adding authorization
+    must not add a checkout REQUIREMENT — same permitted cases as a publish."""
+    t = "co-undo-free"
+    r = run_wait(stack, WRITE_TOOL, {"drawing_id": "demo"}, tenant=t)
+    assert r.status_code == 200, r.text
+
+    assert undo(stack, t).status_code == 200
+    assert versions(stack, t).json()["head"] == 1
+    assert redo(stack, t).status_code == 200
+    assert versions(stack, t).json()["head"] == 2

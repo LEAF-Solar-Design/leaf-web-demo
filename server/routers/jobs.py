@@ -17,15 +17,17 @@ import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+import checkout_capability
 import deps
 import entitlements
 import jobs
+import write_loop
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
@@ -52,34 +54,21 @@ class RunRequest(BaseModel):
     catalog_digest: Optional[str] = None
     # specific immutable drawing version (da/store.py resolve_version) otherwise.
     #
-    # SINGLE-WRITER IDENTITY. `holder` is the caller's own session id — the SAME
-    # value it sends to POST/DELETE /api/drawings/{id}/checkout, so the three
-    # routes speak one vocabulary. A `drawing.write` run publishes a new version,
-    # and until this field existed the store was never told WHO was publishing:
-    # it verified that a checkout was live, not that the caller owned it, so a
-    # second session could write under the first session's lease. `fence` is the
-    # lock generation from `checkout.fence` (GET /versions); supplying it makes
-    # the token a real fencing token, rejecting a writer whose lease lapsed and
-    # was re-acquired even under the same holder id.
+    # SINGLE-WRITER IDENTITY IS NOT A BODY FIELD. `holder`/`fence` used to live
+    # here, and a caller could choose both. That was the hole: GET /versions
+    # publishes the current holder and used to publish its fence, so any
+    # same-tenant session could read the pair and present it to publish under
+    # someone else's lease. Pydantic drops unknown fields, so a client still
+    # sending them is not rejected — its run is simply UNNAMED, which the store
+    # refuses against every active lock (`store.ANONYMOUS_HOLDER`). That is the
+    # right failure: a client that has not been issued a capability has not
+    # proven anything.
     #
-    # Omitted -> the RESERVED `store.ANONYMOUS_HOLDER`, which no checkout can
-    # ever hold (acquire_checkout refuses it), so an unnamed run is refused 403
-    # against EVERY active lock and still publishes freely on an unlocked
-    # drawing. This deliberately does NOT default to the tenant id: POST
-    # .../checkout defaults ITS holder to the tenant too, so a drawing locked
-    # with an empty body is held by the tenant id and an unnamed writer matched
-    # it exactly — the fail-open sol-critic found on PR #141.
-    #
-    # SCOPE, stated plainly: `holder` is caller-supplied and bound only to the
-    # tenant (deps.require_tenant), exactly like the POST/DELETE .../checkout
-    # routes it mirrors. Against a MALICIOUS same-tenant caller this is a
-    # coordination lock, not an authorization boundary — that caller can read
-    # the holder from GET /versions and present it. Closing that needs an
-    # opaque server-issued checkout capability, tracked separately. What this
-    # does close is the cross-session write: no caller publishes under a lock
-    # it has not at least named, and none publishes anonymously under any lock.
-    holder: Optional[str] = Field(default=None, max_length=200)
-    fence: Optional[int] = Field(default=None, ge=0)
+    # The identity now arrives as the opaque `X-Checkout-Capability` header
+    # (server/checkout_capability.py), which the route exchanges for the
+    # manifest's own (holder, fence) before submitting. Header, not body, so the
+    # credential is never persisted into the durable job record and never
+    # forwarded to the broker — only the pair it proves is.
 
 
 class TerminalCallback(BaseModel):
@@ -143,18 +132,57 @@ def _canonical_tenant_id(tenant: Any, context: Dict[str, Any]) -> str:
     return canonical if context.get("authority_mode") == "postgres_canonical" else str(tenant)
 
 
+def _checkout_identity(tenant_id: Any, drawing_id: str,
+                       capability: Optional[str]) -> Tuple[str, Optional[int]]:
+    """Exchange the presented capability for the (holder, fence) the write path
+    carries. Never trusts anything the caller named.
+
+    Returns `(ANONYMOUS_HOLDER, None)` when the drawing has no ACTIVE checkout or
+    when its state cannot be read at all: the run then publishes freely on an
+    unlocked drawing and is refused against any live lease, which is the
+    fail-closed answer for a caller that has proven nothing.
+
+    A REJECTED capability is deliberately not an error here. The gate that
+    matters runs in the store, under the row lock, at the moment of publish
+    (`da/store.py put_drawing`), and a read tool with a stale header must not be
+    blocked by a lock it never consults. Presenting a bad capability therefore
+    lands the caller in exactly the unnamed case: refused against any active
+    lock, allowed on an unlocked drawing.
+    """
+    store = _store()
+    anonymous = str(store.ANONYMOUS_HOLDER)
+    try:
+        backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+        co = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
+        if not store.checkout_active(co):
+            return anonymous, None
+        holder, fence = checkout_capability.verify(
+            capability, tenant_id, drawing_id, co)
+    except Exception:  # noqa: BLE001 - unreadable state or a bad capability -> unnamed
+        return anonymous, None
+    return holder, fence
+
+
 @router.post("/api/run")
 def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_tenant),
         x_org_id: Optional[str] = Header(default=None),
         x_project_id: Optional[str] = Header(default=None),
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-        authorization: Optional[str] = Header(default=None)):
+        authorization: Optional[str] = Header(default=None),
+        x_checkout_capability: Optional[str] = Header(default=None)):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
     ``X-Project-Id``, the run is additionally recorded as a canonical platform
     Job (best-effort, env-gated — see server/platform_link.py). Absent either
     header the behaviour is byte-identical to before.
+
+    SINGLE-WRITER: a `drawing.write` run publishes a version, so it must prove it
+    owns the drawing's checkout. `X-Checkout-Capability` (from POST
+    /api/drawings/{id}/checkout) is exchanged HERE for the manifest's own
+    (holder, fence), and only that pair travels on to the broker and the store.
+    No capability, or a stale one, means the run is unnamed and is refused
+    against any active lock.
     """
     # TENANT-SCOPED resolution (wave 4): resolve the tool from the REQUESTING tenant's
     # catalog (globals + that tenant's own repo tools). A tool authored by another
@@ -193,6 +221,15 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
 
+    # Exchange the capability for the lock's OWN (holder, fence) before anything
+    # is submitted, so the identity that reaches the store was read from the
+    # manifest rather than chosen by the caller.
+    # write_loop resolves the target from `params.drawing_id`, NOT from `dwg`
+    # (which names the intake source). Asking it means the capability is verified
+    # against the drawing that will actually be published to.
+    checkout_holder, checkout_fence = _checkout_identity(
+        tenant_id, write_loop.target_drawing_id(params), x_checkout_capability)
+
     try:
         platform_context = jobs.platform_link.resolve_submission_context(
             x_org_id, x_project_id, authorization)
@@ -226,16 +263,13 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                 dwg_version=req.dwg_version,
                 idempotency_key=idempotency_key, authority_mode=authority_mode,
                 platform_context=platform_context,
-                # A caller that names no session gets the RESERVED anonymous id,
-                # not the tenant id. Defaulting to the tenant looked fail-closed
-                # but was not: POST .../checkout also defaults its holder to the
-                # tenant, so a drawing locked with an empty body is held by the
-                # tenant id and an unnamed writer matched it. No lock can ever
-                # hold the reserved id (store.acquire_checkout refuses it), so
-                # this is refused against every active lock, never just `sess-`
-                # shaped ones.
-                checkout_holder=(req.holder or _store().ANONYMOUS_HOLDER),
-                checkout_fence=req.fence,
+                # Derived from the VERIFIED capability, never from the request
+                # body. A caller that proved nothing gets the RESERVED anonymous
+                # id, which no lock can ever hold (store.acquire_checkout refuses
+                # it), so its run is refused against every active lock and still
+                # publishes freely on an unlocked drawing.
+                checkout_holder=checkout_holder,
+                checkout_fence=checkout_fence,
             )
     except jobs.platform_link.CanonicalEntitlementDenied as exc:
         # STORED-org entitlement denial from the canonical choke point (P1
