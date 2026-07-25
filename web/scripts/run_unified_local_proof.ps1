@@ -49,6 +49,7 @@ $env:LEAF_SOURCE_SHA = (git -C $repoRoot rev-parse HEAD).Trim()
 $env:LEAF_SOURCE_COMMIT = $env:LEAF_SOURCE_SHA
 $env:LEAF_AUTH_LIVE = '0'
 $env:LEAF_AGENT_MOCK = '1'
+$env:LEAF_GUEST_UPLOADS_ENABLED = '1'
 $env:LEAF_STORE_DIR = Join-Path $runRoot 'drawings'
 $env:LEAF_GUEST_STORE_DIR = Join-Path $runRoot 'guest-drawings'
 $env:LEAF_UPLOADS_DIR = Join-Path $runRoot 'uploads'

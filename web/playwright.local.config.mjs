@@ -2,6 +2,8 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: './e2e/local',
+  workers: 1,
+  timeout: 60_000,
   outputDir: '../artifacts/unified-surface-proof/local/test-results',
   reporter: [['list'], ['html', {
     open: 'never',

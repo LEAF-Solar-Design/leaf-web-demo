@@ -34,7 +34,7 @@ test('real local stack runs a catalog tool and restores its durable receipt', as
   await expect(page).toHaveURL(/\/try$/)
   await expect(page.getByTestId('operator-surface')).toBeVisible()
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  await expect(page.getByText('Panels preserved').locator('..')).not.toContainText('pending')
+  await expect(page.getByText('Panels preserved').locator('..')).not.toContainText('pending', { timeout: 15_000 })
   expect(observed).toContain('GET /api/session 200')
 
   await page.getByRole('tab', { name: /Catalog/ }).click()

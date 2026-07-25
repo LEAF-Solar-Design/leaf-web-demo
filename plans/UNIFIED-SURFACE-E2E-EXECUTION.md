@@ -367,6 +367,15 @@ Progress:
   completed job from the durable API and Jobs rail. The isolated run passed in
   14.0 seconds. APS, Claude, Auth0, PostgreSQL, mid-run reattach, Escape detach,
   and staging proof remain open.
+- A second managed local browser test uploads a distinctive DXF, waits for real
+  extraction, proves the seeded drawing was replaced by a one-panel scene,
+  reviews `count-by-layer`, and confirms that the submitted run remains bound
+  to the uploaded drawing id and account tenant. The two-test managed gate
+  passes. Fourteen live-auth guest-session tests and five upload isolation tests
+  also pass, including tampered and expired session denial, bearer precedence,
+  cross-tenant denial, and refusal to bootstrap unknown guest drawings. The
+  signed-out guest browser gate remains open because guest policy is upload and
+  view only by design.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -440,12 +449,14 @@ Observed Wave 0 results:
 - Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
-- Local tier: 1 passed against an isolated real Vite, FastAPI, broker, harness,
+- Local tier: 2 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness, real drawing intake,
-  catalog review, explicit confirmation, one broker and worker run, completed
-  result rendering, durable job API storage, and Jobs-rail recovery after page
-  reload. APS, Claude, Auth0, PostgreSQL, mid-run reattach, Escape detach, and
-  version mutation claims remain open.
+  catalog review, explicit confirmation, broker and worker runs, completed
+  result rendering, durable job API storage, Jobs-rail recovery after page
+  reload, real DXF upload and extraction, uploaded geometry replacement, and a
+  catalog run bound to the uploaded drawing and tenant. APS, Claude, Auth0,
+  PostgreSQL, the signed-out guest browser gate, mid-run reattach, Escape
+  detach, and version mutation claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:

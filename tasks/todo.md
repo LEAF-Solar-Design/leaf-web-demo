@@ -42,6 +42,13 @@ Risks:
 
 Current additive progress:
 
+- [x] Prove a real account-scoped uploaded DXF remains the target of catalog
+  review and execution on the managed local stack.
+- [x] Prove cross-tenant upload access, unknown uploads, guest bootstrap, expired
+  sessions, tampered sessions, and bearer precedence fail closed at the server.
+- [ ] Prove the live-auth signed-out guest path in the unified browser: upload
+  and view are allowed, run remains visibly gated, and no dispatch occurs.
+
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls
   into `/try`.

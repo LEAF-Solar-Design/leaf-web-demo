@@ -6,3 +6,4 @@ python-multipart  # multipart parsing for POST /api/drawings/upload (§19); was 
 # tests
 jsonschema
 pytest
+httpx2  # required by the current Starlette TestClient
