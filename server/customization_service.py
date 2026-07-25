@@ -930,7 +930,17 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
     with _exclusive_materialize(bare, lock_path):
         if target.exists():
             return  # another holder materialized it while we waited
-        first = _worktree_add(bare, target, commit)
+        try:
+            first = _worktree_add(bare, target, commit)
+        except subprocess.TimeoutExpired:
+            # A slow add -- loaded box, cold cache, post-checkout hook -- can
+            # blow the timeout AFTER git has already written a complete
+            # worktree. Letting that escape turns a materialized catalog into a
+            # false 503. Hand it to _verified_worktree instead: commit + digest
+            # are the authority, and they still reject an absent or torn tree.
+            if target.exists():
+                return
+            raise
         if first.returncode == 0 or target.exists():
             return
         # A lost race or a crash can leave the path registered but absent, and
@@ -939,7 +949,12 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
             ["git", "--git-dir", str(bare), "worktree", "prune"],
             text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
         )
-        retry = _worktree_add(bare, target, commit)
+        try:
+            retry = _worktree_add(bare, target, commit)
+        except subprocess.TimeoutExpired:
+            if target.exists():  # same slow-but-complete add as above
+                return
+            raise
         if retry.returncode != 0 and not target.exists():
             raise _unavailable(
                 f"git worktree add {target} @ {commit}: rc={first.returncode} "

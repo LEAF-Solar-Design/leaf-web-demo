@@ -408,6 +408,43 @@ def test_worktree_add_failure_surfaces_git_stderr(tmp_path, monkeypatch):
     assert missing in caught.value.detail
 
 
+def test_slow_but_complete_worktree_add_is_not_a_false_503(tmp_path, monkeypatch):
+    """A timeout AFTER git wrote a valid worktree must not become a 503.
+
+    `_worktree_add` runs with timeout=20. A loaded box, a cold cache or a
+    post-checkout hook can blow that budget after the tree is already complete
+    on disk. If TimeoutExpired escapes, a materialized catalog is reported as
+    effective_catalog_unavailable and the tenant is down for no reason.
+
+    The adversarial suite already covers ordinary nonzero exits, lost races,
+    deleted worktrees and lock contention -- but every one of those returns a
+    CompletedProcess, so none of them exercises the raising path.
+    """
+    bare, effective, _base = _published_pin(tmp_path, monkeypatch)
+    settled = effective_catalog_dir("tenant-a")
+    assert settled is not None and (settled / "registry.json").exists()
+    commit = settled.name
+
+    # A fresh target for the SAME commit, so the underlying add genuinely
+    # succeeds and writes a complete tree before the timeout is raised.
+    fresh = effective / "tenant-a-slow" / commit
+    calls = {"n": 0}
+    real_add = customization_service._worktree_add
+
+    def timing_out_add(bare_dir, target, commit_sha):
+        calls["n"] += 1
+        real_add(bare_dir, target, commit_sha)   # actually write the tree...
+        raise subprocess.TimeoutExpired(         # ...then blow the budget
+            cmd=["git", "worktree", "add", str(target)], timeout=20)
+
+    monkeypatch.setattr(customization_service, "_worktree_add", timing_out_add)
+
+    _materialize_worktree(bare, fresh, commit)   # must NOT raise
+
+    assert calls["n"] == 1, "the timing-out add was never exercised"
+    assert (fresh / "registry.json").exists(), "the written tree was discarded"
+
+
 def test_materialization_recovers_from_a_deleted_worktree(tmp_path, monkeypatch):
     """A worktree deleted underneath us must not wedge the tenant forever.
 

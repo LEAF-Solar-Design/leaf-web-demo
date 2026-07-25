@@ -512,8 +512,15 @@ def build_suites() -> List[Suite]:
         # the Linux CI runner and skip only on a Windows operator box. Named here
         # so a Windows run stays green without the fail-closed skip rule having to
         # tolerate an unnamed reason.
+        # Floor is 16, the count that executes on Windows (18 collected, minus the
+        # two fcntl-gated lock probes). Linux CI executes all 18 and reports drift.
+        # The old floor of 5 let 11 tests vanish and still call the suite green.
+        # RESIDUAL, deliberately not closed here: the allowlist is not
+        # OS-conditional, so a Linux runner that somehow lacked fcntl would skip
+        # the two lock probes and still clear 16. Catching that needs per-OS suite
+        # config the runner does not have today.
         Suite("server-customization-adversarial", "server customization adversarial", "pytest",
-              SERVER, _py_pytest("tests/test_customization_adversarial.py"), 5,
+              SERVER, _py_pytest("tests/test_customization_adversarial.py"), 16,
               allowed_skip_reasons=(r"POSIX advisory locking only",)),
         Suite("server-customization-publish-recovery", "server customization publish recovery", "pytest",
               SERVER, _py_pytest("tests/test_customization_publish_recovery.py"), 1),
