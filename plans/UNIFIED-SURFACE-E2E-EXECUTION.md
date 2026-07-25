@@ -408,6 +408,13 @@ Progress:
   isolates conversation metering under the per-run temporary directory. A
   failed browser test can no longer return a successful managed-run status or
   write `data/agent_ledger.jsonl` into the worktree.
+- The managed checkout gate now seeds a real active lock held by another
+  editor, renders the holder in the unified execution rail, disables the
+  drawing write action, and records zero run requests. It also proves a
+  non-holder release fails with 403, an expired lease becomes available, the
+  operator can take and release the lock, and the final manifest has no
+  checkout. VR-02 is therefore local E2E proven for the legacy manifest store;
+  PostgreSQL compare-and-swap authority remains a separate external gate.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -481,18 +488,18 @@ Observed Wave 0 results:
 - Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
-- Local tier: 7 passed against an isolated real Vite, FastAPI, broker, harness,
+- Local tier: 8 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness, real drawing intake,
   catalog review, explicit confirmation, broker and worker runs, completed
   result rendering, durable job API storage, Jobs-rail recovery after page
   reload, real DXF upload and extraction, uploaded geometry replacement, and a
   catalog run bound to the uploaded drawing and tenant. It also proves running
   job reattach, Escape detach, page-hide reaping, three-version Undo and Redo
-  depth, and the scripted conversation approval round trip. A separate
-  live-auth guest walk also passes for signed guest upload, extraction, viewer
-  seating, allowed version read, zero dispatch, and denied run. APS, Claude,
-  Auth0 user sign-in, PostgreSQL, and conversation-driven product execution
-  claims remain open.
+  depth, the scripted conversation approval round trip, and checkout conflict,
+  expiry, take, and release. A separate live-auth guest walk also passes for
+  signed guest upload, extraction, viewer seating, allowed version read, zero
+  dispatch, and denied run. APS, Claude, Auth0 user sign-in, PostgreSQL, and
+  conversation-driven product execution claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:

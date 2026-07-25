@@ -60,6 +60,8 @@ Current additive progress:
   resume turn in the unified scene, with the scripted agent limit in the receipt.
 - [x] Make the managed proof runner return Playwright failures and isolate its
   conversation metering ledger from the worktree.
+- [x] Prove real checkout conflict, non-holder denial, expiry, take, release,
+  write gating, and final authoritative state in the unified browser.
 
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls
