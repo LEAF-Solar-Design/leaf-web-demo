@@ -13,15 +13,6 @@ import pytest
 
 import session_store
 
-# DELIBERATE GATE PROOF -- REVERTED IN THE NEXT COMMIT ON THIS BRANCH.
-# Skips the whole module with this suite's EXACT allowlisted reason. All 15
-# tests then report as skipped, 0 failures, and every skip is tolerated by the
-# skip-allowlist rule -- the precise shape of a vacuous green. The only thing
-# left that can redden the gate is coverage_verdict rule 1, "ALL skipped: no
-# coverage".
-pytestmark = pytest.mark.skip(
-    reason="PostgreSQL integration test requires explicit DATABASE_URL")
-
 
 def test_store_mode_is_call_time_and_rejects_unknown(monkeypatch):
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "legacy")
