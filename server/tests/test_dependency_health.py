@@ -123,43 +123,35 @@ def test_all_success_is_ready_and_preserves_dependency_order():
     assert {item["state"] for item in report["dependencies"].values()} == {"ready"}
 
 
-def _wait_overshoot_ceiling(budget_s, samples=5):
-    """Longest a bare Event().wait(budget_s) actually takes on this machine.
-
-    A timeout bound written as a constant tests the OS scheduler, not the code:
-    a 0.05s wait has been measured returning at 0.61s on Windows under load,
-    which is why the old `< 0.2` assertion failed 4 of 20 isolated runs. But a
-    bound loose enough to absorb that (2.5s) stops catching a regression that
-    waits 1s on a 0.05s budget. Calibrating against the scheduler's own
-    overshoot resolves the two: the bound is tight on a quiet machine and
-    relaxes only as far as the machine actually misbehaves.
-    """
-    worst = 0.0
-    for _ in range(samples):
-        started = time.monotonic()
-        threading.Event().wait(budget_s)
-        worst = max(worst, time.monotonic() - started)
-    return worst
-
-
-def test_required_timeout_is_bounded_and_not_ready():
+def test_required_timeout_is_bounded_and_not_ready(monkeypatch):
+    # The budget is asserted at the seam, not with a stopwatch. A wall-clock
+    # bound cannot decide this on Windows: a 0.05s wait has been measured
+    # returning at 0.61s, so a bound tight enough to catch a regression that
+    # waits 1s is also tight enough to fail on scheduler noise. Calibrating the
+    # bound against measured noise only moves the problem -- a noisy sample
+    # yields a bound that hides the regression, a quiet one yields a bound the
+    # next stall trips. Observing the timeout handed to wait() settles it with
+    # no clock at all. The cost is coupling to the fact that readiness_report
+    # collects through concurrent.futures.wait.
     budget_s = 0.05
     probe_hold_s = 5.0
     release = threading.Event()
     entered = threading.Event()
     finished = threading.Event()
+    observed_timeouts = []
 
     def blocked_probe():
         entered.set()
         release.wait(probe_hold_s)
         finished.set()
 
-    # Calibrate immediately before the measurement so the bound reflects the
-    # machine's current behaviour. Never looser than half the probe hold, so a
-    # pathologically noisy host degrades to the ordering proof below instead of
-    # failing spuriously.
-    ceiling = _wait_overshoot_ceiling(budget_s)
-    bound_s = min(max(10 * budget_s, 4 * ceiling), probe_hold_s / 2)
+    real_wait = dependency_health.wait
+
+    def spy_wait(futures, timeout=None, **kwargs):
+        observed_timeouts.append(timeout)
+        return real_wait(futures, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(dependency_health, "wait", spy_wait)
 
     # The counter is module-global, so compare against entry, not zero.
     slots_before = dependency_health._probe_slot_snapshot()[0]
@@ -180,13 +172,14 @@ def test_required_timeout_is_bounded_and_not_ready():
 
     assert entered.wait(probe_hold_s), "the probe never reached the executor"
     assert returned_before_probe_finished
-    assert elapsed < bound_s, (
-        f"readiness_report took {elapsed:.3f}s on a {budget_s}s budget "
-        f"(bound {bound_s:.3f}s, measured scheduler overshoot {ceiling:.3f}s)")
+    # The load-bearing budget check: the configured 0.05s, exactly, is what the
+    # collection actually waited on.
+    assert observed_timeouts == [budget_s]
+    # A coarse guard that the call returned at all. It carries no part of the
+    # budget claim, so it is deliberately far outside any scheduler jitter.
+    assert elapsed < probe_hold_s / 2
     assert report["ready"] is False
     assert report["dependencies"]["broker"]["state"] == "timeout"
-    # The reported latency is the resolved budget, so this pins the timeout
-    # readiness_report actually parsed out of the environment, with no clock.
     assert report["dependencies"]["broker"]["latency_ms"] == int(budget_s * 1000)
     deadline = time.monotonic() + probe_hold_s
     while (dependency_health._probe_slot_snapshot()[0] > slots_before
