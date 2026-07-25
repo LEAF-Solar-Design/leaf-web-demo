@@ -221,8 +221,16 @@ def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float | None = None,
     the host they finish booting on: an observed run here sized the budget at
     1.316s/spawn and hit the deadline when the box had degraded to 16.781s/spawn,
     12x slower. Failing there would blame the server for a machine that changed
-    underneath it. The re-measure is bounded by the same ceiling, so the total
-    wait still cannot exceed it and a true hang still cannot park the gate.
+    underneath it.
+
+    POLLING is bounded by the ceiling: the deadline is always ``started +
+    budget_s`` and ``budget_s`` is clamped, so a true hang cannot park the gate.
+    The diagnostic probes are the honest exception. Each is capped at
+    ``_SPAWN_PROBE_TIMEOUT_S`` and at most two run, both only on the expiry path,
+    so a failing wait can overrun the ceiling by that much before it reports. The
+    elapsed time is therefore re-read after the probe rather than reused from
+    before it, or a slow probe would be spent out of a budget it was not counted
+    against and the reported wait would understate the real one.
     """
     recalibrated = timeout_s is None
     if timeout_s is None:
@@ -235,20 +243,22 @@ def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float | None = None,
     extended = False
     while True:
         if time.time() >= deadline:
-            waited = time.time() - started
             if recalibrated and not extended:
                 extended = True
                 fresh_spawn_s = spawn_latency_s()
                 regraded, how_now = calibrate_boot_timeout_s(
                     lambda: fresh_spawn_s, os.environ)
-                if regraded > waited:
+                # Re-read the clock: the probe above can burn up to
+                # _SPAWN_PROBE_TIMEOUT_S, so comparing against elapsed time from
+                # before it would grant an extension already spent.
+                if regraded > time.time() - started:
                     budget_s = regraded
                     deadline = started + budget_s
                     how = f"{how}; re-measured mid-wait as {how_now}"
                     continue
             raise TimeoutError(
                 f"server at {url} not ready in {budget_s:.0f}s "
-                f"(waited {waited:.0f}s; budget: {how})"
+                f"(waited {time.time() - started:.0f}s; budget: {how})"
                 f"{_slowness_note(spawn_latency_s())}"
                 f"{log_tail(log_path)}")
         if proc.poll() is not None:

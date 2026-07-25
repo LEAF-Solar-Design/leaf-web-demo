@@ -308,15 +308,34 @@ def test_wait_ready_re_measures_once_when_the_host_degrades_mid_wait(monkeypatch
 
     monkeypatch.setattr(rd, "spawn_latency_s", degrading_probe)
 
-    dead_url = f"http://127.0.0.1:{free_port()}/api/health"  # nothing is listening
+    # Record when each poll happened. This is the assertion that has teeth: the
+    # message and the probe count would BOTH still appear if the deadline update
+    # were deleted, so only "polling actually continued past the original budget"
+    # proves the extension bought real time. Polls are made instant so the gap
+    # between 0.5s and 8s is unmistakable rather than a narrow timing window.
+    polls = []
+    started = time.monotonic()
+
+    def refused(*_args, **_kwargs):
+        polls.append(time.monotonic() - started)
+        raise requests.RequestException("nothing is listening")
+
+    monkeypatch.setattr(rd.requests, "get", refused)
+
+    dead_url = f"http://127.0.0.1:{free_port()}/api/health"
     with pytest.raises(TimeoutError) as exc:
         rd.wait_ready(dead_url, NeverExits())
     message = str(exc.value)
 
-    # Asserted as implications, not as a wall-clock window, so this cannot become
-    # a timing flake of its own on the very slow hosts it describes.
     assert "re-measured mid-wait" in message, message
-    assert len(probes) >= 2, "the host was never re-measured at the deadline"
+    # Polling ran well past the 0.5s the original budget allowed. Without the
+    # deadline update the last poll lands at ~0.5s and this fails.
+    assert max(polls) > 2.0, (
+        f"last poll was at {max(polls):.2f}s; polling stopped at the original "
+        f"0.5s budget, so the re-measure never granted any extra wait")
+    # Exactly three probes pins "once": initial calibration, one regrade at
+    # expiry, one final diagnostic. A second regrade would make this four.
+    assert len(probes) == 3, f"expected 3 probes (initial, regrade, diagnostic), got {len(probes)}"
     # Still bounded by the ceiling: a true hang must not park the gate.
     assert "not ready in 8s" in message, message
 
