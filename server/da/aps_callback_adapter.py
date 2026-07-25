@@ -40,8 +40,14 @@ evidence (sha256 + size of the persisted output). Translation refuses, raising
                                1-based, so 0 and negatives never ran);
   * ``wrong_workitem``       — the completion names a different WorkItem than the
                                one this job dispatched;
-  * ``expired_lease``        — the APS lease deadline has passed (a completion
-                               delivered after the lease is not trustworthy);
+  * ``expired_lease``        — the job store's recorded lease deadline has passed,
+                               or is not finite (a completion delivered after the
+                               lease is not trustworthy);
+  * ``wrong_lease``          — the completion's claimed lease disagrees with the
+                               job store's recorded one. The lease is AUTHORITY:
+                               checking the completion's own value was checking the
+                               payload against itself, so an expired job passed by
+                               claiming a future deadline;
   * ``bad_nonce``            — empty delivery nonce;
   * ``bad_clock``            — non-finite translation clock;
   * ``missing_workitem``     — no WorkItem id to bind the receipt to;
@@ -83,7 +89,12 @@ def _callbacks():
     return _CALLBACKS
 
 
-_SUCCESS_STATUSES = frozenset({"success", "succeeded", "completed", "complete"})
+# APS DesignAutomation reports exactly one success state: `success`. The other
+# documented values are pending, inprogress, cancelled and the failed* family. The
+# aliases this used to accept ("succeeded", "completed", "complete") are not APS
+# vocabulary at all, so accepting them meant inventing success states the protocol
+# never emits and promoting any upstream string that happened to match.
+_SUCCESS_STATUSES = frozenset({"success"})
 
 
 class AdapterError(Exception):
@@ -148,6 +159,7 @@ def translate(
     job_id: str,
     job_attempt: int,
     job_workitem_id: str,
+    job_lease_expiry: float,
     secret: bytes,
     now: float,
     reserve_completion: Callable[[str, int], bool],
@@ -250,16 +262,6 @@ def translate(
     # bytes().
     if type(output) not in (bytes, bytearray, memoryview):
         raise AdapterError("missing_output")
-    # One immutable copy: `output` may be a bytearray, and reading it twice (hash,
-    # then len) let a concurrent mutation sign a receipt whose `size` and `sha256`
-    # described different content. A released or resized buffer becomes a tagged
-    # refusal rather than a raw ValueError escaping the adapter.
-    try:
-        attested = bytes(output)
-    except (ValueError, BufferError):
-        raise AdapterError("missing_output")
-    if len(attested) == 0:
-        raise AdapterError("missing_output")
     if type(attempt) is not int or type(job_attempt) is not int:
         raise AdapterError("wrong_attempt")
     claimed_attempt = attempt
@@ -271,17 +273,50 @@ def translate(
     # NaN defeats every comparison (`now > nan` is False), so a non-finite lease
     # deadline would sail past an ordinary expiry check. callbacks.py guards its
     # own timestamp with math.isfinite for the same reason.
+    # THE LEASE IS AUTHORITY TOO. Checking the completion's own `lease_expiry` was
+    # checking the payload against itself: a job whose recorded lease expired an
+    # hour ago still passed by supplying `lease_expiry = now + 3600`. The job
+    # store's deadline decides, and the completion's claim must match it exactly,
+    # exactly like job id, attempt and WorkItem.
+    if (type(job_lease_expiry) not in (int, float)
+            or not math.isfinite(job_lease_expiry)):
+        raise AdapterError("expired_lease")
     if (type(lease_expiry) not in (int, float)
             or not math.isfinite(lease_expiry)
-            or now > lease_expiry):
+            or lease_expiry != job_lease_expiry):
+        raise AdapterError("wrong_lease")
+    if now > job_lease_expiry:
         raise AdapterError("expired_lease")
     if type(nonce) is not str or not nonce.strip():
         raise AdapterError("bad_nonce")
     if not callable(reserve_completion):
         raise AdapterError("no_completion_guard")
+    # BIND THE EMITTED NONCE TO THE ATTEMPT. The consumer's replay store is keyed
+    # on (job_id, nonce), so a delivery nonce reused across two attempts of one job
+    # collided: attempt 2 was CLAIMED here, its envelope was then rejected
+    # downstream as `replay`, and the honest retry with a fresh nonce hit
+    # `duplicate_completion`. One repeated nonce could therefore burn a later
+    # attempt permanently. Prefixing the attempt makes cross-attempt collision
+    # impossible while leaving a verbatim replay of one envelope still detectable,
+    # because that envelope's nonce is unchanged.
+    delivery_nonce = nonce
+    nonce = f"{claimed_attempt}:{delivery_nonce}"
 
     # Built ONLY from the locals captured at entry. `completion` is never read
     # again past this point, so the receipt names exactly what was validated.
+    # THE COPY IS THE LAST VALIDATION STEP, after every cheap check. Round 6 moved
+    # it out of the entry block but not far enough: a huge buffer was still copied
+    # before the attempt, lease, nonce and guard were checked, so an allocation
+    # failure could escape in place of the correct `wrong_attempt` refusal.
+    # `output` is read exactly once, into one immutable snapshot, so a concurrent
+    # mutation cannot make `size` and `sha256` describe different content, and a
+    # released or resized buffer is a tagged refusal rather than a raw exception.
+    try:
+        attested = bytes(output)
+    except (ValueError, BufferError, MemoryError):
+        raise AdapterError("missing_output")
+    if len(attested) == 0:
+        raise AdapterError("missing_output")
     output_sha256 = hashlib.sha256(attested).hexdigest()
     payload: Dict[str, Any] = {
         "job_id": job_id,          # authoritative, and equal to the claimed one

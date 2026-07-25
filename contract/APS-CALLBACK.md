@@ -25,8 +25,24 @@ recomputes it.
 
 ## Signed body — the bindings
 
-`translate()` requires the job store's authority for ALL THREE identity fields:
-`job_id`, `job_attempt` and `job_workitem_id`. It emits a canonical JSON body
+`translate()` requires the job store's authority for ALL FOUR bound fields:
+`job_id`, `job_attempt`, `job_workitem_id` and `job_lease_expiry`. The lease was
+the last one still taken from the payload, which meant checking the completion
+against itself: a job whose recorded lease expired an hour ago passed by claiming
+`lease_expiry = now + 3600`.
+
+**Status:** APS reports exactly one success state, `success` (the others are
+pending, inprogress, cancelled and the failed* family). Case and surrounding
+whitespace are normalized; the aliases once accepted (`succeeded`, `completed`,
+`complete`) were not APS vocabulary and are refused.
+
+**Emitted nonce is attempt-bound**, `"<attempt>:<delivery nonce>"`. The consumer's
+replay store is keyed on `(job_id, nonce)`, so one delivery nonce reused across two
+attempts of a job used to collide: the later attempt was CLAIMED, its envelope was
+rejected downstream as `replay`, and the honest retry with a fresh nonce then hit
+`duplicate_completion` — one repeated nonce permanently burned an attempt. A
+verbatim replay of a single envelope is still detected, since that envelope's nonce
+is unchanged. It emits a canonical JSON body
 (`sort_keys`, `(",",":")`) binding:
 
 | Field | Binds | Source |
