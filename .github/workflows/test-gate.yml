@@ -17,8 +17,11 @@ name: Test gate
 # Deliberately hermetic -- NO secret, AWS credential, or DATABASE_URL is
 # required or provided:
 #   * DATABASE_URL is unset, so the runner's Postgres probe returns NO_DSN and
-#     the db_gated suites (platform, server-g1a-canonical-e2e) report SKIP with
-#     a reason before either suite starts.
+#     all three db_gated suites (platform, server-g1a-canonical-e2e,
+#     server-ops-metrics-pg) report SKIP with a reason before any of them
+#     starts. The list is every Suite(..., db_gated=True) in the runner; keep
+#     it in step with them, because a suite silently missing from here reads as
+#     one that DOES run on this workflow.
 #   * LEAF_CONTAINER_SMOKE is unset, so harness-container-smoke reports SKIP.
 # Both are the runner's own designed behaviour, visible on the scoreboard.
 #
