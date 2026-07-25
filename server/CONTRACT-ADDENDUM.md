@@ -1251,8 +1251,8 @@ output metadata, pending-job leases and heartbeats, and concurrency accounting.
 
 Provenance: recorded 2026-07-25 on operator instruction to land this section. NO
 operator ruling was made on §15.C, and this section previously claimed one. PR
-#131 (merged 2026-07-25) shipped the per-tenant layout before the §15/§16/§17
-freeze's stop-the-line gate was consulted and changed no documentation; PR #144
+#131 (merged 2026-07-25) shipped the per-tenant layout without the operator
+ruling the §15/§16/§17 freeze requires, and changed no documentation; PR #144
 then left the resulting documentation gap open rather than closing it. The freeze
 requires a new section rather than an in-place edit, which is the shape used
 here: §15.C keeps its now-false sentence byte-for-byte and this section carries
