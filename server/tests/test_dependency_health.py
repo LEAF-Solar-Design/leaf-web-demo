@@ -123,13 +123,27 @@ def test_all_success_is_ready_and_preserves_dependency_order():
     assert {item["state"] for item in report["dependencies"].values()} == {"ready"}
 
 
+def _wait_overshoot_ceiling(budget_s, samples=5):
+    """Longest a bare Event().wait(budget_s) actually takes on this machine.
+
+    A timeout bound written as a constant tests the OS scheduler, not the code:
+    a 0.05s wait has been measured returning at 0.61s on Windows under load,
+    which is why the old `< 0.2` assertion failed 4 of 20 isolated runs. But a
+    bound loose enough to absorb that (2.5s) stops catching a regression that
+    waits 1s on a 0.05s budget. Calibrating against the scheduler's own
+    overshoot resolves the two: the bound is tight on a quiet machine and
+    relaxes only as far as the machine actually misbehaves.
+    """
+    worst = 0.0
+    for _ in range(samples):
+        started = time.monotonic()
+        threading.Event().wait(budget_s)
+        worst = max(worst, time.monotonic() - started)
+    return worst
+
+
 def test_required_timeout_is_bounded_and_not_ready():
-    # The bound is asserted as an ordering fact, not a stopwatch reading: the
-    # probe blocks until this test releases it, so a report that comes back
-    # while the probe is still blocked proves readiness_report did not wait for
-    # it. A small wall-clock threshold cannot state that on its own -- a bare
-    # Event().wait(0.05) has been measured overshooting 0.35s on Windows, so any
-    # constant near the timeout budget tests the scheduler, not the code.
+    budget_s = 0.05
     probe_hold_s = 5.0
     release = threading.Event()
     entered = threading.Event()
@@ -140,24 +154,45 @@ def test_required_timeout_is_bounded_and_not_ready():
         release.wait(probe_hold_s)
         finished.set()
 
-    started = time.monotonic()
-    report = dependency_health.readiness_report(
-        {"LEAF_READINESS_TIMEOUT_S": "0.05"},
-        [_spec("broker", probe=blocked_probe)],
-    )
-    elapsed = time.monotonic() - started
-    returned_while_probe_blocked = not finished.is_set()
-    release.set()
+    # Calibrate immediately before the measurement so the bound reflects the
+    # machine's current behaviour. Never looser than half the probe hold, so a
+    # pathologically noisy host degrades to the ordering proof below instead of
+    # failing spuriously.
+    ceiling = _wait_overshoot_ceiling(budget_s)
+    bound_s = min(max(10 * budget_s, 4 * ceiling), probe_hold_s / 2)
+
+    # The counter is module-global, so compare against entry, not zero.
+    slots_before = dependency_health._probe_slot_snapshot()[0]
+    try:
+        started = time.monotonic()
+        report = dependency_health.readiness_report(
+            {"LEAF_READINESS_TIMEOUT_S": str(budget_s)},
+            [_spec("broker", probe=blocked_probe)],
+        )
+        elapsed = time.monotonic() - started
+        # Sampled before the probe is released. The probe cannot finish for
+        # probe_hold_s, so an unset flag proves readiness_report returned
+        # without waiting for it. It does not prove the probe had already been
+        # scheduled -- `entered` below proves only that it was really submitted.
+        returned_before_probe_finished = not finished.is_set()
+    finally:
+        release.set()
 
     assert entered.wait(probe_hold_s), "the probe never reached the executor"
-    assert returned_while_probe_blocked
-    assert elapsed < probe_hold_s / 2
+    assert returned_before_probe_finished
+    assert elapsed < bound_s, (
+        f"readiness_report took {elapsed:.3f}s on a {budget_s}s budget "
+        f"(bound {bound_s:.3f}s, measured scheduler overshoot {ceiling:.3f}s)")
     assert report["ready"] is False
     assert report["dependencies"]["broker"]["state"] == "timeout"
+    # The reported latency is the resolved budget, so this pins the timeout
+    # readiness_report actually parsed out of the environment, with no clock.
+    assert report["dependencies"]["broker"]["latency_ms"] == int(budget_s * 1000)
     deadline = time.monotonic() + probe_hold_s
-    while dependency_health._probe_slot_snapshot()[0] and time.monotonic() < deadline:
+    while (dependency_health._probe_slot_snapshot()[0] > slots_before
+           and time.monotonic() < deadline):
         time.sleep(0.01)
-    assert dependency_health._probe_slot_snapshot()[0] == 0
+    assert dependency_health._probe_slot_snapshot()[0] == slots_before
 
 
 def test_required_unavailable_is_not_ready_without_exception_text():
