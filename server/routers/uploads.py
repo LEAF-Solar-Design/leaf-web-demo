@@ -92,6 +92,42 @@ def _resolve_upload_identity(
     return guest_uploads.mint_guest_tenant_id(), "guest", True
 
 
+def _resolve_upload_read_identity(tenant: Any) -> Any:
+    """Use the same server-owned account binding as upload creation.
+
+    ``require_tenant`` still carries the tenant claim from the verified JWT for
+    legacy routes. Account upload creation deliberately ignores that claim and
+    writes under the subject's active platform binding, so its status reader
+    must resolve that same binding or it can look in a different tenant store.
+    Guest sessions have no platform subject and auth-off callers are plain
+    strings; both keep their existing identity unchanged.
+    """
+    if not deps.auth_live() or not isinstance(tenant, deps.TenantContext):
+        return tenant
+    if tenant.tier == "guest" and guest_uploads.is_guest_tenant(str(tenant)):
+        return tenant
+    if tenant.subject is None and tenant.org_id is None:
+        # Verified broker/harness back-edge identities are server-owned tenant
+        # contexts without an Auth0 subject. Keep that existing trust boundary
+        # intact instead of trying to resolve it through the account binding
+        # table. A JWT-backed account without a subject still fails closed
+        # below because its claimed org is present.
+        return tenant
+
+    import tenancy  # noqa: PLC0415 - lazy, mirrors upload creation
+
+    platform_tenant_id, platform_tier = (
+        deps.resolve_active_platform_tenant_authority(tenant.subject))
+    ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
+    return deps.TenantContext(
+        platform_tenant_id,
+        org_id=platform_tenant_id,
+        tier=platform_tier,
+        workspace=ws.workspace_dir if ws is not None else None,
+        subject=tenant.subject,
+    )
+
+
 @router.post("/api/drawings/upload")
 def upload_drawing(
     request: Request,
@@ -355,6 +391,7 @@ def upload_status(drawing_id: str,
     truth). Guests reach this via their guest-session header (live) or the
     X-Tenant-Id stub (demo). 404 (never 403) for an unknown marker — same
     no-existence-leak posture as the jobs routes."""
+    tenant = _resolve_upload_read_identity(tenant)
     backend = write_loop.upload_backend_for_tenant(str(tenant))
     view = guest_uploads.status_view(backend, str(tenant), drawing_id)
     if view is None:
