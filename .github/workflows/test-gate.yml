@@ -9,10 +9,15 @@ name: Test gate
 # carried no test signal at all. That matters here because merges are gated on
 # the check verdict.
 #
-# It runs scripts/run-all-gates.py, the canonical runner: every suite in its
-# own subprocess with the correct cwd and a cleaned env, one scoreboard, exit 0
-# iff every selected gate passed. Test-level skips fail unless the runner has an
-# exact allowlist, and skipped tests never satisfy executed-count floors.
+# It runs scripts/run-all-gates.py, the canonical runner: every suite that
+# actually executes runs in its own subprocess with the correct cwd and a
+# cleaned env, and one scoreboard reports them all. An environment-gated suite
+# never gets that far: run_suite() returns SKIP on the db probe or the opt-in
+# env check, before any process is spawned or any suite log is opened. Exit is
+# 0 iff every NON-SKIPPED gate passed, so a SKIP row means the suite did not
+# run, never that it passed. Test-level skips inside a suite that DID run fail
+# unless the runner has an exact allowlist, and skipped tests never satisfy
+# executed-count floors.
 #
 # Deliberately hermetic -- NO secret, AWS credential, or DATABASE_URL is
 # required or provided:
