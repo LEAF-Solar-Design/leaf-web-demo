@@ -316,8 +316,15 @@ def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_active_t
     backend = _backend(str(tenant_id))
     try:
         write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
-        m = store.load_manifest(backend, str(tenant_id), drawing_id)
     except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
+                              retryable=False, status_code=404)
+    try:
+        m = store.load_manifest(backend, str(tenant_id), drawing_id)
+    except KeyError as exc:
+        # Missing is a caller-visible 404. A malformed manifest raises a
+        # ValueError subclass and must remain a server fault instead of being
+        # mislabeled as an unavailable drawing.
         return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                               retryable=False, status_code=404)
     view = {
@@ -521,12 +528,18 @@ def release_checkout_route(drawing_id: str,
     backend = _backend(str(tenant_id))
     try:
         write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+    except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
+                              retryable=False, status_code=404)
+    try:
         holder, fence = _lock_authorization(drawing_id, tenant_id, backend,
                                             x_checkout_capability)
     except (checkout_capability.CapabilityRejected,
             checkout_capability.CapabilityUnavailable) as exc:
         return _denied(exc)
-    except (KeyError, ValueError) as exc:
+    except KeyError as exc:
+        # Do not catch ValueError here. JSONDecodeError inherits from it, and
+        # damaged storage is a server fault rather than a missing drawing.
         return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                               retryable=False, status_code=404)
 
