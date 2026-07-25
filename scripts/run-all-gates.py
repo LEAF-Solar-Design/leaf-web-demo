@@ -234,7 +234,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave2.py"), 6,
               allowed_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-wave3", "server tests/test_wave3.py", "pytest", SERVER,
-              _py_pytest("tests/test_wave3.py"), 13,
+              _py_pytest("tests/test_wave3.py"), 18,
               allowed_skip_reasons=(
                   r"platform DB unreachable: .+",
                   r"tenant tool repo absent at .+ \(set LEAF_TENANT_REPO_SRC to one\)",
