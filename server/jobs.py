@@ -75,6 +75,9 @@ REAPER_INTERVAL_S = float(os.environ.get("REAPER_INTERVAL_S", "10"))
 MAX_WORKERS = int(os.environ.get("JOB_WORKERS", "4"))
 
 
+REAPER_LOG_THROTTLE_DEFAULT_S = 300.0
+
+
 def reaper_log_throttle_s() -> float:
     """Quiet window between reminders about a STILL-failing reaper sweep.
 
@@ -83,8 +86,20 @@ def reaper_log_throttle_s() -> float:
     awslogs driver, all describing one repeating fault. The throttle bounds the
     VOLUME, never the SIGNAL -- see _note_reaper_failure for what always escapes
     it. 0 disables the quiet window (every failure logs).
+
+    An unparseable value falls back to the default instead of raising. The caller
+    swallows exceptions to protect the daemon thread, so a raise here would be
+    absorbed into "no reminder logged" -- a typo in one env var would silently
+    turn the reminders off, which is the failure mode this whole change exists to
+    prevent.
     """
-    return max(0.0, float(os.environ.get("REAPER_LOG_THROTTLE_S", "300")))
+    raw = os.environ.get("REAPER_LOG_THROTTLE_S")
+    if raw is None or raw.strip() == "":
+        return REAPER_LOG_THROTTLE_DEFAULT_S
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return REAPER_LOG_THROTTLE_DEFAULT_S
 
 
 def max_attempts() -> int:
@@ -1395,56 +1410,82 @@ def orphan_lease_records(tenant_id: Optional[str] = None) -> List[Dict[str, Any]
 
 
 # Failure-log throttle bookkeeping for the reaper sweep. Process-local: a fresh
-# process starts silent and reports its first failure in full.
+# process starts silent and reports its first failure in full. One Uvicorn worker
+# runs per container, so separate ECS tasks keep separate streaks.
 _reaper_log_lock = threading.Lock()
 _reaper_failure_state: Dict[str, Any] = {
-    "consecutive": 0,        # failures since the last successful sweep
-    "exc_type": None,        # qualified type name of the current streak
+    "consecutive": 0,        # failures since the last successful sweep, ALL classes
+    "seen_types": set(),     # every fault class already reported during this streak
+    "last_type": None,       # most recent fault class, for the recovery line
     "last_logged_at": None,  # time.monotonic() stamp of the last emitted line
 }
+
+
+def _exc_key(exc: BaseException) -> str:
+    """Identify a fault CLASS unambiguously.
+
+    `__qualname__` alone collides: `package_a.Error` and `package_b.Error` both
+    render as `Error`, so a genuine change of fault class would look like a
+    repeat and be throttled away. Qualifying by module makes distinct classes
+    distinct.
+    """
+    cls = type(exc)
+    return f"{getattr(cls, '__module__', '?')}.{cls.__qualname__}"
 
 
 def _reset_reaper_failure_state() -> None:
     """Restore fresh-process throttle bookkeeping (used by tests)."""
     with _reaper_log_lock:
-        _reaper_failure_state.update(consecutive=0, exc_type=None, last_logged_at=None)
+        _reaper_failure_state.update(
+            consecutive=0, seen_types=set(), last_type=None, last_logged_at=None)
 
 
 def _note_reaper_failure(exc: BaseException) -> None:
     """Report a failed sweep at a throttled cadence.
 
-    Throttling volume must not cost an operator information, so two things always
-    escape the quiet window: the FIRST failure of a streak and any CHANGE of
-    exception type (a new fault class is new information, and silently folding it
-    into a running streak would hide it behind the previous one). Everything else
-    collapses into one terse reminder per reaper_log_throttle_s carrying the
-    running count, so the fault stays visible without one traceback per interval.
+    Throttling volume must not cost an operator information, so the FIRST sighting
+    of each distinct fault class in a streak always logs in full: a new class is
+    new information, and folding it into a running streak would hide it behind the
+    previous one. Everything else collapses into one terse reminder per
+    reaper_log_throttle_s carrying the running count.
+
+    "First sighting of each class", not "any change of class". Keying on *change*
+    let two alternating classes bypass the throttle completely -- A, B, A, B logs
+    a full traceback every single interval, which is the exact flood this exists
+    to stop. A return to an already-reported class is not new information, so it
+    goes through the quiet window like any other repeat.
+
+    `consecutive` counts EVERY failure since the last successful sweep regardless
+    of class, so the number an operator reads is the true length of the outage.
 
     NEVER raises: this runs on the daemon's failure path, so a fault in the
     bookkeeping would kill the very thread the swallow exists to protect.
     """
     try:
-        exc_type = type(exc).__qualname__
+        exc_key = _exc_key(exc)
         now = time.monotonic()
         with _reaper_log_lock:
             state = _reaper_failure_state
-            if state["consecutive"] == 0 or state["exc_type"] != exc_type:
-                state.update(consecutive=1, exc_type=exc_type, last_logged_at=now)
-                verbose, count = True, 1
+            state["consecutive"] += 1
+            count = state["consecutive"]
+            state["last_type"] = exc_key
+            if exc_key not in state["seen_types"]:
+                state["seen_types"].add(exc_key)
+                state["last_logged_at"] = now
+                verbose = True
             else:
-                state["consecutive"] += 1
-                count = state["consecutive"]
                 if now - state["last_logged_at"] < reaper_log_throttle_s():
                     return  # inside the quiet window: counted, not logged
                 state["last_logged_at"] = now
                 verbose = False
         if verbose:
-            # full traceback: the first sighting of this fault class
-            logger.exception("job-reaper sweep failed: %s", exc)
+            # full traceback: the first sighting of this fault class in this streak
+            logger.exception(
+                "job-reaper sweep failed (%d consecutive): %s", count, exc)
         else:
             logger.error(
                 "job-reaper sweep still failing: %d consecutive failures, last %s: %s",
-                count, exc_type, exc)
+                count, exc_key, exc)
     except Exception:  # noqa: BLE001 - logging must never kill the reaper
         pass
 
@@ -1455,6 +1496,9 @@ def _note_reaper_success() -> None:
     Recovery is the other half of a throttled signal: without it, a streak that
     stops reporting is indistinguishable from a fault that quietly resolved. The
     reset also re-arms the full-traceback path for the next failure.
+
+    The count reported is the whole streak across every fault class, so a mixed
+    outage does not shrink to just its final class.
     """
     try:
         with _reaper_log_lock:
@@ -1462,10 +1506,18 @@ def _note_reaper_success() -> None:
             count = state["consecutive"]
             if not count:
                 return  # the quiet, overwhelmingly common path
-            exc_type = state["exc_type"]
-            state.update(consecutive=0, exc_type=None, last_logged_at=None)
-        logger.warning(
-            "job-reaper sweep recovered after %d consecutive %s failures", count, exc_type)
+            last_type = state["last_type"]
+            classes = len(state["seen_types"])
+            state.update(
+                consecutive=0, seen_types=set(), last_type=None, last_logged_at=None)
+        if classes > 1:
+            logger.warning(
+                "job-reaper sweep recovered after %d consecutive failures across %d "
+                "fault classes, last %s", count, classes, last_type)
+        else:
+            logger.warning(
+                "job-reaper sweep recovered after %d consecutive %s failures",
+                count, last_type)
     except Exception:  # noqa: BLE001 - logging must never kill the reaper
         pass
 

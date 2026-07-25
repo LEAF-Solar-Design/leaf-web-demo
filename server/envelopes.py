@@ -246,11 +246,20 @@ def install_error_handlers(app) -> None:
         # exception content. Nothing else about what the client sees widens.
         #
         # Contract-legal WITHOUT a new field (contract/CONTRACT.md §10 +
-        # server/envelope_schema.json): the frozen surface is the error object's
-        # KEYS {error_code, message, retryable} and the error_code ENUM. `message`
-        # is an unconstrained string, so carrying the ID inside it leaves the
-        # envelope shape byte-identical and needs no additive field.
-        error_id = secrets.token_hex(4)
+        # server/envelope_schema.json): §10 REQUIRES {error_code, message,
+        # retryable} and freezes the error_code ENUM, while `message` is declared
+        # only as `{"type": "string"}` with no further constraint. Carrying the ID
+        # inside it therefore leaves the envelope's key set byte-identical and
+        # needs no additive field. (§10 permits additive extension -- the schema
+        # has no `additionalProperties: false` -- so a new field would also have
+        # been legal; it is simply not needed, and not widening the shape is the
+        # cheaper change for every existing consumer.)
+        #
+        # 8 bytes, not 4. At 32 bits the collision probability passes 1% within
+        # ~10k IDs, and CloudWatch pools logs across every task and lifetime, so a
+        # 4-byte token could point an operator at two different tracebacks. 64
+        # bits keeps the join key unique at any volume this service will see.
+        error_id = secrets.token_hex(8)
         # Log the FULL detail (type, message, traceback) server-side...
         logger.exception(
             "unhandled exception [error_id=%s] serving %s %s: %s",

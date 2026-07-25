@@ -33,11 +33,13 @@ Env: `APS_LIVE` (default 0 = mock), `JOBS_DB`, `JOB_MAX_S` (540),
 `APS_CRED` (broker only), `LEAF_AUTHOR_LLM` (default 0).
 
 `REAPER_LOG_THROTTLE_S` is the quiet window between reminders about a
-still-failing orphan-reaper sweep. The first failure of a streak and every
-change of exception type always log in full; repeats collapse into one terse
-counted line per window, and recovery is announced once. Only the log VOLUME is
+still-failing orphan-reaper sweep. The first sighting of each distinct fault
+class in a streak logs in full; repeats — including a return to a class already
+seen in that streak — collapse into one terse counted line per window, and
+recovery is announced once with the whole streak length. Only the log VOLUME is
 throttled — a failing sweep is still swallowed and still retried every
-`REAPER_INTERVAL_S`. Set to 0 to log every failure.
+`REAPER_INTERVAL_S`. Set to 0 to log every failure; an unparseable value falls
+back to the 300s default rather than raising.
 
 ## Endpoints
 

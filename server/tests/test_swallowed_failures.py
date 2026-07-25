@@ -156,8 +156,8 @@ def test_reaper_loop_runs_the_sweep_and_lets_baseexception_escape(monkeypatch):
 # The fix in (1) traded a silent failure for a loud one: at REAPER_INTERVAL_S=10
 # a permanently failing sweep shipped 6 full tracebacks a minute, 8,640 a day per
 # process, to CloudWatch. These tests pin the throttle that bounds the VOLUME and
-# the three things that must still escape it -- first failure, new exception
-# type, recovery -- plus the control-flow guarantee that survives both.
+# the three things that must still escape it -- first sighting of each fault
+# class, and recovery -- plus the control-flow guarantee that survives both.
 # --------------------------------------------------------------------------- #
 def _warnings(caplog) -> list:
     return [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -165,6 +165,36 @@ def _warnings(caplog) -> list:
 
 def _always_boom() -> int:
     raise RuntimeError(_SWEEP_BOOM)
+
+
+def test_the_default_quiet_window_is_the_documented_five_minutes(monkeypatch):
+    """Pin the SHIPPED default, and that a bad value cannot silently disable it.
+
+    Other tests assert "no second line appeared inside the window", which would
+    pass for any default longer than the test itself. This one names the number,
+    so lowering it to something that still floods CloudWatch fails here.
+
+    The malformed cases matter because the caller swallows exceptions to protect
+    the daemon: if this raised, the typo would turn the reminders off and look
+    exactly like a healthy quiet window.
+    """
+    monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+    assert jobs.reaper_log_throttle_s() == 300.0
+    assert jobs.REAPER_LOG_THROTTLE_DEFAULT_S == 300.0
+
+    monkeypatch.setenv("REAPER_LOG_THROTTLE_S", "45.5")
+    assert jobs.reaper_log_throttle_s() == 45.5
+
+    monkeypatch.setenv("REAPER_LOG_THROTTLE_S", "0")
+    assert jobs.reaper_log_throttle_s() == 0.0
+
+    monkeypatch.setenv("REAPER_LOG_THROTTLE_S", "-10")
+    assert jobs.reaper_log_throttle_s() == 0.0, "negative clamps, it does not go backwards"
+
+    for junk in ("not-a-number", "", "   "):
+        monkeypatch.setenv("REAPER_LOG_THROTTLE_S", junk)
+        assert jobs.reaper_log_throttle_s() == 300.0, (
+            f"{junk!r} must fall back to the default, not raise into the swallow")
 
 
 def test_a_permanently_failing_sweep_logs_once_not_once_per_interval(caplog, monkeypatch):
@@ -238,6 +268,93 @@ def test_the_throttled_reminder_is_terse_and_carries_the_running_count(caplog, m
     assert "4 consecutive" in counted[2]
     # the fault class stays legible even without the traceback
     assert all("RuntimeError" in m for m in counted)
+
+
+def test_two_alternating_fault_classes_do_not_bypass_the_throttle(caplog, monkeypatch):
+    """A, B, A, B must not log a full traceback every single interval.
+
+    Keying the escape on "the class CHANGED" rather than "this class is NEW to
+    the streak" reopens the entire bug: two faults that alternate would make
+    every sweep look like new information and restore the 360-tracebacks-an-hour
+    flood the throttle exists to stop. Each class earns exactly one full sighting
+    per streak; coming back around is a repeat.
+    """
+    monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+    tick = {"n": 0}
+
+    def _alternating() -> int:
+        tick["n"] += 1
+        raise (RuntimeError if tick["n"] % 2 else ValueError)("alternating-fault")
+
+    monkeypatch.setattr(jobs, "_reap_orphans_once", _alternating)
+
+    with caplog.at_level(logging.ERROR, logger=jobs.logger.name):
+        for _ in range(20):
+            jobs._reaper_sweep_once()
+
+    assert tick["n"] == 20, "every interval still ran its sweep"
+    records = _warnings(caplog)
+    assert len(records) == 2, (
+        f"20 sweeps alternating between two fault classes emitted {len(records)} "
+        "lines; each class must log once, then be throttled like any repeat")
+
+
+def test_the_streak_count_spans_every_fault_class(caplog, monkeypatch):
+    """`consecutive` is failures since the last SUCCESS, not since the last class.
+
+    Resetting the count on a class change understates the outage: a four-sweep
+    failure streak that ended on a different class would report "1 consecutive"
+    on recovery, telling an operator the opposite of what happened.
+    """
+    monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+
+    def _runtime() -> int:
+        raise RuntimeError("class-a")
+
+    def _value() -> int:
+        raise ValueError("class-b")
+
+    with caplog.at_level(logging.WARNING, logger=jobs.logger.name):
+        for probe in (_runtime, _value, _runtime, _value):
+            monkeypatch.setattr(jobs, "_reap_orphans_once", probe)
+            jobs._reaper_sweep_once()
+
+        monkeypatch.setattr(jobs, "_reap_orphans_once", lambda: 0)
+        jobs._reaper_sweep_once()
+
+    recovery = _warnings(caplog)[-1].getMessage()
+    assert "4 consecutive" in recovery, (
+        f"recovery reported the wrong streak length: {recovery!r}")
+    assert "2 fault classes" in recovery, (
+        "a mixed outage must say so rather than name only its last class")
+
+
+def test_same_qualname_in_different_modules_are_distinct_fault_classes(
+        caplog, monkeypatch):
+    """`__qualname__` alone collides, and a collision SUPPRESSES a real signal.
+
+    `package_a.Error` and `package_b.Error` both render as `Error`. Keyed on that
+    alone, a genuine change of fault class looks like a repeat and gets throttled
+    away -- silently, which is the failure mode this module exists to prevent.
+    """
+    monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+
+    first = type("Error", (RuntimeError,), {"__module__": "package_a"})
+    second = type("Error", (RuntimeError,), {"__module__": "package_b"})
+    assert first.__qualname__ == second.__qualname__, "the collision under test"
+
+    with caplog.at_level(logging.ERROR, logger=jobs.logger.name):
+        for cls in (first, second):
+            def _boom(cls=cls) -> int:
+                raise cls("colliding-qualname")
+            monkeypatch.setattr(jobs, "_reap_orphans_once", _boom)
+            jobs._reaper_sweep_once()
+
+    records = _warnings(caplog)
+    assert len(records) == 2, (
+        "the second fault class was folded into the first because they share a "
+        "__qualname__; the key must be module-qualified")
+    assert all(r.exc_info is not None for r in records)
 
 
 def test_a_new_exception_type_always_logs_in_full(caplog, monkeypatch):
@@ -450,11 +567,17 @@ def test_the_correlation_id_in_the_body_matches_the_one_in_the_log(caplog):
 
 
 def test_each_unhandled_exception_gets_a_fresh_correlation_id():
-    """Per-exception, not per-process: two 500s must be distinguishable."""
-    first = _error_id_from(_client().get("/boom").json())
-    second = _error_id_from(_client().get("/boom").json())
+    """Per-EXCEPTION, not per-process and not per-app.
 
-    assert first != second
+    Both requests go through ONE client deliberately. Building a fresh app per
+    request would make this pass even if the ID were generated once per app and
+    reused for every 500 it served -- which is precisely the bug the test is
+    supposed to exclude. Same app, same route, same exception: still different.
+    """
+    client = _client()
+    ids = [_error_id_from(client.get("/boom").json()) for _ in range(5)]
+
+    assert len(set(ids)) == 5, f"ids repeated within one app: {ids}"
 
 
 def test_the_correlation_id_is_opaque_and_cannot_carry_content():
@@ -463,11 +586,15 @@ def test_the_correlation_id_is_opaque_and_cannot_carry_content():
     Generated fresh rather than derived from the request or the exception, and
     constrained to hex, so there is no channel through which exception text, a
     filesystem path, or credential material could ride along inside it.
+
+    16 hex chars = 64 bits. 32 bits collides at ~1% within 10k ids, and
+    CloudWatch pools logs across every task and lifetime, so a short token can
+    point an operator at the wrong traceback.
     """
     response = _client().get("/boom")
     error_id = _error_id_from(response.json())
 
-    assert re.fullmatch(r"[0-9a-f]{8}", error_id), f"unexpected id shape: {error_id!r}"
+    assert re.fullmatch(r"[0-9a-f]{16}", error_id), f"unexpected id shape: {error_id!r}"
     # the id is the ONLY thing added: the exception text is still withheld
     assert _ROUTE_BOOM not in response.text
 
@@ -475,11 +602,15 @@ def test_the_correlation_id_is_opaque_and_cannot_carry_content():
 def test_the_id_bearing_envelope_is_still_contract_legal():
     """Mechanical proof the ID needed no additive field.
 
-    contract/CONTRACT.md §10 freezes the error object's KEYS and the error_code
-    ENUM -- `message` is an unconstrained string, so carrying the id inside it
-    leaves the shape byte-identical. Checked against the machine-readable schema
-    rather than argued, and asserted key-by-key so a future widening of what the
-    client sees fails here.
+    contract/CONTRACT.md §10 REQUIRES {error_code, message, retryable} and freezes
+    the error_code ENUM; `message` is declared only as `{"type": "string"}`, so
+    carrying the id inside it leaves the key set byte-identical.
+
+    The schema check alone is necessary but NOT sufficient: envelope_schema.json
+    has no `additionalProperties: false`, and §10 explicitly permits additive
+    extension, so validation would accept extra keys. The key-by-key assertions
+    below are what actually pin the surface, so a future widening of what the
+    client sees fails here rather than passing validation quietly.
     """
     import jsonschema  # lazy: the local platform/ package shadows what it imports
 
