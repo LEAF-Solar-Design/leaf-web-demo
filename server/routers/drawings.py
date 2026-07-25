@@ -69,7 +69,7 @@ def _backend(tenant_id: str = ""):
 
 @router.get("/api/drawings/{drawing_id}/intake")
 def get_intake(drawing_id: str, version: str = "head",
-               tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+               tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     ver: Any = version
     if isinstance(version, str) and version not in ("head", "latest") and version.lstrip("-").isdigit():
         ver = int(version)
@@ -83,7 +83,7 @@ def get_intake(drawing_id: str, version: str = "head",
 
 @router.get("/api/drawings/{drawing_id}/summary")
 def get_summary(drawing_id: str, version: str = "head",
-                tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+                tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     """Return a bounded drawing digest for assistant context.
 
     The intake endpoint remains the lossless geometry surface. This route keeps
@@ -151,7 +151,7 @@ def get_summary(drawing_id: str, version: str = "head",
 
 
 @router.post("/api/drawings/{drawing_id}/undo")
-def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant),
+def undo(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant),
          x_checkout_capability: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """Step head back one version.
 
@@ -193,7 +193,7 @@ def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant),
 
 
 @router.post("/api/drawings/{drawing_id}/redo")
-def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant),
+def redo(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant),
          x_checkout_capability: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """Step head forward one version. Same single-writer gate as `undo` — the two
     are one surface, and a check on only one of them is no check at all."""
@@ -301,7 +301,7 @@ def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.get("/api/drawings/{drawing_id}/versions")
-def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     """Full version-history chain straight from the store manifest — the read the
     UI's version-chain popover needs (undo/redo only stepped head one hop).
 
@@ -375,7 +375,7 @@ class CheckoutRequest(BaseModel):
 
 @router.post("/api/drawings/{drawing_id}/checkout")
 def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = None,
-                           tenant_id: str = Depends(deps.require_tenant),
+                           tenant_id: str = Depends(deps.require_active_tenant),
                            x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
     """Take the single-writer lock, and mint the capability that proves it.
 
@@ -501,7 +501,7 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
 
 @router.delete("/api/drawings/{drawing_id}/checkout")
 def release_checkout_route(drawing_id: str,
-                           tenant_id: str = Depends(deps.require_tenant),
+                           tenant_id: str = Depends(deps.require_active_tenant),
                            x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
     """Release the single-writer lock. Only a caller that can PROVE it holds the
     active lease may release it — `X-Checkout-Capability`, from the acquire

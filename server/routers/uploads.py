@@ -102,30 +102,7 @@ def _resolve_upload_read_identity(tenant: Any) -> Any:
     Guest sessions have no platform subject and auth-off callers are plain
     strings; both keep their existing identity unchanged.
     """
-    if not deps.auth_live() or not isinstance(tenant, deps.TenantContext):
-        return tenant
-    if tenant.tier == "guest" and guest_uploads.is_guest_tenant(str(tenant)):
-        return tenant
-    if tenant.subject is None and tenant.org_id is None:
-        # Verified broker/harness back-edge identities are server-owned tenant
-        # contexts without an Auth0 subject. Keep that existing trust boundary
-        # intact instead of trying to resolve it through the account binding
-        # table. A JWT-backed account without a subject still fails closed
-        # below because its claimed org is present.
-        return tenant
-
-    import tenancy  # noqa: PLC0415 - lazy, mirrors upload creation
-
-    platform_tenant_id, platform_tier = (
-        deps.resolve_active_platform_tenant_authority(tenant.subject))
-    ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
-    return deps.TenantContext(
-        platform_tenant_id,
-        org_id=platform_tenant_id,
-        tier=platform_tier,
-        workspace=ws.workspace_dir if ws is not None else None,
-        subject=tenant.subject,
-    )
+    return deps.resolve_active_tenant_context(tenant)
 
 
 @router.post("/api/drawings/upload")

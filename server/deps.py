@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import Header, Request
+from fastapi import Depends, Header, Request
 
 # --------------------------------------------------------------------------- #
 # paths + sibling-lane import wiring
@@ -596,6 +596,39 @@ def require_tenant(
         workspace=ws.workspace_dir if ws is not None else None,
         subject=payload.get("sub") if isinstance(payload.get("sub"), str) else None,
     )
+
+
+def resolve_active_tenant_context(tenant: Any) -> Any:
+    """Replace live account claims with the active server-owned binding.
+
+    JWT tenant and org claims can outlive an account move. Account-owned
+    resources are written under the active platform binding, so every later
+    resource read or mutation must resolve that same binding. Guest sessions,
+    auth-off callers, and trusted broker back-edges keep their existing
+    identities.
+    """
+    if not auth_live() or not isinstance(tenant, TenantContext):
+        return tenant
+    if tenant.subject is None and tenant.org_id is None:
+        return tenant
+
+    import tenancy  # noqa: PLC0415 - lazy, mirrors require_tenant
+
+    platform_tenant_id, platform_tier = (
+        resolve_active_platform_tenant_authority(tenant.subject))
+    ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
+    return TenantContext(
+        platform_tenant_id,
+        org_id=platform_tenant_id,
+        tier=platform_tier,
+        workspace=ws.workspace_dir if ws is not None else None,
+        subject=tenant.subject,
+    )
+
+
+def require_active_tenant(tenant: Any = Depends(require_tenant)) -> Any:
+    """FastAPI dependency for resources stored under platform authority."""
+    return resolve_active_tenant_context(tenant)
 
 
 def tenant_echo(body: Dict[str, Any], tenant: Any) -> Dict[str, Any]:

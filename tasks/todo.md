@@ -162,3 +162,15 @@ Risks:
 - A tenant must not select or remove another tenant's account.
 - Removing the active account must select a deterministic survivor or report no active grant.
 - The existing v1 record and single-account API fields must remain compatible during rollout.
+
+# Active tenant authority for drawing routes
+
+- [x] Reproduce the stale JWT tenant claim selecting the demo bootstrap.
+- [x] Resolve live account drawing routes through the active platform binding.
+- [x] Prove account intake serves the uploaded DXF and creates no stale-tenant manifest.
+- [x] Run the focused and full backend gates.
+
+Risks:
+
+- Guest sessions and trusted broker back-edges must keep their existing tenant identity.
+- All drawing reads and mutations must use one tenant key.
