@@ -270,12 +270,12 @@ def test_1_run_returns_202_fast(stack):
         of execution time; load slows both measurements, so common-mode noise
         cancels and the difference stays small.
 
-    Against the 1.72s worst noise measured above, the absolute bound sits 5.8x
-    clear and the delta bound 2.9x, and each of the two fails on its own against
-    a blocking 202 (which costs ~`sleep_s`).
-    The third corroborates rather than decides: the control is subtracted
-    one-sidedly, so a control that was itself slow shrinks `delta` and the bound
-    can pass on a blocking implementation the first two still catch.
+    Against the 1.72s worst noise measured above, `elapsed < sleep_s` sits 5.8x
+    clear and the delta bound 2.9x. Only the first two bounds DECIDE: a blocking
+    202 costs ~`sleep_s`, which leaves the job terminal and pushes `elapsed` past
+    its threshold, and either one fails on its own. The delta only corroborates,
+    because the control is subtracted one-sidedly -- a control that was itself
+    slow shrinks `delta` and lets it pass on the same blocking implementation.
 
     The test DRAINS its own jobs in a `finally` before returning. A `sleep_s` job
     left executing is exactly the leak this file was flaking on: its ledger line
@@ -296,12 +296,12 @@ def test_1_run_returns_202_fast(stack):
     subject_payload = confirmed_requests_payload(
         stack["app"], "count-by-layer", {"_qa_sleep_s": sleep_s}, "rooftop_demo")
 
-    # The `try` opens BEFORE the first POST, not after the last one. The server
-    # can accept a job and start executing it and THEN have the response fail on
-    # the way back (a reset connection, a read timeout), so a POST that raises
-    # has still potentially started a `sleep_s` job. Opening the guard after the
-    # POSTs would leak exactly that job. `finally` reads whatever responses did
-    # arrive, so both names are bound up front.
+    # The `try` opens BEFORE the first POST so that a failure between the two
+    # POSTs still drains the first job. It does NOT close the case where a POST
+    # itself raises after the server accepted the work: the id only exists in the
+    # response that never arrived, and /api/jobs is a gated surface this test has
+    # no token for, so there is nothing to drain BY. `finally` reports that
+    # instead of passing over it -- see the `resp is None` branch.
     control = r = None
     try:
         t0 = time.perf_counter()
@@ -344,7 +344,15 @@ def test_1_run_returns_202_fast(stack):
         drain_errors = []
         for label, resp in (("control", control), ("subject", r)):
             if resp is None:
-                continue  # this POST raised: no response, so no id to drain by
+                # The POST never returned a response. The server may still have
+                # accepted the job, and its id was only ever in the reply that
+                # did not arrive, so it cannot be drained. Say so: an unbounded
+                # job may be running, and no later test is isolated from it.
+                if label == "subject":
+                    drain_errors.append(
+                        "subject: the POST did not return, so a job may have been "
+                        "accepted with an id this test never saw and cannot drain")
+                continue
             try:
                 body_json = resp.json()
                 job_id = body_json.get("job_id") if isinstance(body_json, dict) else None
@@ -488,39 +496,61 @@ def test_5_tenant_kill_switch(stack):
 # --------------------------------------------------------------------------- #
 # 6. exactly one ledger JSONL line per /broker/run, with attribution fields
 # --------------------------------------------------------------------------- #
-def _ledger_lines(stack):
+def _ledger_records(stack) -> list[str]:
+    """The COMPLETE ledger records, in file order. An in-flight tail is dropped.
+
+    Completeness is decided by the trailing newline, which is what makes the
+    split between transient and persistent exact and needs no timing window.
+    broker.py `_ledger_append` writes `line + "\\n"` in ONE call under
+    `_ledger_lock`, and appends land at EOF, so an append caught mid-write is
+    always the unterminated LAST fragment and never anything before it.
+
+    Everything earlier is finished bytes. If a broker died mid-write and a later
+    append ran, the survivor is newline-terminated and will NOT parse -- so it is
+    reported rather than skipped. Only the final unterminated fragment is
+    ambiguous, and it is the one thing this drops.
+    """
     if not stack["ledger"].exists():
         return []
-    return [l for l in stack["ledger"].read_text(encoding="utf-8").splitlines() if l.strip()]
+    raw = stack["ledger"].read_text(encoding="utf-8")
+    parts = raw.split("\n")
+    parts.pop()  # after the last "\n": "" when terminated, else the in-flight tail
+    return [p for p in parts if p.strip()]
 
 
 def _ledger_entries_for(stack, tenants) -> list[dict]:
-    """This test's ledger lines, in file order. Unparseable lines are SKIPPED.
+    """This test's ledger entries, in file order. A broken record FAILS here.
 
-    That skip is deliberate and is not a coverage hole. Three rounds of review
-    pushed for a guard here -- a substring search, then a tenant_id regex, then
-    a durability settle -- and each one was worse than the gap it closed: the
-    first two misattributed other tenants' torn lines, and the third made this
-    test fail on any writer in the suite, which is the exact cross-test coupling
-    this whole change exists to remove.
+    Three earlier attempts tried to decide whether a broken line was OURS: a
+    substring search (claimed `ledger-t10`'s torn line as `ledger-t1`'s), a
+    tenant_id regex (picked the wrong occurrence, mangled escaped quotes), and a
+    timed settle (made this test fail on any writer in the suite, the exact
+    cross-test coupling this change exists to remove). All three asked the wrong
+    question. A broken record cannot be attributed, because the field that says
+    who it belongs to is the field that may be broken.
 
-    The gap is not reachable. broker.py `_ledger_append` builds the line with
-    `json.dumps(..., allow_nan=False)` and writes `line + "\\n"` in ONE call
-    under `_ledger_lock`, so a value that cannot serialize raises BEFORE any
-    write. The broker cannot leave an invalid line behind; an unparseable line
-    can only be an append read mid-write, which is transient by construction.
+    The question that IS answerable is whether a record is finished, and
+    `_ledger_records` answers it from the trailing newline rather than from a
+    timer. So no attribution and no window: every COMPLETE record must be valid
+    JSON, whoever wrote it, and only the unterminated tail is excused.
 
-    And a corrupt line among OUR OWN is already caught, by the count rather than
-    by inspection: it would not parse, so it would not be counted, so
-    `len(mine) == n_runs` fails. Nothing here needs to identify it to fail on it.
+    That is deliberately not limited to this test's tenants. The count below
+    catches a broken record among our OWN three (it would not parse, would not
+    be counted, and `len(mine) == n_runs` would fail), but the count cannot see
+    a broken EXTRA record, and it cannot see one belonging to anyone else. This
+    can. What neither catches is corruption that still parses -- a flipped byte
+    in a field nothing here asserts -- which is a real limit, not a claim.
     """
     wanted = set(tenants)
     out = []
-    for line in _ledger_lines(stack):
+    for line in _ledger_records(stack):
         try:
             entry = json.loads(line)
-        except ValueError:
-            continue  # an append caught mid-write; see the docstring
+        except ValueError as exc:
+            raise AssertionError(
+                f"a COMPLETE ledger record is not valid JSON, so it is durable "
+                f"corruption and not an append caught mid-write ({exc}): {line!r}"
+            ) from exc
         if entry.get("tenant_id") in wanted:
             out.append(entry)
     return out
@@ -545,10 +575,8 @@ def test_6_ledger_attribution(stack):
     unrelated concurrent work. What is asserted is the full expected SEQUENCE,
     not a per-tenant tally: the three calls are serial and `wait=1`, and the
     broker appends inside /broker/run's own `finally`, so each 200 means that
-    call's line is already on disk -- no waiting for OUR OWN lines to show up.
-    (The helper does settle briefly, but only when it sees a line that will not
-    parse, and only to tell a torn append from a corrupt one.) That holds in
-    LEGACY store mode only -- under LEAF_BROKER_STORE=postgres the run completes
+    call's line is already on disk -- nothing here waits or polls for it. That
+    holds in LEGACY store mode only -- under LEAF_BROKER_STORE=postgres the run completes
     into the shared authority and this file is never written -- which is why the
     `stack` fixture pins the mode rather than inheriting it. Their relative
     order is therefore fixed, and checking it is what catches two runs whose
