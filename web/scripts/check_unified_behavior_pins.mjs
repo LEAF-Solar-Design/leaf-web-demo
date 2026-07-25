@@ -27,8 +27,9 @@ assert(
 )
 assert(
   jobs.includes("window.addEventListener('pagehide', closeInflight)") &&
-    jobs.includes('servicesRef.current.closeJobBeacon(pointer.job_id)'),
-  'page hide must retain the in-flight job close beacon',
+    jobs.includes('servicesRef.current.closeJobBeacon(pointer.job_id)') &&
+    jobs.includes('pointer.job_id === closedJobId'),
+  'page hide must retain one deduplicated in-flight job close beacon',
 )
 assert(
   app.includes("rTarget && rTarget !== 'result'") &&

@@ -52,6 +52,8 @@ Current additive progress:
   duplicate run through the unified surface.
 - [x] Prove Escape detaches the unified UI without sending the page-close reap
   beacon or stopping the durable job.
+- [x] Prove page hide sends one deduplicated close beacon and the real orphan
+  reaper fails the abandoned job once.
 
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls

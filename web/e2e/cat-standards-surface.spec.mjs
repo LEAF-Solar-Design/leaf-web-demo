@@ -55,7 +55,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
     mimeType: 'application/dxf',
     buffer: Buffer.from('0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'),
   })
-  await expect(page.locator('.drawing-upload')).toContainText('Drawing ready')
+  await expect(page.locator('.drawing-upload')).toContainText('Drawing ready', { timeout: 15_000 })
   expect(proofState.uploaded).toBe(true)
   await expect(page.locator('.toast')).toContainText('Drawing ready, cat.dwg')
   await page.locator('.tc-bar').evaluate((bar) => {

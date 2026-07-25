@@ -387,6 +387,11 @@ Progress:
   run. Escape now detaches only the UI, clears the pointer, emits no close reap
   beacon, and leaves the same durable job to complete exactly once. Actual page
   close still owns the separate close-beacon path.
+- The real page-hide gate now navigates away during a guarded slow job, observes
+  one close beacon, and verifies that the orphan reaper fails the abandoned job
+  once with the session-closed reason. The proof caught duplicate beacons from
+  `visibilitychange` plus `pagehide`; the shared controller now deduplicates them
+  by job id.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -468,8 +473,7 @@ Observed Wave 0 results:
   catalog run bound to the uploaded drawing and tenant. A separate live-auth
   guest walk also passes for signed guest upload, extraction, viewer seating,
   allowed version read, zero dispatch, and denied run. APS, Claude, Auth0 user
-  sign-in, PostgreSQL, page-close beacon behavior, and version mutation claims
-  remain open.
+  sign-in, PostgreSQL, and version mutation claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:

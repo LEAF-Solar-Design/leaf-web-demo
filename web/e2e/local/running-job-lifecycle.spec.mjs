@@ -145,3 +145,59 @@ test('Escape detaches from a real running job without closing or duplicating it'
     ],
   })
 })
+
+test('leaving the page sends the reap beacon and fails the abandoned job once', async ({ page, request }) => {
+  test.setTimeout(60_000)
+  await requireReady(request)
+  const jobId = await submitSlowJob(request, 20)
+  const closeRequests = []
+  page.on('request', (next) => {
+    const url = new URL(next.url())
+    if (next.method() === 'POST' && url.pathname === `/api/jobs/${jobId}/close`) closeRequests.push(next)
+  })
+
+  await openWithInflightPointer(page, jobId)
+  await expect(page.locator('.tc-running')).toBeVisible({ timeout: 10_000 })
+  await page.goto('about:blank')
+
+  await expect.poll(() => closeRequests.length, { timeout: 5_000 }).toBe(1)
+  let terminal = null
+  await expect.poll(async () => {
+    const response = await request.get(`${API_BASE}/api/jobs/${jobId}`, { headers: TENANT_HEADERS })
+    if (!response.ok()) return response.status()
+    terminal = await response.json()
+    return terminal.status
+  }, { timeout: 30_000 }).toBe('failed')
+  expect(terminal.error?.message).toContain('session closed')
+
+  const jobsResponse = await request.get(`${API_BASE}/api/jobs?limit=20`, { headers: TENANT_HEADERS })
+  expect(jobsResponse.ok()).toBe(true)
+  const jobs = (await jobsResponse.json()).jobs || []
+  expect(jobs.filter((job) => job.job_id === jobId)).toHaveLength(1)
+
+  writeProofReceipt(join(PROOF_DIR, 'page-close-beacon-receipt.json'), {
+    capability_ids: ['JB-01', 'JB-03'],
+    evidence_tier: 'local-e2e',
+    route: '/try',
+    runtime: 'real local Vite, FastAPI, broker, SQLite job store, worker, and orphan reaper with guarded QA latency',
+    api_endpoints: ['GET /api/tools', 'POST /api/run', `POST /api/jobs/${jobId}/close`, `GET /api/jobs/${jobId}`, 'GET /api/jobs'],
+    assertions: [
+      'navigating away emitted exactly one page-hide close beacon for the in-flight job',
+      'the orphan reaper changed the abandoned job to failed',
+      'the terminal error records that the owning session closed',
+      'the durable job ledger contains the job exactly once',
+    ],
+    result: {
+      verdict: 'pass',
+      job_id: jobId,
+      job_status: terminal.status,
+      error_code: terminal.error?.error_code || null,
+      close_request_count: closeRequests.length,
+      matching_job_records: jobs.filter((job) => job.job_id === jobId).length,
+    },
+    limitations: [
+      'The guarded local _qa_sleep_s hook holds the job open long enough for the orphan reaper.',
+      'APS_LIVE=0 substitutes the local engine for Autodesk APS.',
+    ],
+  })
+})

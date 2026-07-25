@@ -381,9 +381,12 @@ export default function useJobController({
 
   useEffect(() => {
     if (mock || typeof window === 'undefined' || typeof document === 'undefined') return undefined
+    let closedJobId = null
     const closeInflight = () => {
       const pointer = readInflightJob(storageRef.current)
-      if (pointer?.job_id) servicesRef.current.closeJobBeacon(pointer.job_id)
+      if (!pointer?.job_id || pointer.job_id === closedJobId) return
+      closedJobId = pointer.job_id
+      servicesRef.current.closeJobBeacon(pointer.job_id)
     }
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') closeInflight()
