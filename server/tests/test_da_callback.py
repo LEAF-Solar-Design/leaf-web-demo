@@ -285,7 +285,11 @@ def test_callback_completes_the_durable_job_and_poll_duplicate_is_a_noop(monkeyp
     job_id = jobs.submit_job("demo-tenant", tool, {}, "rooftop_demo", aps_live=True)
     assert jobs.claim_lease(job_id, "callback-worker") == 1
 
-    body = json.dumps({"job_id": job_id, "status": "success", "result": {"answer": 42}}).encode()
+    # `attempt` is REQUIRED on this route now: enforcing the attempt binding only
+    # when the field happened to be present was fail-open, because omitting it
+    # reopened the whole cross-attempt hole (round 12).
+    body = json.dumps({"job_id": job_id, "status": "success", "attempt": 1,
+                       "result": {"answer": 42}}).encode()
     timestamp = str(time.time())
     nonce = "nonce-complete"
     response = TestClient(broker.app).post(
@@ -325,3 +329,204 @@ def test_callback_primary_misconfiguration_fails_closed(monkeypatch, missing):
     with pytest.raises(broker.CallbackPrimaryConfigurationError, match=missing):
         broker._run_live_tool(da, "drawing.dwg", {"name": "tool"}, {})
     assert da.poll_calls == 0
+
+
+def test_a_stale_attempts_callback_cannot_complete_a_newer_attempt(monkeypatch, tmp_path):
+    """ROUND-10 FINDING. `_complete_callback_job` read the attempt off the JOB
+    RECORD and stamped it onto the provenance, discarding the attempt the adapter
+    had SIGNED. So a delayed attempt-1 envelope arriving after the lease was
+    reclaimed and attempt 2 started was relabelled `attempt: 2` and used to
+    complete attempt 2 — a receipt naming an attempt whose output it does not
+    describe, and a signature over `attempt: 1` that no longer matches the claim
+    the spine recorded.
+
+    The signed attempt now decides applicability, and a disagreement is refused.
+    """
+    import jobs
+
+    class InertExecutor:
+        def submit(self, *args, **kwargs):
+            return None
+
+    if jobs._conn is not None:
+        jobs._conn.close()
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    monkeypatch.setattr(jobs, "_executors", {"fast": InertExecutor(), "slow": InertExecutor()})
+    tool = {"name": "callback-tool", "engine_op": "count_by_layer",
+            "capabilities": ["drawing.read"]}
+    job_id = jobs.submit_job("demo-tenant", tool, {}, "rooftop_demo", aps_live=True)
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    # The lease is reclaimed and a second attempt starts, exactly as happens when
+    # attempt 1's lease expires: claim_lease's compare-and-set accepts a job whose
+    # `lease_expires_at <= now`, so a later clock is all it takes.
+    assert jobs.claim_lease(job_id, "worker-2", now=time.time() + 86_400) == 2
+    assert int(jobs.get_job(job_id)["attempt"]) == 2
+
+    def deliver(payload):
+        body = json.dumps(payload).encode()
+        timestamp = str(time.time())
+        nonce = f"nonce-{payload.get('attempt')}-{payload['status']}"
+        return TestClient(broker.app).post(
+            "/da/callback", content=body,
+            headers={"X-Leaf-Signature": _signed(body, timestamp, nonce),
+                     "X-Leaf-Timestamp": timestamp, "X-Leaf-Nonce": nonce},
+        )
+
+    # Attempt 1's late success envelope must NOT close attempt 2.
+    stale = deliver({"job_id": job_id, "status": "success", "attempt": 1,
+                     "workitem_id": "wi-attempt-1", "result": {"answer": 1}})
+    assert stale.status_code == 409, stale.text
+    assert jobs.get_job(job_id)["status"] != "complete", (
+        "a stale attempt's callback completed a newer attempt")
+
+    # The failure branch carried no attempt at all, so it had the same hole.
+    stale_failure = deliver({"job_id": job_id, "status": "failed", "attempt": 1,
+                             "workitem_id": "wi-attempt-1", "message": "nope"})
+    assert stale_failure.status_code == 409, stale_failure.text
+    assert jobs.get_job(job_id)["status"] != "failed"
+
+    # The CURRENT attempt's callback still completes it, and the receipt carries
+    # the signed attempt and WorkItem rather than dropping them.
+    current = deliver({"job_id": job_id, "status": "success", "attempt": 2,
+                       "workitem_id": "wi-attempt-2", "result": {"answer": 42}})
+    assert current.status_code == 200, current.text
+    completed = jobs.get_job(job_id)
+    assert completed["status"] == "complete"
+    assert completed["result"]["answer"] == 42
+    provenance = completed["provenance"]
+    assert provenance["attempt"] == 2
+    assert provenance["workitem_id"] == "wi-attempt-2", (
+        "the signed WorkItem id must reach the receipt, or provenance cannot be "
+        "reconciled against APS")
+
+
+def test_a_callback_with_no_attempt_is_refused_outright(monkeypatch, tmp_path):
+    """ROUND-12 FINDING, and it was MY hole. Round 11 enforced the attempt binding
+    only when the callback happened to supply one, and shipped a test celebrating
+    that as back-compat. Omitting the field walked straight back through the door:
+    a delayed attempt-1 success with no `attempt`, arriving while attempt 2 ran,
+    was stamped with the job's current attempt and completed it.
+
+    "Validate it if present" is not a binding. The field is required."""
+    import jobs
+
+    class InertExecutor:
+        def submit(self, *args, **kwargs):
+            return None
+
+    if jobs._conn is not None:
+        jobs._conn.close()
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    monkeypatch.setattr(jobs, "_executors", {"fast": InertExecutor(), "slow": InertExecutor()})
+    tool = {"name": "callback-tool", "engine_op": "count_by_layer",
+            "capabilities": ["drawing.read"]}
+    job_id = jobs.submit_job("demo-tenant", tool, {}, "rooftop_demo", aps_live=True)
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.claim_lease(job_id, "worker-2", now=time.time() + 86_400) == 2
+
+    def deliver(payload, nonce):
+        body = json.dumps(payload).encode()
+        timestamp = str(time.time())
+        return TestClient(broker.app).post(
+            "/da/callback", content=body,
+            headers={"X-Leaf-Signature": _signed(body, timestamp, nonce),
+                     "X-Leaf-Timestamp": timestamp, "X-Leaf-Nonce": nonce},
+        )
+
+    # This is the exact payload that used to complete attempt 2 while describing
+    # attempt 1's run: a success carrying no attempt at all.
+    no_attempt = deliver({"job_id": job_id, "status": "success",
+                          "result": {"answer": 1}}, "nonce-no-attempt")
+    assert no_attempt.status_code == 409, no_attempt.text
+    assert "attempt" in no_attempt.json()["error"]["message"]
+    assert jobs.get_job(job_id)["status"] != "complete"
+
+    # A non-int attempt is refused by the same guard rather than coerced. `bool`
+    # matters specifically: `True == 1`, so a truthy attempt must not satisfy an
+    # int comparison against attempt 1.
+    for bad in (None, "2", 2.0, True):
+        response = deliver({"job_id": job_id, "status": "success", "attempt": bad,
+                            "result": {"answer": 1}}, f"nonce-bad-{bad!r}")
+        assert response.status_code == 409, f"{bad!r}: {response.text}"
+        assert jobs.get_job(job_id)["status"] != "complete"
+
+    # The current attempt still completes, so this is a tightening and not a wall.
+    ok = deliver({"job_id": job_id, "status": "success", "attempt": 2,
+                  "workitem_id": "wi-2", "result": {"answer": 42}}, "nonce-good")
+    assert ok.status_code == 200, ok.text
+    assert jobs.get_job(job_id)["status"] == "complete"
+
+
+def test_a_stale_failure_cannot_fail_a_newer_attempt_even_if_it_races(monkeypatch, tmp_path):
+    """ROUND-13 FINDING. The attempt check in broker.py reads the job, then calls
+    `jobs.complete_callback`, which opens its own transaction. For a SUCCESS the
+    spine re-checked the attempt inside that transaction; for a FAILURE it returned
+    early, so a lease reclaim landing in the window let a stale attempt's failure
+    mark a newer, still-running attempt as failed.
+
+    This drives the spine DIRECTLY, which is the only way to exercise the window:
+    it supplies attempt-1 failure provenance against a job the store has already
+    advanced to attempt 2, which is exactly the state a race produces."""
+    import jobs
+
+    class InertExecutor:
+        def submit(self, *args, **kwargs):
+            return None
+
+    if jobs._conn is not None:
+        jobs._conn.close()
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    monkeypatch.setattr(jobs, "_executors", {"fast": InertExecutor(), "slow": InertExecutor()})
+    tool = {"name": "callback-tool", "engine_op": "count_by_layer",
+            "capabilities": ["drawing.read"]}
+    job_id = jobs.submit_job("demo-tenant", tool, {}, "rooftop_demo", aps_live=True)
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.claim_lease(job_id, "worker-2", now=time.time() + 86_400) == 2
+
+    error = {"error_code": "WORKITEM_FAILED", "message": "stale", "retryable": False}
+    with pytest.raises(ValueError, match="failure provenance attempt"):
+        jobs.complete_callback(job_id, "failed", error=error,
+                               provenance={"attempt": 1, "execution_path": "cloud"})
+    assert jobs.get_job(job_id)["status"] != "failed", (
+        "a stale attempt's failure marked a newer attempt as failed")
+
+    # The CURRENT attempt's failure still applies, so this binds rather than blocks.
+    assert jobs.complete_callback(job_id, "failed", error=error,
+                                  provenance={"attempt": 2, "execution_path": "cloud"}) == "applied"
+    assert jobs.get_job(job_id)["status"] == "failed"
+
+
+def test_a_failure_with_no_provenance_is_still_accepted(monkeypatch, tmp_path):
+    """The binding above is guarded on "carries an attempt" on purpose. Failures
+    are also raised by callers with no provenance at all — the orphan reaper is the
+    one that matters — and making provenance mandatory would break them. CONTROL:
+    this passes both before and after the round-13 change, and is here so a future
+    tightening that makes provenance required fails loudly instead of silently
+    breaking the reaper."""
+    import jobs
+
+    class InertExecutor:
+        def submit(self, *args, **kwargs):
+            return None
+
+    if jobs._conn is not None:
+        jobs._conn.close()
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    monkeypatch.setattr(jobs, "_reaper_started", True)
+    monkeypatch.setattr(jobs, "_executors", {"fast": InertExecutor(), "slow": InertExecutor()})
+    tool = {"name": "callback-tool", "engine_op": "count_by_layer",
+            "capabilities": ["drawing.read"]}
+    job_id = jobs.submit_job("demo-tenant", tool, {}, "rooftop_demo", aps_live=True)
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.claim_lease(job_id, "worker-2", now=time.time() + 86_400) == 2
+
+    assert jobs.complete_callback(job_id, "failed", error={
+        "error_code": "WORKITEM_FAILED", "message": "orphaned", "retryable": False}) == "applied"
+    assert jobs.get_job(job_id)["status"] == "failed"

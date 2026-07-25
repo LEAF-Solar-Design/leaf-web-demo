@@ -610,6 +610,24 @@ def _validate_terminal_context(
     execution: Dict[str, Any],
 ) -> None:
     if status != "complete":
+        # A FAILURE THAT NAMES AN ATTEMPT IS BOUND TO IT, exactly like a success.
+        # This used to return unconditionally, so the attempt comparison below
+        # covered successes only. The callback seam reads the job's attempt, then
+        # calls in here; a lease reclaim landing in that window let a STALE
+        # attempt's failure mark a newer, still-running attempt as failed. The
+        # success path was already safe because this function re-reads the durable
+        # attempt; the failure path had nothing.
+        #
+        # Guarded on "carries an attempt", NOT made mandatory: failures are also
+        # raised by callers that legitimately have no provenance at all, notably
+        # the orphan reaper (`_reap_orphans_once`), and requiring provenance here
+        # would break them. So this binds the emitters that DO claim an attempt and
+        # leaves the others exactly as they were.
+        if isinstance(provenance, dict) and "attempt" in provenance:
+            failed_attempt = provenance["attempt"]
+            if failed_attempt != durable_attempt:
+                raise ValueError(
+                    "terminal failure provenance attempt does not match durable attempt")
         return
     assert isinstance(provenance, dict)
     attempt = provenance["attempt"]
