@@ -23,12 +23,13 @@ a documented follow-up (CONTRACT-ADDENDUM §11).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+import checkout_capability
 import deps
 import write_loop
 from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
@@ -47,6 +48,15 @@ def _mutation_gate() -> Optional[JSONResponse]:
         retryable=True,
         status_code=503,
     )
+
+
+def _store_checkout_denied():
+    """`store.CheckoutDenied` for an `except` clause. da/store.py is imported
+    lazily everywhere in this router (it reaches the path only through
+    write_loop's sys.path setup), and an except clause needs the class itself."""
+    import store
+
+    return store.CheckoutDenied
 
 
 def _backend(tenant_id: str = ""):
@@ -141,24 +151,72 @@ def get_summary(drawing_id: str, version: str = "head",
 
 
 @router.post("/api/drawings/{drawing_id}/undo")
-def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant),
+         x_checkout_capability: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    """Step head back one version.
+
+    SINGLE-WRITER (added with the checkout capability): undo MUTATES the drawing
+    every other session reads, so it is gated exactly like publishing a version.
+    It was not, and that made it the way around the write check — a caller refused
+    at `put_drawing` could still walk the same drawing's head backwards under
+    someone else's lease. With no checkout held (the demo's ordinary state) this
+    is unchanged; with one held, `X-Checkout-Capability` from the acquire response
+    is required.
+    """
     blocked = _mutation_gate()
     if blocked is not None:
         return blocked
+    backend = _backend(str(tenant_id))
     try:
-        view = write_loop.undo_view(str(tenant_id), drawing_id, backend=_backend(str(tenant_id)))
+        write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+        holder, fence = _lock_authorization(drawing_id, tenant_id, backend,
+                                            x_checkout_capability)
+    except (checkout_capability.CapabilityRejected,
+            checkout_capability.CapabilityUnavailable) as exc:
+        return _denied(exc)
+    except (KeyError, ValueError) as exc:
+        # 400, not the GET routes' 404: undo/redo have always answered 400 for a
+        # malformed or unresolvable drawing id (tests/test_drawings_bootstrap.py),
+        # and moving the bootstrap ahead of the lock check must not change that.
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400)
+    try:
+        view = write_loop.undo_view(str(tenant_id), drawing_id, backend=backend,
+                                    holder=holder, fence=fence)
+    except _store_checkout_denied() as exc:
+        # The lock changed between the gate above and the store's own check under
+        # its row lock. The store is authoritative; report ITS answer.
+        return _denied(checkout_capability.CapabilityRejected(str(exc)))
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
 
 
 @router.post("/api/drawings/{drawing_id}/redo")
-def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant),
+         x_checkout_capability: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    """Step head forward one version. Same single-writer gate as `undo` — the two
+    are one surface, and a check on only one of them is no check at all."""
     blocked = _mutation_gate()
     if blocked is not None:
         return blocked
+    backend = _backend(str(tenant_id))
     try:
-        view = write_loop.redo_view(str(tenant_id), drawing_id, backend=_backend(str(tenant_id)))
+        write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+        holder, fence = _lock_authorization(drawing_id, tenant_id, backend,
+                                            x_checkout_capability)
+    except (checkout_capability.CapabilityRejected,
+            checkout_capability.CapabilityUnavailable) as exc:
+        return _denied(exc)
+    except (KeyError, ValueError) as exc:
+        # 400 for the same reason `undo` gives it — see the note there.
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400)
+    try:
+        view = write_loop.redo_view(str(tenant_id), drawing_id, backend=backend,
+                                    holder=holder, fence=fence)
+    except _store_checkout_denied() as exc:
+        return _denied(checkout_capability.CapabilityRejected(str(exc)))
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
@@ -167,14 +225,63 @@ def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict
 def _checkout_view(co: Any) -> Any:
     """Manifest `checkout` lock → the surface shape `{holder, acquired, expires}`
     or null. GET /versions renders this read-only ("someone else is editing" chip);
-    the POST/DELETE .../checkout routes below let the holder TAKE and RELEASE it."""
+    the POST/DELETE .../checkout routes below let the holder TAKE and RELEASE it.
+
+    `holder` is a DISPLAY LABEL and nothing more. It is public on this read by
+    design — the UI's "locked by X" chip needs a name — so it can never be the
+    thing that proves ownership; the opaque capability minted at acquire is
+    (server/checkout_capability.py).
+
+    The lock GENERATION is deliberately NOT surfaced. It used to be, and that was
+    half the replay: a second session read `holder` and `fence` here and presented
+    both as its own. It authorizes nothing now, but a client has no use for it
+    either (it holds a capability instead), and an ownership generation is not
+    something to publish to everyone who can read the drawing.
+    """
     if not co:
         return None
-    view = {"holder": co.get("holder"), "acquired": co.get("acquired"),
+    return {"holder": co.get("holder"), "acquired": co.get("acquired"),
             "expires": co.get("expires")}
-    if co.get("fence") is not None:
-        view["fence"] = int(co["fence"])
-    return view
+
+
+def _lock_authorization(drawing_id: str, tenant_id: Any, backend: Any,
+                        capability: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
+    """The ONE ownership gate every mutating drawing route goes through.
+
+    Returns the `(holder, fence)` the store primitives take: the pair read from
+    the manifest once the capability proved the caller owns the active lease, or
+    `(None, None)` when no lease is active and there is nothing to prove.
+
+    The permitted cases are exactly `da/store.py`'s, so publish, undo and redo
+    answer alike and the demo keeps working with no checkout at all:
+
+      * no lock, or an EXPIRED lock -> allowed, unauthenticated by this gate
+        (the store re-grants an expired lock to anyone, so treating it as a
+        barrier here would wedge a drawing behind a forgotten lease);
+      * an ACTIVE lock -> a valid capability for THAT generation, or nothing.
+
+    Raises `checkout_capability.CapabilityRejected` (-> 403) and
+    `CapabilityUnavailable` (-> 503); callers render both via `_denied`.
+    """
+    import store  # da/store.py; importable via write_loop's sys.path setup
+
+    m = store.load_manifest(backend, str(tenant_id), drawing_id)
+    co = m.get("checkout")
+    if not store.checkout_active(co):
+        return None, None
+    return checkout_capability.verify(capability, tenant_id, drawing_id, co)
+
+
+def _denied(exc: Exception) -> JSONResponse:
+    """Capability failure -> the §10 envelope. 403 for a caller who cannot prove
+    ownership (the answer DELETE .../checkout has always given a non-holder); 503
+    for a server that cannot verify anything at all, which is an operator fault
+    and must not be reported as an authorization one."""
+    if isinstance(exc, checkout_capability.CapabilityUnavailable):
+        return error_response(ErrorCode.INTERNAL, str(exc), retryable=True,
+                              status_code=503)
+    return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                          status_code=403)
 
 
 def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
@@ -237,9 +344,16 @@ def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_tenant))
 #     (defaults to the requesting tenant/session). A DIFFERENT holder on the same
 #     tenant+drawing conflicts — that is the single-writer guarantee. Two distinct
 #     TENANTS have separate manifests and never collide (correct isolation).
-#   * The same holder re-acquiring REFRESHES the lease (200, not a conflict).
 #   * An EXPIRED lock (expires <= now) is free — re-acquirable by anyone.
 #   * A read-tool run never consults this lock, so a held lock cannot block reads.
+#
+# WHAT PROVES OWNERSHIP (checkout_capability.py). `holder` is a DISPLAY label and
+# is published by GET /versions, so it can only ever say who the UI should name,
+# never who the caller is. Acquiring mints an opaque capability bound to the
+# tenant, the AUTHENTICATED subject, the drawing and the lock generation; that
+# token — never the holder — is what releasing, refreshing, undo, redo and a
+# `drawing.write` run require. So a same-tenant session that reads the holder off
+# /versions learns a name and gains nothing.
 # --------------------------------------------------------------------------- #
 DEFAULT_CHECKOUT_TTL_S = 3600            # 1h working lease (sane default)
 MAX_CHECKOUT_TTL_S = 86_400             # 24h hard cap so a forgotten lock always expires
@@ -247,22 +361,44 @@ MAX_CHECKOUT_TTL_S = 86_400             # 24h hard cap so a forgotten lock alway
 
 class CheckoutRequest(BaseModel):
     """Optional POST body for taking the lock. Both fields default: `holder` to the
-    requesting tenant/session id, `ttl_s` to DEFAULT_CHECKOUT_TTL_S."""
+    requesting tenant/session id, `ttl_s` to DEFAULT_CHECKOUT_TTL_S.
+
+    `holder` is a DISPLAY LABEL — what the UI shows in its "locked by X" chip. It
+    is not, and must not be read as, a claim of identity: the caller picks it, and
+    GET /versions publishes it. What the caller gets back for having taken the
+    lock is the opaque `checkout_capability`, and that is the only thing any
+    mutating route accepts as proof of ownership.
+    """
     holder: Optional[str] = Field(default=None, max_length=200)
     ttl_s: Optional[float] = Field(default=None, gt=0, le=MAX_CHECKOUT_TTL_S)
 
 
 @router.post("/api/drawings/{drawing_id}/checkout")
 def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = None,
-                           tenant_id: str = Depends(deps.require_tenant)) -> Any:
-    """Take the single-writer lock for the requesting tenant/holder.
+                           tenant_id: str = Depends(deps.require_tenant),
+                           x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
+    """Take the single-writer lock, and mint the capability that proves it.
 
-    §10-enveloped `{drawing_id, acquired: true, holder, checkout:{holder, acquired,
-    expires}}` on success. When the lock is already held by ANOTHER active holder →
-    HTTP 409 with a clear not-acquired body `{acquired: false, locked_by, checkout,
-    error}` so the UI can render "locked by X". The same holder re-acquiring
-    refreshes the lease (200). Same 404 pattern as the other routes for an unknown
-    drawing (the well-known `demo` bootstraps on first use at APS_LIVE=0)."""
+    §10-enveloped `{drawing_id, acquired: true, holder, checkout_capability,
+    checkout:{holder, acquired, expires}}` on success. KEEP THE
+    `checkout_capability`: it is issued once, to this caller, and it is what
+    DELETE .../checkout, undo, redo and a `drawing.write` run all require. It is
+    not recoverable from any read — that is the point — so losing it means waiting
+    out the lease.
+
+    REFRESHING a live lease now requires presenting the current capability in
+    `X-Checkout-Capability`, and the refreshed lease gets a NEW one (the old
+    generation stops verifying). Naming the holder used to be enough, which was
+    this hole from the other end: session B could read A's holder off GET
+    /versions, "refresh" A's lock as A, and be handed authority over it. An active
+    lock with no valid capability -> HTTP 409 not-acquired `{acquired: false,
+    locked_by, checkout, error}` — the same answer a second holder always got, so
+    the UI's "locked by X" path is unchanged.
+
+    An unlocked or EXPIRED lock is granted to anyone, capability or not (the
+    store's rule everywhere else: a forgotten lease must not wedge a drawing).
+    Same 404 pattern as the other routes for an unknown drawing (the well-known
+    `demo` bootstraps on first use at APS_LIVE=0)."""
     blocked = _mutation_gate()
     if blocked is not None:
         return blocked
@@ -278,8 +414,25 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     holder = (req.holder if req else None) or str(tenant_id)
     ttl_s = (req.ttl_s if req and req.ttl_s is not None else None) or DEFAULT_CHECKOUT_TTL_S
 
+    # A refresh needs the CURRENT generation, and only a valid capability yields
+    # one. A caller without it gets expected_fence=None, which `strict_owner`
+    # refuses against any live lease — so an unprovable refresh comes back as the
+    # ordinary 409 conflict below rather than silently taking the lock over.
+    prior = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
+    expected_fence: Optional[int] = None
+    if store.checkout_active(prior):
+        try:
+            _, expected_fence = checkout_capability.verify(
+                x_checkout_capability, tenant_id, drawing_id, prior)
+        except checkout_capability.CapabilityUnavailable as exc:
+            return _denied(exc)
+        except checkout_capability.CapabilityRejected:
+            expected_fence = None
+
     try:
-        acquired = store.acquire_checkout(backend, str(tenant_id), drawing_id, holder, ttl_s)
+        acquired = store.acquire_checkout(
+            backend, str(tenant_id), drawing_id, holder, ttl_s,
+            expected_fence=expected_fence, strict_owner=True)
     except store.CheckoutParamError as exc:
         # ONLY the input faults: a reserved holder (store.ANONYMOUS_HOLDER, the
         # id a run with no `holder` presents) and a non-positive ttl. Answer 400
@@ -297,10 +450,10 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     co = m.get("checkout")
 
     if not acquired:
-        # Held by another active holder (store only refuses in that case; an expired
-        # or same-holder lock would have returned True). Return the CURRENT lock so
-        # the frontend can show who holds it, with a §10 error object for strict
-        # consumers (BAD_PARAMS is the frozen-enum stand-in for a retryable conflict).
+        # A LIVE lease the caller could not prove it owns (an absent or expired lock
+        # would have returned True). Return the CURRENT lock so the frontend can show
+        # who holds it, with a §10 error object for strict consumers (BAD_PARAMS is
+        # the frozen-enum stand-in for a retryable conflict).
         cur = co or {}
         body = with_envelope_fields(deps.tenant_echo({
             "drawing_id": drawing_id,
@@ -314,23 +467,38 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
         }, tenant_id))
         return JSONResponse(status_code=409, content=body)
 
+    try:
+        capability = checkout_capability.mint(
+            tenant_id, drawing_id, int((co or {}).get("fence")))
+    except checkout_capability.CapabilityUnavailable as exc:
+        return _denied(exc)
+
     view = deps.tenant_echo({
         "drawing_id": drawing_id,
         "acquired": True,
         "holder": holder,
+        # Issued ONCE, to this caller. Never readable from GET /versions, never
+        # persisted into a job record, never echoed anywhere else.
+        "checkout_capability": capability,
         "checkout": _checkout_view(co),
     }, tenant_id)
     return with_envelope_fields(view)
 
 
 @router.delete("/api/drawings/{drawing_id}/checkout")
-def release_checkout_route(drawing_id: str, holder: Optional[str] = None,
-                           tenant_id: str = Depends(deps.require_tenant)) -> Any:
-    """Release the single-writer lock. Only the holder may release an ACTIVE lock
-    (`holder` query param defaults to the requesting tenant/session id). A non-holder
-    trying to release an active lock → HTTP 403 (the lock is left intact). Releasing
-    when nothing is held (or the lock already expired) is an idempotent 200 with the
-    cleared state. §10-enveloped `{drawing_id, released, checkout: null}`."""
+def release_checkout_route(drawing_id: str,
+                           tenant_id: str = Depends(deps.require_tenant),
+                           x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
+    """Release the single-writer lock. Only a caller that can PROVE it holds the
+    active lease may release it — `X-Checkout-Capability`, from the acquire
+    response. Without a valid one → HTTP 403, lock left intact.
+
+    The `?holder=` query parameter this route used to authorize with is GONE. It
+    was a public string (GET /versions publishes it), so it proved nothing: anyone
+    on the tenant could read the holder and release someone else's lock. Releasing
+    when nothing is held (or the lock already expired) is still an idempotent 200
+    with the cleared state and needs no capability. §10-enveloped
+    `{drawing_id, released, checkout: null}`."""
     blocked = _mutation_gate()
     if blocked is not None:
         return blocked
@@ -339,23 +507,24 @@ def release_checkout_route(drawing_id: str, holder: Optional[str] = None,
     backend = _backend(str(tenant_id))
     try:
         write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
-        m = store.load_manifest(backend, str(tenant_id), drawing_id)
+        holder, fence = _lock_authorization(drawing_id, tenant_id, backend,
+                                            x_checkout_capability)
+    except (checkout_capability.CapabilityRejected,
+            checkout_capability.CapabilityUnavailable) as exc:
+        return _denied(exc)
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                               retryable=False, status_code=404)
 
-    co = m.get("checkout")
-    who = holder or str(tenant_id)
-    released = store.release_checkout(backend, str(tenant_id), drawing_id, holder=who)
-
-    if not released and co:
-        # release_checkout returns False-with-a-lock-present ONLY when that lock is
-        # ACTIVE and held by a DIFFERENT holder (an expired lock is releasable by
-        # anyone → True). So this is exactly the not-the-holder case → 403, untouched.
-        return error_response(
-            ErrorCode.BAD_PARAMS,
-            f"checkout held by {co.get('holder')!r}; only the holder can release it",
-            retryable=False, status_code=403)
+    if fence is None:
+        # Nothing ACTIVE to release: idempotent. An expired lock is cleared (the
+        # store grants those to anyone), an absent one reports released=False.
+        released = store.release_checkout(backend, str(tenant_id), drawing_id)
+    else:
+        # Release by PROVEN generation, not by holder label, so the clear cannot
+        # land on a different lease that started since the check above.
+        released = store.release_checkout(backend, str(tenant_id), drawing_id,
+                                          holder=holder, expected_fence=fence)
 
     m2 = store.load_manifest(backend, str(tenant_id), drawing_id)
     view = deps.tenant_echo({

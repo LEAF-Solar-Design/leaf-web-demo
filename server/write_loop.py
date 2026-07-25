@@ -190,6 +190,19 @@ def _drawing_id(params: Dict[str, Any]) -> str:
     return str(did) if did else DEMO_DRAWING_ID
 
 
+def target_drawing_id(params: Dict[str, Any]) -> str:
+    """The store drawing a run will WRITE, from its params.
+
+    Public because the /api/run route has to resolve the same drawing this
+    module will publish to, when it exchanges a checkout capability for the
+    lock's identity. It must not re-derive that id: `req.dwg` is the INTAKE
+    source (e.g. `rooftop_demo`) and is frequently a different drawing from
+    `params.drawing_id`, so a route computing its own answer could verify a
+    capability against one drawing and publish to another.
+    """
+    return _drawing_id(params)
+
+
 # --------------------------------------------------------------------------- #
 # intake representation helpers
 # --------------------------------------------------------------------------- #
@@ -350,21 +363,33 @@ def intake_view(tenant_id: str, drawing_id: str, version="head", *, backend=None
     return {"intake": intake, "version": v, "head": int(m["head"]), "latest": int(m["latest"])}
 
 
-def undo_view(tenant_id: str, drawing_id: str, *, backend=None) -> Dict[str, Any]:
+def undo_view(tenant_id: str, drawing_id: str, *, backend=None,
+              holder: Optional[str] = None,
+              fence: Optional[int] = None) -> Dict[str, Any]:
+    """Step head back, then re-read the intake at the new head.
+
+    ``holder``/``fence`` are the caller's single-writer identity, forwarded
+    verbatim to ``store.undo`` — which applies the SAME check as a version
+    publish, under the same row lock. Both default to None (no check), the shape
+    every non-product caller uses.
+    """
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    new_head = store.undo(backend, tenant_id, drawing_id)
+    new_head = store.undo(backend, tenant_id, drawing_id, holder=holder, fence=fence)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
     m = store.load_manifest(backend, tenant_id, drawing_id)
     return {"version": new_head, "head": int(m["head"]), "latest": int(m["latest"]), "intake": intake}
 
 
-def redo_view(tenant_id: str, drawing_id: str, *, backend=None) -> Dict[str, Any]:
+def redo_view(tenant_id: str, drawing_id: str, *, backend=None,
+              holder: Optional[str] = None,
+              fence: Optional[int] = None) -> Dict[str, Any]:
+    """Step head forward. Same single-writer forwarding as ``undo_view``."""
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    new_head = store.redo(backend, tenant_id, drawing_id)
+    new_head = store.redo(backend, tenant_id, drawing_id, holder=holder, fence=fence)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
     m = store.load_manifest(backend, tenant_id, drawing_id)
     return {"version": new_head, "head": int(m["head"]), "latest": int(m["latest"]), "intake": intake}
