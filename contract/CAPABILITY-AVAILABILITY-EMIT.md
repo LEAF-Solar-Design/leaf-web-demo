@@ -42,30 +42,45 @@ The backend emit must conform to these, field for field:
    `observability`). Each receipt is content-addressed: `digest.value` =
    sha256 of the artifact served at `uri`.
 4. `observedAt`/`expiresAt`: availability is a lease, not a fact. Emit SHORT
-   leases; the console must treat an expired lease as `unavailable` and say so.
-   The normative length is the TTL below, 15 seconds. (An earlier draft of this
-   line said "minutes, not days", which contradicted the 15 s figure two
-   paragraphs down. Seconds is correct.)
+   leases. The console treats an expired lease as `unavailable`.
 
-   **Normative TTL: `LEASE_TTL_SECONDS = 15`** (equivalently the website's
-   `SERVER_AVAILABILITY_TTL_MS = 15000`). This line is the single source both
-   sides cite. The window between `observedAt` and `expiresAt` must never exceed
-   one TTL, and `observedAt` must not be stamped further than one TTL into the
-   future (the clock-skew bound).
+   **CORRECTION (2026-07-24).** Earlier revisions of this section stated a
+   "Normative TTL: `LEASE_TTL_SECONDS = 15`, equivalently the website's
+   `SERVER_AVAILABILITY_TTL_MS = 15000`", and called this line "the single source
+   both sides cite". That was wrong, and it was my error. **No
+   `SERVER_AVAILABILITY_TTL_MS` exists anywhere in the website repo.** Read from
+   source on 2026-07-24, `lib/leaf-platform/projection.ts:31-41` checks only:
 
-   Changing this number is a COORDINATED CONTRACT EVENT: the server emit and the
-   console validator must change in the same release, or every emitted
-   availability is rejected by the browser and every capability silently shows
-   locked. Both sides assert against this line —
-   `server/product_capability_availability.py` via
-   `test_product_capability_availability.py`, so a server-side edit that drifts
-   from this document fails the suite rather than shipping.
+   1. `contractVersion` and `authority`;
+   2. `Date.parse(expiresAt)` is not NaN and `expiresAt > now`;
+   3. per-state consistency of `implementationState` / `runtimeState` /
+      `evidence.length` (and a truthy `fallback` for `connected_degraded`).
 
-   **Known limit of that assertion:** it catches a one-sided SERVER change only.
-   Editing this document and the Python constant together still passes while the
-   website sits at a different `SERVER_AVAILABILITY_TTL_MS`. Closing that needs a
-   cross-repo contract test, which does not exist yet. Treat a TTL change as a
-   two-repo change and verify the website side by hand.
+   The console imposes **no TTL, no window-length limit, and never parses
+   `observedAt` at all**. It also never inspects the contents of an evidence
+   record. Its own default fixture (`projection.ts:57-67`) carries a **five
+   minute** window.
+
+   So `LEASE_TTL_SECONDS = 15` in
+   `server/product_capability_availability.py` is **local freshness policy**, not
+   a cross-repo contract. Changing it cannot break the browser's validation. Keep
+   it short so a stale local measurement stops being trusted quickly.
+
+   The server-side validator deliberately applies **more** rules than the console
+   (window length, an `observedAt` skew bound, evidence-record completeness,
+   `fallback.provenanceRequired`). That asymmetry is safe in one direction only,
+   and the direction is the fail-closed one: anything the server accepts, the
+   console accepts. The cost is a possible **false lock**, and it is real — the
+   console's own five-minute fixture would be refused by the server. Both
+   properties are pinned by
+   `test_this_module_is_stricter_than_the_console_never_looser` and
+   `test_everything_this_module_emits_satisfies_the_real_console_validator`,
+   which transcribes the actual TypeScript instead of asserting against a number
+   recorded here.
+
+   If a real cross-repo TTL is ever wanted, it has to be introduced on the
+   website side first; there is nothing to couple to today.
+
 5. Transport: availability rides the authenticated platform-registry response
    path only (types.ts:27). It is never embedded in unauthenticated or public
    payloads.

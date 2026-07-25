@@ -28,18 +28,49 @@ deliberate mirror of that validator, applied before emit, so a malformed
 availability is caught HERE — where it can be logged and fixed — instead of
 being silently swallowed by a browser.
 
-Mirrored rules, kept in this order to match the TypeScript:
-  * `contractVersion` == leaf.platform.v1alpha1, `authority` ==
-    leaf-platform-registry;
+WHAT THE WEBSITE ACTUALLY CHECKS (read from the source, 2026-07-24)
+-------------------------------------------------------------------
+`isVerifiedServerAvailability` in projection.ts:31-41 is SHORT. It checks only:
+  1. `contractVersion` == the contract version, `authority` ==
+     leaf-platform-registry;
+  2. `Date.parse(expiresAt)` is not NaN and `expiresAt` > now;
+  3. per-state consistency:
+     shipping           -> implemented + available + evidence.length > 0
+     connected_degraded -> implemented + degraded + a truthy `fallback`
+                           + evidence.length > 0
+     locked_planned     -> planned + unavailable + evidence.length == 0
+     otherwise          -> implemented + runtimeState != available
+
+That is all. In particular the console does NOT parse `observedAt` at all, has NO
+TTL constant, imposes NO limit on the window length, and never inspects the
+CONTENTS of an evidence record.
+
+CORRECTION (2026-07-24): earlier revisions of this docstring, and of
+contract/CAPABILITY-AVAILABILITY-EMIT.md, claimed the website exports
+`SERVER_AVAILABILITY_TTL_MS = 15000` and enforced a window-length rule and an
+`observedAt` clock-skew bound. No such constant exists anywhere in the website
+repo, and no such rules exist. Those claims were mine and they were wrong. The
+extra rules below are therefore LOCAL POLICY, deliberately stricter than the
+console, not a mirror of it.
+
+LOCAL POLICY ON TOP OF THE MIRROR (stricter on purpose, so fail-closed)
   * every enum field checked exhaustively (an unknown string is a NO, never a
     fall-through);
-  * `expiresAt` in the future, after `observedAt`, and the window no LONGER
-    than one TTL — an attacker-supplied 2099 expiry must not extend trust;
+  * `expiresAt` after `observedAt`, and the window no LONGER than
+    LEASE_TTL_SECONDS, so a supplied 2099 expiry cannot extend trust;
   * `observedAt` no further than one TTL into the future (clock-skew bound);
   * every evidence record complete, with a real 64-hex sha256;
-  * state/implementation/runtime/evidence consistency, including the rule that
-    `locked_planned` carries ZERO evidence — a locked capability dressed in
-    receipts is fail-open by implication.
+  * `connected_degraded` additionally requires `fallback.provenanceRequired`;
+  * `locked_planned` carries ZERO evidence — a lock dressed in receipts is
+    fail-open by implication.
+
+Direction of the difference matters: being STRICTER than the console can only
+turn something the console would have accepted into a local `locked_planned`,
+never the reverse, so it cannot produce a payload the browser silently swallows.
+The cost is a possible FALSE LOCK: the console's own fixture (projection.ts:57-67)
+uses a FIVE MINUTE window, which this module's TTL rule would refuse. Emissions
+from this module are always exactly one TTL, so this only bites `live` entries
+handed in by the integrator.
 
 CLOCKS
   * `now` must be timezone-AWARE. A naive value is refused, never assumed to be
@@ -53,12 +84,12 @@ CLOCKS
     only milliseconds and a 6-digit fraction would put the two runtimes up to
     0.999 ms apart. Incoming timestamps still accept 1 to 6 digits.
 
-TTL drift is a coordinated contract event: changing LEASE_TTL_SECONDS here
-without changing SERVER_AVAILABILITY_TTL_MS on the website breaks every emit.
-That coupling is asserted against contract/CAPABILITY-AVAILABILITY-EMIT.md,
-which catches a one-sided SERVER edit. It cannot catch a drift where the document
-and this constant are changed together while the website stays put; only a
-cross-repo check can, and none exists yet.
+LEASE_TTL_SECONDS is a LOCAL choice, not a cross-repo contract. The console
+enforces no TTL, so shortening or lengthening this value cannot break the
+browser's validation; it only changes how quickly a stale local measurement stops
+being trusted. Keep it short. There is nothing to drift against, which is also
+why the old "assert the TTL against the contract document" test was circular: it
+was comparing this constant to a number I had written down myself.
 
 Run:  cd server && python -m pytest tests/test_product_capability_availability.py -q
 """
@@ -190,7 +221,14 @@ def _parse_iso(value: Any) -> Optional[datetime]:
         return None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
-    return parsed
+    # TRUNCATE to milliseconds, because `Date.parse` does. Accepting 6 digits and
+    # then comparing at microsecond precision was a real divergence, not a
+    # harmless one: with now=12:00:00.123Z and expiresAt=12:00:00.123999Z, Python
+    # saw 999us of life left and said valid while the browser, holding both at
+    # .123, judged the lease expired. Truncating here makes the comparison happen
+    # on exactly the instants the console will use, and still accepts 1 to 6
+    # incoming digits rather than rejecting otherwise-valid ISO.
+    return parsed.replace(microsecond=(parsed.microsecond // 1000) * 1000)
 
 
 def _is_aware(moment: Any) -> bool:
@@ -344,8 +382,24 @@ def locked_availability(product_capability: str, now: Optional[datetime] = None,
 
 
 def descriptor_for(entry: ProductCapability, availability: Dict[str, Any],
-                   entitled: Optional[bool] = None) -> Dict[str, Any]:
-    """ServerCapabilityDescriptor shape, field for field with the website type."""
+                   entitled: Optional[bool] = None,
+                   now: Optional[datetime] = None) -> Dict[str, Any]:
+    """ServerCapabilityDescriptor shape, field for field with the website type.
+
+    The availability is VALIDATED and SNAPSHOTTED here, not trusted. This was the
+    one hole left: `descriptor_for` used to pass caller-owned availability
+    straight through, so a payload carrying a naive datetime (or any shape this
+    module refuses elsewhere) produced a descriptor containing it, contradicting
+    the module's own promise. Anything that does not validate is replaced by the
+    locked default, exactly as `build_descriptors` does.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    now = _to_utc(now)
+    if not is_well_formed_availability(availability, now):
+        availability = locked_availability(entry.id, now)
+    else:
+        availability = copy.deepcopy(availability)
     descriptor: Dict[str, Any] = {
         "id": entry.id,
         "label": entry.label,
@@ -390,5 +444,5 @@ def build_descriptors(live: Optional[Mapping[str, Dict[str, Any]]] = None,
         # reference means a mutation AFTER validation silently changes the emitted
         # descriptor's state without revalidation (validate-then-mutate).
         availability = copy.deepcopy(measured) if usable else locked_availability(entry.id, now)
-        descriptors.append(descriptor_for(entry, availability, entitlements.get(entry.id, False)))
+        descriptors.append(descriptor_for(entry, availability, entitlements.get(entry.id, False), now))
     return descriptors

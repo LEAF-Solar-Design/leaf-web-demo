@@ -89,23 +89,99 @@ def test_identifiers_and_gates_are_pinned():
     assert len(set(gates)) == len(gates)
 
 
-def test_ttl_is_asserted_against_the_contract_document_not_a_local_literal():
-    """TTL drift is a coordinated contract event with the website's
-    SERVER_AVAILABILITY_TTL_MS. Asserting `LEASE_TTL_SECONDS == 15` against a
-    literal duplicated in this file proves nothing — the literal drifts with the
-    code. So read the NORMATIVE value out of the shared contract document, which
-    is what both repos cite, and fail if the code disagrees with it."""
-    contract = (SERVER_DIR.parent / "contract" / "CAPABILITY-AVAILABILITY-EMIT.md")
-    text = contract.read_text(encoding="utf-8")
-    declared = re.search(r"LEASE_TTL_SECONDS\s*=\s*(\d+)", text)
-    assert declared, "the contract document must declare the normative LEASE_TTL_SECONDS"
-    assert LEASE_TTL_SECONDS == int(declared.group(1)), (
-        f"code says {LEASE_TTL_SECONDS}s but {contract.name} declares "
-        f"{declared.group(1)}s — TTL drift must be a coordinated change")
-    # The website counterpart is stated in milliseconds in the same document.
-    declared_ms = re.search(r"SERVER_AVAILABILITY_TTL_MS\s*=\s*(\d+)", text)
-    assert declared_ms, "the contract document must state the website TTL too"
-    assert LEASE_TTL_SECONDS * 1000 == int(declared_ms.group(1))
+def _js_date_parse(value):
+    """`Date.parse` semantics for the spellings this module emits: millisecond
+    resolution, explicit offset required."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.replace(microsecond=(parsed.microsecond // 1000) * 1000)
+
+
+def _website_validator(availability: dict, now: datetime) -> bool:
+    """A faithful transcription of the REAL console validator,
+    leaf_website lib/leaf-platform/projection.ts:31-41, read on 2026-07-24.
+
+    Written out in full because this suite's earlier "mirror" claims were
+    invented: the console has NO TTL constant, never parses `observedAt`, imposes
+    no window-length limit, and never inspects an evidence record's contents. The
+    honest test is not "does our validator match a number I wrote down" but "does
+    everything we EMIT satisfy the rules the console actually applies".
+    """
+    if availability.get("contractVersion") != "leaf.platform.v1alpha1":
+        return False
+    if availability.get("authority") != "leaf-platform-registry":
+        return False
+    parsed = _js_date_parse(availability.get("expiresAt"))
+    if parsed is None or parsed <= now:
+        return False
+    state = availability.get("state")
+    impl = availability.get("implementationState")
+    runtime = availability.get("runtimeState")
+    evidence = availability.get("evidence")
+    if not isinstance(evidence, list):
+        return False
+    if state == "shipping":
+        return impl == "implemented" and runtime == "available" and len(evidence) > 0
+    if state == "connected_degraded":
+        return (impl == "implemented" and runtime == "degraded"
+                and bool(availability.get("fallback")) and len(evidence) > 0)
+    if state == "locked_planned":
+        return impl == "planned" and runtime == "unavailable" and len(evidence) == 0
+    return impl == "implemented" and runtime != "available"
+
+
+def test_everything_this_module_emits_satisfies_the_real_console_validator():
+    """THE mirror test, against a transcription of the actual TypeScript rather
+    than against a constant of my own invention."""
+    for entry in PRODUCT_CAPABILITIES:
+        locked = locked_availability(entry.id, NOW)
+        assert _website_validator(locked, NOW) is True, entry.id
+        assert is_well_formed_availability(locked, NOW) is True
+    for descriptor in build_descriptors(now=NOW):
+        assert _website_validator(descriptor["availability"], NOW) is True, descriptor["id"]
+    live = {"drawing.solve.strings": _shipping("drawing.solve.strings")}
+    got = {d["id"]: d for d in build_descriptors(live, now=NOW)}
+    assert _website_validator(got["drawing.solve.strings"]["availability"], NOW) is True
+
+
+def test_this_module_is_stricter_than_the_console_never_looser():
+    """The asymmetry must only run one way: anything we accept, the console must
+    accept. The reverse (a local FALSE LOCK) is the deliberate cost of the extra
+    policy, and this pins it so nobody loosens us into agreement by accident."""
+    console_fixture = {
+        "contractVersion": "leaf.platform.v1alpha1",
+        "authority": "leaf-platform-registry",
+        "productCapability": "drawing.inspect",
+        "implementationState": "planned",
+        "runtimeState": "unavailable",
+        "state": "locked_planned",
+        "observedAt": "2026-07-21T00:00:00.000+00:00",
+        "expiresAt": "2026-07-21T00:05:00.000+00:00",
+        "evidence": [],
+    }
+    at = datetime(2026, 7, 21, 0, 0, 1, tzinfo=timezone.utc)
+    assert _website_validator(console_fixture, at) is True, "console accepts its own fixture"
+    assert is_well_formed_availability(console_fixture, at) is False, (
+        "we refuse its 5-minute window: stricter, therefore fail-closed")
+
+
+def test_the_lease_ttl_is_local_policy_with_no_cross_repo_counterpart():
+    """The previous version asserted LEASE_TTL_SECONDS against a
+    `SERVER_AVAILABILITY_TTL_MS` figure recorded in the contract document. That
+    constant does not exist in the website repo at all, so the assertion was both
+    circular and false in its premise. Honest statement: the console enforces no
+    TTL, this is a local freshness choice, and it must stay short."""
+    assert 1 <= LEASE_TTL_SECONDS <= 120
+    locked = locked_availability("drawing.inspect", NOW)
+    observed = datetime.fromisoformat(locked["observedAt"])
+    expires = datetime.fromisoformat(locked["expiresAt"])
+    assert (expires - observed).total_seconds() == LEASE_TTL_SECONDS
 
 
 def test_unknown_capability_is_not_invented():
@@ -234,10 +310,23 @@ def test_emitted_timestamps_carry_millisecond_precision():
         fraction = payload["observedAt"].split(".")[1].split("+")[0]
         assert len(fraction) == 3, payload["observedAt"]
         assert is_well_formed_availability(payload, NOW.replace(microsecond=micro)) is True
-    # Incoming 6-digit fractions remain acceptable.
-    incoming = _shipping("drawing.solve.strings")
-    incoming["observedAt"] = (NOW - timedelta(seconds=1)).isoformat()
-    assert "." not in incoming["observedAt"] or is_well_formed_availability(incoming, NOW) is True
+    # Incoming 6-digit fractions stay acceptable, and are compared at MILLISECOND
+    # resolution so Python agrees with Date.parse. The previous assertion here was
+    # a tautology: NOW has zero microseconds, so `"." not in observedAt` was always
+    # True and the right-hand side never ran.
+    incoming = _shipping("drawing.solve.strings", NOW)
+    six = (NOW - timedelta(seconds=1)).replace(microsecond=123456).isoformat()
+    assert "." in six and len(six.split(".")[1].split("+")[0]) == 6
+    incoming["observedAt"] = six
+    assert is_well_formed_availability(incoming, NOW) is True, "6-digit input stays acceptable"
+    # The divergence case: sub-millisecond life the browser cannot see.
+    at = NOW.replace(microsecond=123000)
+    boundary = _shipping("drawing.solve.strings", at)
+    boundary["observedAt"] = (at - timedelta(seconds=1)).isoformat()
+    boundary["expiresAt"] = at.replace(microsecond=123999).isoformat()
+    assert is_well_formed_availability(boundary, at) is False, (
+        "999us of remaining life is already expired to the console, so it must be "
+        "expired to us too")
 
 
 def test_a_validated_availability_is_snapshotted_not_aliased():
