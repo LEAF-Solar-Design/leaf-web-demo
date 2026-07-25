@@ -198,7 +198,14 @@ class TurnRejected(Exception):
     any leg that does not opt in is treated as "the harness may have acted",
     and an approval whose tool call might already be running is never
     un-spent. Only set it True where the request demonstrably never left this
-    process: no POST was attempted, or the connection was never established."""
+    process: no POST was attempted, or the TCP connection was never
+    established (ConnectTimeout).
+
+    A plain ``requests.ConnectionError`` does NOT qualify: requests folds
+    urllib3's ProtocolError into it, so it covers "the server accepted the
+    request then dropped the connection before responding" as well as
+    "connection refused", and those are indistinguishable here. Ambiguous
+    means no rollback. (sol-critic round 2, blocker 1.)"""
 
     def __init__(self, status_code: int, error_code: str, message: str,
                  extra: Optional[Dict[str, Any]] = None,
@@ -382,21 +389,31 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         resp = requests.post(f"{harness_url}/turn", json=payload,
                              headers=broker_client.harness_headers(),
                              stream=True, timeout=(5, max_s))
-    except requests.exceptions.ConnectionError as exc:
-        # pre_harness: the connection was never established, so the request
-        # never reached the harness. ConnectTimeout subclasses ConnectionError
-        # AND Timeout, and Python takes the FIRST matching handler — so this
-        # clause must stay ABOVE the Timeout one below to classify a
-        # connect-phase timeout as pre-contact rather than ambiguous.
+    except requests.exceptions.ConnectTimeout as exc:
+        # The ONLY pre_harness leg here. A connect-phase timeout means the TCP
+        # connection was never established, so no byte of this request reached
+        # the harness.
+        #
+        # ConnectTimeout subclasses BOTH ConnectionError and Timeout, and
+        # Python takes the FIRST matching handler — so this clause must stay
+        # ABOVE both clauses below. Order is load-bearing.
         session_store.end_turn(session_id, turn_id)
         raise TurnRejected(502, ErrorCode.BROKER_UNREACHABLE,
                            f"harness at {harness_url} unreachable: {exc}",
                            pre_harness=True) from exc
-    except requests.exceptions.Timeout as exc:
-        # Deliberately NOT pre_harness: a read timeout means the POST was sent
-        # and the harness may be acting on it right now. Un-spending an
-        # approval whose tool call might already be running is exactly the
-        # double-execution consume-once exists to prevent.
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+        # Deliberately NOT pre_harness — BOTH of these are ambiguous.
+        #
+        # ReadTimeout: the POST was sent and the harness may be acting on it.
+        #
+        # Plain ConnectionError: requests folds urllib3's ProtocolError into
+        # this class, which covers "the server accepted the request then
+        # dropped the connection before responding" (RemoteDisconnected) just
+        # as much as "connection refused". We CANNOT tell those apart here, so
+        # the fail-safe answer is to treat the harness as possibly-having-acted
+        # and leave the approval spent. Un-spending an approval whose tool call
+        # might already be running is exactly the double-execution consume-once
+        # exists to prevent. (sol-critic round 2, blocker 1.)
         session_store.end_turn(session_id, turn_id)
         raise TurnRejected(502, ErrorCode.BROKER_UNREACHABLE,
                            f"harness at {harness_url} unreachable: {exc}") from exc

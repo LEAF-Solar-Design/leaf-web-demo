@@ -92,6 +92,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import deps
+import emf_metrics
 import entitlements
 import session_store
 import turn_runner
@@ -273,24 +274,43 @@ def _give_back_unredeemed_approval(confirmation_id: str, session_id: str,
         recovered = session_store.unconsume_approval(
             confirmation_id, session_id, tenant_id)
     except Exception as exc:  # noqa: BLE001
-        print(
-            f"[leaf-agent] approval give-back FAILED (raised) confirmation_id="
-            f"{confirmation_id!r} session={session_id!r} "
-            f"error={type(exc).__name__}: {exc} — the approval is still spent "
-            f"and this client must obtain a NEW approval",
-            file=sys.stderr, flush=True,
-        )
+        _report_give_back_failure(
+            "raised", confirmation_id, session_id,
+            detail=f"{type(exc).__name__}: {exc}")
         return False
     if not recovered:
         # No row moved 1 -> 0. We consumed it moments ago, so this means the
         # row is not in the state we left it in — never silently swallow it.
+        _report_give_back_failure("not_released", confirmation_id, session_id)
+    return recovered
+
+
+def _report_give_back_failure(reason: str, confirmation_id: str, session_id: str,
+                              detail: str = "") -> None:
+    """Report a destroyed approval on BOTH channels, and never raise.
+
+    A failed give-back means the user's single approval is gone, with no
+    symptom the user or an operator would otherwise see — the highest-priority
+    kind of bug to leave silent. So it goes out twice: a human-readable stderr
+    line for log reading, and an ApprovalGiveBackFailed EMF metric that
+    CloudWatch extracts so it can actually be ALARMED on (a stderr string
+    cannot be). Reporting is best-effort — this runs while we are already
+    answering an error, and must not replace that answer with a 500."""
+    try:
         print(
-            f"[leaf-agent] approval give-back FAILED (no row released) "
-            f"confirmation_id={confirmation_id!r} session={session_id!r} — the "
-            f"approval is still spent and this client must obtain a NEW approval",
+            f"[leaf-agent] approval give-back FAILED ({reason}) confirmation_id="
+            f"{confirmation_id!r} session={session_id!r}"
+            f"{' error=' + detail if detail else ''} — the approval is still "
+            f"spent and this client must obtain a NEW approval",
             file=sys.stderr, flush=True,
         )
-    return recovered
+    except Exception:  # noqa: BLE001  # pragma: no cover
+        pass
+    try:
+        emf_metrics.emit_approval_give_back_failed(
+            reason, confirmation_id=confirmation_id, session_id=session_id)
+    except Exception:  # noqa: BLE001  # pragma: no cover
+        pass
 
 
 def _turn_rejected_response(exc: "turn_runner.TurnRejected",
@@ -320,24 +340,39 @@ def _busy_response(session_id: str, approval_lost: bool = False) -> JSONResponse
     (if any) went back on the shelf, so the retry can really succeed.
 
     When `approval_lost` is set the give-back did NOT happen, so the approval
-    stays spent. Advertising `retryable: true` would then send the client into
-    a loop that can only ever fail `already_consumed`, so this reports
-    `retryable: false` plus `approval_recovered: false` — the client's real
-    next step is a NEW approval, not a retry. `approval_recovered` is emitted
-    ONLY in that failure case, leaving the ordinary busy response (and every
-    text-turn busy response) byte-identical to before.
+    stays spent — and `turn_in_progress` becomes the WRONG answer, not merely
+    an incomplete one. The client classifies that code as `busy`
+    (web/src/converse.js classifyAgentError) and tells the user to wait, but
+    waiting can never help: the approval is gone, and every retry of this
+    confirmation_id can only fail `already_consumed`.
 
-    That byte-identity is why this builds on ``err_envelope`` — the same
-    builder ``error_response`` uses — instead of hand-rolling a body. The busy
-    409 is a §3 run envelope carrying `ok`/`tool`/`version`/`result`/`overlay`/
-    `timing_ms`/`cost` alongside `error`; assembling it from
-    ``with_envelope_fields`` instead would silently DROP those seven fields
-    from a response clients already parse (pinned by
+    So the lost case answers `409 BAD_PARAMS`, which that same classifier
+    already maps to `approval_stale` -> "That request was already decided — ask
+    the assistant to propose it again" (web/src/components/ConversePanel.jsx).
+    That is exactly the user's real next step, delivered through an error shape
+    the client ALREADY handles — no frontend change, and no new field for
+    clients to learn. `approval_recovered: false` rides along for machine
+    consumers. (sol-critic round 2, blocker 3.)
+
+    The ordinary busy response is untouched: same code, same `retryable: true`,
+    byte-identical body. It routes through ``error_response`` — and the lost
+    case through the same ``err_envelope`` builder — because this 409 is a §3
+    run envelope carrying `ok`/`tool`/`version`/`result`/`overlay`/`timing_ms`/
+    `cost` alongside `error`. Hand-building it from ``with_envelope_fields``
+    silently DROPS those seven fields (pinned by
     tests/test_sessions_routes.py::test_messages_busy_response_keeps_the_full_run_envelope)."""
-    message = f"session {session_id!r} already has an active turn"
     if not approval_lost:
-        return error_response(ErrorCode.TURN_IN_PROGRESS, message, retryable=True)
-    body = err_envelope(ErrorCode.TURN_IN_PROGRESS, message, retryable=False)
+        return error_response(
+            ErrorCode.TURN_IN_PROGRESS,
+            f"session {session_id!r} already has an active turn",
+            retryable=True,
+        )
+    body = err_envelope(
+        ErrorCode.BAD_PARAMS,
+        f"session {session_id!r} already has an active turn, and this "
+        f"confirmation could not be returned — request a new approval",
+        retryable=False,
+    )
     body["approval_recovered"] = False
     return JSONResponse(status_code=409, content=body)
 

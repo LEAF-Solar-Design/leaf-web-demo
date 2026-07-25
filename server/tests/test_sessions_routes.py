@@ -18,8 +18,10 @@ Hermetic: in-process TestClient wrapping ONLY routers/sessions.py. SESSIONS_DB
 is redirected to a fresh tmp path BEFORE the first import of session_store
 (read once at import time — same posture as tests/test_agent_approvals.py /
 tests/test_turn_runner.py) so the real server/sessions.db is never touched.
-turn_runner.start_turn is ALWAYS monkeypatched — this suite never performs a
-real HTTP call to a harness.
+This suite never performs a real HTTP call to a harness. Most tests monkeypatch
+turn_runner.start_turn outright; the few that must exercise the REAL dispatch
+(the turn-CAS race and the pre-harness give-back) instead run start_turn with
+no harness URL configured, so it rejects before any POST is attempted.
 
 Run:  cd server && python -m pytest tests/test_sessions_routes.py -q
 """
@@ -635,14 +637,21 @@ def test_messages_confirm_busy_give_back_failure_answers_409_honestly(client, mo
                         headers=_h(tid))
         assert r.status_code == 409, r.text
         body = r.json()
-        assert body["error"]["error_code"] == "turn_in_progress"
-        # the honesty assertions: the approval did NOT come back
+        # The honesty assertions. NOT turn_in_progress: converse.js maps that
+        # to 'busy' and tells the user to wait, which can never help once the
+        # approval is gone. 409 + BAD_PARAMS is the shape that client already
+        # classifies as 'approval_stale' -> "ask the assistant to propose it
+        # again", which IS the user's real next step.
+        assert body["error"]["error_code"] == "BAD_PARAMS"
         assert body["error"]["retryable"] is False, (
             "give-back failed, so the approval is spent — telling the client to "
             "retry sends it into a loop that can only fail 'already_consumed'"
         )
         assert body["approval_recovered"] is False
         assert session_store.get_approval(cid)["consumed"] is True
+        # the full run envelope survives on this leg too
+        assert set(body) >= {"ok", "tool", "version", "result", "overlay",
+                             "timing_ms", "cost", "error", "degraded_mode"}
     finally:
         session_store.end_turn(sid, "turn-holder-boom")
 
@@ -662,10 +671,40 @@ def test_messages_confirm_busy_give_back_noop_answers_409_honestly(client, monke
                         json={"confirm": {"confirmationId": cid, "approved": True}},
                         headers=_h(tid))
         assert r.status_code == 409, r.text
+        assert r.json()["error"]["error_code"] == "BAD_PARAMS"
         assert r.json()["error"]["retryable"] is False
         assert r.json()["approval_recovered"] is False
     finally:
         session_store.end_turn(sid, "turn-holder-noop")
+
+
+def test_give_back_failure_emits_an_alarmable_metric(client, monkeypatch):
+    """A destroyed approval must reach the STRUCTURED reporting path, not just
+    a stderr string: an operator cannot alarm on prose."""
+    emitted = []
+    monkeypatch.setattr(
+        sessions_router.emf_metrics, "emit_approval_give_back_failed",
+        lambda reason, **kw: emitted.append((reason, kw)),
+    )
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+    cid = _seed_approval(sid, tid)
+    session_store.decide_approval(cid, True, by=tid)
+    assert session_store.try_begin_turn(sid, "turn-holder-metric", 300) is True
+
+    monkeypatch.setattr(session_store, "unconsume_approval", lambda *a, **kw: False)
+    try:
+        client.post(f"/api/sessions/{sid}/messages",
+                    json={"confirm": {"confirmationId": cid, "approved": True}},
+                    headers=_h(tid))
+    finally:
+        session_store.end_turn(sid, "turn-holder-metric")
+
+    assert len(emitted) == 1, emitted
+    reason, kw = emitted[0]
+    assert reason == "not_released"
+    assert kw["confirmation_id"] == cid
+    assert kw["session_id"] == sid
 
 
 # =========================================================================== #
