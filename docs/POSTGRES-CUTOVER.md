@@ -1,52 +1,100 @@
 # PostgreSQL production cutover
 
-The repository contains safe prerequisites for PostgreSQL, but production
-authority has not moved. The default remains the current SQLite and file-backed
-stores.
+PostgreSQL support now spans migrations `0001` through `0019`. Production
+authority has not been proven to have moved. Repository defaults still select
+SQLite, files, process memory, or disabled mutation for every opt-in shared
+authority.
 
-## Current authority inventory
+The machine-readable source for selector ownership and cutover readiness is
+[`platform/authority-inventory.json`](../platform/authority-inventory.json).
+It records PostgreSQL tables, legacy sources, backfill and parity status,
+cutover modes, rollback limits, and live selection evidence. The inventory
+marks the current staging and production selections as unknown because this
+repository has no current task-definition environment receipt for either
+environment. Do not infer a live selection from a Dockerfile or Compose
+default.
 
-| Mutable authority | Current store | PostgreSQL schema today | Cutover state |
+## Migration inventory
+
+The migration runner applies every sorted `NNNN_*.sql` file, which is all 19
+files in this commit. `assert_schema_current()` validates the API and canonical
+worker's required table and column subset and reports the shipped manifest
+count. It is not an applied-migration ledger and does not prove that every
+authority table exists.
+
+| Migration | PostgreSQL implementation |
+|---|---|
+| `0001` | orgs, projects, drawing versions, canonical jobs, built tools |
+| `0002` | deletion and purge columns |
+| `0003` | tenant and project authority modes, identity bindings, canonical history, solves, outbox |
+| `0004` | canonical job leases, attempts, terminal fencing, worker heartbeats |
+| `0005` | project share grants |
+| `0006` | platform snapshots, channels, job and solve pins |
+| `0007` | compliance runs, findings, waivers, waiver events |
+| `0008` | evidence bundles and entries |
+| `0009` | professional credentials, credential events, review signatures |
+| `0010` | drawing artifacts and canonical drawing identity |
+| `0011` | async jobs, terminal conflicts, callback replay nonces |
+| `0012` | app sessions, events, approvals |
+| `0013` | agent approvals, grants, counters, kill state, audit, tenant policy, usage |
+| `0014` | broker tenants, usage ledger, admissions, APS slots, resolution audit |
+| `0015` | guest upload counters |
+| `0016` | drawing manifests and versions, upload attempts, purge receipts |
+| `0017` | harness sessions, turns, events, confirmations, usage, tenant repository leases |
+| `0018` | drawing import provenance and replay protection |
+| `0019` | per-session model selection |
+
+Schema availability is not data migration. Most selectors have no historical
+backfill command and no live-data parity command. The inventory states this
+explicitly. App sessions are the exception in part: `LEAF_SESSIONS_STORE`
+supports `dual_write`, `dual_write_shadow`, and `shadow` for new writes and
+runtime read comparison, but it still has no historical SQLite backfill
+command.
+
+## Current authority summary
+
+| Mutable authority | Selector | Repository default | PostgreSQL state |
 |---|---|---|---|
-| Canonical orgs, projects, drawings, jobs, built tools | PostgreSQL when opted in | migrations 0001 to 0010 | Implemented, opt-in |
-| Canonical solve leases, attempts, pins, history, evidence, compliance and review records | PostgreSQL | migrations 0003 to 0010 | Implemented, opt-in |
-| Async non-canonical jobs | `JOBS_DB` SQLite | none | Not migrated |
-| App sessions, events and approval consumption | `SESSIONS_DB` SQLite | none | Not migrated |
-| Agent pending approvals, session grants and rate buckets | JSON files under `LEAF_AGENT_*` | none | Not migrated |
-| Harness conversations and confirmation mirrors | files under `LEAF_SESSIONS_DIR` | none | Not migrated |
-| Claude grants | private files under `LEAF_GRANTS_DIR` | none, use a vault rather than ordinary tables | Not migrated |
-| Broker tenant kill switches and usage ledger | `BROKER_TENANTS` JSON and `BROKER_LEDGER` JSONL | none | Not migrated |
-| Guest upload quotas, markers and purge ledger | process memory and files | none | Not migrated |
-| Tenant repositories and drawing artifacts | filesystem or EFS | metadata exists for canonical drawing artifacts only | Not migrated |
+| Canonical project ledger | tenant or project `authority_mode` row | `legacy_sqlite` when no row exists | implemented in `0001` to `0010` and `0018` |
+| Async jobs and callback replay | `LEAF_JOBS_STORE`, `LEAF_CALLBACK_REPLAY_STORE` | `legacy` | implemented in `0011`; no backfill command |
+| App sessions and approvals | `LEAF_SESSIONS_STORE` | `legacy` | implemented in `0012` and `0019`; dual-write and shadow modes exist |
+| Agent security and usage state | `LEAF_AGENT_STORE` | `legacy` | implemented in `0013`; clean switch only |
+| Broker tenants, admissions, slots, and usage | `LEAF_BROKER_STORE` | `legacy` | implemented in `0014`; clean switch only |
+| Guest caps | `LEAF_GUEST_CAP_STORE` | `memory` | implemented in `0015`; clean switch only |
+| Drawing and upload metadata | `LEAF_DRAWING_STORE`, `LEAF_UPLOAD_STORE` | `legacy` | implemented in `0016` and `0018`; bytes remain outside PostgreSQL |
+| Drawing bytes | `LEAF_BLOB_STORE` | `legacy` | no PostgreSQL byte store; `filesystem` is required by the PostgreSQL startup gate |
+| Harness sessions and repository leases | `LEAF_HARNESS_SESSION_STORE` | `file` | implemented in `0017`; no historical backfill command |
+| Harness grants | `LEAF_GRANT_STORE` | `file` | `vault` is an unimplemented fail-closed seam; tokens are not in PostgreSQL |
+| Tenant repository mutation | `LEAF_HARNESS_AUTHORING_MODE` | `disabled` | `singleton` exists; `fleet` is blocked until the vault exists |
+| Customization R5 and R6 | `LEAF_CUSTOMIZATION_R5_MODE`, `LEAF_CUSTOMIZATION_R6_MODE` | `off` | SQLite only; no PostgreSQL implementation |
 
-Do not set a tenant or project to `postgres_canonical` unless the migration job,
-canonical worker, API, and rollback path have passed the gates below.
+`LEAF_PLATFORM_POSTGRES_REQUIRED=1` is a startup gate, not an authority
+selector. It requires live auth, a direct `DATABASE_URL`, current migrations,
+PostgreSQL drawing and upload metadata, and filesystem blob storage. A database
+connection alone does not select any authority.
 
-## Image and migration contract
+## Migration and reconciliation contract
 
-The migration container applies every numbered migration and then calls
-`db.assert_schema_current()`. The API can use the same check at startup by
-setting `LEAF_PLATFORM_POSTGRES_REQUIRED=1`. That switch also requires:
+The one-shot migration container applies all migrations and then calls
+`db.assert_schema_current()`. The API can run the same subset check at startup
+with `LEAF_PLATFORM_POSTGRES_REQUIRED=1`. The canonical worker checks its
+required schema before entering its claim loop. Each opt-in store also has its
+own startup or first-use table check. Save all of those results because the
+platform assertion alone does not cover every table in migrations `0011`
+through `0019`. These checks do not print the connection string.
 
-- `LEAF_AUTH_LIVE=1`
-- `DATABASE_URL` supplied directly in the process environment
-- a reachable PostgreSQL database with the required 0001 to 0010 schema
-
-The canonical worker always checks the required schema before it starts its
-claim loop. The check does not print the connection string.
-
-Capture a credential-free reconciliation snapshot from an image that has the
-same platform package as the API:
+Capture the credential-free aggregate snapshot from the same platform package
+as the API:
 
 ```shell
 python -c "import json,sys; sys.path.insert(0,'/app/platform'); import db; print(json.dumps(db.reconciliation_snapshot(),sort_keys=True))"
 ```
 
-The snapshot contains schema status, aggregate record counts and authority-mode
-counts. It contains no tenant records or connection string. Store it with the
-cutover evidence before and after each backfill.
+This snapshot proves schema status, aggregate record counts, and canonical
+authority-mode counts only. It is not row-level parity evidence for migrations
+`0011` through `0019`.
 
-For a local rehearsal:
+For a local schema rehearsal:
 
 ```shell
 docker compose -f docker-compose.yml -f docker-compose.canonical.yml up \
@@ -55,38 +103,30 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d \
   canonical-worker app
 ```
 
-The local overlay is not a production database design.
+The overlay supplies database connections but keeps legacy selectors by
+default. It is not evidence of a staging or production cutover.
 
-## Operator decisions still required
+## Required cutover evidence
 
-Choose and record:
-
-1. Managed PostgreSQL provider, region, version, availability level and size.
-2. Connection mode, TLS verification, secret rotation and pool limits.
-3. Backup retention, point-in-time recovery, RPO, RTO and restore drill owner.
-4. Maintenance window, monitoring thresholds and on-call alerts.
-5. Migration identity, application identity and least-privilege grants.
-6. Which non-canonical authorities move into PostgreSQL and which move to a
-   purpose-built store or vault.
-7. Dual-write duration, backfill window, conflict policy and rollback deadline.
-
-## Production gates
-
-1. Provision the database and secret through reviewed infrastructure code.
-2. Run migrations through a protected one-shot task.
-3. Run `assert_schema_current()` from the migration, API and worker images.
-4. Pass the full PostgreSQL integration suite against an empty database and an
-   upgraded copy.
-5. Backfill one authority at a time. Compare tenant-scoped counts and stable
-   record fingerprints before enabling shadow reads.
-6. Prove dual-write failure handling and replay without duplicate jobs,
-   approvals or quota charges.
-7. Switch authority for a test tenant, then a production canary tenant.
-8. Prove task replacement, lease expiry, stale-worker rejection, backup restore
-   and rollback to the old authority.
-9. Move all remaining single-writer state or document why it is safe.
-10. Only then run two ECS tasks, enable automatic rollback and measure a shorter
-    target drain interval.
-
-The 300-second drain and one-task deployment remain safety controls until the
-single-writer authorities in the inventory are removed.
+1. Record the exact release commit, task definitions, environment, database,
+   region, backup policy, RPO, RTO, pool limits, identities, and grants.
+2. Run the protected one-shot migration and save `assert_schema_current()`
+   output from the migration, API, broker, harness, and worker images that use
+   PostgreSQL.
+3. Resolve every `unknown` and `not_implemented` item in the authority
+   inventory. Add reviewed backfill and live-data parity commands before a
+   selector changes.
+4. Rehearse each authority alone. Prove retries, task replacement, lease
+   expiry, stale-owner fencing, and duplicate-charge prevention.
+5. For app sessions, progress through dual-write and shadow modes while the
+   service is still single-task. SQLite and PostgreSQL cannot share one atomic
+   transaction.
+6. Prove rollback for each authority. A selector rollback without a reverse
+   backfill can lose writes made after cutover, so it is not a complete
+   rollback.
+7. Change one staging selector at a time, then save live parity evidence and a
+   rollback receipt.
+8. Use a production canary only after staging is complete and an operator has
+   approved production work.
+9. Keep the one-task deployment and 300-second drain until every mutable
+   single-writer authority is removed or accepted with written evidence.

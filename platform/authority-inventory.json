@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "migration_ids": [
+      "0001", "0002", "0003", "0004", "0005", "0006", "0007",
+      "0008", "0009", "0010", "0011", "0012", "0013", "0014",
+      "0015", "0016", "0017", "0018", "0019"
+    ],
+    "completeness": "partial",
+    "reason": "Historical backfill commands and current live staging and production selector values are not present in this repository."
+  },
+  "selection_evidence": {
+    "repository_defaults": "Dockerfiles and Compose select legacy, file, memory, or disabled modes unless an operator overrides them.",
+    "staging": "No current staging task-definition environment receipt exists at this commit.",
+    "production": "No current production task-definition environment receipt records these selectors at this commit."
+  },
+  "authorities": [
+    {
+      "id": "canonical_project_ledger",
+      "coverage": ["jobs", "drawing_metadata"],
+      "selectors": [
+        {
+          "name": "tenant_authority_modes.authority_mode",
+          "allowed_modes": ["legacy_sqlite", "postgres_canonical"],
+          "repository_default": "legacy_sqlite"
+        },
+        {
+          "name": "project_authority_modes.authority_mode",
+          "allowed_modes": ["legacy_sqlite", "postgres_canonical"],
+          "repository_default": "legacy_sqlite"
+        }
+      ],
+      "postgres_tables": [
+        "orgs", "projects", "drawing_versions", "jobs", "built_tools",
+        "tenant_authority_modes", "project_authority_modes", "identity_bindings",
+        "history_operations", "history_edges", "branch_refs", "solve_records",
+        "outbox_entries", "canonical_worker_heartbeats", "project_share_grants",
+        "platform_snapshots", "snapshot_channels", "job_snapshot_pins",
+        "solve_snapshot_pins", "compliance_runs", "compliance_findings",
+        "compliance_waivers", "compliance_waiver_events", "evidence_bundles",
+        "evidence_entries", "professional_credentials",
+        "professional_credential_events", "review_signatures", "drawing_artifacts"
+      ],
+      "legacy_source": ["server JOBS_DB SQLite", "LEAF_STORE_DIR drawing files and manifests"],
+      "backfill": {
+        "command": null,
+        "status": "not_implemented",
+        "note": "No command maps all legacy project, drawing, job, and ledger records into the canonical schema."
+      },
+      "parity": {
+        "command": "python -c \"import json,sys; sys.path.insert(0,'/app/platform'); import db; print(json.dumps(db.reconciliation_snapshot(),sort_keys=True))\"",
+        "status": "aggregate_snapshot_only",
+        "note": "The snapshot reports counts and authority modes, not row-level fingerprints."
+      },
+      "cutover_modes": ["legacy_sqlite", "postgres_canonical"],
+      "rollback_mode": "Set the tenant or project row back to legacy_sqlite only after reverse reconciliation; no reverse backfill exists.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "No current staging authority-row snapshot is committed."},
+        "production": {"value": null, "status": "unknown", "evidence": "No current production authority-row snapshot is committed."}
+      }
+    },
+    {
+      "id": "async_jobs",
+      "coverage": ["jobs"],
+      "selectors": [
+        {"name": "LEAF_JOBS_STORE", "allowed_modes": ["legacy", "postgres"], "repository_default": "legacy"}
+      ],
+      "postgres_tables": ["async_jobs", "async_job_terminal_conflicts"],
+      "legacy_source": ["JOBS_DB SQLite jobs table"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "The SQLite first-connect dwg_version migration is not a SQLite-to-PostgreSQL backfill."},
+      "parity": {"command": "python -m pytest -q server/tests/test_jobs_callbacks_postgres.py", "status": "contract_tests_only", "note": "Tests cover PostgreSQL behavior, not deployed record parity."},
+      "cutover_modes": ["legacy", "postgres"],
+      "rollback_mode": "Set LEAF_JOBS_STORE=legacy after draining workers and reconciling post-cutover writes; no reverse backfill exists.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Repository default is legacy, but live staging override is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Repository default is legacy, but live production override is not recorded."}
+      }
+    },
+    {
+      "id": "callback_replay_nonces",
+      "coverage": ["jobs"],
+      "selectors": [
+        {"name": "LEAF_CALLBACK_REPLAY_STORE", "allowed_modes": ["legacy", "postgres"], "repository_default": "legacy"}
+      ],
+      "postgres_tables": ["callback_consumed_nonces"],
+      "legacy_source": ["JOBS_DB SQLite callback_consumed_nonces table"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "No nonce backfill or safe cutoff procedure is committed."},
+      "parity": {"command": "python -m pytest -q server/tests/test_jobs_callbacks_postgres.py", "status": "contract_tests_only", "note": "Tests do not compare live nonce sets."},
+      "cutover_modes": ["legacy", "postgres"],
+      "rollback_mode": "Set LEAF_CALLBACK_REPLAY_STORE=legacy only with a reconciled nonce set; stale legacy state can permit replay.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging broker environment is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production broker environment is not recorded."}
+      }
+    },
+    {
+      "id": "app_sessions_and_approvals",
+      "coverage": ["sessions_approvals"],
+      "selectors": [
+        {"name": "LEAF_SESSIONS_STORE", "allowed_modes": ["legacy", "dual_write", "dual_write_shadow", "shadow", "postgres"], "repository_default": "legacy"}
+      ],
+      "postgres_tables": ["app_sessions", "app_session_events", "app_approvals"],
+      "legacy_source": ["SESSIONS_DB SQLite sessions, session_events, and approvals tables"],
+      "backfill": {"command": null, "status": "new_writes_only", "note": "Dual-write mirrors new mutations but no historical SQLite backfill command exists."},
+      "parity": {"command": null, "status": "runtime_shadow_available", "note": "dual_write_shadow and shadow compare reads during exercised workloads; no standalone full-data parity command exists."},
+      "cutover_modes": ["legacy", "dual_write", "dual_write_shadow", "shadow", "postgres"],
+      "rollback_mode": "Return through shadow or dual_write only while single-task, then select legacy after reverse reconciliation. The two stores have no atomic transaction.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging app environment is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production app environment is not recorded."}
+      }
+    },
+    {
+      "id": "agent_state",
+      "coverage": ["agent_state"],
+      "selectors": [
+        {"name": "LEAF_AGENT_STORE", "allowed_modes": ["legacy", "postgres"], "repository_default": "legacy"}
+      ],
+      "postgres_tables": ["agent_approvals", "agent_session_grants", "agent_rate_counters", "agent_fleet_state", "agent_gate_audit_events", "agent_tenant_state", "agent_usage_turns"],
+      "legacy_source": ["LEAF_AGENT_APPROVALS_DIR JSON files", "LEAF_AGENT_GRANTS_FILE JSON", "LEAF_AGENT_RATE_FILE JSON", "LEAF_AGENT_KILL_FILE", "LEAF_AGENT_TENANTS_FILE JSON", "LEAF_AGENT_AUDIT JSONL", "LEAF_AGENT_LEDGER JSONL"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "No approval, grant, rate, kill, policy, audit, or usage import command exists."},
+      "parity": {"command": "python -m pytest -q server/tests/test_agent_gate_postgres.py server/tests/test_agent_ops_postgres.py", "status": "contract_tests_only", "note": "Tests cover store semantics, not live state parity."},
+      "cutover_modes": ["legacy", "postgres"],
+      "rollback_mode": "Set LEAF_AGENT_STORE=legacy only after reconciling approvals, consumed grants, counters, kill state, policy revisions, and audit usage. No reverse backfill exists.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging app environment is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production app environment is not recorded."}
+      }
+    },
+    {
+      "id": "broker_tenants_and_ledger",
+      "coverage": ["broker_tenants_ledger"],
+      "selectors": [
+        {"name": "LEAF_BROKER_STORE", "allowed_modes": ["legacy", "postgres"], "repository_default": "legacy"}
+      ],
+      "postgres_tables": ["broker_tenants", "broker_usage_ledger", "broker_run_admissions", "broker_aps_slots", "broker_admission_resolution_audit"],
+      "legacy_source": ["BROKER_TENANTS JSON", "BROKER_LEDGER JSONL", "process-local admission and slot state"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "No tenant, ledger, admission, or slot backfill command exists."},
+      "parity": {"command": "python -m pytest -q server/tests/test_broker_usage_postgres.py", "status": "contract_tests_only", "note": "Tests do not compare a deployed JSON or JSONL corpus."},
+      "cutover_modes": ["legacy", "postgres"],
+      "rollback_mode": "Set LEAF_BROKER_STORE=legacy only after draining admissions and reconciling tenant disables and ledger events. No reverse backfill exists.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging broker environment is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production broker environment is not recorded."}
+      }
+    },
+    {
+      "id": "guest_caps",
+      "coverage": ["guest_caps"],
+      "selectors": [
+        {"name": "LEAF_GUEST_CAP_STORE", "allowed_modes": ["memory", "postgres"], "repository_default": "memory"}
+      ],
+      "postgres_tables": ["guest_upload_counters"],
+      "legacy_source": ["process-memory daily counters"],
+      "backfill": {"command": null, "status": "not_applicable_to_memory", "note": "Memory counters have no durable source to import; a cutover policy for the current day is not documented."},
+      "parity": {"command": "python -m pytest -q server/tests/test_guest_caps_postgres.py", "status": "contract_tests_only", "note": "Tests cover atomic counter behavior, not a live cutover day."},
+      "cutover_modes": ["memory", "postgres"],
+      "rollback_mode": "Set LEAF_GUEST_CAP_STORE=memory only with an explicit quota reset policy; rollback discards PostgreSQL counter continuity.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Repository default is memory, but live staging override is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Repository default is memory, but live production override is not recorded."}
+      }
+    },
+    {
+      "id": "drawing_metadata",
+      "coverage": ["drawing_metadata"],
+      "selectors": [
+        {"name": "LEAF_DRAWING_STORE", "allowed_modes": ["legacy", "postgres"], "repository_default": "legacy"}
+      ],
+      "postgres_tables": ["drawing_store_manifests", "drawing_store_versions"],
+      "legacy_source": ["LEAF_STORE_DIR per-drawing manifest JSON and version files"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "No manifest, version, checkout, or reservation import command exists."},
+      "parity": {"command": "python -m pytest -q server/tests/test_drawing_upload_authority_postgres.py", "status": "contract_tests_only", "note": "Tests cover authority behavior, not filesystem-to-table parity."},
+      "cutover_modes": ["legacy", "postgres"],
+      "rollback_mode": "Set LEAF_DRAWING_STORE=legacy only after draining checkout and reservation leases and rebuilding legacy manifests from PostgreSQL. No rebuild command exists.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging app and broker environments are not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production app and broker environments are not recorded."}
+      }
+    },
+    {
+      "id": "upload_metadata",
+      "coverage": ["upload_metadata"],
+      "selectors": [
+        {"name": "LEAF_UPLOAD_STORE", "allowed_modes": ["legacy", "postgres"], "repository_default": "legacy"}
+      ],
+      "postgres_tables": ["drawing_upload_attempts", "drawing_purge_receipts"],
+      "legacy_source": ["LEAF_UPLOADS_DIR marker JSON and purge receipt files"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "No upload marker, extraction lease, purge lease, or receipt import command exists."},
+      "parity": {"command": "python -m pytest -q server/tests/test_drawing_upload_authority_postgres.py", "status": "contract_tests_only", "note": "Tests cover PostgreSQL upload lifecycle behavior, not live file parity."},
+      "cutover_modes": ["legacy", "postgres"],
+      "rollback_mode": "Set LEAF_UPLOAD_STORE=legacy only after draining extraction and purge leases and reconciling every marker and receipt. No reverse command exists.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging app environment is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production app environment is not recorded."}
+      }
+    },
+    {
+      "id": "drawing_blob_bytes",
+      "coverage": ["drawing_metadata", "upload_metadata"],
+      "selectors": [
+        {"name": "LEAF_BLOB_STORE", "allowed_modes": ["legacy", "filesystem", "aps_oss"], "repository_default": "legacy"}
+      ],
+      "postgres_tables": [],
+      "legacy_source": ["LEAF_STORE_DIR and LEAF_UPLOADS_DIR bytes", "APS OSS when aps_oss is selected"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "PostgreSQL stores metadata only. No byte migration command is committed."},
+      "parity": {"command": null, "status": "not_implemented", "note": "No committed object count, size, and digest parity command exists."},
+      "cutover_modes": ["legacy", "filesystem", "aps_oss"],
+      "rollback_mode": "Select the prior blob backend only after object digest parity. PostgreSQL metadata can reference objects that the prior backend does not contain.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging app and broker environments are not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production app and broker environments are not recorded."}
+      }
+    },
+    {
+      "id": "harness_sessions_and_repo_leases",
+      "coverage": ["harness_sessions_grants", "tenant_repositories_leases"],
+      "selectors": [
+        {"name": "LEAF_HARNESS_SESSION_STORE", "allowed_modes": ["file", "postgres"], "repository_default": "file"}
+      ],
+      "postgres_tables": ["harness_sessions", "harness_turns", "harness_events", "harness_confirmations", "harness_usage", "harness_tenant_repo_leases"],
+      "legacy_source": ["LEAF_SESSIONS_DIR session directories", "process-local tenant repository locking"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "No harness file-session import command exists. Repository lease rows begin with PostgreSQL use."},
+      "parity": {"command": "npm test -- test/sessionStoreFactory.test.ts test/tenantRepoLease.test.ts", "status": "contract_tests_only", "note": "Tests cover selection and lease fencing, not live session parity."},
+      "cutover_modes": ["file", "postgres"],
+      "rollback_mode": "Select file only after stopping all authors and exporting PostgreSQL sessions; no export command exists. Repository lease fencing is lost on rollback.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging harness environment is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production harness environment is not recorded."}
+      }
+    },
+    {
+      "id": "harness_grants",
+      "coverage": ["harness_sessions_grants"],
+      "selectors": [
+        {"name": "LEAF_GRANT_STORE", "allowed_modes": ["file", "vault"], "repository_default": "file"}
+      ],
+      "postgres_tables": [],
+      "legacy_source": ["LEAF_GRANTS_DIR private grant files"],
+      "backfill": {"command": null, "status": "blocked_unimplemented_target", "note": "The vault provider is a fail-closed seam and has no implementation."},
+      "parity": {"command": "npm test -- test/grantStore.test.ts", "status": "fail_closed_contract_only", "note": "The test proves that vault does not fall back to files; it does not prove a vault implementation."},
+      "cutover_modes": ["file", "vault"],
+      "rollback_mode": "Keep file until a tested vault import, rotation, tenant isolation, unlink, and deletion path exists.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging harness environment is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production harness environment is not recorded."}
+      }
+    },
+    {
+      "id": "tenant_repository_authoring",
+      "coverage": ["tenant_repositories_leases"],
+      "selectors": [
+        {"name": "LEAF_HARNESS_AUTHORING_MODE", "allowed_modes": ["disabled", "singleton", "fleet"], "repository_default": "disabled"}
+      ],
+      "postgres_tables": ["harness_tenant_repo_leases"],
+      "legacy_source": ["LEAF_TENANTS_DIR repositories", "LEAF_TENANT_REPO single-repository compatibility path", "single-process mutation ownership"],
+      "backfill": {"command": null, "status": "not_applicable", "note": "Repositories remain on the filesystem; only lease authority moves to PostgreSQL."},
+      "parity": {"command": "npm test -- test/tenantRepoLease.test.ts", "status": "contract_tests_only", "note": "Two-writer tests require PG_REPO_LEASE_TEST_URL and do not prove a deployed repository corpus."},
+      "cutover_modes": ["disabled", "singleton", "fleet"],
+      "rollback_mode": "Return to disabled before changing lease or grant authority. singleton is allowed on one task only; fleet remains blocked until a real vault exists.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging harness environment is not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production harness environment is not recorded."}
+      }
+    },
+    {
+      "id": "customization_r5",
+      "coverage": ["customization"],
+      "selectors": [
+        {"name": "LEAF_CUSTOMIZATION_R5_MODE", "allowed_modes": ["off", "internal", "all"], "repository_default": "off"}
+      ],
+      "postgres_tables": [],
+      "legacy_source": ["LEAF_CUSTOMIZATION_DB SQLite customization_change_sets, effective_catalogs, audit, confirmations, deployment snapshots, and deployment audit"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "No PostgreSQL customization store exists."},
+      "parity": {"command": "python -m pytest -q server/tests/test_customization_authority.py server/tests/test_customization_reconcile.py", "status": "sqlite_contract_tests_only", "note": "Tests do not establish a shared multi-task authority."},
+      "cutover_modes": ["off", "internal", "all"],
+      "rollback_mode": "Set LEAF_CUSTOMIZATION_R5_MODE=off. This disables access but does not migrate or roll back SQLite state.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging app and broker environments are not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production app and broker environments are not recorded."}
+      }
+    },
+    {
+      "id": "customization_r6",
+      "coverage": ["customization"],
+      "selectors": [
+        {"name": "LEAF_CUSTOMIZATION_R6_MODE", "allowed_modes": ["off", "internal", "all"], "repository_default": "off"}
+      ],
+      "postgres_tables": [],
+      "legacy_source": ["LEAF_CUSTOMIZATION_DB SQLite customization_change_sets, effective_catalogs, audit, confirmations, deployment snapshots, and deployment audit"],
+      "backfill": {"command": null, "status": "not_implemented", "note": "No PostgreSQL customization store exists."},
+      "parity": {"command": "python -m pytest -q server/tests/test_customization_authority.py server/tests/test_customization_reconcile.py", "status": "sqlite_contract_tests_only", "note": "Tests do not establish a shared multi-task authority."},
+      "cutover_modes": ["off", "internal", "all"],
+      "rollback_mode": "Set LEAF_CUSTOMIZATION_R6_MODE=off, then use the application rollback operation for a published pin when applicable. State remains SQLite.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "Live staging app and broker environments are not recorded."},
+        "production": {"value": null, "status": "unknown", "evidence": "Live production app and broker environments are not recorded."}
+      }
+    }
+  ]
+}
