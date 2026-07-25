@@ -782,7 +782,10 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             fingerprint, worker_id, now, allow_closed=_allow_closed,
         )
         if outcome == "applied":
-            platform_link.on_terminal(job_id, status, result_env, error)
+            # The platform mirror already landed inside _pg_store.complete()'s own
+            # transaction, atomically with the authority row. Only the in-process
+            # correlation housekeeping is left to do here.
+            platform_link.forget(job_id)
             _emit_job_terminal(status)
         return outcome
     applied = False

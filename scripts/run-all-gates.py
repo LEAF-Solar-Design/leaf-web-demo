@@ -507,6 +507,13 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_jobs_callbacks_postgres.py"), 1,
               allowed_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
+        # No allowed_skip_reasons ON PURPOSE. This suite proves the terminal write
+        # and its platform mirror share one transaction, using a fake connection
+        # rather than DATABASE_URL, so every test must execute on every runner. A
+        # skip here means the atomicity guarantee went unchecked.
+        Suite("server-jobs-terminal-mirror-atomic",
+              "server tests/test_jobs_terminal_mirror_atomic.py", "pytest", SERVER,
+              _py_pytest("tests/test_jobs_terminal_mirror_atomic.py"), 5),
         # Floor 13, re-measured after main added four offline tests. It was 9 when
         # this suite was first registered; leaving it there would have let all
         # four of main's new tests disappear without reddening the gate.
