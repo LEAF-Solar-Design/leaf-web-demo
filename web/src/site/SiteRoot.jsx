@@ -105,7 +105,7 @@ export default function SiteRoot() {
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === 'Escape' && scene === 'tool') {
-        const ownedSurface = document.querySelector('.proj-menu, .route, .drawer-layer .drawer, .claude-pop')
+        const ownedSurface = document.querySelector('.proj-menu, .route, .strip-decision, .resolver, .drawer-layer .drawer, .claude-pop')
         if (!ownedSurface) navigate('/')
       }
       else if ((e.key === 't' || e.key === 'T') && scene === 'site') navigate('/try')
@@ -155,7 +155,7 @@ export default function SiteRoot() {
       drawingId={scene === 'tool' ? 'cat-panels' : 'rooftop_demo'}
       drawingOptions={drawingOptions}
     >
-      <div className="stage-root" data-scene={scene} ref={stageRef}>
+      <main className="stage-root" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>
         <StageLayer
           intakeOverride={scene === 'tool' ? operatorIntake : null}
           visibleLayers={scene === 'tool' ? operatorVisibleLayers : null}
@@ -171,7 +171,7 @@ export default function SiteRoot() {
           onSelectedHandleChange={setOperatorSelectedHandle}
           onResultOverlayChange={setOperatorOverlay}
         />
-      </div>
+      </main>
     </WorkspaceControllerProvider>
   )
 }

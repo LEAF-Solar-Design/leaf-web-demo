@@ -588,6 +588,20 @@ export default function ToolCast({
     return () => window.removeEventListener('keydown', closeOpsOnEscape)
   }, [opsOpen])
 
+  useEffect(() => {
+    if (!route) return undefined
+    const dismissProposalOnEscape = (event) => {
+      if (event.key !== 'Escape') return
+      if (document.querySelector('.drawer-layer .drawer, .claude-pop, .proj-menu')) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      catalog.actions.dismissRoute()
+      requestAnimationFrame(() => document.querySelector('.tc-bar-input')?.focus())
+    }
+    window.addEventListener('keydown', dismissProposalOnEscape, true)
+    return () => window.removeEventListener('keydown', dismissProposalOnEscape, true)
+  }, [catalog.actions, route])
+
   const runRequest = useCallback(async () => {
     const text = prompt.trim()
     if (!text || busy || jobRunning) return
@@ -656,7 +670,7 @@ export default function ToolCast({
         <span className="key">Esc</span>
       </div>
 
-      <aside className="tc-rail tc-rail-l tc-operator-rail" data-cast="tool" data-controller-instance={instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
+      <aside className="tc-rail tc-rail-l tc-operator-rail" aria-label="Workspace controls" data-cast="tool" data-controller-instance={instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
         <div className="tc-rail-head">
           <span className="tc-rail-title">Workspace</span>
           <span className="tc-rail-sub">request and tools</span>
@@ -746,7 +760,7 @@ export default function ToolCast({
         </div>
       </aside>
 
-      <aside className="tc-rail tc-rail-r" data-cast="tool" style={{ '--rank': 1 }}>
+      <aside className="tc-rail tc-rail-r" aria-label="Operations controls" data-cast="tool" style={{ '--rank': 1 }}>
         <div className="tc-rail-head">
           <span className="tc-rail-title">Operations</span>
           <span className="tc-rail-sub">controller state</span>
@@ -974,7 +988,7 @@ export default function ToolCast({
         Deterministic browser proof. This surface does not claim a live Claude or APS run.
       </div>
 
-      <div className="sr-only" aria-live="polite" aria-atomic="true">
+      <div className="sr-only" role="status" aria-label="Run status announcements" aria-live="polite" aria-atomic="true">
         {jobRunning
           ? `Running ${selectedCatalogTool?.name || currentJob?.tool || 'tool'}`
           : jobResult?.ok

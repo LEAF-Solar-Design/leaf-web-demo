@@ -326,8 +326,15 @@ Progress:
   structured terminal failures. Browser proof aborts the first run request,
   verifies Retry submits nothing, then confirms a second proposal with a new
   idempotency key and a successful result.
+- The unified scene now exposes named main and complementary landmarks, a named
+  live status region, and visible keyboard focus. Proposal Escape dismisses the
+  proposal before scene navigation. Details and ops dialogs trap focus, consume
+  Escape before the scene ladder, and restore their opener. Four focused browser
+  contracts cover these semantics and the combined ops proof caught and fixed a
+  real double-Escape navigation defect.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
-  route transport recovery, and the remaining accessibility ladder remain open.
+  natural-language catalog routing, and the remaining accessibility ladder
+  remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

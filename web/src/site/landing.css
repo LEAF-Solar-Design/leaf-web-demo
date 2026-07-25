@@ -440,6 +440,14 @@
   font-family: inherit; font-size: 13px; color: #e4e4e7; padding: 0;
 }
 .tc-bar-input:focus-visible { outline: 2px solid #4ade80; outline-offset: 4px; border-radius: 2px; }
+.stage-root button:focus-visible,
+.stage-root [role="option"]:focus-visible,
+.stage-root input:focus-visible,
+.stage-root select:focus-visible,
+.stage-root textarea:focus-visible {
+  outline: 2px solid #4ade80;
+  outline-offset: 2px;
+}
 .tc-bar-input::placeholder { color: #52525b; }
 .tc-bar-blink {
   display: inline-block; width: 7px; height: 13px; background: #22c55e;

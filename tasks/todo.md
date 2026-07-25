@@ -40,6 +40,19 @@ Risks:
 - [ ] Wave 4: prove accessibility, keyboard, responsive, motion, and visual standards.
 - [ ] Wave 5: record the aggregate walk and promote authorized flows to staging proof.
 
+Current additive progress:
+
+- [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
+  trust, account, results, details, versions, operations, and responsive controls
+  into `/try`.
+- [x] Prove structured and submit failures require fresh approval before retry.
+- [x] Prove initial and mid-session 401, sign-out, token clearing, and poll stop.
+- [x] Persist drawing controller state across `/try` to site to `/try` recasts.
+- [x] Recover a failed post-write viewer refresh without rerunning the write.
+- [ ] Reconcile remaining visible and standards gaps against the capability ledger.
+- [ ] Run the expanded aggregate fixture suite, local real-stack suite, and any
+  authorized staging proof.
+
 Files and ownership are defined in `plans/UNIFIED-SURFACE-E2E-EXECUTION.md`.
 
 Risks:
