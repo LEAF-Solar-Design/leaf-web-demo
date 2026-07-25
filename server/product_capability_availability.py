@@ -71,14 +71,10 @@ ancestry.
 
 Mirrored rules (this module applies all of the above). Two deliberate places
 where this module is STRICTER, both fail-closed:
-  * `_parse_iso` demands an explicit UTC offset and compares at millisecond
-    resolution, while the console's `isIsoDate` accepts anything `Date.parse`
-    accepts. A naive or oddly-spelled stamp is read differently by the two
-    runtimes, so refusing it here removes the ambiguity. It accepts EITHER `T`
-    or a space as the date/time separator, because both resolve to the same
-    instant in both runtimes once an offset is present, and because
-    `jobs.py` already emits the space form: demanding `T` false-locked a valid
-    payload, which is this module's own failure mode pointed the wrong way.
+  * `_parse_iso` demands `T` plus an explicit UTC offset and compares at
+    millisecond resolution, while the console's `isIsoDate` accepts anything
+    `Date.parse` accepts. A naive or oddly-spelled stamp is read differently by
+    the two runtimes, so refusing it here removes the ambiguity.
   * a naive `now` is refused outright rather than assumed to be UTC.
 
 LEASE_TTL_SECONDS IS a cross-repo contract: it must equal the website's
@@ -137,24 +133,10 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
 # payloads never contain null". That was wrong: this validator also judges LIVE
 # measurements handed in by the integrator, which are parsed JSON and can.
 _MISSING = object()
-# The timestamp spellings this validator and the console's Date.parse both accept
-# AND resolve to the same instant: extended date, `T` OR a space separator,
-# seconds, optional fractional seconds, and an EXPLICIT Z or +/-HH:MM offset.
-#
-# The OFFSET is the part that carries the hazard, not the separator. Without an
-# offset, Python reads the stamp as UTC while `Date.parse` reads it as the
-# VIEWER'S LOCAL time, so the two runtimes silently disagree on the instant; that
-# is why naive stamps stay refused. Measured in node on 2026-07-24:
-# "2026-07-24 12:00:00+00:00" and "2026-07-24T12:00:00+00:00" both parse to
-# 1784894400000, the same instant Python's fromisoformat gives for each.
-#
-# The space form is not hypothetical. server/routers/jobs.py already emits live
-# availability with `str(health["observed_at"])`, and str() of an aware datetime
-# produces exactly that spelling. Demanding a literal `T` here FALSE-LOCKED a
-# payload the console accepts and that our own other emitter produces — the same
-# silent-failure shape this module exists to prevent, pointed the other way.
-_ISO_UTC_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})\Z")
+# The one timestamp spelling this validator and the console's Date.parse both
+# accept AND resolve to the same instant: extended date, literal T, seconds,
+# optional fractional seconds, explicit Z or +/-HH:MM offset.
+_ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})\Z")
 
 
 class ProductCapability:
@@ -242,19 +224,15 @@ def _parse_iso(value: Any) -> Optional[datetime]:
     """
     if not isinstance(value, str) or not value:
         return None
-    # Restrict to the spellings both runtimes agree on. Verified against node's
-    # Date.parse (2026-07-24):
+    # Restrict to the EXACT spelling both runtimes agree on. Verified against
+    # node's Date.parse (2026-07-24):
     #   "2026-07-24T11:59:59+00:00:30"  Python ok  / JS NaN      -> divergence
     #   "20260724T115959Z"              Python ok  / JS NaN      -> divergence
     #   "2026-07-24 11:59:59"           both ok, but JS resolves it as the
     #                                   viewer's LOCAL time (16:59:59Z on a
     #                                   UTC-5 host) while Python reads UTC
     #                                   -> silent 5-hour disagreement
-    #   "2026-07-24 11:59:59+00:00"     both ok and BOTH resolve to 11:59:59Z
-    #                                   -> agreement; accepted
-    # The last two differ only in the OFFSET, which is where the hazard lives.
-    # Extended date + `T` or a space + time + explicit Z/±HH:MM is the safe
-    # intersection; a missing offset is not.
+    # Extended date + `T` + time + explicit Z/±HH:MM is the safe intersection.
     if not _ISO_UTC_RE.match(value):
         return None
     try:
