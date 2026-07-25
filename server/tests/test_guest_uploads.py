@@ -238,6 +238,27 @@ def test_upload_dxf_happy_path_serves_their_geometry(client):
     assert intake["polylines"][0]["closed"] is True
 
 
+def test_extraction_rejects_staged_bytes_that_do_not_match_upload_marker(
+        client, monkeypatch):
+    monkeypatch.setattr(
+        guest_uploads, "start_extraction_thread",
+        lambda tenant_id, drawing_id, ext: None)
+    receipt = _upload(client).json()
+    tenant, drawing = receipt["tenant_id"], receipt["drawing_id"]
+    guest_uploads.staged_path(tenant, drawing, ".dxf").write_bytes(
+        DXF_BYTES.replace(b"111.25", b"999.25"))
+
+    guest_uploads.run_extraction(tenant, drawing, ".dxf")
+
+    backend = write_loop.upload_backend_for_tenant(tenant)
+    marker = guest_uploads.read_marker(backend, tenant, drawing)
+    assert marker["status"] == "failed"
+    assert "reserved source bytes" in marker["error"]["message"]
+    import store
+    with pytest.raises(KeyError):
+        store.load_manifest(backend, tenant, drawing)
+
+
 def test_upload_account_tenant_no_retention(client):
     r = _upload(client, headers={"X-Tenant-Id": "acme-solar"})
     assert r.status_code == 202
