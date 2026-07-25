@@ -410,16 +410,58 @@ def test_entitlement_resolves_per_capability_not_from_one_hardcoded_key(monkeypa
         tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None))
     assert demo[jobs_router.SOLVE_CAPABILITY]["entitled"] is True
 
+    # `author` maps to the `build` policy capability, which demo holds, and which
+    # `customization_service.stage` already enforces on the authoring path. A
+    # projection that said "not entitled" here would have contradicted the
+    # enforcement.
+    assert demo["tool.author.company"]["entitled"] is True
+    starter_authoring = _by_id(jobs_router.platform_capabilities(
+        tenant=jobs_router.deps.TenantContext("tenant", tier="hosted_starter"),
+        x_org_id="org-1", x_project_id="project-1", authorization=None))
+    assert starter_authoring["tool.author.company"]["entitled"] is False, (
+        "hosted_starter has build: False, so authoring must read not-entitled")
+
     # An unmapped entitlement name denies for EVERY tier, including full-access
     # demo. Fail-closed by decision, pinned so it cannot drift open unnoticed.
-    for capability_id in ("drawing.run.approved", "evidence.generate",
-                          "tool.author.company"):
+    for capability_id in ("drawing.run.approved", "evidence.generate"):
         assert demo[capability_id]["entitled"] is False, capability_id
 
     # A capability that does not declare an entitlement carries no `entitled` key
     # at all: absent is not the same as false.
     assert "entitled" not in demo["drawing.inspect"]
     assert "entitled" not in demo["review.evidence"]
+
+
+def test_a_lease_that_has_already_expired_reads_as_offline_not_malformed(monkeypatch):
+    """The heartbeat query admits a row on `observed_at >= now - 15s`
+    INCLUSIVELY, and the lease runs `observed + 15s`, so a row at the edge of the
+    window has an `expiresAt` already in the past.
+
+    Handing that to the catalog got it refused as
+    `live_availability_rejected_by_contract_validator`, which means "the
+    integrator emitted something malformed" and would send whoever read it hunting
+    a wiring bug that does not exist. Ordinary lease expiry is the
+    `canonical_worker_offline` case."""
+    import product_capability_availability as catalog
+    from datetime import datetime, timedelta, timezone
+
+    context = {"org_id": "org-1", "project_id": "project-1",
+               "authority_mode": "postgres_canonical"}
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "resolve_submission_context",
+                        lambda *_args: context)
+    stale = (datetime.now(timezone.utc)
+             - timedelta(seconds=catalog.LEASE_TTL_SECONDS)).isoformat()
+    monkeypatch.setattr(jobs_router.jobs.platform_link, "canonical_worker_health",
+                        lambda _tool: {"runtime": "python-test", "source_revision": "abc123",
+                                       "source_sha256": "c" * 64, "observed_at": stale})
+    response = jobs_router.platform_capabilities(
+        tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None)
+    solve = _by_id(response)[jobs_router.SOLVE_CAPABILITY]
+    assert solve["availability"]["state"] == "failed_retryable"
+    assert solve["availability"]["reasonCode"] == "canonical_worker_offline"
+    # And specifically NOT the integrator-defect reason.
+    assert solve["availability"]["reasonCode"] != catalog.REASON_REJECTED_MEASUREMENT
+    assert catalog.is_well_formed_availability(solve["availability"]) is True
 
 
 def test_an_unreadable_entitlement_policy_denies_every_capability(monkeypatch):
@@ -440,9 +482,14 @@ def test_an_unreadable_entitlement_policy_denies_every_capability(monkeypatch):
     monkeypatch.setattr(entitlements, "entitlements_for", boom)
     response = jobs_router.platform_capabilities(
         tenant="demo", x_org_id="org-1", x_project_id="project-1", authorization=None)
-    for descriptor in response["capabilities"]:
-        if "entitled" in descriptor:
-            assert descriptor["entitled"] is False, descriptor["id"]
+    # COUNT FIRST. Looping over "whatever descriptors exist" passed against the
+    # parent too, because a route emitting ONE descriptor trivially satisfies it.
+    # The claim is denial across every capability that declares an entitlement,
+    # so the number of them is part of the claim.
+    declaring = [d for d in response["capabilities"] if "entitled" in d]
+    assert len(declaring) == 5, [d["id"] for d in declaring]
+    for descriptor in declaring:
+        assert descriptor["entitled"] is False, descriptor["id"]
 
 
 def test_canonical_worker_container_contract_is_non_root_and_source_bound():

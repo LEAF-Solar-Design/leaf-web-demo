@@ -70,8 +70,19 @@ SOLVE_CAPABILITY = "drawing.solve.strings"
 _ENTITLEMENT_POLICY_KEY = {
     "run_read": "run_read",
     "solve": "solve",
+    # `author` -> `build` is not a guess, it is the mapping this server already
+    # enforces: `customization_service.stage` (the tool-authoring path) gates on
+    # `entitlements_for(tier).get("build")`, and the policy's own denial message
+    # for `build` reads "does not include authoring new tools (Build)". Leaving it
+    # unmapped denied `tool.author.company` to demo, self_hosted and hosted_pro,
+    # every one of which has `build: True` and can in fact author — the projection
+    # would have contradicted the enforcement.
+    "author": "build",
 }
-_UNMAPPED_ENTITLEMENTS = frozenset({"run", "review", "author"})
+# `run` and `review` genuinely have no counterpart. `run` could be run_read or
+# run_write depending on the tool, and no policy capability corresponds to
+# `review` at all. Picking one would be inventing a security boundary.
+_UNMAPPED_ENTITLEMENTS = frozenset({"run", "review"})
 
 
 def _entitled_by_capability(policy: Dict[str, bool]) -> Dict[str, bool]:
@@ -107,6 +118,20 @@ def _measured_solve_availability(health: Optional[Dict[str, Any]],
     `live_availability_rejected_by_contract_validator` instead of being emitted
     and then silently swallowed by the browser.
     """
+    # AN EXPIRED LEASE IS AN OFFLINE WORKER, NOT AN INTEGRATOR DEFECT. The
+    # heartbeat query admits a row on `observed_at >= now - 15s` INCLUSIVELY, and
+    # the lease this builds runs `observed + 15s`, so a row at the edge of that
+    # window yields an `expiresAt` that is already in the past. Handing that to
+    # the catalog got it refused as `live_availability_rejected_by_contract_validator`
+    # — a reason that means "the integrator emitted something malformed" and would
+    # send whoever read it hunting a wiring bug that does not exist. Ordinary lease
+    # expiry is the `canonical_worker_offline` case, so classify it here where the
+    # freshness is actually known.
+    if health:
+        lease_expiry = (datetime.fromisoformat(str(health["observed_at"]))
+                        + timedelta(seconds=capability_catalog.LEASE_TTL_SECONDS))
+        if lease_expiry <= now:
+            health = None
     observed = str(health["observed_at"]) if health else now.isoformat()
     expires = ((datetime.fromisoformat(observed) if health else now)
                + timedelta(seconds=capability_catalog.LEASE_TTL_SECONDS)).isoformat()
