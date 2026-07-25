@@ -223,13 +223,11 @@ def wait_ready(url: str, proc: subprocess.Popen, timeout_s: float | None = None,
     12x slower. Failing there would blame the server for a machine that changed
     underneath it.
 
-    The ceiling bounds the CALIBRATED deadline, which is what keeps a true hang
-    from parking the gate. It is not a bound on wall-clock time, and four things
-    can exceed it, all deliberate: an operator ``LEAF_TEST_BOOT_TIMEOUT_S`` and a
-    caller-supplied ``timeout_s`` are taken as given and never clamped; a poll
-    iteration already in flight when the deadline passes runs to completion,
-    because the deadline is checked at the top of the loop; and the expiry path
-    runs at most two probes, each capped at ``_SPAWN_PROBE_TIMEOUT_S``.
+    The ceiling bounds the CALIBRATED polling deadline, which is what keeps a
+    true hang from parking the gate. It is not a wall-clock bound: an operator
+    ``LEAF_TEST_BOOT_TIMEOUT_S`` and a caller-supplied ``timeout_s`` are taken as
+    given and never clamped, and the spawn probes and any poll iteration already
+    in flight add time on top of it.
 
     The elapsed time is re-read after the regrade probe rather than reused from
     before it, or a slow probe would be spent out of a budget it was not counted
