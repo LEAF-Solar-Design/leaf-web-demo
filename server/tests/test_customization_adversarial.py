@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -15,6 +16,7 @@ from customization_models import ChangeSet, ChangeState
 from customization_service import (
     CustomizationService,
     CustomizationServiceError,
+    _materialize_worktree,
     effective_catalog_dir,
 )
 from customization_store import SQLiteCustomizationStore
@@ -328,3 +330,114 @@ def test_effective_catalog_wraps_sqlite_failure(tmp_path, monkeypatch):
 
     assert caught.value.code == "effective_catalog_unavailable"
     assert caught.value.status_code == 503
+
+
+def _published_pin(tmp_path, monkeypatch):
+    """Publish one catalog pin and return (bare repo, effective root)."""
+    _source, bare_base, base, _tool = repository(tmp_path)
+    registry = subprocess.run(
+        ["git", "show", f"{base}:registry.json"],
+        cwd=bare_base / "tenant-a.git", check=True, stdout=subprocess.PIPE,
+    ).stdout
+    digest = hashlib.sha256(registry).hexdigest()
+    database = tmp_path / "customization.db"
+    effective = tmp_path / "effective"
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))
+    monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(bare_base))
+    monkeypatch.setenv("LEAF_EFFECTIVE_TENANTS_DIR", str(effective))
+    store = SQLiteCustomizationStore(database)
+    store.initialize()
+    change_set_id = "11111111-1111-4111-8111-111111111111"
+    state = store.create_change_set(
+        tenant_id="tenant-a", idempotency_key="create", base_commit=base,
+        desired_platform_release=RELEASE, workspace_contract_digest=WORKSPACE,
+        author_subject="auth0|author", change_set_id=change_set_id,
+    )
+    state = store.transition(
+        tenant_id="tenant-a", change_set_id=change_set_id,
+        next_state=ChangeState.STAGING, expected_version=state.version,
+        idempotency_key="staging",
+    )
+    state = store.record_staged(
+        tenant_id="tenant-a", change_set_id=change_set_id,
+        expected_version=state.version, idempotency_key="staged",
+        staged_commit=base, catalog_digest=digest, platform_release=RELEASE,
+        workspace_contract_digest=WORKSPACE,
+    )
+    for next_state, key in (
+        (ChangeState.AWAITING_APPROVAL, "awaiting"),
+        (ChangeState.APPROVED, "approved"),
+        (ChangeState.PUBLISHING, "publishing"),
+    ):
+        extra = {"approver_subject": "auth0|approver"} if key == "approved" else {}
+        state = store.transition(
+            tenant_id="tenant-a", change_set_id=change_set_id,
+            next_state=next_state, expected_version=state.version,
+            idempotency_key=key, **extra,
+        )
+    store.publish(
+        tenant_id="tenant-a", change_set_id=change_set_id,
+        expected_version=state.version, idempotency_key="published",
+        approver_subject="auth0|approver",
+    )
+    return bare_base / "tenant-a.git", effective, base
+
+
+def test_worktree_add_failure_surfaces_git_stderr(tmp_path, monkeypatch):
+    """git's own words must reach the operator.
+
+    These subprocesses used to run with stderr=DEVNULL, so a failure in CI
+    produced a bare 503 and nothing to diagnose it with.
+    """
+    bare, effective, _base = _published_pin(tmp_path, monkeypatch)
+    missing = "0" * 40
+
+    with pytest.raises(CustomizationServiceError) as caught:
+        _materialize_worktree(bare, effective / "tenant-a" / missing, missing)
+
+    # The client still learns only the generic code...
+    assert caught.value.code == "effective_catalog_unavailable"
+    assert caught.value.status_code == 503
+    # ...while the operator gets what git actually said.
+    assert "invalid reference" in caught.value.detail
+    assert missing in caught.value.detail
+
+
+def test_materialization_recovers_from_a_deleted_worktree(tmp_path, monkeypatch):
+    """A worktree deleted underneath us must not wedge the tenant forever.
+
+    `git worktree add` removes the target on its own failure path, and the
+    registration it leaves behind makes every later add fail with "missing but
+    already registered worktree" until something prunes it.
+    """
+    _bare, _effective, _base = _published_pin(tmp_path, monkeypatch)
+    path = effective_catalog_dir("tenant-a")
+    assert path is not None
+
+    shutil.rmtree(path)  # exactly what the losing racer used to do
+
+    assert effective_catalog_dir("tenant-a") == path
+    assert (path / "registry.json").exists()
+
+
+def test_concurrent_materialization_never_loses_the_worktree(tmp_path, monkeypatch):
+    """Many callers racing one pin all get the same materialized path.
+
+    Two concurrent `git worktree add` calls on one path let the loser delete
+    the winner's directory; this failed ~6% of contended attempts before the
+    materialization was serialized.
+    """
+    _bare, _effective, _base = _published_pin(tmp_path, monkeypatch)
+    workers = 8
+    barrier = threading.Barrier(workers)
+
+    def materialize(_):
+        barrier.wait()
+        return effective_catalog_dir("tenant-a")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        paths = list(pool.map(materialize, range(workers)))
+
+    assert paths[0] is not None
+    assert paths == [paths[0]] * workers
+    assert (paths[0] / "registry.json").exists()

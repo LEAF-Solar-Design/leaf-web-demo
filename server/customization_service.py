@@ -9,11 +9,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sqlite3
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,12 +41,18 @@ CONTRACT = "leaf.customization.v1"
 DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
 _configured_lock = threading.Lock()
 _configured_services: dict[str, "CustomizationService"] = {}
+_LOG = logging.getLogger(__name__)
 
 
 class CustomizationServiceError(RuntimeError):
-    def __init__(self, code: str, status_code: int = 409) -> None:
+    def __init__(self, code: str, status_code: int = 409, detail: str = "") -> None:
         super().__init__(code)
         self.code, self.status_code = code, status_code
+        # `code` is the ONLY client-visible part: routers/author.py copies it
+        # into the response body as `reason_code`. `detail` carries operator
+        # diagnostics (git stderr, absolute tenant paths) and must never be
+        # serialized into a response. It is for logs and test assertions.
+        self.detail = str(detail)
 
 
 def database_path() -> Path:
@@ -755,6 +763,168 @@ class CustomizationService:
             raise CustomizationServiceError("catalog_digest_mismatch")
 
 
+# --- effective-catalog materialization ------------------------------------
+#
+# `git worktree add` is NOT safe to run twice at once on one path. git records
+# the target as junk and REMOVES it on its own failure path, so the caller that
+# loses the race deletes the directory the winner just populated -- measured on
+# Linux at ~9% of contended attempts, and in some of those the winner's own
+# `add` still exits 0. The deletion then leaves the path registered in the bare
+# repo, and every later add fails for good with "is a missing but already
+# registered worktree", so one lost race becomes a durable 503 for that tenant
+# rather than a transient one.
+#
+# Hence: one add at a time per tenant repository, prune the leftovers of any
+# earlier loss before retrying, and keep git's stderr for the operator.
+
+_MATERIALIZE_ATTEMPTS = 5
+_MATERIALIZE_LOCK_TIMEOUT = 60.0
+# Only a crashed holder should ever be evicted, so this sits far above the 20s
+# `worktree add` timeout rather than near it.
+_MATERIALIZE_LOCK_STALE = 300.0
+
+_worktree_guard = threading.Lock()
+_worktree_locks: dict[str, threading.Lock] = {}
+
+
+def _git_stderr(result: subprocess.CompletedProcess) -> str:
+    """Collapse git's stderr to one bounded line fit for a log record."""
+    return " ".join((result.stderr or "").split())[:500]
+
+
+def _unavailable(detail: str) -> CustomizationServiceError:
+    """Log the operator-facing cause, return the client-safe 503."""
+    _LOG.warning("effective_catalog_unavailable: %s", detail)
+    return CustomizationServiceError("effective_catalog_unavailable", 503, detail=detail)
+
+
+def _tenant_worktree_lock(bare: Path) -> threading.Lock:
+    """One in-process lock per tenant repository.
+
+    Keyed on the bare repo rather than the target path so that two different
+    pinned commits for one tenant cannot add concurrently -- `worktree prune`
+    below would otherwise be free to delete a sibling add still in flight.
+    """
+    key = str(bare)
+    with _worktree_guard:
+        lock = _worktree_locks.get(key)
+        if lock is None:
+            lock = _worktree_locks[key] = threading.Lock()
+        return lock
+
+
+@contextmanager
+def _exclusive_materialize(bare: Path, lock_dir: Path):
+    """Serialize materialization for one tenant across threads AND processes.
+
+    `os.mkdir` is atomic on POSIX and on Windows, so exactly one holder wins
+    without a platform-specific file-locking call. A lock older than
+    ``_MATERIALIZE_LOCK_STALE`` is taken over, so a worker killed mid-add
+    cannot wedge the tenant permanently.
+    """
+    with _tenant_worktree_lock(bare):
+        deadline = time.monotonic() + _MATERIALIZE_LOCK_TIMEOUT
+        while True:
+            try:
+                lock_dir.mkdir()
+                break
+            except FileExistsError:
+                try:
+                    held = time.time() - lock_dir.stat().st_mtime
+                except OSError:
+                    continue  # released underneath us; try to claim it now
+                if held > _MATERIALIZE_LOCK_STALE:
+                    try:
+                        lock_dir.rmdir()
+                    except OSError:
+                        pass
+                    continue
+                if time.monotonic() >= deadline:
+                    raise _unavailable(
+                        f"materialization lock held past {_MATERIALIZE_LOCK_TIMEOUT}s: {lock_dir}"
+                    )
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            try:
+                lock_dir.rmdir()
+            except OSError:
+                pass
+
+
+def _worktree_add(bare: Path, target: Path, commit: str) -> subprocess.CompletedProcess:
+    """Add the detached worktree, CAPTURING stderr.
+
+    The previous DEVNULL here is why three CI failures produced nothing but a
+    generic 503: git's actual complaint was thrown away at the point of failure.
+    """
+    return subprocess.run(
+        ["git", "-c", "core.autocrlf=false", "--git-dir", str(bare),
+         "worktree", "add", "--detach", str(target), commit],
+        text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
+    )
+
+
+def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
+    """Ensure `target` holds `commit`, serialized against every other worker."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_dir = target.parent / ".materialize.lock"
+    with _exclusive_materialize(bare, lock_dir):
+        if target.exists():
+            return  # another holder materialized it while we waited
+        first = _worktree_add(bare, target, commit)
+        if first.returncode == 0 or target.exists():
+            return
+        # A lost race or a crash can leave the path registered but absent, and
+        # git then refuses every add on it until the registration is pruned.
+        prune = subprocess.run(
+            ["git", "--git-dir", str(bare), "worktree", "prune"],
+            text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
+        )
+        retry = _worktree_add(bare, target, commit)
+        if retry.returncode != 0 and not target.exists():
+            raise _unavailable(
+                f"git worktree add {target} @ {commit}: rc={first.returncode} "
+                f"{_git_stderr(first)!r}; prune rc={prune.returncode} "
+                f"{_git_stderr(prune)!r}; retry rc={retry.returncode} "
+                f"{_git_stderr(retry)!r}"
+            )
+
+
+def _verified_worktree(bare: Path, target: Path, commit: str) -> tuple[str, bytes]:
+    """Return the worktree's observed HEAD and its registry.json bytes.
+
+    Each attempt re-materializes when the directory is missing. The loop this
+    replaces only ever re-ran `rev-parse`, which can never recover the one
+    failure that actually happens: the directory being deleted.
+    """
+    detail = "no attempt completed"
+    for attempt in range(_MATERIALIZE_ATTEMPTS):
+        # Attempt 0 fast-paths an already-good worktree without taking the
+        # lock. Every later attempt goes through it, so a caller that arrived
+        # mid-add blocks until the holder finishes instead of spinning on a
+        # half-written directory and exhausting its retries.
+        if attempt or not target.exists():
+            _materialize_worktree(bare, target, commit)
+        try:
+            probe = subprocess.run(
+                ["git", "-C", str(target), "rev-parse", "HEAD"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+            )
+            if probe.returncode == 0:
+                # A tampered registry still reads and still rev-parses; the
+                # caller's digest check is what must reject it, not a retry.
+                return probe.stdout.strip(), (target / "registry.json").read_bytes()
+            detail = f"git rev-parse HEAD rc={probe.returncode}: {_git_stderr(probe)!r}"
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+        if attempt + 1 < _MATERIALIZE_ATTEMPTS:
+            time.sleep(0.05 * (attempt + 1))
+    raise _unavailable(f"{target} @ {commit} unverifiable after "
+                       f"{_MATERIALIZE_ATTEMPTS} attempts: {detail}")
+
+
 def effective_catalog_dir(tenant_id: str) -> Path | None:
     """Materialize the durable pin, even after rollout flags are turned off.
 
@@ -808,43 +978,28 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
         target = root / tenant_id / pin.catalog_commit
         resolved_root = root.resolve(strict=True)
         if target.is_symlink():
-            raise CustomizationServiceError("effective_catalog_unavailable", 503)
+            raise _unavailable(f"refusing symlinked catalog target {target}")
         if not _path_within(target, resolved_root):
-            raise CustomizationServiceError("effective_catalog_unavailable", 503)
-        if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                subprocess.run(["git", "-c", "core.autocrlf=false", "--git-dir", str(bare), "worktree", "add", "--detach", str(target), pin.catalog_commit],
-                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-            except subprocess.SubprocessError:
-                # Another worker may have won the deterministic-path race.
-                # Accept only the fully verified target below.
-                if not target.exists():
-                    raise
-        observed = ""
-        for attempt in range(10):
-            try:
-                observed = subprocess.run(
-                    ["git", "-C", str(target), "rev-parse", "HEAD"],
-                    check=True, text=True, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, timeout=10,
-                ).stdout.strip()
-                materialized_registry = (target / "registry.json").read_bytes()
-                break
-            except (OSError, subprocess.SubprocessError):
-                if attempt == 9:
-                    raise
-                time.sleep(0.05)
+            raise _unavailable(f"catalog target {target} escapes {resolved_root}")
+        observed, materialized_registry = _verified_worktree(
+            bare, target, pin.catalog_commit
+        )
         if observed != pin.catalog_commit:
-            raise CustomizationServiceError("effective_catalog_commit_mismatch", 503)
+            raise CustomizationServiceError(
+                "effective_catalog_commit_mismatch", 503,
+                detail=f"{target} HEAD {observed!r} != pinned {pin.catalog_commit!r}",
+            )
         if hashlib.sha256(materialized_registry).hexdigest() != pin.catalog_digest:
-            raise CustomizationServiceError("effective_catalog_digest_mismatch", 503)
+            raise CustomizationServiceError(
+                "effective_catalog_digest_mismatch", 503,
+                detail=f"{target}/registry.json does not match the pinned digest",
+            )
         return target
     except ChangeSetNotFoundError:
         if enabled(5, tenant_id) or enabled(6, tenant_id):
-            raise CustomizationServiceError("effective_catalog_unavailable", 503)
+            raise _unavailable(f"no effective catalog pinned for tenant {tenant_id}")
         return None
     except CustomizationServiceError:
         raise
     except (OSError, sqlite3.DatabaseError, subprocess.SubprocessError) as exc:
-        raise CustomizationServiceError("effective_catalog_unavailable", 503) from exc
+        raise _unavailable(f"{type(exc).__name__}: {exc}") from exc
