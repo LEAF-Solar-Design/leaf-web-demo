@@ -574,6 +574,31 @@ def test_messages_confirm_busy_gives_the_approval_back(client, monkeypatch):
     assert len(calls) == 1, "the replay started a SECOND turn from one approval"
 
 
+def test_messages_busy_response_keeps_the_full_run_envelope(client):
+    """The busy 409 is a §3 run envelope, and adding the give-back must not
+    have quietly reshaped it. Pin every field: a body assembled from
+    `with_envelope_fields` instead of `err_envelope` drops the seven
+    ok/tool/version/result/overlay/timing_ms/cost keys that clients parse."""
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+    assert session_store.try_begin_turn(sid, "turn-holder-envelope", 300) is True
+    try:
+        r = client.post(f"/api/sessions/{sid}/messages",
+                        json={"text": "hi"}, headers=_h(tid))
+        assert r.status_code == 409, r.text
+        body = r.json()
+        assert set(body) == {
+            "ok", "tool", "version", "result", "overlay", "timing_ms", "cost",
+            "error", "degraded_mode",
+        }, body
+        assert body["ok"] is False
+        assert body["degraded_mode"] is False
+        # no give-back happened, so the honesty field stays absent
+        assert "approval_recovered" not in body
+    finally:
+        session_store.end_turn(sid, "turn-holder-envelope")
+
+
 def test_messages_busy_text_turn_needs_no_give_back(client):
     """The give-back is confirm-only: a busy TEXT turn has no approval to
     return, and must still answer a plain retryable 409."""

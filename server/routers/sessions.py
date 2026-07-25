@@ -95,7 +95,8 @@ import deps
 import entitlements
 import session_store
 import turn_runner
-from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
+from envelopes import (ErrorCode, err_envelope, error_obj, error_response,
+                       with_envelope_fields)
 
 router = APIRouter()
 
@@ -324,15 +325,20 @@ def _busy_response(session_id: str, approval_lost: bool = False) -> JSONResponse
     `retryable: false` plus `approval_recovered: false` — the client's real
     next step is a NEW approval, not a retry. `approval_recovered` is emitted
     ONLY in that failure case, leaving the ordinary busy response (and every
-    text-turn busy response) byte-identical to before."""
-    body = with_envelope_fields({
-        **({"approval_recovered": False} if approval_lost else {}),
-        "error": error_obj(
-            ErrorCode.TURN_IN_PROGRESS,
-            f"session {session_id!r} already has an active turn",
-            retryable=not approval_lost,
-        ),
-    })
+    text-turn busy response) byte-identical to before.
+
+    That byte-identity is why this builds on ``err_envelope`` — the same
+    builder ``error_response`` uses — instead of hand-rolling a body. The busy
+    409 is a §3 run envelope carrying `ok`/`tool`/`version`/`result`/`overlay`/
+    `timing_ms`/`cost` alongside `error`; assembling it from
+    ``with_envelope_fields`` instead would silently DROP those seven fields
+    from a response clients already parse (pinned by
+    tests/test_sessions_routes.py::test_messages_busy_response_keeps_the_full_run_envelope)."""
+    message = f"session {session_id!r} already has an active turn"
+    if not approval_lost:
+        return error_response(ErrorCode.TURN_IN_PROGRESS, message, retryable=True)
+    body = err_envelope(ErrorCode.TURN_IN_PROGRESS, message, retryable=False)
+    body["approval_recovered"] = False
     return JSONResponse(status_code=409, content=body)
 
 
