@@ -1334,8 +1334,23 @@ def unconsume_approval(
     mode = _store_mode()
     if mode == "postgres":
         return _pg_unconsume_approval(confirmation_id, session_id, tenant_id)
-    legacy = _legacy_unconsume_approval(confirmation_id, session_id, tenant_id)
+    # ORDER MATTERS, and it is the REVERSE of consume_approval's.
+    #
+    # consume_approval gates on LEGACY first (it only calls _pg_consume after
+    # _legacy_consume succeeds), so legacy is what actually blocks a second
+    # consume. A release must therefore free legacy LAST: while the release is
+    # half-applied, legacy is still consumed=1, so a concurrent consume fails
+    # `already_consumed` at the legacy gate and never touches PostgreSQL.
+    #
+    # Releasing legacy first is unsafe and _shadow_equal cannot catch it: the
+    # concurrent consume would re-take legacy (1), then raise against the
+    # still-consumed PostgreSQL row, and this release would then clear
+    # PostgreSQL — leaving legacy consumed and PostgreSQL free. BOTH release
+    # calls return True in that interleaving, so the shadow comparison passes
+    # while the two stores genuinely disagree.
     if mode in _DUAL_WRITE_MODES:
         postgres = _pg_unconsume_approval(confirmation_id, session_id, tenant_id)
+        legacy = _legacy_unconsume_approval(confirmation_id, session_id, tenant_id)
         _shadow_equal("approval consumption release", legacy, postgres)
-    return legacy
+        return legacy
+    return _legacy_unconsume_approval(confirmation_id, session_id, tenant_id)

@@ -189,6 +189,77 @@ def test_dual_write_unconsume_fails_closed_on_mismatch(monkeypatch):
         session_store.unconsume_approval("confirm-1", "session-1", "tenant-1")
 
 
+def test_dual_write_unconsume_releases_postgres_before_legacy(monkeypatch):
+    """Release order is load-bearing and is the REVERSE of consume's.
+
+    consume_approval gates on legacy (it calls _pg_consume only after
+    _legacy_consume succeeds), so legacy is what blocks a second consume. The
+    release must therefore free legacy LAST."""
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
+    order = []
+
+    def _pg(*_args):
+        order.append("postgres")
+        return True
+
+    def _legacy(*_args):
+        order.append("legacy")
+        return True
+
+    monkeypatch.setattr(session_store, "_pg_unconsume_approval", _pg)
+    monkeypatch.setattr(session_store, "_legacy_unconsume_approval", _legacy)
+
+    assert session_store.unconsume_approval("confirm-1", "session-1", "tenant-1") is True
+    assert order == ["postgres", "legacy"], (
+        "legacy is the gate consume_approval checks first, so releasing it "
+        "before PostgreSQL lets a concurrent consume re-take legacy, fail "
+        "against the still-consumed PostgreSQL row, and leave the two stores "
+        "divergent -- with BOTH release calls returning True, so _shadow_equal "
+        "cannot catch it"
+    )
+
+
+def test_dual_write_unconsume_blocks_a_consume_racing_mid_release(monkeypatch):
+    """Fire a concurrent consume in the WINDOW between the two release calls.
+
+    It must be blocked cleanly at the legacy gate, and the stores must not
+    diverge. This is the interleaving that both release calls returning True
+    would otherwise hide from the shadow comparison."""
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
+    consumed = {"legacy": True, "postgres": True}
+    race = {}
+
+    def _racing_consume():
+        # exactly consume_approval's order: the legacy gate first...
+        if consumed["legacy"]:
+            race["blocked"] = True
+            return
+        race["blocked"] = False
+        consumed["legacy"] = True
+        # ...and PostgreSQL only after legacy succeeded.
+        race["diverged"] = consumed["postgres"] is True
+
+    def _pg(*_args):
+        consumed["postgres"] = False
+        _racing_consume()          # the race lands mid-release
+        return True
+
+    def _legacy(*_args):
+        consumed["legacy"] = False
+        return True
+
+    monkeypatch.setattr(session_store, "_pg_unconsume_approval", _pg)
+    monkeypatch.setattr(session_store, "_legacy_unconsume_approval", _legacy)
+
+    assert session_store.unconsume_approval("confirm-1", "session-1", "tenant-1") is True
+    assert race["blocked"] is True, (
+        "a consume racing mid-release got past the legacy gate; with legacy "
+        "released first it would re-take legacy and strand the stores at "
+        "legacy=consumed / postgres=free"
+    )
+    assert consumed == {"legacy": False, "postgres": False}
+
+
 def test_shadow_append_never_writes_postgres(monkeypatch):
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "shadow")
     monkeypatch.setattr(

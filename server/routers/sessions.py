@@ -53,18 +53,31 @@ invites could only ever fail ``already_consumed``, destroying the user's one
 approval. The ``TurnBusy`` handler therefore calls
 ``session_store.unconsume_approval``.
 
-That rollback is legal for EXACTLY this exception and no other. ``TurnBusy``
-means try_begin_turn lost the CAS, which is the first thing start_turn does
-after the session guard — no ``turn_started`` event was appended, no request
-reached the harness, so nothing anywhere redeemed the approval and giving it
-back cannot produce a second redemption. ``TurnRejected`` is deliberately NOT
-rolled back: by then the CAS was WON and the turn was recorded, and on the
-timeout/connection-drop legs the harness may well have received the resume and
-acted on it — un-spending an approval whose tool call might already be running
-is precisely the double-execution that consume-once exists to prevent. Single
-redemption is preserved in both directions: a confirm whose turn really started
-still replays into ``already_consumed`` (see
+The rule is NOT "roll back on TurnBusy". It is: **roll back exactly when the
+harness provably never saw the turn, and never otherwise.** Two sites qualify.
+
+``TurnBusy`` means try_begin_turn lost the CAS, which is the first thing
+start_turn does after the session guard — no ``turn_started`` event was
+appended, no request reached the harness, so nothing anywhere redeemed the
+approval and giving it back cannot produce a second redemption.
+
+``TurnRejected`` qualifies ONLY when it carries ``pre_harness`` (turn_runner
+sets it where no POST was attempted, or the connection was never established).
+Those legs answer ``BROKER_UNREACHABLE``, which ``_RETRYABLE_BY_CODE`` marks
+retryable — so skipping the give-back there would invite a retry against an
+approval already spent, which is the same defect this note exists to fix.
+``pre_harness`` DEFAULTS TO FALSE, so every ambiguous leg still refuses to roll
+back: on a read timeout, or a rejection the harness itself returned, the
+harness may already be executing the tool call, and un-spending that approval
+is precisely the double-execution consume-once exists to prevent.
+
+Single redemption is preserved in both directions: a confirm whose turn really
+started still replays into ``already_consumed`` (see
 tests/test_sessions_routes.py::test_messages_confirm_busy_gives_the_approval_back).
+
+When a give-back does not succeed the approval stays spent, and the response
+says so rather than advertising a retry that could only fail — see
+``_busy_response``/``_turn_rejected_response``'s ``approval_recovered``.
 """
 from __future__ import annotations
 
@@ -240,36 +253,87 @@ def _require_owned_session(session_id: str, tenant: Any) -> Optional[Dict[str, A
 
 
 def _give_back_unredeemed_approval(confirmation_id: str, session_id: str,
-                                   tenant_id: str) -> None:
+                                   tenant_id: str) -> bool:
     """Return a consumed-but-never-redeemed approval to the shelf (see the
     module docstring's APPROVAL GIVE-BACK note for when this is legal).
 
-    Failure here is not fatal to the response: the caller is already answering
-    a retryable 409, and turning that into a 500 would hide the real outcome
-    from a client whose only correct move is still to retry. The cost of a
-    failed give-back is exactly the pre-fix behaviour (the approval stays
-    spent), so it is logged loudly rather than raised. The confirmation_id is a
+    Returns True IFF the approval is genuinely back on the shelf. A raise and a
+    False both mean it is still spent, and the CALLER MUST NOT then tell the
+    client to retry — the retry could only fail `already_consumed`. Callers
+    thread this through to `_busy_response`/`_turn_rejected_response` so the
+    answer stays honest about what the client can actually do next.
+
+    A store failure is not re-raised: the turn genuinely is busy (or rejected),
+    and a 500 would replace an accurate status with a misleading one. It is
+    reported instead — loudly to stderr for the operator, and truthfully to the
+    client via `approval_recovered: false`. The confirmation_id is a
     server-issued opaque id the client already holds — not a secret."""
     try:
-        session_store.unconsume_approval(confirmation_id, session_id, tenant_id)
+        recovered = session_store.unconsume_approval(
+            confirmation_id, session_id, tenant_id)
     except Exception as exc:  # noqa: BLE001
         print(
-            f"[leaf-agent] approval give-back failed for confirmation_id "
-            f"{confirmation_id!r} on session {session_id!r}: "
-            f"{type(exc).__name__}: {exc}",
+            f"[leaf-agent] approval give-back FAILED (raised) confirmation_id="
+            f"{confirmation_id!r} session={session_id!r} "
+            f"error={type(exc).__name__}: {exc} — the approval is still spent "
+            f"and this client must obtain a NEW approval",
             file=sys.stderr, flush=True,
         )
+        return False
+    if not recovered:
+        # No row moved 1 -> 0. We consumed it moments ago, so this means the
+        # row is not in the state we left it in — never silently swallow it.
+        print(
+            f"[leaf-agent] approval give-back FAILED (no row released) "
+            f"confirmation_id={confirmation_id!r} session={session_id!r} — the "
+            f"approval is still spent and this client must obtain a NEW approval",
+            file=sys.stderr, flush=True,
+        )
+    return recovered
 
 
-def _turn_rejected_response(exc: "turn_runner.TurnRejected") -> JSONResponse:
+def _turn_rejected_response(exc: "turn_runner.TurnRejected",
+                            approval_lost: bool = False) -> JSONResponse:
     """TurnRejected -> HTTP response: exc.extra merged TOP-LEVEL (e.g.
-    {'grant_required': True}) alongside the §10-valid `error` object."""
+    {'grant_required': True}) alongside the §10-valid `error` object.
+
+    `approval_lost` says a confirm's approval was consumed and could NOT be
+    given back. It forces `retryable` false and surfaces
+    `approval_recovered: false`, because retrying with the same confirmation_id
+    can then only fail `already_consumed` — see `_busy_response`."""
     retryable = _RETRYABLE_BY_CODE.get(exc.error_code, False)
+    if approval_lost:
+        retryable = False
     body = with_envelope_fields({
         **exc.extra,
+        **({"approval_recovered": False} if approval_lost else {}),
         "error": error_obj(exc.error_code, exc.message, retryable=retryable),
     })
     return JSONResponse(status_code=exc.status_code, content=body)
+
+
+def _busy_response(session_id: str, approval_lost: bool = False) -> JSONResponse:
+    """The 409 TURN_IN_PROGRESS answer, told honestly.
+
+    Normally this is retryable: the turn is busy, and the confirm's approval
+    (if any) went back on the shelf, so the retry can really succeed.
+
+    When `approval_lost` is set the give-back did NOT happen, so the approval
+    stays spent. Advertising `retryable: true` would then send the client into
+    a loop that can only ever fail `already_consumed`, so this reports
+    `retryable: false` plus `approval_recovered: false` — the client's real
+    next step is a NEW approval, not a retry. `approval_recovered` is emitted
+    ONLY in that failure case, leaving the ordinary busy response (and every
+    text-turn busy response) byte-identical to before."""
+    body = with_envelope_fields({
+        **({"approval_recovered": False} if approval_lost else {}),
+        "error": error_obj(
+            ErrorCode.TURN_IN_PROGRESS,
+            f"session {session_id!r} already has an active turn",
+            retryable=not approval_lost,
+        ),
+    })
+    return JSONResponse(status_code=409, content=body)
 
 
 # --------------------------------------------------------------------------- #
@@ -426,18 +490,27 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         # The approval (if any) was consumed at step 4 but NOTHING redeemed it:
         # TurnBusy means try_begin_turn lost the CAS, which happens before
         # start_turn appends `turn_started` or calls the harness. Give it back
-        # so the retry this 409 explicitly invites can actually succeed. This
-        # is the ONLY rollback point — see the module docstring's APPROVAL
-        # GIVE-BACK note for why TurnRejected deliberately does not roll back.
+        # so the retry this 409 explicitly invites can actually succeed.
+        approval_lost = False
         if confirmation_id is not None:
-            _give_back_unredeemed_approval(confirmation_id, session_id, str(tenant))
-        return error_response(
-            ErrorCode.TURN_IN_PROGRESS,
-            f"session {session_id!r} already has an active turn",
-            retryable=True,
-        )
+            approval_lost = not _give_back_unredeemed_approval(
+                confirmation_id, session_id, str(tenant))
+        return _busy_response(session_id, approval_lost=approval_lost)
     except turn_runner.TurnRejected as exc:
-        return _turn_rejected_response(exc)
+        # Same rule, second site: give the approval back on every rejection
+        # the engine can PROVE happened before the harness saw the turn
+        # (exc.pre_harness — e.g. no harness URL configured, or the connection
+        # was never established). Those legs report BROKER_UNREACHABLE, which
+        # _RETRYABLE_BY_CODE marks retryable, so without this the client is
+        # told to retry an approval that has already been spent — the very bug
+        # the TurnBusy path fixes. `pre_harness` defaults False, so ambiguous
+        # legs (read timeout, an actual harness rejection) still never roll
+        # back; see the module docstring's APPROVAL GIVE-BACK note.
+        approval_lost = False
+        if exc.pre_harness and confirmation_id is not None:
+            approval_lost = not _give_back_unredeemed_approval(
+                confirmation_id, session_id, str(tenant))
+        return _turn_rejected_response(exc, approval_lost=approval_lost)
 
     return JSONResponse(
         status_code=202,
