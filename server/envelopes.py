@@ -15,6 +15,7 @@ solver").
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Any, Dict, Optional
 
 from fastapi.responses import JSONResponse
@@ -232,9 +233,28 @@ def install_error_handlers(app) -> None:
     # the reading order honest.
     @app.exception_handler(Exception)
     async def _unhandled_handler(request, exc):  # noqa: ANN001
+        # Correlation ID. Suppressing the detail below (correctly) leaves the
+        # caller holding a bare "internal server error", and the log line carried
+        # only method + path -- so an operator handed that string by a user had
+        # no way to find WHICH traceback it came from among every other 500 on
+        # the same route. This token is the join key: same value in the log line
+        # and in the response.
+        #
+        # It leaks nothing. The ID is random and opaque -- it IDENTIFIES the log
+        # line rather than describing the fault, and is generated here rather
+        # than derived from the exception, so it cannot carry request or
+        # exception content. Nothing else about what the client sees widens.
+        #
+        # Contract-legal WITHOUT a new field (contract/CONTRACT.md §10 +
+        # server/envelope_schema.json): the frozen surface is the error object's
+        # KEYS {error_code, message, retryable} and the error_code ENUM. `message`
+        # is an unconstrained string, so carrying the ID inside it leaves the
+        # envelope shape byte-identical and needs no additive field.
+        error_id = secrets.token_hex(4)
         # Log the FULL detail (type, message, traceback) server-side...
         logger.exception(
-            "unhandled exception serving %s %s: %s",
+            "unhandled exception [error_id=%s] serving %s %s: %s",
+            error_id,
             getattr(request, "method", "?"),
             getattr(getattr(request, "url", None), "path", "?"),
             exc,
@@ -242,8 +262,11 @@ def install_error_handlers(app) -> None:
         # ...but do NOT echo str(exc) to the caller. An arbitrary in-flight
         # exception can carry a filesystem path, a SQL fragment, or credential
         # material (same leak class the validation handler above refuses to
-        # echo). The client gets the machine-readable code; the operator gets
-        # the detail from the log.
+        # echo). The client gets the machine-readable code plus the opaque ID;
+        # the operator gets the detail from the log.
         return error_response(
-            ErrorCode.INTERNAL, "internal server error", retryable=False, status_code=500
+            ErrorCode.INTERNAL,
+            f"internal server error (error_id: {error_id})",
+            retryable=False,
+            status_code=500,
         )

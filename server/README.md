@@ -28,9 +28,16 @@ finds the broker via `BROKER_URL`, default `http://127.0.0.1:8140`). CORS is
 permissive for localhost dev.
 
 Env: `APS_LIVE` (default 0 = mock), `JOBS_DB`, `JOB_MAX_S` (540),
-`HEARTBEAT_STALE_S` (60), `JOB_WORKERS` (4), `BROKER_URL`, `BROKER_LEDGER`,
-`BROKER_TENANTS`, `BROKER_EGRESS_EXTRA`, `APS_CRED` (broker only),
-`LEAF_AUTHOR_LLM` (default 0).
+`HEARTBEAT_STALE_S` (60), `JOB_WORKERS` (4), `REAPER_LOG_THROTTLE_S` (300),
+`BROKER_URL`, `BROKER_LEDGER`, `BROKER_TENANTS`, `BROKER_EGRESS_EXTRA`,
+`APS_CRED` (broker only), `LEAF_AUTHOR_LLM` (default 0).
+
+`REAPER_LOG_THROTTLE_S` is the quiet window between reminders about a
+still-failing orphan-reaper sweep. The first failure of a streak and every
+change of exception type always log in full; repeats collapse into one terse
+counted line per window, and recovery is announced once. Only the log VOLUME is
+throttled — a failing sweep is still swallowed and still retried every
+`REAPER_INTERVAL_S`. Set to 0 to log every failure.
 
 ## Endpoints
 
