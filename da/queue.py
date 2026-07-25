@@ -9,8 +9,8 @@ import — breaking collection and the async job spine's thread pool. The brief
 mandates this filename, so this module is a TRANSPARENT SUPERSET: it loads the
 real stdlib `queue` by path and re-exports its public API, THEN adds the Leaf
 scheduler on top. `queue.LifoQueue` still works; `queue.FairQueue` / `queue.admit`
-are the additions. (The broker process also caches the stdlib `queue` before any
-`da/` path insert — belt and suspenders.)
+/ `queue.fair_admit` are the additions. (The broker process also caches the stdlib
+`queue` before any `da/` path insert — belt and suspenders.)
 
 WHAT THE SCHEDULER DOES
 -----------------------
@@ -26,9 +26,17 @@ model — the head-of-line-blocking point named in the plan. This module adds:
     a global semaphore + a recorded dispatch log. Pure python; no external broker
     needed for the unit test.
 
-INTEGRATION: da/client.submit_workitem routes its LIVE submit through `admit()`
-(the process-global ceiling gate), so the synchronous /api/run path stays correct
-while honoring the ceiling. APS_LIVE=0 / dry_run never reach the gate.
+Two entry points share that ceiling, for the two different caller shapes:
+`FairQueue` drains a BATCH enqueued up front with its own worker pool, while
+`fair_admit()` blocks INDEPENDENT caller threads in place until their tenant's
+turn — which is what a synchronous per-request submit path needs.
+
+INTEGRATION: da/client.submit_workitem routes its LIVE submit through
+`fair_admit()` — the process-global gate that enforces BOTH the ceiling AND
+round-robin fairness across tenants, so the synchronous /api/run path stays
+correct while no tenant can starve another. `admit()` (ceiling only, tenant-
+blind) is kept for backward compatibility and has no production caller.
+APS_LIVE=0 / dry_run never reach the gate.
 """
 from __future__ import annotations
 
@@ -103,6 +111,14 @@ def admit(tenant_id: str | None = None, timeout: float | None = None):
     concurrently in this process. `tenant_id` is accepted for future fair
     accounting + logging; the ceiling itself is tenant-agnostic (fairness ACROSS
     tenants is FairQueue's job). Raises QueueFull if `timeout` elapses.
+
+    Releasing here also runs the fair dispatcher. Both entry points draw from ONE
+    semaphore, so a slot this function frees may be the slot a `fair_admit` ticket
+    is waiting on, and a fair ticket only ever wakes when some dispatcher sets its
+    Event. Without that call a legacy `admit()` holder releases into an idle
+    ceiling while the fair ticket blocks forever, or raises QueueFull against a
+    free slot. (Found 2026-07-24 by review of this change; reproduced at ceiling 1
+    with an admit() holder and one waiting fair_admit ticket.)
     """
     sem = _ensure_gate()
     acquired = sem.acquire(timeout=timeout) if timeout is not None else sem.acquire()
@@ -111,10 +127,149 @@ def admit(tenant_id: str | None = None, timeout: float | None = None):
     try:
         yield
     finally:
-        try:
-            sem.release()
-        except ValueError:
-            pass  # ceiling was rebuilt underneath us; ignore stale release
+        _release_slot(sem)
+        with _fair_lock:
+            _fair_dispatch_locked()
+
+
+def _release_slot(sem) -> None:
+    """Hand a ceiling slot back, tolerating a semaphore rebuilt underneath us."""
+    try:
+        sem.release()
+    except ValueError:
+        pass  # ceiling was rebuilt (APS_MAX_CONCURRENCY changed); stale release
+
+
+# --------------------------------------------------------------------------- #
+# fair_admit — the FAIR process-global gate the live submit path actually uses
+# --------------------------------------------------------------------------- #
+# `admit()` holds the ceiling but is tenant-blind: whichever thread the OS wakes
+# first takes the free slot, so one busy tenant can win every slot in a row and
+# starve the others. FairQueue (below) enforces fairness but assumes a BATCH —
+# jobs are enqueued up front and drained by ITS OWN worker pool (`run_all`) —
+# which the synchronous /api/run path cannot use: each request arrives on its own
+# independent thread and must block IN PLACE until its own turn comes.
+#
+# fair_admit is FairQueue's round-robin ring applied to the ceiling gate for
+# those independent callers. Each caller registers a TICKET in its tenant's FIFO
+# and blocks on its own Event; a lock-protected dispatcher hands out free ceiling
+# slots in round-robin tenant order, so a tenant's k-th admission never precedes
+# any other WAITING tenant's (k-1)-th. Both entry points take slots from the SAME
+# semaphore (`_ensure_gate`), so mixing them can never exceed the ceiling.
+#
+# As with `admit()`, change APS_MAX_CONCURRENCY only while the gate is idle: the
+# rebuild in `_ensure_gate` cannot reclaim permits already held by live callers.
+_fair_lock = threading.Lock()
+_fair_fifos: "OrderedDict[str, deque]" = OrderedDict()  # tenant_id -> deque[ticket]
+_fair_ring: deque = deque()  # tenants with waiting tickets, in rotation order
+
+
+def _fair_drop_tenant_locked(tid: str) -> None:
+    """Forget a tenant whose FIFO just drained (call under _fair_lock)."""
+    _fair_fifos.pop(tid, None)
+    try:
+        _fair_ring.remove(tid)
+    except ValueError:
+        pass  # already rotated out of the ring by _fair_pick_locked
+
+
+def _fair_pick_locked():
+    """Pop the next waiting ticket round-robin across tenants (under _fair_lock).
+
+    Same rotation rule as FairQueue._next_job_id: the served tenant goes to the
+    BACK of the ring, so every other waiting tenant is served before it again —
+    the fairness invariant. Returns None when nothing is waiting.
+    """
+    checked = 0
+    n = len(_fair_ring)
+    while _fair_ring and checked <= n:
+        tid = _fair_ring.popleft()
+        fifo = _fair_fifos.get(tid)
+        if fifo:
+            ticket = fifo.popleft()
+            if fifo:
+                _fair_ring.append(tid)  # still waiting -> back of the rotation
+            else:
+                _fair_fifos.pop(tid, None)
+            return ticket
+        _fair_fifos.pop(tid, None)  # empty FIFO left in the ring; drop it
+        checked += 1
+    return None
+
+
+def _fair_dispatch_locked() -> None:
+    """Grant waiting tickets while ceiling slots are free (under _fair_lock).
+
+    The slot is taken (non-blocking) BEFORE a ticket is granted, and the granted
+    ticket owns that slot until its caller leaves the context manager — so the
+    ceiling bounds admissions, never the dispatcher's own progress.
+    """
+    while _fair_fifos:
+        sem = _ensure_gate()
+        if not sem.acquire(blocking=False):
+            return  # ceiling full; the next release re-runs the dispatcher
+        ticket = _fair_pick_locked()
+        if ticket is None:
+            _release_slot(sem)
+            return
+        ticket["sem"] = sem
+        ticket["granted"] = True
+        ticket["event"].set()
+
+
+def fair_pending() -> int:
+    """Tickets waiting for a slot right now, across all tenants (queue depth)."""
+    with _fair_lock:
+        return sum(len(d) for d in _fair_fifos.values())
+
+
+@contextmanager
+def fair_admit(tenant_id: str | None = None, timeout: float | None = None):
+    """FAIR ceiling gate for ONE live WorkItem submit (process-global).
+
+    Blocks the CALLING thread until it is this tenant's turn AND a ceiling slot
+    is free, so across concurrent callers at most APS_MAX_CONCURRENCY are inside
+    the gate and dispatch is round-robin fair across tenants. `tenant_id=None`
+    (legacy single-tenant callers) shares one default bucket. Raises QueueFull if
+    `timeout` elapses before this caller's turn, leaving no ticket behind.
+    """
+    key = tenant_id or ""
+    ticket = {"event": threading.Event(), "granted": False, "sem": None}
+
+    with _fair_lock:
+        fifo = _fair_fifos.get(key)
+        if fifo is None:
+            fifo = _fair_fifos[key] = deque()
+            _fair_ring.append(key)
+        fifo.append(ticket)
+        _fair_dispatch_locked()  # a free slot admits us immediately
+
+    if not ticket["event"].wait(timeout):
+        with _fair_lock:
+            if ticket["granted"]:
+                # granted in the timeout race: hand the slot straight back
+                _release_slot(ticket["sem"])
+                ticket["sem"] = None
+                _fair_dispatch_locked()
+            else:
+                fifo = _fair_fifos.get(key)
+                if fifo is not None:
+                    try:
+                        fifo.remove(ticket)
+                    except ValueError:
+                        pass
+                    if not fifo:
+                        _fair_drop_tenant_locked(key)
+        raise QueueFull(
+            f"APS ceiling ({_gate['n']}) busy; tenant {key!r} got no slot within {timeout}s")
+
+    try:
+        yield
+    finally:
+        with _fair_lock:
+            _release_slot(ticket["sem"])
+            ticket["sem"] = None
+            _fair_dispatch_locked()
 
 
 # --------------------------------------------------------------------------- #

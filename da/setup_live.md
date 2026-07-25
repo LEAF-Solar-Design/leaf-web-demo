@@ -64,10 +64,12 @@ scratch space are isolated from each other and per tenant.
 ### Concurrency ceiling
 
 `APS_MAX_CONCURRENCY` (env, default **1**) is the account Flex ceiling: at most
-that many WorkItems are in flight across ALL tenants. `da/queue.py` provides the
-round-robin-fair scheduler (`FairQueue`) and the process-global `admit()` gate
-that `da/client.submit_workitem` wraps around the LIVE submit. Raise it **in
-lockstep** with the Autodesk Flex-limit raise drafted in
+that many WorkItems are in flight across ALL tenants. `da/client.submit_workitem`
+wraps the LIVE submit in `da/queue.fair_admit()`, the process-global gate that
+holds that ceiling AND hands slots out round-robin across tenants, so no tenant
+can starve another. (`da/queue.py` also provides `FairQueue` for batch drains and
+the tenant-blind `admit()` for backward compatibility; neither is on the live
+submit path.) Raise it **in lockstep** with the Autodesk Flex-limit raise drafted in
 `docs/aps-concurrency-raise-request.md`.
 
 ### Orphan reaping
