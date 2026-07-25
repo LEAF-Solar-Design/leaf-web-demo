@@ -123,12 +123,11 @@ def test_headers_carry_the_signed_triple():
     # job_attempt=1 and sign `"attempt":true`.
     (dict(attempt=True), b"out", 1, "wrong_attempt"),
     (dict(attempt=2.0), b"out", 2, "wrong_attempt"),
-    (dict(lease_expiry=NOW - 1.0), b"out", 2, "wrong_lease"),
     # NaN defeats comparison (`now > nan` is False), so it must be refused
     # explicitly rather than sailing past the expiry check.
-    (dict(lease_expiry=float("nan")), b"out", 2, "wrong_lease"),
-    (dict(lease_expiry=float("inf")), b"out", 2, "wrong_lease"),
-    (dict(lease_expiry=None), b"out", 2, "wrong_lease"),
+    (dict(lease_expiry=float("nan")), b"out", 2, "malformed_lease"),
+    (dict(lease_expiry=float("inf")), b"out", 2, "malformed_lease"),
+    (dict(lease_expiry=None), b"out", 2, "malformed_lease"),
     (dict(nonce="   "), b"out", 2, "bad_nonce"),
 ])
 def test_every_fail_closed_mode_refuses_with_its_reason(mutate, output, job_attempt, reason):
@@ -581,32 +580,107 @@ def test_only_the_exact_aps_success_state_is_a_completion():
         assert json.loads(envelope.body)["status"] == "success"
 
 
-def test_the_lease_comes_from_the_job_store_not_the_completion():
-    """Checking the completion's own `lease_expiry` was checking the payload against
-    itself: a job whose recorded lease expired an hour ago passed by claiming
-    `lease_expiry = now + 3600`."""
-    # Authority says the lease died an hour ago; the completion claims a future one.
-    with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(lease_expiry=NOW + 3600.0), b"out", job_id="job-1",
-                          job_attempt=2, job_workitem_id="wi-1",
-                          job_lease_expiry=NOW - 1.0, secret=SECRET, now=NOW,
-                          reserve_completion=_win)
-    assert excinfo.value.reason == "wrong_lease", (
-        "the completion's claim must match authority before anything else is judged")
-    # Matching authority, but authority itself is expired.
-    with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(lease_expiry=NOW - 1.0), b"out", job_id="job-1",
-                          job_attempt=2, job_workitem_id="wi-1",
-                          job_lease_expiry=NOW - 1.0, secret=SECRET, now=NOW,
-                          reserve_completion=_win)
-    assert excinfo.value.reason == "expired_lease"
-    # A non-finite authority is refused rather than compared.
+def test_the_lease_is_decided_by_authority_alone():
+    """Two wrong answers preceded this one.
+
+    First the completion's OWN `lease_expiry` was validated, i.e. the payload
+    checked against itself, so a job whose recorded lease expired an hour ago passed
+    by claiming `lease_expiry = now + 3600`.
+
+    Then the fix ALSO required the completion's copy to equal authority exactly.
+    That was float equality on a timestamp: an APS payload echoing a rounded or
+    re-serialized lease would be refused forever and the job could never close. A
+    permanently unclosable job is worse than the hole it replaced, and the
+    comparison bought nothing, because authority already decides.
+
+    So: authority decides expiry, and the completion's copy is informational."""
+    # A ROUNDED echo of a valid authoritative lease must be accepted, not refused.
+    envelope = adapter.translate(
+        _completion(lease_expiry=1_700_000_060.123), b"out", job_id="job-1",
+        job_attempt=2, job_workitem_id="wi-1", job_lease_expiry=1_700_000_060.123456,
+        secret=SECRET, now=NOW, reserve_completion=_win)
+    assert json.loads(envelope.body)["attempt"] == 2, (
+        "a re-serialized lease echo must not block a legitimate completion")
+
+    # An EXPIRED authoritative lease is refused no matter what the completion claims.
+    for claimed in (NOW + 3600.0, NOW - 1.0, NOW):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(lease_expiry=claimed), b"out", job_id="job-1",
+                              job_attempt=2, job_workitem_id="wi-1",
+                              job_lease_expiry=NOW - 1.0, secret=SECRET, now=NOW,
+                              reserve_completion=_win)
+        assert excinfo.value.reason == "expired_lease", (
+            "authority decides expiry; the completion's claim cannot extend it")
+
+    # A non-finite AUTHORITY is refused rather than compared.
     for bad in (float("nan"), float("inf"), None, "later"):
         with pytest.raises(adapter.AdapterError) as excinfo:
             adapter.translate(_completion(), b"out", job_id="job-1", job_attempt=2,
                               job_workitem_id="wi-1", job_lease_expiry=bad,
                               secret=SECRET, now=NOW, reserve_completion=_win)
         assert excinfo.value.reason == "expired_lease"
+
+    # A malformed COMPLETION lease is still caught, just not compared.
+    for bad in (float("nan"), None, "soon"):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(lease_expiry=bad), b"out", job_id="job-1",
+                              job_attempt=2, job_workitem_id="wi-1",
+                              job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                              reserve_completion=_win)
+        assert excinfo.value.reason == "malformed_lease"
+
+
+def test_a_nonce_cannot_inject_an_http_header_line():
+    """The nonce is signed AND sent as the `X-Leaf-Nonce` header value, so CRLF in it
+    injects header lines. `.strip()` alone let control characters straight through:
+    `"abc\r\nX-Evil: yes"` produced an envelope whose header carried the forged
+    line, and the attempt was claimed on the way."""
+    claimed = []
+
+    def record(job_id, attempt):
+        claimed.append((job_id, attempt))
+        return True
+
+    for injected in ("abc\r\nX-Evil: yes", "abc\nX-Evil: yes", "abc\r", "a b",
+                     "abc\x00", "abc\x7f", "\u2028abc", "abc:def"):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(nonce=injected), b"out", job_id="job-1",
+                              job_attempt=2, job_workitem_id="wi-1",
+                              job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                              reserve_completion=record)
+        assert excinfo.value.reason == "bad_nonce", f"{injected!r} must be refused"
+    assert claimed == [], "a refused nonce must never reach the reservation"
+
+    # Ordinary APS-shaped nonces still work, including base64 and GUID forms.
+    for good in ("nonce-abc", "0123456789abcdef", "aGVsbG8+d29ybGQ=",
+                 "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "a" * 128):
+        envelope = adapter.translate(_completion(nonce=good), b"out", job_id="job-1",
+                                     job_attempt=2, job_workitem_id="wi-1",
+                                     job_lease_expiry=NOW + 60.0, secret=SECRET,
+                                     now=NOW, reserve_completion=_win)
+        assert envelope.nonce == f"2:{good}"
+        assert envelope.headers()[callbacks.NONCE_HEADER] == f"2:{good}"
+
+
+def test_over_long_fields_are_refused_before_any_normalization():
+    """`.strip()`, `.lower()` and the derived-nonce format all allocate in proportion
+    to their input, so an enormous but otherwise valid string could raise MemoryError
+    before a cheap refusal was reported. Length is capped first, and `len()` is O(1)."""
+    huge = "a" * 5000
+    for mutate in (dict(job_id=huge), dict(workitem_id=huge), dict(status=huge),
+                   dict(nonce=huge)):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(**mutate), b"out", job_id="job-1",
+                              job_attempt=2, job_workitem_id="wi-1",
+                              job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
+                              reserve_completion=_win)
+        assert excinfo.value.reason == "field_too_long"
+    # The authoritative side is capped too.
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), b"out", job_id=huge, job_attempt=2,
+                          job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,
+                          secret=SECRET, now=NOW, reserve_completion=_win)
+    assert excinfo.value.reason == "field_too_long"
 
 
 def test_a_reused_delivery_nonce_cannot_burn_a_later_attempt():

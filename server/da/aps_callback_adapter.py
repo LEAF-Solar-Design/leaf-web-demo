@@ -43,12 +43,21 @@ evidence (sha256 + size of the persisted output). Translation refuses, raising
   * ``expired_lease``        — the job store's recorded lease deadline has passed,
                                or is not finite (a completion delivered after the
                                lease is not trustworthy);
-  * ``wrong_lease``          — the completion's claimed lease disagrees with the
-                               job store's recorded one. The lease is AUTHORITY:
-                               checking the completion's own value was checking the
-                               payload against itself, so an expired job passed by
-                               claiming a future deadline;
-  * ``bad_nonce``            — empty delivery nonce;
+  * ``malformed_lease``      — the completion's lease field is not a finite number.
+                               It is INFORMATIONAL only: authority supplies the
+                               deadline, so this value is never compared. Requiring
+                               it to EQUAL authority (round 7) was float equality on
+                               a timestamp, which would refuse every completion
+                               whose lease had been re-serialized and leave the job
+                               unclosable;
+  * ``bad_nonce``            — the delivery nonce is empty, over-long, or contains
+                               anything outside a header-safe alphabet. It is signed
+                               AND sent as the ``X-Leaf-Nonce`` header, so a nonce
+                               containing CRLF injected header lines;
+  * ``field_too_long``       — a string field exceeded the length cap. Capping
+                               before normalizing keeps every pre-copy step bounded,
+                               so a huge input cannot raise MemoryError in place of
+                               a cheap refusal;
   * ``bad_clock``            — non-finite translation clock;
   * ``missing_workitem``     — no WorkItem id to bind the receipt to;
   * ``no_completion_guard`` — no reservation authority was supplied. REQUIRED:
@@ -68,6 +77,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -95,6 +105,20 @@ def _callbacks():
 # vocabulary at all, so accepting them meant inventing success states the protocol
 # never emits and promoting any upstream string that happened to match.
 _SUCCESS_STATUSES = frozenset({"success"})
+
+# The delivery nonce is placed in an HTTP header (`X-Leaf-Nonce`) and signed. A
+# nonce containing CRLF therefore injects header lines: `"abc\r\nX-Evil: yes"`
+# produced an envelope whose header carried the forged line. Restrict it to a
+# header-safe, bounded alphabet. A COLON is excluded on purpose so the emitted
+# `"<attempt>:<delivery nonce>"` form has exactly one colon and splits
+# unambiguously.
+_NONCE_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{1,128}\Z")
+
+# Length caps make the pre-copy work genuinely BOUNDED. `len()` is O(1), while
+# `.strip()`, `.lower()` and the derived-nonce f-string all allocate in proportion
+# to their input, so an enormous but otherwise valid string could raise MemoryError
+# before a cheap refusal was reported. Cap first, then normalize.
+_MAX_ID_LEN = 512
 
 
 class AdapterError(Exception):
@@ -232,6 +256,10 @@ def translate(
     # closes the swap; only the copy moves later.
     if type(now) not in (int, float) or not math.isfinite(now):
         raise AdapterError("bad_clock")
+    # Cap BEFORE normalizing, so every later strip/lower/format is bounded.
+    for candidate in (claimed_job_id, job_id, workitem_id, job_workitem_id, status, nonce):
+        if type(candidate) is str and len(candidate) > _MAX_ID_LEN:
+            raise AdapterError("field_too_long")
     if type(claimed_job_id) is not str or not claimed_job_id.strip():
         raise AdapterError("missing_job")
     if type(job_id) is not str or not job_id.strip():
@@ -273,21 +301,30 @@ def translate(
     # NaN defeats every comparison (`now > nan` is False), so a non-finite lease
     # deadline would sail past an ordinary expiry check. callbacks.py guards its
     # own timestamp with math.isfinite for the same reason.
-    # THE LEASE IS AUTHORITY TOO. Checking the completion's own `lease_expiry` was
-    # checking the payload against itself: a job whose recorded lease expired an
-    # hour ago still passed by supplying `lease_expiry = now + 3600`. The job
-    # store's deadline decides, and the completion's claim must match it exactly,
-    # exactly like job id, attempt and WorkItem.
+    # THE LEASE IS AUTHORITY, AND ONLY AUTHORITY. Checking the completion's own
+    # `lease_expiry` was checking the payload against itself: a job whose recorded
+    # lease expired an hour ago passed by supplying `lease_expiry = now + 3600`.
+    #
+    # Round 7 fixed that by ALSO requiring the completion's copy to equal authority
+    # exactly. That was a trap of its own: float equality on a timestamp, so an APS
+    # payload that echoes a rounded or re-serialized lease would be refused forever
+    # and the job could never close. A permanently unclosable job is worse than the
+    # hole it replaced, and the comparison buys nothing, because once authority
+    # supplies the deadline the completion's copy is untrusted and decides nothing.
+    #
+    # So the completion's `lease_expiry` is INFORMATIONAL: still type-checked, so a
+    # malformed record is caught, but never compared and never decisive.
     if (type(job_lease_expiry) not in (int, float)
             or not math.isfinite(job_lease_expiry)):
         raise AdapterError("expired_lease")
     if (type(lease_expiry) not in (int, float)
-            or not math.isfinite(lease_expiry)
-            or lease_expiry != job_lease_expiry):
-        raise AdapterError("wrong_lease")
+            or not math.isfinite(lease_expiry)):
+        raise AdapterError("malformed_lease")
     if now > job_lease_expiry:
         raise AdapterError("expired_lease")
-    if type(nonce) is not str or not nonce.strip():
+    # Header-safe and bounded. `.strip()` alone let control characters through, and
+    # the nonce is both signed AND sent as the `X-Leaf-Nonce` header value.
+    if type(nonce) is not str or not _NONCE_RE.match(nonce):
         raise AdapterError("bad_nonce")
     if not callable(reserve_completion):
         raise AdapterError("no_completion_guard")

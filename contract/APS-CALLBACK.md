@@ -36,6 +36,23 @@ pending, inprogress, cancelled and the failed* family). Case and surrounding
 whitespace are normalized; the aliases once accepted (`succeeded`, `completed`,
 `complete`) were not APS vocabulary and are refused.
 
+**The nonce must be header-safe and bounded.** It is signed AND sent as the
+`X-Leaf-Nonce` header value, so CRLF in it injects header lines: `"abc
+X-Evil:
+yes"` produced an envelope whose header carried the forged line, and the attempt was
+claimed on the way. The alphabet is `[A-Za-z0-9._~+/=-]`, 1 to 128 characters, with
+COLON excluded so the emitted `"<attempt>:<delivery nonce>"` form has exactly one
+colon. Every string field is length-capped BEFORE any `strip()`/`lower()`/format,
+because those allocate in proportion to input and could raise `MemoryError` in place
+of a cheap refusal.
+
+**The lease is decided by AUTHORITY ALONE.** Validating the completion's own
+`lease_expiry` was checking the payload against itself. Requiring it to EQUAL
+authority was the opposite error: float equality on a timestamp, so an APS payload
+echoing a rounded lease would be refused forever and the job could never close. The
+completion's copy is informational, type-checked as `malformed_lease` but never
+compared; `job_lease_expiry` decides expiry.
+
 **Emitted nonce is attempt-bound**, `"<attempt>:<delivery nonce>"`. The consumer's
 replay store is keyed on `(job_id, nonce)`, so one delivery nonce reused across two
 attempts of a job used to collide: the later attempt was CLAIMED, its envelope was
