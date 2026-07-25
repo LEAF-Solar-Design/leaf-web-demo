@@ -1259,8 +1259,24 @@ A template-authored body is written to
 the first 32 hex characters of the SHA-256 of the exact tenant id. The registry
 entry NAMES that file: `tool['entry']` is `authored/<dir>/<name>.py`, still
 stored relative to `server/` so the broker resolves it regardless of cwd. The
-tool also carries `tenant_id`, and the `authored_tools.json` store dedups on
-`(tenant_id, name)` rather than on `name`.
+tool also carries `tenant_id`, and the `authored_tools.json` store keys its dedup
+on `(tenant_id, name)` rather than on `name`.
+
+That dedup is not retroactive. The eviction filter matches a concrete tenant id,
+so a row persisted before this change carries no `tenant_id`, never matches, and
+is not evicted. Re-authoring a demo-tenant tool that predates the change leaves
+both the legacy row and the new tenant-scoped row in the store.
+
+The tenant-visible catalog is still correct: `deps.all_tools` attributes an
+unscoped row to the demo tenant and folds entries by name in list order, so the
+later tenant-scoped row wins, and `GET /api/tools`, digest issuance and
+`POST /api/run` all read that fold. The leftover row is not invisible, though.
+Consumers that read the raw store instead of the fold still see it:
+`engine/selfcheck.py`'s effective-registry gate iterates every row of
+`authored_tools.json` and reddens if a row's referenced file is gone, and
+`/api/health` counts raw rows in `n_authored`. A leftover row also predates
+`tenant_id`, so its original author is unrecorded. The demo tenant inherits it
+by default, which is not evidence that the demo tenant wrote it.
 
 Resolution is by PRECEDENCE, not by absolute location, and the distinction is
 load-bearing for anyone reasoning about which bytes actually execute.
@@ -1283,8 +1299,26 @@ internal. `deps.catalog_tool_view` spreads the whole tool, so `entry` is
 serialized by `GET /api/tools`, and `deps.catalog_tool_digest` hashes every key
 except `catalog_digest`, so the `entry` value is inside the digest that GET
 issues and `POST /api/run` requires again. A template-authored tool's
-`catalog_digest` therefore changed. Callers that cached a digest across the
-2026-07-25 boundary must re-read the catalog.
+`catalog_digest` therefore changes as soon as its record is written with the new
+`entry` and the added `tenant_id`. It does not change on deploy alone:
+`deps.load_authored_tools` reads `authored_tools.json` verbatim and migrates
+nothing, so a record persisted before 2026-07-25 keeps its old `entry`, carries
+no `tenant_id`, and keeps its old digest until something rewrites it. Callers
+must re-read the catalog for any tool authored or re-authored on or after
+2026-07-25. What invalidates a cached digest is a change to the entry that wins
+the tenant's catalog fold, not a rewrite of the row a caller happened to read
+from: re-authoring shadows an older row of the same name, so a digest cached
+from that older row is refused by `POST /api/run` even though the row itself was
+never rewritten. A record's own digest is a function of its content, so a record
+that is never rewritten computes the same digest it did before 2026-07-25.
+
+Visibility is a separate axis, and it did change on deploy. The authored store
+used to be global to every tenant. `deps.all_tools` now attributes an unscoped
+row to the demo tenant, so a non-demo tenant that could previously resolve a
+legacy authored tool no longer finds it in its fold. If no other visible catalog
+entry carries that name, `POST /api/run` answers `UNKNOWN_TOOL` rather than a
+digest mismatch. If a lower tier does carry it, that record is what the tenant
+now resolves.
 
 §15.C's other statements are unaffected: the harness path still does NOT persist
 to `server/authored/` or `_AUTHORED`, and `source` / `static_scan` are unchanged.
