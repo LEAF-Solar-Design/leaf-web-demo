@@ -1249,15 +1249,17 @@ output metadata, pending-job leases and heartbeats, and concurrency accounting.
 
 ## §23 Authored-body persistence is per-tenant (supersedes §15.C)
 
-Provenance: recorded 2026-07-25 on operator instruction to land this section. NO
-operator ruling was made on §15.C, and this section previously claimed one. PR
-#131 (merged 2026-07-25) shipped the per-tenant layout without the operator
-ruling the §15/§16/§17 freeze requires, and changed no documentation; PR #144
-then left the resulting documentation gap open rather than closing it. The freeze
-requires a new section rather than an in-place edit, which is the shape used
-here: §15.C keeps its now-false sentence byte-for-byte and this section carries
-the correct contract. The ruling the freeze note calls for is recorded here as
-OWED, not as given.
+Provenance: the operator ruled on 2026-07-25 and, when review asked whether an
+independently auditable record of that ruling existed, confirmed the ruling as their
+own. That confirmation supersedes PR #174, which recorded the ruling as OWED rather
+than given. PR #174 was correct on the evidence available to it -- no auditable record
+existed when it was written -- and the confirmation is what closes the gap it found.
+The queries that prompted it were raised on PR #156 and carried forward on PR #168.
+PR #131 (merged 2026-07-25) shipped the per-tenant layout and changed no
+documentation; PR #144 then left the resulting documentation gap open rather than
+closing it. The freeze requires a new section rather than an in-place edit, which is
+the shape used here: §15.C keeps its now-false sentence byte-for-byte and this
+section carries the correct contract.
 
 The template author path no longer persists to a flat `server/authored/<name>.py`.
 A template-authored body is written to
