@@ -7,18 +7,25 @@ empty). Also exercises the job create/poll/list round-trip.
 """
 import uuid
 
+from leaf_platform import store
+
 
 def test_create_list_open_roundtrip(client, make_org):
     org = make_org(name="Round Trip Org")
     hdr = {"X-Org-Id": str(org.org_id)}
 
     # POST create
-    r_create = client.post("/api/projects", json={"name": "Rooftop demo"}, headers=hdr)
+    r_create = client.post(
+        "/api/projects",
+        json={"name": "Rooftop demo", "authority_mode": "legacy_sqlite"},
+        headers=hdr,
+    )
     assert r_create.status_code == 200, r_create.text
     project = r_create.json()["project"]
     pid = project["project_id"]
     assert uuid.UUID(pid)  # valid UUID
     assert project["name"] == "Rooftop demo"
+    assert store.get_authority_mode(org.org_id, uuid.UUID(pid)) == "postgres_canonical"
 
     # GET list contains it
     r_list = client.get("/api/projects", headers=hdr)
