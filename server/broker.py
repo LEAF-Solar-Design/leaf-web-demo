@@ -1072,6 +1072,18 @@ def _disown_active_workitem(job_id: Optional[str], run_token: Optional[str]) -> 
         return True
 
 
+def _owned_workitem_for(job_id: Optional[str],
+                        run_token: Optional[str]) -> Optional[str]:
+    """job_id's WorkItem id, but only if `run_token` registered it."""
+    if not job_id or not run_token:
+        return None
+    with _active_workitems_lock:
+        current = _active_workitems.get(job_id)
+        if current is None or current[1] != run_token:
+            return None
+        return current[0]
+
+
 def _reap_or_disown_own_workitem(job_id: Optional[str],
                                  run_token: Optional[str]) -> None:
     """End-of-run cleanup for a WorkItem that may still be executing.
@@ -1089,7 +1101,13 @@ def _reap_or_disown_own_workitem(job_id: Optional[str],
     if not job_id:
         return
     try:
-        workitem_id = active_workitem_for(job_id)
+        # OWNERSHIP FIRST. Every early return in broker_run -- a duplicate
+        # delivery rejected as leased/executing, a kill-switched tenant, a quota
+        # rejection -- leaves terminal_env unset and lands here, and none of them
+        # registered anything. Cancelling by job_id alone would issue a DELETE
+        # against the WorkItem of the run that IS in flight. A run may only reap
+        # the correlation it registered itself.
+        workitem_id = _owned_workitem_for(job_id, run_token)
         if not workitem_id:
             return
         reaper = _get_reaper()

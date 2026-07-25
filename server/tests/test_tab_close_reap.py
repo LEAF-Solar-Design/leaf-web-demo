@@ -888,6 +888,30 @@ def test_the_broker_cancels_its_own_orphan_when_a_run_ends_badly(monkeypatch, tm
     assert broker.active_workitem_for("job-orphan") is None, "cancelled: nothing left"
 
 
+def test_a_rejected_duplicate_never_cancels_the_live_runs_workitem(monkeypatch):
+    """Every early return in broker_run -- a duplicate rejected as
+    leased/executing, a kill-switched tenant, a quota rejection -- leaves
+    terminal_env unset and reaches the self-reap. None of them registered
+    anything, so cancelling by job_id alone would DELETE the WorkItem of the run
+    that is actually in flight. That is worse than doing nothing at all."""
+    reaper = broker._get_reaper()
+    cancels = _RecordingCancelClient(succeeds=True)
+    monkeypatch.setattr(reaper, "reap_live_enabled", lambda: True)
+    monkeypatch.setattr(reaper, "cancel_client_for", lambda **_kw: cancels)
+
+    broker._record_active_workitem("job-inflight", "wi-inflight",
+                                   run_token="the-real-run")
+
+    # The duplicate leaves with its own token, owning nothing.
+    broker._reap_or_disown_own_workitem("job-inflight", "the-duplicate")
+
+    assert cancels.cancelled == [], "a duplicate must not cancel live work"
+    assert broker.active_workitem_for("job-inflight") == "wi-inflight"
+    with broker._active_workitems_lock:
+        assert broker._active_workitems["job-inflight"][1] == "the-real-run", (
+            "the duplicate must not have disowned it either")
+
+
 def test_a_failed_self_reap_still_leaves_the_workitem_reapable(monkeypatch, tmp_path):
     """If the broker's own cancel does not land, the correlation must survive."""
     monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "ledger.jsonl")
