@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const app = readFileSync(join(ROOT, 'src', 'App.jsx'), 'utf8')
 const jobs = readFileSync(join(ROOT, 'src', 'controllers', 'useJobController.js'), 'utf8')
+const toolCast = readFileSync(join(ROOT, 'src', 'site', 'ToolCast.jsx'), 'utf8')
 const styles = readFileSync(join(ROOT, 'src', 'styles.css'), 'utf8')
 const landing = readFileSync(join(ROOT, 'src', 'site', 'landing.css'), 'utf8')
 const demo = readFileSync(join(ROOT, 'src', 'demo', 'demo.css'), 'utf8')
@@ -13,10 +14,21 @@ function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
 
+const detachStart = jobs.indexOf('const detachJob = useCallback(() => {')
+const detachEnd = jobs.indexOf('const resumeJobPolling', detachStart)
+const detachSource = jobs.slice(detachStart, detachEnd)
 assert(
-  jobs.includes('sequenceRef.current += 1') &&
-    jobs.includes('if (!mock && jobId) servicesRef.current.closeJobBeacon(jobId)'),
-  'Escape must detach the current run and send the close beacon',
+  detachStart >= 0 && detachEnd > detachStart &&
+    detachSource.includes('sequenceRef.current += 1') &&
+    !detachSource.includes('closeJobBeacon') &&
+    toolCast.includes("if (!jobRunning) return undefined") &&
+    toolCast.includes('detachJob()'),
+  'Escape must detach the current run without sending the page-close beacon',
+)
+assert(
+  jobs.includes("window.addEventListener('pagehide', closeInflight)") &&
+    jobs.includes('servicesRef.current.closeJobBeacon(pointer.job_id)'),
+  'page hide must retain the in-flight job close beacon',
 )
 assert(
   app.includes("rTarget && rTarget !== 'result'") &&

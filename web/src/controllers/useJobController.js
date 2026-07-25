@@ -86,7 +86,6 @@ export default function useJobController({
 
   const sequenceRef = useRef(0)
   const runningSinceRef = useRef(null)
-  const currentJobIdRef = useRef(null)
   const callbacksRef = useRef({ formatError, onCompleteVersion, onNotice, onAuthRequired })
   const servicesRef = useRef(services)
   const storageRef = useRef(storage)
@@ -95,7 +94,6 @@ export default function useJobController({
   storageRef.current = storage
 
   const setJobId = useCallback((jobId) => {
-    currentJobIdRef.current = jobId
     setCurrentJobId(jobId)
   }, [])
 
@@ -295,15 +293,13 @@ export default function useJobController({
 
   const detachJob = useCallback(() => {
     sequenceRef.current += 1
-    const jobId = currentJobIdRef.current
-    if (!mock && jobId) servicesRef.current.closeJobBeacon(jobId)
     const pointer = readInflightJob(storageRef.current)
     if (pointer?.job_id) clearInflightJob(pointer.job_id, storageRef.current)
     setInflight(null)
     setReattaching(false)
     resetActivity()
     refreshJobs()
-  }, [mock, refreshJobs, resetActivity])
+  }, [refreshJobs, resetActivity])
 
   const resumeJobPolling = useCallback(() => setPollGeneration((value) => value + 1), [])
 

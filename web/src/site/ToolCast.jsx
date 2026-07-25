@@ -373,6 +373,7 @@ export default function ToolCast({
     elapsedMs: jobElapsedMs,
     runJob: runTrackedJob,
     attachJob: attachTrackedJob,
+    detachJob,
     adoptEnvelope,
   } = useJobController({
     onCompleteVersion,
@@ -710,6 +711,21 @@ export default function ToolCast({
     window.addEventListener('keydown', dismissProposalOnEscape, true)
     return () => window.removeEventListener('keydown', dismissProposalOnEscape, true)
   }, [catalog.actions, route])
+
+  useEffect(() => {
+    if (!jobRunning) return undefined
+    const detachOnEscape = (event) => {
+      if (event.key !== 'Escape') return
+      if (route || drawer || opsOpen || document.querySelector('.claude-pop, .proj-menu')) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      const toolName = currentJob?.tool || selectedCatalogTool?.name || 'job'
+      detachJob()
+      showToast({ text: `Detached from ${toolName}. The job keeps running in Jobs.` })
+    }
+    window.addEventListener('keydown', detachOnEscape)
+    return () => window.removeEventListener('keydown', detachOnEscape)
+  }, [currentJob?.tool, detachJob, drawer, jobRunning, opsOpen, route, selectedCatalogTool?.name, showToast])
 
   const changePrompt = useCallback((value) => {
     setPrompt(value)

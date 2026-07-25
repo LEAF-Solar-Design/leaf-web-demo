@@ -381,6 +381,12 @@ Progress:
   valid guest credential fails closed with 403. Guest authority is stored only
   for the server allowlisted uploaded-drawing reads and never reaches run, job,
   solve, author, or conversation calls.
+- The managed local job gate now uses the guarded QA latency hook to hold a real
+  broker job in the running state. The unified scene reattaches to its durable
+  pointer, renders progress and the terminal result, and submits no duplicate
+  run. Escape now detaches only the UI, clears the pointer, emits no close reap
+  beacon, and leaves the same durable job to complete exactly once. Actual page
+  close still owns the separate close-beacon path.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -462,8 +468,8 @@ Observed Wave 0 results:
   catalog run bound to the uploaded drawing and tenant. A separate live-auth
   guest walk also passes for signed guest upload, extraction, viewer seating,
   allowed version read, zero dispatch, and denied run. APS, Claude, Auth0 user
-  sign-in, PostgreSQL, mid-run reattach, Escape detach, and version mutation
-  claims remain open.
+  sign-in, PostgreSQL, page-close beacon behavior, and version mutation claims
+  remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:

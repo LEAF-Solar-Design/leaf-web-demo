@@ -48,6 +48,10 @@ Current additive progress:
   sessions, tampered sessions, and bearer precedence fail closed at the server.
 - [x] Prove the live-auth signed-out guest path in the unified browser: upload
   and view are allowed, run remains visibly gated, and no dispatch occurs.
+- [x] Prove a real running local job reattaches, completes once, and submits no
+  duplicate run through the unified surface.
+- [x] Prove Escape detaches the unified UI without sending the page-close reap
+  beacon or stopping the durable job.
 
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls
