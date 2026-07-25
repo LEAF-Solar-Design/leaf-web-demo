@@ -1483,9 +1483,16 @@ def _note_reaper_failure(exc: BaseException) -> None:
     fault throwing a fresh class every sweep logged every interval. Each fix
     closed one shape of the same hole. So the rule here is not about classes at
     all: per quiet window, at most _MAX_VERBOSE_PER_WINDOW full tracebacks and at
-    most one terse reminder, no matter what the exceptions do. At the defaults
-    that is <=48 lines/hour against the 360 this replaced, and it cannot be
-    inflated by an exception stream of any shape.
+    most one terse reminder, no matter what the exceptions do. At the defaults a
+    CONTINUOUS outage is <=48 lines/hour against the 360 this replaced, and no
+    exception stream of any shape can inflate it.
+
+    That ceiling bounds a failing STREAK, not the wall clock. A sweep that
+    alternates failure and success ends its streak on every success, so the next
+    failure is a first sighting again: a full traceback plus a recovery line, and
+    an hour of flapping therefore exceeds 48. The reset is deliberate, since it
+    is what re-arms reporting for the next failure, so a flapping sweep is meant
+    to stay loud.
 
     Within that budget, a fault class not yet seen this streak still gets priority
     for a full traceback, because a new class is the highest-signal thing that can
