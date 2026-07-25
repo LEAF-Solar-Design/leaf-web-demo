@@ -160,10 +160,32 @@ function grantRecordFileName(tenantId: string): string {
   return `${safeBase(tenantId)}.grant.json`;
 }
 
-interface PersistedGrantRecord {
+interface PersistedGrantRecordV1 {
   version: 1;
   kind: GrantKind;
   token: string;
+}
+
+interface PersistedGrantAccount {
+  id: string;
+  label: string;
+  kind: GrantKind;
+  token: string;
+  linked_at: string;
+}
+
+interface PersistedGrantRecordV2 {
+  version: 2;
+  active_account_id: string;
+  accounts: PersistedGrantAccount[];
+}
+
+type PersistedGrantRecord = PersistedGrantRecordV1 | PersistedGrantRecordV2;
+
+function cleanLabel(label: string | undefined, kind: GrantKind): string {
+  const value = (label ?? "").trim();
+  if (value.length > 120) throw new Error("grant account label must be at most 120 characters");
+  return value || (kind === "api_key" ? "Anthropic API key" : "Claude subscription");
 }
 
 function writePrivateFileAtomic(path: string, content: string): void {
@@ -254,18 +276,66 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     } catch {
       throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
     }
-    const candidate = raw as Partial<PersistedGrantRecord>;
-    if (
-      typeof raw !== "object" ||
-      raw === null ||
-      candidate.version !== 1 ||
-      (candidate.kind !== "oauth" && candidate.kind !== "api_key") ||
-      typeof candidate.token !== "string" ||
-      !candidate.token.trim()
-    ) {
+    const candidate = raw as Record<string, unknown>;
+    if (typeof raw !== "object" || raw === null) {
       throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
     }
-    return { version: 1, kind: candidate.kind, token: candidate.token.trim() };
+    if (candidate.version === 1) {
+      if (
+        (candidate.kind !== "oauth" && candidate.kind !== "api_key") ||
+        typeof candidate.token !== "string" ||
+        !candidate.token.trim()
+      ) throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
+      return { version: 1, kind: candidate.kind, token: candidate.token.trim() };
+    }
+    if (candidate.version === 2 && Array.isArray(candidate.accounts)) {
+      const accounts = candidate.accounts as Array<Record<string, unknown>>;
+      const valid = accounts.length > 0 && accounts.every((account) =>
+        typeof account.id === "string" && !!account.id &&
+        typeof account.label === "string" && account.label.length <= 120 &&
+        (account.kind === "oauth" || account.kind === "api_key") &&
+        typeof account.token === "string" && !!account.token.trim() &&
+        typeof account.linked_at === "string" && !Number.isNaN(Date.parse(account.linked_at))
+      );
+      const ids = accounts.map((account) => account.id as string);
+      if (!valid || new Set(ids).size !== ids.length ||
+          typeof candidate.active_account_id !== "string" ||
+          !ids.includes(candidate.active_account_id)) {
+        throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
+      }
+      return {
+        version: 2,
+        active_account_id: candidate.active_account_id,
+        accounts: accounts.map((account) => ({
+          id: account.id as string,
+          label: account.label as string,
+          kind: account.kind as GrantKind,
+          token: (account.token as string).trim(),
+          linked_at: account.linked_at as string,
+        })),
+      };
+    }
+    throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
+  }
+
+  private asV2(tenantId: string, record: PersistedGrantRecord): PersistedGrantRecordV2 {
+    if (record.version === 2) return record;
+    const linkedAt = statSync(this.recordFile(tenantId)).mtime.toISOString();
+    return {
+      version: 2,
+      active_account_id: "legacy",
+      accounts: [{
+        id: "legacy",
+        label: cleanLabel(undefined, record.kind),
+        kind: record.kind,
+        token: record.token,
+        linked_at: linkedAt,
+      }],
+    };
+  }
+
+  private writeRecord(tenantId: string, record: PersistedGrantRecordV2): void {
+    writePrivateFileAtomic(this.recordFile(tenantId), JSON.stringify(record) + "\n");
   }
 
   private readToken(tenantId: string): string | null {
@@ -285,7 +355,11 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
 
   async get(tenantId: string): Promise<AgentGrant | null> {
     const record = this.readRecord(tenantId);
-    if (record) return grantFor(record.kind, record.token);
+    if (record) {
+      if (record.version === 1) return grantFor(record.kind, record.token);
+      const active = record.accounts.find((account) => account.id === record.active_account_id)!;
+      return grantFor(active.kind, active.token);
+    }
 
     const tok = this.readToken(tenantId);
     if (tok) {
@@ -297,15 +371,33 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     return null;
   }
 
-  async put(tenantId: string, token: string, kind?: GrantKind): Promise<GrantStatus> {
+  async put(tenantId: string, token: string, kind?: GrantKind, label?: string): Promise<GrantStatus> {
     const t = (token ?? "").trim();
     if (!t) throw new Error("grant token must not be empty");
     const k: GrantKind = kind ?? detectGrantKind(t);
     mkdirSync(this.dir, { recursive: true });
-    writePrivateFileAtomic(
-      this.recordFile(tenantId),
-      JSON.stringify({ version: 1, kind: k, token: t } satisfies PersistedGrantRecord) + "\n",
-    );
+    const existing = this.readRecord(tenantId);
+    const record = existing ? this.asV2(tenantId, existing) : {
+      version: 2 as const,
+      active_account_id: "",
+      accounts: [],
+    };
+    const id = randomUUID();
+    record.accounts.push({ id, label: cleanLabel(label, k), kind: k, token: t, linked_at: new Date().toISOString() });
+    record.active_account_id = id;
+    this.writeRecord(tenantId, record);
+    return this.status(tenantId);
+  }
+
+  async activate(tenantId: string, accountId: string): Promise<GrantStatus> {
+    const existing = this.readRecord(tenantId);
+    if (!existing) throw new Error("grant account not found");
+    const record = this.asV2(tenantId, existing);
+    if (!record.accounts.some((account) => account.id === accountId)) {
+      throw new Error("grant account not found");
+    }
+    record.active_account_id = accountId;
+    this.writeRecord(tenantId, record);
     return this.status(tenantId);
   }
 
@@ -313,7 +405,27 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     const recordPath = this.recordFile(tenantId);
     const record = this.readRecord(tenantId);
     if (record) {
-      return { linked: true, linked_at: statSync(recordPath).mtime.toISOString(), kind: record.kind };
+      if (record.version === 1) {
+        const linkedAt = statSync(recordPath).mtime.toISOString();
+        return {
+          linked: true, linked_at: linkedAt, kind: record.kind, active_account_id: "legacy",
+          accounts: [{ id: "legacy", label: cleanLabel(undefined, record.kind), kind: record.kind, linked_at: linkedAt, active: true }],
+        };
+      }
+      const active = record.accounts.find((account) => account.id === record.active_account_id)!;
+      return {
+        linked: true,
+        linked_at: active.linked_at,
+        kind: active.kind,
+        active_account_id: active.id,
+        accounts: record.accounts.map((account) => ({
+          id: account.id,
+          label: account.label,
+          kind: account.kind,
+          linked_at: account.linked_at,
+          active: account.id === active.id,
+        })),
+      };
     }
 
     const p = this.file(tenantId);
@@ -350,16 +462,19 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       const recordPath = this.recordFile(tenantId);
       const record = this.readRecord(tenantId);
       if (record) {
+        const diagnosticKind = record.version === 1
+          ? record.kind
+          : record.accounts.find((account) => account.id === record.active_account_id)!.kind;
         const st = statSync(recordPath);
         return {
           ...base,
           linked: true,
-          kind: record.kind,
+          kind: diagnosticKind,
           linked_at: st.mtime.toISOString(),
           path_class: (process.env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase() === "production"
             ? "efs_access_point"
             : "local_file",
-          record_format: "v1",
+          record_format: record.version === 2 ? "v2" : "v1",
           owner: owner(recordPath),
           persistence: {
             atomic_publish: true,
@@ -436,7 +551,20 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     }
   }
 
-  async remove(tenantId: string): Promise<void> {
+  async remove(tenantId: string, accountId?: string): Promise<void> {
+    if (accountId) {
+      const existing = this.readRecord(tenantId);
+      if (!existing) throw new Error("grant account not found");
+      const record = this.asV2(tenantId, existing);
+      const accounts = record.accounts.filter((account) => account.id !== accountId);
+      if (accounts.length === record.accounts.length) throw new Error("grant account not found");
+      if (accounts.length) {
+        record.accounts = accounts;
+        if (record.active_account_id === accountId) record.active_account_id = accounts[0].id;
+        this.writeRecord(tenantId, record);
+        return;
+      }
+    }
     rmSync(this.recordFile(tenantId), { force: true });
     rmSync(this.file(tenantId), { force: true });
     rmSync(this.kindFile(tenantId), { force: true });

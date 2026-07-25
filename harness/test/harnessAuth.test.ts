@@ -169,6 +169,18 @@ describe("harness auth gate (enabled)", () => {
     expect((await store.status("acme")).linked).toBe(true);
   });
 
+  it("PATCH /grants/{tid} with NO secret -> 401 and the active account is unchanged", async () => {
+    const first = await store.put("acme", FAKE_TOKEN, "oauth", "first");
+    const second = await store.put("acme", "FAKE-OAUTH-second-not-real", "oauth", "second");
+    const r = await fetch(`${baseUrl}/grants/acme`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ account_id: first.active_account_id }),
+    });
+    expect(r.status).toBe(401);
+    expect((await store.status("acme")).active_account_id).toBe(second.active_account_id);
+  });
+
   it("PUT then GET /grants/{tid} with CORRECT secret round-trips (token never echoed)", async () => {
     const put = await fetch(`${baseUrl}/grants/acme`, {
       method: "PUT",

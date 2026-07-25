@@ -47,9 +47,10 @@ timing-safe compare; FAIL-CLOSED when enabled with no secret configured).
 | POST | `/author` | `{ description, mode?, tenant_id? }` | **build** (default): `200 { tool, code, preview, telemetry? }` (CONTRACT §4; `telemetry` additive + absent-safe). **one-off** (`mode:"one-off"`): `200 { tool, code, preview, run, telemetry? }`. Missing grant → `401 { grant_required: true, error }` |
 | POST | `/run-registered` | `{ tool, params?, dwg?, aps_live?, tenant_id? }` | `200` CONTRACT §3 result envelope; never constructs the SDK |
 | POST | `/turn` | `ConverseTurnInput` (`ports/converse.ts`, FROZEN) | `200 application/x-ndjson`, one `HarnessTurnEvent` per line, always terminated by `turn_complete` or `error`; pre-stream grant failure → non-stream `401 { grant_required: true }`; no runner wired → `501` |
-| PUT | `/grants/{tenantId}` | `{ token, kind? }` (§17: kind auto-detected when absent) | `200 { linked, linked_at, kind }` — the token is NEVER echoed |
-| GET | `/grants/{tenantId}` | — | `200 { linked, linked_at, kind? }` — never the token |
-| DELETE | `/grants/{tenantId}` | — | `200` = the store's post-remove `status()` (for the demo tenant a documented §16 env/file fallback can still report `linked:true`); never the token |
+| PUT | `/grants/{tenantId}` | `{ token, kind?, label? }` (§17: kind auto-detected when absent) | Adds and activates an account. Returns token-free status and account inventory. |
+| PATCH | `/grants/{tenantId}` | `{ account_id }` | Selects one of the tenant's linked accounts as active. |
+| GET | `/grants/{tenantId}` | none | Returns legacy active fields plus `{active_account_id, accounts[]}`. Never returns a token. |
+| DELETE | `/grants/{tenantId}?account_id={id}` | none | Removes one tenant account. Without `account_id`, removes all accounts for legacy clients. Returns post-remove status. |
 
 - `POST /author` build response is `{ tool, code, preview }` plus the ADDITIVE,
   absent-safe `telemetry?` (A1 — present only when the runner metered the build;
