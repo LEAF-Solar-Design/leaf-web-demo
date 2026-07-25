@@ -115,7 +115,12 @@ IMPLEMENTATION_STATES = ("implemented", "planned")
 EVIDENCE_KINDS = ("contract_test", "security", "end_to_end", "observability", "recovery")
 FALLBACK_MODES = ("local", "cached", "read_only")
 
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# `\Z`, NOT `$`. Python's `$` also matches just before a trailing newline, so
+# `"a"*64 + "\n"` satisfied this pattern while JS `/^[0-9a-f]{64}$/` refuses it: we
+# were ACCEPTING a digest the console rejects, the dangerous direction. Verified in
+# node, which also does not trim whitespace in `Date.parse`, so the same reasoning
+# applies to the timestamp pattern below.
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 # Absent is NOT the same as JSON `null`, and conflating them was a hole in the
 # DANGEROUS direction (accepting what the console refuses). The console tests
@@ -131,7 +136,7 @@ _MISSING = object()
 # The one timestamp spelling this validator and the console's Date.parse both
 # accept AND resolve to the same instant: extended date, literal T, seconds,
 # optional fractional seconds, explicit Z or +/-HH:MM offset.
-_ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$")
+_ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})\Z")
 
 
 class ProductCapability:
@@ -460,10 +465,14 @@ def build_descriptors(live: Optional[Mapping[str, Dict[str, Any]]] = None,
     entitlements = entitlements or {}
     descriptors: List[Dict[str, Any]] = []
     for entry in PRODUCT_CAPABILITIES:
-        measured = live.get(entry.id)
+        # A key present with value None is a REJECTED measurement, not an absent one.
+        # `live.get(id)` returned None for both, so `{"drawing.solve.strings": None}`
+        # reported REASON_NO_MEASUREMENT and the integrator's null payload looked
+        # like no payload at all. Same absent-vs-null distinction as the validator.
+        measured = live.get(entry.id, _MISSING)
         # Distinguish WHY a live entry is unusable, so a refused measurement never
         # looks like an absent one. The reason rides out as `reasonCode`.
-        if measured is None:
+        if measured is _MISSING:
             usable, reason = False, REASON_NO_MEASUREMENT
         elif not isinstance(measured, dict):
             usable, reason = False, REASON_REJECTED_MEASUREMENT

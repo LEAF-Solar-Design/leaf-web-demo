@@ -62,7 +62,6 @@ PINNED_IDS = [
     "tool.author.company",
 ]
 
-
 def _shipping(product_capability: str, now: datetime = NOW) -> dict:
     return {
         "contractVersion": "leaf.platform.v1alpha1",
@@ -81,13 +80,11 @@ def _shipping(product_capability: str, now: datetime = NOW) -> dict:
         }],
     }
 
-
 def test_identifiers_and_gates_are_pinned():
     assert [c.id for c in PRODUCT_CAPABILITIES] == PINNED_IDS
     gates = [c.release_gate for c in PRODUCT_CAPABILITIES]
     assert gates == [2, 3, 4, 5, 6, 7, 8], "catalog order must be release-gate order"
     assert len(set(gates)) == len(gates)
-
 
 WEBSITE_REPO = Path("C:/Users/ehaug/OneDrive/Documents/GitHub/leaf_website")
 WEBSITE_VALIDATOR_PATH = "lib/leaf-platform/projection.ts"
@@ -98,15 +95,14 @@ _CAPABILITY_STATES = ("shipping", "connected_degraded", "locked_planned", "faile
 _EVIDENCE_KINDS = ("contract_test", "security", "end_to_end", "observability", "recovery")
 _FALLBACK_MODES = ("local", "cached", "read_only")
 _WEBSITE_TTL_MS = 15_000
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}\Z")
 # Distinguishes an ABSENT key from an explicit JSON null, because the console does.
 _ABSENT = object()
 # The extended-ISO subset `Date.parse` actually accepts. Node returns NaN for the
 # basic format ("20260724T115959Z"), so a helper that accepted it was claiming the
 # console tolerates something it does not.
 _JS_PARSEABLE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$")
-
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?\Z")
 
 def _website_source() -> str:
     """The console validator's SOURCE, read from origin/main by content.
@@ -139,7 +135,6 @@ def _website_source() -> str:
         unavailable(out.stderr.strip()[:120])
     return out.stdout
 
-
 def test_the_lease_ttl_matches_the_websites_constant_read_from_origin_main():
     """A REAL cross-repo assertion, which is what rounds 3, 4 and 5 all asked for.
 
@@ -164,7 +159,6 @@ def test_the_lease_ttl_matches_the_websites_constant_read_from_origin_main():
         f"console enforces a {website_ms}ms window. A one-sided change makes the "
         f"browser reject every emitted availability and every capability shows "
         f"locked with nothing reporting why")
-
 
 def test_the_website_still_enforces_the_rules_this_module_mirrors():
     """Pin the PREMISE of the mirror, so a website-side removal is caught here
@@ -192,7 +186,6 @@ def test_the_website_still_enforces_the_rules_this_module_mirrors():
             f"dropped this rule, this module's corresponding check becomes local "
             f"policy and must be relabelled, not silently left in place")
 
-
 def _js_date_parse(value):
     """Model of `Date.parse` for the spellings these tests exercise.
 
@@ -219,10 +212,8 @@ def _js_date_parse(value):
         return None
     return parsed.replace(microsecond=(parsed.microsecond // 1000) * 1000)
 
-
 def _is_record(value) -> bool:
     return isinstance(value, dict)
-
 
 def _website_evidence_ok(value) -> bool:
     """Port of `isCapabilityEvidence`."""
@@ -235,7 +226,6 @@ def _website_evidence_ok(value) -> bool:
             and _is_record(digest) and digest.get("algorithm") == "sha256"
             and isinstance(digest.get("value"), str)
             and _SHA256.match(digest["value"]) is not None)
-
 
 def _website_validator(availability, now: datetime) -> bool:
     """FAITHFUL port of `isVerifiedServerAvailability` as it exists on
@@ -309,7 +299,6 @@ def _website_validator(availability, now: datetime) -> bool:
         return impl == "planned" and runtime == "unavailable" and len(evidence) == 0
     return impl == "implemented" and runtime != "available"
 
-
 def test_everything_this_module_emits_satisfies_the_real_console_validator():
     """THE mirror test, against a port of the actual origin/main TypeScript."""
     for entry in PRODUCT_CAPABILITIES:
@@ -321,7 +310,6 @@ def test_everything_this_module_emits_satisfies_the_real_console_validator():
     live = {"drawing.solve.strings": _shipping("drawing.solve.strings")}
     got = {d["id"]: d for d in build_descriptors(live, now=NOW)}
     assert _website_validator(got["drawing.solve.strings"]["availability"], NOW) is True
-
 
 @pytest.mark.parametrize("mutate,why", [
     (lambda a: a.update({"expiresAt": "2099-01-01T00:00:00.000+00:00"}), "window longer than one TTL"),
@@ -346,7 +334,6 @@ def test_the_console_and_this_module_refuse_the_same_payloads(mutate, why):
     assert _website_validator(availability, NOW) is False, f"console must refuse: {why}"
     assert is_well_formed_availability(availability, NOW) is False, f"we must refuse: {why}"
 
-
 def test_we_are_never_looser_than_the_console():
     """The only tolerable asymmetry is us being STRICTER. Anything we accept, the
     console must accept."""
@@ -361,7 +348,6 @@ def test_we_are_never_looser_than_the_console():
             assert _website_validator(availability, NOW) is True, (
                 f"we accept something the console refuses: {availability.get('productCapability')} "
                 f"{availability.get('state')}")
-
 
 def test_descriptor_for_refuses_an_availability_belonging_to_another_capability():
     """Validity alone is not enough: the availability must be FOR this capability.
@@ -380,12 +366,10 @@ def test_descriptor_for_refuses_an_availability_belonging_to_another_capability(
     kept = descriptor_for(capability("drawing.solve.strings"), own, now=NOW)
     assert kept["availability"]["productCapability"] == "drawing.solve.strings"
 
-
 def test_unknown_capability_is_not_invented():
     assert capability("drawing.solve.string") is None  # deliberate typo
     assert capability("") is None
     assert capability("drawing.solve.strings").release_gate == 4
-
 
 def test_locked_default_is_accepted_and_carries_no_proof():
     locked = locked_availability("drawing.inspect", NOW)
@@ -399,12 +383,10 @@ def test_locked_default_is_accepted_and_carries_no_proof():
     dressed["evidence"] = _shipping("drawing.inspect")["evidence"]
     assert is_well_formed_availability(dressed, NOW) is False
 
-
 def test_locked_lease_expires_like_any_other():
     locked = locked_availability("drawing.inspect", NOW)
     stale = NOW + timedelta(seconds=LEASE_TTL_SECONDS + 1)
     assert is_well_formed_availability(locked, stale) is False
-
 
 @pytest.mark.parametrize("mutate,reason", [
     (lambda a: a.update({"contractVersion": "leaf.platform.v2"}), "wrong contract version"),
@@ -433,7 +415,6 @@ def test_validator_refuses_what_the_console_would_refuse(mutate, reason):
     mutate(availability)
     assert is_well_formed_availability(availability, NOW) is False, reason
 
-
 def test_degraded_needs_fallback_and_proof():
     availability = _shipping("drawing.solve.strings")
     availability.update({"runtimeState": "degraded", "state": "connected_degraded",
@@ -453,7 +434,6 @@ def test_degraded_needs_fallback_and_proof():
     failed = _shipping("drawing.solve.strings")
     failed.update({"runtimeState": "available", "state": "failed_retryable"})
     assert is_well_formed_availability(failed, NOW) is False
-
 
 def test_a_naive_now_is_refused_not_assumed_to_be_utc():
     """Two wrong answers were tried here before this one.
@@ -479,7 +459,6 @@ def test_a_naive_now_is_refused_not_assumed_to_be_utc():
     with pytest.raises(ValueError, match="timezone-aware"):
         locked_availability("drawing.inspect", naive)
 
-
 def test_an_aware_non_utc_now_is_converted_not_emitted_verbatim():
     """Emitting isoformat() straight from an odd-offset clock produced
     `+00:00:30`, which this module's own validator rejects, so the module emitted
@@ -495,7 +474,6 @@ def test_an_aware_non_utc_now_is_converted_not_emitted_verbatim():
         clock = NOW.astimezone(timezone(timedelta(hours=offset_hours)))
         payload = locked_availability("drawing.inspect", clock)
         assert is_well_formed_availability(payload, clock) is True
-
 
 def test_emitted_timestamps_carry_millisecond_precision():
     """`Date.parse` keeps only milliseconds, so a 6-digit fraction would leave
@@ -525,7 +503,6 @@ def test_emitted_timestamps_carry_millisecond_precision():
         "999us of remaining life is already expired to the console, so it must be "
         "expired to us too")
 
-
 def test_a_validated_availability_is_snapshotted_not_aliased():
     """Validate-then-mutate: the caller owns the `live` mapping, so keeping a
     reference let a mutation AFTER validation change the emitted descriptor's
@@ -537,7 +514,6 @@ def test_a_validated_availability_is_snapshotted_not_aliased():
     live["drawing.solve.strings"]["evidence"].clear()
     assert descriptors["drawing.solve.strings"]["availability"]["state"] == "shipping"
     assert descriptors["drawing.solve.strings"]["availability"]["evidence"], "evidence must not be aliased either"
-
 
 def test_timestamps_javascript_cannot_parse_are_rejected():
     """The mirror only holds if this validator is no more permissive than JS
@@ -555,7 +531,6 @@ def test_timestamps_javascript_cannot_parse_are_rejected():
         availability["observedAt"] = odd
         assert is_well_formed_availability(availability, NOW) is False, f"{odd!r} must be rejected"
 
-
 def test_no_live_measurement_locks_every_gate():
     descriptors = build_descriptors(now=NOW)
     assert [d["id"] for d in descriptors] == PINNED_IDS
@@ -565,7 +540,6 @@ def test_no_live_measurement_locks_every_gate():
         # Round trip: what we emit, the console accepts.
         assert is_well_formed_availability(descriptor["availability"], NOW) is True
 
-
 def test_a_valid_live_measurement_is_passed_through():
     live = {"drawing.solve.strings": _shipping("drawing.solve.strings")}
     descriptors = {d["id"]: d for d in build_descriptors(live, {"drawing.solve.strings": True}, NOW)}
@@ -573,7 +547,6 @@ def test_a_valid_live_measurement_is_passed_through():
     assert descriptors["drawing.solve.strings"]["entitled"] is True
     # Everything else stays locked; one live capability does not lift the rest.
     assert descriptors["drawing.inspect"]["availability"]["state"] == "locked_planned"
-
 
 @pytest.mark.parametrize("live,reason", [
     ({"drawing.solve.strings": _shipping("drawing.inspect")}, "key disagrees with payload"),
@@ -585,19 +558,16 @@ def test_a_bad_live_measurement_falls_back_to_locked(live, reason):
     assert descriptors["drawing.solve.strings"]["availability"]["state"] == "locked_planned", reason
     assert is_well_formed_availability(descriptors["drawing.solve.strings"]["availability"], NOW)
 
-
 def test_an_expired_live_measurement_falls_back_to_locked():
     stale = _shipping("drawing.solve.strings", NOW - timedelta(minutes=1))
     descriptors = {d["id"]: d for d in build_descriptors({"drawing.solve.strings": stale}, now=NOW)}
     assert descriptors["drawing.solve.strings"]["availability"]["state"] == "locked_planned"
-
 
 def test_an_unknown_live_id_is_never_promoted():
     live = {"drawing.solve.everything": _shipping("drawing.solve.everything")}
     descriptors = build_descriptors(live, now=NOW)
     assert [d["id"] for d in descriptors] == PINNED_IDS
     assert all(d["availability"]["state"] == "locked_planned" for d in descriptors)
-
 
 def test_entitled_is_absent_where_entitlement_does_not_gate():
     descriptors = {d["id"]: d for d in build_descriptors(now=NOW)}
@@ -608,7 +578,6 @@ def test_entitled_is_absent_where_entitlement_does_not_gate():
     assert descriptors["drawing.solve.strings"]["entitled"] is False
     assert descriptors["tool.author.company"]["entitled"] is False
 
-
 def test_descriptor_shape_matches_the_website_type():
     entry = capability("drawing.solve.strings")
     descriptor = descriptor_for(entry, locked_availability(entry.id, NOW), entitled=True)
@@ -616,7 +585,6 @@ def test_descriptor_shape_matches_the_website_type():
                                "toolCapabilities", "entitlements", "entitled"}
     assert descriptor["toolCapabilities"] == ["solve"]
     assert descriptor["entitlements"] == ["solve"]
-
 
 @pytest.mark.parametrize("field", ["reasonCode", "fallback"])
 def test_an_explicit_json_null_is_refused_like_the_console_refuses_it(field):
@@ -628,7 +596,6 @@ def test_an_explicit_json_null_is_refused_like_the_console_refuses_it(field):
     availability[field] = None
     assert _website_validator(availability, NOW) is False, "console refuses it"
     assert is_well_formed_availability(availability, NOW) is False, "so must we"
-
 
 def test_a_refused_live_measurement_is_distinguishable_from_no_measurement():
     """Fail-closed is right, but silent fail-closed hides the integrator's bug: a
@@ -660,7 +627,6 @@ def test_a_refused_live_measurement_is_distinguishable_from_no_measurement():
     for descriptor in list(absent.values()) + list(rejected.values()) + list(keyed.values()):
         assert _website_validator(descriptor["availability"], NOW) is True
 
-
 def test_the_js_parse_model_rejects_what_node_rejects():
     """Pins the helper's fidelity, measured against the real runtime in round 6."""
     assert _js_date_parse("20260724T115959Z") is None, "Node returns NaN for basic format"
@@ -672,3 +638,38 @@ def test_the_js_parse_model_rejects_what_node_rejects():
     # Millisecond truncation, as Date.parse does.
     got = _js_date_parse("2026-07-24T11:59:59.123999+00:00")
     assert got is not None and got.microsecond == 123000
+
+def test_a_trailing_newline_does_not_slip_past_a_python_anchor():
+    r"""Python's `$` also matches just before a trailing newline; JS `$` does not, and
+    `Date.parse` does not trim whitespace either (both verified in node). So
+    `"a"*64 + "\n"` satisfied the digest pattern here while the console refused it,
+    and the same held for timestamps. Both patterns use `\Z` now."""
+    for suffix in ("\n", "\r\n", " ", "\t"):
+        digest_padded = _shipping("drawing.solve.strings")
+        digest_padded["evidence"][0]["digest"]["value"] = "a" * 64 + suffix
+        assert is_well_formed_availability(digest_padded, NOW) is False, (
+            f"a digest with {suffix!r} appended must be refused, as the console refuses it")
+        assert _website_validator(digest_padded, NOW) is False, "the port must agree"
+
+        stamp_padded = _shipping("drawing.solve.strings")
+        stamp_padded["observedAt"] = (NOW - timedelta(seconds=1)).isoformat() + suffix
+        assert is_well_formed_availability(stamp_padded, NOW) is False, (
+            f"a timestamp with {suffix!r} appended must be refused")
+
+    # The clean values still pass, so the anchors were tightened and not broken.
+    assert is_well_formed_availability(_shipping("drawing.solve.strings"), NOW) is True
+
+def test_an_explicit_null_measurement_is_reported_as_rejected_not_absent():
+    """`live.get(id)` returned None for an absent key AND for a key whose value is
+    null, so an integrator handing `{"drawing.solve.strings": None}` got
+    REASON_NO_MEASUREMENT and its null payload looked like no payload at all."""
+    from product_capability_availability import (
+        REASON_NO_MEASUREMENT, REASON_REJECTED_MEASUREMENT,
+    )
+    explicit_null = {d["id"]: d for d in build_descriptors(
+        {"drawing.solve.strings": None}, now=NOW)}
+    assert explicit_null["drawing.solve.strings"]["availability"]["reasonCode"] == \
+        REASON_REJECTED_MEASUREMENT, "a null measurement was SUPPLIED and refused"
+    # A capability with no key at all still reports absence.
+    assert explicit_null["drawing.inspect"]["availability"]["reasonCode"] == \
+        REASON_NO_MEASUREMENT
