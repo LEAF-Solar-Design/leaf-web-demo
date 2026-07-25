@@ -43,6 +43,11 @@ def test_required_config_manifests_fail_closed_for_postgres_authority():
     assert {
         "LEAF_BLOB_STORE",
         "LEAF_BROKER_STORE",
+        # The broker must declare its authority stage explicitly. The guard
+        # defaults to the durable postgres posture, so a deployment cannot
+        # reach the legacy posture by omitting this, but the manifest still
+        # requires it to be stated rather than defaulted.
+        "LEAF_PLATFORM_AUTHORITY_STAGE",
     }.issubset(broker_environment)
     assert "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED" not in broker_environment
 

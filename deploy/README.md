@@ -118,6 +118,22 @@ accident. Production should inject the broker connection as a broker-only
 secret. The broker image still excludes the Anthropic SDK, Claude grants, and
 tenant grant storage.
 
+A production broker must declare which persistence authority it runs on, with
+`LEAF_PLATFORM_AUTHORITY_STAGE`:
+
+| Stage | Meaning |
+| --- | --- |
+| `postgres` (default) | The durable target. All three store selectors must be `postgres`. |
+| `legacy` | Credential wired, data move outstanding. All three selectors must be `legacy`. |
+
+The default is `postgres`, so a deployment cannot reach the legacy posture by
+omitting the variable. The legacy stage is an explicit, temporary opt-in for the
+window between wiring `DATABASE_URL` and completing the production data move; it
+still requires the connection string and still requires `LEAF_BLOB_STORE=filesystem`.
+Both stages reject a split, where one selector disagrees with the declared stage,
+because `da/store.py` resolves the drawing selector per container and never falls
+back. Remove the `legacy` opt-in once the move is done.
+
 Run schema work as a separate one-shot stage. Do not call
 `apply_migration()` from an app, broker, or harness startup command.
 

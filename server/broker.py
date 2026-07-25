@@ -677,6 +677,55 @@ def _sandbox_configured() -> bool:
     return os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER", "").strip().lower() == "e2b"
 
 
+# --------------------------------------------------------------------------- #
+# Production persistence authority stage.
+#
+# A production broker must declare which authority it runs on. `postgres` is the
+# durable target and stays the DEFAULT, so no existing deployment can weaken by
+# omission — the staged posture has to be asked for by name. `legacy` is the
+# interim state in which the PostgreSQL credential is wired but the production
+# data move (drawing manifests off the EFS authority, with a parity proof) has
+# not run yet.
+#
+# Neither stage is a skip. Both require all three selectors to agree with the
+# declared stage, because da/store.py resolves the drawing selector per
+# container and never falls back: a half-flipped deployment would let one
+# process advance the PostgreSQL head while the other kept reading the EFS
+# manifest, and an app undo would then move only the EFS head.
+# --------------------------------------------------------------------------- #
+_AUTHORITY_STAGES = ("postgres", "legacy")
+
+
+def _authority_stage() -> str:
+    return os.environ.get(
+        "LEAF_PLATFORM_AUTHORITY_STAGE", "postgres").strip().lower()
+
+
+def _upload_store_mode() -> str:
+    mode = os.environ.get("LEAF_UPLOAD_STORE", "legacy").strip().lower()
+    if mode not in {"legacy", "postgres"}:
+        raise RuntimeError("LEAF_UPLOAD_STORE must be 'legacy' or 'postgres'")
+    return mode
+
+
+def _validate_authority_stage() -> None:
+    """Require every store selector to agree with the declared stage."""
+    stage = _authority_stage()
+    if stage not in _AUTHORITY_STAGES:
+        raise RuntimeError(
+            "production broker requires LEAF_PLATFORM_AUTHORITY_STAGE to be "
+            "'postgres' or 'legacy'")
+    for name, mode in (
+        ("LEAF_BROKER_STORE", _broker_store_mode()),
+        ("LEAF_DRAWING_STORE", _drawing_store_mode()),
+        ("LEAF_UPLOAD_STORE", _upload_store_mode()),
+    ):
+        if mode != stage:
+            raise RuntimeError(
+                f"production broker requires {name}={stage}"
+                f" in the {stage} authority stage")
+
+
 def validate_runtime_safety() -> None:
     """Reject unsafe or ambiguous production broker configuration."""
     if not _production_runtime():
@@ -687,12 +736,9 @@ def validate_runtime_safety() -> None:
         raise RuntimeError("production broker requires LEAF_AUTH_LIVE=1")
     if os.environ.get("LEAF_QA_HOOKS", "").strip() != "0":
         raise RuntimeError("production broker requires explicit LEAF_QA_HOOKS=0")
-    if _broker_store_mode() != "postgres":
-        raise RuntimeError("production broker requires LEAF_BROKER_STORE=postgres")
-    if _drawing_store_mode() != "postgres":
-        raise RuntimeError("production broker requires LEAF_DRAWING_STORE=postgres")
-    if os.environ.get("LEAF_UPLOAD_STORE", "").strip().lower() != "postgres":
-        raise RuntimeError("production broker requires LEAF_UPLOAD_STORE=postgres")
+    _validate_authority_stage()
+    # Blobs stay on the shared encrypted volume in EVERY stage, so this is not
+    # part of the stage comparison above.
     if write_loop.blob_store_mode() != "filesystem":
         raise RuntimeError("production broker requires LEAF_BLOB_STORE=filesystem")
     if not os.environ.get("DATABASE_URL", "").strip():

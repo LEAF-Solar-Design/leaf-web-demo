@@ -63,6 +63,78 @@ def test_broker_rejects_nondurable_production_authority(
         broker.validate_runtime_safety()
 
 
+# --------------------------------------------------------------------------- #
+# Staged authority posture.
+#
+# The durable postgres stage stays the DEFAULT — every assertion above runs
+# without setting LEAF_PLATFORM_AUTHORITY_STAGE at all, so a deployment cannot
+# reach the legacy posture by omission. These cases cover the explicit opt-in
+# used while the production data move is still outstanding.
+# --------------------------------------------------------------------------- #
+def _staged_legacy(monkeypatch):
+    _safe_production(monkeypatch)
+    monkeypatch.setenv("LEAF_PLATFORM_AUTHORITY_STAGE", "legacy")
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "legacy")
+
+
+def test_broker_accepts_explicit_staged_legacy_authority(monkeypatch):
+    _staged_legacy(monkeypatch)
+    assert broker.validate_runtime_safety() is None
+
+
+def test_staged_legacy_still_requires_the_wired_credential(monkeypatch):
+    """The legacy stage is credential-wired; it is not a database-free posture."""
+    _staged_legacy(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", "")
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        broker.validate_runtime_safety()
+
+
+def test_staged_legacy_still_requires_filesystem_blobs(monkeypatch):
+    """Blobs stay on the shared volume in every stage."""
+    _staged_legacy(monkeypatch)
+    monkeypatch.setenv("LEAF_BLOB_STORE", "aps_oss")
+    with pytest.raises(RuntimeError, match="LEAF_BLOB_STORE=filesystem"):
+        broker.validate_runtime_safety()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["LEAF_BROKER_STORE", "LEAF_DRAWING_STORE", "LEAF_UPLOAD_STORE"],
+)
+def test_broker_rejects_authority_split_across_selectors(monkeypatch, name):
+    """A half-flipped deployment must fail closed, in either direction.
+
+    da/store.py resolves the drawing selector per container and never falls
+    back, so one selector disagreeing with the declared stage is the split that
+    would let the broker advance the PostgreSQL head while the app kept reading
+    the EFS manifest.
+    """
+    _staged_legacy(monkeypatch)
+    monkeypatch.setenv(name, "postgres")
+    with pytest.raises(RuntimeError, match=f"{name}=legacy"):
+        broker.validate_runtime_safety()
+
+
+@pytest.mark.parametrize("stage", ["", "  ", "off", "postgres-ish", "1"])
+def test_broker_rejects_unrecognized_authority_stage(monkeypatch, stage):
+    _safe_production(monkeypatch)
+    monkeypatch.setenv("LEAF_PLATFORM_AUTHORITY_STAGE", stage)
+    with pytest.raises(RuntimeError, match="LEAF_PLATFORM_AUTHORITY_STAGE"):
+        broker.validate_runtime_safety()
+
+
+def test_absent_authority_stage_defaults_to_the_durable_posture(monkeypatch):
+    """Omitting the variable must NOT reach the legacy posture."""
+    _safe_production(monkeypatch)
+    monkeypatch.delenv("LEAF_PLATFORM_AUTHORITY_STAGE", raising=False)
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    with pytest.raises(RuntimeError, match="LEAF_BROKER_STORE=postgres"):
+        broker.validate_runtime_safety()
+
+
 @pytest.mark.parametrize("qa_value", [None, "1"])
 def test_broker_rejects_nonexplicit_qa_containment(monkeypatch, qa_value):
     _safe_production(monkeypatch)
