@@ -38,6 +38,10 @@ import deps
 SERVER_DIR = Path(__file__).resolve().parent
 
 SITE_TENANT = "site-demo"
+# Bump only after a reviewed operator recovery invalidates a terminal demo
+# admission. The broker keeps the old denial and ledger evidence under its
+# original key, while this generation receives a fresh idempotency identity.
+SITE_RUN_GENERATION = "r2"
 SITE_DWG = "rooftop_demo"
 
 # Inline §2 tool package. Entry resolves via tool_loader.resolve_local_file
@@ -228,7 +232,8 @@ def _compute_solve(sha: str, run_id: str, computed_at: str) -> Dict[str, Any]:
     env = broker_client.run_via_broker(
         SITE_TENANT, SITE_TOOL, {}, SITE_DWG, aps_live=False,
         ledger_event_key=(
-            f"site-demo:{sha}:{SITE_TOOL['version']}:{run_id}"
+            f"site-demo:{sha}:{SITE_TOOL['version']}:"
+            f"{SITE_RUN_GENERATION}:{run_id}"
         ),
     )
     if not env.get("ok"):
