@@ -298,17 +298,21 @@ def test_1_run_returns_202_fast(stack):
 
     # The `try` opens BEFORE the first POST so that a failure between the two
     # POSTs still drains the first job. It does NOT close the case where a POST
-    # itself raises after the server accepted the work: the id only exists in the
-    # response that never arrived, and /api/jobs is a gated surface this test has
-    # no token for, so there is nothing to drain BY. `finally` reports that
-    # instead of passing over it -- see the `resp is None` branch.
+    # itself raises after the server accepted the work: the id existed only in
+    # the response that never arrived. That id could be recovered by diffing
+    # GET /api/jobs before and after (test_10 reaches it unauthenticated in this
+    # same fixture), but a recovery path inside `finally` is more machinery in
+    # the one place that must stay boring. So the case is REPORTED rather than
+    # repaired -- see the `attempted` branch below.
     control = r = None
+    subject_attempted = False
     try:
         t0 = time.perf_counter()
         control = requests.post(url, json=control_payload, timeout=120)
         control_elapsed = time.perf_counter() - t0
 
         t1 = time.perf_counter()
+        subject_attempted = True  # set BEFORE the call: a raise still means sent
         r = requests.post(url, json=subject_payload, timeout=120)
         elapsed = time.perf_counter() - t1
 
@@ -344,11 +348,11 @@ def test_1_run_returns_202_fast(stack):
         drain_errors = []
         for label, resp in (("control", control), ("subject", r)):
             if resp is None:
-                # The POST never returned a response. The server may still have
-                # accepted the job, and its id was only ever in the reply that
-                # did not arrive, so it cannot be drained. Say so: an unbounded
-                # job may be running, and no later test is isolated from it.
-                if label == "subject":
+                # No response. Only report it if the request was actually SENT:
+                # if the control POST raised, the subject was never issued and
+                # there is no subject job to worry about. Reporting it anyway
+                # would blame the wrong call and bury the real exception.
+                if label == "subject" and subject_attempted:
                     drain_errors.append(
                         "subject: the POST did not return, so a job may have been "
                         "accepted with an id this test never saw and cannot drain")
@@ -503,7 +507,11 @@ def _ledger_records(stack) -> list[str]:
     split between transient and persistent exact and needs no timing window.
     broker.py `_ledger_append` writes `line + "\\n"` in ONE call under
     `_ledger_lock`, and appends land at EOF, so an append caught mid-write is
-    always the unterminated LAST fragment and never anything before it.
+    always the unterminated LAST fragment and never anything before it. That
+    holds because ONE broker process owns this fixture's ledger: `_ledger_lock`
+    is a thread lock, not an interprocess one, so two brokers sharing a ledger
+    file could interleave. The `stack` fixture starts a single broker on a fresh
+    temporary path, so there is exactly one writer.
 
     Everything earlier is finished bytes. If a broker died mid-write and a later
     append ran, the survivor is newline-terminated and will NOT parse -- so it is
@@ -534,12 +542,12 @@ def _ledger_entries_for(stack, tenants) -> list[dict]:
     timer. So no attribution and no window: every COMPLETE record must be valid
     JSON, whoever wrote it, and only the unterminated tail is excused.
 
-    That is deliberately not limited to this test's tenants. The count below
-    catches a broken record among our OWN three (it would not parse, would not
-    be counted, and `len(mine) == n_runs` would fail), but the count cannot see
-    a broken EXTRA record, and it cannot see one belonging to anyone else. This
-    can. What neither catches is corruption that still parses -- a flipped byte
-    in a field nothing here asserts -- which is a real limit, not a claim.
+    That is deliberately not limited to this test's tenants, and it fires BEFORE
+    the count: a complete broken record raises here, so the count never sees it.
+    The count's own job is the other half -- a record that is simply MISSING, or
+    one whose tenant is wrong -- which no parse check can see. What neither
+    catches is corruption that still parses, a flipped byte in a field nothing
+    here asserts. That is a real limit, not a claim.
     """
     wanted = set(tenants)
     out = []
