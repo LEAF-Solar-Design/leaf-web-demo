@@ -40,6 +40,11 @@ class GrantLinkRequest(BaseModel):
     # "api_key" (enterprise BYO key). When omitted the harness AUTO-DETECTS from the token
     # prefix. Passed through to the harness; the token itself is never persisted app-side.
     kind: Optional[str] = None
+    label: Optional[str] = None
+
+
+class GrantActivateRequest(BaseModel):
+    account_id: str
 
 
 def _harness_url() -> str:
@@ -65,14 +70,47 @@ def _grant_admin_url(tenant: str) -> Optional[str]:
     return f"{base}/grants/{urllib.parse.quote(str(tenant), safe='')}"
 
 
+def _rejected(status_code: int) -> JSONResponse:
+    """Preserve a harness client-error status without echoing its body."""
+    return JSONResponse(
+        status_code=status_code,
+        content=err_envelope(
+            ErrorCode.BAD_PARAMS,
+            "Claude account request rejected",
+            retryable=False,
+        ),
+    )
+
+
 def _status_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize the harness status into a §10-enveloped {linked, linked_at, kind}.
     Defensive: only these safe fields are surfaced, so a token can NEVER be echoed even if
     a future harness bug returned one. `kind` (§17) is the credential kind, never a secret."""
+    safe_accounts = []
+    raw_accounts = harness_json.get("accounts")
+    if isinstance(raw_accounts, list):
+        for account in raw_accounts:
+            if not isinstance(account, dict):
+                continue
+            if (not isinstance(account.get("id"), str)
+                    or not isinstance(account.get("label"), str)
+                    or account.get("kind") not in {"oauth", "api_key"}):
+                continue
+            safe_accounts.append({
+                "id": account["id"],
+                "label": account["label"],
+                "kind": account["kind"],
+                "linked_at": account.get("linked_at")
+                if isinstance(account.get("linked_at"), str) else None,
+                "active": bool(account.get("active", False)),
+            })
     return with_envelope_fields({
         "linked": bool(harness_json.get("linked", False)),
         "linked_at": harness_json.get("linked_at"),
         "kind": harness_json.get("kind"),
+        "active_account_id": harness_json.get("active_account_id")
+        if isinstance(harness_json.get("active_account_id"), str) else None,
+        "accounts": safe_accounts,
     })
 
 
@@ -99,7 +137,7 @@ def _diagnostic_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
         else "local_file",
         "record_format": harness_json.get("record_format")
         if harness_json.get("record_format") in {
-            "v1", "legacy", "environment", "missing", "invalid"
+            "v1", "v2", "legacy", "environment", "missing", "invalid"
         } else "invalid",
         "legacy_fallback_present": bool(harness_json.get("legacy_fallback_present", False)),
         "owner": {
@@ -155,6 +193,8 @@ def link_grant(req: GrantLinkRequest, tenant=Depends(deps.require_tenant)):
     payload: Dict[str, Any] = {"token": req.token}
     if req.kind is not None:
         payload["kind"] = req.kind
+    if req.label is not None:
+        payload["label"] = req.label
     try:
         import requests
         import broker_client
@@ -163,6 +203,36 @@ def link_grant(req: GrantLinkRequest, tenant=Depends(deps.require_tenant)):
         return _unreachable(str(exc))
     if r.status_code >= 500:
         return _unreachable(f"harness returned HTTP {r.status_code}")
+    if r.status_code >= 400:
+        return _rejected(r.status_code)
+    try:
+        hj = r.json()
+    except ValueError:
+        return _unreachable("harness returned non-JSON")
+    return deps.tenant_echo(_status_body(hj), tenant)
+
+
+@router.patch("/api/tenant/claude-grant")
+def activate_grant(req: GrantActivateRequest, tenant=Depends(deps.require_tenant)):
+    """Select one of THIS tenant's linked accounts as the authoring credential."""
+    url = _grant_admin_url(str(tenant))
+    if url is None:
+        return _unreachable("LEAF_AUTHOR_HARNESS_URL not configured")
+    try:
+        import requests
+        import broker_client
+        r = requests.patch(
+            url,
+            json={"account_id": req.account_id},
+            headers=broker_client.harness_headers(),
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _unreachable(str(exc))
+    if r.status_code >= 500:
+        return _unreachable(f"harness returned HTTP {r.status_code}")
+    if r.status_code >= 400:
+        return _rejected(r.status_code)
     try:
         hj = r.json()
     except ValueError:
@@ -192,7 +262,7 @@ def grant_status(tenant=Depends(deps.require_tenant)):
 
 
 @router.delete("/api/tenant/claude-grant")
-def unlink_grant(tenant=Depends(deps.require_tenant)):
+def unlink_grant(account_id: Optional[str] = None, tenant=Depends(deps.require_tenant)):
     """Unlink THIS tenant's grant."""
     url = _grant_admin_url(str(tenant))
     if url is None:
@@ -200,11 +270,14 @@ def unlink_grant(tenant=Depends(deps.require_tenant)):
     try:
         import requests
         import broker_client
-        r = requests.delete(url, headers=broker_client.harness_headers(), timeout=30)
+        params = {"account_id": account_id} if account_id else None
+        r = requests.delete(url, params=params, headers=broker_client.harness_headers(), timeout=30)
     except Exception as exc:  # noqa: BLE001
         return _unreachable(str(exc))
     if r.status_code >= 500:
         return _unreachable(f"harness returned HTTP {r.status_code}")
+    if r.status_code >= 400:
+        return _rejected(r.status_code)
     try:
         hj = r.json()
     except ValueError:

@@ -146,3 +146,19 @@ Risks:
 - The public request path must not hold a process lock during broker or file IO.
 - GitHub schedules can be delayed, so backend request-time renewal remains the
   source of truth and the canary runs away from the start-of-hour peak.
+
+# Multiple Claude accounts per workspace
+
+- [x] Freeze an additive, token-free account-list contract with stable account IDs and one active account.
+- [x] Migrate legacy single-grant records on read and keep the execution port bound to the active account.
+- [x] Add tenant-isolation, token-redaction, selection, removal, and legacy-compatibility tests.
+- [x] Update the Leaf Platform panel so a linked workspace can add, select, and remove accounts.
+- [x] Run focused server, harness, and website build gates.
+- [ ] Record staging deployment and rollback evidence without using the local root AWS identity.
+
+Risks:
+
+- Account IDs and labels must never reveal credential material.
+- A tenant must not select or remove another tenant's account.
+- Removing the active account must select a deterministic survivor or report no active grant.
+- The existing v1 record and single-account API fields must remain compatible during rollout.

@@ -98,7 +98,40 @@ describe("harness /grants admin endpoints", () => {
     expect(r.status).toBe(400);
   });
 
-  it("GET diagnostic returns only token-free v1 storage facts", async () => {
+  it("adds two labeled accounts, selects the first, and removes only that account", async () => {
+    const first = await fetch(`${baseUrl}/grants/acme`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: FAKE, label: "first@example.com" }),
+    }).then((response) => response.json()) as { active_account_id: string };
+    const secondToken = "FAKE-OAUTH-second-not-real";
+    const second = await fetch(`${baseUrl}/grants/acme`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: secondToken, label: "second@example.com" }),
+    }).then((response) => response.json()) as { active_account_id: string; accounts: unknown[] };
+    expect(second.accounts).toHaveLength(2);
+
+    const select = await fetch(`${baseUrl}/grants/acme`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ account_id: first.active_account_id }),
+    });
+    expect(select.status).toBe(200);
+    expect((await select.json() as { active_account_id: string }).active_account_id).toBe(first.active_account_id);
+
+    const remove = await fetch(`${baseUrl}/grants/acme?account_id=${encodeURIComponent(first.active_account_id)}`, {
+      method: "DELETE",
+    });
+    const bodyText = await remove.text();
+    expect(bodyText).not.toContain(FAKE);
+    expect(bodyText).not.toContain(secondToken);
+    const body = JSON.parse(bodyText) as { active_account_id: string; accounts: unknown[] };
+    expect(body.active_account_id).toBe(second.active_account_id);
+    expect(body.accounts).toHaveLength(1);
+  });
+
+  it("GET diagnostic returns only token-free v2 storage facts", async () => {
     await store.put("acme", FAKE);
     const r = await fetch(`${baseUrl}/grants/acme/diagnostic`);
     expect(r.status).toBe(200);
@@ -117,7 +150,7 @@ describe("harness /grants admin endpoints", () => {
       kind: "oauth",
       backend: "file",
       path_class: "local_file",
-      record_format: "v1",
+      record_format: "v2",
       legacy_fallback_present: false,
       degraded: false,
       owner: { mode: process.platform === "win32" ? "0666" : "0600" },

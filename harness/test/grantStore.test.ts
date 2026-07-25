@@ -48,11 +48,11 @@ describe("FileTenantGrantStore", () => {
     // New writes publish one atomic token+kind record.
     const file = join(dir, "acme.grant.json");
     expect(existsSync(file)).toBe(true);
-    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
-      version: 1,
-      kind: "oauth",
-      token: FAKE,
-    });
+    const persisted = JSON.parse(readFileSync(file, "utf8"));
+    expect(persisted.version).toBe(2);
+    expect(persisted.accounts).toHaveLength(1);
+    expect(persisted.accounts[0]).toMatchObject({ kind: "oauth", token: FAKE });
+    expect(persisted.active_account_id).toBe(persisted.accounts[0].id);
   });
 
   it("status NEVER returns the token (only linked + linked_at + kind)", async () => {
@@ -60,7 +60,9 @@ describe("FileTenantGrantStore", () => {
     await store.put("acme", FAKE);
     const status = await store.status("acme");
     // §17: status now also carries `kind` — still NEVER the token.
-    expect(Object.keys(status).sort()).toEqual(["kind", "linked", "linked_at"]);
+    expect(Object.keys(status).sort()).toEqual([
+      "accounts", "active_account_id", "kind", "linked", "linked_at",
+    ]);
     expect(status.kind).toBe("oauth");
     expect(JSON.stringify(status)).not.toContain(FAKE);
   });
@@ -71,16 +73,46 @@ describe("FileTenantGrantStore", () => {
     expect(await store.status("nobody")).toEqual({ linked: false, linked_at: null });
   });
 
-  it("put replaces, remove unlinks (idempotent)", async () => {
+  it("put adds accounts, activate selects one, and targeted remove preserves the survivor", async () => {
     const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
-    await store.put("acme", FAKE);
-    await store.put("acme", FAKE2);
+    const first = await store.put("acme", FAKE, "oauth", "first@example.com");
+    const firstId = first.active_account_id!;
+    const second = await store.put("acme", FAKE2, "oauth", "second@example.com");
+    const secondId = second.active_account_id!;
+    expect(second.accounts).toHaveLength(2);
     expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE2 });
 
-    await store.remove("acme");
+    await store.activate("acme", firstId);
+    expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
+    await store.remove("acme", firstId);
+    expect((await store.status("acme")).active_account_id).toBe(secondId);
+    expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE2 });
+    await store.remove("acme", secondId);
     expect(await store.get("acme")).toBeNull();
     expect((await store.status("acme")).linked).toBe(false);
     await expect(store.remove("acme")).resolves.toBeUndefined(); // idempotent
+  });
+
+  it("keeps v1 records readable and migrates them when a second account is added", async () => {
+    writeFileSync(join(dir, "acme.grant.json"), JSON.stringify({ version: 1, kind: "oauth", token: FAKE }), "utf8");
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    expect((await store.status("acme")).active_account_id).toBe("legacy");
+    expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
+
+    const status = await store.put("acme", FAKE2, "oauth", "new@example.com");
+    expect(status.accounts).toHaveLength(2);
+    expect(status.accounts?.map((account) => account.label)).toEqual([
+      "Claude subscription", "new@example.com",
+    ]);
+    expect(JSON.stringify(status)).not.toContain(FAKE);
+    expect(JSON.stringify(status)).not.toContain(FAKE2);
+  });
+
+  it("rejects selection and removal of an unknown account", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("acme", FAKE);
+    await expect(store.activate("acme", "not-owned")).rejects.toThrow(/not found/);
+    await expect(store.remove("acme", "not-owned")).rejects.toThrow(/not found/);
   });
 
   it("ignores an interrupted temp record and keeps the last complete grant", async () => {
@@ -138,7 +170,7 @@ describe("FileTenantGrantStore", () => {
   it("explicit kind:'api_key' -> get returns an api_key grant; status.kind is api_key", async () => {
     const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
     const status = await store.put("ent", FAKE, "api_key"); // explicit kind wins over prefix
-    expect(status).toEqual({ linked: true, linked_at: status.linked_at, kind: "api_key" });
+    expect(status).toMatchObject({ linked: true, linked_at: status.linked_at, kind: "api_key" });
     expect(await store.get("ent")).toEqual({ kind: "api_key", apiKey: FAKE });
     expect((await store.status("ent")).kind).toBe("api_key");
     expect(JSON.stringify(await store.status("ent"))).not.toContain(FAKE);
