@@ -535,6 +535,41 @@ def test_timestamps_javascript_cannot_parse_are_rejected():
         availability["observedAt"] = odd
         assert is_well_formed_availability(availability, NOW) is False, f"{odd!r} must be rejected"
 
+def test_the_space_separator_stays_rejected_even_though_it_carries_an_offset():
+    """DO NOT "fix" this by widening `_ISO_UTC_RE` to `[T ]`. That was tried on
+    2026-07-24 and reverted; this test exists so the next reader does not repeat it.
+
+    The tempting argument runs: an offset is present, so both runtimes agree on the
+    instant and the separator is cosmetic. It is wrong. A space makes the string
+    non-ISO, so `Date.parse` falls back to node's LEGACY parser, which applies
+    two-digit-year mapping. Measured in node 22.17.1:
+
+        "0001-01-01T00:00:00+00:00" -> -62135596800000  (year 1)
+        "0001-01-01 00:00:00+00:00" ->     978307200000  (year 2001)
+        "0099-06-05T01:02:03+00:00" -> -59029599477000  (year 99)
+        "0099-06-05 01:02:03+00:00" ->     928544523000  (year 1999)
+
+    Python's `fromisoformat` reads all four as the literal year. So for years below
+    0100 the two runtimes disagree about the instant while both "accept" — exactly
+    the divergence class this validator exists to exclude.
+
+    The second half of that argument was also wrong: `jobs.py:359` does NOT emit a
+    space. `str(health["observed_at"])` looks like it would, but `health` comes from
+    `canonical_jobs.worker_health` -> `_record` -> `_json_value`, which has already
+    called `.isoformat()`, so the value reaching `str()` is a `T`-separated string.
+    There was no false lock to fix.
+    """
+    for spelling in ("2026-07-24 11:59:59+00:00", "0001-01-01 00:00:00+00:00",
+                     "0099-06-05 01:02:03+00:00"):
+        availability = _shipping("drawing.solve.strings")
+        availability["observedAt"] = spelling
+        assert is_well_formed_availability(availability, NOW) is False, (
+            f"{spelling!r} uses a space separator and must stay rejected")
+        # And it must fail CLOSED, not merely fail validation.
+        live = {"drawing.solve.strings": availability}
+        descriptors = {d["id"]: d for d in build_descriptors(live, now=NOW)}
+        assert descriptors["drawing.solve.strings"]["availability"]["state"] == "locked_planned"
+
 def test_no_live_measurement_locks_every_gate():
     descriptors = build_descriptors(now=NOW)
     assert [d["id"] for d in descriptors] == PINNED_IDS
