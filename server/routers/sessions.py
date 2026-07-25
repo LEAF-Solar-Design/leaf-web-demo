@@ -43,11 +43,48 @@ decided ``approved: false`` all fail closed. Wire-compat: console/converse.js
 BEFORE its caller sends the confirm message via ``postMessage({confirm})`` —
 see that file's ``approve()``/``postMessage()`` comments — so requiring
 ``decided`` here is compatible with every real client.
+
+APPROVAL GIVE-BACK: the consume above necessarily runs BEFORE the turn's busy
+compare-and-swap, because that CAS lives inside ``turn_runner.start_turn``
+(``session_store.try_begin_turn``) and start_turn is one call. So a confirm
+that races a concurrent turn gets consumed and then answered 409
+TURN_IN_PROGRESS — and without a give-back the retry that 409 explicitly
+invites could only ever fail ``already_consumed``, destroying the user's one
+approval. The ``TurnBusy`` handler therefore calls
+``session_store.unconsume_approval``.
+
+The rule is NOT "roll back on TurnBusy". It is: **roll back exactly when the
+harness provably never saw the turn, and never otherwise.** Two sites qualify.
+
+``TurnBusy`` means try_begin_turn lost the CAS, which is the first thing
+start_turn does after the session guard — no ``turn_started`` event was
+appended, no request reached the harness, so nothing anywhere redeemed the
+approval and giving it back cannot produce a second redemption.
+
+``TurnRejected`` qualifies ONLY when it carries ``pre_harness`` (turn_runner
+sets it where no POST was attempted, or the connection was never established).
+Those legs answer ``BROKER_UNREACHABLE``, which ``_RETRYABLE_BY_CODE`` marks
+retryable — so skipping the give-back there would invite a retry against an
+approval already spent, which is the same defect this note exists to fix.
+``pre_harness`` DEFAULTS TO FALSE, so every ambiguous leg still refuses to roll
+back: on a read timeout, or a rejection the harness itself returned, the
+harness may already be executing the tool call, and un-spending that approval
+is precisely the double-execution consume-once exists to prevent.
+
+Single redemption is preserved in both directions: a confirm whose turn really
+started still replays into ``already_consumed`` (see
+tests/test_sessions_routes.py::test_messages_confirm_busy_gives_the_approval_back).
+
+When a give-back does not succeed the approval stays spent, and the response
+says so rather than advertising a retry that could only fail — see
+``_busy_response``/``_turn_rejected_response``'s ``approval_recovered``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sys
 import time
 from typing import Any, Dict, Optional
 
@@ -56,10 +93,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import deps
+import emf_metrics
 import entitlements
 import session_store
 import turn_runner
-from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
+from envelopes import (ErrorCode, err_envelope, error_obj, error_response,
+                       with_envelope_fields)
 
 router = APIRouter()
 
@@ -216,15 +255,127 @@ def _require_owned_session(session_id: str, tenant: Any) -> Optional[Dict[str, A
     return sess
 
 
-def _turn_rejected_response(exc: "turn_runner.TurnRejected") -> JSONResponse:
+def _give_back_unredeemed_approval(confirmation_id: str, session_id: str,
+                                   tenant_id: str) -> bool:
+    """Return a consumed-but-never-redeemed approval to the shelf (see the
+    module docstring's APPROVAL GIVE-BACK note for when this is legal).
+
+    Returns True IFF the approval is genuinely back on the shelf. A raise and a
+    False both mean it is still spent, and the CALLER MUST NOT then tell the
+    client to retry — the retry could only fail `already_consumed`. Callers
+    thread this through to `_busy_response`/`_turn_rejected_response` so the
+    answer stays honest about what the client can actually do next.
+
+    A store failure is not re-raised: the turn genuinely is busy (or rejected),
+    and a 500 would replace an accurate status with a misleading one. It is
+    reported instead — loudly to stderr for the operator, and truthfully to the
+    client via `approval_recovered: false`. The confirmation_id is a
+    server-issued opaque id the client already holds — not a secret."""
+    try:
+        recovered = session_store.unconsume_approval(
+            confirmation_id, session_id, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        _report_give_back_failure(
+            "raised", confirmation_id, session_id,
+            detail=f"{type(exc).__name__}: {exc}")
+        return False
+    if not recovered:
+        # No row moved 1 -> 0. We consumed it moments ago, so this means the
+        # row is not in the state we left it in — never silently swallow it.
+        _report_give_back_failure("not_released", confirmation_id, session_id)
+    return recovered
+
+
+def _report_give_back_failure(reason: str, confirmation_id: str, session_id: str,
+                              detail: str = "") -> None:
+    """Report a destroyed approval on BOTH channels, and never raise.
+
+    A failed give-back means the user's single approval is gone, with no
+    symptom the user or an operator would otherwise see — the highest-priority
+    kind of bug to leave silent. So it goes out twice: a human-readable stderr
+    line for log reading, and an ApprovalGiveBackFailed EMF metric that
+    CloudWatch extracts so it can actually be ALARMED on (a stderr string
+    cannot be). Reporting is best-effort — this runs while we are already
+    answering an error, and must not replace that answer with a 500."""
+    try:
+        print(
+            f"[leaf-agent] approval give-back FAILED ({reason}) confirmation_id="
+            f"{confirmation_id!r} session={session_id!r}"
+            f"{' error=' + detail if detail else ''} — the approval is still "
+            f"spent and this client must obtain a NEW approval",
+            file=sys.stderr, flush=True,
+        )
+    except Exception:  # noqa: BLE001  # pragma: no cover
+        pass
+    try:
+        emf_metrics.emit_approval_give_back_failed(
+            reason, confirmation_id=confirmation_id, session_id=session_id)
+    except Exception:  # noqa: BLE001  # pragma: no cover
+        pass
+
+
+def _turn_rejected_response(exc: "turn_runner.TurnRejected",
+                            approval_lost: bool = False) -> JSONResponse:
     """TurnRejected -> HTTP response: exc.extra merged TOP-LEVEL (e.g.
-    {'grant_required': True}) alongside the §10-valid `error` object."""
+    {'grant_required': True}) alongside the §10-valid `error` object.
+
+    `approval_lost` says a confirm's approval was consumed and could NOT be
+    given back. It forces `retryable` false and surfaces
+    `approval_recovered: false`, because retrying with the same confirmation_id
+    can then only fail `already_consumed` — see `_busy_response`."""
     retryable = _RETRYABLE_BY_CODE.get(exc.error_code, False)
+    if approval_lost:
+        retryable = False
     body = with_envelope_fields({
         **exc.extra,
+        **({"approval_recovered": False} if approval_lost else {}),
         "error": error_obj(exc.error_code, exc.message, retryable=retryable),
     })
     return JSONResponse(status_code=exc.status_code, content=body)
+
+
+def _busy_response(session_id: str, approval_lost: bool = False) -> JSONResponse:
+    """The 409 TURN_IN_PROGRESS answer, told honestly.
+
+    Normally this is retryable: the turn is busy, and the confirm's approval
+    (if any) went back on the shelf, so the retry can really succeed.
+
+    When `approval_lost` is set the give-back did NOT happen, so the approval
+    stays spent — and `turn_in_progress` becomes the WRONG answer, not merely
+    an incomplete one. The client classifies that code as `busy`
+    (web/src/converse.js classifyAgentError) and tells the user to wait, but
+    waiting can never help: the approval is gone, and every retry of this
+    confirmation_id can only fail `already_consumed`.
+
+    So the lost case answers `409 BAD_PARAMS`, which that same classifier
+    already maps to `approval_stale` -> "That request was already decided — ask
+    the assistant to propose it again" (web/src/components/ConversePanel.jsx).
+    That is exactly the user's real next step, delivered through an error shape
+    the client ALREADY handles — no frontend change, and no new field for
+    clients to learn. `approval_recovered: false` rides along for machine
+    consumers. (sol-critic round 2, blocker 3.)
+
+    The ordinary busy response is untouched: same code, same `retryable: true`,
+    byte-identical body. It routes through ``error_response`` — and the lost
+    case through the same ``err_envelope`` builder — because this 409 is a §3
+    run envelope carrying `ok`/`tool`/`version`/`result`/`overlay`/`timing_ms`/
+    `cost` alongside `error`. Hand-building it from ``with_envelope_fields``
+    silently DROPS those seven fields (pinned by
+    tests/test_sessions_routes.py::test_messages_busy_response_keeps_the_full_run_envelope)."""
+    if not approval_lost:
+        return error_response(
+            ErrorCode.TURN_IN_PROGRESS,
+            f"session {session_id!r} already has an active turn",
+            retryable=True,
+        )
+    body = err_envelope(
+        ErrorCode.BAD_PARAMS,
+        f"session {session_id!r} already has an active turn, and this "
+        f"confirmation could not be returned — request a new approval",
+        retryable=False,
+    )
+    body["approval_recovered"] = False
+    return JSONResponse(status_code=409, content=body)
 
 
 # --------------------------------------------------------------------------- #
@@ -275,11 +426,12 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     # encrypted request) and shape-checked; the validated (never the raw) grant
     # is forwarded to the turn.
     #
-    # This orders THESE inputs ahead of the consume. It is not a general
-    # no-burn guarantee: `consume_approval` below still runs before
-    # `start_turn`'s busy CAS, so a confirm that races a concurrent turn is
-    # consumed and then answered 409, and the retry fails as already-consumed.
-    # That window predates this feature (e064086) and is tracked separately.
+    # `consume_approval` below still runs BEFORE `start_turn`'s busy CAS — the
+    # CAS is the real busy gate and it lives inside start_turn — so a confirm
+    # that races a concurrent turn IS consumed and then answered 409. The
+    # TurnBusy handler at the bottom of this function gives that consume back
+    # (see APPROVAL GIVE-BACK in the module docstring), which is what makes the
+    # retryable 409 actually retryable.
     if req.model is not None and not turn_runner.is_allowed_model(req.model):
         return _invalid_model_response(req.model)
     validated_grant: Optional[Dict[str, Any]] = None
@@ -315,6 +467,10 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     # the STORED approved value — never the client's req.confirm.approved,
     # which is read here only to validate the confirm shape, not trusted.
     confirm_payload: Optional[Dict[str, Any]] = None
+    # Hoisted so the dispatch step below can give an unredeemed consume back.
+    # Every failure between here and that step returns immediately, so by the
+    # time `start_turn` is called this is non-None IFF a consume succeeded.
+    confirmation_id: Optional[str] = None
     if has_confirm:
         confirmation_id = (req.confirm or {}).get("confirmationId")
         if not confirmation_id:
@@ -373,13 +529,30 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             model=req.model, credential_grant=validated_grant,
         )
     except turn_runner.TurnBusy:
-        return error_response(
-            ErrorCode.TURN_IN_PROGRESS,
-            f"session {session_id!r} already has an active turn",
-            retryable=True,
-        )
+        # The approval (if any) was consumed at step 4 but NOTHING redeemed it:
+        # TurnBusy means try_begin_turn lost the CAS, which happens before
+        # start_turn appends `turn_started` or calls the harness. Give it back
+        # so the retry this 409 explicitly invites can actually succeed.
+        approval_lost = False
+        if confirmation_id is not None:
+            approval_lost = not _give_back_unredeemed_approval(
+                confirmation_id, session_id, str(tenant))
+        return _busy_response(session_id, approval_lost=approval_lost)
     except turn_runner.TurnRejected as exc:
-        return _turn_rejected_response(exc)
+        # Same rule, second site: give the approval back on every rejection
+        # the engine can PROVE happened before the harness saw the turn
+        # (exc.pre_harness — e.g. no harness URL configured, or the connection
+        # was never established). Those legs report BROKER_UNREACHABLE, which
+        # _RETRYABLE_BY_CODE marks retryable, so without this the client is
+        # told to retry an approval that has already been spent — the very bug
+        # the TurnBusy path fixes. `pre_harness` defaults False, so ambiguous
+        # legs (read timeout, an actual harness rejection) still never roll
+        # back; see the module docstring's APPROVAL GIVE-BACK note.
+        approval_lost = False
+        if exc.pre_harness and confirmation_id is not None:
+            approval_lost = not _give_back_unredeemed_approval(
+                confirmation_id, session_id, str(tenant))
+        return _turn_rejected_response(exc, approval_lost=approval_lost)
 
     return JSONResponse(
         status_code=202,
@@ -393,21 +566,31 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
 # GET /api/sessions/{id}/stream (SSE)
 # --------------------------------------------------------------------------- #
 @router.get("/api/sessions/{session_id}/stream")
-def stream_session(session_id: str, after_seq: int = 0, tenant=Depends(deps.require_tenant)):
+async def stream_session(session_id: str, after_seq: int = 0, tenant=Depends(deps.require_tenant)):
     """Event-per-frame SSE (the client's EventSource addEventListener's per
     type — see converse.js openStream): `event: {type}\\ndata: {envelope}\\n\\n`.
     404 guard runs BEFORE the generator is constructed (matches
     routers/jobs.py:120-126's precedent) so an unknown/foreign session never
-    starts a stream at all."""
-    if _require_owned_session(session_id, tenant) is None:
+    starts a stream at all.
+
+    Async generator (mirrors routers/jobs.py's stream_job): a sync generator
+    here is consumed via AnyIO's threadpool, pinning one of its ~40 worker
+    threads for the stream's whole lifetime — every open or abandoned tab holds
+    one for up to STREAM_DEADLINE_S, and enough of them starve every sync
+    endpoint in the app. The poll cadence now awaits on the event loop; the
+    404 pre-check and each per-tick store read hop to a thread so the loop
+    never blocks on the session_store lock. Wire format/timing unchanged."""
+    if await asyncio.to_thread(_require_owned_session, session_id, tenant) is None:
         return _session_not_found(session_id)
 
-    def event_stream():
+    async def event_stream():
         cursor = int(after_seq)
         deadline = time.time() + STREAM_DEADLINE_S
         last_activity = time.time()
         while time.time() < deadline:
-            events = session_store.events_after(session_id, cursor, limit=500)
+            events = await asyncio.to_thread(
+                session_store.events_after, session_id, cursor, 500
+            )
             if events:
                 for ev in events:
                     cursor = ev["seq"]
@@ -418,7 +601,7 @@ def stream_session(session_id: str, after_seq: int = 0, tenant=Depends(deps.requ
                 if now - last_activity >= STREAM_PING_S:
                     yield ": ping\n\n"
                     last_activity = now
-            time.sleep(STREAM_POLL_S)
+            await asyncio.sleep(STREAM_POLL_S)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

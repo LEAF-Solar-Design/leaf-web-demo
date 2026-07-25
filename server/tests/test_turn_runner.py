@@ -570,3 +570,75 @@ def test_second_turn_carries_prior_turn_as_messages(monkeypatch, turn_stub):
         {"role": "user", "text": "how many panels?"},
         {"role": "assistant", "text": "42 panels."},
     ]
+
+
+# =========================================================================== #
+# pre_harness classification (routers/sessions.py's APPROVAL GIVE-BACK). The
+# router un-spends a consumed approval IFF TurnRejected.pre_harness is set, so
+# a leg wrongly marked pre_harness can un-spend an approval the harness is
+# already acting on. Getting this boundary right IS the safety property.
+# (sol-critic round 2, blocker 1.)
+# =========================================================================== #
+def _reject_from_post_error(monkeypatch, exc, url="http://127.0.0.1:9/"):
+    """Drive start_turn to its POST and make requests.post raise `exc`."""
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    sess = _new_session("tenant-preharness")
+
+    def _boom(*a, **kw):
+        raise exc
+
+    monkeypatch.setattr(turn_runner.requests, "post", _boom)
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-preharness", sess["session_id"], text="hi")
+    return ei.value
+
+
+def test_connect_timeout_is_pre_harness(monkeypatch):
+    """ConnectTimeout: the TCP connection was never established, so no byte
+    reached the harness — the one POST-phase leg safe to roll back."""
+    exc = _reject_from_post_error(
+        monkeypatch, turn_runner.requests.exceptions.ConnectTimeout("no connect"))
+    assert exc.error_code == ErrorCode.BROKER_UNREACHABLE
+    assert exc.pre_harness is True
+
+
+def test_read_timeout_is_not_pre_harness(monkeypatch):
+    """ReadTimeout: the POST was sent; the harness may be running the tool
+    call right now."""
+    exc = _reject_from_post_error(
+        monkeypatch, turn_runner.requests.exceptions.ReadTimeout("slow"))
+    assert exc.pre_harness is False
+
+
+def test_accept_then_disconnect_is_not_pre_harness(monkeypatch):
+    """The interleaving that made a blanket ConnectionError unsafe: requests
+    folds urllib3's ProtocolError (server accepted the POST, then dropped the
+    connection before responding) into ConnectionError. Indistinguishable from
+    'connection refused' here, so it MUST stay ambiguous."""
+    exc = _reject_from_post_error(
+        monkeypatch,
+        turn_runner.requests.exceptions.ConnectionError(
+            "('Connection aborted.', RemoteDisconnected(...))"),
+    )
+    assert exc.pre_harness is False, (
+        "a connection dropped AFTER the harness accepted the request was "
+        "classified as pre-contact — the router would un-spend an approval "
+        "whose tool call may already be running"
+    )
+
+
+def test_missing_harness_url_is_pre_harness(monkeypatch):
+    """No URL configured: no POST is attempted at all."""
+    monkeypatch.delenv("LEAF_CONVERSE_HARNESS_URL", raising=False)
+    monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
+    sess = _new_session("tenant-nourl")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-nourl", sess["session_id"], text="hi")
+    assert ei.value.pre_harness is True
+
+
+def test_turn_rejected_defaults_to_not_pre_harness():
+    """The fail-safe default: any construction site that does not opt in is
+    treated as 'the harness may have acted'."""
+    exc = turn_runner.TurnRejected(502, ErrorCode.BROKER_UNREACHABLE, "x")
+    assert exc.pre_harness is False

@@ -470,11 +470,29 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     return env, 200
 
 
+def _accepts_on_submitted(fn: Any) -> bool:
+    """Whether `fn` can take an `on_submitted` kwarg.
+
+    Mirrors the broker-side guard. `da` is a test double in most suites, so the
+    kwarg is offered only to implementations that declare it (explicitly or via
+    **kwargs); an older/stubbed submit_workitem keeps its exact call signature.
+    """
+    import inspect
+    try:
+        sig_params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "on_submitted" in sig_params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig_params.values())
+
+
 def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,
                    backend, da: Any, t0: float,
                    ledger_entry: Optional[Dict[str, Any]] = None,
                    version="head", holder: Optional[str] = None,
-                   fence: Optional[int] = None) -> Tuple[Dict[str, Any], int]:
+                   fence: Optional[int] = None,
+                   on_submitted=None) -> Tuple[Dict[str, Any], int]:
     """APS_LIVE=1 write: run the proven LeafWriteProbe Activity on the BASE
     version's DWG (``version``; default "head", unchanged), store output.dwg as a
     new version whose parent is that base, re-extract for the intake cache, stamp
@@ -593,8 +611,13 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         activity_id = da.activity_qualified(WRITE_ACTIVITY)
         w_args = {"HostDwg": {"url": in_url, "verb": "get"},
                   "Result": {"url": out_url, "verb": "put"}}
-        status = da.submit_workitem(activity_id, w_args, dry_run=False, poll=True,
-                                    tenant_id=tenant_id)
+        submit_kwargs: Dict[str, Any] = {"dry_run": False, "poll": True,
+                                         "tenant_id": tenant_id}
+        # Report the live WorkItem id before the poll blocks, so a tab closed
+        # mid-write has something to cancel (see broker._record_active_workitem).
+        if on_submitted is not None and _accepts_on_submitted(da.submit_workitem):
+            submit_kwargs["on_submitted"] = on_submitted
+        status = da.submit_workitem(activity_id, w_args, **submit_kwargs)
         if status.get("status") != "success":
             return (err_envelope(ErrorCode.WORKITEM_FAILED,
                                  f"write WorkItem {status.get('id')} status={status.get('status')} "

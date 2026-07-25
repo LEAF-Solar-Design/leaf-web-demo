@@ -303,6 +303,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_sessions_e2e.py"), 9),
         Suite("server-capabilities-promotion", "server tests/test_capabilities_promotion.py",
               "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py"), 11),
+        Suite("server-product-capability-catalog",
+              "server tests/test_product_capability_availability.py",
+              "pytest", SERVER, _py_pytest("tests/test_product_capability_availability.py"), 56),
         # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
         # one red was a stale pre-§19 assertion (offline `dwg` no longer
         # ignored) — fixed and registered per the #29 fix-then-register rule.
@@ -325,7 +328,9 @@ def build_suites() -> List[Suite]:
         # Callback-primary is isolated: it changes completion selection and holds
         # a durable replay ledger, so it must not share another broker suite.
         Suite("server-da-callback", "server tests/test_da_callback.py", "pytest",
-              SERVER, _py_pytest("tests/test_da_callback.py"), 7),
+              SERVER, _py_pytest("tests/test_da_callback.py"), 15),
+        Suite("server-aps-callback-adapter", "server tests/test_aps_callback_adapter.py",
+              "pytest", SERVER, _py_pytest("tests/test_aps_callback_adapter.py"), 50),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 27),

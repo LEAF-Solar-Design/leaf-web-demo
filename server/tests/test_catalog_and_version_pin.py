@@ -269,9 +269,11 @@ def test_submit_job_threads_dwg_version_to_broker_client(monkeypatch, tmp_path):
 
     def fake_run_via_broker(tenant_id, tool, params, dwg, aps_live, timeout_s=None,
                             dwg_version=None, ledger_event_key=None,
-                            checkout_holder=None, checkout_fence=None):
+                            checkout_holder=None, checkout_fence=None,
+                            job_id=None):
         captured["dwg_version"] = dwg_version
         captured["ledger_event_key"] = ledger_event_key
+        captured["job_id"] = job_id
         # The submitting session's single-writer identity rides the same lane as
         # the version pin, so a job recovered or retried later is authorized as
         # the session that actually asked for it.
@@ -288,6 +290,9 @@ def test_submit_job_threads_dwg_version_to_broker_client(monkeypatch, tmp_path):
     assert rec is not None and rec["status"] == "complete", rec
     assert captured["dwg_version"] == 42
     assert captured["ledger_event_key"] == f"{job_id}:broker-run"
+    # The job identity travels with the run so the broker can correlate its live
+    # WorkItem and cancel it if the owning tab closes.
+    assert captured["job_id"] == job_id
 
 
 # =========================================================================== #
