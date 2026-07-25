@@ -126,6 +126,87 @@ def test_spawn_normalization_leaves_linux_and_native_windows_commands_unchanged(
     )
 
 
+def _summary_suite(g, *, expected, reason, allowed=()):
+    output = (
+        f"SKIPPED [1] fake_test.py:7: {reason}\n"
+        "1 passed, 1 skipped in 0.01s\n"
+    )
+    return g.Suite(
+        "skip-victim", "skip victim", "pytest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], expected,
+        allowed_skip_reasons=allowed,
+    )
+
+
+def test_non_allowlisted_pytest_skip_fails_gate(tmp_path):
+    g = _load_runner()
+    result = g.run_suite(
+        _summary_suite(g, expected=1, reason="unexpected dependency gap"),
+        tmp_path,
+    )
+    assert result.status == "FAIL"
+    assert "non-allowlisted skip" in result.note
+
+
+def test_allowlisted_skip_passes_only_when_executed_floor_is_met(tmp_path):
+    g = _load_runner()
+    reason = "known optional integration unavailable"
+    allowed = (r"known optional integration unavailable",)
+
+    passing = g.run_suite(
+        _summary_suite(g, expected=1, reason=reason, allowed=allowed), tmp_path)
+    deficient = g.run_suite(
+        _summary_suite(g, expected=2, reason=reason, allowed=allowed), tmp_path)
+
+    assert passing.status == "PASS"
+    assert deficient.status == "FAIL"
+    assert "executed-count regression: expected >= 2, got 1" in deficient.note
+
+
+def test_all_skipped_pytest_suite_fails_even_when_reason_is_allowlisted(tmp_path):
+    g = _load_runner()
+    output = (
+        "SKIPPED [1] fake_test.py:7: known optional integration unavailable\n"
+        "1 skipped in 0.01s\n"
+    )
+    suite = g.Suite(
+        "all-skip", "all skip", "pytest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 0,
+        allowed_skip_reasons=(r"known optional integration unavailable",),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "ALL skipped: no coverage" in result.note
+
+
+def test_selected_script_environment_skip_is_a_failure(tmp_path):
+    g = _load_runner()
+    suite = g.Suite(
+        "required-smoke", "required smoke", "script", SCRIPTS,
+        [sys.executable, "-c", "print('SKIP no runtime'); raise SystemExit(3)"], None,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert result.got == "err"
+
+
+def test_vitest_skip_fails_gate(tmp_path):
+    g = _load_runner()
+    suite = g.Suite(
+        "vitest-skip", "vitest skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", "print('Tests 1 passed | 1 skipped')"], 1,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "non-allowlisted vitest skip" in result.note
+
+
 def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch):
     g = _load_runner()
     monkeypatch.setattr(g.os, "name", "nt")

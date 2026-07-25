@@ -11,13 +11,14 @@ name: Test gate
 #
 # It runs scripts/run-all-gates.py, the canonical runner: every suite in its
 # own subprocess with the correct cwd and a cleaned env, one scoreboard, exit 0
-# iff every non-skipped gate passed.
+# iff every selected gate passed. Test-level skips fail unless the runner has an
+# exact reason allowlist, and skipped tests never satisfy executed-count floors.
 #
 # Deliberately hermetic -- NO secret, AWS credential, or DATABASE_URL is
 # required or provided:
 #   * DATABASE_URL is unset, so the runner's Postgres probe returns NO_DSN and
 #     the db_gated suites (platform, server-g1a-canonical-e2e) report SKIP with
-#     a reason instead of FAIL.
+#     a reason before either suite starts.
 #   * LEAF_CONTAINER_SMOKE is unset, so harness-container-smoke reports SKIP.
 # Both are the runner's own designed behaviour, visible on the scoreboard.
 #
@@ -103,8 +104,8 @@ jobs:
         env:
           # The autofill-solver is a sibling checkout on an operator box and is
           # not vendored here. test_autofill_adapter.py offers exactly this flag
-          # to acknowledge a source-less host; it turns one hard failure into a
-          # visible skip and leaves the other 13 tests in the gate.
+          # to acknowledge a source-less host. The runner allowlists that exact
+          # integration reason, and still requires the other 13 tests to execute.
           LEAF_AUTOFILL_SOLVER_ABSENT_OK: "1"
         # --retry is pinned rather than inherited so the trade-off is explicit:
         # several suites boot real servers and flake under runner load, so one

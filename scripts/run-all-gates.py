@@ -49,7 +49,7 @@ USAGE
 
 EXIT CODE
 ---------
-    0  iff every non-skipped gate passed
+    0  iff every gate passed and every test-level skip was explicitly allowlisted
     1  otherwise
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
@@ -100,7 +100,11 @@ class Suite:
     kind: str               # pytest | vitest | tsc
     cwd: Path
     argv: List[str]         # command argv (python -m pytest ... / npm ... / npx ...)
-    expected: Optional[int] # expected test count (None for tsc: pass/fail only)
+    expected: Optional[int] # minimum executed test count (None for pass/fail-only)
+    # Pytest skips fail the gate unless their reported reason matches one of
+    # these regular expressions. This keeps environmental exceptions explicit
+    # instead of letting any skipped assertion count as a passing test.
+    allowed_skip_reasons: tuple[str, ...] = ()
     reset_authored: bool = False   # reset authored_tools.json before this suite
     db_gated: bool = False         # SKIP unless the platform DB is reachable
     opt_in_env: str = ""           # SKIP unless this env flag is truthy (opt-in suite)
@@ -120,7 +124,7 @@ class Result:
 
 def _py_pytest(target: str) -> List[str]:
     return [sys.executable, "-m", "pytest", target, "-q", "--color=no",
-            "-p", "no:cacheprovider"]
+            "-r", "s", "-p", "no:cacheprovider"]
 
 
 def _npm() -> str:
@@ -213,9 +217,14 @@ def build_suites() -> List[Suite]:
         Suite("server-ui-wave", "server tests/test_ui_wave.py", "pytest", SERVER,
               _py_pytest("tests/test_ui_wave.py"), 9),
         Suite("server-wave2", "server tests/test_wave2.py", "pytest", SERVER,
-              _py_pytest("tests/test_wave2.py"), 11),
+              _py_pytest("tests/test_wave2.py"), 6,
+              allowed_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-wave3", "server tests/test_wave3.py", "pytest", SERVER,
-              _py_pytest("tests/test_wave3.py"), 19),
+              _py_pytest("tests/test_wave3.py"), 11,
+              allowed_skip_reasons=(
+                  r"platform DB unreachable: .+",
+                  r"tenant tool repo absent at .+ \(set LEAF_TENANT_REPO_SRC to one\)",
+              )),
         Suite("server-wave4", "server tests/test_wave4.py", "pytest", SERVER,
               _py_pytest("tests/test_wave4.py"), 9),
         Suite("server-wave5", "server tests/test_wave5.py", "pytest", SERVER,
@@ -286,11 +295,20 @@ def build_suites() -> List[Suite]:
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
               "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 15),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
-              "pytest", SERVER, _py_pytest("tests/test_inverter_placement_adapter.py"), 3),
+              "pytest", SERVER, _py_pytest("tests/test_inverter_placement_adapter.py"), 1,
+              allowed_skip_reasons=(
+                  r"aws-inverter-placement source or its runtime deps \(numpy\) unavailable",
+              )),
         Suite("server-adapter-combiner", "server tests/test_combiner_placement_adapter.py",
-              "pytest", SERVER, _py_pytest("tests/test_combiner_placement_adapter.py"), 3),
+              "pytest", SERVER, _py_pytest("tests/test_combiner_placement_adapter.py"), 1,
+              allowed_skip_reasons=(
+                  r"aws-combiner-placement checkout is unavailable; adapter needs the real solver source",
+              )),
         Suite("server-adapter-autofill", "server tests/test_autofill_adapter.py", "pytest",
-              SERVER, _py_pytest("tests/test_autofill_adapter.py"), 9),
+              SERVER, _py_pytest("tests/test_autofill_adapter.py"), 13,
+              allowed_skip_reasons=(
+                  r"autofill-solver source absent, acknowledged via LEAF_AUTOFILL_SOLVER_ABSENT_OK=1",
+              )),
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 19),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
@@ -422,7 +440,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 4),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 12),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
@@ -588,8 +606,13 @@ def parse_pytest(text: str) -> dict:
     xfailed = _n("xfailed", summary)
     xpassed = _n("xpassed", summary)
     got = passed + failed + errors + skipped + xfailed + xpassed
+    skip_reasons: list[tuple[int, str]] = []
+    for line in t.splitlines():
+        match = re.match(r"SKIPPED \[(\d+)\] .*?: (.+)$", line.strip())
+        if match:
+            skip_reasons.append((int(match.group(1)), match.group(2).strip()))
     return {"passed": passed, "failed": failed, "errors": errors,
-            "skipped": skipped, "got": got}
+            "skipped": skipped, "got": got, "skip_reasons": skip_reasons}
 
 
 def parse_vitest(text: str) -> dict:
@@ -715,29 +738,33 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         note = pre_note
         if fail_hint and not passed:
             note = (note + " " if note else "") + fail_hint
+        executed = c["got"] - c["skipped"]
         if c["skipped"]:
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
-        # A suite where EVERY test skipped executed no assertions, so it proves
-        # nothing -- reporting PASS there makes a green scoreboard mean "tested"
-        # when it means "did not run". The expected-count floor below cannot
-        # catch this on its own because `got` counts skips, so an all-skipped
-        # suite still satisfies its floor. Report SKIP so the row is honest;
-        # SKIP is not a failure and does not change the runner's exit code.
-        executed = c["got"] - c["skipped"]
+            reported = sum(count for count, _ in c["skip_reasons"])
+            unexpected = [reason for _, reason in c["skip_reasons"]
+                          if not any(re.fullmatch(pattern, reason)
+                                     for pattern in suite.allowed_skip_reasons)]
+            if reported != c["skipped"]:
+                passed = False
+                note += (f"; skip details incomplete: pytest reported {c['skipped']} "
+                         f"but named {reported}")
+            elif unexpected:
+                passed = False
+                note += "; non-allowlisted skip: " + "; ".join(unexpected)
         if passed and c["got"] and executed == 0:
-            return Result(suite, "SKIP", "0", seconds,
-                          note=(note + " " if note else "") + "ALL skipped: no coverage",
-                          log_path=log_path, counts=c)
-        # Expected counts are a FLOOR: fewer tests than registered means the
-        # suite silently lost coverage (deselected file, import skip, renamed
-        # module) even when everything that ran was green. Growth is fine and
-        # only noted.
-        if suite.expected is not None and passed and c["got"] < suite.expected:
+            passed = False
+            note = (note + " " if note else "") + "ALL skipped: no coverage"
+        # Expected counts are an EXECUTED-test floor. A skipped test proves no
+        # assertion, so it can never satisfy this floor even when its reason is
+        # an explicit environmental exception.
+        if suite.expected is not None and passed and executed < suite.expected:
             passed = False
             note = (note + " " if note else "") + \
-                f"count regression: expected >= {suite.expected}, got {c['got']}"
-        elif suite.expected is not None and c["got"] > suite.expected and passed:
-            note = (note + " " if note else "") + f"(count drift: expected {suite.expected})"
+                f"executed-count regression: expected >= {suite.expected}, got {executed}"
+        elif suite.expected is not None and executed > suite.expected and passed:
+            note = (note + " " if note else "") + \
+                f"(executed-count drift: expected {suite.expected})"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
                       note=note.strip(), log_path=log_path, counts=c)
 
@@ -745,6 +772,9 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         c = parse_vitest(out)
         passed = rc == 0 and c["failed"] == 0
         note = f"{c['skipped']} skipped" if c.get("skipped") else ""
+        if c.get("skipped"):
+            passed = False
+            note += "; non-allowlisted vitest skip"
         if fail_hint and not passed:
             note = (note + " " if note else "") + fail_hint
         # Same floor rule as pytest suites.
@@ -756,12 +786,12 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                       note=note.strip(), log_path=log_path, counts=c)
 
     if suite.kind == "script":
-        # standalone smoke script: exit 0 PASS; exit 3 = environment unavailable
-        # (e.g. no Docker) -> SKIP with reason; anything else FAIL.
+        # Optional scripts are skipped before spawn through opt_in_env. Once a
+        # script is selected, an unavailable prerequisite is a failed gate.
         if rc == 3:
             last = next((ln for ln in out.strip().splitlines() if ln.strip()), "")
-            return Result(suite, "SKIP", "skip", seconds,
-                          note=last[:120] or "environment unavailable",
+            return Result(suite, "FAIL", "err", seconds,
+                          note=last[:120] or "required environment unavailable",
                           log_path=log_path, counts={})
         return Result(suite, "PASS" if rc == 0 else "FAIL",
                       "ok" if rc == 0 else "err", seconds,
