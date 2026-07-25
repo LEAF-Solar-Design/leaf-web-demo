@@ -78,6 +78,7 @@ describe("FakeTurnRunner", () => {
     const [proposed, required, complete] = events;
     const confirmationId = proposed.data.confirmation_id;
     expect(typeof confirmationId).toBe("string");
+    expect(proposed.data.dwg).toBe("demo");
     expect(required.data.confirmation_id).toBe(confirmationId);
     expect(complete.data.stop_reason).toBe("awaiting_approval");
   });

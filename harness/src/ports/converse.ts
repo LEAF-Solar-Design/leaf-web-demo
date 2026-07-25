@@ -81,6 +81,8 @@ export interface ConverseTurnInput {
     proposal: {
       tool: string;
       params: Record<string, unknown>;
+      /** Server-stored target drawing. The client cannot supply or alter it. */
+      dwg?: string;
       capability?: string;
     };
   };

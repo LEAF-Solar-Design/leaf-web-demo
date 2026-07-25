@@ -21,7 +21,7 @@ CONFIRM-SHAPE SEAM: the client's ``{confirm: {confirmationId, approved}}`` is
 NOT the frozen ``ConverseTurnInput.confirm`` shape the harness expects — this
 router is the ONE place that bridges them. It looks up the approval row
 (created by turn_runner when the harness emitted confirmation_required) and
-builds ``{confirmation_id, approved, proposal: {tool, params, capability}}``
+builds ``{confirmation_id, approved, proposal: {tool, params, dwg?, capability}}``
 from it before ever calling ``turn_runner.start_turn`` — the params/tool/
 capability the harness resumes with come from the DURABLE row, never from the
 client (the client only ever sends confirmationId + approved).
@@ -511,14 +511,39 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 f"confirmation_id {confirmation_id!r} has expired",
                 retryable=False,
             )
+        proposal = {
+            "tool": approval.get("tool"),
+            "params": approval.get("params"),
+            "capability": approval.get("capability"),
+        }
+        stored_payload = approval.get("payload")
+        stored_dwg = (
+            stored_payload.get("dwg")
+            if isinstance(stored_payload, dict)
+            else None
+        )
+        if approval.get("tool") and not (
+            isinstance(stored_dwg, str) and stored_dwg
+        ):
+            # Pre-binding approvals cannot be upgraded safely. Falling back to
+            # the session drawing would authorize a target the stored row never
+            # named. The approval has already been consumed, so the only safe
+            # recovery is a fresh proposal with an explicit server-stored dwg.
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                f"confirmation_id {confirmation_id!r} has no stored drawing; "
+                "request a new approval",
+                retryable=False,
+                status_code=409,
+            )
+        if isinstance(stored_dwg, str):
+            # Server-stored proposal truth only. The confirm request carries no
+            # drawing field, so a client cannot retarget an approved action.
+            proposal["dwg"] = stored_dwg
         confirm_payload = {
             "confirmation_id": confirmation_id,
             "approved": bool(approval.get("approved")),  # STORED value, never the client's
-            "proposal": {
-                "tool": approval.get("tool"),
-                "params": approval.get("params"),
-                "capability": approval.get("capability"),
-            },
+            "proposal": proposal,
         }
 
     # 5. dispatch the turn.

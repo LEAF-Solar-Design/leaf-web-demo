@@ -530,7 +530,11 @@ export class ConverseLoop {
             args: {
               tool: target,
               params: asRecord(args.params),
-              ...(typeof args.dwg === "string" ? { dwg: args.dwg } : {}),
+              // Normalize the default onto the approval-bound args. The app's
+              // proposal row and a rebuilt harness mirror both carry this exact
+              // drawing, so an omitted SDK arg cannot become a different hash
+              // during confirmation replay.
+              dwg: String(args.dwg ?? session.drawing_id),
               ...(typeof args.confirmation_id === "string"
                 ? { confirmation_id: args.confirmation_id }
                 : {}),
@@ -624,7 +628,13 @@ export class ConverseLoop {
           const kind = tool === "run_capability" ? "run_capability" : tool;
           // Mirror row for stream rendering/replay; the APP's store stays
           // authoritative for gating (wire contract section 6).
-          await store.putConfirmation(mkConfirmation(confirmationId, tool, args, kind));
+          // run_capability uses the normalized gate args, including the resolved
+          // drawing. Raw SDK args may omit the default drawing, which would make
+          // the mirror disagree with the app gate's args hash on replay.
+          const confirmationArgs = tool === "run_capability" ? consult.args : args;
+          await store.putConfirmation(
+            mkConfirmation(confirmationId, tool, confirmationArgs, kind),
+          );
           state.proposalMade = true;
           if (tool === "run_capability") {
             const target = String(args.tool ?? "");
