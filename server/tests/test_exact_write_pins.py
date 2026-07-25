@@ -1,8 +1,11 @@
 """Exact catalog and drawing generation pins for conversational writes."""
 from __future__ import annotations
 
+import pytest
+
 from routers import capabilities as capabilities_router
 from routers import jobs as jobs_router
+from customization_service import CustomizationServiceError
 from customization_store import SQLiteCustomizationStore
 
 
@@ -71,7 +74,9 @@ def test_capability_projection_issues_base_generation_for_fresh_tenant(monkeypat
     assert entry["effective_catalog_digest"] == expected["effective_catalog_digest"]
 
 
-def test_fresh_enabled_tenant_uses_real_base_catalog(tmp_path, monkeypatch):
+def test_fresh_enabled_tenant_without_effective_catalog_fails_closed(
+    tmp_path, monkeypatch
+):
     database = tmp_path / "customization.db"
     SQLiteCustomizationStore(database).initialize()
     monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))
@@ -81,21 +86,11 @@ def test_fresh_enabled_tenant_uses_real_base_catalog(tmp_path, monkeypatch):
     monkeypatch.delenv("LEAF_TENANT_REPO", raising=False)
     capabilities_router.customization_service.reset_configured_services()
 
-    body = capabilities_router.capabilities(
-        x_internal_role=None, x_ops_secret=None, tenant="fresh-tenant"
-    )
-    entries = [
-        item
-        for family in body["families"]
-        for item in family["capabilities"]
-    ]
-    writes = [
-        item for item in entries if "drawing.write" in item.get("capabilities", [])
-    ]
-
-    assert writes
-    assert all(item.get("catalog_commit") for item in writes)
-    assert all(item.get("effective_catalog_digest") for item in writes)
+    with pytest.raises(CustomizationServiceError) as exc:
+        capabilities_router.capabilities(
+            x_internal_role=None, x_ops_secret=None, tenant="fresh-tenant"
+        )
+    assert exc.value.code == "effective_catalog_unavailable"
 
 
 def _request(**changes):
