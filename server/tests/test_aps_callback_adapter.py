@@ -61,17 +61,17 @@ def test_translation_without_a_completion_guard_is_refused():
     caller who omits it silently regains the duplicate-completion hole. No
     authority, no receipt."""
     with pytest.raises(TypeError):
-        adapter.translate(_completion(), b"out", job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW)
+        adapter.translate(_completion(), b"out", job_id='job-1', job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW)
     for bad in (None, "nope", 42):
         with pytest.raises(adapter.AdapterError) as excinfo:
-            adapter.translate(_completion(), b"out", job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW,
+            adapter.translate(_completion(), b"out", job_id='job-1', job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW,
                               reserve_completion=bad)
         assert excinfo.value.reason == "no_completion_guard"
 
 
 def test_a_translated_envelope_verifies_and_consumes_exactly_once():
     output = b'{"strings": 12, "banks": 3}'
-    envelope = adapter.translate(_completion(), output, job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
+    envelope = adapter.translate(_completion(), output, job_id='job-1', job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
 
     # The real signature verifier accepts it.
     assert callbacks.verify_signature(envelope.body, envelope.timestamp, envelope.nonce,
@@ -96,7 +96,7 @@ def test_a_translated_envelope_verifies_and_consumes_exactly_once():
 
 
 def test_tampering_the_body_breaks_the_signature():
-    envelope = adapter.translate(_completion(), b"output", job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
+    envelope = adapter.translate(_completion(), b"output", job_id='job-1', job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
     tampered = envelope.body.replace(b'"size":6', b'"size":9')
     assert tampered != envelope.body
     assert callbacks.verify_signature(tampered, envelope.timestamp, envelope.nonce,
@@ -104,7 +104,7 @@ def test_tampering_the_body_breaks_the_signature():
 
 
 def test_headers_carry_the_signed_triple():
-    envelope = adapter.translate(_completion(), b"output", job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
+    envelope = adapter.translate(_completion(), b"output", job_id='job-1', job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
     headers = envelope.headers()
     assert headers[callbacks.SIGNATURE_HEADER] == envelope.signature
     assert headers[callbacks.TIMESTAMP_HEADER] == envelope.timestamp
@@ -133,7 +133,7 @@ def test_headers_carry_the_signed_triple():
 ])
 def test_every_fail_closed_mode_refuses_with_its_reason(mutate, output, job_attempt, reason):
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(**mutate), output, job_attempt=job_attempt, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
+        adapter.translate(_completion(**mutate), output, job_id='job-1', job_attempt=job_attempt, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
     assert excinfo.value.reason == reason
 
 
@@ -145,7 +145,7 @@ def test_a_bad_clock_is_refused_as_bad_clock_specifically(bad_now):
     comparison, and inf was mislabelled `expired_lease`. The previous test
     accepted EITHER reason, so deleting the bad_clock check left it green."""
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(), b"out", job_attempt=2, job_workitem_id="wi-1",
+        adapter.translate(_completion(), b"out", job_id='job-1', job_attempt=2, job_workitem_id="wi-1",
                           secret=SECRET, now=bad_now, reserve_completion=_win)
     assert excinfo.value.reason == "bad_clock"
 
@@ -154,13 +154,13 @@ def test_the_receipt_must_name_the_workitem_the_job_dispatched():
     """Nonblank is not enough: a completion for some OTHER WorkItem must not
     close this job."""
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(workitem_id="wi-other"), b"out", job_attempt=2,
+        adapter.translate(_completion(workitem_id="wi-other"), b"out", job_id='job-1', job_attempt=2,
                           job_workitem_id="wi-real", secret=SECRET, now=NOW,
                           reserve_completion=_win)
     assert excinfo.value.reason == "wrong_workitem"
     for absent in ("", "   ", None):
         with pytest.raises(adapter.AdapterError) as excinfo:
-            adapter.translate(_completion(), b"out", job_attempt=2, job_workitem_id=absent,
+            adapter.translate(_completion(), b"out", job_id='job-1', job_attempt=2, job_workitem_id=absent,
                               secret=SECRET, now=NOW, reserve_completion=_win)
         assert excinfo.value.reason == "missing_workitem"
 
@@ -170,7 +170,7 @@ def test_nonpositive_attempts_are_not_real_attempts(attempt):
     """Attempts are 1-based, so 0 and negatives never ran, even when the job
     store agrees with them."""
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(attempt=attempt), b"out", job_attempt=attempt,
+        adapter.translate(_completion(attempt=attempt), b"out", job_id='job-1', job_attempt=attempt,
                           job_workitem_id="wi-1", secret=SECRET, now=NOW,
                           reserve_completion=_win)
     assert excinfo.value.reason == "wrong_attempt"
@@ -193,7 +193,7 @@ def test_an_int_subclass_cannot_lie_about_equality():
             return hash(int(self))
 
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(attempt=TrickInt(3)), b"out", job_attempt=2,
+        adapter.translate(_completion(attempt=TrickInt(3)), b"out", job_id='job-1', job_attempt=2,
                           job_workitem_id="wi-1", secret=SECRET, now=NOW,
                           reserve_completion=_win)
     assert excinfo.value.reason == "wrong_attempt"
@@ -206,7 +206,7 @@ def test_an_int_subclass_cannot_lie_about_equality():
         pass
 
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(attempt=PlainInt(2)), b"out", job_attempt=2,
+        adapter.translate(_completion(attempt=PlainInt(2)), b"out", job_id='job-1', job_attempt=2,
                           job_workitem_id="wi-1", secret=SECRET, now=NOW,
                           reserve_completion=_win)
     assert excinfo.value.reason == "wrong_attempt"
@@ -218,7 +218,7 @@ def test_an_int_subclass_cannot_lie_about_equality():
             return 2
 
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(attempt=LyingInt(7)), b"out", job_attempt=2,
+        adapter.translate(_completion(attempt=LyingInt(7)), b"out", job_id='job-1', job_attempt=2,
                           job_workitem_id="wi-1", secret=SECRET, now=NOW,
                           reserve_completion=_win)
     assert excinfo.value.reason == "wrong_attempt"
@@ -234,7 +234,7 @@ def test_a_str_subclass_cannot_turn_a_failure_into_a_success():
             return "success"
 
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(status=LyingStatus("failed")), b"out", job_attempt=2,
+        adapter.translate(_completion(status=LyingStatus("failed")), b"out", job_id='job-1', job_attempt=2,
                           job_workitem_id="wi-1", secret=SECRET, now=NOW,
                           reserve_completion=_win)
     assert excinfo.value.reason == "workitem_not_success"
@@ -246,8 +246,8 @@ def test_workitem_ids_are_compared_exactly_not_normalized():
     "wi-1" while the envelope carried the untrimmed string."""
     for claimed in (" wi-1 ", " wi-1", "wi-1	", "WI-1"):
         with pytest.raises(adapter.AdapterError) as excinfo:
-            adapter.translate(_completion(workitem_id=claimed), b"out", job_attempt=2,
-                              job_workitem_id="wi-1", secret=SECRET, now=NOW,
+            adapter.translate(_completion(workitem_id=claimed), b"out", job_id="job-1",
+                              job_attempt=2, job_workitem_id="wi-1", secret=SECRET, now=NOW,
                               reserve_completion=_win)
         assert excinfo.value.reason == "wrong_workitem", f"{claimed!r} must not match 'wi-1'"
 
@@ -268,13 +268,13 @@ def test_a_failure_after_validation_does_not_burn_the_attempt():
 
     # A non-bytes output is refused cleanly, and claims nothing.
     with pytest.raises(adapter.AdapterError) as excinfo:
-        adapter.translate(_completion(), "not-bytes", job_attempt=2, job_workitem_id="wi-1",
+        adapter.translate(_completion(), "not-bytes", job_id='job-1', job_attempt=2, job_workitem_id="wi-1",
                           secret=SECRET, now=NOW, reserve_completion=reserve)
     assert excinfo.value.reason == "missing_output"
     assert claimed == set(), "a rejected translation must not consume the identity"
 
     # So the genuine retry still succeeds.
-    envelope = adapter.translate(_completion(), b"real-output", job_attempt=2,
+    envelope = adapter.translate(_completion(), b"real-output", job_id='job-1', job_attempt=2,
                                  job_workitem_id="wi-1", secret=SECRET, now=NOW,
                                  reserve_completion=reserve)
     assert json.loads(envelope.body)["attempt"] == 2
@@ -309,7 +309,7 @@ def test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accep
     for nonce in ("n-1", "n-2"):          # translate BOTH first, record nothing
         try:
             env = adapter.translate(
-                _completion(nonce=nonce), b"out", job_attempt=2, job_workitem_id="wi-1",
+                _completion(nonce=nonce), b"out", job_id='job-1', job_attempt=2, job_workitem_id="wi-1",
                 secret=SECRET, now=NOW, reserve_completion=reserve)
             envelopes.append(env)
             outcomes.append(("envelope", json.loads(env.body)["nonce"]))
@@ -343,11 +343,11 @@ def test_duplicate_completion_guard_is_keyed_on_attempt_not_nonce():
     completed = {("job-1", 2)}
     for nonce in ("nonce-abc", "nonce-def", "totally-new-nonce"):
         with pytest.raises(adapter.AdapterError) as excinfo:
-            adapter.translate(_completion(nonce=nonce), b"out", job_attempt=2, job_workitem_id='wi-1', secret=SECRET,
+            adapter.translate(_completion(nonce=nonce), b"out", job_id='job-1', job_attempt=2, job_workitem_id='wi-1', secret=SECRET,
                               now=NOW, reserve_completion=lambda job, attempt: (job, attempt) not in completed)
         assert excinfo.value.reason == "duplicate_completion", f"nonce {nonce} must not mint a second receipt"
     # A genuinely different ATTEMPT of the same job is a distinct completion.
-    envelope = adapter.translate(_completion(attempt=3, nonce="nonce-xyz"), b"out", job_attempt=3,
+    envelope = adapter.translate(_completion(attempt=3, nonce="nonce-xyz"), b"out", job_id='job-1', job_attempt=3,
                                  job_workitem_id="wi-1", secret=SECRET, now=NOW,
                                  reserve_completion=lambda job, attempt: (job, attempt) not in completed)
     assert json.loads(envelope.body)["attempt"] == 3
@@ -370,8 +370,8 @@ def test_two_nonces_for_one_attempt_cannot_both_be_consumed():
     accepted = 0
     for nonce in ("nonce-1", "nonce-2"):
         try:
-            envelope = adapter.translate(_completion(nonce=nonce), b"out", job_attempt=2,
-                                         job_workitem_id="wi-1", secret=SECRET, now=NOW,
+            envelope = adapter.translate(_completion(nonce=nonce), b"out", job_id="job-1",
+                                         job_attempt=2, job_workitem_id="wi-1", secret=SECRET, now=NOW,
                                          reserve_completion=reserve)
         except adapter.AdapterError as exc:
             assert exc.reason == "duplicate_completion"
@@ -386,7 +386,7 @@ def test_two_nonces_for_one_attempt_cannot_both_be_consumed():
 def test_a_stale_translated_envelope_is_rejected_by_the_consumer_freshness_window():
     # Adapter stamps produced_at = NOW; consuming far later exceeds max age.
     envelope = adapter.translate(_completion(lease_expiry=NOW + 10_000.0), b"out",
-                                 job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
+                                 job_id='job-1', job_attempt=2, job_workitem_id='wi-1', secret=SECRET, now=NOW, reserve_completion=_win)
     late = callbacks.consume_callback(envelope.body, envelope.signature, envelope.timestamp,
                                       envelope.nonce, now=NOW + 10_000.0,
                                       replay_store=callbacks.CallbackReplayStore())
@@ -424,12 +424,14 @@ def test_a_stateful_completion_cannot_swap_identities_after_validation():
 
         @property
         def nonce(self):
-            # Raising on the SECOND read pins the single-read guarantee: any
-            # re-read at all, including one after the claim, fails the test.
+            # A SHIFTING value, not a read counter. Round 6 pointed out that
+            # demanding exactly one read is stricter than the safety property: an
+            # implementation could legitimately read twice and compare. What must
+            # never happen is a LATER value reaching the receipt, so this returns a
+            # different nonce on every read and the test asserts the receipt carries
+            # the first one.
             self._nonce_reads += 1
-            if self._nonce_reads > 1:
-                raise RuntimeError("nonce must be read exactly once")
-            return "nonce-abc"
+            return "nonce-abc" if self._nonce_reads == 1 else f"nonce-shifted-{self._nonce_reads}"
 
     claimed = set()
 
@@ -440,7 +442,7 @@ def test_a_stateful_completion_cannot_swap_identities_after_validation():
         claimed.add(key)
         return True
 
-    envelope = adapter.translate(ShiftingCompletion(), b"out", job_attempt=2,
+    envelope = adapter.translate(ShiftingCompletion(), b"out", job_id='job-1', job_attempt=2,
                                  job_workitem_id="wi-1", secret=SECRET, now=NOW,
                                  reserve_completion=reserve)
     body = json.loads(envelope.body)
@@ -449,3 +451,82 @@ def test_a_stateful_completion_cannot_swap_identities_after_validation():
     assert claimed == {("job-1", 2)}, "the claim key must match the receipt's job"
     assert envelope.nonce == "nonce-abc"
     assert body["nonce"] == "nonce-abc"
+
+
+def test_the_completion_must_name_the_job_whose_state_was_supplied():
+    """Until round 6 there was NO authoritative job id. The attempt and the
+    WorkItem were both checked against the job store while the job id itself was
+    taken from the completion, so a completion naming `victim-job` produced a valid
+    signed envelope AND reserved `("victim-job", 2)`."""
+    claimed = []
+
+    def reserve(job, attempt):
+        claimed.append((job, attempt))
+        return True
+
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(job_id="victim-job"), b"out", job_id="job-1",
+                          job_attempt=2, job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                          reserve_completion=reserve)
+    assert excinfo.value.reason == "wrong_job"
+    assert claimed == [], "a refused translation must not reserve anything"
+    # A blank authority is refused too, rather than matching a blank completion.
+    for absent in ("", "   ", None):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(), b"out", job_id=absent, job_attempt=2,
+                              job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                              reserve_completion=_win)
+        assert excinfo.value.reason == "missing_job"
+
+
+def test_a_guard_whose_result_cannot_be_truth_tested_does_not_crash_after_claiming():
+    """`if not reserve(...)` calls __bool__ on the result, so a guard returning an
+    object whose __bool__ raises produced a RuntimeError AFTER the identity was
+    recorded, burning the attempt. The result is compared against the exact
+    singletons now, so nothing after the claim can raise."""
+
+    class Unusable:
+        def __bool__(self):
+            raise RuntimeError("__bool__ is not available")
+
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), b"out", job_id="job-1", job_attempt=2,
+                          job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                          reserve_completion=lambda j, a: Unusable())
+    assert excinfo.value.reason == "bad_completion_guard"
+
+    # Truthy/falsy stand-ins are contract violations too, not silent successes.
+    for sloppy in (1, 0, "yes", None, []):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(), b"out", job_id="job-1", job_attempt=2,
+                              job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                              reserve_completion=lambda j, a: sloppy)
+        assert excinfo.value.reason == "bad_completion_guard", f"{sloppy!r} is not True/False"
+
+
+def test_a_released_buffer_is_a_tagged_refusal_not_a_raw_exception():
+    """Copying `output` eagerly at entry meant an already-released memoryview
+    raised a raw ValueError out of the adapter, and a huge buffer was copied in full
+    before a bad clock or mismatched identity was even looked at. Cheap checks run
+    first, and a released buffer is a tagged refusal."""
+    buf = bytearray(b"out")
+    view = memoryview(buf)
+    view.release()
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), view, job_id="job-1", job_attempt=2,
+                          job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "missing_output"
+
+    # And a cheap failure is reported BEFORE the output is touched at all: a
+    # released buffer plus a bad clock reports the clock.
+    buf2 = bytearray(b"out")
+    view2 = memoryview(buf2)
+    view2.release()
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), view2, job_id="job-1", job_attempt=2,
+                          job_workitem_id="wi-1", secret=SECRET, now=None,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "bad_clock", (
+        "cheap validation must precede the expensive copy, so the real problem is "
+        "the one reported")

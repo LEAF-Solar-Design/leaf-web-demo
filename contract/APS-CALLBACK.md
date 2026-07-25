@@ -25,7 +25,9 @@ recomputes it.
 
 ## Signed body — the bindings
 
-`translate()` emits a canonical JSON body (`sort_keys`, `(",",":")`) binding:
+`translate()` requires the job store's authority for ALL THREE identity fields:
+`job_id`, `job_attempt` and `job_workitem_id`. It emits a canonical JSON body
+(`sort_keys`, `(",",":")`) binding:
 
 | Field | Binds | Source |
 |-------|-------|--------|
@@ -43,7 +45,9 @@ recomputes it.
 
 | `reason` | Condition | Why it must fail |
 |----------|-----------|------------------|
-| `missing_job` | no job id | nothing to complete |
+| `missing_job` | no job id on the completion, or no authoritative job id supplied | nothing to complete, and nothing to check against |
+| `wrong_job` | the completion names a different job than the one whose state was supplied | until round 6 there was NO authoritative job id: the attempt and WorkItem were checked against the job store while the job itself was taken from the completion, so a completion naming another job produced a receipt reserved for that job |
+| `bad_completion_guard` | the reservation returned something other than `True` or `False` | `if not reserve(...)` calls `__bool__` on the result, and a result whose `__bool__` raised crashed AFTER the identity was recorded. The result is compared against the exact singletons now, so nothing after the claim can raise |
 | `missing_workitem` | blank WorkItem id | the receipt must bind to a real WorkItem |
 | `workitem_not_success` | WorkItem not succeeded | a failure is not a completion receipt; polling reports it |
 | `missing_output` | no persisted output bytes | an empty receipt would attest a completion that produced nothing |
@@ -90,7 +94,10 @@ easy to get subtly wrong:
 - `output` gets one `bytes()` copy because a `bytearray` read twice (hash, then
   `len`) could sign a receipt whose `size` and `sha256` describe different content.
   `memoryview` is accepted alongside `bytes`/`bytearray`, since database drivers
-  return it for BLOB columns and `bytes()` snapshots it safely.
+  return it for BLOB columns and `bytes()` snapshots it safely. The copy happens
+  AFTER the cheap checks, not at entry: copying eagerly meant an already-released
+  memoryview raised a raw `ValueError` out of the adapter, and a huge buffer was
+  copied in full before a bad clock or a mismatched identity was even looked at.
 
 ### The claim is the last gate
 

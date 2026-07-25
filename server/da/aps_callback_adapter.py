@@ -23,7 +23,12 @@ The signed body binds the job, the attempt, the delivery nonce, and the output
 evidence (sha256 + size of the persisted output). Translation refuses, raising
 ``AdapterError(reason)``, when:
 
-  * ``missing_job``          — no job id on the completion;
+  * ``missing_job``          — no job id on the completion, or none supplied as
+                               authority;
+  * ``wrong_job``            — the completion names a different job than the one
+                               whose state was supplied;
+  * ``bad_completion_guard`` — the reservation returned something other than True
+                               or False, violating its contract;
   * ``workitem_not_success`` — the WorkItem did not succeed (a failure is not a
                                completion receipt; polling reports the failure);
   * ``missing_output``       — no persisted output to attest (an empty receipt
@@ -140,6 +145,7 @@ def translate(
     completion: ApsWorkItemCompletion,
     output: Optional[bytes],
     *,
+    job_id: str,
     job_attempt: int,
     job_workitem_id: str,
     secret: bytes,
@@ -148,8 +154,12 @@ def translate(
 ) -> CallbackEnvelope:
     """Translate a successful APS WorkItem completion into a signed envelope.
 
-    ``job_attempt`` and ``job_workitem_id`` are the job store's AUTHORITATIVE
-    current attempt and dispatched WorkItem id; the completion must match both.
+    ``job_id``, ``job_attempt`` and ``job_workitem_id`` are the job store's
+    AUTHORITATIVE identity, current attempt and dispatched WorkItem id; the
+    completion must match ALL THREE. ``job_id`` was missing until round 6, so a
+    completion naming a different job emitted and reserved a valid receipt for
+    that other job: the attempt and WorkItem were checked against authority while
+    the job itself was simply taken from the completion.
     ``now`` is the epoch seconds at translation.
 
     ``reserve_completion(job_id, attempt) -> bool`` is REQUIRED and must
@@ -195,21 +205,31 @@ def translate(
     #
     # A completion validated as (job-1, wi-1) previously went on to emit AND
     # RESERVE a signed receipt for (victim-job, wi-victim).
-    job_id = completion.job_id
+    claimed_job_id = completion.job_id
     workitem_id = completion.workitem_id
     attempt = completion.attempt
     status = completion.status
     nonce = completion.nonce
     lease_expiry = completion.lease_expiry
-    # `attested` is one immutable copy for the same reason: `output` may be a
-    # bytearray, and reading it twice (hash, then len) let a concurrent mutation
-    # sign a receipt whose `size` and `sha256` described different content.
-    attested = bytes(output) if type(output) in (bytes, bytearray, memoryview) else None
 
+    # CHEAP CHECKS FIRST, then the expensive copy. Copying `output` eagerly at
+    # entry was a regression of its own: an already-released memoryview raised a
+    # raw ValueError instead of a tagged refusal, and a huge buffer was copied in
+    # full before a bad clock or a mismatched identity was ever noticed. The
+    # identity fields above are still captured in a single read each, which is what
+    # closes the swap; only the copy moves later.
     if type(now) not in (int, float) or not math.isfinite(now):
         raise AdapterError("bad_clock")
+    if type(claimed_job_id) is not str or not claimed_job_id.strip():
+        raise AdapterError("missing_job")
     if type(job_id) is not str or not job_id.strip():
         raise AdapterError("missing_job")
+    # The completion must name the job whose state we were handed. Without this the
+    # attempt and WorkItem were validated against authority while the job id was
+    # taken on trust, so a completion naming another job produced a receipt
+    # reserved for that job.
+    if claimed_job_id != job_id:
+        raise AdapterError("wrong_job")
     if type(workitem_id) is not str or not workitem_id.strip():
         raise AdapterError("missing_workitem")
     if type(job_workitem_id) is not str or not job_workitem_id.strip():
@@ -228,7 +248,17 @@ def translate(
     # for BLOB columns and it is a legitimate producer; the exact-type rule exists
     # to stop OVERRIDABLE behaviour, and these three are all safely snapshotted by
     # bytes().
-    if attested is None or len(attested) == 0:
+    if type(output) not in (bytes, bytearray, memoryview):
+        raise AdapterError("missing_output")
+    # One immutable copy: `output` may be a bytearray, and reading it twice (hash,
+    # then len) let a concurrent mutation sign a receipt whose `size` and `sha256`
+    # described different content. A released or resized buffer becomes a tagged
+    # refusal rather than a raw ValueError escaping the adapter.
+    try:
+        attested = bytes(output)
+    except (ValueError, BufferError):
+        raise AdapterError("missing_output")
+    if len(attested) == 0:
         raise AdapterError("missing_output")
     if type(attempt) is not int or type(job_attempt) is not int:
         raise AdapterError("wrong_attempt")
@@ -254,7 +284,7 @@ def translate(
     # again past this point, so the receipt names exactly what was validated.
     output_sha256 = hashlib.sha256(attested).hexdigest()
     payload: Dict[str, Any] = {
-        "job_id": job_id,
+        "job_id": job_id,          # authoritative, and equal to the claimed one
         "workitem_id": workitem_id,
         "attempt": claimed_attempt,
         "status": "success",
@@ -281,6 +311,17 @@ def translate(
     # indivisible step. A read-only "have you seen this?" cannot close the window
     # in which two deliveries are both translated before either receipt is
     # recorded; the consumer accepted both and one attempt completed twice.
-    if not reserve_completion(job_id, claimed_attempt):
+    # NO IMPLICIT TRUTH CONVERSION HERE. `if not reserve_completion(...)` calls
+    # __bool__ on whatever comes back, and a guard returning an object whose
+    # __bool__ raises produced a RuntimeError AFTER the identity was already
+    # recorded, burning the attempt. Compare against the exact singletons instead,
+    # so nothing after the claim can raise.
+    outcome = reserve_completion(job_id, claimed_attempt)
+    if outcome is True:
+        return envelope
+    if outcome is False:
         raise AdapterError("duplicate_completion")
-    return envelope
+    # A guard that returns anything else is violating its contract. It may already
+    # have recorded the claim, and the adapter cannot undo a side effect it does not
+    # own, so this is reported as its own reason rather than guessed at.
+    raise AdapterError("bad_completion_guard")
