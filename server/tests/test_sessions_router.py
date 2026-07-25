@@ -851,6 +851,67 @@ def test_byo_credential_over_tls_reaches_wire_but_not_session_state(
     assert _BYO_SECRET not in json.dumps(events)
 
 
+def test_pasted_credential_is_stripped_before_the_transcript_append(
+    client, wired, behind_trusted_proxy,
+):
+    """A user who pastes their own key into the PROMPT must not have it persisted.
+
+    sol-critic PR #123 round 6: turn_runner appends the user's text to the durable
+    transcript BEFORE the harness is called, so a harness-side scrub cannot keep
+    the value out of app storage. The strip has to happen here, and covers the
+    wire body too because both derive from the same scrubbed text."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": f"please use {_BYO_SECRET} for this",
+              "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    # Not in the durable transcript…
+    events = session_store.recent_events(sess["session_id"], 200)
+    dumped = json.dumps(events)
+    assert _BYO_SECRET not in dumped
+    assert "[REDACTED]" in dumped, "the turn_started text should be scrubbed, not dropped"
+
+    # …and not in the wire body's TEXT either (the grant field itself still
+    # carries it — that is the whole point of the mount).
+    assert _BYO_SECRET not in state.bodies[0].get("text", "")
+    assert state.bodies[0]["credential_grant"]["api_key"] == _BYO_SECRET
+
+
+def test_pasted_credential_is_stripped_from_classifier_hint_too(
+    client, wired, behind_trusted_proxy,
+):
+    """sol-critic PR #123 round 7, blocker 1. `classifier_hint` is an
+    unrestricted caller-controlled dict that turn_runner persists verbatim into
+    the durable turn_started event, and it is NOT on the harness wire — so
+    nothing downstream can repair it. Scrubbing only `text` left this open."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={
+            "text": "hello",
+            "classifier_hint": {"rationale": f"the key is {_BYO_SECRET}",
+                                "nested": [{"deep": _BYO_SECRET}]},
+            "credential_grant": {"kind": "api_key", "api_key": _BYO_SECRET},
+        },
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 202, r.text
+    _wait_terminal(sess["session_id"])
+
+    events = session_store.recent_events(sess["session_id"], 200)
+    dumped = json.dumps(events)
+    assert _BYO_SECRET not in dumped, "credential survived in classifier_hint"
+    # The hint itself is still recorded — scrubbed, not dropped.
+    assert "rationale" in dumped and "[REDACTED]" in dumped
+
+
 def test_byo_credential_over_plain_http_is_rejected(client, wired):
     url, state = wired
     sess = _new_session()
@@ -876,6 +937,46 @@ def test_byo_credential_malformed_is_rejected(client, wired, behind_trusted_prox
     assert r.status_code == 400, r.text
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"
     assert state.hits == 0
+
+
+@pytest.mark.parametrize("bad,distinctive", [
+    ("short", True),                          # below the length floor
+    ("x" * 23, True),                         # one char below the floor
+    ("has whitespace in it aaaaaaaaaaaa", True),  # long enough, not credential-shaped
+    ("error", False),      # a protocol word: redaction would corrupt transcripts
+    ('"', False),          # a JSON delimiter: redaction would corrupt shape
+    # PARITY: U+FEFF is NOT whitespace to Python's str.isspace() but IS matched
+    # by JavaScript's \s, so the old predicate accepted this here while the
+    # harness refused to redact it — accepted but unstrippable. Both sides now
+    # require printable ASCII. (sol-critic PR #123 rounds 6-8.)
+    ("abcdefghijklmnopqrstuvwx﻿", True),
+    ("abcdefghijklmnopqrstuvwxé", True),   # non-ASCII generally
+])
+def test_credential_must_look_like_a_credential(
+    client, wired, behind_trusted_proxy, bad, distinctive,
+):
+    """sol-critic PR #117 round 4, blocker 3. Accepting ANY non-empty string made
+    downstream redaction unwinnable: the harness strips the grant out of the
+    transcript by literal match, so a credential of 'error' or '"' would either
+    corrupt ordinary text and protocol values or have to be left in place. Real
+    Agent SDK credentials are long and whitespace-free, so rejecting these costs
+    nothing genuine and removes the pathological cases at the boundary."""
+    url, state = wired
+    sess = _new_session()
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"text": "hi", "credential_grant": {"kind": "api_key", "api_key": bad}},
+        headers={**_h(sess["tenant_id"]), "X-Forwarded-Proto": "https"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert state.hits == 0          # rejected before any harness traffic
+    # Echo check only for values that are not substrings of an ordinary error
+    # envelope — `error` and `"` occur in any JSON body, so their presence would
+    # prove nothing. The dedicated non-echo proof is
+    # test_byo_credential_is_never_echoed_by_the_validation_handler.
+    if distinctive:
+        assert bad not in r.text
 
 
 def test_forwarded_proto_header_alone_cannot_bypass_the_tls_gate(client, wired):

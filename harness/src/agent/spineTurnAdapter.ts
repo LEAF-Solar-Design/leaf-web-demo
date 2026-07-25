@@ -45,6 +45,7 @@
 
 import { ConverseLoop } from "./converseLoop.js";
 import { wireGrantToAgentGrant } from "../ports/wireGrant.js";
+import { grantSecrets, isRedactableSecret, stripSecrets } from "../redact.js";
 import type {
   AgentGrant,
   AppRunClient,
@@ -112,15 +113,50 @@ export class SpineTurnAdapter implements ConverseRunner {
       ? wireGrantToAgentGrant(input.credential_grant)
       : await this.ports.oauth.getGrant(input.tenant_id);
 
+    // Scrub the credential out of the INBOUND CONTENT, exactly once, here.
+    //
+    // A user who pastes their own key into the prompt would otherwise have it
+    // copied into the transcript, the app gate's pending record, confirmation
+    // args_json, and the wire. Rounds 3-5 of the PR #117 review tried to scrub
+    // each of those SINKS and that approach fails structurally:
+    //   - the app gate keeps its own raw copy, so scrubbing the harness copy
+    //     made the two args hashes disagree and approval replay died as
+    //     args_mismatch;
+    //   - walking event objects to redact keys dropped fields on collision and
+    //     let `__proto__` mutate the rebuilt object's prototype.
+    //
+    // Scrubbing the SOURCE has neither failure mode. Every downstream copy is
+    // derived from this one scrubbed input, so they all agree by construction
+    // and no hash can mismatch. It touches only `text` strings — never a key,
+    // never a structure — so it cannot drop a field or pollute a prototype. And
+    // because the model never receives the credential, it cannot echo it back
+    // into a text_delta or propose a tool parameter containing it.
+    //
+    // Only long, whitespace-free values are eligible (isRedactableSecret), so a
+    // short or common string can never shred ordinary prose. LITERAL removal only
+    // (stripSecrets, not redactSecrets): the pattern pass would rewrite any 40-char
+    // token-shaped run, e.g. a Git SHA the user legitimately pasted, before the
+    // model saw it. (sol-critic PR #123 round 7, blocker 2.)
+    const secrets = grantSecrets(grant).filter(isRedactableSecret);
+    if (secrets.length) {
+      input = {
+        ...input,
+        ...(input.text !== undefined ? { text: stripSecrets(input.text, secrets) } : {}),
+        messages: input.messages.map((m) => ({ ...m, text: stripSecrets(m.text, secrets) })),
+      };
+    }
+
+    // The grant itself goes to the runner's env and NOWHERE else — never to this
+    // store, the wire, or a log. Content is handled above, at the input, which is
+    // why nothing downstream of here needs a scrubbing wrapper.
+    const store = this.ports.store;
+
     // 2. The loop's own session row (idempotent per tenant+drawing).
-    const session = await this.ports.store.createOrGetSession(
-      input.tenant_id,
-      input.drawing_id,
-    );
+    const session = await store.createOrGetSession(input.tenant_id, input.drawing_id);
 
     // 3. Resilience seed for the confirm mirror (see header).
     if (input.confirm) {
-      await this.seedConfirmationMirror(session.session_id, input);
+      await this.seedConfirmationMirror(store, session.session_id, input);
     }
 
     const loop = new ConverseLoop(
@@ -138,7 +174,7 @@ export class SpineTurnAdapter implements ConverseRunner {
               authorityTurnId: input.turn_id,
             }),
         },
-        store: this.ports.store,
+        store,
       },
       {
         // Per-session model ("mount your LLM"): the wire value wins, then the
@@ -222,11 +258,12 @@ export class SpineTurnAdapter implements ConverseRunner {
    *  proposal so a store-loss never strands a consumed approval. args are exactly
    *  {tool, params} — the propose-time gate consult shape (hash compatibility). */
   private async seedConfirmationMirror(
+    store: SessionStore,
     loopSessionId: string,
     input: ConverseTurnInput,
   ): Promise<void> {
     const confirm = input.confirm!;
-    const existing = await this.ports.store.getConfirmation(confirm.confirmation_id);
+    const existing = await store.getConfirmation(confirm.confirmation_id);
     if (existing) return;
     const ttlS = this.opts.confirmationTtlS ?? 300;
     const now = Date.now();
@@ -246,6 +283,6 @@ export class SpineTurnAdapter implements ConverseRunner {
       decided_at: null,
       decided_by: null,
     };
-    await this.ports.store.putConfirmation(rec);
+    await store.putConfirmation(rec);
   }
 }

@@ -273,6 +273,16 @@ def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
     for t in write_tools:  # tracked drawing.write seed (M2)
         by_name[t["name"]] = t
     for t in _AUTHORED:  # in-memory authored list (also persisted)
+        # TENANT ISOLATION: _AUTHORED is process-global and folded LAST, so an
+        # unscoped entry would win a name collision against the requesting
+        # tenant's own registry tools above — one tenant could shadow another
+        # tenant's tool by authoring a same-named one. Only fold entries this
+        # tenant authored. Entries written before tools carried an owner (no
+        # "tenant_id") default to the demo tenant, so an existing store keeps
+        # working for the lane that created it without leaking across tenants.
+        owner = t.get("tenant_id") or _DEFAULT_TENANT
+        if owner != tenant_id:
+            continue
         by_name[t["name"]] = t
     return list(by_name.values())
 

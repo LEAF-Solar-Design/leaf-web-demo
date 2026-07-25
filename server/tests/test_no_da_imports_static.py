@@ -15,9 +15,8 @@ The documented, allowed seams (checked here, not waived silently):
   * write_loop_live.py   — standalone live-receipt SCRIPT (`python
                            write_loop_live.py`), imported by nothing app-side;
                            runs credential-side by design.
-  * deps.get_da_client() — the ONE §11 legacy loader for APS_LIVE=1 store
-                           reads (OSSBackend); every call-site must be
-                           APS_LIVE-gated (`... if deps.APS_LIVE else None`).
+  * deps.get_da_client() — the legacy loader remains defined for broker-side
+                           compatibility, but no tenant-app call-site may use it.
   * `import store` (da/store.py via write_loop's sys.path append) — the §11
     versioned-store seam; store.py itself imports da/client as a MODULE, but
     the credential file is only read on live token fetch (the dynamic
@@ -40,8 +39,6 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 CREDENTIAL_SIDE = {"broker.py", "write_loop_live.py"}
 
 GET_DA_CLIENT_RE = re.compile(r"deps\.get_da_client\(\)")
-# The §11 idiom every app-side call-site must use, verbatim:
-GATED_IDIOM = "deps.get_da_client() if deps.APS_LIVE else None"
 DA_PATH_LOAD_RE = re.compile(r"""DA_DIR\s*/\s*["']([\w.]+)["']""")
 # importlib.import_module("da...") / __import__("da") / ...("client") — the
 # dynamic spellings a line-regex import check cannot see.
@@ -153,18 +150,16 @@ def test_broker_client_reaches_execution_over_http_only():
     assert "DA_DIR" not in src
 
 
-def test_every_get_da_client_call_site_is_aps_live_gated():
-    """Every app-side use of the §11 legacy loader must be the gated idiom
-    `deps.get_da_client() if deps.APS_LIVE else None` — never unconditional.
-    (deps.py itself defines the function; call-sites live elsewhere.)"""
+def test_no_app_side_get_da_client_call_site():
+    """The tenant app never loads the broker-only APS client or credential."""
     offenders = []
     for p in _app_side_files():
         if p.name == "deps.py":
             continue
         for i, line in enumerate(_src(p).splitlines(), 1):
-            if GET_DA_CLIENT_RE.search(line) and GATED_IDIOM not in line:
+            if GET_DA_CLIENT_RE.search(line):
                 offenders.append(f"{_rel(p)}:{i}: {line.strip()}")
-    assert not offenders, "ungated get_da_client call(s): " + "; ".join(offenders)
+    assert not offenders, "app-side get_da_client call(s): " + "; ".join(offenders)
 
 
 def test_da_path_loads_target_only_documented_pure_modules():

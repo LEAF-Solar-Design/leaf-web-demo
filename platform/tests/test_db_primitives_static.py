@@ -38,6 +38,34 @@ class _FakePool:
         yield self.conn
 
 
+def test_pool_checks_connections_and_retires_them_before_proxy_idle_timeout(
+    monkeypatch,
+):
+    """A closed RDS Proxy connection must not be handed to a request."""
+    captured = {}
+
+    class CapturingPool:
+        @staticmethod
+        def check_connection(conn):
+            return conn
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql://user:password@db.example.test/platform",
+    )
+    monkeypatch.setattr(db, "_pool", None)
+    monkeypatch.setattr(db, "ConnectionPool", CapturingPool)
+
+    pool = db.get_pool()
+
+    assert isinstance(pool, CapturingPool)
+    assert captured["check"] is CapturingPool.check_connection
+    assert captured["max_idle"] == 600
+    assert captured["max_idle"] < 900
+
+
 def test_transaction_uses_non_leaking_transaction_settings(monkeypatch):
     conn = _FakeConnection()
     monkeypatch.setattr(db, "get_pool", lambda: _FakePool(conn))
