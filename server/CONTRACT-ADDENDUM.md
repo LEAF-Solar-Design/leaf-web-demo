@@ -1270,12 +1270,13 @@ both the legacy row and the new tenant-scoped row in the store.
 The tenant-visible catalog is still correct: `deps.all_tools` attributes an
 unscoped row to the demo tenant and folds entries by name in list order, so the
 later tenant-scoped row wins, and `GET /api/tools`, digest issuance and
-`POST /api/run` all read that fold. Both rows belong to one tenant, so the
-duplicate is not an isolation defect. It is not free either. Consumers that read
-the raw store instead of the fold see both rows: `engine/selfcheck.py` resolves
-and runs every row in `authored_tools.json`, so a duplicate exercises the stale
-body alongside the current one and reddens that gate if the legacy file is gone,
-and `/api/health` counts raw rows in `n_authored`.
+`POST /api/run` all read that fold. The leftover row is not invisible, though.
+Consumers that read the raw store instead of the fold still see it:
+`engine/selfcheck.py`'s effective-registry gate iterates every row of
+`authored_tools.json` and reddens if a row's referenced file is gone, and
+`/api/health` counts raw rows in `n_authored`. A leftover row also predates
+`tenant_id`, so its original author is unrecorded. The demo tenant inherits it
+by default, which is not evidence that the demo tenant wrote it.
 
 Resolution is by PRECEDENCE, not by absolute location, and the distinction is
 load-bearing for anyone reasoning about which bytes actually execute.
@@ -1308,7 +1309,8 @@ must re-read the catalog for any tool authored or re-authored on or after
 the tenant's catalog fold, not a rewrite of the row a caller happened to read
 from: re-authoring shadows an older row of the same name, so a digest cached
 from that older row is refused by `POST /api/run` even though the row itself was
-never rewritten. A digest for a tool that has not been re-authored stays valid.
+never rewritten. What this change does not do is invalidate anything on its own:
+a record that is never rewritten keeps the digest it had before 2026-07-25.
 
 §15.C's other statements are unaffected: the harness path still does NOT persist
 to `server/authored/` or `_AUTHORED`, and `source` / `static_scan` are unchanged.
