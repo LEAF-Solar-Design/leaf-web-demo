@@ -531,9 +531,12 @@ class _FakeFcntl:
     LOCK_EX = 2
     LOCK_NB = 4
 
-    def __init__(self, code: int, *, forever: bool = False) -> None:
+    def __init__(
+        self, code: int, *, forever: bool = False, max_calls: int | None = None
+    ) -> None:
         self._code = code
         self._forever = forever
+        self._max_calls = max_calls
         self.calls = 0
 
     def flock(self, fileno: int, flags: int) -> None:
@@ -542,6 +545,15 @@ class _FakeFcntl:
         # see -- a fake that accepted any flags would pass straight over it.
         assert flags == self.LOCK_EX | self.LOCK_NB, f"non-blocking lock expected: {flags}"
         self.calls += 1
+        # The retry loop is bounded HERE rather than by the production deadline,
+        # so that a regression which never settles (one that keeps returning
+        # False even after flock succeeds) fails on the next attempt instead of
+        # spinning until the timeout. A test may not hang to prove a point.
+        if self._max_calls is not None and self.calls > self._max_calls:
+            raise AssertionError(
+                f"retry loop never settled: flock called {self.calls} times, "
+                f"expected at most {self._max_calls}"
+            )
         if self._forever or self.calls == 1:
             raise OSError(self._code, "injected lock failure")
 
@@ -583,14 +595,16 @@ def test_contended_lock_is_waited_out_and_then_taken(tmp_path, monkeypatch):
 
     The fake fails once and then succeeds, so the loop ends because the second
     attempt wins, not because a clock ran out. The one clock production does
-    read between attempts is its own deadline, so that is raised out of reach
-    here: at the default 60s a host that suspended this process mid-retry could
-    cut the retry short and fail the test for a reason that has nothing to do
-    with locking. An hour cannot be reached by a stall, and nothing waits on it
-    -- the second attempt succeeds either way.
+    read between attempts is its own deadline, and at the default 60s a host
+    that suspended this process mid-retry could cut the retry short and fail
+    the test for a reason that has nothing to do with locking. So the deadline
+    is put out of a stall's reach, and the loop is bounded by the fake's own
+    call cap instead: raising the deadline alone would let a regression that
+    never settles spin for the whole hour, which is a worse test than the flaky
+    one it replaced.
     """
     monkeypatch.setattr(customization_service, "_MATERIALIZE_LOCK_TIMEOUT", 3600.0)
-    contended = _FakeFcntl(errno.EAGAIN)
+    contended = _FakeFcntl(errno.EAGAIN, max_calls=2)
     monkeypatch.setattr(customization_service, "fcntl", contended)
 
     entered = False
