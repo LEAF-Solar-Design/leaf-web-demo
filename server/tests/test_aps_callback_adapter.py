@@ -298,24 +298,30 @@ def test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accep
         claimed.add(key)          # claim and record are ONE step
         return True
 
+    # Record the outcome of each delivery IN ORDER. Order is the discriminator that
+    # counts alone could never be: a previous version asserted only "one envelope,
+    # one refusal", which is equally true of the old query semantics AND of an
+    # inverted gate (`if reserve(...)` instead of `if not reserve(...)`), where the
+    # FIRST delivery is refused and the SECOND succeeds. Only correct polarity
+    # gives envelope-then-refusal.
+    outcomes = []
     envelopes = []
-    refusals = []
     for nonce in ("n-1", "n-2"):          # translate BOTH first, record nothing
         try:
-            envelopes.append(adapter.translate(
+            env = adapter.translate(
                 _completion(nonce=nonce), b"out", job_attempt=2, job_workitem_id="wi-1",
-                secret=SECRET, now=NOW, reserve_completion=reserve))
+                secret=SECRET, now=NOW, reserve_completion=reserve)
+            envelopes.append(env)
+            outcomes.append(("envelope", json.loads(env.body)["nonce"]))
         except adapter.AdapterError as exc:
-            refusals.append(exc.reason)
+            outcomes.append(("refused", exc.reason))
 
-    assert len(envelopes) == 1, "only one translation may win the reservation"
-    assert refusals == ["duplicate_completion"]
-    # THE DISCRIMINATOR. Without this the test cannot tell reservation semantics
-    # from the old query semantics: a query returning False-then-True and a
-    # reservation returning True-then-False both yield one envelope and one
-    # refusal, so every other assertion here passes either way. What only a
-    # RESERVATION does is RECORD on the winning call. Under `seen_completion` the
-    # check wrote nothing, and `claimed` would still be empty.
+    assert outcomes == [("envelope", "n-1"), ("refused", "duplicate_completion")], (
+        f"the FIRST delivery must win and the SECOND must lose; got {outcomes}. "
+        "Reversed order means the reservation gate's polarity is inverted")
+    assert len(envelopes) == 1
+    # And only a RESERVATION records on the winning call. Under a read-only
+    # `seen_completion` the check wrote nothing, so `claimed` would still be empty.
     assert claimed == {("job-1", 2)}, (
         "the winning call must itself have recorded the claim; an empty set means "
         "the guard merely queried and the race is still open")
@@ -386,3 +392,60 @@ def test_a_stale_translated_envelope_is_rejected_by_the_consumer_freshness_windo
                                       replay_store=callbacks.CallbackReplayStore())
     assert late["ok"] is False
     assert late["reason"] == "stale_callback"
+
+
+def test_a_stateful_completion_cannot_swap_identities_after_validation():
+    """Validate-then-REREAD, the deepest form of this module's recurring bug. An
+    object whose attributes are properties returned `job-1`/`wi-1` to the validator
+    and then `victim-job`/`wi-victim` to the payload builder, so a signed receipt
+    was emitted AND reserved for a job that was never validated. Every field is
+    snapshotted once now, and the payload is built only from those locals."""
+
+    class ShiftingCompletion:
+        """First read of each identity field is the honest one; later reads lie."""
+
+        def __init__(self):
+            self._job_reads = 0
+            self._wi_reads = 0
+            self._nonce_reads = 0
+            self.attempt = 2
+            self.status = "success"
+            self.lease_expiry = NOW + 60.0
+
+        @property
+        def job_id(self):
+            self._job_reads += 1
+            return "job-1" if self._job_reads == 1 else "victim-job"
+
+        @property
+        def workitem_id(self):
+            self._wi_reads += 1
+            return "wi-1" if self._wi_reads == 1 else "wi-victim"
+
+        @property
+        def nonce(self):
+            # Raising on the SECOND read pins the single-read guarantee: any
+            # re-read at all, including one after the claim, fails the test.
+            self._nonce_reads += 1
+            if self._nonce_reads > 1:
+                raise RuntimeError("nonce must be read exactly once")
+            return "nonce-abc"
+
+    claimed = set()
+
+    def reserve(job_id, attempt):
+        key = (job_id, attempt)
+        if key in claimed:
+            return False
+        claimed.add(key)
+        return True
+
+    envelope = adapter.translate(ShiftingCompletion(), b"out", job_attempt=2,
+                                 job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                                 reserve_completion=reserve)
+    body = json.loads(envelope.body)
+    assert body["job_id"] == "job-1", "the receipt must name the job that was VALIDATED"
+    assert body["workitem_id"] == "wi-1"
+    assert claimed == {("job-1", 2)}, "the claim key must match the receipt's job"
+    assert envelope.nonce == "nonce-abc"
+    assert body["nonce"] == "nonce-abc"

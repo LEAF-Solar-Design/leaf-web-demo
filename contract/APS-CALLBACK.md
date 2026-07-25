@@ -73,6 +73,25 @@ These values arrive from parsed JSON and the job store, where exact `str`, `int`
 and `bytes` are what occur, so demanding exact types costs nothing real. `bool` is
 excluded for free, since `type(True) is bool`.
 
+### Read every field exactly once, at entry
+
+`translate()` captures `job_id`, `workitem_id`, `attempt`, `status`, `nonce`,
+`lease_expiry` and an immutable `bytes` copy of `output` BEFORE validating any of
+them, and never reads `completion` again. The ordering is the defence, and it is
+easy to get subtly wrong:
+
+- Re-reading a field after validating it let a completion whose attributes are
+  properties hand `job-1`/`wi-1` to the validator and `victim-job`/`wi-victim` to
+  the payload builder, emitting AND reserving a signed receipt for a job that was
+  never validated.
+- Snapshotting *after* validation is not enough either. The validator reads some
+  fields twice (a type check, then a comparison), so any read past the first is
+  already untrusted. Validate exactly the values you will sign.
+- `output` gets one `bytes()` copy because a `bytearray` read twice (hash, then
+  `len`) could sign a receipt whose `size` and `sha256` describe different content.
+  `memoryview` is accepted alongside `bytes`/`bytearray`, since database drivers
+  return it for BLOB columns and `bytes()` snapshots it safely.
+
 ### The claim is the last gate
 
 `reserve_completion` is called AFTER hashing, serialization and signing. It used to

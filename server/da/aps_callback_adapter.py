@@ -183,11 +183,34 @@ def translate(
     # `int` and `bytes` are what actually occur, so demanding exact types costs
     # nothing real and removes the whole class of override tricks. `bool` is
     # excluded automatically, since `type(True) is bool`, not `int`.
+    # READ EVERY FIELD EXACTLY ONCE, BEFORE VALIDATING ANY OF IT.
+    #
+    # This ordering is the whole defence, and getting it wrong is subtle: an
+    # earlier attempt snapshotted the fields AFTER validation, which still let an
+    # object whose attributes are properties hand one value to the validator and a
+    # different one to the snapshot. The validator itself reads some fields twice
+    # (a type check, then a comparison), so any read after the first is already
+    # untrusted. Validate exactly the values you will sign, which means capturing
+    # them first and never touching `completion` again.
+    #
+    # A completion validated as (job-1, wi-1) previously went on to emit AND
+    # RESERVE a signed receipt for (victim-job, wi-victim).
+    job_id = completion.job_id
+    workitem_id = completion.workitem_id
+    attempt = completion.attempt
+    status = completion.status
+    nonce = completion.nonce
+    lease_expiry = completion.lease_expiry
+    # `attested` is one immutable copy for the same reason: `output` may be a
+    # bytearray, and reading it twice (hash, then len) let a concurrent mutation
+    # sign a receipt whose `size` and `sha256` described different content.
+    attested = bytes(output) if type(output) in (bytes, bytearray, memoryview) else None
+
     if type(now) not in (int, float) or not math.isfinite(now):
         raise AdapterError("bad_clock")
-    if type(completion.job_id) is not str or not completion.job_id.strip():
+    if type(job_id) is not str or not job_id.strip():
         raise AdapterError("missing_job")
-    if type(completion.workitem_id) is not str or not completion.workitem_id.strip():
+    if type(workitem_id) is not str or not workitem_id.strip():
         raise AdapterError("missing_workitem")
     if type(job_workitem_id) is not str or not job_workitem_id.strip():
         raise AdapterError("missing_workitem")
@@ -196,18 +219,20 @@ def translate(
     # whitespace, which let " wi-1 " and "\xa0wi-1" both match "wi-1" while the
     # envelope carried the UNTRIMMED string. Two ids either are the same or they
     # are not, and the receipt must carry exactly the id that was compared.
-    if completion.workitem_id != job_workitem_id:
+    if workitem_id != job_workitem_id:
         raise AdapterError("wrong_workitem")
-    if type(completion.status) is not str or completion.status.strip().lower() not in _SUCCESS_STATUSES:
+    if type(status) is not str or status.strip().lower() not in _SUCCESS_STATUSES:
         raise AdapterError("workitem_not_success")
-    # `output` must really be bytes. A `str` passed len() and then blew up inside
-    # sha256 AFTER the identity had been claimed, which permanently burned the
-    # attempt (see the reservation note below).
-    if type(output) not in (bytes, bytearray) or len(output) == 0:
+    # `output` must be a real byte buffer. A `str` passed len() and then blew up
+    # inside sha256. `memoryview` is accepted because database drivers return it
+    # for BLOB columns and it is a legitimate producer; the exact-type rule exists
+    # to stop OVERRIDABLE behaviour, and these three are all safely snapshotted by
+    # bytes().
+    if attested is None or len(attested) == 0:
         raise AdapterError("missing_output")
-    if type(completion.attempt) is not int or type(job_attempt) is not int:
+    if type(attempt) is not int or type(job_attempt) is not int:
         raise AdapterError("wrong_attempt")
-    claimed_attempt = completion.attempt
+    claimed_attempt = attempt
     if claimed_attempt != job_attempt:
         raise AdapterError("wrong_attempt")
     # Attempts are 1-based. 0 and negatives are not attempts that ever ran.
@@ -216,28 +241,25 @@ def translate(
     # NaN defeats every comparison (`now > nan` is False), so a non-finite lease
     # deadline would sail past an ordinary expiry check. callbacks.py guards its
     # own timestamp with math.isfinite for the same reason.
-    if (type(completion.lease_expiry) not in (int, float)
-            or not math.isfinite(completion.lease_expiry)
-            or now > completion.lease_expiry):
+    if (type(lease_expiry) not in (int, float)
+            or not math.isfinite(lease_expiry)
+            or now > lease_expiry):
         raise AdapterError("expired_lease")
-    if type(completion.nonce) is not str or not completion.nonce.strip():
+    if type(nonce) is not str or not nonce.strip():
         raise AdapterError("bad_nonce")
     if not callable(reserve_completion):
         raise AdapterError("no_completion_guard")
 
-    # Everything that can fail is done BEFORE the claim is taken. Hashing and
-    # signing used to run after it, so an exception in between consumed the
-    # identity without producing a receipt and the legitimate retry was then
-    # refused as `duplicate_completion` — the job could never complete at all.
-    # Trading a wasted hash for a permanently unclosable job is no trade.
-    output_sha256 = hashlib.sha256(bytes(output)).hexdigest()
+    # Built ONLY from the locals captured at entry. `completion` is never read
+    # again past this point, so the receipt names exactly what was validated.
+    output_sha256 = hashlib.sha256(attested).hexdigest()
     payload: Dict[str, Any] = {
-        "job_id": completion.job_id,
-        "workitem_id": completion.workitem_id,
+        "job_id": job_id,
+        "workitem_id": workitem_id,
         "attempt": claimed_attempt,
         "status": "success",
-        "nonce": completion.nonce,
-        "output": {"sha256": output_sha256, "size": len(output)},
+        "nonce": nonce,
+        "output": {"sha256": output_sha256, "size": len(attested)},
         "produced_at": now,
         "source": "aps-callback-adapter",
     }
@@ -245,15 +267,20 @@ def translate(
     # str(float) round-trips through float() in consume_callback's freshness
     # check; keep it a plain decimal string.
     timestamp = repr(float(now))
-    signature = _callbacks().sign_payload(body, timestamp, completion.nonce, secret)
+    signature = _callbacks().sign_payload(body, timestamp, nonce, secret)
+    envelope = CallbackEnvelope(body=body, timestamp=timestamp, nonce=nonce, signature=signature)
 
-    # THE CLAIM IS THE LAST GATE. Taken here, after every step that can raise, so
-    # a failure upstream cannot burn the identity. It is a RESERVATION, not a
-    # query: it must ATOMICALLY claim (job, attempt) and return False if already
-    # claimed, making the check and the record one indivisible step. A read-only
-    # "have you seen this?" cannot close the window in which two deliveries are
-    # both translated before either receipt is recorded — the consumer accepted
-    # both and one attempt completed twice.
-    if not reserve_completion(completion.job_id, claimed_attempt):
+    # THE CLAIM IS THE LAST STATEMENT THAT CAN FAIL, and the envelope is already
+    # fully built above. Previously the return statement still read
+    # `completion.nonce` AFTER the claim, so a property that raised on a later read
+    # left the identity consumed with no envelope, and the genuine retry was then
+    # refused as `duplicate_completion` — the job could never complete.
+    #
+    # It is a RESERVATION, not a query: it must ATOMICALLY claim (job, attempt) and
+    # return False if already claimed, making the check and the record one
+    # indivisible step. A read-only "have you seen this?" cannot close the window
+    # in which two deliveries are both translated before either receipt is
+    # recorded; the consumer accepted both and one attempt completed twice.
+    if not reserve_completion(job_id, claimed_attempt):
         raise AdapterError("duplicate_completion")
-    return CallbackEnvelope(body=body, timestamp=timestamp, nonce=completion.nonce, signature=signature)
+    return envelope
