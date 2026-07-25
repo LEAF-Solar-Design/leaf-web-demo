@@ -7,7 +7,8 @@
  * system-prompt policy the real model follows).
  *
  * Deterministic directives (embedded in the user text by tests):
- *   RUN:<tool> [PARAMS:<json>]  -> run_capability {tool, params}
+ *   RUN:<tool> [DWG:<drawing>] [PARAMS:<json>]
+ *                                  -> run_capability {tool, params, dwg?}
  *   SEARCH:<query>              -> catalog_search {query}
  *   STATE:<what>                -> drawing_state {what}
  *   JOB:<job_id>                -> job_status {job_id}
@@ -87,7 +88,7 @@ export class FakeConverseRunner implements SpineConverseRunner {
       }
     } else {
       const directive =
-        /(RUN|SEARCH|STATE|JOB|AUTHOR|CONFIRM_REQ):(\S+)(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
+        /(RUN|SEARCH|STATE|JOB|AUTHOR|CONFIRM_REQ):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
       if (tail.includes("FORBIDDEN_TOOL")) {
         const verdict = await input.canUseTool("mcp__other__shell", {});
         yield say(
@@ -96,10 +97,13 @@ export class FakeConverseRunner implements SpineConverseRunner {
             : "unexpectedly allowed",
         );
       } else if (directive) {
-        const [, kind, value, paramsJson] = directive;
+        const [, kind, value, dwg, paramsJson] = directive;
         const params = paramsJson ? (JSON.parse(paramsJson) as Record<string, unknown>) : {};
         const argsByKind: Record<string, [string, Record<string, unknown>]> = {
-          RUN: ["run_capability", { tool: value, params }],
+          RUN: [
+            "run_capability",
+            { tool: value, params, ...(dwg ? { dwg } : {}) },
+          ],
           SEARCH: ["catalog_search", { query: value }],
           STATE: ["drawing_state", { what: value }],
           JOB: ["job_status", { job_id: value }],

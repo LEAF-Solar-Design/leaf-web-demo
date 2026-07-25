@@ -174,3 +174,17 @@ Risks:
 
 - Guest sessions and trusted broker back-edges must keep their existing tenant identity.
 - All drawing reads and mutations must use one tenant key.
+
+# Approval drawing binding recovery
+
+- [x] Persist the proposed drawing in the app approval row without a schema migration.
+- [x] Forward the stored drawing on the server-authored confirmation wire.
+- [x] Rebuild a missing harness confirmation mirror with the exact drawing-bound args.
+- [x] Replace the vacuous hash-mismatch check with a real proposal, mirror loss, approval, and replay test.
+- [ ] Run focused server and harness tests, type-check, build, and the full repository gate.
+
+Risks:
+
+- Approval arguments are security-sensitive and must remain byte-equivalent across the app and harness.
+- Existing approvals without a stored drawing must fail closed instead of gaining a new target.
+- The client cannot choose or alter the drawing during confirmation replay.

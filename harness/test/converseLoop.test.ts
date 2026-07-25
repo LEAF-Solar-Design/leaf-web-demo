@@ -586,8 +586,12 @@ describe("ConverseLoop — gate action vocabulary (app policy catalog)", () => {
     expect(gate.checks[0]!.args).toEqual({ what: "capabilities" });
     expect(gate.checks[1]!.args).toEqual({ what: "versions" });
     expect(gate.checks[2]!.args).toEqual({ what: "jobs" });
-    // run_* args honor the {tool, params, dwg?, confirmation_id?} args_schema.
-    expect(gate.checks[3]!.args).toEqual({ tool: "count-by-layer", params: {} });
+    // run_* args normalize the target drawing onto the approval-bound schema.
+    expect(gate.checks[3]!.args).toEqual({
+      tool: "count-by-layer",
+      params: {},
+      dwg: "rooftop_demo",
+    });
   });
 });
 

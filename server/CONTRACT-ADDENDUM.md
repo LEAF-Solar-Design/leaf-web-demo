@@ -977,7 +977,7 @@ One JSON object per SSE `data:` line; the SSE event name equals `type`. Envelope
 | `tool_call` | `{tool, args_summary}` | `args_summary` is a short human string — never full params. |
 | `tool_result` | `{tool, ok, summary}` | |
 | `job_linked` | `{job_id, tool}` | Dispatch handoff; job progress rides the existing per-job SSE (`server/routers/jobs.py:110`), not this stream. |
-| `proposed_run` | `{confirmation_id, tool, params, capability, rationale}` | `params` is the full dict — the UI renders server truth, never a model paraphrase. |
+| `proposed_run` | `{confirmation_id, tool, params, dwg, capability, rationale}` | `params` and `dwg` are the full server-stored target. The UI renders server truth, never a model paraphrase. |
 | `confirmation_required` | `{confirmation_id, kind, payload}` | |
 | `confirmation_resolved` | `{confirmation_id, approved, by}` | First approval wins; other tabs observe this event. |
 | `turn_usage` | `{turns, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_tokens, total_cost_usd?, models?}` | `total_cost_usd` is an estimate (no balance API exists — `research/agentsdk-usage-visibility.md`). |
