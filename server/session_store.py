@@ -94,6 +94,7 @@ Store API v1 (signatures FROZEN — downstream lanes S3/S4 call these exactly):
     get_approval(confirmation_id) -> Optional[dict]
     decide_approval(confirmation_id, approved, by) -> str   # 'recorded'|'already_decided'|'not_found'
     consume_approval(confirmation_id, session_id, tenant_id) -> dict   # raises ApprovalConsumeError
+    unconsume_approval(confirmation_id, session_id, tenant_id) -> bool # give back an unredeemed consume
 """
 from __future__ import annotations
 
@@ -603,6 +604,43 @@ def consume_approval(confirmation_id: str, session_id: str, tenant_id: str) -> D
         return result
 
 
+def unconsume_approval(confirmation_id: str, session_id: str, tenant_id: str) -> bool:
+    """Give back an approval that was consumed but never actually redeemed.
+
+    consume_approval() marks the row spent BEFORE its caller knows whether the
+    turn it was consumed for will really start. When the caller can PROVE the
+    turn did not start (routers/sessions.py's TurnBusy path -- the turn CAS was
+    lost, so no `turn_started` event was appended and the harness was never
+    called), the approval was not redeemed by anyone and must go back on the
+    shelf; otherwise the user's single approval is destroyed by a concurrent
+    turn and the retry the 409 invites can only ever fail 'already_consumed'.
+
+    This does NOT weaken single-redeem. The row is consumed=1 for the whole
+    window between the consume and this call, so no other caller can consume it
+    meanwhile -- the ONLY writer that can reach a given consumed=1 row is the
+    one that set it. Redemption therefore stays strictly one-shot: this flips
+    1 -> 0 only for a redemption that provably never happened, and a replay of
+    a confirm whose turn DID start still hits 'already_consumed'.
+
+    `session_id`/`tenant_id` must match the stored row, same ownership guard
+    consume_approval enforces -- a cross-session or cross-tenant caller can
+    never un-spend someone else's approval.
+
+    Returns True iff this call actually flipped a consumed=1 row back to
+    consumed=0; False (a harmless no-op) for an unknown/foreign row or one that
+    was not consumed to begin with."""
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "UPDATE approvals SET consumed = 0"
+            " WHERE confirmation_id = ? AND session_id = ? AND tenant_id = ?"
+            " AND consumed = 1",
+            (confirmation_id, str(session_id), str(tenant_id)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 # --------------------------------------------------------------------------- #
 # PostgreSQL authority seam
 # --------------------------------------------------------------------------- #
@@ -623,6 +661,7 @@ _legacy_create_approval = create_approval
 _legacy_get_approval = get_approval
 _legacy_decide_approval = decide_approval
 _legacy_consume_approval = consume_approval
+_legacy_unconsume_approval = unconsume_approval
 
 _STORE_MODES = {
     "legacy", "dual_write", "dual_write_shadow", "shadow", "postgres",
@@ -1003,6 +1042,20 @@ def _pg_consume_approval(
     return result
 
 
+def _pg_unconsume_approval(
+    confirmation_id: str, session_id: str, tenant_id: str,
+) -> bool:
+    db = _platform_db()
+    with db.transaction() as conn:
+        row = conn.execute(
+            "UPDATE app_approvals SET consumed = FALSE"
+            " WHERE confirmation_id = %s AND session_id = %s AND tenant_id = %s"
+            " AND consumed = TRUE RETURNING confirmation_id",
+            (confirmation_id, str(session_id), str(tenant_id)),
+        ).fetchone()
+    return row is not None
+
+
 def _shadow_equal(label: str, legacy: Any, postgres: Any) -> None:
     """Fail closed when a shadow read disagrees with the legacy authority."""
     if legacy != postgres:
@@ -1273,3 +1326,31 @@ def consume_approval(
         right.pop("expired", None)
         _shadow_equal("approval consumption", left, right)
     return legacy
+
+
+def unconsume_approval(
+    confirmation_id: str, session_id: str, tenant_id: str,
+) -> bool:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_unconsume_approval(confirmation_id, session_id, tenant_id)
+    # ORDER MATTERS, and it is the REVERSE of consume_approval's.
+    #
+    # consume_approval gates on LEGACY first (it only calls _pg_consume after
+    # _legacy_consume succeeds), so legacy is what actually blocks a second
+    # consume. A release must therefore free legacy LAST: while the release is
+    # half-applied, legacy is still consumed=1, so a concurrent consume fails
+    # `already_consumed` at the legacy gate and never touches PostgreSQL.
+    #
+    # Releasing legacy first is unsafe and _shadow_equal cannot catch it: the
+    # concurrent consume would re-take legacy (1), then raise against the
+    # still-consumed PostgreSQL row, and this release would then clear
+    # PostgreSQL — leaving legacy consumed and PostgreSQL free. BOTH release
+    # calls return True in that interleaving, so the shadow comparison passes
+    # while the two stores genuinely disagree.
+    if mode in _DUAL_WRITE_MODES:
+        postgres = _pg_unconsume_approval(confirmation_id, session_id, tenant_id)
+        legacy = _legacy_unconsume_approval(confirmation_id, session_id, tenant_id)
+        _shadow_equal("approval consumption release", legacy, postgres)
+        return legacy
+    return _legacy_unconsume_approval(confirmation_id, session_id, tenant_id)
