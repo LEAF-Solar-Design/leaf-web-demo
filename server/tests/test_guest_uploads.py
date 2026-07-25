@@ -412,7 +412,7 @@ def test_live_mode_dxf_parses_locally_and_never_calls_the_broker(client, monkeyp
     call to it surfaces as a failed status instead of the user's geometry."""
     import deps
 
-    def _broker_must_not_be_called(tenant_id, drawing_id):
+    def _broker_must_not_be_called(tenant_id, drawing_id, attempt):
         raise AssertionError("a default-mode .dxf upload must never reach the APS broker")
 
     monkeypatch.delenv("LEAF_GUEST_DXF_EXTRACT", raising=False)
@@ -437,6 +437,128 @@ def test_live_mode_dxf_parses_locally_and_never_calls_the_broker(client, monkeyp
                for pt in pl["pts"]), "must carry the uploaded DXF's own coordinates"
 
 
+def test_live_upload_never_loads_broker_only_aps_credentials(client, monkeypatch):
+    """The live app persists upload state on its shared drawings volume.
+
+    APS extraction may cross the broker HTTP seam, but upload creation,
+    extraction persistence, and status reads must not load the APS credential
+    in the tenant-facing process.
+    """
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.setattr(
+        deps,
+        "get_da_client",
+        lambda: pytest.fail("tenant app attempted to load broker-only APS credentials"),
+    )
+    monkeypatch.setattr(
+        guest_uploads,
+        "_extract_via_broker",
+        lambda tenant_id, drawing_id, attempt: {
+            "dwg": drawing_id,
+            "layers": ["BrokerExtracted"],
+            "polylines": [],
+        },
+    )
+
+    receipt = _upload(
+        client,
+        data=b"AC1032" + b"\x00" * 64,
+        name="real.dwg",
+        headers={"X-Tenant-Id": "account-a"},
+    )
+    assert receipt.status_code == 202
+    tenant = receipt.json()["tenant_id"]
+    drawing = receipt.json()["drawing_id"]
+
+    status = client.get(
+        f"/api/drawings/{drawing}/upload-status",
+        headers={"X-Tenant-Id": tenant},
+    )
+    assert status.status_code == 200
+    assert status.json()["status"] == "ready"
+    assert client.get(
+        f"/api/drawings/{drawing}/intake",
+        headers={"X-Tenant-Id": tenant},
+    ).status_code == 200
+    assert client.get(
+        f"/api/drawings/{drawing}/versions",
+        headers={"X-Tenant-Id": tenant},
+    ).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "configured", [None, "", "0", "true", "TRUE", "yes", "2", " 1 "]
+)
+def test_storage_cutover_gate_blocks_upload_before_any_receipt(
+    client, monkeypatch, configured
+):
+    if configured is None:
+        monkeypatch.delenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", configured)
+    response = _upload(client, headers={"X-Tenant-Id": "account-a"})
+    assert response.status_code == 503
+    assert not any(guest_uploads.uploads_dir().glob("*"))
+
+
+def test_upload_gate_is_independent_from_authored_mutation_gate(client, monkeypatch):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+    response = _upload(client, headers={"X-Tenant-Id": "account-a"})
+    assert response.status_code == 202
+
+
+def test_guest_disable_keeps_signed_account_lane_open(client, monkeypatch):
+    import auth
+    import tenancy
+
+    canonical = "f49766b5-1e5a-4e67-a10f-4e3a9b576266"
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_GUEST_UPLOADS_ENABLED", "0")
+    monkeypatch.setattr(
+        auth,
+        "verify_platform_token",
+        lambda authorization: {"sub": "auth0|signed-account"},
+    )
+    monkeypatch.setattr(auth, "extract_tenant_claims", lambda payload: {})
+    monkeypatch.setattr(
+        deps,
+        "resolve_active_platform_tenant_authority",
+        lambda subject: (canonical, "hosted_pro"),
+    )
+    monkeypatch.setattr(
+        tenancy,
+        "get_store",
+        lambda: SimpleNamespace(resolve_workspace=lambda tenant_id: None),
+    )
+
+    account = _upload(
+        client,
+        headers={
+            "Authorization": "Bearer verified",
+            "X-Tenant-Id": "forged-account",
+        },
+    )
+    assert account.status_code == 202
+    assert account.json()["tenant_id"] == canonical
+    assert account.json()["tenant_kind"] == "account"
+    staged_before_guest = sorted(guest_uploads.uploads_dir().glob("*"))
+
+    signed_out_guest = _upload(client)
+    guest_session = _upload(client, headers={"X-Guest-Session": "blocked"})
+    assert signed_out_guest.status_code == 503
+    assert guest_session.status_code == 503
+    assert sorted(guest_uploads.uploads_dir().glob("*")) == staged_before_guest
+
+
+def test_upload_surfaces_have_no_da_client_call_site():
+    """Static guard for the app-side upload credential boundary."""
+    for module in (uploads_router, guest_uploads):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert "get_da_client" not in source
+
+
 def test_dxf_extract_mode_aps_routes_dxf_through_the_broker(client, monkeypatch):
     """OPT-IN: with LEAF_GUEST_DXF_EXTRACT=aps at APS_LIVE=1, a .dxf goes to the
     broker (full-fidelity APS DXF Activity) instead of the local parser.
@@ -451,7 +573,7 @@ def test_dxf_extract_mode_aps_routes_dxf_through_the_broker(client, monkeypatch)
                                  "xdata": None, "handle": "FF"}]}
     calls = {"n": 0}
 
-    def _fake_broker(tenant_id, drawing_id):
+    def _fake_broker(tenant_id, drawing_id, attempt):
         calls["n"] += 1
         return aps_intake
 
@@ -478,7 +600,7 @@ def test_dxf_extract_mode_aps_ignored_when_aps_offline(client, monkeypatch):
     broker call that would fail)."""
     import deps
 
-    def _broker_must_not_be_called(tenant_id, drawing_id):
+    def _broker_must_not_be_called(tenant_id, drawing_id, attempt):
         raise AssertionError("aps mode must not call the broker when APS is offline")
 
     monkeypatch.setenv("LEAF_GUEST_DXF_EXTRACT", "aps")
@@ -504,7 +626,7 @@ def test_store_representation_dwg_raw_bytes_v1(client, monkeypatch):
                                   "xdata": None, "handle": "AA"}]}
     monkeypatch.setattr(deps, "APS_LIVE", True)
     monkeypatch.setattr(guest_uploads, "_extract_via_broker",
-                        lambda tenant_id, drawing_id: fake_intake)
+                        lambda tenant_id, drawing_id, attempt: fake_intake)
     r = _upload(client, data=dwg_bytes, name="real.dwg")
     assert r.status_code == 202
     tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]

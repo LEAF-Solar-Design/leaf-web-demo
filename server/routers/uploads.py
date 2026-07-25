@@ -100,20 +100,40 @@ def upload_drawing(
     authorization: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
 ) -> Any:
-    if not guest_uploads.enabled():
-        return error_response(ErrorCode.INTERNAL,
-                              "drawing uploads are disabled on this deployment",
-                              retryable=False, status_code=503)
-
-    if deps.auth_live() and not authorization and guest_uploads.guest_secret() is None:
-        # Live mode with no way to mint a verifiable guest identity: the guest
-        # lane is OFF. Honest 503 (config gap), never an unsigned tenant.
-        return error_response(ErrorCode.INTERNAL,
-                              "guest uploads are not configured (LEAF_GUEST_SECRET unset)",
-                              retryable=False, status_code=503)
+    if not write_loop.upload_import_mutations_enabled():
+        return error_response(
+            ErrorCode.INTERNAL,
+            "drawing upload/import mutations are temporarily disabled",
+            retryable=True,
+            status_code=503,
+        )
+    if deps.auth_live() and not authorization:
+        if not guest_uploads.enabled():
+            return error_response(
+                ErrorCode.INTERNAL,
+                "guest drawing uploads are disabled on this deployment",
+                retryable=False,
+                status_code=503,
+            )
+        if guest_uploads.guest_secret() is None:
+            # Live mode with no way to mint a verifiable guest identity: the
+            # guest lane is OFF. Honest 503, never an unsigned tenant.
+            return error_response(
+                ErrorCode.INTERNAL,
+                "guest uploads are not configured (LEAF_GUEST_SECRET unset)",
+                retryable=False,
+                status_code=503,
+            )
 
     tenant, tenant_kind, _minted = _resolve_upload_identity(
         x_tenant_id, authorization, x_guest_session)
+    if tenant_kind == "guest" and not guest_uploads.enabled():
+        return error_response(
+            ErrorCode.INTERNAL,
+            "guest drawing uploads are disabled on this deployment",
+            retryable=False,
+            status_code=503,
+        )
 
     # ENTITLEMENT GATE (§17 pattern): the tier must grant `upload`.
     tier = "guest" if tenant_kind == "guest" else entitlements.resolve_tier(tenant)
@@ -145,9 +165,7 @@ def upload_drawing(
         return error_response(ErrorCode.BAD_PARAMS, reason, retryable=False,
                               status_code=400)
 
-    backend = write_loop.backend_for_tenant(
-        str(tenant), aps_live=deps.APS_LIVE,
-        da=deps.get_da_client() if deps.APS_LIVE else None)
+    backend = write_loop.upload_backend_for_tenant(str(tenant))
     import store  # importable via write_loop's sys.path setup
 
     # §19 idempotent GUEST uploads (FE review round 3, MAJOR — receipt
@@ -337,9 +355,7 @@ def upload_status(drawing_id: str,
     truth). Guests reach this via their guest-session header (live) or the
     X-Tenant-Id stub (demo). 404 (never 403) for an unknown marker — same
     no-existence-leak posture as the jobs routes."""
-    backend = write_loop.backend_for_tenant(
-        str(tenant), aps_live=deps.APS_LIVE,
-        da=deps.get_da_client() if deps.APS_LIVE else None)
+    backend = write_loop.upload_backend_for_tenant(str(tenant))
     view = guest_uploads.status_view(backend, str(tenant), drawing_id)
     if view is None:
         return error_response(ErrorCode.BAD_PARAMS,

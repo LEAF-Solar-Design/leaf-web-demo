@@ -5,6 +5,7 @@ legacy defaults and process trust boundaries that must hold before an operator
 can run the separate migration and cutover stages.
 """
 from pathlib import Path
+import json
 import re
 
 
@@ -23,6 +24,43 @@ def _service(compose: str, name: str) -> str:
     )
     assert match is not None, f"missing compose service {name}"
     return match.group(1)
+
+
+def _required_environment(path: str) -> set[str]:
+    manifest = json.loads(_read(path))
+    return set(manifest["required"]["environment"])
+
+
+def test_required_config_manifests_fail_closed_for_postgres_authority():
+    app_environment = _required_environment("deploy/required-config.app.json")
+    broker_environment = _required_environment("deploy/required-config.broker.json")
+
+    assert {
+        "LEAF_BLOB_STORE",
+        "LEAF_PLATFORM_POSTGRES_REQUIRED",
+        "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED",
+    }.issubset(app_environment)
+    assert {
+        "LEAF_BLOB_STORE",
+        "LEAF_BROKER_STORE",
+    }.issubset(broker_environment)
+    assert "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED" not in broker_environment
+
+
+def test_upload_import_boundary_has_a_real_postgres_pr_gate():
+    workflow = _read(".github/workflows/upload-authority-postgres.yml")
+
+    for protected_path in (
+        "platform/api.py",
+        "platform/tests/test_drawing_import.py",
+        "server/routers/uploads.py",
+        "server/write_loop.py",
+        "deploy/required-config.app.json",
+    ):
+        assert f"- '{protected_path}'" in workflow
+    assert "working-directory: server" in workflow
+    assert "python -m pytest --import-mode=importlib -q" in workflow
+    assert "../platform/tests/test_drawing_import.py" in workflow
 
 
 def test_broker_image_contains_pg_runtime_without_crossing_secret_boundary():

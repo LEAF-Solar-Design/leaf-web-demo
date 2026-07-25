@@ -297,6 +297,115 @@ def download_object(object_key: str) -> bytes:
     return d.content
 
 
+def delete_object(object_key: str) -> None:
+    """Delete one broker-owned APS scratch object. Missing is already clean."""
+    response = requests.delete(
+        f"{APS}/oss/v2/buckets/{bucket_key()}/objects/{_enc(object_key)}",
+        headers=_auth_headers(),
+        timeout=_HTTP_TIMEOUT,
+    )
+    if response.status_code != 404:
+        response.raise_for_status()
+
+
+def scratch_bucket_key() -> str:
+    """Dedicated TRANSIENT bucket for WorkItem copies, never canonical blobs."""
+    return f"{bucket_key()[:120]}-scratch"
+
+
+def _ensure_scratch_bucket() -> None:
+    key = scratch_bucket_key()
+    response = requests.post(
+        f"{APS}/oss/v2/buckets",
+        headers={
+            **_auth_headers(),
+            "Content-Type": "application/json",
+            "x-ads-region": OSS_REGION,
+        },
+        data=json.dumps({"bucketKey": key, "policyKey": "transient"}),
+        timeout=_HTTP_TIMEOUT,
+    )
+    if response.status_code != 409:
+        response.raise_for_status()
+
+
+def upload_scratch_object(local_path: str, object_key: str) -> None:
+    """Upload one WorkItem input to the expiring scratch bucket."""
+    _ensure_scratch_bucket()
+    key = scratch_bucket_key()
+    headers = _auth_headers()
+    start = requests.get(
+        f"{APS}/oss/v2/buckets/{key}/objects/{_enc(object_key)}/signeds3upload",
+        headers=headers,
+        timeout=_HTTP_TIMEOUT,
+    )
+    start.raise_for_status()
+    body = start.json()
+    with open(local_path, "rb") as handle:
+        uploaded = requests.put(body["urls"][0], data=handle, timeout=300)
+    uploaded.raise_for_status()
+    finish = requests.post(
+        f"{APS}/oss/v2/buckets/{key}/objects/{_enc(object_key)}/signeds3upload",
+        headers={**headers, "Content-Type": "application/json"},
+        data=json.dumps({"uploadKey": body["uploadKey"]}),
+        timeout=_HTTP_TIMEOUT,
+    )
+    finish.raise_for_status()
+
+
+def scratch_signed_download_url(object_key: str, minutes: int = 60) -> str:
+    _ensure_scratch_bucket()
+    response = requests.get(
+        f"{APS}/oss/v2/buckets/{scratch_bucket_key()}/objects/{_enc(object_key)}"
+        f"/signeds3download?minutesExpiration={minutes}",
+        headers=_auth_headers(),
+        timeout=_HTTP_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()["url"]
+
+
+def scratch_signed_upload_url(object_key: str, minutes: int = 60) -> tuple[str, str]:
+    _ensure_scratch_bucket()
+    response = requests.get(
+        f"{APS}/oss/v2/buckets/{scratch_bucket_key()}/objects/{_enc(object_key)}"
+        f"/signeds3upload?minutesExpiration={minutes}",
+        headers=_auth_headers(),
+        timeout=_HTTP_TIMEOUT,
+    )
+    response.raise_for_status()
+    body = response.json()
+    return body["uploadKey"], body["urls"][0]
+
+
+def finalize_scratch_upload(object_key: str, upload_key: str) -> None:
+    response = requests.post(
+        f"{APS}/oss/v2/buckets/{scratch_bucket_key()}/objects/{_enc(object_key)}"
+        "/signeds3upload",
+        headers={**_auth_headers(), "Content-Type": "application/json"},
+        data=json.dumps({"uploadKey": upload_key}),
+        timeout=_HTTP_TIMEOUT,
+    )
+    response.raise_for_status()
+
+
+def download_scratch_object(object_key: str) -> bytes:
+    url = scratch_signed_download_url(object_key)
+    response = requests.get(url, timeout=300)
+    response.raise_for_status()
+    return response.content
+
+
+def delete_scratch_object(object_key: str) -> None:
+    response = requests.delete(
+        f"{APS}/oss/v2/buckets/{scratch_bucket_key()}/objects/{_enc(object_key)}",
+        headers=_auth_headers(),
+        timeout=_HTTP_TIMEOUT,
+    )
+    if response.status_code != 404:
+        response.raise_for_status()
+
+
 def signed_download_url(object_key: str, minutes: int = 60) -> str:
     """A self-authenticating presigned S3 GET url DA can fetch (no Bearer header).
 
@@ -386,9 +495,10 @@ def submit_workitem(activity_id: str, arguments: dict,
     dry_run=False -> POST, then (poll=True) poll to a terminal status and return it.
 
     The LIVE submit (dry_run=False) is the head-of-line-blocking point, so it is
-    routed through the account Flex CEILING gate (da/queue.admit): at most
+    routed through the FAIR account Flex gate (da/queue.fair_admit): at most
     APS_MAX_CONCURRENCY WorkItems are in flight across all tenants in this
-    process. With poll=True the slot is held for the WorkItem's whole lifetime
+    process, AND slots go round-robin per tenant so none can starve another.
+    With poll=True the slot is held for the WorkItem's whole lifetime
     (submit -> terminal), which is exactly what the ceiling should count. dry_run
     returns BEFORE the gate, so APS_LIVE=0 / dry-run paths are unaffected.
 
@@ -405,7 +515,7 @@ def submit_workitem(activity_id: str, arguments: dict,
         return {"_dry_run": True, "endpoint": f"POST {DA}/workitems",
                 "body": _redact(body)}
     _q = _leaf_queue()
-    with _q.admit(tenant_id):
+    with _q.fair_admit(tenant_id):
         r = requests.post(f"{DA}/workitems",
                           headers={**_auth_headers(), "Content-Type": "application/json"},
                           data=json.dumps(body), timeout=_HTTP_TIMEOUT)

@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -149,6 +150,15 @@ class StorageBackend:
     def exists(self, key: str) -> bool:
         raise NotImplementedError
 
+    def put_if_absent_or_verify(self, key: str, data: bytes) -> None:
+        """Publish immutable bytes without replacing a matching winner."""
+        payload = bytes(data)
+        if not self.exists(key):
+            self.put(key, payload)
+        existing = self.get(key)
+        if existing != payload:
+            raise ValueError("immutable object already exists with different content")
+
 
 class InMemoryBackend(StorageBackend):
     """In-memory dict backend for tests — makes ZERO network calls."""
@@ -166,6 +176,12 @@ class InMemoryBackend(StorageBackend):
 
     def exists(self, key: str) -> bool:
         return key in self._blobs
+
+    def put_if_absent_or_verify(self, key: str, data: bytes) -> None:
+        payload = bytes(data)
+        winner = self._blobs.setdefault(key, payload)
+        if winner != payload:
+            raise ValueError("immutable object already exists with different content")
 
     # test convenience
     def keys(self) -> list[str]:
@@ -235,13 +251,61 @@ class FilesystemBackend(StorageBackend):
 
     def put(self, key: str, data: bytes) -> None:
         p = self._path(key)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        # atomic-ish write (tmp in the same dir, then replace) so a crash mid-write
-        # never leaves a half-written immutable version or manifest behind.
-        tmp = p + ".tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(bytes(data))
-        os.replace(tmp, p)
+        parent = os.path.dirname(p)
+        os.makedirs(parent, exist_ok=True)
+        handle, tmp = tempfile.mkstemp(prefix=".leaf-put-", dir=parent)
+        try:
+            with os.fdopen(handle, "wb") as fh:
+                fh.write(bytes(data))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, p)
+            if hasattr(os, "O_DIRECTORY"):
+                directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
+
+    def put_if_absent_or_verify(self, key: str, data: bytes) -> None:
+        """Durably create an immutable object, or verify the atomic winner."""
+        p = self._path(key)
+        parent = os.path.dirname(p)
+        os.makedirs(parent, exist_ok=True)
+        payload = bytes(data)
+        handle, tmp = tempfile.mkstemp(prefix=".leaf-immutable-", dir=parent)
+        created = False
+        try:
+            with os.fdopen(handle, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(tmp, p)
+                created = True
+            except FileExistsError:
+                pass
+            with open(p, "rb") as winner:
+                existing = winner.read()
+            if existing != payload:
+                raise ValueError(
+                    "immutable object already exists with different content")
+            if created and hasattr(os, "O_DIRECTORY"):
+                directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
 
     def exists(self, key: str) -> bool:
         return os.path.exists(self._path(key))
@@ -368,13 +432,11 @@ def _put_or_verify_blob(
     backend: StorageBackend, key: str, data: bytes, digest: str,
 ) -> None:
     """Publish one immutable blob, or adopt an exact crash-window artifact."""
-    if backend.exists(key):
-        existing = backend.get(key)
-        if len(existing) != len(data) or _sha256(existing) != digest:
-            raise ValueError(
-                f"reserved immutable version key {key} has mismatched content")
-        return
-    backend.put(key, data)
+    backend.put_if_absent_or_verify(key, data)
+    existing = backend.get(key)
+    if len(existing) != len(data) or _sha256(existing) != digest:
+        raise ValueError(
+            f"reserved immutable version key {key} has mismatched content")
 
 
 def _locked_upload_guard(conn, guard: dict) -> bool:
@@ -488,10 +550,15 @@ def _pg_ingest_guarded(
                 """,
                 params,
             )
-        _put_or_verify_blob(backend, vkey, data, digest)
         # clock_timestamp() is intentional. NOW() is fixed at transaction start.
         if not _locked_upload_guard(conn, params):
             raise RuntimeError("upload extraction lease expired during ingest")
+        if guard.get("defer_ready"):
+            # The upload owner will publish the intake proof, ready version,
+            # manifest head, and terminal upload marker in one later database
+            # transaction. Blob bytes may exist first, but remain unreachable.
+            return
+        _put_or_verify_blob(backend, vkey, data, digest)
         updated = conn.execute(
             """
             UPDATE drawing_store_manifests m
@@ -532,6 +599,8 @@ def _pg_ingest_guarded(
                 "upload extraction lease expired during manifest publication")
 
     db.run_transaction(operation, isolation="serializable")
+    if guard.get("defer_ready"):
+        _put_or_verify_blob(backend, vkey, data, digest)
     return {"drawing_id": drawing_id, "version": 1}
 
 

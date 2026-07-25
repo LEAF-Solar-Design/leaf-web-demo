@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 import dependency_health
 import deps
 import jobs as job_store
+import write_loop
 from customization_flags import RolloutMode, mode as customization_mode
 from customization_service import CustomizationService
 from envelopes import install_error_handlers, with_envelope_fields
@@ -130,6 +131,7 @@ import guest_uploads  # noqa: E402
 # database connection remains lazy, but an invalid or unsafe selector cannot
 # degrade to per-process state.
 guest_uploads.upload_store_mode()
+write_loop.blob_store_mode()
 guest_uploads.start_purge_daemon()
 
 

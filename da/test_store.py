@@ -34,7 +34,7 @@ class _NoNetwork:
     def _boom(self, *a, **k):
         raise AssertionError("offline test attempted a real network call")
 
-    get = post = put = request = _boom
+    get = post = put = delete = request = _boom
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +82,30 @@ def test_create_bucket_default_policy_is_persistent(monkeypatch):
     assert captured["url"].endswith("/oss/v2/buckets")
     # store bucket uses the fresh persistent stem, not the abandoned transient one
     assert client.bucket_key().startswith("leaf-web-store-")
+
+
+def test_workitem_scratch_bucket_is_transient(monkeypatch):
+    captured = {}
+
+    class _Resp:
+        status_code = 409
+
+        def raise_for_status(self):  # pragma: no cover
+            raise AssertionError
+
+    class _Cap:
+        def post(self, url, headers=None, data=None, timeout=None):
+            captured["body"] = json.loads(data)
+            return _Resp()
+
+    monkeypatch.setattr(client, "requests", _Cap(), raising=True)
+    client._ensure_scratch_bucket()
+
+    assert captured["body"] == {
+        "bucketKey": client.scratch_bucket_key(),
+        "policyKey": "transient",
+    }
+    assert client.scratch_bucket_key().endswith("-scratch")
 
 
 # --------------------------------------------------------------------------- #

@@ -210,8 +210,17 @@ def _query(sql: str, args: tuple = ()) -> List[sqlite3.Row]:
 def ensure_started() -> None:
     """Idempotent: open the DB (creates the schema if missing). No background
     threads live in this module — the turn engine (S3) and its watchdog own
-    their own lifecycle; this store is passive, called-into storage only."""
-    _db()
+    their own lifecycle; this store is passive, called-into storage only.
+
+    Held under `_lock` because `_db()` publishes the module-level `_conn` BEFORE
+    running the additive column retrofits below it. Every other `_db()` caller
+    already holds the lock, so this was the one unserialized entry: a racing
+    thread could take the published connection and read a row whose `model`
+    column had not been added yet, raising `IndexError: No item with that key`
+    from _row_to_session. Locking here makes first-open atomic with respect to
+    every reader. (sol-critic PR #117 round 2, blocker 2.)"""
+    with _lock:
+        _db()
 
 
 # --------------------------------------------------------------------------- #
