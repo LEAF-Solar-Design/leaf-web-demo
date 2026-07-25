@@ -322,10 +322,11 @@ def test_bad_params_pre_validation_gate(stack, tmp_path):
     bad-params call must leave neither behind.
 
     Marker paths are absolute and baked into the body text because the body
-    executes in the BROKER subprocess (broker.py ``_run_tool`` ->
-    ``tool_loader.run_tool_dynamic``), not in this process: an in-process
-    monkeypatch would never see that call, and the broker's cwd is not this
-    test's. A file crosses the process boundary; a spy does not.
+    executes in the BROKER subprocess (broker.py ``_execute`` ->
+    ``tool_loader.run_tool_dynamic``, which is also where the ``validate_params``
+    gate this test covers sits), not in this process: an in-process monkeypatch
+    would never see that call, and the broker's cwd is not this test's. A file
+    crosses the process boundary; a spy does not.
 
     ORDER IS LOAD-BEARING. The bad-params call runs FIRST, against bytes that
     have never been loaded — ``tool_loader._MOD_CACHE`` keys on path+mtime+size,
