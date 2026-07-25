@@ -818,11 +818,19 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
                                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
             except subprocess.SubprocessError:
                 # Another worker may have won the deterministic-path race.
-                # Accept only the fully verified target below.
-                if not target.exists():
-                    raise
+                # `git worktree add` can reject the loser before the winner
+                # creates the target directory. Wait briefly for that winner
+                # instead of checking once and turning a safe concurrent read
+                # into a false 503. The commit and digest checks below remain
+                # the authority, so an unrelated failure cannot be accepted.
+                for attempt in range(100):
+                    if target.exists():
+                        break
+                    if attempt == 99:
+                        raise
+                    time.sleep(0.05)
         observed = ""
-        for attempt in range(10):
+        for attempt in range(100):
             try:
                 observed = subprocess.run(
                     ["git", "-C", str(target), "rev-parse", "HEAD"],
@@ -832,7 +840,7 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
                 materialized_registry = (target / "registry.json").read_bytes()
                 break
             except (OSError, subprocess.SubprocessError):
-                if attempt == 9:
+                if attempt == 99:
                     raise
                 time.sleep(0.05)
         if observed != pin.catalog_commit:

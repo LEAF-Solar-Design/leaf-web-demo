@@ -205,8 +205,16 @@ def test_author_persist_and_run_from_file(stack):
     assert entry not in FORBIDDEN_OPS
     assert not any(op in str(entry) for op in FORBIDDEN_OPS), entry
 
-    # (1) the code is persisted to a real file that exists on disk
-    fpath = AUTHORED_DIR / f"{tool['name']}.py"
+    # (1) the code is persisted to the tenant-scoped file named by the returned
+    # entry. The path must stay below server/authored and must not fall back to
+    # the legacy flat store, which allowed two tenants to overwrite each other.
+    relative_entry = Path(entry)
+    assert not relative_entry.is_absolute()
+    assert relative_entry.parts[0] == "authored"
+    assert len(relative_entry.parts) == 3
+    assert relative_entry.name == f"{tool['name']}.py"
+    fpath = SERVER_DIR / relative_entry
+    assert fpath.resolve().is_relative_to(AUTHORED_DIR.resolve())
     assert fpath.exists(), fpath
     assert "def run(" in fpath.read_text(encoding="utf-8")
 

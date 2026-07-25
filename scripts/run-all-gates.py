@@ -89,6 +89,13 @@ sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != REPO]
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+_PARKED_AGENT_ROUTER_REASON = re.escape(
+    "PARKED at the 2026-07-21 merge resolution (spine x sessions-wire): "
+    "this exercises a section-18 surface replaced by the section-2.1 lane "
+    "(approvals resolve against session_store; site.py serves the reviewed "
+    "builtin-only catalog + canned artifact). Restore at spine unification."
+)
+
 
 def strip_ansi(s: str) -> str:
     return _ANSI.sub("", s)
@@ -227,7 +234,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave2.py"), 6,
               allowed_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-wave3", "server tests/test_wave3.py", "pytest", SERVER,
-              _py_pytest("tests/test_wave3.py"), 11,
+              _py_pytest("tests/test_wave3.py"), 13,
               allowed_skip_reasons=(
                   r"platform DB unreachable: .+",
                   r"tenant tool repo absent at .+ \(set LEAF_TENANT_REPO_SRC to one\)",
@@ -253,7 +260,12 @@ def build_suites() -> List[Suite]:
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_gate.py"), 49),
         Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
-              _py_pytest("tests/test_agent_router.py"), 30),
+              # Four section-18 tests are intentionally parked because the
+              # section-2.1 lane replaced that surface. Pin the complete reason
+              # and require all 26 active tests, so any different or additional
+              # skip fails the gate and this debt cannot grow silently.
+              _py_pytest("tests/test_agent_router.py"), 26,
+              allowed_skip_reasons=(_PARKED_AGENT_ROUTER_REASON,)),
         Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
               _py_pytest("tests/test_sessions_router.py"), 25),
         Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
