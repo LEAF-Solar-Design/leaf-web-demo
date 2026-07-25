@@ -89,56 +89,179 @@ def test_identifiers_and_gates_are_pinned():
     assert len(set(gates)) == len(gates)
 
 
+WEBSITE_REPO = Path("C:/Users/ehaug/OneDrive/Documents/GitHub/leaf_website")
+WEBSITE_VALIDATOR_PATH = "lib/leaf-platform/projection.ts"
+
+_IMPLEMENTATION_STATES = ("implemented", "planned")
+_RUNTIME_STATES = ("available", "degraded", "unavailable")
+_CAPABILITY_STATES = ("shipping", "connected_degraded", "locked_planned", "failed_retryable")
+_EVIDENCE_KINDS = ("contract_test", "security", "end_to_end", "observability", "recovery")
+_FALLBACK_MODES = ("local", "cached", "read_only")
+_WEBSITE_TTL_MS = 15_000
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _website_source() -> str:
+    """The console validator's SOURCE, read from origin/main by content.
+
+    Not from the local working tree. A stale local checkout is what caused a wrong
+    "this constant does not exist" conclusion in round 4; squash merges rewrite
+    SHAs, so a change can be merged while its commit is not an ancestor of main.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "show", f"origin/main:{WEBSITE_VALIDATOR_PATH}"],
+            cwd=str(WEBSITE_REPO), capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
+        pytest.skip(f"cannot read the website validator from origin/main: {exc}")
+    if out.returncode != 0:  # pragma: no cover
+        pytest.skip(f"cannot read the website validator from origin/main: {out.stderr.strip()[:120]}")
+    return out.stdout
+
+
+def test_the_lease_ttl_matches_the_websites_constant_read_from_origin_main():
+    """A REAL cross-repo assertion, which is what rounds 3, 4 and 5 all asked for.
+
+    Earlier versions compared LEASE_TTL_SECONDS to a number copied into this
+    repo's own contract document, which is circular. This reads the website's
+    exported constant out of origin/main and fails if the two have drifted. If the
+    sibling repo is not reachable the test SKIPS with a reason rather than passing
+    vacuously.
+    """
+    source = _website_source()
+    found = re.search(r"SERVER_AVAILABILITY_TTL_MS\s*=\s*([0-9_]+)", source)
+    assert found, (
+        "origin/main no longer exports SERVER_AVAILABILITY_TTL_MS. If the website "
+        "genuinely dropped its TTL rules, this module's window and skew checks "
+        "become local policy and this test must be rewritten deliberately")
+    website_ms = int(found.group(1).replace("_", ""))
+    assert website_ms == _WEBSITE_TTL_MS, (
+        f"the transcription in this file assumes {_WEBSITE_TTL_MS}ms but "
+        f"origin/main says {website_ms}ms")
+    assert LEASE_TTL_SECONDS * 1000 == website_ms, (
+        f"TTL DRIFT: this module emits {LEASE_TTL_SECONDS}s leases while the "
+        f"console enforces a {website_ms}ms window. A one-sided change makes the "
+        f"browser reject every emitted availability and every capability shows "
+        f"locked with nothing reporting why")
+
+
+def test_the_website_still_enforces_the_rules_this_module_mirrors():
+    """Pin the PREMISE of the mirror, so a website-side removal is caught here
+    rather than silently making this module's strictness arbitrary."""
+    source = _website_source()
+    for needle, why in (
+        ("expiresMs - observedMs > SERVER_AVAILABILITY_TTL_MS", "window no longer than one TTL"),
+        ("observedMs > now.getTime() + SERVER_AVAILABILITY_TTL_MS", "observedAt clock-skew bound"),
+        ("provenanceRequired !== true", "fallback must declare provenanceRequired"),
+        ("Array.isArray(evidence)", "evidence must be an array"),
+        ("isCapabilityEvidence", "every evidence member is validated"),
+    ):
+        assert needle in source, f"origin/main no longer enforces: {why}"
+
+
 def _js_date_parse(value):
-    """`Date.parse` semantics for the spellings this module emits: millisecond
-    resolution, explicit offset required."""
+    """`Date.parse` semantics: any parseable string, millisecond resolution.
+    Deliberately permissive, because the console's `isIsoDate` is."""
     if not isinstance(value, str):
         return None
+    candidate = value.strip()
     try:
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(candidate)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return None
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.replace(microsecond=(parsed.microsecond // 1000) * 1000)
 
 
-def _website_validator(availability: dict, now: datetime) -> bool:
-    """A faithful transcription of the REAL console validator,
-    leaf_website lib/leaf-platform/projection.ts:31-41, read on 2026-07-24.
+def _is_record(value) -> bool:
+    return isinstance(value, dict)
 
-    Written out in full because this suite's earlier "mirror" claims were
-    invented: the console has NO TTL constant, never parses `observedAt`, imposes
-    no window-length limit, and never inspects an evidence record's contents. The
-    honest test is not "does our validator match a number I wrote down" but "does
-    everything we EMIT satisfy the rules the console actually applies".
+
+def _website_evidence_ok(value) -> bool:
+    """Port of `isCapabilityEvidence`."""
+    if not _is_record(value):
+        return False
+    digest = value.get("digest")
+    return (isinstance(value.get("kind"), str) and value["kind"] in _EVIDENCE_KINDS
+            and isinstance(value.get("uri"), str) and len(value["uri"]) > 0
+            and _js_date_parse(value.get("verifiedAt")) is not None
+            and _is_record(digest) and digest.get("algorithm") == "sha256"
+            and isinstance(digest.get("value"), str)
+            and _SHA256.match(digest["value"]) is not None)
+
+
+def _website_validator(availability, now: datetime) -> bool:
+    """FAITHFUL port of `isVerifiedServerAvailability` as it exists on
+    origin/main (verified 2026-07-24), clause for clause and in the same order.
+
+    Round 5 caught the previous version being unfaithful in two ways at once: it
+    was transcribed from a STALE local checkout of a much shorter validator, and it
+    mapped JavaScript truthiness onto Python truthiness. Both are fixed by porting
+    the real thing, which uses explicit `Array.isArray` and `!== undefined` checks
+    rather than loose truthiness, so the semantics now line up exactly.
+
+    One documented mapping: JS distinguishes `undefined` (absent) from `null`,
+    Python's `.get()` returns None for both. Our payloads never contain null, so
+    the distinction cannot change a verdict here.
     """
+    if not _is_record(availability):
+        return False
     if availability.get("contractVersion") != "leaf.platform.v1alpha1":
         return False
     if availability.get("authority") != "leaf-platform-registry":
         return False
-    parsed = _js_date_parse(availability.get("expiresAt"))
-    if parsed is None or parsed <= now:
+    pc = availability.get("productCapability")
+    if not isinstance(pc, str) or len(pc) == 0:
         return False
-    state = availability.get("state")
-    impl = availability.get("implementationState")
-    runtime = availability.get("runtimeState")
+    for field, allowed in (("implementationState", _IMPLEMENTATION_STATES),
+                           ("runtimeState", _RUNTIME_STATES),
+                           ("state", _CAPABILITY_STATES)):
+        value = availability.get(field)
+        if not isinstance(value, str) or value not in allowed:
+            return False
+    observed = _js_date_parse(availability.get("observedAt"))
+    expires = _js_date_parse(availability.get("expiresAt"))
+    if observed is None or expires is None:
+        return False
+    if expires <= now:
+        return False
+    if expires <= observed:
+        return False
+    if (expires - observed) > timedelta(milliseconds=_WEBSITE_TTL_MS):
+        return False
+    if observed > now + timedelta(milliseconds=_WEBSITE_TTL_MS):
+        return False
+    reason = availability.get("reasonCode")
+    if reason is not None and not isinstance(reason, str):
+        return False
+    fallback = availability.get("fallback")
+    if fallback is not None:
+        if not _is_record(fallback):
+            return False
+        if fallback.get("mode") not in _FALLBACK_MODES:
+            return False
+        if fallback.get("provenanceRequired") is not True:
+            return False
     evidence = availability.get("evidence")
-    if not isinstance(evidence, list):
+    if not isinstance(evidence, list) or not all(_website_evidence_ok(e) for e in evidence):
         return False
+    impl = availability["implementationState"]
+    runtime = availability["runtimeState"]
+    state = availability["state"]
     if state == "shipping":
         return impl == "implemented" and runtime == "available" and len(evidence) > 0
     if state == "connected_degraded":
         return (impl == "implemented" and runtime == "degraded"
-                and bool(availability.get("fallback")) and len(evidence) > 0)
+                and fallback is not None and len(evidence) > 0)
     if state == "locked_planned":
         return impl == "planned" and runtime == "unavailable" and len(evidence) == 0
     return impl == "implemented" and runtime != "available"
 
 
 def test_everything_this_module_emits_satisfies_the_real_console_validator():
-    """THE mirror test, against a transcription of the actual TypeScript rather
-    than against a constant of my own invention."""
+    """THE mirror test, against a port of the actual origin/main TypeScript."""
     for entry in PRODUCT_CAPABILITIES:
         locked = locked_availability(entry.id, NOW)
         assert _website_validator(locked, NOW) is True, entry.id
@@ -150,38 +273,62 @@ def test_everything_this_module_emits_satisfies_the_real_console_validator():
     assert _website_validator(got["drawing.solve.strings"]["availability"], NOW) is True
 
 
-def test_this_module_is_stricter_than_the_console_never_looser():
-    """The asymmetry must only run one way: anything we accept, the console must
-    accept. The reverse (a local FALSE LOCK) is the deliberate cost of the extra
-    policy, and this pins it so nobody loosens us into agreement by accident."""
-    console_fixture = {
-        "contractVersion": "leaf.platform.v1alpha1",
-        "authority": "leaf-platform-registry",
-        "productCapability": "drawing.inspect",
-        "implementationState": "planned",
-        "runtimeState": "unavailable",
-        "state": "locked_planned",
-        "observedAt": "2026-07-21T00:00:00.000+00:00",
-        "expiresAt": "2026-07-21T00:05:00.000+00:00",
-        "evidence": [],
-    }
-    at = datetime(2026, 7, 21, 0, 0, 1, tzinfo=timezone.utc)
-    assert _website_validator(console_fixture, at) is True, "console accepts its own fixture"
-    assert is_well_formed_availability(console_fixture, at) is False, (
-        "we refuse its 5-minute window: stricter, therefore fail-closed")
+@pytest.mark.parametrize("mutate,why", [
+    (lambda a: a.update({"expiresAt": "2099-01-01T00:00:00.000+00:00"}), "window longer than one TTL"),
+    (lambda a: a.update({"state": "available"}), "unknown state string"),
+    (lambda a: a.update({"runtimeState": "online"}), "unknown runtime state"),
+    (lambda a: a.update({"productCapability": ""}), "empty capability id"),
+    (lambda a: a.update({"reasonCode": 7}), "non-string reasonCode"),
+    (lambda a: a["evidence"][0]["digest"].update({"value": "nope"}), "digest not sha256"),
+    (lambda a: a["evidence"][0].update({"kind": "vibes"}), "unknown evidence kind"),
+    (lambda a: a.update({"evidence": "receipts"}), "evidence not an array"),
+    (lambda a: a.update({"observedAt": (NOW + timedelta(minutes=5)).isoformat(),
+                         "expiresAt": (NOW + timedelta(minutes=5, seconds=10)).isoformat()}),
+     "observation beyond the skew bound"),
+])
+def test_the_console_and_this_module_refuse_the_same_payloads(mutate, why):
+    """The mirror runs BOTH ways for these: what the console refuses, we refuse.
+    This is what makes the mirror claim testable instead of asserted in prose."""
+    availability = _shipping("drawing.solve.strings")
+    assert _website_validator(availability, NOW) is True, "baseline valid to console"
+    assert is_well_formed_availability(availability, NOW) is True, "baseline valid to us"
+    mutate(availability)
+    assert _website_validator(availability, NOW) is False, f"console must refuse: {why}"
+    assert is_well_formed_availability(availability, NOW) is False, f"we must refuse: {why}"
 
 
-def test_the_lease_ttl_is_local_policy_with_no_cross_repo_counterpart():
-    """The previous version asserted LEASE_TTL_SECONDS against a
-    `SERVER_AVAILABILITY_TTL_MS` figure recorded in the contract document. That
-    constant does not exist in the website repo at all, so the assertion was both
-    circular and false in its premise. Honest statement: the console enforces no
-    TTL, this is a local freshness choice, and it must stay short."""
-    assert 1 <= LEASE_TTL_SECONDS <= 120
-    locked = locked_availability("drawing.inspect", NOW)
-    observed = datetime.fromisoformat(locked["observedAt"])
-    expires = datetime.fromisoformat(locked["expiresAt"])
-    assert (expires - observed).total_seconds() == LEASE_TTL_SECONDS
+def test_we_are_never_looser_than_the_console():
+    """The only tolerable asymmetry is us being STRICTER. Anything we accept, the
+    console must accept."""
+    cases = [locked_availability(e.id, NOW) for e in PRODUCT_CAPABILITIES]
+    cases.append(_shipping("drawing.solve.strings"))
+    degraded = _shipping("drawing.solve.strings")
+    degraded.update({"runtimeState": "degraded", "state": "connected_degraded",
+                     "fallback": {"mode": "read_only", "provenanceRequired": True}})
+    cases.append(degraded)
+    for availability in cases:
+        if is_well_formed_availability(availability, NOW):
+            assert _website_validator(availability, NOW) is True, (
+                f"we accept something the console refuses: {availability.get('productCapability')} "
+                f"{availability.get('state')}")
+
+
+def test_descriptor_for_refuses_an_availability_belonging_to_another_capability():
+    """Validity alone is not enough: the availability must be FOR this capability.
+    A well-formed `drawing.inspect` availability attached to the
+    `drawing.solve.strings` descriptor used to pass straight through, producing a
+    descriptor whose id and productCapability disagreed."""
+    foreign = locked_availability("drawing.inspect", NOW)
+    assert is_well_formed_availability(foreign, NOW) is True, "foreign payload is itself valid"
+    descriptor = descriptor_for(capability("drawing.solve.strings"), foreign, now=NOW)
+    assert descriptor["id"] == "drawing.solve.strings"
+    assert descriptor["availability"]["productCapability"] == "drawing.solve.strings", (
+        "the descriptor must not carry another capability's availability")
+    assert descriptor["availability"]["state"] == "locked_planned"
+    # The matching one is kept.
+    own = locked_availability("drawing.solve.strings", NOW)
+    kept = descriptor_for(capability("drawing.solve.strings"), own, now=NOW)
+    assert kept["availability"]["productCapability"] == "drawing.solve.strings"
 
 
 def test_unknown_capability_is_not_invented():

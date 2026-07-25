@@ -28,68 +28,62 @@ deliberate mirror of that validator, applied before emit, so a malformed
 availability is caught HERE — where it can be logged and fixed — instead of
 being silently swallowed by a browser.
 
-WHAT THE WEBSITE ACTUALLY CHECKS (read from the source, 2026-07-24)
--------------------------------------------------------------------
-`isVerifiedServerAvailability` in projection.ts:31-41 is SHORT. It checks only:
-  1. `contractVersion` == the contract version, `authority` ==
-     leaf-platform-registry;
-  2. `Date.parse(expiresAt)` is not NaN and `expiresAt` > now;
-  3. per-state consistency:
-     shipping           -> implemented + available + evidence.length > 0
-     connected_degraded -> implemented + degraded + a truthy `fallback`
-                           + evidence.length > 0
-     locked_planned     -> planned + unavailable + evidence.length == 0
-     otherwise          -> implemented + runtimeState != available
+WHAT THE WEBSITE ACTUALLY CHECKS (verified against origin/main, 2026-07-24)
+--------------------------------------------------------------------------
+Ground truth is `git show origin/main:lib/leaf-platform/projection.ts`, function
+`isVerifiedServerAvailability`. It exports
+`SERVER_AVAILABILITY_TTL_MS = 15_000` and validates, in order:
 
-That is all. In particular the console does NOT parse `observedAt` at all, has NO
-TTL constant, imposes NO limit on the window length, and never inspects the
-CONTENTS of an evidence record.
+  * the payload is a record; `contractVersion`; `authority`;
+  * `productCapability` a non-empty string;
+  * `implementationState`, `runtimeState`, `state` each checked EXHAUSTIVELY
+    against an allow-list (an unknown string is a NO, never a fall-through);
+  * `observedAt` and `expiresAt` both parseable (`isIsoDate`);
+  * `expiresAt` in the future, `expiresAt` after `observedAt`,
+    `expiresAt - observedAt` NO LONGER than one TTL, and `observedAt` no further
+    than one TTL into the future (the clock-skew bound);
+  * `reasonCode`, if present, a string;
+  * `fallback`, if present, a record with `mode` in the allow-list and
+    `provenanceRequired === true`;
+  * `evidence` an array whose EVERY member is a complete record: `kind` in the
+    allow-list, non-empty `uri`, parseable `verifiedAt`, and a `digest` with
+    `algorithm === 'sha256'` and a 64-hex value;
+  * then the per-state consistency rules, including `locked_planned` carrying
+    ZERO evidence.
 
-CORRECTION (2026-07-24): earlier revisions of this docstring, and of
-contract/CAPABILITY-AVAILABILITY-EMIT.md, claimed the website exports
-`SERVER_AVAILABILITY_TTL_MS = 15000` and enforced a window-length rule and an
-`observedAt` clock-skew bound. No such constant exists anywhere in the website
-repo, and no such rules exist. Those claims were mine and they were wrong. The
-extra rules below are therefore LOCAL POLICY, deliberately stricter than the
-console, not a mirror of it.
+So the mirror below is a real mirror, rule for rule.
 
-LOCAL POLICY ON TOP OF THE MIRROR (stricter on purpose, so fail-closed)
-  * every enum field checked exhaustively (an unknown string is a NO, never a
-    fall-through);
-  * `expiresAt` after `observedAt`, and the window no LONGER than
-    LEASE_TTL_SECONDS, so a supplied 2099 expiry cannot extend trust;
-  * `observedAt` no further than one TTL into the future (clock-skew bound);
-  * every evidence record complete, with a real 64-hex sha256;
-  * `connected_degraded` additionally requires `fallback.provenanceRequired`;
-  * `locked_planned` carries ZERO evidence — a lock dressed in receipts is
-    fail-open by implication.
+CORRECTION OF A CORRECTION (2026-07-24)
+---------------------------------------
+An earlier revision of this docstring, and of
+contract/CAPABILITY-AVAILABILITY-EMIT.md, announced that
+`SERVER_AVAILABILITY_TTL_MS` "does not exist anywhere in the website repo" and
+relabelled the TTL, window and skew rules as local invention. THAT RETRACTION WAS
+WRONG. It came from reading the stale local working tree of leaf_website instead
+of `origin/main`, where the constant and both rules are present. The original
+claims were accurate and are restored above.
 
-Direction of the difference matters: being STRICTER than the console can only
-turn something the console would have accepted into a local `locked_planned`,
-never the reverse, so it cannot produce a payload the browser silently swallows.
-The cost is a possible FALSE LOCK: the console's own fixture (projection.ts:57-67)
-uses a FIVE MINUTE window, which this module's TTL rule would refuse. Emissions
-from this module are always exactly one TTL, so this only bites `live` entries
-handed in by the integrator.
+The lesson, which this repo's own notes already recorded: squash merges rewrite
+SHAs, so a branch can be merged while its commit is not an ancestor of main.
+Verify cross-repo claims by CONTENT against `origin/<branch>`
+(`git show origin/main:<path>`), never against a local checkout and never by SHA
+ancestry.
 
-CLOCKS
-  * `now` must be timezone-AWARE. A naive value is refused, never assumed to be
-    UTC: assuming UTC is fail-OPEN, because a UTC-5 caller's naive 12:00 would
-    accept a lease that expired at 12:00:13Z five hours earlier. The emit path
-    raises ValueError; the validator returns False.
-  * an aware non-UTC `now` is CONVERTED to UTC before emitting, or `isoformat()`
-    would produce spellings like `+00:00:30` that this module's own validator
-    rejects.
-  * emitted timestamps carry MILLISECOND precision, because `Date.parse` keeps
-    only milliseconds and a 6-digit fraction would put the two runtimes up to
-    0.999 ms apart. Incoming timestamps still accept 1 to 6 digits.
+Mirrored rules (this module applies all of the above). Two deliberate places
+where this module is STRICTER, both fail-closed:
+  * `_parse_iso` demands `T` plus an explicit UTC offset and compares at
+    millisecond resolution, while the console's `isIsoDate` accepts anything
+    `Date.parse` accepts. A naive or oddly-spelled stamp is read differently by
+    the two runtimes, so refusing it here removes the ambiguity.
+  * a naive `now` is refused outright rather than assumed to be UTC.
 
-LEASE_TTL_SECONDS is a LOCAL choice, not a cross-repo contract. The console
-enforces no TTL, so shortening or lengthening this value cannot break the
-browser's validation; it only changes how quickly a stale local measurement stops
-being trusted. Keep it short. There is nothing to drift against, which is also
-why the old "assert the TTL against the contract document" test was circular: it
-was comparing this constant to a number I had written down myself.
+LEASE_TTL_SECONDS IS a cross-repo contract: it must equal the website's
+`SERVER_AVAILABILITY_TTL_MS / 1000`. Drift is a coordinated contract event, and a
+one-sided change makes the console reject every emitted availability while every
+capability silently shows locked. The test asserts this against
+`git show origin/main:lib/leaf-platform/projection.ts` when the sibling repo is
+reachable, and skips with a stated reason when it is not; asserting it against a
+number copied into this repo would be circular.
 
 Run:  cd server && python -m pytest tests/test_product_capability_availability.py -q
 """
@@ -396,7 +390,14 @@ def descriptor_for(entry: ProductCapability, availability: Dict[str, Any],
     if now is None:
         now = datetime.now(timezone.utc)
     now = _to_utc(now)
-    if not is_well_formed_availability(availability, now):
+    # The availability must be FOR THIS CAPABILITY. Validity alone is not enough:
+    # a well-formed availability for `drawing.inspect` attached to the
+    # `drawing.solve.strings` descriptor was accepted, producing a descriptor whose
+    # id and whose availability.productCapability disagreed. `build_descriptors`
+    # checked the mapping key; this path did not.
+    if (not isinstance(availability, dict)
+            or availability.get("productCapability") != entry.id
+            or not is_well_formed_availability(availability, now)):
         availability = locked_availability(entry.id, now)
     else:
         availability = copy.deepcopy(availability)

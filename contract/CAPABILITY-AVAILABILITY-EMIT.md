@@ -41,45 +41,41 @@ The backend emit must conform to these, field for field:
    `contract_test`, live write receipt as `end_to_end`, broker ledger line as
    `observability`). Each receipt is content-addressed: `digest.value` =
    sha256 of the artifact served at `uri`.
-4. `observedAt`/`expiresAt`: availability is a lease, not a fact. Emit SHORT
-   leases. The console treats an expired lease as `unavailable`.
+4. `observedAt`/`expiresAt`: availability is a lease, not a fact.
 
-   **CORRECTION (2026-07-24).** Earlier revisions of this section stated a
-   "Normative TTL: `LEASE_TTL_SECONDS = 15`, equivalently the website's
-   `SERVER_AVAILABILITY_TTL_MS = 15000`", and called this line "the single source
-   both sides cite". That was wrong, and it was my error. **No
-   `SERVER_AVAILABILITY_TTL_MS` exists anywhere in the website repo.** Read from
-   source on 2026-07-24, `lib/leaf-platform/projection.ts:31-41` checks only:
+   **Normative TTL: `LEASE_TTL_SECONDS = 15`, matching the website's exported
+   `SERVER_AVAILABILITY_TTL_MS = 15_000`.** Verified by content against
+   `git show origin/main:lib/leaf-platform/projection.ts` on 2026-07-24, and
+   asserted by `test_the_lease_ttl_matches_the_websites_constant_read_from_origin_main`,
+   which reads that constant out of `origin/main` and fails on drift (it SKIPS with
+   a stated reason if the sibling repo is unreachable, rather than passing
+   vacuously).
 
-   1. `contractVersion` and `authority`;
-   2. `Date.parse(expiresAt)` is not NaN and `expiresAt > now`;
-   3. per-state consistency of `implementationState` / `runtimeState` /
-      `evidence.length` (and a truthy `fallback` for `connected_degraded`).
+   The console enforces, structurally: `expiresAt` in the future, `expiresAt` after
+   `observedAt`, `expiresAt - observedAt` no longer than one TTL (so a supplied
+   2099 expiry cannot extend trust), and `observedAt` no further than one TTL into
+   the future (bounded clock-skew tolerance). It also validates every enum
+   exhaustively, requires `fallback.provenanceRequired === true` when `fallback` is
+   present, and requires `evidence` to be an array whose every member is a
+   complete sha256-digested record.
 
-   The console imposes **no TTL, no window-length limit, and never parses
-   `observedAt` at all**. It also never inspects the contents of an evidence
-   record. Its own default fixture (`projection.ts:57-67`) carries a **five
-   minute** window.
+   Changing the TTL is a COORDINATED CONTRACT EVENT: a one-sided change makes the
+   browser reject every emitted availability, and every capability then shows
+   locked with nothing reporting why.
 
-   So `LEASE_TTL_SECONDS = 15` in
-   `server/product_capability_availability.py` is **local freshness policy**, not
-   a cross-repo contract. Changing it cannot break the browser's validation. Keep
-   it short so a stale local measurement stops being trusted quickly.
+   **CORRECTION OF A CORRECTION (2026-07-24).** A previous revision of this
+   section announced that `SERVER_AVAILABILITY_TTL_MS` "does not exist anywhere in
+   the website repo" and downgraded the TTL, window and skew rules to local
+   invention. **That retraction was wrong**, and the original claim above was
+   right. The mistake: I read the *stale local working tree* of leaf_website rather
+   than `origin/main`. Squash merges rewrite SHAs, so the change was merged into
+   `main` even though its branch commit `c5f9c39` is not an ancestor of it. Verify
+   cross-repo claims by CONTENT against `origin/<branch>`, never against a local
+   checkout and never by SHA ancestry.
 
-   The server-side validator deliberately applies **more** rules than the console
-   (window length, an `observedAt` skew bound, evidence-record completeness,
-   `fallback.provenanceRequired`). That asymmetry is safe in one direction only,
-   and the direction is the fail-closed one: anything the server accepts, the
-   console accepts. The cost is a possible **false lock**, and it is real — the
-   console's own five-minute fixture would be refused by the server. Both
-   properties are pinned by
-   `test_this_module_is_stricter_than_the_console_never_looser` and
-   `test_everything_this_module_emits_satisfies_the_real_console_validator`,
-   which transcribes the actual TypeScript instead of asserting against a number
-   recorded here.
-
-   If a real cross-repo TTL is ever wanted, it has to be introduced on the
-   website side first; there is nothing to couple to today.
+   `test_the_website_still_enforces_the_rules_this_module_mirrors` now pins the
+   PREMISE too: if the website ever drops one of these rules, that test fails here
+   instead of this module's strictness quietly becoming arbitrary.
 
 5. Transport: availability rides the authenticated platform-registry response
    path only (types.ts:27). It is never embedded in unauthenticated or public
