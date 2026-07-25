@@ -911,9 +911,35 @@ def test_a_recovered_envelope_must_name_the_identity_we_tried_to_claim():
                                      job_lease_expiry=NOW + 60.0, secret=SECRET, now=NOW,
                                      reserve_completion=_win)
 
+    # A receipt matching job, attempt and output but naming a DIFFERENT WorkItem
+    # and a FAILED status. Round 14 found this: it would have made the broker fail
+    # the job and record provenance for a WorkItem this completion never ran.
+    # Signed with our own secret so only the body comparison can catch it.
+    wrong_semantics_body = json.dumps({
+        "job_id": "job-1", "workitem_id": "wi-DIFFERENT", "attempt": 2,
+        "status": "failed", "nonce": real.nonce,
+        "output": json.loads(real.body)["output"],
+        "produced_at": NOW, "source": "aps-callback-adapter",
+    }, sort_keys=True, separators=(",", ":")).encode()
+    wrong_semantics = adapter.CallbackEnvelope(
+        body=wrong_semantics_body, timestamp=real.timestamp, nonce=real.nonce,
+        signature=callbacks.sign_payload(wrong_semantics_body, real.timestamp,
+                                         real.nonce, SECRET))
+
+    # An attempt of `True`: `True == 1`, so a plain dict comparison would let it
+    # satisfy attempt 1. Included so the exact-type pin cannot be dropped.
+    true_attempt_body = json.dumps({**json.loads(real.body), "attempt": True},
+                                   sort_keys=True, separators=(",", ":")).encode()
+    true_attempt = adapter.CallbackEnvelope(
+        body=true_attempt_body, timestamp=real.timestamp, nonce=real.nonce,
+        signature=callbacks.sign_payload(true_attempt_body, real.timestamp,
+                                         real.nonce, SECRET))
+
     for bogus, why in ((other, "another job"), (other_attempt, "another attempt"),
                        (forged, "an unsigned body"),
-                       (other_output, "different output bytes")):
+                       (other_output, "different output bytes"),
+                       (wrong_semantics, "a different WorkItem and status"),
+                       (true_attempt, "a bool attempt")):
         with pytest.raises(adapter.AdapterError) as excinfo:
             adapter.translate(_completion(), b"output", job_id="job-1", job_attempt=2,
                               job_workitem_id="wi-1", job_lease_expiry=NOW + 60.0,

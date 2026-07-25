@@ -482,19 +482,30 @@ def translate(
             raise AdapterError("bad_completion_guard")
         if type(recovered) is not dict:
             raise AdapterError("bad_completion_guard")
-        if (recovered.get("job_id") != job_id
-                or type(recovered.get("attempt")) is not int
-                or recovered.get("attempt") != claimed_attempt):
+        # COMPARE THE WHOLE BODY, NOT A LIST OF FIELDS. Three review rounds went
+        # the other way and each found one more field I had not thought to check:
+        # first the identity, then the output evidence, then `status` and
+        # `workitem_id` (a stored receipt saying "failed" for a different WorkItem
+        # was accepted as a successful wi-1 completion and would have failed the
+        # job with false provenance). Enumerating trusted fields is a losing game,
+        # because the default for anything unlisted is ACCEPT.
+        #
+        # Inverted: the recovered body must equal the body we just built, and only
+        # the two fields that legitimately differ between deliveries are exempt.
+        # `produced_at` is the original delivery's clock and `nonce` carries the
+        # original delivery nonce; the whole point of returning the receipt
+        # verbatim is that those keep their first values, so its signature still
+        # matches what the replay store may already hold. Every other field is
+        # semantic and must match. A field added to `payload` later is compared
+        # automatically instead of being silently trusted.
+        _RECOVERY_MAY_DIFFER = ("produced_at", "nonce")
+        ours = {k: v for k, v in payload.items() if k not in _RECOVERY_MAY_DIFFER}
+        theirs = {k: v for k, v in recovered.items() if k not in _RECOVERY_MAY_DIFFER}
+        # `bool` is an int subclass and `True == 1`, so a dict comparison alone
+        # would let `attempt: True` satisfy `attempt: 1`. Pin the exact type first.
+        if type(recovered.get("attempt")) is not int:
             raise AdapterError("bad_completion_guard")
-        # AND IT MUST ATTEST THE BYTES WE WERE ASKED TO ATTEST. Checking only the
-        # identity was still too weak: a correctly signed receipt for (job-1, 2)
-        # describing output B came back from a translate() call handed output A,
-        # so the caller received a receipt for content it never produced. The
-        # output evidence is the substance of the receipt, not decoration.
-        recovered_output = recovered.get("output")
-        if (type(recovered_output) is not dict
-                or recovered_output.get("sha256") != output_sha256
-                or recovered_output.get("size") != len(attested)):
+        if theirs != ours:
             raise AdapterError("bad_completion_guard")
         # And it must be a receipt WE could have signed. An unverifiable body is
         # not a recovery, it is an unsigned claim wearing the envelope type.
