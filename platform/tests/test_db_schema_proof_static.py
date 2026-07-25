@@ -149,9 +149,10 @@ def test_legacy_selectors_preserve_the_base_schema_contract():
 
 
 class _SchemaCursor:
-    def __init__(self, column_rows, ledger_rows):
+    def __init__(self, column_rows, ledger_rows, catalog_rows):
         self.column_rows = column_rows
         self.ledger_rows = ledger_rows
+        self.catalog_rows = catalog_rows
         self.rows = []
         self.one = None
 
@@ -164,6 +165,12 @@ class _SchemaCursor:
     def execute(self, statement, _params=None):
         if "information_schema.columns" in statement:
             self.rows = self.column_rows
+        elif "FROM pg_constraint" in statement:
+            self.rows = self.catalog_rows["constraints"]
+        elif "FROM pg_indexes" in statement:
+            self.rows = self.catalog_rows["indexes"]
+        elif "FROM pg_trigger" in statement:
+            self.rows = self.catalog_rows["triggers"]
         elif statement.startswith("SELECT name, sha256"):
             self.rows = self.ledger_rows
         elif statement.startswith("SELECT current_database()"):
@@ -179,12 +186,24 @@ class _SchemaCursor:
 
 
 class _SchemaConnection:
-    def __init__(self, column_rows, ledger_rows):
+    def __init__(self, column_rows, ledger_rows, catalog_rows=None):
         self.column_rows = column_rows
         self.ledger_rows = ledger_rows
+        self.catalog_rows = catalog_rows or {
+            "constraints": [], "indexes": [], "triggers": [],
+        }
 
     def cursor(self):
-        return _SchemaCursor(self.column_rows, self.ledger_rows)
+        return _SchemaCursor(self.column_rows, self.ledger_rows, self.catalog_rows)
+
+
+def _complete_catalog_rows(environ):
+    required = db.required_catalog_for_selected_authorities(environ)
+    return {
+        "constraints": [{"conname": name} for name in required["constraints"]],
+        "indexes": [{"indexname": name} for name in required["indexes"]],
+        "triggers": [{"tgname": name} for name in required["triggers"]],
+    }
 
 
 def test_selected_authority_missing_table_fails_readiness_without_live_database(
@@ -200,7 +219,10 @@ def test_selected_authority_missing_table_fails_readiness_without_live_database(
         for column in columns
     ]
     ledger_rows = db.migration_manifest()
-    conn = _SchemaConnection(column_rows, ledger_rows)
+    conn = _SchemaConnection(
+        column_rows, ledger_rows,
+        _complete_catalog_rows({"LEAF_JOBS_STORE": "postgres"}),
+    )
     monkeypatch.setattr(db, "get_pool", lambda: _Pool(conn))
 
     status = db.schema_status()
@@ -210,6 +232,38 @@ def test_selected_authority_missing_table_fails_readiness_without_live_database(
         db._AUTHORITY_REQUIRED_COLUMNS["jobs"][absent])
     assert status["missing_migrations"] == []
     with pytest.raises(RuntimeError, match=absent):
+        db.assert_schema_current()
+
+
+def test_complete_ledger_cannot_bootstrap_past_missing_runtime_constraint(
+    monkeypatch,
+):
+    """An old CREATE IF NOT EXISTS table must not become ready from ledger rows."""
+    environ = {"LEAF_UPLOAD_STORE": "postgres"}
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "postgres")
+    required = db.required_columns_for_selected_authorities(environ)
+    required[db._MIGRATION_LEDGER_TABLE] = set(db._MIGRATION_LEDGER_COLUMNS)
+    column_rows = [
+        {"table_name": table, "column_name": column}
+        for table, columns in required.items()
+        for column in columns
+    ]
+    catalog_rows = _complete_catalog_rows(environ)
+    missing_constraint = "drawing_store_versions_tenant_id_drawing_id_fkey"
+    catalog_rows["constraints"] = [
+        row for row in catalog_rows["constraints"]
+        if row["conname"] != missing_constraint
+    ]
+    conn = _SchemaConnection(column_rows, db.migration_manifest(), catalog_rows)
+    monkeypatch.setattr(db, "get_pool", lambda: _Pool(conn))
+
+    status = db.schema_status()
+
+    assert status["missing"] == {}
+    assert status["missing_migrations"] == []
+    assert status["missing_constraints"] == [missing_constraint]
+    assert status["ok"] is False
+    with pytest.raises(RuntimeError, match=missing_constraint):
         db.assert_schema_current()
 
 

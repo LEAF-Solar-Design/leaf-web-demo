@@ -184,7 +184,10 @@
       "selectors": [
         {"name": "LEAF_UPLOAD_STORE", "allowed_modes": ["legacy", "postgres"], "repository_default": "legacy"}
       ],
-      "postgres_tables": ["drawing_upload_attempts", "drawing_purge_receipts"],
+      "postgres_tables": [
+        "drawing_store_manifests", "drawing_store_versions",
+        "drawing_upload_attempts", "drawing_purge_receipts"
+      ],
       "legacy_source": ["LEAF_UPLOADS_DIR marker JSON and purge receipt files"],
       "backfill": {"command": null, "status": "not_implemented", "note": "No upload marker, extraction lease, purge lease, or receipt import command exists."},
       "parity": {"command": "python -m pytest -q server/tests/test_drawing_upload_authority_postgres.py", "status": "contract_tests_only", "note": "Tests cover PostgreSQL upload lifecycle behavior, not live file parity."},
