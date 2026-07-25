@@ -38,6 +38,10 @@ Special handling, all documented on the scoreboard:
     crash that loses the scoreboard. Drill it with
     LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" (first attempt only; see
     scripts/test_gate_runner.py, registered as gate-runner-selftest).
+  * `--only` is REPEATABLE and unions its matches, a substring that matches no
+    suite exits 2 rather than silently shrinking the run, and the scoreboard
+    echoes the exact selection that produced it — so the printed result can be
+    checked against the command that was typed.
 
 USAGE
 -----
@@ -45,11 +49,14 @@ USAGE
     python scripts/run-all-gates.py --fail-fast  # stop at the first failing gate
     python scripts/run-all-gates.py --continue    # explicit default (run everything)
     python scripts/run-all-gates.py --only server # substring filter on suite ids
+    python scripts/run-all-gates.py --only server-backbone --only harness-vitest
+                                                 # repeatable: runs the UNION of both
     python scripts/run-all-gates.py --log-dir DIR # where per-suite logs land
 
 EXIT CODE
 ---------
     0  iff every gate passed and every test-level skip was explicitly allowlisted
+    2  nothing ran: an --only substring matched no suite (never a gate verdict)
     1  otherwise
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
@@ -651,7 +658,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 15),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 22),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
@@ -1070,9 +1077,44 @@ def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int) -> Result:
 
 
 # --------------------------------------------------------------------------- #
+# --only selection
+# --------------------------------------------------------------------------- #
+NO_FILTER = "all suites (no --only filter)"
+
+
+def select_suites(suites: List[Suite],
+                  patterns: List[str]) -> tuple[List[Suite], List[str]]:
+    """Union filter for `--only`: a suite is selected when its id contains ANY
+    of the given substrings, in the runner's declared suite order.
+
+    Returns (selected, dead_patterns). A pattern matching no suite is reported
+    rather than absorbed. Both halves exist for the same reason: on 2026-07-25
+    two sessions typed `--only a --only b`, argparse kept only `b`, and the run
+    printed a perfectly truthful `1 PASS 0 FAIL 0 SKIP` for a set nobody asked
+    for. Unioning fixes the flag; refusing to run on a dead substring stops a
+    typo from re-opening the same gap one pattern at a time.
+    """
+    selected = [s for s in suites if any(p in s.id for p in patterns)]
+    dead = [p for p in patterns if not any(p in s.id for s in suites)]
+    return selected, dead
+
+
+def describe_selection(patterns: List[str]) -> str:
+    """The `--only` selection, rendered so the scoreboard can be read straight
+    back against the command line that produced it."""
+    if not patterns:
+        return NO_FILTER
+    flags = " ".join(f"--only {p}" for p in patterns)
+    if len(patterns) == 1:
+        return flags
+    return f"{flags}  (union of {len(patterns)} substrings)"
+
+
+# --------------------------------------------------------------------------- #
 # scoreboard
 # --------------------------------------------------------------------------- #
-def print_scoreboard(results: List[Result], log_dir: Path, wall: float) -> None:
+def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
+                     selection: str = NO_FILTER) -> None:
     rows = []
     for r in results:
         exp = "-" if r.suite.expected is None else str(r.suite.expected)
@@ -1114,6 +1156,10 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float) -> None:
     print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP   "
           f"| test cases passed: {total_tests}  skipped: {total_skipped}   "
           f"| wall: {wall:.1f}s")
+    # The counts above are only meaningful next to WHICH suites they counted.
+    # Echo the selection so a scoreboard can be checked against the command that
+    # produced it instead of being trusted to answer the question that was asked.
+    print(f"  filter: {selection}")
     print(f"  logs:   {log_dir}")
 
     # A suite that only went green on a retry is NOT the same as a green suite,
@@ -1137,8 +1183,11 @@ def main() -> int:
                     help="stop at the first failing gate (default: run all)")
     ap.add_argument("--continue", dest="cont", action="store_true",
                     help="run every gate even if one fails (this is the default)")
-    ap.add_argument("--only", default=None,
-                    help="only run suites whose id contains this substring")
+    ap.add_argument("--only", action="append", default=None, metavar="SUBSTR",
+                    help="only run suites whose id contains SUBSTR. REPEATABLE: each "
+                         "occurrence adds to a union, so `--only a --only b` runs every "
+                         "suite matching a OR b. Exits 2 if any SUBSTR matches no suite, "
+                         "so a typo can never silently shrink the run.")
     ap.add_argument("--retry", type=int, default=1,
                     help="re-run a FAILED suite up to N more times before calling it "
                          "red (default 1). These suites boot real servers and can flake "
@@ -1153,14 +1202,22 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     suites = build_suites()
-    if args.only:
-        suites = [s for s in suites if args.only in s.id]
-        if not suites:
-            print(f"no suites match --only {args.only!r}")
+    total = len(suites)
+    only: List[str] = args.only or []
+    selection = describe_selection(only)
+    if only:
+        suites, dead = select_suites(suites, only)
+        if dead:
+            for pattern in dead:
+                print(f"no suites match --only {pattern!r}")
+            print(f"nothing ran: every --only substring must match at least one "
+                  f"suite. Selection was: {selection}")
             return 2
+        selection += f"  -> {len(suites)} of {total} suites"
 
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "
           f"separate processes, logs -> {log_dir}")
+    print(f"  selection: {selection}")
 
     # Preserve the operator's authored_tools.json: the nl-router gate resets it to
     # clean (gitignored runtime pollution otherwise flakes NL routing), but we
@@ -1211,7 +1268,7 @@ def main() -> int:
             AUTHORED_TOOLS.unlink(missing_ok=True)
 
     wall = time.perf_counter() - wall0
-    print_scoreboard(results, log_dir, wall)
+    print_scoreboard(results, log_dir, wall, selection)
 
     # EXIT 0 iff every non-skipped gate passed.
     any_fail = any(r.status == "FAIL" for r in results)
