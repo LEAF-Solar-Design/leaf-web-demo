@@ -189,12 +189,41 @@ def test_the_default_quiet_window_is_the_documented_five_minutes(monkeypatch):
     assert jobs.reaper_log_throttle_s() == 0.0
 
     monkeypatch.setenv("REAPER_LOG_THROTTLE_S", "-10")
-    assert jobs.reaper_log_throttle_s() == 0.0, "negative clamps, it does not go backwards"
+    assert jobs.reaper_log_throttle_s() == 300.0, (
+        "a negative window is a typo, not a request to log everything; clamping it "
+        "to 0 would turn one bad character into the flood this change prevents")
 
-    for junk in ("not-a-number", "", "   "):
+    # Each of these breaks the bound in its own direction if it gets through:
+    # a raise is absorbed by the caller's swallow into "no reminder logged";
+    # NaN makes every comparison False, restoring full-volume logging; inf
+    # suppresses every reminder forever.
+    for junk in ("not-a-number", "", "   ", "nan", "NaN", "inf", "-inf", "Infinity"):
         monkeypatch.setenv("REAPER_LOG_THROTTLE_S", junk)
         assert jobs.reaper_log_throttle_s() == 300.0, (
-            f"{junk!r} must fall back to the default, not raise into the swallow")
+            f"{junk!r} must fall back to the default, not raise into the swallow "
+            "and not silently break the bound")
+
+
+def test_a_bad_throttle_value_says_so_exactly_once(caplog, monkeypatch):
+    """Falling back is right; falling back SILENTLY hides an operator error.
+
+    The env var would read as configured while having no effect. Once, not per
+    sweep -- a warning on every failure would be its own flood.
+    """
+    monkeypatch.setenv("REAPER_LOG_THROTTLE_S", "not-a-number")
+    monkeypatch.setattr(jobs, "_reaper_throttle_bad_raw", None)
+    monkeypatch.setattr(jobs, "_reaper_throttle_warned", False)
+    monkeypatch.setattr(jobs, "_reap_orphans_once", _always_boom)
+
+    with caplog.at_level(logging.WARNING, logger=jobs.logger.name):
+        for _ in range(30):
+            jobs._reaper_sweep_once()
+
+    complaints = [r for r in _warnings(caplog)
+                  if "REAPER_LOG_THROTTLE_S" in r.getMessage()]
+    assert len(complaints) == 1, (
+        f"expected exactly one complaint about the bad value, got {len(complaints)}")
+    assert "not-a-number" in complaints[0].getMessage()
 
 
 def test_a_permanently_failing_sweep_logs_once_not_once_per_interval(caplog, monkeypatch):
@@ -297,6 +326,88 @@ def test_two_alternating_fault_classes_do_not_bypass_the_throttle(caplog, monkey
     assert len(records) == 2, (
         f"20 sweeps alternating between two fault classes emitted {len(records)} "
         "lines; each class must log once, then be throttled like any repeat")
+
+
+def test_a_stream_of_unique_fault_classes_is_still_bounded(caplog, monkeypatch):
+    """The bound is on LOG LINES, not on fault classes.
+
+    Two earlier versions bounded the wrong thing. Keying the escape on "the class
+    changed" let A, B, A, B log every interval; keying it on "this class is new to
+    the streak" let a fault throwing a FRESH class every sweep log every interval.
+    Same hole, different shape. So this drives 200 sweeps that never repeat a
+    class -- the worst case for any class-keyed rule -- and requires the output to
+    stay inside the per-window budget anyway.
+    """
+    monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+    tick = {"n": 0}
+
+    def _ever_new() -> int:
+        tick["n"] += 1
+        raise type(f"Fault{tick['n']}", (RuntimeError,),
+                   {"__module__": f"mod_{tick['n']}"})("unique-every-time")
+
+    monkeypatch.setattr(jobs, "_reap_orphans_once", _ever_new)
+
+    with caplog.at_level(logging.ERROR, logger=jobs.logger.name):
+        for _ in range(200):
+            jobs._reaper_sweep_once()
+
+    assert tick["n"] == 200, "every interval still ran its sweep"
+
+    records = _warnings(caplog)
+    ceiling = jobs._MAX_VERBOSE_PER_WINDOW + 1  # + the one terse reminder
+    assert len(records) <= ceiling, (
+        f"200 sweeps with 200 distinct fault classes emitted {len(records)} lines; "
+        f"the per-window budget is {ceiling} regardless of class cardinality")
+
+
+def test_the_fault_class_bookkeeping_cannot_grow_without_bound(monkeypatch):
+    """A long outage must not leak memory through the throttle's own state.
+
+    Unbounded `seen_types` plus a fault that throws a fresh class every
+    REAPER_INTERVAL_S is 8,640 retained strings a day, in a process that runs for
+    weeks. The set is capped; the overflow is remembered so the counts an operator
+    reads stay honest rather than silently wrong.
+    """
+    monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+    tick = {"n": 0}
+
+    def _ever_new() -> int:
+        tick["n"] += 1
+        raise type(f"Fault{tick['n']}", (RuntimeError,),
+                   {"__module__": f"mod_{tick['n']}"})("unique-every-time")
+
+    monkeypatch.setattr(jobs, "_reap_orphans_once", _ever_new)
+    for _ in range(200):
+        jobs._reaper_sweep_once()
+
+    state = jobs._reaper_failure_state
+    assert len(state["seen_types"]) <= jobs._MAX_TRACKED_FAULT_CLASSES
+    assert state["class_overflow"] is True, "the cap was hit but not recorded"
+    assert state["consecutive"] == 200, "the streak count is NOT what gets capped"
+
+
+def test_suppressed_failures_are_counted_in_the_next_line_and_on_recovery(
+        caplog, monkeypatch):
+    """A throttled line must say what it swallowed.
+
+    A log line that silently stops is worse than one that floods: the operator
+    cannot tell "healthy" from "throttled into invisibility". Every emitted line
+    carries the suppressed count, and recovery reports what never got logged.
+    """
+    monkeypatch.delenv("REAPER_LOG_THROTTLE_S", raising=False)
+    monkeypatch.setattr(jobs, "_reap_orphans_once", _always_boom)
+
+    with caplog.at_level(logging.WARNING, logger=jobs.logger.name):
+        for _ in range(9):
+            jobs._reaper_sweep_once()
+        monkeypatch.setattr(jobs, "_reap_orphans_once", lambda: 0)
+        jobs._reaper_sweep_once()
+
+    recovery = _warnings(caplog)[-1].getMessage()
+    assert "9 consecutive" in recovery, recovery
+    assert "8 never logged" in recovery, (
+        f"recovery did not account for the suppressed failures: {recovery!r}")
 
 
 def test_the_streak_count_spans_every_fault_class(caplog, monkeypatch):

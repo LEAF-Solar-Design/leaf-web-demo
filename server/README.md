@@ -32,14 +32,25 @@ Env: `APS_LIVE` (default 0 = mock), `JOBS_DB`, `JOB_MAX_S` (540),
 `BROKER_URL`, `BROKER_LEDGER`, `BROKER_TENANTS`, `BROKER_EGRESS_EXTRA`,
 `APS_CRED` (broker only), `LEAF_AUTHOR_LLM` (default 0).
 
-`REAPER_LOG_THROTTLE_S` is the quiet window between reminders about a
-still-failing orphan-reaper sweep. The first sighting of each distinct fault
-class in a streak logs in full; repeats — including a return to a class already
-seen in that streak — collapse into one terse counted line per window, and
-recovery is announced once with the whole streak length. Only the log VOLUME is
-throttled — a failing sweep is still swallowed and still retried every
-`REAPER_INTERVAL_S`. Set to 0 to log every failure; an unparseable value falls
-back to the 300s default rather than raising.
+`REAPER_LOG_THROTTLE_S` is the quiet window bounding how much a still-failing
+orphan-reaper sweep may log. Per window the ceiling is at most 3 full tracebacks
+plus 1 terse reminder, **whatever the exceptions do** — the budget is on log
+lines, not on fault classes, so no stream of exception types can inflate it. At
+the defaults that is at most 48 lines/hour against the 360 it replaced. Within
+the budget a fault class not yet seen in the streak gets priority for a full
+traceback, since a new class is the highest-signal event; once the budget is
+spent it is counted and named by the next line instead.
+
+Suppression is never silent: every line carries the streak length, how many
+distinct classes it spans, and how many failures were suppressed since the last
+line, and recovery reports the whole streak plus what never got logged. Only the
+log VOLUME is throttled — a failing sweep is still swallowed and still retried
+every `REAPER_INTERVAL_S`.
+
+Set to 0 to log every failure. A missing or empty value uses the 300s default. A
+value that is unparseable, negative, NaN, or infinite also falls back to 300s and
+says so once, rather than raising (which the daemon's swallow would absorb into
+silence) or clamping to 0 (which would turn one bad character into the flood).
 
 ## Endpoints
 
