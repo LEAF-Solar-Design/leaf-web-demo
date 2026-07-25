@@ -392,6 +392,12 @@ Progress:
   once with the session-closed reason. The proof caught duplicate beacons from
   `visibilitychange` plus `pagehide`; the shared controller now deduplicates them
   by job id.
+- The managed local version-depth gate now confirms the tracked
+  `delete-marked-panel` write tool twice, creating a real `demo` chain from
+  version 1 to 2 to 3. The unified surface then sends two Undo and two Redo
+  mutations, walks the authoritative head from 3 to 1 and back to 3, and shows
+  all three immutable versions in history. Exactly two run, two undo, and two
+  redo requests are recorded.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -473,7 +479,7 @@ Observed Wave 0 results:
   catalog run bound to the uploaded drawing and tenant. A separate live-auth
   guest walk also passes for signed guest upload, extraction, viewer seating,
   allowed version read, zero dispatch, and denied run. APS, Claude, Auth0 user
-  sign-in, PostgreSQL, and version mutation claims remain open.
+  sign-in, and PostgreSQL claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:

@@ -54,6 +54,8 @@ Current additive progress:
   beacon or stopping the durable job.
 - [x] Prove page hide sends one deduplicated close beacon and the real orphan
   reaper fails the abandoned job once.
+- [x] Prove two real drawing writes create a three-version chain, then drive two
+  undos and two redos through the unified surface and authoritative API.
 
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls
