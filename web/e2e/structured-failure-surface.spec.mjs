@@ -106,3 +106,53 @@ test('retryable failures require a fresh approval and nonretryable failures stay
   await expect(result.getByRole('button', { name: 'Retry' })).toHaveCount(0)
   expect(submissions).toHaveLength(3)
 })
+
+test('a submit transport failure returns to fresh review before recovery', async ({ page }) => {
+  test.setTimeout(90_000)
+  const state = makeCatProofState()
+  const submissions = []
+  await page.addInitScript(() => localStorage.setItem('leaf.org_id', 'cat-proof-org'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    let body = {}
+    if (request.postData()) {
+      try { body = request.postDataJSON() } catch { body = {} }
+    }
+    if (url.pathname === '/api/run' && request.method() === 'POST' && body.tool === 'count-panels') {
+      submissions.push({ body, headers: await request.allHeaders() })
+      if (submissions.length === 1) {
+        await route.abort('failed')
+        return
+      }
+    }
+    const result = catProofResponse({ method: request.method(), path: url.pathname, body, query: Object.fromEntries(url.searchParams) }, state)
+    await route.fulfill({
+      status: result.status,
+      contentType: result.body == null ? undefined : 'application/json',
+      body: result.body == null ? '' : JSON.stringify(result.body),
+      headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
+    })
+  })
+
+  await page.goto('/try')
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await page.getByRole('tab', { name: /Catalog/ }).click()
+  await page.getByRole('button', { name: /count-panels/i }).click()
+  await page.getByRole('button', { name: 'Review & run' }).click()
+  await page.getByRole('button', { name: 'Run count-panels' }).click()
+  await expect(page.getByTestId('operator-phase')).toContainText('Request failed', { timeout: 15_000 })
+  await page.getByRole('tab', { name: 'Execution' }).click()
+  const result = page.getByTestId('catalog-run-result')
+  await expect(result).toContainText('The panel run did not produce a readable result.')
+
+  await result.getByRole('button', { name: 'Retry' }).click()
+  await expect(page.getByRole('button', { name: 'Run count-panels' })).toBeVisible()
+  expect(submissions).toHaveLength(1)
+  await page.getByRole('button', { name: 'Run count-panels' }).click()
+  await expect(page.getByTestId('operator-phase')).toContainText('Tool run complete', { timeout: 15_000 })
+  await page.getByRole('tab', { name: 'Execution' }).click()
+  await expect(result).toContainText('Passed')
+  expect(submissions).toHaveLength(2)
+  expect(submissions[1].headers['idempotency-key']).not.toBe(submissions[0].headers['idempotency-key'])
+})

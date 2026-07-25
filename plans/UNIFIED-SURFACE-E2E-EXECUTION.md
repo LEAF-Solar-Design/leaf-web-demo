@@ -322,9 +322,12 @@ Progress:
   Retry, and uses the controller's head-read recovery without approving or
   submitting the write again. The focused browser proof injects one 503, then
   recovers version 2 with one submission.
+- Submit transport failures now use the same fresh-review recovery path as
+  structured terminal failures. Browser proof aborts the first run request,
+  verifies Retry submits nothing, then confirms a second proposal with a new
+  idempotency key and a successful result.
 - Job, catalog, platform, checkout, upload, and project provider lifting,
-  submit and route transport recovery, and the remaining accessibility ladder
-  remain open.
+  route transport recovery, and the remaining accessibility ladder remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
