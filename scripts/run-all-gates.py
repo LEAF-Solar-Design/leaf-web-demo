@@ -602,29 +602,24 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # 199 COLLECTED with a DB configured, measured on this tree 2026-07-25
-        # via `cd server && DATABASE_URL=... python -m pytest ../platform/tests
-        # --collect-only -q`. Collecting needs no reachable server: the conftest
-        # ignore-hook keys off DATABASE_URL (or platform/.env.local) merely
-        # being present, so every module collects, not just the *_static.py
-        # proofs.
-        # The floor below is NOT that number. Per coverage_verdict, `expected`
-        # is an EXECUTED-test floor. Provenance of 145: commit 80e3762
-        # (2026-07-23) measured 145/145 executed, zero skips, on a throwaway
-        # Neon branch. 54 tests have been added since.
-        # 199 is the floor this suite should carry, and the 54-test gap is a
-        # real hole, not a safe margin. This suite allowlists NO skip reason, a
-        # non-allowlisted skip fails it outright, and every skip path under
-        # platform/tests is gated on the DB being unconfigured. That is exactly
-        # why the 2026-07-23 run came back 145/145 with zero skips: on a
-        # reachable DB nothing skips, so a green run executes everything
-        # collected. At a floor of 145 the suite can therefore lose up to 54
-        # tests and still report green -- 146..198 pass with only a drift note,
-        # and exactly 145 passes silently, with no note at all.
-        # Not raised here because that is an executable change and this host has
-        # no Postgres. Re-baseline it to the collected count on a live-DB run.
+        # Floor is 199, the EXECUTED count measured 2026-07-25 against a live
+        # PostgreSQL 17 (throwaway Neon branch): 199 passed, 0 skipped, 0
+        # failed. It replaces 145, which commit 80e3762 (2026-07-23) measured
+        # the same way. 54 tests were added after that and the floor never
+        # moved, so the suite could have lost 54 of them and still reported
+        # green: 146..198 passed with only a drift note, and exactly 145 passed
+        # silently, with no note at all.
+        # Collected and executed are both 199 because this suite allowlists NO
+        # skip reason, and every skip path under platform/tests is gated on the
+        # DB being unconfigured -- on a reachable DB nothing skips, so a green
+        # run executes everything collected.
+        # Re-baselining this needs a PRISTINE database, not just a reachable
+        # one. Several tests bind fixed external subjects (e.g.
+        # "auth0|1b-cross-org") that are unique per tenant, so a second run
+        # against the same branch fails on the first run's rows instead of
+        # measuring anything.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 145, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 199, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
