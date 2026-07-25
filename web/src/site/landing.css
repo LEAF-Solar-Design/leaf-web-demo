@@ -304,6 +304,14 @@
 .tc-operator-rail .tc-rail-body > .converse-card { flex: 1; }
 .tc-rail .tools-inner { padding: 10px 8px 16px; }
 .tc-rail .tools-inner .panel-sub { margin: 0 0 10px; color: #71717a; font-size: 11px; line-height: 1.45; }
+.tc-rail .catalog-summary {
+  padding: 10px 12px 8px; color: #71717a; font: 500 10.5px 'Inter Tight', sans-serif;
+}
+.tc-rail .catalog-family { margin: 0 8px 8px; border-color: #27272a; background: #0f0f11; }
+.tc-rail .catalog-family .section-head { padding: 9px 10px; font-size: 11px; }
+.tc-rail .catalog-family .section-body { padding: 0; }
+.tc-rail .catalog-family .tools-inner { padding: 8px 6px 10px; }
+.tc-rail .catalog-fallback { padding: 0 8px; }
 .tc-rail .tool-card { background: #111113; border-color: #27272a; }
 .tc-rail .tool-head { padding: 10px; }
 .tc-rail .tool-name { font-size: 11.5px; }

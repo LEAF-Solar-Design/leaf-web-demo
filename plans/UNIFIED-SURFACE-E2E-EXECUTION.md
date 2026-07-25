@@ -432,6 +432,18 @@ Progress:
   real panel handle, canvas change on layer hide, automatic selection clearing,
   and layer restoration. VW-01 and VW-02 are local E2E proven with the
   receipt's APS, headless WebGL, and Auth0 limits.
+- The unified Catalog tab now renders the capability families already owned by
+  the shared catalog controller instead of discarding them in favor of the
+  flat tool list. The managed gate proves real family and capability totals,
+  collapse and reopen, capability detail, immutable review, execution, and
+  durable result restoration in one scene. A family-service failure keeps the
+  registered flat list as an explicit retryable fallback. CA-01 is local E2E
+  proven except for live transient-failure recovery.
+- AU-01 cannot advance in the off-auth managed profile. The protected author
+  route correctly requires a signed user identity, trusted tenant binding,
+  isolated tenant repository, enabled R5 and R6 rollout, authoring authority,
+  and independent approval authority. Those controls must be supplied by an
+  authorized protected environment. The fixture proof remains contract-only.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -514,11 +526,12 @@ Observed Wave 0 results:
   job reattach, Escape detach, page-hide reaping, three-version Undo and Redo
   depth, the scripted conversation approval round trip, checkout conflict,
   expiry, take, and release, the real local Trust lifecycle, real layer
-  visibility, resident zoom and Fit, entity picking, and selection clearing. A
-  separate live-auth guest walk also passes for signed guest upload,
-  extraction, viewer seating, allowed version read, zero dispatch, and denied
-  run. APS, live Claude, Auth0 user sign-in, PostgreSQL, production billing,
-  and conversation-driven product execution claims remain open.
+  visibility, resident zoom and Fit, entity picking, selection clearing, and
+  the real grouped capability catalog through durable execution. A separate
+  live-auth guest walk also passes for signed guest upload, extraction, viewer
+  seating, allowed version read, zero dispatch, and denied run. APS, live
+  Claude, Auth0 user sign-in, protected authoring, PostgreSQL, production
+  billing, and conversation-driven product execution claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:

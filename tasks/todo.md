@@ -68,6 +68,12 @@ Current additive progress:
 - [x] Prove the real local drawing's layer count, zoom, Fit, resident canvas,
   entity picking, layer visibility, and selection clearing in the unified View
   rail.
+- [x] Render the shared controller's real capability families in the unified
+  Catalog tab and prove totals, collapse, detail, review, execution, and durable
+  restoration on the managed local stack.
+- [ ] Promote protected author stage, independent approval, publish, catalog
+  refresh, and use in an authorized environment with live signed identity,
+  trusted tenant binding, isolated authoring authority, and R5/R6 rollout.
 
 - [x] Integrate projects, catalog, authoring, upload, viewer, selection, checkout,
   trust, account, results, details, versions, operations, and responsive controls

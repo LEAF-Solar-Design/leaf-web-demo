@@ -1,11 +1,11 @@
 import { expect, test } from '@playwright/test'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 
-test('real local stack runs a catalog tool and restores its durable receipt', async ({ page, request }) => {
+test('real local stack runs a catalog tool and restores its durable receipt', async ({ page, request }, testInfo) => {
   let ready
   try {
     const response = await request.get(`${API_BASE}/api/ready`, { timeout: 3_000 })
@@ -14,6 +14,19 @@ test('real local stack runs a catalog tool and restores its durable receipt', as
     ready = null
   }
   test.skip(!ready?.ready, `real local stack is not ready at ${API_BASE}`)
+  const capabilityResponse = await request.get(`${API_BASE}/api/capabilities`, {
+    headers: { 'X-Tenant-Id': 'demo-tenant' },
+  })
+  expect(capabilityResponse.status()).toBe(200)
+  const capabilityCatalog = await capabilityResponse.json()
+  const targetFamily = capabilityCatalog.families.find((family) => (
+    family.capabilities?.some((capability) => capability.name === 'count-by-layer')
+  ))
+  expect(targetFamily, 'the real capability catalog must classify count-by-layer').toBeTruthy()
+  const capabilityCount = capabilityCatalog.families.reduce(
+    (count, family) => count + (family.capabilities?.length || 0),
+    0,
+  )
 
   const observed = []
   const runSubmissions = []
@@ -38,9 +51,21 @@ test('real local stack runs a catalog tool and restores its durable receipt', as
   expect(observed).toContain('GET /api/session 200')
 
   await page.getByRole('tab', { name: /Catalog/ }).click()
+  await expect(page.locator('.catalog-summary')).toContainText(`${capabilityCatalog.families.length}`)
+  await expect(page.locator('.catalog-summary')).toContainText(`${capabilityCount} capabilities`)
+  const family = page.locator('.catalog-family').filter({ hasText: targetFamily.label })
+  const familyToggle = family.locator('.catalog-family-head')
+  await expect(familyToggle).toHaveAttribute('aria-expanded', 'true')
+  await familyToggle.click()
+  await expect(familyToggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(family.locator('.tool-card')).toHaveCount(0)
+  await familyToggle.click()
+  await expect(familyToggle).toHaveAttribute('aria-expanded', 'true')
   const toolCard = page.locator('.tool-card').filter({ hasText: 'count-by-layer' })
   await expect(toolCard).toBeVisible()
   await toolCard.getByRole('button').first().click()
+  await expect(toolCard).toContainText('drawing.read')
+  await expect(toolCard).toContainText('No parameters.')
   await toolCard.getByRole('button', { name: 'Review & run' }).click()
 
   const confirmRun = page.getByRole('button', { name: 'Run count-by-layer' })
@@ -79,7 +104,7 @@ test('real local stack runs a catalog tool and restores its durable receipt', as
   await expect(restoredJob).toContainText('complete', { timeout: 15_000 })
 
   writeProofReceipt(join(PROOF_DIR, 'receipt.json'), {
-    capability_ids: ['ID-03', 'HL-01', 'JB-01', 'JB-02'],
+    capability_ids: ['ID-03', 'CA-01', 'HL-01', 'JB-01', 'JB-02'],
     evidence_tier: 'local-e2e',
     route: '/try',
     runtime: 'real local Vite, FastAPI, broker, harness, SQLite stores, and job workers',
@@ -87,13 +112,27 @@ test('real local stack runs a catalog tool and restores its durable receipt', as
     assertions: [
       'the real local readiness gate returned ready',
       'the real drawing session loaded a non-empty panel count without API interception',
+      'the unified Catalog tab rendered the real capability family and capability counts',
+      'the real family could be collapsed and reopened without leaving the unified scene',
+      'the count-by-layer detail rendered its capability and parameter contract',
       'catalog review staged an immutable proposal without dispatching a run',
       'explicit confirmation submitted count-by-layer to the real broker and worker',
       'the completed result rendered in the unified scene',
       'the completed job remained available from the durable job API and Jobs rail after reload',
       'no request targeted leaf-proof.invalid',
     ],
-    result: { verdict: 'pass', readiness: ready, job_id: submitted.job_id, job_status: 'complete' },
+    artifacts: [
+      relative(join(process.cwd(), '..'), testInfo.outputPath('video.webm')).replaceAll('\\', '/'),
+    ],
+    result: {
+      verdict: 'pass',
+      readiness: ready,
+      catalog_families: capabilityCatalog.families.length,
+      catalog_capabilities: capabilityCount,
+      selected_family: targetFamily.family_id,
+      job_id: submitted.job_id,
+      job_status: 'complete',
+    },
     limitations: [
       'APS_LIVE=0 substitutes the local engine for Autodesk APS.',
       'LEAF_AGENT_MOCK=1 substitutes the fake harness runner for Claude.',

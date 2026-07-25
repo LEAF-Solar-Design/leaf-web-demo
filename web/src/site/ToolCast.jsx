@@ -17,6 +17,7 @@ import {
 } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
 import AuthorPanel from '../components/AuthorPanel.jsx'
+import CapabilityCatalog from '../components/CapabilityCatalog.jsx'
 import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
 import CheckoutControls from '../components/CheckoutControls.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
@@ -33,7 +34,6 @@ import DegradedBanner from '../components/DegradedBanner.jsx'
 import Toast from '../components/Toast.jsx'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
-import ToolsPanel from '../components/ToolsPanel.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
@@ -206,6 +206,7 @@ export default function ToolCast({
   const accountSessionObservedRef = useRef(false)
   const tourSeqRef = useRef(0)
   const catalogDecisionRef = useRef(null)
+  const catalogFamiliesOpenedRef = useRef(false)
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
     const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
@@ -447,11 +448,21 @@ export default function ToolCast({
   const {
     tools,
     toolsError,
+    catalog: capabilityCatalog,
+    catalogError,
+    openFamilies,
     route,
     routing,
     routeError,
     agentBanner,
   } = catalog.state
+  useEffect(() => {
+    if (catalogFamiliesOpenedRef.current || capabilityCatalog.families.length === 0) return
+    catalogFamiliesOpenedRef.current = true
+    for (const family of capabilityCatalog.families) {
+      catalog.actions.setFamilyOpen(family.family_id, true)
+    }
+  }, [capabilityCatalog.families, catalog.actions])
   const armCatalogDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') return decision
     const tool = tools.find((candidate) => candidate.name === decision.tool)
@@ -866,17 +877,21 @@ export default function ToolCast({
             </div>
           ))}
           {leftView === 'catalog' && (
-            <ToolsPanel
+            <CapabilityCatalog
+              catalog={capabilityCatalog}
+              catalogError={catalogError}
+              openFamilies={openFamilies}
+              onToggleFamily={catalog.actions.toggleFamily}
+              onRetryCatalog={catalog.actions.loadCatalog}
               tools={tools}
-              error={toolsError}
+              toolsError={toolsError}
               running={busy || jobRunning}
               selectedTool={selectedCatalogTool}
               onRequestRun={requestCatalogRun}
               onOpenTool={setSelectedCatalogTool}
-              onRetry={catalog.actions.retryTools}
+              onRetryTools={catalog.actions.retryTools}
               writeEntitled={writeEntitled}
               writeLocked={checkout.writeLocked}
-              subtitle="Choose a registered capability, inspect its parameters, then review before it runs."
             />
           )}
           {leftView === 'workspace' && (
