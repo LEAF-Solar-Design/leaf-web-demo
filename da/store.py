@@ -33,6 +33,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1414,6 +1415,39 @@ def checkout_active(co: dict | None) -> bool:
     return _is_active(co, datetime.now(timezone.utc))
 
 
+_LEGACY_CHECKOUT_LOCKS: dict[str, threading.Lock] = {}
+_LEGACY_CHECKOUT_LOCKS_GUARD = threading.Lock()
+
+
+def _legacy_checkout_lock(tid: str, did: str) -> threading.Lock:
+    """Serialize the legacy authority's checkout read-modify-write, per drawing.
+
+    The legacy manifest is a load, edit, save with nothing holding the record in
+    between (see the module note on non-atomic writes). Two concurrent acquires
+    of a FREE drawing therefore both read generation N, both compute N+1, and
+    the second save wins — leaving ONE persisted lease that two callers were
+    each told they had taken. Both then hold a capability that verifies against
+    it, because the capability binds the generation and the generations are
+    equal, which is the ownership bypass the fence exists to prevent. A release
+    racing an acquire loses the same update in the other direction and lets a
+    generation repeat.
+
+    The postgres authority does not need this: it reads `FOR UPDATE` and
+    increments in the same statement. This closes the window for the DOCUMENTED
+    legacy deployment, which is a single app process (docker-compose pins one
+    for the SQLite write path). It does NOT make the legacy manifest atomic
+    across processes — two app replicas on the legacy store can still lose an
+    update, and the fix for that is postgres, which is what production runs.
+    """
+    key = f"{tid}/{did}"
+    with _LEGACY_CHECKOUT_LOCKS_GUARD:
+        lock = _LEGACY_CHECKOUT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LEGACY_CHECKOUT_LOCKS[key] = lock
+        return lock
+
+
 def _next_fence(m: dict) -> int:
     """The next legacy lock generation — monotonic ACROSS release.
 
@@ -1562,29 +1596,30 @@ def acquire_checkout_fence(backend: StorageBackend, tenant_id: str, drawing_id: 
             return int(written["checkout_fence"])
 
         return db.run_transaction(operation, isolation="serializable")
-    m = load_manifest(backend, tid, did)
-    now = datetime.now(timezone.utc)
-    co = m.get("checkout")
+    with _legacy_checkout_lock(tid, did):
+        m = load_manifest(backend, tid, did)
+        now = datetime.now(timezone.utc)
+        co = m.get("checkout")
 
-    if _is_active(co, now):
-        if strict_owner:
-            if expected_fence is None:
+        if _is_active(co, now):
+            if strict_owner:
+                if expected_fence is None:
+                    return None
+                if int((co or {}).get("fence") or 0) != int(expected_fence):
+                    return None
+            elif co.get("holder") != holder:
                 return None
-            if int((co or {}).get("fence") or 0) != int(expected_fence):
-                return None
-        elif co.get("holder") != holder:
-            return None
 
-    fence = _next_fence(m)
-    m["checkout_fence"] = fence          # monotonic; survives release (see _next_fence)
-    m["checkout"] = {
-        "holder": holder,
-        "acquired": now.isoformat(),
-        "expires": (now + timedelta(seconds=float(ttl_s))).isoformat(),
-        "fence": fence,
-    }
-    save_manifest(backend, tid, did, m)
-    return fence
+        fence = _next_fence(m)
+        m["checkout_fence"] = fence      # monotonic; survives release (see _next_fence)
+        m["checkout"] = {
+            "holder": holder,
+            "acquired": now.isoformat(),
+            "expires": (now + timedelta(seconds=float(ttl_s))).isoformat(),
+            "fence": fence,
+        }
+        save_manifest(backend, tid, did, m)
+        return fence
 
 
 def release_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
@@ -1645,20 +1680,21 @@ def release_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
             return True
 
         return db.run_transaction(operation, isolation="serializable")
-    m = load_manifest(backend, tid, did)
-    co = m.get("checkout")
-    if not co:
-        return False
-
-    if _is_active(co, datetime.now(timezone.utc)):
-        # refuse to steal an ACTIVE lock: by proven generation when the caller
-        # has one, else by the caller-supplied holder label.
-        if expected_fence is not None:
-            if int(co.get("fence") or 0) != int(expected_fence):
-                return False
-        elif holder is not None and co.get("holder") != holder:
+    with _legacy_checkout_lock(tid, did):
+        m = load_manifest(backend, tid, did)
+        co = m.get("checkout")
+        if not co:
             return False
 
-    m["checkout"] = None
-    save_manifest(backend, tid, did, m)
-    return True
+        if _is_active(co, datetime.now(timezone.utc)):
+            # refuse to steal an ACTIVE lock: by proven generation when the caller
+            # has one, else by the caller-supplied holder label.
+            if expected_fence is not None:
+                if int(co.get("fence") or 0) != int(expected_fence):
+                    return False
+            elif holder is not None and co.get("holder") != holder:
+                return False
+
+        m["checkout"] = None
+        save_manifest(backend, tid, did, m)
+        return True

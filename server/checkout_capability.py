@@ -158,19 +158,39 @@ def _subject_of(tenant: Any) -> str:
     return ""
 
 
-def ensure_mintable(tenant: Any) -> None:
-    """Raise `CapabilityUnavailable` now if this deployment could not mint.
+_TRIAL_FENCE = 0  # never a real generation; `_next_fence` starts at 1
 
-    Called by the acquire route BEFORE it takes the lock. Both failures the mint
-    can raise — no usable signing secret, and no authenticated subject under
-    LEAF_AUTH_LIVE=1 — depend only on posture, not on the generation, so they
-    can be answered before anything is written. Discovering them afterwards
-    would leave an ACTIVE lock whose capability was never issued: nobody could
-    release, refresh or write it, and the drawing would stay locked for the
-    whole TTL on what is really a server misconfiguration.
+
+def ensure_mintable(tenant: Any, drawing_id: str) -> None:
+    """Raise `CapabilityUnavailable` now if minting for this caller would fail.
+
+    Called by the acquire route BEFORE it takes the lock. Discovering a mint
+    failure afterwards would leave an ACTIVE lock whose capability was never
+    issued: nobody could release, refresh or write it, and the drawing would
+    stay locked for the whole TTL on what is really a server-side fault.
+
+    This performs a REAL trial mint against a sentinel generation and throws the
+    result away, rather than re-listing the individual reasons minting can fail.
+    Listing them is what leaves gaps: the first version of this check called
+    `_secret` and `_subject_of` and still missed that `mint` UTF-8 encodes the
+    binding, so an authenticated `sub` carrying an unpaired surrogate passed the
+    check and then raised `UnicodeEncodeError` from inside `mint` — a 500 with
+    the lock already taken, which is precisely the failure this exists to
+    prevent. Everything `mint` can raise for a given (tenant, subject, drawing),
+    now and later, is raised here instead, because it is the same call.
+
+    The generation is the ONE input that differs between this trial and the real
+    mint, and it cannot fail: the route passes what `acquire_checkout_fence`
+    returned, always an int.
     """
-    _secret()
-    _subject_of(tenant)
+    try:
+        mint(tenant, drawing_id, _TRIAL_FENCE)
+    except CapabilityUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any mint fault is an operator fault
+        raise CapabilityUnavailable(
+            f"this deployment cannot mint a checkout capability for this "
+            f"caller: {type(exc).__name__}") from exc
 
 
 def mint(tenant: Any, drawing_id: str, fence: int) -> str:

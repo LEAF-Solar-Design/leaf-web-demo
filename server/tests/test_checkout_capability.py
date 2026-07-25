@@ -275,15 +275,175 @@ def test_ensure_mintable_refuses_production_without_a_secret(monkeypatch):
     monkeypatch.delenv("LEAF_CHECKOUT_CAP_SECRET", raising=False)
     monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
     with pytest.raises(cc.CapabilityUnavailable):
-        cc.ensure_mintable(TENANT)
+        cc.ensure_mintable(TENANT, DRAWING)
 
 
 def test_ensure_mintable_refuses_a_subjectless_caller_when_auth_is_live(monkeypatch):
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     with pytest.raises(cc.CapabilityUnavailable, match="authenticated subject"):
-        cc.ensure_mintable(subject_ctx(None))
+        cc.ensure_mintable(subject_ctx(None), DRAWING)
 
 
 def test_ensure_mintable_passes_in_the_ordinary_posture():
-    cc.ensure_mintable(subject_ctx("auth0|alice"))
-    cc.ensure_mintable(TENANT)
+    cc.ensure_mintable(subject_ctx("auth0|alice"), DRAWING)
+    cc.ensure_mintable(TENANT, DRAWING)
+
+
+def test_ensure_mintable_refuses_a_subject_mint_cannot_encode():
+    """sol-critic r4. The first precheck re-listed the reasons minting fails
+    (`_secret`, `_subject_of`) instead of trying it, and so missed that `mint`
+    UTF-8 encodes the binding. A verified `sub` carrying an unpaired surrogate
+    passed the check, then raised UnicodeEncodeError from inside `mint` — a 500
+    with the lock already taken, which is the exact failure the precheck exists
+    to prevent. It now trial-mints, so anything `mint` can raise is raised here.
+    """
+    lone_surrogate = subject_ctx("auth0|\ud800")
+    with pytest.raises(cc.CapabilityUnavailable):
+        cc.ensure_mintable(lone_surrogate, DRAWING)
+    # and the underlying mint really would have failed, so the check is not
+    # rejecting something that would otherwise have worked
+    with pytest.raises(UnicodeEncodeError):
+        cc.mint(lone_surrogate, DRAWING, 1)
+
+
+# --------------------------------------------------------------------------- #
+# sol-critic r4: pin the ROUTE's choice, not just the primitive's contract
+#
+# The store tests above prove `acquire_checkout_fence` reports the generation it
+# stamped, and the unit tests prove a capability for a different generation is
+# refused. Neither fails if the ROUTE goes back to minting from a reloaded
+# manifest — which was the actual defect. This forces the two apart: the store
+# reports one generation while the manifest holds another, exactly the state the
+# race produces, and asserts which one the route signed.
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def drawings_client(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from envelopes import install_error_handlers
+
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    monkeypatch.setenv("APS_LIVE", "0")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+
+    from routers import drawings as drawings_router
+
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(drawings_router.router)
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_the_route_signs_the_granted_generation_not_the_current_one(
+        drawings_client, monkeypatch):
+    tenant = "route-fence-tenant"
+    headers = {"X-Tenant-Id": tenant}
+
+    first = drawings_client.post("/api/drawings/demo/checkout",
+                                 json={"holder": "sess-a", "ttl_s": 300},
+                                 headers=headers)
+    assert first.status_code == 200, first.text
+    granted_generation = 1
+
+    sys.path.insert(0, str(SERVER_DIR.parent / "da"))
+    import store  # noqa: E402
+    from routers import drawings as drawings_router  # noqa: E402
+
+    backend = drawings_router._backend(tenant)
+
+    # A second session takes the drawing, moving the manifest to generation 2.
+    # This is the state the race leaves behind: the generation THIS caller's
+    # acquire stamped is no longer the one a reload finds.
+    assert store.acquire_checkout_fence(
+        backend, tenant, "demo", "sess-b", 300,
+        expected_fence=granted_generation, strict_owner=True) == 2
+
+    # Our acquire reports the generation it wrote, as the fixed primitive does.
+    monkeypatch.setattr(
+        store, "acquire_checkout_fence",
+        lambda *a, **k: granted_generation, raising=True)
+
+    second = drawings_client.post("/api/drawings/demo/checkout",
+                                  json={"holder": "sess-a", "ttl_s": 300},
+                                  headers=headers)
+    assert second.status_code == 200, second.text
+    issued = second.json()["checkout_capability"]
+
+    co = store.load_manifest(backend, tenant, "demo")["checkout"]
+    assert int(co["fence"]) != granted_generation, (
+        "fixture failed to separate the granted generation from the current one")
+
+    # The route must have signed the GRANTED generation. Minting from the
+    # reloaded manifest instead would make this capability verify against the
+    # current lock — which is the bypass.
+    with pytest.raises(cc.CapabilityRejected):
+        cc.verify(issued, tenant, "demo", co)
+    assert issued == cc.mint(tenant, "demo", granted_generation)
+
+
+def test_concurrent_legacy_acquires_cannot_share_one_generation(monkeypatch):
+    """sol-critic r4. The legacy manifest is a load-edit-save with nothing held
+    in between, so two concurrent acquires of a FREE drawing both read
+    generation N, both compute N+1, and the second save wins. Two callers are
+    each told they took the lock, ONE lease persists, and both capabilities
+    verify against it because the generations are equal — the bypass the fence
+    exists to prevent. Only one acquire may win, and the winner's generation
+    must be unique.
+    """
+    import threading
+    import time
+
+    da_dir = str(SERVER_DIR.parent / "da")
+    if da_dir not in sys.path:
+        sys.path.insert(0, da_dir)
+    import store  # noqa: E402
+
+    backend = store.InMemoryBackend()
+    store.save_manifest(backend, TENANT, DRAWING,
+                        store._new_manifest(TENANT, DRAWING))
+
+    # The window is between the load and the save. In memory those are adjacent
+    # with no yield point, so a plain thread race almost never lands on it — a
+    # test built that way passes with the serialization REMOVED and proves
+    # nothing. Force the interleaving instead: the first loader announces itself
+    # and then holds its snapshot briefly, and the second waits for that
+    # announcement before loading. Without serialization both threads therefore
+    # certainly hold generation N and both certainly write N+1. With it, the
+    # second thread cannot reach the load until the first has saved.
+    real_load = store.load_manifest
+    first_has_loaded = threading.Event()
+
+    def interleaved_load(*a, **k):
+        m = real_load(*a, **k)
+        if not first_has_loaded.is_set():
+            first_has_loaded.set()
+            time.sleep(0.25)        # hold the snapshot, inviting the collision
+        else:
+            first_has_loaded.wait(timeout=5)
+        return m
+
+    monkeypatch.setattr(store, "load_manifest", interleaved_load)
+    granted: list[int] = []
+    granted_guard = threading.Lock()
+
+    def acquire(n):
+        fence = store.acquire_checkout_fence(
+            backend, TENANT, DRAWING, f"sess-{n}", 300,
+            expected_fence=None, strict_owner=True)
+        if fence is not None:
+            with granted_guard:
+                granted.append(fence)
+
+    threads = [threading.Thread(target=acquire, args=(n,)) for n in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Exactly one caller may be told it holds the free drawing, and no two
+    # callers may ever be handed the same generation.
+    assert len(granted) == 1, f"{len(granted)} callers were granted the same lock"
+    assert len(set(granted)) == len(granted)
+    persisted = store.load_manifest(backend, TENANT, DRAWING)["checkout"]
+    assert int(persisted["fence"]) == granted[0]

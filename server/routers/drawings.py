@@ -434,7 +434,7 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     # nobody can then release or write — a server misconfiguration turning into
     # a locked drawing for the whole TTL.
     try:
-        checkout_capability.ensure_mintable(tenant_id)
+        checkout_capability.ensure_mintable(tenant_id, drawing_id)
     except checkout_capability.CapabilityUnavailable as exc:
         return _denied(exc)
 
