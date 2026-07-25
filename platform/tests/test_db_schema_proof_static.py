@@ -409,6 +409,26 @@ def test_catalog_contract_accepts_postgres_deparser_grouping_and_casts():
     assert self_error not in errors["invalid_constraints"]
 
 
+def test_catalog_contract_rejects_cross_schema_foreign_key_target():
+    environ = {"LEAF_UPLOAD_STORE": "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    name = "drawing_store_versions_tenant_id_drawing_id_fkey"
+    row = next(
+        item
+        for item in rows["constraints"]
+        if item["conname"] == name
+    )
+    row["definition"] = row["definition"].replace(
+        "REFERENCES drawing_store_manifests",
+        "REFERENCES evil.drawing_store_manifests",
+    )
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert f"{name}:definition-mismatch" in errors["invalid_constraints"]
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
