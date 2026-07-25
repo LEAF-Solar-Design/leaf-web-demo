@@ -171,34 +171,44 @@ def translate(
     # validating it late meant `now="170..."` or None raised an untagged
     # TypeError out of the lease comparison instead of a tagged refusal, and
     # `now=inf` was misreported as `expired_lease`.
-    if not isinstance(now, (int, float)) or isinstance(now, bool) or not math.isfinite(now):
+    # EXACT TYPES, not isinstance. This is one rule closing three separate
+    # defects, all the same shape: a subclass of a built-in can override the very
+    # method used to validate it.
+    #   * `LyingStatus("failed")` whose strip() returns "success" turned a FAILED
+    #     WorkItem into a success receipt;
+    #   * `LyingInt(7)` whose __int__ returns 2 got signed as attempt 2, a receipt
+    #     for an attempt the completion never claimed;
+    #   * str subclasses generally make every `.strip()` here untrustworthy.
+    # These values arrive from parsed JSON and a job store, where exact `str`,
+    # `int` and `bytes` are what actually occur, so demanding exact types costs
+    # nothing real and removes the whole class of override tricks. `bool` is
+    # excluded automatically, since `type(True) is bool`, not `int`.
+    if type(now) not in (int, float) or not math.isfinite(now):
         raise AdapterError("bad_clock")
-    if not isinstance(completion.job_id, str) or not completion.job_id.strip():
+    if type(completion.job_id) is not str or not completion.job_id.strip():
         raise AdapterError("missing_job")
-    if not isinstance(completion.workitem_id, str) or not completion.workitem_id.strip():
+    if type(completion.workitem_id) is not str or not completion.workitem_id.strip():
         raise AdapterError("missing_workitem")
-    # Nonblank is not enough: the receipt must name the WorkItem the job actually
-    # dispatched, or a completion for some other WorkItem closes this job.
-    if not isinstance(job_workitem_id, str) or not job_workitem_id.strip():
+    if type(job_workitem_id) is not str or not job_workitem_id.strip():
         raise AdapterError("missing_workitem")
-    if completion.workitem_id.strip() != job_workitem_id.strip():
+    # EXACT equality, no strip(). A WorkItem id is an opaque identifier, so
+    # normalizing it is not leniency but a hole: `strip()` removes unicode
+    # whitespace, which let " wi-1 " and "\xa0wi-1" both match "wi-1" while the
+    # envelope carried the UNTRIMMED string. Two ids either are the same or they
+    # are not, and the receipt must carry exactly the id that was compared.
+    if completion.workitem_id != job_workitem_id:
         raise AdapterError("wrong_workitem")
-    if not isinstance(completion.status, str) or completion.status.strip().lower() not in _SUCCESS_STATUSES:
+    if type(completion.status) is not str or completion.status.strip().lower() not in _SUCCESS_STATUSES:
         raise AdapterError("workitem_not_success")
-    if output is None or len(output) == 0:
+    # `output` must really be bytes. A `str` passed len() and then blew up inside
+    # sha256 AFTER the identity had been claimed, which permanently burned the
+    # attempt (see the reservation note below).
+    if type(output) not in (bytes, bytearray) or len(output) == 0:
         raise AdapterError("missing_output")
-    # `bool` is a subclass of `int` and `True == 1`, so an unguarded isinstance
-    # check lets attempt=True satisfy job_attempt=1 and sign `"attempt":true`.
-    if (isinstance(completion.attempt, bool) or not isinstance(completion.attempt, int)
-            or isinstance(job_attempt, bool) or not isinstance(job_attempt, int)):
+    if type(completion.attempt) is not int or type(job_attempt) is not int:
         raise AdapterError("wrong_attempt")
-    # Compare and emit the COERCED ints. An int subclass may override __eq__ /
-    # __ne__ to claim equality it does not have, which previously let attempt=3
-    # satisfy job_attempt=2 and then serialize as 3. Coercing first makes the
-    # compared value and the signed value the same number by construction.
-    claimed_attempt = int(completion.attempt)
-    authoritative_attempt = int(job_attempt)
-    if claimed_attempt != authoritative_attempt:
+    claimed_attempt = completion.attempt
+    if claimed_attempt != job_attempt:
         raise AdapterError("wrong_attempt")
     # Attempts are 1-based. 0 and negatives are not attempts that ever ran.
     if claimed_attempt < 1:
@@ -206,26 +216,21 @@ def translate(
     # NaN defeats every comparison (`now > nan` is False), so a non-finite lease
     # deadline would sail past an ordinary expiry check. callbacks.py guards its
     # own timestamp with math.isfinite for the same reason.
-    if (isinstance(completion.lease_expiry, bool)
-            or not isinstance(completion.lease_expiry, (int, float))
+    if (type(completion.lease_expiry) not in (int, float)
             or not math.isfinite(completion.lease_expiry)
             or now > completion.lease_expiry):
         raise AdapterError("expired_lease")
-    if not isinstance(completion.nonce, str) or not completion.nonce.strip():
+    if type(completion.nonce) is not str or not completion.nonce.strip():
         raise AdapterError("bad_nonce")
-    # RESERVATION, not a query. `seen_completion` used to ask "have you seen
-    # this?", which cannot prevent a race: two deliveries could both be
-    # translated BEFORE either receipt was recorded, and the consumer accepted
-    # both, completing one attempt twice. `reserve_completion` must ATOMICALLY
-    # claim (job, attempt) and return False if it was already claimed, so the
-    # check and the record are one indivisible step. Required, never optional: a
-    # caller who omits it gets no receipt at all.
     if not callable(reserve_completion):
         raise AdapterError("no_completion_guard")
-    if not reserve_completion(completion.job_id, claimed_attempt):
-        raise AdapterError("duplicate_completion")
 
-    output_sha256 = hashlib.sha256(output).hexdigest()
+    # Everything that can fail is done BEFORE the claim is taken. Hashing and
+    # signing used to run after it, so an exception in between consumed the
+    # identity without producing a receipt and the legitimate retry was then
+    # refused as `duplicate_completion` — the job could never complete at all.
+    # Trading a wasted hash for a permanently unclosable job is no trade.
+    output_sha256 = hashlib.sha256(bytes(output)).hexdigest()
     payload: Dict[str, Any] = {
         "job_id": completion.job_id,
         "workitem_id": completion.workitem_id,
@@ -241,4 +246,14 @@ def translate(
     # check; keep it a plain decimal string.
     timestamp = repr(float(now))
     signature = _callbacks().sign_payload(body, timestamp, completion.nonce, secret)
+
+    # THE CLAIM IS THE LAST GATE. Taken here, after every step that can raise, so
+    # a failure upstream cannot burn the identity. It is a RESERVATION, not a
+    # query: it must ATOMICALLY claim (job, attempt) and return False if already
+    # claimed, making the check and the record one indivisible step. A read-only
+    # "have you seen this?" cannot close the window in which two deliveries are
+    # both translated before either receipt is recorded — the consumer accepted
+    # both and one attempt completed twice.
+    if not reserve_completion(completion.job_id, claimed_attempt):
+        raise AdapterError("duplicate_completion")
     return CallbackEnvelope(body=body, timestamp=timestamp, nonce=completion.nonce, signature=signature)

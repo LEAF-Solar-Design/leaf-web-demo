@@ -197,14 +197,88 @@ def test_an_int_subclass_cannot_lie_about_equality():
                           job_workitem_id="wi-1", secret=SECRET, now=NOW,
                           reserve_completion=_win)
     assert excinfo.value.reason == "wrong_attempt"
-    # A plain subclass whose value AND serialization are both 2 is legitimate.
+
+    # DELIBERATE TIGHTENING vs round 3, which accepted a plain int subclass. There
+    # is no way to tell a plain subclass from a lying one without trusting a method
+    # the subclass controls, and these values come from parsed JSON where exact
+    # ints are what actually occur. So EXACT type only.
     class PlainInt(int):
         pass
 
-    envelope = adapter.translate(_completion(attempt=PlainInt(2)), b"out", job_attempt=2,
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(attempt=PlainInt(2)), b"out", job_attempt=2,
+                          job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "wrong_attempt"
+
+    # And the specific bypass round 3 introduced: coercing with int() trusted
+    # __int__, so a real value of 7 was signed as attempt 2.
+    class LyingInt(int):
+        def __int__(self):
+            return 2
+
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(attempt=LyingInt(7)), b"out", job_attempt=2,
+                          job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "wrong_attempt"
+
+
+def test_a_str_subclass_cannot_turn_a_failure_into_a_success():
+    """The sharpest case found so far: a `str` subclass whose strip() returns
+    "success" made a FAILED WorkItem emit a success receipt. Every `.strip()` in
+    the validator was only as trustworthy as the type it was called on."""
+
+    class LyingStatus(str):
+        def strip(self, *args):
+            return "success"
+
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(status=LyingStatus("failed")), b"out", job_attempt=2,
+                          job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                          reserve_completion=_win)
+    assert excinfo.value.reason == "workitem_not_success"
+
+
+def test_workitem_ids_are_compared_exactly_not_normalized():
+    """A WorkItem id is opaque, so normalizing it is a hole rather than leniency:
+    strip() removes unicode whitespace, so " wi-1 " and " wi-1" both matched
+    "wi-1" while the envelope carried the untrimmed string."""
+    for claimed in (" wi-1 ", " wi-1", "wi-1	", "WI-1"):
+        with pytest.raises(adapter.AdapterError) as excinfo:
+            adapter.translate(_completion(workitem_id=claimed), b"out", job_attempt=2,
+                              job_workitem_id="wi-1", secret=SECRET, now=NOW,
+                              reserve_completion=_win)
+        assert excinfo.value.reason == "wrong_workitem", f"{claimed!r} must not match 'wi-1'"
+
+
+def test_a_failure_after_validation_does_not_burn_the_attempt():
+    """The claim is the LAST gate. It used to be taken before hashing and signing,
+    so a str `output` blew up inside sha256 AFTER consuming the identity, and the
+    legitimate retry was then refused as duplicate_completion — the job could
+    never be completed at all."""
+    claimed = set()
+
+    def reserve(job_id, attempt):
+        key = (job_id, attempt)
+        if key in claimed:
+            return False
+        claimed.add(key)
+        return True
+
+    # A non-bytes output is refused cleanly, and claims nothing.
+    with pytest.raises(adapter.AdapterError) as excinfo:
+        adapter.translate(_completion(), "not-bytes", job_attempt=2, job_workitem_id="wi-1",
+                          secret=SECRET, now=NOW, reserve_completion=reserve)
+    assert excinfo.value.reason == "missing_output"
+    assert claimed == set(), "a rejected translation must not consume the identity"
+
+    # So the genuine retry still succeeds.
+    envelope = adapter.translate(_completion(), b"real-output", job_attempt=2,
                                  job_workitem_id="wi-1", secret=SECRET, now=NOW,
-                                 reserve_completion=_win)
+                                 reserve_completion=reserve)
     assert json.loads(envelope.body)["attempt"] == 2
+    assert claimed == {("job-1", 2)}
 
 
 def test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accepted():
@@ -214,9 +288,11 @@ def test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accep
     attempt twice. An atomic reservation makes the check and the record one step,
     so the second translation loses the claim."""
     claimed = set()
+    calls = []
 
     def reserve(job_id, attempt):
         key = (job_id, attempt)
+        calls.append(key)
         if key in claimed:
             return False
         claimed.add(key)          # claim and record are ONE step
@@ -234,6 +310,16 @@ def test_two_translations_before_either_receipt_is_recorded_cannot_both_be_accep
 
     assert len(envelopes) == 1, "only one translation may win the reservation"
     assert refusals == ["duplicate_completion"]
+    # THE DISCRIMINATOR. Without this the test cannot tell reservation semantics
+    # from the old query semantics: a query returning False-then-True and a
+    # reservation returning True-then-False both yield one envelope and one
+    # refusal, so every other assertion here passes either way. What only a
+    # RESERVATION does is RECORD on the winning call. Under `seen_completion` the
+    # check wrote nothing, and `claimed` would still be empty.
+    assert claimed == {("job-1", 2)}, (
+        "the winning call must itself have recorded the claim; an empty set means "
+        "the guard merely queried and the race is still open")
+    assert calls == [("job-1", 2), ("job-1", 2)], "the guard is consulted once per delivery"
 
     store = callbacks.CallbackReplayStore()
     accepted = sum(

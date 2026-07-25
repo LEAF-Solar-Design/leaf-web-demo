@@ -47,13 +47,39 @@ recomputes it.
 | `missing_workitem` | blank WorkItem id | the receipt must bind to a real WorkItem |
 | `workitem_not_success` | WorkItem not succeeded | a failure is not a completion receipt; polling reports it |
 | `missing_output` | no persisted output bytes | an empty receipt would attest a completion that produced nothing |
-| `wrong_workitem` | completion names a WorkItem other than the one the job dispatched | nonblank is not enough; a completion for another WorkItem must not close this job |
+| `wrong_workitem` | completion's WorkItem id is not EXACTLY the one the job dispatched | nonblank is not enough. Compared exactly, with no `strip()`: a WorkItem id is opaque, and normalizing it let `" wi-1 "` and `" wi-1"` match `"wi-1"` while the envelope carried the untrimmed string |
 | `wrong_attempt` | completion attempt ≠ job's current attempt, either is not a real `int`, or it is below 1 | a stale retry's late callback must not complete a newer attempt. `bool` is an `int` subclass and `True == 1`, so `attempt=True` is rejected explicitly rather than satisfying `job_attempt=1` |
 | `expired_lease` | `now` past the lease deadline, or the deadline is not finite | a late completion is untrustworthy; `NaN` defeats every comparison (`now > nan` is `False`), so non-finite deadlines are refused outright |
 | `bad_clock` | non-finite translation clock | a `NaN` clock would make the freshness stamp meaningless |
 | `bad_nonce` | empty delivery nonce | the nonce is the signed + replay key |
 | `no_completion_guard` | no duplicate-completion authority supplied | the guard is **required**, not optional: defaulting it to `None` is fail-open for a signing seam, since a caller who omits it silently regains the duplicate-completion hole |
 | `duplicate_completion` | this `(job, ATTEMPT)` already produced a receipt | **keyed on completion identity, not the nonce.** The consumer's nonce store only rejects a repeat of the *same* nonce, so a second delivery bearing a *fresh* nonce would otherwise mint a second accepted envelope and complete one attempt twice. This adapter is the authority for one-receipt-per-attempt; the nonce store remains the second line against a verbatim replay |
+
+
+### Exact types, and why
+
+Every field is checked with `type(x) is ...`, not `isinstance`. A subclass of a
+built-in can override the very method used to validate it, and three real defects
+came from exactly that:
+
+- `LyingStatus("failed")` whose `strip()` returned `"success"` produced a SUCCESS
+  receipt for a FAILED WorkItem;
+- `LyingInt(7)` whose `__int__()` returned 2 was signed as `attempt: 2`, a receipt
+  for an attempt the completion never claimed (this one was introduced by an
+  earlier fix that "normalized" with `int()`);
+- `str` subclasses made every `.strip()` in the validator untrustworthy.
+
+These values arrive from parsed JSON and the job store, where exact `str`, `int`
+and `bytes` are what occur, so demanding exact types costs nothing real. `bool` is
+excluded for free, since `type(True) is bool`.
+
+### The claim is the last gate
+
+`reserve_completion` is called AFTER hashing, serialization and signing. It used to
+run before them, so an exception in between consumed the identity without
+producing a receipt, and the legitimate retry was refused as
+`duplicate_completion` — the job could never be completed at all. A wasted hash is
+cheaper than a permanently unclosable job.
 
 ### Why the replay key changed
 
