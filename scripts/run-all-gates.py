@@ -546,22 +546,30 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # COLLECTED with a DB configured is 199, measured on this tree
+        # COLLECTED with the DB configured is 199, measured on this tree
         # 2026-07-25 via `DATABASE_URL=... pytest --collect-only -q
-        # platform/tests`. Collection needs only the env var, not a reachable
-        # server: the conftest ignore-hook prunes solely on DATABASE_URL being
-        # unset, so with it set every module collects, not just the *_static.py
-        # proofs. Unset it and the same command collects 61, exactly the set
-        # the platform-static suite below names.
+        # platform/tests`. Collection needs only the config, not a reachable
+        # server. "Configured" is EITHER DATABASE_URL or a platform/.env.local
+        # file (conftest `_DB_CONFIGURED`), and the ignore-hook prunes only when
+        # neither is present; with neither, the same command collects 61,
+        # exactly the set the platform-static suite below names.
         # The floor below is an EXECUTED count (coverage_verdict rule 2), not
-        # the collection count this comment used to call it. That floor is
-        # UNVERIFIED: reaching it needs a live Postgres, which a DB-less
-        # operator box does not have and CI does not supply (test-gate.yml is
-        # deliberately hermetic, so this suite reports SKIP there). 145 sits 54
-        # below the 199 collected, and only a run against a real DB can say
-        # whether that gap is genuine self-skips or a stale floor. Both
-        # directions stay safe meanwhile: too low a floor only under-claims,
-        # and executed > floor reports drift rather than a silent pass.
+        # the collection count this comment used to call it.
+        # THE 145 FLOOR IS TOO LOW, and that is a real hole rather than a safe
+        # margin. This suite allowlists NO skip reason, a non-allowlisted skip
+        # fails it outright, and every skip path under platform/tests is gated
+        # on the DB being unconfigured. So with a reachable DB nothing skips,
+        # and a green run must have executed all 199 collected. A floor of 145
+        # therefore lets the suite lose up to 54 tests and still report green:
+        # 146..198 pass with only a drift note, and exactly 145 passes silently.
+        # 199 is the honest floor. Left at 145 here because raising it is an
+        # executable change and this host has no Postgres to run the suite
+        # against, so 199-as-floor is derived from the runner's own rules, not
+        # observed. Re-baseline on a host with a reachable DB.
+        # CI never exercises this floor either: test-gate.yml leaves
+        # DATABASE_URL unset, so this suite reports SKIP there. The one workflow
+        # that does provide Postgres (upload-authority-postgres.yml) runs
+        # selected server tests directly and never invokes this suite.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests"), 145, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
