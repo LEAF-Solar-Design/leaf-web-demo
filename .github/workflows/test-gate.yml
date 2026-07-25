@@ -106,7 +106,13 @@ jobs:
           # to acknowledge a source-less host; it turns one hard failure into a
           # visible skip and leaves the other 13 tests in the gate.
           LEAF_AUTOFILL_SOLVER_ABSENT_OK: "1"
-        run: python scripts/run-all-gates.py --log-dir "$RUNNER_TEMP/gate-logs"
+        # --retry is pinned rather than inherited so the trade-off is explicit:
+        # several suites boot real servers and flake under runner load, so one
+        # retry keeps the gate usable. The cost is that a suite passing only on
+        # attempt 2 still exits 0. The runner prints a FLAKED line naming those
+        # suites -- treat it as a defect to chase, not as a clean pass. Use
+        # --retry 0 to see raw first-attempt signal.
+        run: python scripts/run-all-gates.py --retry 1 --log-dir "$RUNNER_TEMP/gate-logs"
 
       - name: Upload per-suite gate logs
         if: failure()

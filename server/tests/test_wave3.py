@@ -49,12 +49,16 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SERVER_DIR.parent
 PLATFORM_DIR = PROJECT_ROOT / "platform"
 TENANT_REPO_SRC = Path(os.environ.get("LEAF_TENANT_REPO_SRC", "C:/tmp/leaf-tenants/demo-tenant"))
+SHIPPED_TENANT_REPO = PROJECT_ROOT / "harness" / "test" / "fixtures" / "tenant-repo"
 
-# The C2/C5 tests fold a real tenant tool repo (layer-bounding-boxes et al) over
-# the engine catalog. That repo is an operator-host artifact, not something this
-# repo ships -- harness/test/fixtures/tenant-repo carries only count-by-layer --
-# so on a clean CI runner the default path does not exist. Skip-with-reason
-# keeps the other 11 tests in the gate instead of 3 failures + 4 fixture errors.
+# The C2 tests assert on `layer-bounding-boxes`, which lives in a real tenant tool
+# repo -- an operator-host artifact this repo does not ship -- so on a clean CI
+# runner the default path does not exist and only those tests skip.
+#
+# Everything else that folds a tenant repo (C5b/C5c) needs only SOME repo plus
+# count-by-layer, which harness/test/fixtures/tenant-repo does ship, so the
+# `stack` fixture falls back to it instead of skipping the whole module. Guarding
+# at the module level instead would drop C5b/C5c off CI as collateral.
 _TENANT_REPO_PRESENT = TENANT_REPO_SRC.is_dir()
 _NO_TENANT_REPO_REASON = (
     f"tenant tool repo absent at {TENANT_REPO_SRC} (set LEAF_TENANT_REPO_SRC to one)"
@@ -460,12 +464,16 @@ def stop(proc: subprocess.Popen) -> None:
 
 @pytest.fixture(scope="module")
 def stack(tmp_path_factory):
-    if not _TENANT_REPO_PRESENT:
-        pytest.skip(_NO_TENANT_REPO_REASON)
+    # Only the C2 tests need the operator's tenant repo (they assert on
+    # layer-bounding-boxes, which this repo does not ship). C5b/C5c just need
+    # SOME tenant repo to fold, and count-by-layer -- both of which the shipped
+    # fixture provides -- so fall back to it rather than skipping the whole
+    # module and taking those two live regression checks off CI with it.
+    src = TENANT_REPO_SRC if _TENANT_REPO_PRESENT else SHIPPED_TENANT_REPO
     tmp = tmp_path_factory.mktemp("wave3")
     # Run against a COPY of the tenant repo (never mutate the live one).
     tenant_copy = tmp / "tenant"
-    shutil.copytree(TENANT_REPO_SRC, tenant_copy,
+    shutil.copytree(src, tenant_copy,
                     ignore=shutil.ignore_patterns(".git", "__pycache__"))
     store_dir = tmp / "drawings"
     ledger = tmp / "ledger.jsonl"
@@ -517,6 +525,7 @@ def _run_payload(stack, tool, params, headers, dwg=None):
 
 
 # --- Contract 2 (through the real broker) ---------------------------------- #
+@requires_tenant_repo
 def test_C2_layer_bounding_boxes_in_api_tools(stack):
     r = requests.get(f"{stack['app']}/api/tools", timeout=15)
     assert r.status_code == 200, r.text
@@ -524,6 +533,7 @@ def test_C2_layer_bounding_boxes_in_api_tools(stack):
     assert "layer-bounding-boxes" in names
 
 
+@requires_tenant_repo
 def test_C2_run_through_broker_matches_receipt_bbox(stack):
     headers = _h("wave3-c2")
     r = requests.post(f"{stack['app']}/api/run?wait=1",

@@ -309,9 +309,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_hardening_1f.py"), 8),
         Suite("server-hardening-2b", "server tests/test_hardening_2b.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2b.py"), 15),
-        Suite("server-hardening-2c-microvm",
-              "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_2c_microvm.py"), 14),
+        # (test_hardening_2c_microvm.py is registered above as "server-microvm";
+        # it was listed twice, running the same 14 tests for no added coverage.)
         Suite("server-hardening-3b", "server tests/test_hardening_3b.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_3b.py"), 9),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
@@ -365,9 +364,15 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_da_callback.py"), 7),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
-              _py_pytest("test_store.py"), 14),
+              _py_pytest("test_store.py"), 15),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 5),
+        # Both are fully offline (no APS, no network) but were never registered,
+        # so 8 tests sat outside the gate entirely.
+        Suite("da-client-credentials", "da test_client_credentials.py", "pytest", DA,
+              _py_pytest("test_client_credentials.py"), 6),
+        Suite("da-extract-dxf-activity", "da test_extract_dxf_activity.py", "pytest", DA,
+              _py_pytest("test_extract_dxf_activity.py"), 5),
         # --- tenant customization control plane (one process per file) --- #
         Suite("server-customization-authority", "server customization authority", "pytest",
               SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
@@ -712,6 +717,17 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
             note = (note + " " if note else "") + fail_hint
         if c["skipped"]:
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
+        # A suite where EVERY test skipped executed no assertions, so it proves
+        # nothing -- reporting PASS there makes a green scoreboard mean "tested"
+        # when it means "did not run". The expected-count floor below cannot
+        # catch this on its own because `got` counts skips, so an all-skipped
+        # suite still satisfies its floor. Report SKIP so the row is honest;
+        # SKIP is not a failure and does not change the runner's exit code.
+        executed = c["got"] - c["skipped"]
+        if passed and c["got"] and executed == 0:
+            return Result(suite, "SKIP", "0", seconds,
+                          note=(note + " " if note else "") + "ALL skipped: no coverage",
+                          log_path=log_path, counts=c)
         # Expected counts are a FLOOR: fewer tests than registered means the
         # suite silently lost coverage (deselected file, import skip, renamed
         # module) even when everything that ran was green. Growth is fine and
@@ -813,9 +829,24 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float) -> None:
     nfail = sum(1 for r in results if r.status == "FAIL")
     nskip = sum(1 for r in results if r.status == "SKIP")
     total_tests = sum(r.counts.get("passed", 0) for r in results)
+    total_skipped = sum(r.counts.get("skipped", 0) for r in results)
     print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP   "
-          f"| test cases passed: {total_tests}   | wall: {wall:.1f}s")
+          f"| test cases passed: {total_tests}  skipped: {total_skipped}   "
+          f"| wall: {wall:.1f}s")
     print(f"  logs:   {log_dir}")
+
+    # A suite that only went green on a retry is NOT the same as a green suite,
+    # and one annotated row inside a 90-row scoreboard is easy to miss. Call the
+    # flakes out by name so "the gate passed" cannot quietly mean "the gate
+    # passed the second time".
+    flaked = [r.suite.id for r in results if r.status == "PASS" and "flaked" in r.note]
+    if flaked:
+        print(f"  FLAKED (passed only on retry, so this run's green is soft): "
+              f"{', '.join(flaked)}")
+    allskip = [r.suite.id for r in results if r.status == "SKIP" and r.got == "0"]
+    if allskip:
+        print(f"  NO COVERAGE (every test skipped, host artifact absent): "
+              f"{', '.join(allskip)}")
     print("=" * len(line))
 
 
