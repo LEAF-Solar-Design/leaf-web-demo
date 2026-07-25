@@ -257,8 +257,9 @@ def test_1_run_returns_202_fast(stack):
         of execution time; load slows both measurements, so common-mode noise
         cancels and the difference stays small.
 
-    Each bound sits about 3x above the worst noise measured above and fails hard
-    on the regression it exists to catch (a blocking 202 costs ~`sleep_s`).
+    The direct POST remains bound by the documented 200ms contract. The catalog
+    lookup is built outside the timed window, which removes the unrelated
+    round-trip that made the old assertion flaky.
     """
     sleep_s = 10.0
     url = f"{stack['app']}/api/run"
@@ -282,6 +283,8 @@ def test_1_run_returns_202_fast(stack):
     body = r.json()
     assert body["status"] == "submitted"
     assert body["job_id"]
+    assert elapsed < 0.2, (
+        f"POST /api/run took {elapsed*1000:.0f}ms (the contract is <200ms)")
 
     # The 202 came back while the job was still executing. A response that
     # blocked on execution could only return once the job was terminal.
@@ -432,10 +435,7 @@ def _ledger_entries_for(stack, tenants) -> list[dict]:
     wanted = set(tenants)
     out = []
     for line in _ledger_lines(stack):
-        try:
-            entry = json.loads(line)
-        except ValueError:  # a partially flushed line is not this test's business
-            continue
+        entry = json.loads(line)
         if entry.get("tenant_id") in wanted:
             out.append(entry)
     return out
