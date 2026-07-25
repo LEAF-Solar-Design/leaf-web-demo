@@ -237,8 +237,11 @@ Progress:
   proof creates version 2, seats it in the viewer, undoes to version 1, and makes
   redo available. Both surfaces use controller-owned `canUndo` and `canRedo`.
 - Catalog, workspace, and platform-trust controllers are extracted behind stable
-  interfaces. Their 22 focused tests pass. App integration and provider lifting
-  remain open before Wave 1 is complete.
+  interfaces and now own the corresponding `/app` state. Their 22 focused tests,
+  the 10-test fixture suite, the managed real-stack smoke, production build,
+  behavior pins, customization checks, and all four staging-fix checks pass.
+- Provider lifting and mounting the capability panels on `/try` remain open
+  before Wave 1 and the capability-panel wave are complete.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

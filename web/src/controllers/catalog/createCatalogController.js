@@ -214,8 +214,23 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     },
     openTool(tool) { publish({ openTool: tool || null }) },
     closeTool() { publish({ openTool: null }) },
+    resetTransient() {
+      adapters.dismissDecision?.()
+      publish({
+        openTool: null,
+        prompt: '',
+        route: null,
+        routing: false,
+        routeError: null,
+        agentMode: null,
+        agentBanner: null,
+      })
+    },
+    clearAgentMode() { publish({ agentMode: null }) },
+    clearAgentBanner() { publish({ agentBanner: null }) },
     setPrompt,
     dismissRoute,
+    commitDecision,
     dispatch,
     completeSlash(name) { setPrompt(name ? `/${name}` : '/') },
     dispatchSlash(name) { return dispatch(name ? `/${name}` : '/') },

@@ -50,11 +50,18 @@ assert(!confirmRunIntent(staged.state, request, { now: 1000 + 5 * 60 * 1000 + 1 
   'an expired confirmation must fail closed')
 
 const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+const catalogController = readFileSync(
+  new URL('../src/controllers/catalog/createCatalogController.js', import.meta.url),
+  'utf8',
+)
 const routePanel = readFileSync(new URL('../src/components/RoutePanel.jsx', import.meta.url), 'utf8')
 assert(app.includes('const armDecision = useCallback((decision) =>'),
   'all route decisions must cross the shared intent staging seam')
-assert(app.includes('armDecision(r)'), 'NL routes do not use the shared intent seam')
-assert(app.includes('armDecision({\n          lane: \'run\', tool: t.name'),
+assert(app.includes('commitDecision: (decision) => catalogUiRef.current.armDecision?.(decision)'),
+  'the catalog controller is not connected to the shared intent seam')
+assert(catalogController.includes('commitDecision(decision)'),
+  'NL routes do not use the shared intent seam')
+assert(catalogController.includes('slash.decision ? commitDecision(slash.decision) : undefined'),
   'slash routes do not use the shared intent seam')
 assert(app.includes('runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)'),
   'route dismissal does not invalidate the active intent')

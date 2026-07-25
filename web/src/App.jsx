@@ -33,11 +33,10 @@ import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
-  config, getSession, getTools, getCapabilities, getUsage, getHealth, runTool, runToolAsync,
+  config, getSession, getTools, getCapabilities, runTool, runToolAsync,
   getJob, recordToEnvelope, stageAuthorTool, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
-  getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
-  getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant, getEntitlements,
+  createOrg, listProjects, createProject, openProject,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
@@ -48,6 +47,9 @@ import { THRESHOLDS, classifyAgentError } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import useJobController from './controllers/useJobController.js'
 import useDrawingVersionController from './controllers/useDrawingVersionController.js'
+import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
+import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
+import useCatalogController from './controllers/catalog/useCatalogController.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -177,36 +179,20 @@ export default function App() {
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
-  const [tools, setTools] = useState([])
-  const [toolsErr, setToolsErr] = useState(null)
-  const [toolsRetryKey, setToolsRetryKey] = useState(0) // R ladder / Retry chip — bumping re-runs the tools load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
   const [pendingEdit, setPendingEdit] = useState(null)
   // Write-loop (§11, live mode): the current drawing/version chain from the last
   // drawing response and an undo/redo-in-flight guard. Version-completed events
   // surface as NT2 toasts (showToast), never as a persistent amber note.
-  const [openTool, setOpenTool] = useState(null)         // the tool card expanded in ToolsPanel (for the write ghost)
 
   // --- platform session state ---
   const [tenant, setTenant] = useState(null)             // /api/session tenant echo (else "demo")
   const [tier, setTier] = useState(null)                 // real tier from the session echo (auth-live)
   const [org, setOrg] = useState(null)                   // org_id from the session echo (auth-live)
-  const [catalog, setCatalog] = useState({ families: [], source: null }) // grouped families catalog
-  const [catalogErr, setCatalogErr] = useState(null)     // families load failure (falls back to flat tools)
-  const [openFamilies, setOpenFamilies] = useState({})   // per-family collapse state (family_id -> bool)
-  const [usage, setUsage] = useState(null)               // GET /api/usage aggregate (live; null hides chip)
-  const [usageAt, setUsageAt] = useState(0)              // ts of the last successful usage poll (freshness gate for quota self-clear)
-  const [health, setHealth] = useState(null)             // GET /api/health (live; null -> static footer)
   // Real entitlements (GET /api/entitlements): drives the write-tool + build gates.
   // null in mock, or when the endpoint isn't deployed -> treated as full access.
-  const [entitlements, setEntitlements] = useState(null) // {tier, entitlements:{run_read,run_write,build}, source}
-  const [entLoading, setEntLoading] = useState(false)
   // Version-history browser (§ version chain) + read-only preview state.
-  const [prompt, setPrompt] = useState('')               // dispatch box text
-  const [route, setRoute] = useState(null)               // §12 nl-prompt routing decision
-  const [routing, setRouting] = useState(false)          // awaiting the router
-  const [routeErr, setRouteErr] = useState(null)         // routing call failed -> failed strip
   const [authRequired, setAuthRequired] = useState(false) // live mode with no session: 401s observed -> polls stop, footer says so
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
@@ -215,16 +201,6 @@ export default function App() {
   const [authorSignal, setAuthorSignal] = useState(0)    // bump to re-seed the author flow
 
   // --- projects / orgs workspace (UI wave 2, item 1) ---
-  const [orgId, setOrgId] = useState(getStoredOrgId())   // stored workspace org (localStorage leaf.org_id)
-  const [projects, setProjects] = useState([])           // GET /api/projects
-  const [projectsErr, setProjectsErr] = useState(null)   // platform unavailable (no DB) -> graceful note
-  const [projectsLoading, setProjectsLoading] = useState(false)
-  const [openProjectId, setOpenProjectId] = useState(null)
-  const [workspace, setWorkspace] = useState(null)       // hydration payload {project, drawing_versions[], jobs[], built_tools[]}
-  const [canonicalVersionId, setCanonicalVersionId] = useState(null)
-  const [wsLoading, setWsLoading] = useState(false)      // re-hydration in flight
-  const [orgBusy, setOrgBusy] = useState(false)
-  const [projectBusy, setProjectBusy] = useState(false)
 
   // --- single-writer checkout lock (item 3) ---
   const [checkout, setCheckout] = useState(null)         // {holder, acquired, expires} | null (from /versions)
@@ -240,10 +216,6 @@ export default function App() {
   // --- Claude account grant (Concern 2 — the user's Claude login) ---
   // Kept strictly apart from the platform identity above (AUTH.md §0). The token
   // is write-only: we hold linkage status only, never the token itself.
-  const [grant, setGrant] = useState(null)        // {linked, linked_at} | null (null = unknown/undeployed)
-  const [grantLoading, setGrantLoading] = useState(false)
-  const [grantBusy, setGrantBusy] = useState(false) // link/unlink request in flight
-  const [grantErr, setGrantErr] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
   // M5 guided tour: opened ONLY by the ?demo=tour (or ?demo=1) deep-link, and
   // only while mock is active. Exiting clears the tour and leaves you in mock.
@@ -257,8 +229,6 @@ export default function App() {
   if (tourOn) tourAvailable.current = true
 
   // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
-  const [agentMode, setAgentMode] = useState(null)  // null | 'race' (chip primary) | 'primary' (panel primary)
-  const [agentBanner, setAgentBanner] = useState(null) // {kind, message} calm degraded note
   const { converse } = useWorkspaceControllers()
   const {
     sessionId: agentSessionId,
@@ -269,6 +239,7 @@ export default function App() {
 
   const viewerRef = useRef(null)
   const drawingErrorRef = useRef(null)
+  const catalogUiRef = useRef({})
   const authorSectionRef = useRef(null)
   const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
   const barInputRef = useRef(null)      // ⌘K focuses the command bar input
@@ -346,6 +317,54 @@ export default function App() {
     markRefreshFailure,
     retryRefresh: onRetryViewerRefresh,
   } = drawingActions
+  const platform = usePlatformTrustController({ mock })
+  const {
+    usage,
+    usageAt,
+    health,
+    entitlements,
+    entLoading,
+    grant,
+    grantLoading,
+    grantBusy,
+    grantErr,
+    actions: platformActions,
+  } = platform
+  const {
+    loadUsage,
+    loadHealth,
+    linkClaude: onLinkClaude,
+    unlinkClaude: onUnlinkClaude,
+  } = platformActions
+  const workspaceServices = useMemo(() => ({
+    createOrg,
+    listProjects,
+    createProject,
+    openProject,
+  }), [])
+  const workspaceController = useWorkspaceController({
+    mock,
+    services: workspaceServices,
+    formatError: humanizeError,
+  })
+  const {
+    orgId,
+    projects,
+    projectsError: projectsErr,
+    projectsLoading,
+    openProjectId,
+    workspace,
+    canonicalVersionId,
+    workspaceLoading: wsLoading,
+    orgBusy,
+    projectBusy,
+    openProject: onOpenProject,
+    createOrg: createWorkspaceOrg,
+    createProject: createWorkspaceProject,
+    rehydrate,
+    closeProject: onCloseProject,
+    selectCanonicalVersion,
+  } = workspaceController
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
   // else the applied write-loop version, else the base intake.
   const projectName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : 'your project'
@@ -373,6 +392,67 @@ export default function App() {
   // (unknown/undeployed policy resolves permissive, like every other gate).
   const canConverse = entOf('converse')
   const agentDisabled = mock || !canConverse
+  const catalogServices = useMemo(() => ({
+    getTools,
+    getCapabilities,
+    routePrompt: nlPrompt,
+  }), [])
+  const catalogAdapters = useMemo(() => ({
+    humanizeError,
+    isUnauthorized: (error) => error?.status === 401 || / -> 401$/.test(String(error?.message || '')),
+    thresholds: THRESHOLDS,
+    previewRoute: matchPrompt,
+    commitDecision: (decision) => catalogUiRef.current.armDecision?.(decision),
+    dismissDecision: () => {
+      runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+    },
+    openAuthor: (text) => {
+      setAuthorSeed(text)
+      setAuthorSignal((value) => value + 1)
+      setAuthorOpen(true)
+      setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+    },
+    startAgentTurn: (...args) => catalogUiRef.current.startAgentTurn?.(...args),
+    agentBannerFor,
+    onAuthRequired: () => setAuthRequired(true),
+  }), [])
+  const { state: catalogState, actions: catalogActions } = useCatalogController({
+    services: catalogServices,
+    adapters: catalogAdapters,
+    context: { mock, entitlements, running: false, agentDisabled },
+  })
+  const {
+    tools,
+    toolsError: toolsErr,
+    catalog,
+    catalogError: catalogErr,
+    openFamilies,
+    openTool,
+    prompt,
+    route,
+    routing,
+    routeError: routeErr,
+    agentMode,
+    agentBanner,
+    hintLane,
+    runnableTools: slashTools,
+    capabilityCount: capCount,
+  } = catalogState
+  const {
+    retryTools,
+    loadCatalog,
+    upsertTool,
+    toggleFamily,
+    openTool: setOpenTool,
+    resetTransient: resetCatalogTransient,
+    clearAgentMode,
+    clearAgentBanner,
+    setPrompt: onPromptChange,
+    dismissRoute,
+    commitDecision: commitCatalogDecision,
+    pickAlternative: onPickAlternative,
+    clearRouteError,
+  } = catalogActions
 
   // Claude account (Concern 2) authoring gate. Only fires when we DEFINITELY know
   // the tenant has no linked Claude grant (live + grant read + linked === false).
@@ -414,12 +494,10 @@ export default function App() {
   useEffect(() => {
     let alive = true
     resetDrawing(); setLoadErr(null)
-    setOpenTool(null)
-    setToast(null); setDrawer(null); setRouteErr(null)
-    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    setRoute(null); setRouting(false); setTenant(null)
+    resetCatalogTransient()
+    setToast(null); setDrawer(null); setTenant(null)
     setTier(null); setOrg(null)
-    setAgentMode(null); setAgentBanner(null); clearAgentSession()
+    clearAgentSession()
     mockVersions.reset()
     const seat = (d) => {
       if (!alive) return
@@ -450,43 +528,7 @@ export default function App() {
         }
       })
     return () => { alive = false }
-  }, [mock, isEditFixture, intakeRetryKey, resetDrawing, seatIntake])
-
-  useEffect(() => {
-    let alive = true
-    setToolsErr(null)
-    getTools(mock)
-      .then((t) => alive && setTools(t))
-      .catch((e) => alive && setToolsErr(humanizeError(e)))
-    return () => { alive = false }
-  }, [mock, toolsRetryKey])
-
-  // Retry the tools load (ToolsPanel's Retry chip + the R ladder below).
-  const retryTools = useCallback(() => setToolsRetryKey((k) => k + 1), [])
-
-  // Families catalog (left rail): GET /api/capabilities grouped, or the mock
-  // registry grouped client-side. Refetched on mode change and after authoring a
-  // tool (so it lands in "Custom authored tools"). Falls back to the flat list
-  // inside getCapabilities; a total failure surfaces catalogErr (flat ToolsPanel).
-  const loadCatalog = useCallback(async () => {
-    setCatalogErr(null)
-    try {
-      const cat = await getCapabilities(mock)
-      setCatalog(cat)
-      // default every family collapsed (keeps the left catalog secondary to the prompt)
-      setOpenFamilies((prev) => {
-        const next = { ...prev }
-        for (const f of cat.families) if (!(f.family_id in next)) next[f.family_id] = false
-        return next
-      })
-    } catch (e) {
-      setCatalog({ families: [], source: null })
-      setCatalogErr(humanizeError(e))
-      if (!mock && is401(e)) setAuthRequired(true)
-    }
-  }, [mock])
-
-  useEffect(() => { loadCatalog() }, [loadCatalog])
+  }, [mock, isEditFixture, intakeRetryKey, resetCatalogTransient, resetDrawing, seatIntake])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
   // finish the exchange + store leaf.jwt, then reload so the fresh loads send
@@ -498,90 +540,19 @@ export default function App() {
 
   // Per-tenant spend chip: poll GET /api/usage on load (live only). null hides
   // the chip (mock, or the sibling endpoint not deployed yet) — no fake numbers.
-  const loadUsage = useCallback(async () => {
-    if (mock) { setUsage(null); return }
-    try { setUsage(await getUsage()); setUsageAt(Date.now()) } catch { setUsage(null) }
-  }, [mock])
-
-  useEffect(() => { loadUsage() }, [loadUsage])
-
   // Real entitlements (live only): fetch on load so the write-tool + build gates
   // reflect the tenant's actual plan. null in mock (full access, all true) or when
   // the sibling endpoint isn't deployed yet (degrades to ungated — honest demo).
-  const loadEntitlements = useCallback(async () => {
-    if (mock) { setEntitlements(null); return }
-    setEntLoading(true)
-    try { setEntitlements(await getEntitlements()) } catch { setEntitlements(null) } finally { setEntLoading(false) }
-  }, [mock])
-
-  useEffect(() => { loadEntitlements() }, [loadEntitlements])
-
   // Real backend diagnostics for the footer chips (live only). Mock keeps the
   // static footer (setHealth(null)); any error -> null -> calm static fallback.
-  const loadHealth = useCallback(async () => {
-    if (mock) { setHealth(null); return }
-    try { setHealth(await getHealth()) } catch { setHealth(null) }
-  }, [mock])
-
-  useEffect(() => { loadHealth() }, [loadHealth])
-
   // Claude account grant (Concern 2): read linkage status on load (live only).
   // null in mock (panel hidden) or when the sibling endpoint isn't deployed yet
   // (the affordance then degrades to today's ungated authoring — no gate, no
   // fabricated "linked" claim). Never fetches or holds the token itself.
-  const loadGrant = useCallback(async () => {
-    if (mock) { setGrant(null); return }
-    setGrantLoading(true); setGrantErr(null)
-    try { setGrant(await getClaudeGrant()) } catch { setGrant(null) } finally { setGrantLoading(false) }
-  }, [mock])
-
-  useEffect(() => { loadGrant() }, [loadGrant])
-
-  const onLinkClaude = useCallback(async (token, kind) => {
-    // token is passed straight to the API and never stored/logged here. `kind`
-    // ("oauth" | "api_key") is the user's explicit choice; the server may echo the
-    // authoritative kind back (it auto-detects), so prefer the response kind.
-    setGrantBusy(true); setGrantErr(null)
-    try {
-      const res = await linkClaudeGrant(token, kind)
-      setGrant({ linked: true, linked_at: res?.linked_at || new Date().toISOString(), kind: res?.kind || kind || null })
-    } catch (e) {
-      setGrantErr(humanizeError(e))
-    } finally {
-      setGrantBusy(false)
-    }
-  }, [])
-
-  const onUnlinkClaude = useCallback(async () => {
-    setGrantBusy(true); setGrantErr(null)
-    try {
-      await unlinkClaudeGrant()
-      setGrant({ linked: false, linked_at: null })
-    } catch (e) {
-      setGrantErr(humanizeError(e))
-    } finally {
-      setGrantBusy(false)
-    }
-  }, [])
-
   // Projects workspace (item 1): fetch the org's projects (live only). No org
   // stored -> empty list + no error (the switcher offers "create workspace org").
   // Platform down (no DATABASE_URL / 500) -> projectsErr drives the graceful
   // "projects unavailable" note. Mock -> zero /api calls (no surface).
-  const loadProjects = useCallback(async () => {
-    if (mock || !orgId) { setProjects([]); setProjectsErr(null); return }
-    setProjectsLoading(true); setProjectsErr(null)
-    try {
-      setProjects(await listProjects(orgId))
-    } catch (e) {
-      setProjects([]); setProjectsErr(humanizeError(e))
-    } finally {
-      setProjectsLoading(false)
-    }
-  }, [mock, orgId])
-
-  useEffect(() => { loadProjects() }, [loadProjects])
-
   // Checkout lock (item 3): read the current drawing's version manifest and pick
   // up its `checkout` (sibling contract adds it to /versions). Live only; any
   // error -> null (no chip, no write-Run suppression). Refetched when the drawing
@@ -828,39 +799,8 @@ export default function App() {
   }, [drawingState, redoDrawingVersion, showToast, viewViewer])
 
   // --- version-history browser + read-only preview -------------------------
-  const toggleFamily = useCallback((id) => {
-    setOpenFamilies((o) => ({ ...o, [id]: !o[id] }))
-  }, [])
-
   // --- projects / orgs workspace handlers (item 1) -------------------------
-  const onOpenProject = useCallback(async (pid) => {
-    if (!pid) return
-    setOpenProjectId(pid); setWorkspace(null); setCanonicalVersionId(null)
-    setWsLoading(true); setProjectsErr(null)
-    try {
-      setWorkspace(await openProject(pid, orgId))
-    } catch (e) {
-      setWorkspace(null); setProjectsErr(humanizeError(e))
-    } finally {
-      setWsLoading(false)
-    }
-  }, [orgId])
-
   // Re-hydrate the open project (after a terminal run so jobs[] visibly grows).
-  const rehydrate = useCallback(async () => {
-    if (!openProjectId) return
-    setWsLoading(true)
-    try {
-      setWorkspace(await openProject(openProjectId, orgId))
-    } catch { /* transient — keep the last good hydration */ } finally {
-      setWsLoading(false)
-    }
-  }, [openProjectId, orgId])
-
-  const onCloseProject = useCallback(() => {
-    setOpenProjectId(null); setWorkspace(null); setCanonicalVersionId(null)
-  }, [])
-
   // Both creators accept the name from an inline F1 field (ProjectSwitcher);
   // the window.prompt fallback only fires when no name is passed (legacy path —
   // native dialogs are off-standard and slated for removal with the switcher).
@@ -869,39 +809,16 @@ export default function App() {
       ? givenName
       : window.prompt('Name your workspace org', 'My workspace')
     if (name == null) return
-    setOrgBusy(true); setProjectsErr(null)
-    try {
-      const org = await createOrg(name.trim() || 'My workspace')
-      const id = org.org_id || org.id
-      setStoredOrgId(id); setOrgId(id); setProjects([])
-    } catch (e) {
-      setProjectsErr(humanizeError(e))
-    } finally {
-      setOrgBusy(false)
-    }
-  }, [])
+    return createWorkspaceOrg(name)
+  }, [createWorkspaceOrg])
 
   const onCreateProject = useCallback(async (givenName) => {
     const name = typeof givenName === 'string'
       ? givenName
       : window.prompt('New project name', 'rooftop demo')
     if (name == null || !name.trim()) return
-    setProjectBusy(true); setProjectsErr(null)
-    try {
-      const p = await createProject(name.trim(), orgId)
-      setProjects((prev) => [...prev, p])
-      await onOpenProject(p.project_id || p.id)
-    } catch (e) {
-      setProjectsErr(humanizeError(e))
-    } finally {
-      setProjectBusy(false)
-    }
-  }, [orgId, onOpenProject])
-
-  const dismissRoute = useCallback(() => {
-    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    setRoute(null)
-  }, [])
+    return createWorkspaceProject(name)
+  }, [createWorkspaceProject])
 
   const prepareRunParams = useCallback((tool, params) => {
     const isWrite = (tool.capabilities || []).includes('drawing.write')
@@ -925,7 +842,6 @@ export default function App() {
   const armDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-      setRoute(decision)
       return decision
     }
     // Family catalog entries are presentation-normalized. Resolve the canonical
@@ -934,7 +850,6 @@ export default function App() {
     const catalogTool = tools.find((candidate) => candidate.name === decision.tool)
     if (!catalogTool) {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-      setRoute(decision)
       return decision
     }
     if (!mock && !tenant) return
@@ -953,25 +868,24 @@ export default function App() {
       toolSnapshot: createCatalogToolSnapshot(catalogTool),
     })
     runIntentStateRef.current = staged.state
-    setRouteErr(null)
     const armed = {
       ...decision,
       tool: catalogTool.name,
       params: staged.intent.params,
       runIntent: staged.intent,
     }
-    setRoute(armed)
     return armed
   }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
+  catalogUiRef.current = { armDecision, startAgentTurn, running }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null) => {
     if (!tool) return
-    return armDecision({
+    return commitCatalogDecision({
       lane: 'run', tool: tool.name, params, confidence: 1,
       rationale: rationale || 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [],
     })
-  }, [armDecision])
+  }, [commitCatalogDecision])
 
   /* Legacy inline run lifecycle is disabled; useJobController owns it.
   const onRun = useCallback(async (tool, params, {
@@ -1088,8 +1002,8 @@ export default function App() {
     if (previewing) return null
     if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return null
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    setRoute(null); setRouteErr(null)
-    setAgentMode((mode) => (mode === 'race' ? null : mode))
+    dismissRoute()
+    if (agentMode === 'race') clearAgentMode()
     setSelectedTool(tool)
     setOverlayStale(false); markRefreshFailure(null)
     const merged = intentConfirmed ? params : prepareRunParams(tool, params)
@@ -1117,8 +1031,8 @@ export default function App() {
       if (openProjectId) rehydrate()
     }
     return envelope
-  }, [catalogRunContext, loadCheckout, loadUsage, mock, openProjectId, prepareRunParams,
-    markRefreshFailure, previewing, rehydrate, runJob, shown, writeLocked])
+  }, [agentMode, catalogRunContext, clearAgentMode, dismissRoute, loadCheckout, loadUsage, mock,
+    openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob, shown, writeLocked])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     let currentTool = tool
@@ -1131,7 +1045,7 @@ export default function App() {
       toolSnapshot = createCatalogToolSnapshot(currentTool)
     } catch {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
-      setRoute(null)
+      dismissRoute()
       setRunErr('That catalog tool changed or is no longer available. Choose Run again to create a new intent.')
       return
     }
@@ -1145,7 +1059,7 @@ export default function App() {
     })
     runIntentStateRef.current = confirmed.state
     if (!confirmed.ok) {
-      setRoute(null)
+      dismissRoute()
       setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
       return
     }
@@ -1154,7 +1068,7 @@ export default function App() {
       runContext: { ...confirmed.execution.context, toolSnapshot: confirmed.execution.toolSnapshot },
       idempotencyKey: confirmed.execution.intentId,
     })
-  }, [mock, onRun])
+  }, [dismissRoute, mock, onRun])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
@@ -1229,10 +1143,7 @@ export default function App() {
     try {
       const res = await publishStagedAuthor(mock, staged)
       const tool = res.tool || staged.tool
-      setTools((prev) => {
-        const rest = prev.filter((t) => t.name !== tool.name)
-        return [...rest, tool]
-      })
+      upsertTool(tool)
       // Re-group the catalog so the new tool lands in "Custom authored tools"
       // (visible re-fetch of the grouped capabilities).
       loadCatalog()
@@ -1252,7 +1163,7 @@ export default function App() {
     } finally {
       setTourLanded(true)
     }
-  }, [mock, loadCatalog, showToast])
+  }, [mock, loadCatalog, showToast, upsertTool])
 
   // "Run it now" from the author card — prefill the RUN lane (RoutePanel) with
   // the just-authored tool so the user confirms before it runs (paid actions
@@ -1260,35 +1171,24 @@ export default function App() {
   // RoutePanel resolves it and shows a single Run.
   const onUseAuthored = useCallback((tool) => {
     if (!tool) return
-    armDecision({
+    commitCatalogDecision({
       lane: 'run', tool: tool.name, params: {}, confidence: 0.99,
       rationale: `Authored just now — confirm to run “${tool.name}”.`,
       alternatives: [],
     })
     setTimeout(() => document.querySelector('main')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
-  }, [armDecision])
+  }, [commitCatalogDecision])
 
   // --- prompt-first dispatch (§12) -----------------------------------------
   // Live preview of which lane the text will route to (lights the hero's dots).
-  const hintLane = useMemo(() => {
-    const s = prompt.trim()
-    if (!s) return null
-    if (s.startsWith('/')) return 'run' // slash = explicit tool invocation
-    try { return matchPrompt(s, tools).lane } catch { return null }
-  }, [prompt, tools])
-
   // The slash-completable catalog: every runnable tool the CURRENT plan allows
   // (write tools drop out when the plan lacks run_write — the menu only offers
   // what the end user can actually complete and run).
-  const slashTools = useMemo(
-    () => tools.filter((t) => canRunWrite || !(t.capabilities || []).includes('drawing.write')),
-    [tools, canRunWrite],
-  )
-
   // `override` is an optional explicit string — the guided tour's canned prompt,
   // or the menu-picked "/tool" (state hasn't flushed yet). Click handlers pass
   // an event object, which is NOT a string, so the normal "dispatch what's in
   // the bar" path is untouched.
+  /* Legacy inline catalog dispatch is disabled; useCatalogController owns it.
   const onDispatch = useCallback(async (override) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
@@ -1407,6 +1307,12 @@ export default function App() {
       stub: prev?.stub, stubReason: prev?.stubReason,
     })
   }, [armDecision, route])
+  */
+
+  const onDispatch = useCallback((override) => {
+    if (running) return undefined
+    return catalogActions.dispatch(override)
+  }, [catalogActions, running])
 
   const onOpenAuthor = useCallback(() => {
     setAuthorOpen(true)
@@ -1428,10 +1334,10 @@ export default function App() {
     setTourLanded(false)
     // self-type into the real bar so the audience sees the sentence being written
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    setRoute(null); setRouteErr(null)
+    dismissRoute()
     for (let i = 1; i <= text.length; i += 1) {
       if (cannedSeq.current !== seq) return
-      setPrompt(text.slice(0, i))
+      onPromptChange(text.slice(0, i))
       // eslint-disable-next-line no-await-in-loop
       await new Promise((res) => setTimeout(res, 22))
     }
@@ -1453,7 +1359,7 @@ export default function App() {
       // tool is actually authored, which is the whole differentiator beat.
       if (cannedSeq.current === seq && !(r && r.lane === 'build')) setTourLanded(true)
     }
-  }, [onDispatch, onRequestCatalogRun, tools])
+  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, tools])
 
   const onTourExit = useCallback(() => {
     // Leaving the tour keeps you exactly where you are — in mock, on the same
@@ -1620,7 +1526,7 @@ export default function App() {
         if (drawer) { setDrawer(null); return }
         if (historyOpen) { closeHistory(); return }
         if (route) { dismissRoute(); return }
-        if (routeErr || runErr) { setRouteErr(null); clearRunErr(); return }
+        if (routeErr || runErr) { clearRouteError(); clearRunErr(); return }
         if (running) { interruptRun(); return }
         if (selectedHandle) { setSelectedHandle(null); return }
         // Bottom rung: the WorkspaceSummary Esc cap — close the open project
@@ -1662,7 +1568,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, onDispatch, openProjectId, onCloseProject, rTarget,
-      closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute])
+      closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
@@ -1707,12 +1613,6 @@ export default function App() {
   }, [mock, selectedHandle, openTool])
 
   const degraded = !!result?.degraded_mode || demoDegraded
-
-  // Total capabilities across families (footer + fam-title, honest count).
-  const capCount = useMemo(
-    () => catalog.families.reduce((n, f) => n + f.capabilities.length, 0),
-    [catalog],
-  )
 
   // A run rejected by the hard SPEND cap (§ broker 402) -> calm amber quota card,
   // not a red failure. The backend's message is authoritative. The coarse DAILY
@@ -1964,7 +1864,7 @@ export default function App() {
             workspace={workspace}
             loading={wsLoading}
             selectedVersionId={canonicalVersionId}
-            onSelectVersion={setCanonicalVersionId}
+            onSelectVersion={selectCanonicalVersion}
             onClose={onCloseProject}
           />
         )}
@@ -2180,7 +2080,7 @@ export default function App() {
           <ConversePanel
             sessionId={agentSessionId}
             userTurns={agentTurns}
-            onDismiss={() => setAgentMode(null)}
+            onDismiss={clearAgentMode}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
@@ -2241,7 +2141,7 @@ export default function App() {
                   Link account
                 </button>
               )}
-              <button type="button" className="chip-neutral" onClick={() => setAgentBanner(null)}>
+              <button type="button" className="chip-neutral" onClick={clearAgentBanner}>
                 Dismiss
               </button>
             </div>
