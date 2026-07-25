@@ -506,6 +506,113 @@ def test_messages_confirm_replay_second_confirm_409_bad_params(client, monkeypat
 
 
 # =========================================================================== #
+# Consume-vs-CAS race — a confirm that loses the turn CAS must not eat the
+# approval. consume_approval() runs BEFORE start_turn's try_begin_turn CAS
+# (the CAS is inside start_turn), so the 409 TURN_IN_PROGRESS leg has to give
+# the consume back or the retry it invites can only fail 'already_consumed'.
+# =========================================================================== #
+def test_messages_confirm_busy_gives_the_approval_back(client, monkeypatch):
+    """Hold the session's REAL turn lock, send a confirm, and assert the full
+    round trip: 409 -> approval still unconsumed -> the SAME approval redeems
+    once the lock clears -> a replay after that redemption is still rejected.
+
+    The busy leg runs the REAL turn_runner.start_turn on purpose — TurnBusy is
+    raised by the CAS before any harness I/O, so this stays hermetic while
+    exercising the actual race site rather than a stub of it."""
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+    cid = _seed_approval(sid, tid, tool="write_home_run",
+                         params={"length_ft": 12}, capability="drawing.write")
+    session_store.decide_approval(cid, True, by=tid)
+
+    # A concurrent turn holds the session lock (what try_begin_turn sees).
+    assert session_store.try_begin_turn(sid, "turn-concurrent-holder", 300) is True
+
+    confirm_body = {"confirm": {"confirmationId": cid, "approved": True}}
+    busy = client.post(f"/api/sessions/{sid}/messages", json=confirm_body, headers=_h(tid))
+    assert busy.status_code == 409, busy.text
+    assert busy.json()["error"]["error_code"] == "turn_in_progress"
+    assert busy.json()["error"]["retryable"] is True
+
+    # THE REGRESSION: the losing confirm must not have spent the approval.
+    assert session_store.get_approval(cid)["consumed"] is False, (
+        "the approval was consumed by a confirm whose turn never started — "
+        "the retry the 409 invites can now only fail 'already_consumed'"
+    )
+
+    # The concurrent turn finishes and the client retries, exactly as the
+    # retryable 409 tells it to.
+    session_store.end_turn(sid, "turn-concurrent-holder")
+
+    calls = []
+
+    def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
+                         classifier_hint=None, model=None, credential_grant=None):
+        calls.append(confirm)
+        return f"turn-after-busy-{len(calls)}"
+
+    monkeypatch.setattr(turn_runner, "start_turn", _fake_start_turn)
+    retry = client.post(f"/api/sessions/{sid}/messages", json=confirm_body, headers=_h(tid))
+    assert retry.status_code == 202, retry.text
+    assert retry.json()["turn_id"] == "turn-after-busy-1"
+    # the SAME approval resumed, with its stored proposal intact
+    assert calls == [{
+        "confirmation_id": cid,
+        "approved": True,
+        "proposal": {
+            "tool": "write_home_run",
+            "params": {"length_ft": 12},
+            "capability": "drawing.write",
+        },
+    }]
+
+    # ...and single-redeem is still single-redeem: the give-back reopened the
+    # approval for a turn that never ran, it did NOT make it reusable.
+    replay = client.post(f"/api/sessions/{sid}/messages", json=confirm_body, headers=_h(tid))
+    assert replay.status_code == 409, replay.text
+    assert replay.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert len(calls) == 1, "the replay started a SECOND turn from one approval"
+
+
+def test_messages_busy_text_turn_needs_no_give_back(client):
+    """The give-back is confirm-only: a busy TEXT turn has no approval to
+    return, and must still answer a plain retryable 409."""
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+    assert session_store.try_begin_turn(sid, "turn-holder-text", 300) is True
+    try:
+        r = client.post(f"/api/sessions/{sid}/messages",
+                        json={"text": "hi"}, headers=_h(tid))
+        assert r.status_code == 409, r.text
+        assert r.json()["error"]["error_code"] == "turn_in_progress"
+    finally:
+        session_store.end_turn(sid, "turn-holder-text")
+
+
+def test_messages_confirm_busy_give_back_failure_still_answers_409(client, monkeypatch):
+    """A store failure inside the give-back must not turn the retryable 409
+    into a 500 — the client's correct move is still to retry."""
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+    cid = _seed_approval(sid, tid)
+    session_store.decide_approval(cid, True, by=tid)
+    assert session_store.try_begin_turn(sid, "turn-holder-boom", 300) is True
+
+    def _boom(*a, **kw):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(session_store, "unconsume_approval", _boom)
+    try:
+        r = client.post(f"/api/sessions/{sid}/messages",
+                        json={"confirm": {"confirmationId": cid, "approved": True}},
+                        headers=_h(tid))
+        assert r.status_code == 409, r.text
+        assert r.json()["error"]["error_code"] == "turn_in_progress"
+    finally:
+        session_store.end_turn(sid, "turn-holder-boom")
+
+
+# =========================================================================== #
 # GET /api/sessions/{id}/stream — SSE, event-per-frame, after_seq replay
 # =========================================================================== #
 def test_stream_unknown_session_404(client):

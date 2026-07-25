@@ -225,6 +225,130 @@ def test_consume_approval_undecided_takes_priority_over_expired():
 
 
 # =========================================================================== #
+# unconsume_approval — give back a consume that never redeemed anything
+# (routers/sessions.py's TurnBusy leg; see that module's APPROVAL GIVE-BACK)
+# =========================================================================== #
+def test_unconsume_approval_makes_an_unredeemed_consume_consumable_again():
+    sess = _new_session()
+    cid = _seed_approval(sess["session_id"], sess["tenant_id"])
+    session_store.decide_approval(cid, True, by="user-1")
+    session_store.consume_approval(cid, sess["session_id"], sess["tenant_id"])
+
+    assert session_store.unconsume_approval(
+        cid, sess["session_id"], sess["tenant_id"]) is True
+    assert session_store.get_approval(cid)["consumed"] is False
+
+    # consumable again, and the stored decision/proposal survived the round trip
+    again = session_store.consume_approval(cid, sess["session_id"], sess["tenant_id"])
+    assert again["approved"] is True
+    assert again["consumed"] is True
+    assert again["tool"] == "write_home_run"
+    assert again["params"] == {"length_ft": 12}
+
+
+def test_unconsume_approval_is_still_single_redeem():
+    """A give-back reopens the approval EXACTLY once. Consuming it again and
+    NOT giving that one back leaves it spent for good."""
+    sess = _new_session()
+    cid = _seed_approval(sess["session_id"], sess["tenant_id"])
+    session_store.decide_approval(cid, True, by="user-1")
+
+    session_store.consume_approval(cid, sess["session_id"], sess["tenant_id"])
+    session_store.unconsume_approval(cid, sess["session_id"], sess["tenant_id"])
+    session_store.consume_approval(cid, sess["session_id"], sess["tenant_id"])
+
+    try:
+        session_store.consume_approval(cid, sess["session_id"], sess["tenant_id"])
+        assert False, "expected ApprovalConsumeError"
+    except session_store.ApprovalConsumeError as exc:
+        assert exc.reason == "already_consumed"
+
+
+def test_unconsume_approval_never_consumed_is_a_false_noop():
+    sess = _new_session()
+    cid = _seed_approval(sess["session_id"], sess["tenant_id"])
+    session_store.decide_approval(cid, True, by="user-1")
+
+    assert session_store.unconsume_approval(
+        cid, sess["session_id"], sess["tenant_id"]) is False
+    assert session_store.get_approval(cid)["consumed"] is False
+    # and the row is otherwise untouched — still decided, still consumable
+    assert session_store.consume_approval(
+        cid, sess["session_id"], sess["tenant_id"])["approved"] is True
+
+
+def test_unconsume_approval_unknown_confirmation_id_is_a_false_noop():
+    sess = _new_session()
+    assert session_store.unconsume_approval(
+        "no-such-confirmation-id", sess["session_id"], sess["tenant_id"]) is False
+
+
+def test_unconsume_approval_wrong_session_cannot_unspend():
+    """Session B must not be able to un-spend session A's approval — the same
+    ownership guard consume_approval enforces."""
+    sess_a = _new_session(tenant_id="tenant-unconsume-xsession")
+    sess_b = _new_session(tenant_id="tenant-unconsume-xsession")
+    cid = _seed_approval(sess_a["session_id"], "tenant-unconsume-xsession")
+    session_store.decide_approval(cid, True, by="user-1")
+    session_store.consume_approval(cid, sess_a["session_id"], "tenant-unconsume-xsession")
+
+    assert session_store.unconsume_approval(
+        cid, sess_b["session_id"], "tenant-unconsume-xsession") is False
+    assert session_store.get_approval(cid)["consumed"] is True
+
+
+def test_unconsume_approval_wrong_tenant_cannot_unspend():
+    sess = _new_session(tenant_id="tenant-unconsume-owner")
+    cid = _seed_approval(sess["session_id"], "tenant-unconsume-owner")
+    session_store.decide_approval(cid, True, by="user-1")
+    session_store.consume_approval(cid, sess["session_id"], "tenant-unconsume-owner")
+
+    assert session_store.unconsume_approval(
+        cid, sess["session_id"], "tenant-unconsume-intruder") is False
+    assert session_store.get_approval(cid)["consumed"] is True
+
+
+def test_unconsume_approval_only_the_consumer_can_give_back():
+    """Two racers, one winner, and only the WINNER's give-back can fire: the
+    loser never consumed, so the row it would hand back is not its to hand.
+    This is what keeps the give-back from becoming a second redemption — a
+    consumed=1 row has exactly one writer, the caller that set it."""
+    sess = _new_session()
+    cid = _seed_approval(sess["session_id"], sess["tenant_id"])
+    session_store.decide_approval(cid, True, by="user-1")
+
+    n = 8
+    barrier = threading.Barrier(n)
+    won = []
+    errors = []
+
+    def worker():
+        try:
+            barrier.wait(timeout=5)
+            try:
+                session_store.consume_approval(cid, sess["session_id"], sess["tenant_id"])
+                won.append(True)
+            except session_store.ApprovalConsumeError:
+                pass
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"unexpected errors: {errors}"
+    assert len(won) == 1
+    # the single winner gives back; every loser's give-back would be a no-op
+    assert session_store.unconsume_approval(
+        cid, sess["session_id"], sess["tenant_id"]) is True
+    assert session_store.unconsume_approval(
+        cid, sess["session_id"], sess["tenant_id"]) is False  # already given back
+
+
+# =========================================================================== #
 # atomicity — 2-thread race on the SAME confirmation_id -> exactly one winner
 # =========================================================================== #
 def test_consume_approval_concurrent_exactly_one_winner():

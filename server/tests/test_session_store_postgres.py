@@ -156,6 +156,39 @@ def test_dual_write_end_turn_requires_postgres_row(monkeypatch):
         session_store.end_turn("session-1", "turn-1")
 
 
+def test_postgres_authority_unconsume_does_not_fall_back(monkeypatch):
+    """The approval give-back (routers/sessions.py's TurnBusy path) must honour
+    the authority seam exactly like consume does — a PostgreSQL-authority
+    deployment must never silently un-spend the approval in SQLite instead."""
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "postgres")
+    monkeypatch.setattr(
+        session_store, "_pg_unconsume_approval",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        session_store, "_legacy_unconsume_approval",
+        lambda *_args: pytest.fail("legacy fallback must not run"),
+    )
+
+    assert session_store.unconsume_approval("confirm-1", "session-1", "tenant-1") is True
+
+
+def test_dual_write_unconsume_fails_closed_on_mismatch(monkeypatch):
+    """A give-back that lands in one store but not the other leaves the two
+    ledgers disagreeing about whether the approval is still redeemable —
+    exactly the divergence the shadow comparison exists to catch."""
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
+    monkeypatch.setattr(
+        session_store, "_legacy_unconsume_approval", lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        session_store, "_pg_unconsume_approval", lambda *_args: False,
+    )
+
+    with pytest.raises(RuntimeError, match="approval consumption release shadow mismatch"):
+        session_store.unconsume_approval("confirm-1", "session-1", "tenant-1")
+
+
 def test_shadow_append_never_writes_postgres(monkeypatch):
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "shadow")
     monkeypatch.setattr(

@@ -43,11 +43,34 @@ decided ``approved: false`` all fail closed. Wire-compat: console/converse.js
 BEFORE its caller sends the confirm message via ``postMessage({confirm})`` —
 see that file's ``approve()``/``postMessage()`` comments — so requiring
 ``decided`` here is compatible with every real client.
+
+APPROVAL GIVE-BACK: the consume above necessarily runs BEFORE the turn's busy
+compare-and-swap, because that CAS lives inside ``turn_runner.start_turn``
+(``session_store.try_begin_turn``) and start_turn is one call. So a confirm
+that races a concurrent turn gets consumed and then answered 409
+TURN_IN_PROGRESS — and without a give-back the retry that 409 explicitly
+invites could only ever fail ``already_consumed``, destroying the user's one
+approval. The ``TurnBusy`` handler therefore calls
+``session_store.unconsume_approval``.
+
+That rollback is legal for EXACTLY this exception and no other. ``TurnBusy``
+means try_begin_turn lost the CAS, which is the first thing start_turn does
+after the session guard — no ``turn_started`` event was appended, no request
+reached the harness, so nothing anywhere redeemed the approval and giving it
+back cannot produce a second redemption. ``TurnRejected`` is deliberately NOT
+rolled back: by then the CAS was WON and the turn was recorded, and on the
+timeout/connection-drop legs the harness may well have received the resume and
+acted on it — un-spending an approval whose tool call might already be running
+is precisely the double-execution that consume-once exists to prevent. Single
+redemption is preserved in both directions: a confirm whose turn really started
+still replays into ``already_consumed`` (see
+tests/test_sessions_routes.py::test_messages_confirm_busy_gives_the_approval_back).
 """
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from typing import Any, Dict, Optional
 
@@ -216,6 +239,28 @@ def _require_owned_session(session_id: str, tenant: Any) -> Optional[Dict[str, A
     return sess
 
 
+def _give_back_unredeemed_approval(confirmation_id: str, session_id: str,
+                                   tenant_id: str) -> None:
+    """Return a consumed-but-never-redeemed approval to the shelf (see the
+    module docstring's APPROVAL GIVE-BACK note for when this is legal).
+
+    Failure here is not fatal to the response: the caller is already answering
+    a retryable 409, and turning that into a 500 would hide the real outcome
+    from a client whose only correct move is still to retry. The cost of a
+    failed give-back is exactly the pre-fix behaviour (the approval stays
+    spent), so it is logged loudly rather than raised. The confirmation_id is a
+    server-issued opaque id the client already holds — not a secret."""
+    try:
+        session_store.unconsume_approval(confirmation_id, session_id, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[leaf-agent] approval give-back failed for confirmation_id "
+            f"{confirmation_id!r} on session {session_id!r}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr, flush=True,
+        )
+
+
 def _turn_rejected_response(exc: "turn_runner.TurnRejected") -> JSONResponse:
     """TurnRejected -> HTTP response: exc.extra merged TOP-LEVEL (e.g.
     {'grant_required': True}) alongside the §10-valid `error` object."""
@@ -275,11 +320,12 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     # encrypted request) and shape-checked; the validated (never the raw) grant
     # is forwarded to the turn.
     #
-    # This orders THESE inputs ahead of the consume. It is not a general
-    # no-burn guarantee: `consume_approval` below still runs before
-    # `start_turn`'s busy CAS, so a confirm that races a concurrent turn is
-    # consumed and then answered 409, and the retry fails as already-consumed.
-    # That window predates this feature (e064086) and is tracked separately.
+    # `consume_approval` below still runs BEFORE `start_turn`'s busy CAS — the
+    # CAS is the real busy gate and it lives inside start_turn — so a confirm
+    # that races a concurrent turn IS consumed and then answered 409. The
+    # TurnBusy handler at the bottom of this function gives that consume back
+    # (see APPROVAL GIVE-BACK in the module docstring), which is what makes the
+    # retryable 409 actually retryable.
     if req.model is not None and not turn_runner.is_allowed_model(req.model):
         return _invalid_model_response(req.model)
     validated_grant: Optional[Dict[str, Any]] = None
@@ -315,6 +361,10 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     # the STORED approved value — never the client's req.confirm.approved,
     # which is read here only to validate the confirm shape, not trusted.
     confirm_payload: Optional[Dict[str, Any]] = None
+    # Hoisted so the dispatch step below can give an unredeemed consume back.
+    # Every failure between here and that step returns immediately, so by the
+    # time `start_turn` is called this is non-None IFF a consume succeeded.
+    confirmation_id: Optional[str] = None
     if has_confirm:
         confirmation_id = (req.confirm or {}).get("confirmationId")
         if not confirmation_id:
@@ -373,6 +423,14 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             model=req.model, credential_grant=validated_grant,
         )
     except turn_runner.TurnBusy:
+        # The approval (if any) was consumed at step 4 but NOTHING redeemed it:
+        # TurnBusy means try_begin_turn lost the CAS, which happens before
+        # start_turn appends `turn_started` or calls the harness. Give it back
+        # so the retry this 409 explicitly invites can actually succeed. This
+        # is the ONLY rollback point — see the module docstring's APPROVAL
+        # GIVE-BACK note for why TurnRejected deliberately does not roll back.
+        if confirmation_id is not None:
+            _give_back_unredeemed_approval(confirmation_id, session_id, str(tenant))
         return error_response(
             ErrorCode.TURN_IN_PROGRESS,
             f"session {session_id!r} already has an active turn",
