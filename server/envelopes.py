@@ -15,6 +15,7 @@ solver").
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Any, Dict, Optional
 
 from fastapi.responses import JSONResponse
@@ -232,9 +233,37 @@ def install_error_handlers(app) -> None:
     # the reading order honest.
     @app.exception_handler(Exception)
     async def _unhandled_handler(request, exc):  # noqa: ANN001
+        # Correlation ID. Suppressing the detail below (correctly) leaves the
+        # caller holding a bare "internal server error", and the log line carried
+        # only method + path -- so an operator handed that string by a user had
+        # no way to find WHICH traceback it came from among every other 500 on
+        # the same route. This token is the join key: same value in the log line
+        # and in the response.
+        #
+        # It leaks nothing. The ID is random and opaque -- it IDENTIFIES the log
+        # line rather than describing the fault, and is generated here rather
+        # than derived from the exception, so it cannot carry request or
+        # exception content. Nothing else about what the client sees widens.
+        #
+        # Contract-legal WITHOUT a new field (contract/CONTRACT.md §10 +
+        # server/envelope_schema.json): §10 REQUIRES {error_code, message,
+        # retryable} and freezes the error_code ENUM, while `message` is declared
+        # only as `{"type": "string"}` with no further constraint. Carrying the ID
+        # inside it therefore leaves the envelope's key set byte-identical and
+        # needs no additive field. (§10 permits additive extension -- the schema
+        # has no `additionalProperties: false` -- so a new field would also have
+        # been legal; it is simply not needed, and not widening the shape is the
+        # cheaper change for every existing consumer.)
+        #
+        # 8 bytes, not 4. At 32 bits the collision probability passes 1% within
+        # ~10k IDs, and CloudWatch pools logs across every task and lifetime, so a
+        # 4-byte token could point an operator at two different tracebacks. 64
+        # bits keeps the join key unique at any volume this service will see.
+        error_id = secrets.token_hex(8)
         # Log the FULL detail (type, message, traceback) server-side...
         logger.exception(
-            "unhandled exception serving %s %s: %s",
+            "unhandled exception [error_id=%s] serving %s %s: %s",
+            error_id,
             getattr(request, "method", "?"),
             getattr(getattr(request, "url", None), "path", "?"),
             exc,
@@ -242,8 +271,11 @@ def install_error_handlers(app) -> None:
         # ...but do NOT echo str(exc) to the caller. An arbitrary in-flight
         # exception can carry a filesystem path, a SQL fragment, or credential
         # material (same leak class the validation handler above refuses to
-        # echo). The client gets the machine-readable code; the operator gets
-        # the detail from the log.
+        # echo). The client gets the machine-readable code plus the opaque ID;
+        # the operator gets the detail from the log.
         return error_response(
-            ErrorCode.INTERNAL, "internal server error", retryable=False, status_code=500
+            ErrorCode.INTERNAL,
+            f"internal server error (error_id: {error_id})",
+            retryable=False,
+            status_code=500,
         )
