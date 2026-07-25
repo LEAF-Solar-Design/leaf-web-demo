@@ -126,8 +126,13 @@ def _cleanup_scratch_objects(da: Any, scratch_keys) -> None:
 
 
 def drawing_mutations_enabled() -> bool:
-    """Global cutover drain for every drawing-authority mutation surface."""
+    """Cutover gate for authored, checkout, and broker drawing mutations."""
     return os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") == "1"
+
+
+def upload_import_mutations_enabled() -> bool:
+    """Fail-closed gate for upload admission and canonical upload import."""
+    return os.environ.get("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "0") == "1"
 
 
 def default_backend(*, aps_live: bool = False, da: Any = None):

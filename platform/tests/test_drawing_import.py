@@ -8,6 +8,7 @@ import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from psycopg.types.json import Jsonb
 
 import leaf_platform.store as store
@@ -91,7 +92,35 @@ def _canonical_project(make_org, name="Drawing import org"):
     return org, project
 
 
-def test_ready_account_upload_import_and_exact_api_replay(client, make_org):
+@pytest.mark.parametrize("configured", [None, "", "0", "true", "TRUE", " 1 "])
+def test_import_gate_defaults_closed_before_store_write(
+    client, make_org, monkeypatch, configured
+):
+    if configured is None:
+        monkeypatch.delenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", configured)
+    org, project = _canonical_project(make_org, "Disabled drawing import org")
+    binding = _binding(org.org_id)
+
+    response = client.post(
+        f"/api/projects/{project.project_id}/drawing-versions/import",
+        headers=_headers(org.org_id, binding.binding_id, "disabled-import-1"),
+        json=_body(uuid.uuid4()),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "drawing upload/import mutations are temporarily disabled"
+    )
+    assert store.list_drawing_versions(org.org_id, project.project_id) == []
+
+
+def test_ready_account_upload_import_and_exact_api_replay(
+    client, make_org, monkeypatch
+):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
     org, project = _canonical_project(make_org)
     binding = _binding(org.org_id)
     drawing_id, digest, object_key, attempt, intake_digest = _ready_upload(org.org_id)
@@ -324,6 +353,8 @@ def test_account_upload_receipt_imports_exact_ready_source(
     org, project = _canonical_project(make_org, "Upload receipt import")
     binding = _binding(org.org_id)
     server_dir = str(Path(__file__).parents[2] / "server")
+    da_dir = str(Path(__file__).parents[2] / "da")
+    sys.path.insert(0, da_dir)
     sys.path.insert(0, server_dir)
     try:
         monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
@@ -332,7 +363,12 @@ def test_account_upload_receipt_imports_exact_ready_source(
         monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
 
         import guest_uploads
+        import store as drawing_store
         from routers import uploads as uploads_router
+
+        assert Path(drawing_store.__file__).resolve() == (
+            Path(__file__).parents[2] / "da" / "store.py"
+        ).resolve()
 
         monkeypatch.setattr(
             guest_uploads, "start_extraction_thread",
@@ -387,6 +423,7 @@ def test_account_upload_receipt_imports_exact_ready_source(
         assert uuid.UUID(body["drawing_version"]["version_id"])
     finally:
         sys.path.remove(server_dir)
+        sys.path.remove(da_dir)
 
 
 def test_concurrent_exact_replay_creates_one_version(make_org):

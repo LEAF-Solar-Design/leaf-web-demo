@@ -100,27 +100,40 @@ def upload_drawing(
     authorization: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
 ) -> Any:
-    if not write_loop.drawing_mutations_enabled():
+    if not write_loop.upload_import_mutations_enabled():
         return error_response(
             ErrorCode.INTERNAL,
-            "drawing mutations are temporarily disabled for a storage cutover",
+            "drawing upload/import mutations are temporarily disabled",
             retryable=True,
             status_code=503,
         )
-    if not guest_uploads.enabled():
-        return error_response(ErrorCode.INTERNAL,
-                              "drawing uploads are disabled on this deployment",
-                              retryable=False, status_code=503)
-
-    if deps.auth_live() and not authorization and guest_uploads.guest_secret() is None:
-        # Live mode with no way to mint a verifiable guest identity: the guest
-        # lane is OFF. Honest 503 (config gap), never an unsigned tenant.
-        return error_response(ErrorCode.INTERNAL,
-                              "guest uploads are not configured (LEAF_GUEST_SECRET unset)",
-                              retryable=False, status_code=503)
+    if deps.auth_live() and not authorization:
+        if not guest_uploads.enabled():
+            return error_response(
+                ErrorCode.INTERNAL,
+                "guest drawing uploads are disabled on this deployment",
+                retryable=False,
+                status_code=503,
+            )
+        if guest_uploads.guest_secret() is None:
+            # Live mode with no way to mint a verifiable guest identity: the
+            # guest lane is OFF. Honest 503, never an unsigned tenant.
+            return error_response(
+                ErrorCode.INTERNAL,
+                "guest uploads are not configured (LEAF_GUEST_SECRET unset)",
+                retryable=False,
+                status_code=503,
+            )
 
     tenant, tenant_kind, _minted = _resolve_upload_identity(
         x_tenant_id, authorization, x_guest_session)
+    if tenant_kind == "guest" and not guest_uploads.enabled():
+        return error_response(
+            ErrorCode.INTERNAL,
+            "guest drawing uploads are disabled on this deployment",
+            retryable=False,
+            status_code=503,
+        )
 
     # ENTITLEMENT GATE (§17 pattern): the tier must grant `upload`.
     tier = "guest" if tenant_kind == "guest" else entitlements.resolve_tier(tenant)

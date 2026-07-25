@@ -29,6 +29,11 @@ from .offboard import OrgNotFound, PurgeHook, offboard_org
 router = APIRouter(prefix="/api", tags=["platform"])
 
 
+def upload_import_mutations_enabled() -> bool:
+    """Return true only for an explicit upload/import activation."""
+    return os.environ.get("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "0") == "1"
+
+
 # --------------------------------------------------------------------------- #
 # request bodies
 # --------------------------------------------------------------------------- #
@@ -189,10 +194,10 @@ def import_drawing_version(
     actor_binding_id: uuid.UUID = Depends(get_write_binding_id),
 ):
     """Adopt a ready same-org account upload using server-derived refs and provenance."""
-    if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
+    if not upload_import_mutations_enabled():
         raise HTTPException(
             status_code=503,
-            detail="drawing mutations are temporarily disabled for a storage cutover",
+            detail="drawing upload/import mutations are temporarily disabled",
         )
     try:
         version, replayed = store.import_ready_account_upload(
