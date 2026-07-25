@@ -312,8 +312,14 @@ Progress:
   expiry, stopped job polling, sign-out without Auth0 build flags, token removal,
   and callback route ownership. Two controller tests cover latch and sign-out
   ordering.
-- Provider lifting, post-write refresh and transport recovery, and the remaining
-  accessibility ladder remain open.
+- Drawing state now lives in the persistent workspace provider instead of the
+  scene cast, and the provider is no longer keyed by route. Browser proof creates
+  cat version 2, recasts `/try` to the site and back, then verifies the same
+  controller instance, version head, single submission, unchanged session-read
+  count, and resident viewer.
+- Job, catalog, platform, checkout, upload, and project provider lifting,
+  post-write refresh and transport recovery, and the remaining accessibility
+  ladder remain open.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 

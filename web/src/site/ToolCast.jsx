@@ -4,19 +4,16 @@ import {
   createOrg,
   createProject,
   getDrawingIntake,
-  getDrawingVersions,
   getJob,
   getSession,
   getTools,
   listProjects,
   nlPrompt,
   openProject,
-  redoDrawing,
   runToolAsync,
   stageAuthorTool,
   publishStagedAuthor,
   recordToEnvelope,
-  undoDrawing,
 } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
 import AuthorPanel from '../components/AuthorPanel.jsx'
@@ -38,7 +35,6 @@ import ToolsPanel from '../components/ToolsPanel.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
-import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 import useJobController from '../controllers/useJobController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
@@ -60,11 +56,6 @@ import { authConfigured, isSignedIn, login } from '../auth.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
 const DRAWING_ID = 'cat-panels'
-const loadHead = (drawingId) => getDrawingIntake(false, drawingId, 'head')
-const loadVersion = (drawingId, version) => getDrawingIntake(false, drawingId, version)
-const loadVersions = (drawingId) => getDrawingVersions(false, drawingId)
-const undoVersion = (drawingId) => undoDrawing(false, drawingId)
-const redoVersion = (drawingId) => redoDrawing(false, drawingId)
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
 const workspaceServices = { createOrg, listProjects, createProject, openProject }
 
@@ -115,14 +106,13 @@ function moveTab(event) {
 
 export default function ToolCast({
   active,
-  onIntakeChange,
   onVisibleLayersChange,
   selectedHandle,
   onSelectedHandleChange,
   onResultOverlayChange,
 }) {
   const [prompt, setPrompt] = useState(CAT_REQUEST)
-  const { converse } = useWorkspaceControllers()
+  const { converse, drawing, drawingEvent, drawingError, instanceId } = useWorkspaceControllers()
   const { sessionId, turns, startTurn, clear: clearConverse, resetCached } = converse
   const platformSession = useSessionController()
   const sessionAuthRequired = platformSession.status === 'required'
@@ -130,7 +120,6 @@ export default function ToolCast({
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
   const [linkedJobId, setLinkedJobId] = useState(null)
-  const [panelCount, setPanelCount] = useState(null)
   const [tenantId, setTenantId] = useState('try-surface')
   const [sessionTier, setSessionTier] = useState(null)
   const [sessionOrg, setSessionOrg] = useState(null)
@@ -164,37 +153,18 @@ export default function ToolCast({
     onAuthRequired: () => requireAuth('catalog'),
   }), [requireAuth])
 
-  const applyIntake = useCallback((nextIntake) => {
-    onIntakeChange(nextIntake)
-    setPanelCount(nextIntake?.polylines?.length || null)
-  }, [onIntakeChange])
+  useEffect(() => {
+    if (!drawingEvent) return
+    setPhase(drawingEvent.event === 'undo' ? 'undone' : 'complete')
+  }, [drawingEvent])
 
-  const resetSelection = useCallback(() => {
-    onSelectedHandleChange?.(null)
-  }, [onSelectedHandleChange])
-
-  const onVersionEvent = useCallback(({ event }) => {
-    setPhase(event === 'undo' ? 'undone' : 'complete')
-  }, [])
-
-  const onDrawingError = useCallback((cause, { operation }) => {
-    if (operation === 'undo') setError('Undo failed. The current drawing version is unchanged.')
-    else if (operation === 'redo') setError('Redo failed. The current drawing version is unchanged.')
+  useEffect(() => {
+    if (!drawingError) return
+    const { error: cause, context } = drawingError
+    if (context?.operation === 'undo') setError('Undo failed. The current drawing version is unchanged.')
+    else if (context?.operation === 'redo') setError('Redo failed. The current drawing version is unchanged.')
     else setError(String(cause?.message || cause))
-  }, [])
-
-  const drawing = useDrawingVersionController({
-    loadHead,
-    loadVersion,
-    loadVersions,
-    undoVersion,
-    redoVersion,
-    onApplyIntake: applyIntake,
-    onResetSelection: resetSelection,
-    onVersionEvent,
-    onError: onDrawingError,
-    initialDrawingState: { drawing_id: DRAWING_ID, version: 1, head: 1, latest: 1 },
-  })
+  }, [drawingError])
   const {
     seatIntake,
     seatVersion,
@@ -203,6 +173,7 @@ export default function ToolCast({
   } = drawing.actions
   const version = drawing.head
   const { canUndo, canRedo } = drawing
+  const panelCount = drawing.shown?.polylines?.length || null
   const selection = useMemo(() => selectedEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
   const layerCounts = useMemo(() => {
     const counts = {}
@@ -225,6 +196,10 @@ export default function ToolCast({
 
   useEffect(() => {
     if (!active) return undefined
+    if (platformSession.status === 'active' && drawing.shown) {
+      setPhase(Number(drawing.head) > 1 ? 'complete' : 'ready')
+      return undefined
+    }
     let live = true
     platformSession.actions.checking()
     setPhase('loading')
@@ -681,7 +656,7 @@ export default function ToolCast({
         <span className="key">Esc</span>
       </div>
 
-      <aside className="tc-rail tc-rail-l tc-operator-rail" data-cast="tool" style={{ '--rank': 0 }} data-testid="operator-surface">
+      <aside className="tc-rail tc-rail-l tc-operator-rail" data-cast="tool" data-controller-instance={instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
         <div className="tc-rail-head">
           <span className="tc-rail-title">Workspace</span>
           <span className="tc-rail-sub">request and tools</span>

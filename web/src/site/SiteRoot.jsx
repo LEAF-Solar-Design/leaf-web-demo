@@ -7,13 +7,19 @@
 // regardless of path — every pre-existing deep link keeps working byte-for-
 // byte. Checked ONCE at boot; navigate() preserves the search string.
 
-import React, { Suspense, useEffect, useRef, useState } from 'react'
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useRoute, navigate } from './router.js'
 import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { handleRedirectCallback } from '../auth.js'
+import {
+  getDrawingIntake,
+  getDrawingVersions,
+  redoDrawing,
+  undoDrawing,
+} from '../api.js'
 import './landing.css'
 
 const App = React.lazy(() => import('../App.jsx'))
@@ -42,6 +48,13 @@ function sceneForPath(path) {
 const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
 
+const OPERATOR_DRAWING_ID = 'cat-panels'
+const loadHead = (drawingId) => getDrawingIntake(false, drawingId, 'head')
+const loadVersion = (drawingId, version) => getDrawingIntake(false, drawingId, version)
+const loadVersions = (drawingId) => getDrawingVersions(false, drawingId)
+const undoVersion = (drawingId) => undoDrawing(false, drawingId)
+const redoVersion = (drawingId) => redoDrawing(false, drawingId)
+
 export default function SiteRoot() {
   // Evaluated once at boot — deep links into the console never see the site.
   const [bootApp] = useState(() => bootWantsApp(window.location.search, window.location.pathname))
@@ -56,6 +69,21 @@ export default function SiteRoot() {
   const [operatorVisibleLayers, setOperatorVisibleLayers] = useState(null)
   const [operatorSelectedHandle, setOperatorSelectedHandle] = useState(null)
   const [operatorOverlay, setOperatorOverlay] = useState(null)
+  const drawingOptions = useMemo(() => ({
+    loadHead,
+    loadVersion,
+    loadVersions,
+    undoVersion,
+    redoVersion,
+    onApplyIntake: setOperatorIntake,
+    onResetSelection: () => setOperatorSelectedHandle(null),
+    initialDrawingState: {
+      drawing_id: OPERATOR_DRAWING_ID,
+      version: 1,
+      head: 1,
+      latest: 1,
+    },
+  }), [])
 
   useEffect(() => {
     if (!authCallbackPending) return
@@ -124,8 +152,8 @@ export default function SiteRoot() {
 
   return (
     <WorkspaceControllerProvider
-      key={scene}
       drawingId={scene === 'tool' ? 'cat-panels' : 'rooftop_demo'}
+      drawingOptions={drawingOptions}
     >
       <div className="stage-root" data-scene={scene} ref={stageRef}>
         <StageLayer
@@ -138,7 +166,6 @@ export default function SiteRoot() {
         <LandingCast onTryTool={() => navigate('/try')} />
         <ToolCast
           active={scene === 'tool'}
-          onIntakeChange={setOperatorIntake}
           onVisibleLayersChange={setOperatorVisibleLayers}
           selectedHandle={operatorSelectedHandle}
           onSelectedHandleChange={setOperatorSelectedHandle}
