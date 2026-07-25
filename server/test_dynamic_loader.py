@@ -9,7 +9,9 @@ tests/test_backbone.py) and drives the HTTP surface end to end:
     /api/tools -> /api/run returns a §3 envelope whose `result` is produced by
     THAT FILE (proven with a sentinel rewrite) and differs from count-by-layer.
   * the produced envelope schema-validates against engine/envelope_schema.json.
-  * bad params -> ok:false BAD_PARAMS envelope, tool body never runs.
+  * bad params -> ok:false BAD_PARAMS envelope, and the tool body never runs
+    (proven by an instrumented body that stamps marker files on import and on
+    run(), with a valid-params positive control proving the markers work).
   * no OPS/OP_ALIASES/MIRRORS entry exists for the authored engine_op.
   * the 3 built-ins return the recorded byte-identical result/overlay.
 
@@ -285,18 +287,76 @@ def test_author_persist_and_run_from_file(stack):
 # --------------------------------------------------------------------------- #
 # ACCEPTANCE 6: bad params -> ok:false BAD_PARAMS envelope, body never runs
 # --------------------------------------------------------------------------- #
-def test_bad_params_pre_validation_gate(stack):
+def test_bad_params_pre_validation_gate(stack, tmp_path):
+    """Params are pre-validated and the tool BODY IS NEVER REACHED.
+
+    The envelope alone cannot prove the second half. A regression that resolved
+    the tool, executed its ``run(intake, params)`` for the side effect, threw the
+    output away and then returned the same BAD_PARAMS envelope would satisfy
+    every assertion on the response. So the persisted body is INSTRUMENTED first:
+    it stamps one marker file at module import and a second inside ``run()``. The
+    bad-params call must leave neither behind.
+
+    Marker paths are absolute and baked into the body text because the body
+    executes in the BROKER subprocess (broker.py ``_run_tool`` ->
+    ``tool_loader.run_tool_dynamic``), not in this process: an in-process
+    monkeypatch would never see that call, and the broker's cwd is not this
+    test's. A file crosses the process boundary; a spy does not.
+
+    ORDER IS LOAD-BEARING. The bad-params call runs FIRST, against bytes that
+    have never been loaded — ``tool_loader._MOD_CACHE`` keys on path+mtime+size,
+    so a module already executed once is handed back without re-executing its top
+    level, and an import marker checked after a prior run would not restamp. The
+    positive control then runs the SAME bytes with valid params: both markers
+    must appear. That is what makes their absence above evidence rather than an
+    instrument that never worked.
+    """
     a = requests.post(f"{stack['app']}/api/author",
                       json={"description": "list all layer names in the drawing"},
                       timeout=15).json()
     name = a["tool"]["name"]
-    # prefix must be a string; sending a number violates the tool's own schema
-    r = run_wait(stack, name, {"prefix": 123})
-    env = r.json()
-    assert env["ok"] is False
-    assert env["error"]["error_code"] == "BAD_PARAMS", env["error"]
-    # body never ran: no result payload leaked through
-    assert env.get("result") in (None, {}), env.get("result")
+    fpath = authored_tenant_dir(DEFAULT_TENANT) / f"{name}.py"
+    assert fpath.exists(), fpath
+    original = fpath.read_text(encoding="utf-8")
+
+    import_marker = tmp_path / "import-marker.txt"
+    run_marker = tmp_path / "run-marker.txt"
+    instrumented = (
+        "import pathlib\n"
+        f"pathlib.Path({str(import_marker)!r}).write_text('IMPORTED', encoding='utf-8')\n"
+        "\n"
+        "\n"
+        "def run(intake, params):\n"
+        f"    pathlib.Path({str(run_marker)!r}).write_text('RAN', encoding='utf-8')\n"
+        "    return ({'layers': [], 'count': 0}, None)\n"
+    )
+    try:
+        fpath.write_text(instrumented, encoding="utf-8")
+
+        # prefix must be a string; sending a number violates the tool's own schema
+        r = run_wait(stack, name, {"prefix": 123})
+        env = r.json()
+        assert env["ok"] is False
+        assert env["error"]["error_code"] == "BAD_PARAMS", env["error"]
+        # body never ran: no result payload leaked through
+        assert env.get("result") in (None, {}), env.get("result")
+        # ...and it left no trace on disk either — the part the envelope can't show
+        assert not run_marker.exists(), \
+            "tool body run() executed despite BAD_PARAMS (marker stamped)"
+        assert not import_marker.exists(), \
+            "tool file was imported despite BAD_PARAMS (marker stamped)"
+
+        # POSITIVE CONTROL — same instrumented bytes, VALID params. Both markers
+        # must now appear, or the two assertions above proved nothing.
+        ok_env = run_wait(stack, name, {}).json()
+        assert ok_env["ok"] is True, ok_env
+        assert import_marker.exists(), \
+            "instrument is dead: import marker never stamped even on a good run"
+        assert run_marker.exists(), \
+            "instrument is dead: run() marker never stamped even on a good run"
+    finally:
+        # restore the real list-layers body so the persisted tool stays meaningful
+        fpath.write_text(original, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
