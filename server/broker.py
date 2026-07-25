@@ -880,23 +880,115 @@ def _tenant_tier(tenant_id: str) -> str:
 # completion. This registry is that mapping: written the moment the WorkItem is
 # submitted, dropped when broker_run leaves (success, failure, or timeout), so it
 # only ever holds genuinely in-flight runs.
-_active_workitems: Dict[str, str] = {}
+#
+# Each entry is (workitem_id, owner_token). The OWNER matters: a redelivery of
+# the same job POSTs the same job_id, is rejected as already leased/executing,
+# and then runs the same `finally` as a real run. Without ownership that
+# duplicate would evict the ORIGINAL run's correlation and make a live,
+# billing WorkItem permanently unreapable. A token of None means "unowned"
+# (replayed from disk after a restart): anyone may evict it.
+_active_workitems: Dict[str, tuple] = {}
 _active_workitems_lock = threading.Lock()
 
+# Correlations are also appended to disk so they survive a broker restart. The
+# WorkItem outlives this process -- APS keeps running and billing it -- so a
+# restart must not be what makes an abandoned run uncancellable.
+ACTIVE_WORKITEMS_PATH = Path(
+    os.environ.get("BROKER_ACTIVE_WORKITEMS_PATH",
+                   str(Path(LEDGER_PATH).parent / "active_workitems.jsonl")))
+_ACTIVE_WORKITEMS_COMPACT_LINES = 2000
 
-def _record_active_workitem(job_id: str, workitem_id: Optional[str]) -> None:
+
+def _persist_workitem_event(event: str, job_id: str, workitem_id: Optional[str]) -> None:
+    """Append one open/close event. Best-effort: a broken sidecar must never
+    fail a paid run, it only costs restart recovery."""
+    try:
+        ACTIVE_WORKITEMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with ACTIVE_WORKITEMS_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"event": event, "job_id": job_id,
+                                 "workitem_id": workitem_id}) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-broker] could not persist workitem correlation "
+              f"({event} {job_id}): {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+
+
+def _replay_persisted_workitems() -> Dict[str, tuple]:
+    """Rebuild the open correlations from the sidecar. Entries come back UNOWNED
+    (token None): the process that owned them is gone, so any later run or reap
+    may evict them."""
+    open_map: Dict[str, tuple] = {}
+    lines = 0
+    try:
+        if not ACTIVE_WORKITEMS_PATH.exists():
+            return open_map
+        with ACTIVE_WORKITEMS_PATH.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                lines += 1
+                rec = json.loads(line)
+                job_id = rec.get("job_id")
+                if not job_id:
+                    continue
+                if rec.get("event") == "open" and rec.get("workitem_id"):
+                    open_map[job_id] = (str(rec["workitem_id"]), None)
+                else:
+                    open_map.pop(job_id, None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-broker] could not replay workitem correlations: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return open_map
+    if lines > _ACTIVE_WORKITEMS_COMPACT_LINES:
+        _compact_persisted_workitems(open_map)
+    return open_map
+
+
+def _compact_persisted_workitems(open_map: Dict[str, tuple]) -> None:
+    """Rewrite the sidecar as just the still-open correlations."""
+    try:
+        tmp = ACTIVE_WORKITEMS_PATH.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for job_id, (wid, _owner) in open_map.items():
+                fh.write(json.dumps({"event": "open", "job_id": job_id,
+                                     "workitem_id": wid}) + "\n")
+        tmp.replace(ACTIVE_WORKITEMS_PATH)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-broker] could not compact workitem correlations: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+
+def _record_active_workitem(job_id: str, workitem_id: Optional[str],
+                            run_token: Optional[str] = None) -> None:
     if not job_id or not workitem_id:
         return
     with _active_workitems_lock:
-        _active_workitems[job_id] = str(workitem_id)
+        _active_workitems[job_id] = (str(workitem_id), run_token)
+    _persist_workitem_event("open", job_id, str(workitem_id))
 
 
-def _drop_active_workitem(job_id: Optional[str]) -> Optional[str]:
-    """Evict and return job_id's WorkItem id (None when absent)."""
+def _drop_active_workitem(job_id: Optional[str],
+                          run_token: Optional[str] = None) -> Optional[str]:
+    """Evict and return job_id's WorkItem id, but ONLY if `run_token` owns it.
+
+    `run_token=None` is the unconditional evict used by the reap path, which owns
+    any correlation it has just cancelled. A run passes its own token, so a
+    duplicate delivery -- which never registered anything -- cannot evict the
+    correlation belonging to the run that is actually in flight.
+    """
     if not job_id:
         return None
     with _active_workitems_lock:
-        return _active_workitems.pop(job_id, None)
+        current = _active_workitems.get(job_id)
+        if current is None:
+            return None
+        workitem_id, owner = current
+        if run_token is not None and owner is not None and owner != run_token:
+            return None  # a different run owns this correlation: leave it alone
+        del _active_workitems[job_id]
+    _persist_workitem_event("close", job_id, workitem_id)
+    return workitem_id
 
 
 def active_workitem_for(job_id: Optional[str]) -> Optional[str]:
@@ -904,7 +996,20 @@ def active_workitem_for(job_id: Optional[str]) -> Optional[str]:
     if not job_id:
         return None
     with _active_workitems_lock:
-        return _active_workitems.get(job_id)
+        current = _active_workitems.get(job_id)
+        return current[0] if current else None
+
+
+_active_workitems.update(_replay_persisted_workitems())
+
+
+def _submission_recorder(req: "BrokerRunRequest", run_token: Optional[str]):
+    """The `on_submitted` callback for one run, or None when there is nothing to
+    correlate. No job_id -> no callback -> the call is byte-for-byte unchanged."""
+    if not req.job_id:
+        return None
+    return functools.partial(_record_active_workitem, req.job_id,
+                             run_token=run_token)
 
 
 class BrokerRunRequest(BaseModel):
@@ -1399,10 +1504,19 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
     cc = reaper.cancel_client_for(live=use_live, da_client=_get_da() if use_live else None)
     records = _resolve_reap_workitems(req.records)
     reaped = reaper.sweep(records, cancel_client=cc)
+    live_cancel = not isinstance(cc, reaper.StubCancelClient)
     for rec in reaped:
-        # Cancelled -> no longer in flight. Drop it so a repeated sweep cannot
-        # cancel the same WorkItem twice.
-        _drop_active_workitem(rec.get("job_id"))
+        # Drop the correlation ONLY when a real cancel really succeeded. sweep()
+        # marks a row reaped regardless of outcome, so evicting on that alone
+        # would throw the id away after a FAILED DELETE, or in a deployment
+        # where live reaping is off and the inert stub cancelled nothing at all
+        # -- and the id is the only thing that can stop the billing. Keeping it
+        # lets a later sweep retry; dropping it on success is what keeps a
+        # repeated beacon from cancelling the same WorkItem twice.
+        outcome = rec.get("reap_outcome")
+        cancelled = isinstance(outcome, dict) and bool(outcome.get("cancelled"))
+        if live_cancel and cancelled:
+            _drop_active_workitem(rec.get("job_id"))
     return JSONResponse(status_code=200, content=with_envelope_fields({
         "ok": True,
         "reaped": [r.get("workitem_id") for r in reaped],
@@ -1707,6 +1821,11 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
     }
     postgres_mode = _broker_store_mode() == "postgres"
     ledger_event_key = req.ledger_event_key or str(uuid.uuid4())
+    # Identifies THIS invocation as the owner of any WorkItem correlation it
+    # registers, so the `finally` below evicts only what this call created. A
+    # redelivery of the same job_id gets its own token, registers nothing, and
+    # therefore cannot evict the in-flight run's correlation.
+    run_token = uuid.uuid4().hex
     admission: Optional[Dict[str, Any]] = None
     terminal_env: Optional[Dict[str, Any]] = None
     terminal_status: Optional[int] = None
@@ -1808,6 +1927,7 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
             req, tool, engine_op, t0, entry,
             quota_reserved=postgres_mode,
             admission=admission,
+            run_token=run_token,
         )
         entry["status"] = (
             "ok" if terminal_env.get("ok")
@@ -1849,8 +1969,10 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
     finally:
         # This run is over (returned, raised, or timed out): its WorkItem is no
         # longer reapable, and leaving the entry would grow the registry without
-        # bound. Runs into the same `finally` on every exit path.
-        _drop_active_workitem(req.job_id)
+        # bound. Runs into the same `finally` on every exit path, INCLUDING the
+        # early returns for a duplicate delivery -- which is why the token is
+        # passed: only the run that registered a correlation may evict it.
+        _drop_active_workitem(req.job_id, run_token)
         if (
             postgres_mode and admission is not None
             and admission.get("lease_token") and not admission.get("capacity_wait")
@@ -1896,7 +2018,8 @@ def _start_admitted_execution(
 
 def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: float,
              entry: Dict[str, Any], *, quota_reserved: bool = False,
-             admission: Optional[Dict[str, Any]] = None):
+             admission: Optional[Dict[str, Any]] = None,
+             run_token: Optional[str] = None):
     # 1) kill-switch FIRST — a disabled tenant never touches APS
     if tenant_disabled(req.tenant_id):
         env = err_envelope(ErrorCode.TENANT_DISABLED,
@@ -2012,9 +2135,13 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             if da is not None and hasattr(da, "run_tool"):
                 backend = write_loop.default_backend(aps_live=True, da=da)
                 _start_admitted_execution(req, admission, aps_submission=True)
+                # A live WRITE submits its own WorkItem and polls it exactly like
+                # a read does, so an abandoned write burns money the same way.
+                # It needs the same correlation.
                 return write_loop.run_write_live(tool, params, req.tenant_id,
                                                  backend=backend, da=da, t0=t0,
-                                                 ledger_entry=entry, version=base_version)
+                                                 ledger_entry=entry, version=base_version,
+                                                 on_submitted=_submission_recorder(req, run_token))
             # requested live but no da client -> degraded pure-python write
             backend = write_loop.default_backend(aps_live=False)
             _start_admitted_execution(req, admission, aps_submission=False)
@@ -2079,9 +2206,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 # Register this run's WorkItem id against the caller's job_id the
                 # instant APS accepts it, so a tab closed mid-poll has something
                 # to cancel. No job_id -> no callback -> unchanged call.
-                on_submitted = (
-                    functools.partial(_record_active_workitem, req.job_id)
-                    if req.job_id else None)
+                on_submitted = _submission_recorder(req, run_token)
                 env = dict(_run_live_tool(da, local, tool, params,
                                           on_submitted=on_submitted) or {})
                 env.setdefault("ok", True)

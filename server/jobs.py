@@ -1007,6 +1007,7 @@ def _reap_orphans_once() -> int:
             "(updated_at < ? OR progress = ? OR "
             "(lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
             (stale_before, CLOSED_PROGRESS, time.time()))
+    _retry_pending_reaps()
     handled = 0
     for row in rows:
         if row["progress"] == CLOSED_PROGRESS:
@@ -1036,7 +1037,37 @@ def _row_get(row: Any, key: str) -> Any:
         return None
 
 
-def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str]) -> None:
+# Tab-close reaps the broker could not accept yet (broker down, restarting,
+# transient network). The job row is ALREADY terminal by then and will never be
+# selected by the sweep again, so without this the single failed attempt is the
+# end of it and APS bills the abandoned WorkItem to completion. Retried on every
+# later sweep until the broker takes it. Bounded so a long outage cannot grow it
+# without limit; the cap is far above any plausible burst of closed tabs.
+_pending_reaps: Dict[str, Optional[str]] = {}
+_pending_reaps_lock = threading.Lock()
+PENDING_REAP_MAX = int(os.environ.get("PENDING_REAP_MAX", "512"))
+
+
+def _remember_pending_reap(job_id: str, tenant_id: Optional[str]) -> None:
+    with _pending_reaps_lock:
+        if job_id in _pending_reaps or len(_pending_reaps) < PENDING_REAP_MAX:
+            _pending_reaps[job_id] = tenant_id
+            return
+    print(f"[leaf-jobs] pending-reap queue full ({PENDING_REAP_MAX}); dropping "
+          f"job {job_id} — its APS WorkItem may bill to completion",
+          file=sys.stderr, flush=True)
+
+
+def _retry_pending_reaps() -> None:
+    """Re-attempt every reap a previous sweep could not deliver."""
+    with _pending_reaps_lock:
+        pending = list(_pending_reaps.items())
+    for job_id, tenant_id in pending:
+        _cancel_remote_workitem(job_id, tenant_id, _retry=True)
+
+
+def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str],
+                            _retry: bool = False) -> None:
     """Ask the broker to cancel this job's APS WorkItem (tab-close path ONLY).
 
     Marking the row terminal stops US from waiting; it does NOT stop APS, which
@@ -1062,8 +1093,13 @@ def _cancel_remote_workitem(job_id: str, tenant_id: Optional[str]) -> None:
             "session_closed": True,
         }])
     except Exception as exc:  # noqa: BLE001  (broker down != job not finished)
-        print(f"[leaf-jobs] tab-close reap failed for job {job_id}: "
-              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        _remember_pending_reap(job_id, tenant_id)
+        print(f"[leaf-jobs] tab-close reap failed for job {job_id} "
+              f"(queued for retry): {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        return
+    with _pending_reaps_lock:
+        _pending_reaps.pop(job_id, None)
 
 
 def _redispatch_record(job_id: str) -> bool:

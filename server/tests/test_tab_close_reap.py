@@ -18,8 +18,10 @@ monkeypatched or returns None under pytest) and no cancel leaves the process.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -65,13 +67,51 @@ def isolated_jobs(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def clean_registry():
-    """No test may inherit or leak an in-flight WorkItem mapping."""
+def clean_registry(monkeypatch, tmp_path):
+    """No test may inherit or leak an in-flight WorkItem mapping, and none may
+    write the durable sidecar into the repo."""
+    monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH",
+                        tmp_path / "active_workitems.jsonl")
     with broker._active_workitems_lock:
         broker._active_workitems.clear()
+    with jobs._pending_reaps_lock:
+        jobs._pending_reaps.clear()
     yield
     with broker._active_workitems_lock:
         broker._active_workitems.clear()
+    with jobs._pending_reaps_lock:
+        jobs._pending_reaps.clear()
+
+
+class _RecordingCancelClient:
+    """A cancel client that is NOT the inert stub, so the broker treats its
+    outcome as a genuine cancel (as it would a real DACancelClient)."""
+
+    def __init__(self, succeeds: bool = True) -> None:
+        self.cancelled: list = []
+        self._succeeds = succeeds
+
+    def cancel(self, workitem_id: str) -> dict:
+        self.cancelled.append(workitem_id)
+        return {"workitem_id": workitem_id, "cancelled": self._succeeds}
+
+
+@pytest.fixture
+def live_cancels(monkeypatch):
+    """A cancel that really reaches APS and succeeds."""
+    reaper = broker._get_reaper()
+    client = _RecordingCancelClient(succeeds=True)
+    monkeypatch.setattr(reaper, "cancel_client_for", lambda **_kw: client)
+    return client
+
+
+@pytest.fixture
+def failing_cancels(monkeypatch):
+    """A cancel that reaches APS and is REFUSED."""
+    reaper = broker._get_reaper()
+    client = _RecordingCancelClient(succeeds=False)
+    monkeypatch.setattr(reaper, "cancel_client_for", lambda **_kw: client)
+    return client
 
 
 def _submit(*, aps_live=False):
@@ -303,6 +343,96 @@ def test_a_run_without_job_id_registers_nothing(monkeypatch, tmp_path):
         assert broker._active_workitems == {}
 
 
+def test_a_live_write_registers_its_workitem_too(monkeypatch, tmp_path):
+    """A live WRITE submits and polls its own WorkItem exactly like a read does,
+    so an abandoned write burns money the same way. It was the one live branch
+    with no correlation at all -- a closed tab could never cancel it."""
+    import store
+    import write_loop
+
+    backend = store.InMemoryBackend()
+    vkey = store.drawing_version_key("tenant-reap", "d1", 1)
+    backend.put(vkey, b"DWGBYTES")
+    backend.put(store.manifest_key("tenant-reap", "d1"), json.dumps({
+        "schema": 1, "tenant_id": "tenant-reap", "drawing_id": "d1",
+        "head": 1, "latest": 1, "versions": [{"v": 1, "key": vkey}],
+        "checkout": None}).encode())
+
+    seen = {}
+
+    def _fake_submit(activity_id, arguments, dry_run=False, poll=True,
+                     tenant_id=None, on_submitted=None):
+        seen["offered"] = on_submitted is not None
+        if on_submitted is not None:
+            on_submitted("wi-write-1")
+        # Mid-poll: this is exactly when an abandoned write must be cancellable.
+        seen["mid_run"] = broker.active_workitem_for("job-write")
+        return {"status": "failed", "id": "wi-write-1"}   # stop before upload
+
+    da = types.SimpleNamespace(
+        submit_workitem=_fake_submit,
+        activity_qualified=lambda name: f"nick.{name}",
+        signed_download_url=lambda key: "https://example.invalid/in",
+        signed_upload_url=lambda key: ("upload-key", "https://example.invalid/out"),
+        upload_object=lambda *a, **k: None,
+        finalize_upload=lambda *a, **k: None,
+    )
+
+    req = broker.BrokerRunRequest(tenant_id="tenant-reap", tool={"name": "w"},
+                                  params={}, dwg="d1", aps_live=True,
+                                  job_id="job-write")
+
+    env, status_code = write_loop.run_write_live(
+        {"name": "w"}, {"drawing_id": "d1"}, "tenant-reap",
+        backend=backend, da=da, t0=0.0,
+        on_submitted=broker._submission_recorder(req, "write-token"))
+
+    assert env["ok"] is False and status_code >= 400, "the stub WorkItem failed"
+    assert seen.get("offered") is True, "the write path must offer the hook"
+    assert seen.get("mid_run") == "wi-write-1", (
+        "the write's WorkItem must be reapable while it is still polling")
+
+
+def test_a_failed_reap_is_retried_on_the_next_sweep(monkeypatch):
+    """The row is already terminal when the reap fires, so the sweep will never
+    select it again. One broker blip must not be the end of the attempt."""
+    job_id = _submit()
+    assert jobs.claim_lease(job_id, "worker-1") == 1
+    assert jobs.mark_job_closed(job_id) is True
+
+    attempts = []
+
+    def _down(records, **_kw):
+        attempts.append(records)
+        raise broker_client.BrokerUnreachable("broker unreachable")
+
+    monkeypatch.setattr(broker_client, "reap_via_broker", _down)
+    assert jobs._reap_orphans_once() == 1
+    assert len(attempts) == 1
+    assert job_id in jobs._pending_reaps, "a failed reap must be queued, not lost"
+
+    # Broker comes back; the next sweep delivers it even though the row is
+    # terminal and is no longer selected.
+    delivered = []
+    monkeypatch.setattr(broker_client, "reap_via_broker",
+                        lambda records, **_kw: delivered.append(records) or {"ok": True})
+
+    assert jobs._reap_orphans_once() == 0, "no reclaimable rows left"
+    assert len(delivered) == 1, "the queued reap was retried"
+    assert delivered[0][0]["job_id"] == job_id
+    assert job_id not in jobs._pending_reaps, "a delivered reap is dequeued"
+
+
+def test_the_pending_reap_queue_is_bounded(monkeypatch, capsys):
+    """A long outage must not grow the queue without limit."""
+    monkeypatch.setattr(jobs, "PENDING_REAP_MAX", 2)
+    for i in range(4):
+        jobs._remember_pending_reap(f"job-{i}", "tenant-reap")
+
+    assert len(jobs._pending_reaps) == 2
+    assert "pending-reap queue full" in capsys.readouterr().err
+
+
 # --------------------------------------------------------------------------- #
 # broker: /broker/reap resolves job_id -> workitem_id and cancels it
 # --------------------------------------------------------------------------- #
@@ -330,7 +460,9 @@ def test_reap_by_job_id_alone_cancels_the_resolved_workitem(stub_cancels):
     assert body["reaped"] == ["wi-abandoned"]
     assert body["count"] == 1
     assert body["live"] is False, "APS_LIVE unset -> no live DA cancel"
-    assert broker.active_workitem_for("job-abandoned") is None, "resolved entry is dropped"
+    assert broker.active_workitem_for("job-abandoned") == "wi-abandoned", (
+        "the inert stub cancelled NOTHING on APS, so the id must be kept: it is "
+        "the only thing that can stop the billing once reaping is enabled")
 
 
 def test_reap_resolves_through_the_real_factory_and_stays_non_live(monkeypatch):
@@ -384,9 +516,9 @@ def test_reap_leaves_a_healthy_run_alone_and_keeps_its_id(stub_cancels):
     assert broker.active_workitem_for("job-healthy") == "wi-healthy"
 
 
-def test_reaping_the_same_job_twice_cancels_it_once(stub_cancels):
-    """The sweep is idempotent from the registry's side: once cancelled, the
-    correlation is gone, so a repeated beacon cannot re-cancel."""
+def test_reaping_the_same_job_twice_cancels_it_once(live_cancels):
+    """The sweep is idempotent from the registry's side: once a cancel really
+    succeeds the correlation is gone, so a repeated beacon cannot re-cancel."""
     broker._record_active_workitem("job-dup", "wi-dup")
     client = TestClient(broker.app)
     payload = {"records": [{"job_id": "job-dup", "session_closed": True,
@@ -394,7 +526,72 @@ def test_reaping_the_same_job_twice_cancels_it_once(stub_cancels):
 
     assert client.post("/broker/reap", json=payload).status_code == 200
     assert client.post("/broker/reap", json=payload).status_code == 200
-    assert stub_cancels.cancelled == ["wi-dup"]
+    assert live_cancels.cancelled == ["wi-dup"]
+    assert broker.active_workitem_for("job-dup") is None
+
+
+def test_a_refused_cancel_keeps_the_correlation_for_a_later_retry(failing_cancels):
+    """sweep() marks a row reaped whatever the cancel returned. Evicting on that
+    alone would throw the id away after a FAILED DELETE, and the id is the only
+    thing that can stop the billing."""
+    broker._record_active_workitem("job-refused", "wi-refused")
+
+    resp = TestClient(broker.app).post("/broker/reap", json={
+        "records": [{"job_id": "job-refused", "session_closed": True,
+                     "status": "inprogress"}]})
+
+    assert resp.status_code == 200
+    assert failing_cancels.cancelled == ["wi-refused"]
+    assert broker.active_workitem_for("job-refused") == "wi-refused", (
+        "the DELETE was refused: keep the id so a later sweep can try again")
+
+
+def test_a_duplicate_delivery_cannot_evict_the_live_runs_correlation(monkeypatch, tmp_path):
+    """A redelivery of the same job POSTs the same job_id, is rejected before it
+    runs anything, and then falls into the SAME `finally` as a real run. Without
+    ownership it would evict the in-flight run's correlation and leave a live,
+    billing WorkItem permanently unreapable."""
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    broker._record_active_workitem("job-inflight", "wi-inflight",
+                                   run_token="token-of-the-real-run")
+
+    # The duplicate never reaches _execute, so it registers nothing; its own
+    # token owns nothing.
+    broker._drop_active_workitem("job-inflight", "token-of-the-duplicate")
+
+    assert broker.active_workitem_for("job-inflight") == "wi-inflight", (
+        "a duplicate delivery must not evict the running job's WorkItem id")
+
+    # The run that actually owns it still evicts on its way out.
+    assert broker._drop_active_workitem(
+        "job-inflight", "token-of-the-real-run") == "wi-inflight"
+    assert broker.active_workitem_for("job-inflight") is None
+
+
+def test_correlations_are_recoverable_after_a_broker_restart(monkeypatch, tmp_path):
+    """The WorkItem outlives the broker process -- APS keeps running and billing
+    it -- so a restart must not be what makes an abandoned run uncancellable."""
+    sidecar = tmp_path / "active_workitems.jsonl"
+    monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH", sidecar)
+
+    broker._record_active_workitem("job-survivor", "wi-survivor", run_token="t1")
+    broker._record_active_workitem("job-finished", "wi-finished", run_token="t2")
+    broker._drop_active_workitem("job-finished", "t2")
+
+    replayed = broker._replay_persisted_workitems()
+
+    assert replayed["job-survivor"] == ("wi-survivor", None), (
+        "replayed entries are UNOWNED: the process that owned them is gone")
+    assert "job-finished" not in replayed, "a closed correlation must not come back"
+
+
+def test_a_replayed_correlation_can_be_evicted_by_any_later_run(monkeypatch, tmp_path):
+    """Replayed entries carry no owner, so they can never become unevictable."""
+    monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH", tmp_path / "a.jsonl")
+    with broker._active_workitems_lock:
+        broker._active_workitems["job-replayed"] = ("wi-replayed", None)
+
+    assert broker._drop_active_workitem("job-replayed", "any-new-token") == "wi-replayed"
 
 
 # --------------------------------------------------------------------------- #
