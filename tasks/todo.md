@@ -74,6 +74,9 @@ Current additive progress:
 - [x] Prove a real natural-language catalog match from the unified command bar
   through immutable review, exactly one dispatch, execution result, and durable
   job truth without creating a Claude session.
+- [x] Prove the real local internal Operations drawer lists isolated tenant
+  usage, cancels before mutation, disables and restores through broker
+  authority, scopes its disposable credential, and fails closed after removal.
 - [ ] Promote protected author stage, independent approval, publish, catalog
   refresh, and use in an authorized environment with live signed identity,
   trusted tenant binding, isolated authoring authority, and R5/R6 rollout.

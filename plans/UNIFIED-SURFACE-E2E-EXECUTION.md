@@ -451,6 +451,13 @@ Progress:
   matches the durable job API. CA-02 and the catalog-run slice of RN-01 are
   local E2E proven. The receipt records that confident v1 matches do not invoke
   Claude.
+- The managed internal Operations gate now provisions a random disposable ops
+  credential for the isolated run, lists real local tenant usage, cancels a
+  destructive action without mutation, disables and restores one tenant through
+  the broker authority, and then proves the same Refresh action fails closed
+  after the browser credential is removed. OP-01 is local E2E proven for the
+  legacy isolated authority. No credential appears in page text, URLs, receipts,
+  or non-ops request headers.
 
 ### Wave 2: unified shell, resident viewer, motion, and responsive behavior
 
@@ -524,7 +531,7 @@ Observed Wave 0 results:
 - Fixture tier: 10 passed with two workers. It covers the cat happy path, route
   persistence, stale session reattach, denial, stale and expired approval,
   entitlement denial, quota, spend cap, and reduced-motion completion.
-- Local tier: 11 passed against an isolated real Vite, FastAPI, broker, harness,
+- Local tier: 12 passed against an isolated real Vite, FastAPI, broker, harness,
   SQLite, and job-worker stack. It proves readiness, real drawing intake,
   catalog review, explicit confirmation, broker and worker runs, completed
   result rendering, durable job API storage, Jobs-rail recovery after page
@@ -536,11 +543,12 @@ Observed Wave 0 results:
   visibility, resident zoom and Fit, entity picking, selection clearing, and
   the real grouped capability catalog through durable execution. It also proves
   natural-language catalog classification, review, single dispatch, and result
-  without creating a Claude session. A separate live-auth guest walk also
-  passes for signed guest upload, extraction, viewer seating, allowed version
-  read, zero dispatch, and denied run. APS, live Claude, Auth0 user sign-in,
-  protected authoring, PostgreSQL, production billing, and
-  conversation-driven product execution claims remain open.
+  without creating a Claude session. The internal Operations drawer also proves
+  real list, cancel, disable, restore, secret scoping, and calm denial. A
+  separate live-auth guest walk passes for signed guest upload, extraction,
+  viewer seating, allowed version read, zero dispatch, and denied run. APS,
+  live Claude, Auth0 user sign-in, protected authoring, PostgreSQL, production
+  billing, and conversation-driven product execution claims remain open.
 - Production-like tier: runnable and skipped because no deployed base URL was
   authorized or supplied.
 - Behavior pins, customization check, production build, and whitespace check:
