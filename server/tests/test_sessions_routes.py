@@ -607,11 +607,15 @@ def test_transcript_clamps_nonpositive_limit_to_one(client, monkeypatch):
 
 # =========================================================================== #
 # Merge-gate finding #6 — /api/site/capabilities must be BUILTIN-only (no
-# authored/runtime tool leak). routers/site.py has no dedicated test file of
-# its own (checked: none exists anywhere in this repo) and isn't part of this
-# suite's WRITE-SET scope for a new file, so this coverage lives here instead
-# -- see routers/site.py's own BUILTIN-ONLY docstring note for the loader
-# split this test asserts against.
+# authored/runtime tool leak). See routers/site.py's own BUILTIN-ONLY docstring
+# note for the loader split this test asserts against.
+#
+# Response shape: routers/site.py::_public_families() projects the raw
+# catalog.build_catalog() families (whose tool list lives under "capabilities")
+# into the public shape, where the tool list is "tools" and each tool carries
+# its OWN "capabilities" grant list. That projection is locked by
+# tests/test_site.py::test_capabilities_projection_is_stripped — keep this
+# reader in step with it.
 # =========================================================================== #
 def test_site_capabilities_never_leaks_an_authored_tool():
     import deps
@@ -646,7 +650,10 @@ def test_site_capabilities_never_leaks_an_authored_tool():
         r = site_client.get("/api/site/capabilities")
         assert r.status_code == 200, r.text
         families = r.json()["families"]
-        all_names = {cap["name"] for fam in families for cap in fam["capabilities"]}
+        all_names = {tool["name"] for fam in families for tool in fam["tools"]}
+        # non-vacuity: the public catalog actually rendered builtin tools, so a
+        # "not in" pass below means FILTERED, not "the catalog came back empty".
+        assert all_names, "public capabilities catalog was empty — leak check would be vacuous"
         assert fake_tool["name"] not in all_names, (
             "an authored/runtime tool leaked into the public /api/site/capabilities catalog"
         )
