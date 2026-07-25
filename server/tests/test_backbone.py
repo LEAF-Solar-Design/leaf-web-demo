@@ -265,8 +265,14 @@ def test_boot_timeout_is_calibrated_to_host_speed_not_a_fixed_wall_clock():
         assert budget(0.15, {BOOT_TIMEOUT_ENV: bad}) == 90.0, (
             f"{bad!r} was obeyed instead of ignored")
 
-    # A probe that could not measure falls back to the floor rather than raising.
-    assert budget(None) == 90.0
+    # A probe that could not measure must not raise, and must fall back UPWARD.
+    # An unmeasurable probe means the host could not start a process at all, so
+    # it is the worst reading available, not a missing one. Pinning the floor
+    # here would hand the smallest budget to the most degraded host, which is how
+    # a real gate run failed two tests at "not ready in 90s" while saturated.
+    assert budget(None) == 300.0, (
+        "an unmeasurable probe fell back to the floor; on a host too loaded to "
+        "start a process that is the smallest budget at the worst moment")
 
 
 def submit(stack, tool="count-by-layer", params=None, tenant=None, wait=False):

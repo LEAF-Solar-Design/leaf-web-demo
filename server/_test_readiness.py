@@ -153,7 +153,17 @@ def calibrate_boot_timeout_s(measure_spawn: Callable[[], float | None],
             return override, f"{BOOT_TIMEOUT_ENV}={raw}"
     spawn_s = measure_spawn()
     if spawn_s is None:
-        return _BOOT_TIMEOUT_FLOOR_S, "spawn probe unavailable, using floor"
+        # CEILING, not floor. A failed probe is not "no information", it is the
+        # WORST reading available: the host could not start a bare interpreter
+        # within _SPAWN_PROBE_TIMEOUT_S at all. Falling back to the floor put the
+        # smallest budget on the most degraded host, and this is not theoretical:
+        # a gate run on 2026-07-25 failed two tests with
+        # "not ready in 90s (budget: spawn probe unavailable, using floor)" while
+        # the box was saturated, which is precisely the false failure this module
+        # exists to prevent, reintroduced through its own fallback.
+        return _BOOT_TIMEOUT_CEILING_S, (
+            "spawn probe failed, so the host could not start a process at all; "
+            "using the ceiling")
     scaled = spawn_s * _BOOT_COST_IN_SPAWNS
     budget = min(max(scaled, _BOOT_TIMEOUT_FLOOR_S), _BOOT_TIMEOUT_CEILING_S)
     how = f"{spawn_s:.3f}s/spawn * {_BOOT_COST_IN_SPAWNS} = {scaled:.0f}s"
