@@ -38,6 +38,22 @@ def _load_runner():
     return mod
 
 
+def test_postgres_proof_files_are_registered_with_exact_counts():
+    g = _load_runner()
+    suites = {suite.id: suite for suite in g.build_suites()}
+
+    inventory = suites["server-postgres-authority-inventory"]
+    assert inventory.expected == 6
+    assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
+
+    static = suites["platform-static"]
+    assert static.expected == 78
+    assert any(
+        str(arg).endswith("platform/tests/test_db_schema_proof_static.py")
+        for arg in static.argv
+    )
+
+
 def test_spawn_failure_is_retryable_fail_row(tmp_path):
     g = _load_runner()
     suite = g.Suite("spawn-victim", "spawn victim", "script", SCRIPTS,

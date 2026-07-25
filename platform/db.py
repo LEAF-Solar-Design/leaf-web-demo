@@ -9,6 +9,7 @@ as well as a direct one.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from hashlib import sha256
@@ -174,12 +175,6 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "guest_upload_counters": {"namespace", "counter_key", "value", "updated_at"},
     },
     "drawing": {
-        "drawing_authority_cutover": {
-            "id", "state", "schema_version", "source_commit", "run_id",
-            "run_attempt", "task_definition_arn", "source_task_definition_arn",
-            "efs_id", "fence_path", "source_counts", "parity_digest",
-            "entered_at", "updated_at", "deadline", "last_error",
-        },
         "drawing_store_manifests": {
             "tenant_id", "drawing_id", "head", "latest", "checkout_holder",
             "checkout_fence", "checkout_acquired_at", "checkout_expires_at",
@@ -193,12 +188,6 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         },
     },
     "upload": {
-        "drawing_authority_cutover": {
-            "id", "state", "schema_version", "source_commit", "run_id",
-            "run_attempt", "task_definition_arn", "source_task_definition_arn",
-            "efs_id", "fence_path", "source_counts", "parity_digest",
-            "entered_at", "updated_at", "deadline", "last_error",
-        },
         "drawing_store_manifests": {
             "tenant_id", "drawing_id", "head", "latest", "checkout_holder",
             "checkout_fence", "checkout_acquired_at", "checkout_expires_at",
@@ -240,134 +229,253 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "tenant_id", "owner_token", "generation", "acquired_at", "heartbeat_at", "expires_at",
         },
     },
-    "customization": {
-        "customization_change_sets": {
-            "change_set_id", "tenant_id", "idempotency_key", "state", "version",
-            "base_commit", "staged_commit", "catalog_digest",
-            "desired_platform_release", "workspace_contract_digest",
-            "author_subject", "approver_subject", "created_at", "updated_at",
-        },
-        "effective_catalogs": {
-            "tenant_id", "change_set_id", "catalog_commit", "catalog_digest",
-            "effective_platform_release", "workspace_contract_digest", "updated_at",
-        },
-        "customization_audit_events": {
-            "event_id", "tenant_id", "change_set_id", "prior_state", "next_state",
-            "author_subject", "approver_subject", "base_commit", "staged_commit",
-            "catalog_digest", "platform_release", "workspace_contract_digest",
-            "idempotency_key", "result", "reason_code", "payload_json", "created_at",
-        },
-        "customization_confirmations": {
-            "confirmation_id", "tenant_id", "change_set_id", "payload_json",
-            "signature", "consumed", "created_at",
-        },
-        "customization_publication_requests": {
-            "tenant_id", "change_set_id", "confirmation_id", "status",
-            "reason_code", "created_at", "updated_at",
-        },
-        "customization_deployment_snapshots": {
-            "snapshot_id", "payload_json", "effective_catalog_digest",
-            "platform_release", "idempotency_key", "created_at",
-        },
-        "customization_deployment_audit": {
-            "audit_id", "snapshot_id", "action", "result", "idempotency_key",
-            "created_at",
-        },
-    },
 }
+
+# Each catalog contract names the owning relation and stable semantic fragments
+# from PostgreSQL's canonical pg_get_*def output.  A same-name object elsewhere
+# in the schema, or an object whose definition drifted, must not satisfy
+# readiness.
+def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, Any]:
+    if not definition_fragments:
+        raise ValueError("catalog contracts require a definition")
+    return {
+        "relation": relation,
+        "definition_fragments": definition_fragments,
+    }
+
 
 # Names below are stable database API. They enforce idempotency, fencing, state
 # shape, referential integrity, and immutable audit records used by callers.
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
-    "jobs": {"async_jobs_pkey", "async_job_terminal_conflicts_pkey",
-             "async_job_terminal_conflicts_job_id_fkey"},
-    "callback_replay": {"callback_consumed_nonces_pkey"},
-    "sessions": {"app_sessions_pkey", "app_sessions_tenant_id_drawing_id_key",
-                 "app_session_events_pkey", "app_session_events_session_id_fkey",
-                 "app_approvals_pkey"},
-    "agent": {"agent_approvals_pkey", "agent_session_grants_pkey",
-              "agent_rate_counters_pkey", "agent_fleet_state_pkey",
-              "agent_gate_audit_events_pkey", "agent_tenant_state_pkey",
-              "agent_usage_turns_pkey", "agent_usage_turns_tenant_id_session_id_turn_id_key"},
-    "broker": {"broker_run_admissions_event_tenant_uq",
-               "broker_run_admissions_state_allowed", "broker_run_admissions_state_shape",
-               "broker_usage_ledger_admission_fk",
-               "broker_usage_ledger_engine_seconds_nonnegative_finite",
-               "broker_usage_ledger_usd_est_nonnegative_finite",
-               "broker_aps_slots_admission_fk", "broker_aps_slots_state_allowed",
-               "broker_aps_slots_state_shape", "broker_admission_resolution_allowed",
-               "broker_admission_resolution_prior_state",
-               "broker_admission_resolution_admission_fk"},
-    "guest_caps": {"guest_upload_counters_pkey"},
-    "drawing": {"drawing_authority_cutover_pkey",
-                "drawing_authority_cutover_singleton",
-                "drawing_authority_cutover_state_allowed",
-                "drawing_authority_cutover_deadline_after_entry",
-                "drawing_authority_cutover_migrated_has_digest",
-                "drawing_store_manifests_pkey", "drawing_store_versions_pkey",
-                "drawing_store_versions_object_key_key",
-                "drawing_store_versions_tenant_id_drawing_id_fkey",
-                "drawing_store_versions_state_check"},
-    "upload": {"drawing_authority_cutover_pkey",
-               "drawing_authority_cutover_singleton",
-               "drawing_authority_cutover_state_allowed",
-               "drawing_authority_cutover_deadline_after_entry",
-               "drawing_authority_cutover_migrated_has_digest",
-               "drawing_store_manifests_pkey", "drawing_store_versions_pkey",
-               "drawing_store_versions_object_key_key",
-               "drawing_store_versions_tenant_id_drawing_id_fkey",
-               "drawing_store_versions_state_check", "drawing_upload_attempts_pkey",
-               "drawing_upload_attempts_status_check", "drawing_purge_receipts_pkey",
-               "drawing_purge_receipts_status_check"},
-    "harness_sessions": {"harness_sessions_pkey", "harness_turns_pkey",
-                         "harness_turns_session_id_fkey", "harness_events_pkey",
-                         "harness_events_session_id_fkey", "harness_confirmations_pkey",
-                         "harness_confirmations_session_id_fkey", "harness_usage_pkey",
-                         "harness_usage_session_id_fkey", "harness_tenant_repo_leases_pkey"},
-    "customization": {
-        "customization_change_sets_pkey",
-        "customization_change_sets_tenant_id_idempotency_key_key",
-        "effective_catalogs_pkey",
-        "effective_catalogs_change_set_id_fkey",
-        "customization_audit_events_pkey",
-        "customization_audit_events_change_set_id_fkey",
-        "customization_audit_events_tenant_id_idempotency_key_key",
-        "customization_confirmations_pkey",
-        "customization_confirmations_consumed_check",
-        "customization_publication_requests_pkey",
-        "customization_publication_requests_change_set_id_fkey",
-        "customization_publication_requests_confirmation_id_fkey",
-        "customization_deployment_snapshots_pkey",
-        "customization_deployment_snapshots_idempotency_key_key",
-        "customization_deployment_audit_pkey",
-        "customization_deployment_audit_snapshot_id_fkey",
-        "customization_deployment_audit_idempotency_key_key",
+    "jobs": {
+        "async_jobs_pkey": _catalog_contract("async_jobs", "PRIMARY KEY (job_id)"),
+        "async_job_terminal_conflicts_pkey": _catalog_contract(
+            "async_job_terminal_conflicts", "PRIMARY KEY (job_id, fingerprint)"),
+        "async_job_terminal_conflicts_job_id_fkey": _catalog_contract(
+            "async_job_terminal_conflicts",
+            "FOREIGN KEY (job_id) REFERENCES async_jobs(job_id) ON DELETE CASCADE"),
+    },
+    "callback_replay": {
+        "callback_consumed_nonces_pkey": _catalog_contract(
+            "callback_consumed_nonces", "PRIMARY KEY (job_id, nonce)"),
+    },
+    "sessions": {
+        "app_sessions_pkey": _catalog_contract(
+            "app_sessions", "PRIMARY KEY (session_id)"),
+        "app_sessions_tenant_id_drawing_id_key": _catalog_contract(
+            "app_sessions", "UNIQUE (tenant_id, drawing_id)"),
+        "app_session_events_pkey": _catalog_contract(
+            "app_session_events", "PRIMARY KEY (session_id, seq)"),
+        "app_session_events_session_id_fkey": _catalog_contract(
+            "app_session_events",
+            "FOREIGN KEY (session_id) REFERENCES app_sessions(session_id) ON DELETE CASCADE"),
+        "app_approvals_pkey": _catalog_contract(
+            "app_approvals", "PRIMARY KEY (confirmation_id)"),
+    },
+    "agent": {
+        "agent_approvals_pkey": _catalog_contract(
+            "agent_approvals", "PRIMARY KEY (confirmation_id)"),
+        "agent_session_grants_pkey": _catalog_contract(
+            "agent_session_grants",
+            "PRIMARY KEY (tenant_id, session_id, action, target_key)"),
+        "agent_rate_counters_pkey": _catalog_contract(
+            "agent_rate_counters", "PRIMARY KEY (namespace, counter_key)"),
+        "agent_fleet_state_pkey": _catalog_contract(
+            "agent_fleet_state", "PRIMARY KEY (state_key)"),
+        "agent_gate_audit_events_pkey": _catalog_contract(
+            "agent_gate_audit_events", "PRIMARY KEY (event_id)"),
+        "agent_tenant_state_pkey": _catalog_contract(
+            "agent_tenant_state", "PRIMARY KEY (tenant_id)"),
+        "agent_usage_turns_pkey": _catalog_contract(
+            "agent_usage_turns", "PRIMARY KEY (usage_key)"),
+        "agent_usage_turns_tenant_id_session_id_turn_id_key": _catalog_contract(
+            "agent_usage_turns", "UNIQUE (tenant_id, session_id, turn_id)"),
+    },
+    "broker": {
+        "broker_run_admissions_event_tenant_uq": _catalog_contract(
+            "broker_run_admissions", "UNIQUE (event_key, tenant_id)"),
+        "broker_run_admissions_state_allowed": _catalog_contract(
+            "broker_run_admissions", "CHECK", "state", "leased", "executing", "terminal"),
+        "broker_run_admissions_state_shape": _catalog_contract(
+            "broker_run_admissions", "CHECK", "state = 'leased'",
+            "state = 'executing'", "state = 'terminal'"),
+        "broker_usage_ledger_admission_fk": _catalog_contract(
+            "broker_usage_ledger",
+            "FOREIGN KEY (event_key, tenant_id)",
+            "REFERENCES broker_run_admissions(event_key, tenant_id)"),
+        "broker_usage_ledger_engine_seconds_nonnegative_finite": _catalog_contract(
+            "broker_usage_ledger", "CHECK", "engine_seconds >= 0", "infinity"),
+        "broker_usage_ledger_usd_est_nonnegative_finite": _catalog_contract(
+            "broker_usage_ledger", "CHECK", "usd_est >= 0", "infinity"),
+        "broker_aps_slots_admission_fk": _catalog_contract(
+            "broker_aps_slots", "FOREIGN KEY (event_key, tenant_id)",
+            "REFERENCES broker_run_admissions(event_key, tenant_id)"),
+        "broker_aps_slots_state_allowed": _catalog_contract(
+            "broker_aps_slots", "CHECK", "state", "held", "released"),
+        "broker_aps_slots_state_shape": _catalog_contract(
+            "broker_aps_slots", "CHECK", "state = 'held'", "state = 'released'"),
+        "broker_admission_resolution_allowed": _catalog_contract(
+            "broker_admission_resolution_audit", "CHECK", "resolution",
+            "confirmed_failed_no_charge", "verified_terminal"),
+        "broker_admission_resolution_prior_state": _catalog_contract(
+            "broker_admission_resolution_audit", "CHECK", "prior_state = 'executing'"),
+        "broker_admission_resolution_admission_fk": _catalog_contract(
+            "broker_admission_resolution_audit",
+            "FOREIGN KEY (event_key, tenant_id)",
+            "REFERENCES broker_run_admissions(event_key, tenant_id)"),
+    },
+    "guest_caps": {
+        "guest_upload_counters_pkey": _catalog_contract(
+            "guest_upload_counters", "PRIMARY KEY (namespace, counter_key)"),
+    },
+    "drawing": {
+        "drawing_store_manifests_pkey": _catalog_contract(
+            "drawing_store_manifests", "PRIMARY KEY (tenant_id, drawing_id)"),
+        "drawing_store_versions_pkey": _catalog_contract(
+            "drawing_store_versions", "PRIMARY KEY (tenant_id, drawing_id, version)"),
+        "drawing_store_versions_object_key_key": _catalog_contract(
+            "drawing_store_versions", "UNIQUE (object_key)"),
+        "drawing_store_versions_tenant_id_drawing_id_fkey": _catalog_contract(
+            "drawing_store_versions", "FOREIGN KEY (tenant_id, drawing_id)",
+            "REFERENCES drawing_store_manifests(tenant_id, drawing_id)",
+            "ON DELETE CASCADE"),
+        "drawing_store_versions_state_check": _catalog_contract(
+            "drawing_store_versions", "CHECK", "state", "reserved", "ready", "orphaned"),
+    },
+    "upload": {
+        "drawing_store_manifests_pkey": _catalog_contract(
+            "drawing_store_manifests", "PRIMARY KEY (tenant_id, drawing_id)"),
+        "drawing_store_versions_pkey": _catalog_contract(
+            "drawing_store_versions", "PRIMARY KEY (tenant_id, drawing_id, version)"),
+        "drawing_store_versions_object_key_key": _catalog_contract(
+            "drawing_store_versions", "UNIQUE (object_key)"),
+        "drawing_store_versions_tenant_id_drawing_id_fkey": _catalog_contract(
+            "drawing_store_versions", "FOREIGN KEY (tenant_id, drawing_id)",
+            "REFERENCES drawing_store_manifests(tenant_id, drawing_id)",
+            "ON DELETE CASCADE"),
+        "drawing_store_versions_state_check": _catalog_contract(
+            "drawing_store_versions", "CHECK", "state", "reserved", "ready", "orphaned"),
+        "drawing_upload_attempts_pkey": _catalog_contract(
+            "drawing_upload_attempts", "PRIMARY KEY (tenant_id, drawing_id)"),
+        "drawing_upload_attempts_status_check": _catalog_contract(
+            "drawing_upload_attempts", "CHECK", "status", "extracting", "ready",
+            "failed", "purging", "purged"),
+        "drawing_purge_receipts_pkey": _catalog_contract(
+            "drawing_purge_receipts",
+            "PRIMARY KEY (tenant_id, drawing_id, attempt, purge_fence)"),
+        "drawing_purge_receipts_status_check": _catalog_contract(
+            "drawing_purge_receipts", "CHECK", "status", "deleted", "failed"),
+    },
+    "harness_sessions": {
+        "harness_sessions_pkey": _catalog_contract(
+            "harness_sessions", "PRIMARY KEY (session_id)"),
+        "harness_turns_pkey": _catalog_contract(
+            "harness_turns", "PRIMARY KEY (session_id, turn_id)"),
+        "harness_turns_session_id_fkey": _catalog_contract(
+            "harness_turns", "FOREIGN KEY (session_id)",
+            "REFERENCES harness_sessions(session_id)", "ON DELETE CASCADE"),
+        "harness_events_pkey": _catalog_contract(
+            "harness_events", "PRIMARY KEY (session_id, seq)"),
+        "harness_events_session_id_fkey": _catalog_contract(
+            "harness_events", "FOREIGN KEY (session_id)",
+            "REFERENCES harness_sessions(session_id)", "ON DELETE CASCADE"),
+        "harness_confirmations_pkey": _catalog_contract(
+            "harness_confirmations", "PRIMARY KEY (confirmation_id)"),
+        "harness_confirmations_session_id_fkey": _catalog_contract(
+            "harness_confirmations", "FOREIGN KEY (session_id)",
+            "REFERENCES harness_sessions(session_id)", "ON DELETE CASCADE"),
+        "harness_usage_pkey": _catalog_contract(
+            "harness_usage", "PRIMARY KEY (usage_id)"),
+        "harness_usage_session_id_fkey": _catalog_contract(
+            "harness_usage", "FOREIGN KEY (session_id)",
+            "REFERENCES harness_sessions(session_id)", "ON DELETE CASCADE"),
+        "harness_tenant_repo_leases_pkey": _catalog_contract(
+            "harness_tenant_repo_leases", "PRIMARY KEY (tenant_id)"),
     },
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
-    "jobs": {"async_jobs_project_idempotency_uq", "async_jobs_reclaim_idx"},
-    "callback_replay": {"callback_consumed_nonces_expiry_idx"},
-    "sessions": {"idx_app_session_events_recent", "idx_app_approvals_session"},
-    "agent": {"idx_agent_approvals_pending", "idx_agent_gate_audit_tenant_created",
-              "idx_agent_gate_audit_session_created", "idx_agent_usage_tenant_ts"},
-    "broker": {"broker_usage_ledger_tenant_ts_idx",
-               "broker_run_admissions_tenant_state_idx", "broker_aps_slots_held_idx"},
-    "guest_caps": {"idx_guest_upload_counters_updated"},
-    "drawing": {"drawing_store_versions_ready_idx"},
-    "upload": {"drawing_store_versions_ready_idx", "drawing_upload_expiry_idx"},
-    "harness_sessions": {"harness_one_active_session", "harness_one_active_turn",
-                         "idx_harness_events_turn", "idx_harness_confirmations_session",
-                         "idx_harness_usage_session", "idx_harness_tenant_repo_leases_expiry"},
-    "customization": {
-        "customization_recovery_idx",
-        "customization_confirmation_lookup_idx",
+    "jobs": {
+        "async_jobs_project_idempotency_uq": _catalog_contract(
+            "async_jobs", "CREATE UNIQUE INDEX", "(tenant_id, project_id, idempotency_key)",
+            "WHERE", "project_id IS NOT NULL", "idempotency_key IS NOT NULL"),
+        "async_jobs_reclaim_idx": _catalog_contract(
+            "async_jobs", "(status, lease_expires_at, updated_at)",
+            "WHERE", "status", "submitted", "running"),
+    },
+    "callback_replay": {
+        "callback_consumed_nonces_expiry_idx": _catalog_contract(
+            "callback_consumed_nonces", "(expires_at)"),
+    },
+    "sessions": {
+        "idx_app_session_events_recent": _catalog_contract(
+            "app_session_events", "(session_id, seq DESC)"),
+        "idx_app_approvals_session": _catalog_contract(
+            "app_approvals", "(session_id, created_at DESC)"),
+    },
+    "agent": {
+        "idx_agent_approvals_pending": _catalog_contract(
+            "agent_approvals", "(tenant_id, expires_at)", "WHERE",
+            "granted = false", "denied = false"),
+        "idx_agent_gate_audit_tenant_created": _catalog_contract(
+            "agent_gate_audit_events", "(tenant_id, created_at)"),
+        "idx_agent_gate_audit_session_created": _catalog_contract(
+            "agent_gate_audit_events", "(session_id, created_at)"),
+        "idx_agent_usage_tenant_ts": _catalog_contract(
+            "agent_usage_turns", "(tenant_id, ts)"),
+    },
+    "broker": {
+        "broker_usage_ledger_tenant_ts_idx": _catalog_contract(
+            "broker_usage_ledger", "(tenant_id, ts)"),
+        "broker_run_admissions_tenant_state_idx": _catalog_contract(
+            "broker_run_admissions", "(tenant_id, state)"),
+        "broker_aps_slots_held_idx": _catalog_contract(
+            "broker_aps_slots", "(state, lease_expires_at)"),
+    },
+    "guest_caps": {
+        "idx_guest_upload_counters_updated": _catalog_contract(
+            "guest_upload_counters", "(updated_at)"),
+    },
+    "drawing": {
+        "drawing_store_versions_ready_idx": _catalog_contract(
+            "drawing_store_versions", "(tenant_id, drawing_id, version)",
+            "WHERE", "state = 'ready'"),
+    },
+    "upload": {
+        "drawing_store_versions_ready_idx": _catalog_contract(
+            "drawing_store_versions", "(tenant_id, drawing_id, version)",
+            "WHERE", "state = 'ready'"),
+        "drawing_upload_expiry_idx": _catalog_contract(
+            "drawing_upload_attempts", "(retention_expires_at)", "WHERE",
+            "status <> 'purged'", "retention_expires_at IS NOT NULL"),
+    },
+    "harness_sessions": {
+        "harness_one_active_session": _catalog_contract(
+            "harness_sessions", "CREATE UNIQUE INDEX", "(tenant_id, drawing_id)",
+            "WHERE", "status <> 'archived'"),
+        "harness_one_active_turn": _catalog_contract(
+            "harness_turns", "CREATE UNIQUE INDEX", "(session_id)",
+            "WHERE", "status = 'active'"),
+        "idx_harness_events_turn": _catalog_contract(
+            "harness_events", "(session_id, turn_id, seq)"),
+        "idx_harness_confirmations_session": _catalog_contract(
+            "harness_confirmations", "(session_id, status, expires_at)"),
+        "idx_harness_usage_session": _catalog_contract(
+            "harness_usage", "(session_id, ts)"),
+        "idx_harness_tenant_repo_leases_expiry": _catalog_contract(
+            "harness_tenant_repo_leases", "(expires_at)"),
     },
 }
 
 _AUTHORITY_REQUIRED_TRIGGERS = {
-    "broker": {"broker_usage_ledger_immutable",
-               "broker_admission_resolution_audit_immutable"},
+    "broker": {
+        "broker_usage_ledger_immutable": _catalog_contract(
+            "broker_usage_ledger", "BEFORE UPDATE OR DELETE",
+            "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
+        "broker_admission_resolution_audit_immutable": _catalog_contract(
+            "broker_admission_resolution_audit", "BEFORE UPDATE OR DELETE",
+            "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
+    },
 }
 
 _AUTHORITY_SELECTORS = {
@@ -385,7 +493,6 @@ _AUTHORITY_SELECTORS = {
     "LEAF_DRAWING_STORE": {"postgres": "drawing"},
     "LEAF_UPLOAD_STORE": {"postgres": "upload"},
     "LEAF_HARNESS_SESSION_STORE": {"postgres": "harness_sessions"},
-    "LEAF_CUSTOMIZATION_STORE": {"postgres": "customization"},
 }
 _RECONCILIATION_TABLES = (
     "orgs", "projects", "drawing_artifacts", "drawing_versions", "jobs",
@@ -410,10 +517,12 @@ def required_columns_for_selected_authorities(
 
 def required_catalog_for_selected_authorities(
     environ: Optional[Mapping[str, str]] = None,
-) -> Dict[str, set[str]]:
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Return runtime-critical constraints, indexes, and triggers by selector."""
     source = os.environ if environ is None else environ
-    catalog = {"constraints": set(), "indexes": set(), "triggers": set()}
+    catalog: Dict[str, Dict[str, Dict[str, Any]]] = {
+        "constraints": {}, "indexes": {}, "triggers": {},
+    }
     contracts = {
         "constraints": _AUTHORITY_REQUIRED_CONSTRAINTS,
         "indexes": _AUTHORITY_REQUIRED_INDEXES,
@@ -424,7 +533,7 @@ def required_catalog_for_selected_authorities(
         if authority is None:
             continue
         for kind, authority_contracts in contracts.items():
-            catalog[kind].update(authority_contracts.get(authority, set()))
+            catalog[kind].update(authority_contracts.get(authority, {}))
     return catalog
 
 
@@ -734,6 +843,66 @@ def _migration_proof(applied_rows: List[Mapping[str, str]]) -> Dict[str, Any]:
     }
 
 
+def _normalize_catalog_definition(value: Any) -> str:
+    """Normalize pg_get_*def output without weakening semantic comparison."""
+    normalized = str(value or "").replace('"', "").lower()
+    normalized = re.sub(r"\b[a-z_][a-z0-9_]*\.", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"\s*([(),])\s*", r"\1", normalized)
+    return normalized
+
+
+def _catalog_contract_errors(
+    required_catalog: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    found_catalog: Mapping[str, List[Mapping[str, Any]]],
+) -> Dict[str, List[str]]:
+    """Return missing or malformed selected catalog objects by object kind."""
+    errors: Dict[str, List[str]] = {}
+    for kind, contracts in required_catalog.items():
+        rows_by_name: Dict[str, List[Mapping[str, Any]]] = {}
+        name_field = {
+            "constraints": "conname",
+            "indexes": "indexname",
+            "triggers": "tgname",
+        }[kind]
+        for row in found_catalog.get(kind, []):
+            rows_by_name.setdefault(str(row[name_field]), []).append(row)
+
+        invalid: List[str] = []
+        for name, contract in contracts.items():
+            candidates = rows_by_name.get(name, [])
+            matching_relation = [
+                row for row in candidates
+                if str(row.get("relation_name")) == contract["relation"]
+            ]
+            if not matching_relation:
+                invalid.append(f"{name}:missing-or-wrong-relation")
+                continue
+
+            row = matching_relation[0]
+            if kind == "constraints" and not bool(row.get("validated")):
+                invalid.append(f"{name}:not-validated")
+                continue
+            if kind == "indexes" and (
+                not bool(row.get("valid")) or not bool(row.get("ready"))
+            ):
+                invalid.append(f"{name}:not-valid-ready")
+                continue
+            if kind == "triggers" and str(row.get("enabled")) not in {"O", "A"}:
+                invalid.append(f"{name}:disabled")
+                continue
+
+            definition = _normalize_catalog_definition(row.get("definition"))
+            fragments = [
+                _normalize_catalog_definition(fragment)
+                for fragment in contract["definition_fragments"]
+            ]
+            if any(fragment not in definition for fragment in fragments):
+                invalid.append(f"{name}:definition-mismatch")
+        errors[f"invalid_{kind}"] = sorted(invalid)
+    return errors
+
+
 def schema_status() -> Dict[str, Any]:
     """Read-only readiness result for the API and canonical worker schema."""
     required = required_columns_for_selected_authorities()
@@ -755,31 +924,48 @@ def schema_status() -> Dict[str, Any]:
                 if columns - found.get(table, set())
             }
             cur.execute(
-                "SELECT conname FROM pg_constraint "
-                "WHERE connamespace = current_schema()::regnamespace "
-                "AND conname = ANY(%(constraints)s)",
+                "SELECT c.conname, r.relname AS relation_name, "
+                "c.convalidated AS validated, "
+                "pg_get_constraintdef(c.oid, true) AS definition "
+                "FROM pg_constraint AS c "
+                "JOIN pg_class AS r ON r.oid = c.conrelid "
+                "WHERE c.connamespace = current_schema()::regnamespace "
+                "AND c.conname = ANY(%(constraints)s)",
                 {"constraints": list(required_catalog["constraints"])},
             )
-            found_constraints = {str(row["conname"]) for row in cur.fetchall()}
+            constraint_rows = cur.fetchall()
             cur.execute(
-                "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() "
-                "AND indexname = ANY(%(indexes)s)",
+                "SELECT idx.relname AS indexname, tbl.relname AS relation_name, "
+                "i.indisvalid AS valid, i.indisready AS ready, "
+                "pg_get_indexdef(i.indexrelid, 0, true) AS definition "
+                "FROM pg_index AS i "
+                "JOIN pg_class AS idx ON idx.oid = i.indexrelid "
+                "JOIN pg_class AS tbl ON tbl.oid = i.indrelid "
+                "JOIN pg_namespace AS ns ON ns.oid = idx.relnamespace "
+                "WHERE ns.nspname = current_schema() "
+                "AND idx.relname = ANY(%(indexes)s)",
                 {"indexes": list(required_catalog["indexes"])},
             )
-            found_indexes = {str(row["indexname"]) for row in cur.fetchall()}
+            index_rows = cur.fetchall()
             cur.execute(
-                "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal "
-                "AND tgname = ANY(%(triggers)s)",
+                "SELECT t.tgname, r.relname AS relation_name, "
+                "t.tgenabled AS enabled, pg_get_triggerdef(t.oid, true) AS definition "
+                "FROM pg_trigger AS t "
+                "JOIN pg_class AS r ON r.oid = t.tgrelid "
+                "JOIN pg_namespace AS ns ON ns.oid = r.relnamespace "
+                "WHERE ns.nspname = current_schema() AND NOT t.tgisinternal "
+                "AND t.tgname = ANY(%(triggers)s)",
                 {"triggers": list(required_catalog["triggers"])},
             )
-            found_triggers = {str(row["tgname"]) for row in cur.fetchall()}
-            missing_catalog = {
-                "missing_constraints": sorted(
-                    required_catalog["constraints"] - found_constraints),
-                "missing_indexes": sorted(required_catalog["indexes"] - found_indexes),
-                "missing_triggers": sorted(
-                    required_catalog["triggers"] - found_triggers),
-            }
+            trigger_rows = cur.fetchall()
+            catalog_errors = _catalog_contract_errors(
+                required_catalog,
+                {
+                    "constraints": constraint_rows,
+                    "indexes": index_rows,
+                    "triggers": trigger_rows,
+                },
+            )
             applied_rows = []
             if not (_MIGRATION_LEDGER_COLUMNS - found.get(_MIGRATION_LEDGER_TABLE, set())):
                 cur.execute(
@@ -788,7 +974,7 @@ def schema_status() -> Dict[str, Any]:
             migration_proof = _migration_proof(applied_rows)
             cur.execute("SELECT current_database() AS database, current_schema() AS schema")
             identity = cur.fetchone()
-    ok = not missing and not any(missing_catalog.values()) \
+    ok = not missing and not any(catalog_errors.values()) \
         and not migration_proof["missing_migrations"] \
         and not migration_proof["migration_hash_drift"]
     return {
@@ -797,7 +983,7 @@ def schema_status() -> Dict[str, Any]:
         "schema": identity["schema"],
         "migration_count": len(migration_manifest()),
         "missing": missing,
-        **missing_catalog,
+        **catalog_errors,
         **migration_proof,
     }
 
@@ -817,9 +1003,9 @@ def assert_schema_current() -> Dict[str, Any]:
             details.append(
                 "migration hash drift: " + ",".join(status["migration_hash_drift"]))
         for field, label in (
-            ("missing_constraints", "missing constraints"),
-            ("missing_indexes", "missing indexes"),
-            ("missing_triggers", "missing triggers"),
+            ("invalid_constraints", "invalid constraints"),
+            ("invalid_indexes", "invalid indexes"),
+            ("invalid_triggers", "invalid triggers"),
         ):
             if status.get(field):
                 details.append(label + ": " + ",".join(status[field]))

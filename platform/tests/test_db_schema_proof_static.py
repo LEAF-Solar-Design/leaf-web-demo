@@ -167,7 +167,7 @@ class _SchemaCursor:
             self.rows = self.column_rows
         elif "FROM pg_constraint" in statement:
             self.rows = self.catalog_rows["constraints"]
-        elif "FROM pg_indexes" in statement:
+        elif "FROM pg_index" in statement:
             self.rows = self.catalog_rows["indexes"]
         elif "FROM pg_trigger" in statement:
             self.rows = self.catalog_rows["triggers"]
@@ -200,9 +200,34 @@ class _SchemaConnection:
 def _complete_catalog_rows(environ):
     required = db.required_catalog_for_selected_authorities(environ)
     return {
-        "constraints": [{"conname": name} for name in required["constraints"]],
-        "indexes": [{"indexname": name} for name in required["indexes"]],
-        "triggers": [{"tgname": name} for name in required["triggers"]],
+        "constraints": [
+            {
+                "conname": name,
+                "relation_name": contract["relation"],
+                "validated": True,
+                "definition": " ".join(contract["definition_fragments"]),
+            }
+            for name, contract in required["constraints"].items()
+        ],
+        "indexes": [
+            {
+                "indexname": name,
+                "relation_name": contract["relation"],
+                "valid": True,
+                "ready": True,
+                "definition": " ".join(contract["definition_fragments"]),
+            }
+            for name, contract in required["indexes"].items()
+        ],
+        "triggers": [
+            {
+                "tgname": name,
+                "relation_name": contract["relation"],
+                "enabled": "O",
+                "definition": " ".join(contract["definition_fragments"]),
+            }
+            for name, contract in required["triggers"].items()
+        ],
     }
 
 
@@ -261,10 +286,102 @@ def test_complete_ledger_cannot_bootstrap_past_missing_runtime_constraint(
 
     assert status["missing"] == {}
     assert status["missing_migrations"] == []
-    assert status["missing_constraints"] == [missing_constraint]
+    assert status["invalid_constraints"] == [
+        f"{missing_constraint}:missing-or-wrong-relation"]
     assert status["ok"] is False
     with pytest.raises(RuntimeError, match=missing_constraint):
         db.assert_schema_current()
+
+
+@pytest.mark.parametrize(
+    ("kind", "selector", "name", "mutation", "expected_reason"),
+    [
+        (
+            "constraints",
+            "LEAF_UPLOAD_STORE",
+            "drawing_store_versions_tenant_id_drawing_id_fkey",
+            {"relation_name": "drawing_upload_attempts"},
+            "missing-or-wrong-relation",
+        ),
+        (
+            "constraints",
+            "LEAF_UPLOAD_STORE",
+            "drawing_store_versions_tenant_id_drawing_id_fkey",
+            {"definition": "FOREIGN KEY (tenant_id) REFERENCES wrong_table(tenant_id)"},
+            "definition-mismatch",
+        ),
+        (
+            "constraints",
+            "LEAF_UPLOAD_STORE",
+            "drawing_store_versions_tenant_id_drawing_id_fkey",
+            {"validated": False},
+            "not-validated",
+        ),
+        (
+            "indexes",
+            "LEAF_JOBS_STORE",
+            "async_jobs_project_idempotency_uq",
+            {"valid": False},
+            "not-valid-ready",
+        ),
+        (
+            "indexes",
+            "LEAF_JOBS_STORE",
+            "async_jobs_project_idempotency_uq",
+            {"ready": False},
+            "not-valid-ready",
+        ),
+        (
+            "indexes",
+            "LEAF_JOBS_STORE",
+            "async_jobs_project_idempotency_uq",
+            {"definition": "CREATE INDEX wrong ON async_jobs (tenant_id)"},
+            "definition-mismatch",
+        ),
+        (
+            "triggers",
+            "LEAF_BROKER_STORE",
+            "broker_usage_ledger_immutable",
+            {"enabled": "D"},
+            "disabled",
+        ),
+        (
+            "triggers",
+            "LEAF_BROKER_STORE",
+            "broker_usage_ledger_immutable",
+            {"relation_name": "broker_tenants"},
+            "missing-or-wrong-relation",
+        ),
+    ],
+)
+def test_catalog_contract_rejects_wrong_relation_definition_or_validity(
+    kind, selector, name, mutation, expected_reason,
+):
+    environ = {selector: "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    name_field = {
+        "constraints": "conname",
+        "indexes": "indexname",
+        "triggers": "tgname",
+    }[kind]
+    row = next(item for item in rows[kind] if item[name_field] == name)
+    row.update(mutation)
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert f"{name}:{expected_reason}" in errors[f"invalid_{kind}"]
+
+
+def test_every_selected_catalog_object_has_relation_and_definition_contract():
+    for selector, modes in db._AUTHORITY_SELECTORS.items():
+        for value in modes:
+            catalog = db.required_catalog_for_selected_authorities({selector: value})
+            for kind, contracts in catalog.items():
+                for name, contract in contracts.items():
+                    assert name
+                    assert contract["relation"]
+                    assert contract["definition_fragments"]
 
 
 @pytest.mark.parametrize(
