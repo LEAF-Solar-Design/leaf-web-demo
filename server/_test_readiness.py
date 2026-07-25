@@ -15,24 +15,46 @@ from pathlib import Path
 import requests
 
 
+_TAIL_BYTES = 64 * 1024  # plenty for 25 lines of uvicorn output, bounded on purpose
+
+
 def log_tail(log_path: Path | None, max_lines: int = 25) -> str:
     """Tail of a child's stdout+stderr log, for readiness failure messages.
 
     Without it a readiness failure is a bare "not ready in Ns" — indistinguishable
     between a slow boot and a server that is up but wedged before it can serve. The
     child holds this file open for append; the read is best-effort and must never
-    replace the real failure with an OSError from the diagnostic itself.
+    replace the real failure with an exception from the diagnostic itself.
+
+    That last sentence is the whole contract, so this reads a BOUNDED tail and
+    catches BROADLY. A wedged child can append without limit, and the previous
+    whole-file `read_text()` was unbounded in both memory and time: on a large log
+    it could raise `MemoryError`, which is not an `OSError`, escape this function,
+    and REPLACE the `TimeoutError`/`RuntimeError` the caller is trying to report —
+    turning a readable "server not ready, here is why" into an unrelated crash.
+    Seeking to the last `_TAIL_BYTES` also keeps the cost flat as the log grows.
     """
     if log_path is None:
         return ""
     try:
-        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as exc:
-        return f"\n  (could not read {log_path}: {exc})"
+        with log_path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - _TAIL_BYTES))
+            chunk = fh.read()
+        text = chunk.decode("utf-8", errors="replace")
+        # A mid-line seek leaves a partial first line; drop it rather than print it.
+        if size > _TAIL_BYTES and "\n" in text:
+            text = text.split("\n", 1)[1]
+        lines = text.splitlines()
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never mask the real failure
+        return f"\n  (could not read {log_path}: {exc!r})"
     if not lines:
         return f"\n  ({log_path} is empty — the child logged nothing)"
     body = "\n".join(f"  | {ln}" for ln in lines[-max_lines:])
-    return f"\n  last {min(len(lines), max_lines)} line(s) of {log_path}:\n{body}"
+    shown = min(len(lines), max_lines)
+    truncated = " (tail)" if size > _TAIL_BYTES else ""
+    return f"\n  last {shown} line(s) of {log_path}{truncated}:\n{body}"
 
 
 # 90s, not 30s: these children are two uvicorn boots racing whatever else the gate
