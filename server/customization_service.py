@@ -42,7 +42,8 @@ from customization_authority import (
 )
 from customization_flags import RolloutMode, enabled, mode
 from customization_models import ChangeSet, ChangeSetNotFoundError, ChangeState
-from customization_store import SQLiteCustomizationStore
+from customization_postgres_store import PostgresCustomizationStore
+from customization_store import CustomizationRepository, SQLiteCustomizationStore
 from platform_release_policy import PlatformReleasePolicyError, classify_path, load_policy
 from tenant_id_validator import is_valid_tenant_id
 
@@ -68,6 +69,13 @@ class CustomizationServiceError(RuntimeError):
 def database_path() -> Path:
     raw = os.environ.get("LEAF_CUSTOMIZATION_DB", "").strip()
     return Path(raw) if raw else DEFAULT_DB
+
+
+def customization_store_mode() -> str:
+    selected = os.environ.get("LEAF_CUSTOMIZATION_STORE", "sqlite").strip().lower()
+    if selected not in {"sqlite", "postgres"}:
+        raise CustomizationServiceError("customization_store_unsupported", 503)
+    return selected
 
 
 def _path_key(path: Path, *, resolve: bool) -> str:
@@ -214,7 +222,7 @@ def _binding(tenant: Any) -> TenantBinding:
 
 class _StoreConfirmations:
     """Adapter preserving the authority module's atomic confirmation protocol."""
-    def __init__(self, store: SQLiteCustomizationStore) -> None:
+    def __init__(self, store: CustomizationRepository) -> None:
         self.store = store
 
     def put(self, confirmation_id: str, payload: dict[str, Any], signature: str) -> None:
@@ -230,10 +238,25 @@ class _StoreConfirmations:
 
 @dataclass
 class CustomizationService:
-    store: SQLiteCustomizationStore
+    store: CustomizationRepository
 
     @classmethod
     def configured(cls) -> "CustomizationService":
+        if customization_store_mode() == "postgres":
+            if not os.environ.get("DATABASE_URL", "").strip():
+                raise CustomizationServiceError(
+                    "customization_database_url_required", 503
+                )
+            key = "postgres"
+            with _configured_lock:
+                cached = _configured_services.get(key)
+                if cached is not None:
+                    return cached
+                store = PostgresCustomizationStore()
+                store.initialize()
+                service = cls(store)
+                _configured_services[key] = service
+                return service
         path = database_path()
         if _shared_sqlite_path(path):
             raise CustomizationServiceError(
@@ -1200,8 +1223,9 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
     """
     tenant_id = _tenant_id(tenant_id)
     try:
+        postgres = customization_store_mode() == "postgres"
         path = database_path()
-        if _shared_sqlite_path(path):
+        if not postgres and _shared_sqlite_path(path):
             if not (
                 mode("LEAF_CUSTOMIZATION_R5_MODE") is RolloutMode.OFF
                 and mode("LEAF_CUSTOMIZATION_R6_MODE") is RolloutMode.OFF
@@ -1213,13 +1237,13 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
             # authority. Keep the base catalog available while rollout is off
             # without opening or migrating SQLite on EFS.
             return None
-        if not path.exists():
+        if not postgres and not path.exists():
             if enabled(5, tenant_id) or enabled(6, tenant_id):
                 raise CustomizationServiceError(
                     "effective_catalog_authority_unavailable", 503
                 )
             return None
-        if _shared_sqlite_path(path):
+        if not postgres and _shared_sqlite_path(path):
             if enabled(5, tenant_id) or enabled(6, tenant_id):
                 raise CustomizationServiceError(
                     "customization_shared_sqlite_unsupported", 503
@@ -1264,7 +1288,7 @@ def effective_catalog_pin(tenant_id: str) -> dict[str, str] | None:
     """Return the durable effective catalog generation without materializing it."""
     tenant_id = _tenant_id(tenant_id)
     path = database_path()
-    if not path.exists():
+    if customization_store_mode() != "postgres" and not path.exists():
         return None
     try:
         pin = CustomizationService.configured().store.get_effective_catalog(

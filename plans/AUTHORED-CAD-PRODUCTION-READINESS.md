@@ -109,7 +109,10 @@ no E2B credential.
 
 Status remains NOT READY. Staging still needs the broker E2B credential and
 allowlist, a coherent deployed release, live receipt evidence, the two-tenant
-acceptance run, and the production infrastructure and rollback gates.
+acceptance run, the customization backfill and parity receipts, and the
+production infrastructure and rollback gates. Migration `0020` and the
+fail-closed PostgreSQL customization selector are implemented on the
+application branch, but no live environment has selected them.
 
 ## Release gates
 
@@ -136,7 +139,9 @@ acceptance run, and the production infrastructure and rollback gates.
 - Store a Leaf-owned E2B credential in Secrets Manager.
 - Add an explicit HTTPS broker or health probe URL whose hostname equals the
   sandbox allowlist hostname.
-- Confirm migration `0017_harness_sessions.sql` and all earlier migrations.
+- Confirm migrations through `0020_customization_authority.sql`.
+- Run the customization SQLite-to-PostgreSQL backfill and exact parity commands
+  before selecting `LEAF_CUSTOMIZATION_STORE=postgres`.
 - Set harness sessions to PostgreSQL.
 - Set harness authoring mode to `singleton`.
 - Keep the author runner on the trusted harness host with

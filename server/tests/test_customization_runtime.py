@@ -159,6 +159,48 @@ def test_shared_efs_sqlite_cannot_activate(monkeypatch):
         CustomizationService.configured()
 
 
+def test_postgres_store_requires_database_url(monkeypatch):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STORE", "postgres")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(
+        CustomizationServiceError,
+        match="customization_database_url_required",
+    ):
+        CustomizationService.configured()
+
+
+def test_postgres_store_selector_uses_migration_owned_store(monkeypatch):
+    initialized = []
+
+    class FakePostgresStore:
+        def initialize(self):
+            initialized.append(True)
+
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STORE", "postgres")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://configured-without-connecting")
+    monkeypatch.setattr(
+        customization_service, "PostgresCustomizationStore", FakePostgresStore
+    )
+
+    first = CustomizationService.configured()
+    second = CustomizationService.configured()
+
+    assert first is second
+    assert isinstance(first.store, FakePostgresStore)
+    assert initialized == [True]
+
+
+def test_customization_store_selector_fails_closed(monkeypatch):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STORE", "autoload")
+
+    with pytest.raises(
+        CustomizationServiceError,
+        match="customization_store_unsupported",
+    ):
+        CustomizationService.configured()
+
+
 def test_dark_rollout_ignores_existing_unsupported_shared_sqlite(tmp_path, monkeypatch):
     database = tmp_path / "customization.db"
     database.write_bytes(b"not a supported authority")

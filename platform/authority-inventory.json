@@ -270,12 +270,13 @@
       "id": "customization_r5",
       "coverage": ["customization"],
       "selectors": [
-        {"name": "LEAF_CUSTOMIZATION_R5_MODE", "allowed_modes": ["off", "internal", "all"], "repository_default": "off"}
+        {"name": "LEAF_CUSTOMIZATION_R5_MODE", "allowed_modes": ["off", "internal", "all"], "repository_default": "off"},
+        {"name": "LEAF_CUSTOMIZATION_STORE", "allowed_modes": ["sqlite", "postgres"], "repository_default": "sqlite"}
       ],
-      "postgres_tables": [],
+      "postgres_tables": ["customization_change_sets", "effective_catalogs", "customization_audit_events", "customization_confirmations", "customization_publication_requests", "customization_deployment_snapshots", "customization_deployment_audit"],
       "legacy_source": ["LEAF_CUSTOMIZATION_DB SQLite customization_change_sets, effective_catalogs, audit, confirmations, deployment snapshots, and deployment audit"],
-      "backfill": {"command": null, "status": "not_implemented", "note": "No PostgreSQL customization store exists."},
-      "parity": {"command": "python -m pytest -q server/tests/test_customization_authority.py server/tests/test_customization_reconcile.py", "status": "sqlite_contract_tests_only", "note": "Tests do not establish a shared multi-task authority."},
+      "backfill": {"command": "python scripts/reconcile_customization_authority.py --mode backfill --sqlite /data/state/customization.db", "status": "implemented_not_run", "note": "The command requires an empty target or byte-equivalent authority and prints only counts plus an aggregate digest."},
+      "parity": {"command": "python scripts/reconcile_customization_authority.py --mode parity --sqlite /data/state/customization.db", "status": "postgres_contract_tests_only", "note": "Static and hermetic contracts pass; staging backfill and live parity remain required."},
       "cutover_modes": ["off", "internal", "all"],
       "rollback_mode": "Set LEAF_CUSTOMIZATION_R5_MODE=off. This disables access but does not migrate or roll back SQLite state.",
       "current_selection": {
@@ -287,12 +288,13 @@
       "id": "customization_r6",
       "coverage": ["customization"],
       "selectors": [
-        {"name": "LEAF_CUSTOMIZATION_R6_MODE", "allowed_modes": ["off", "internal", "all"], "repository_default": "off"}
+        {"name": "LEAF_CUSTOMIZATION_R6_MODE", "allowed_modes": ["off", "internal", "all"], "repository_default": "off"},
+        {"name": "LEAF_CUSTOMIZATION_STORE", "allowed_modes": ["sqlite", "postgres"], "repository_default": "sqlite"}
       ],
-      "postgres_tables": [],
+      "postgres_tables": ["customization_change_sets", "effective_catalogs", "customization_audit_events", "customization_confirmations", "customization_publication_requests", "customization_deployment_snapshots", "customization_deployment_audit"],
       "legacy_source": ["LEAF_CUSTOMIZATION_DB SQLite customization_change_sets, effective_catalogs, audit, confirmations, deployment snapshots, and deployment audit"],
-      "backfill": {"command": null, "status": "not_implemented", "note": "No PostgreSQL customization store exists."},
-      "parity": {"command": "python -m pytest -q server/tests/test_customization_authority.py server/tests/test_customization_reconcile.py", "status": "sqlite_contract_tests_only", "note": "Tests do not establish a shared multi-task authority."},
+      "backfill": {"command": "python scripts/reconcile_customization_authority.py --mode backfill --sqlite /data/state/customization.db", "status": "implemented_not_run", "note": "The command requires an empty target or byte-equivalent authority and prints only counts plus an aggregate digest."},
+      "parity": {"command": "python scripts/reconcile_customization_authority.py --mode parity --sqlite /data/state/customization.db", "status": "postgres_contract_tests_only", "note": "Static and hermetic contracts pass; staging backfill and live parity remain required."},
       "cutover_modes": ["off", "internal", "all"],
       "rollback_mode": "Set LEAF_CUSTOMIZATION_R6_MODE=off, then use the application rollback operation for a published pin when applicable. State remains SQLite.",
       "current_selection": {
