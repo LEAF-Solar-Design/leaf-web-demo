@@ -26,6 +26,8 @@ da/client.py OSS helpers).
 """
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import importlib.util
 import json
@@ -36,6 +38,7 @@ import tempfile
 import threading
 import time
 import uuid
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -194,11 +197,173 @@ def manifest_key(tenant_id: str, drawing_id: str) -> str:
     return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}/manifest.json"
 
 
+def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
+    """Object key of the drawing's cross-process checkout lock file.
+
+    NOT the manifest. `save_manifest` replaces the manifest's inode on every
+    save, and a lock held on a replaced inode is one no later caller can reach,
+    which is a lock that excludes nobody.
+
+    NOT inside the drawing's own directory either, which is the harder
+    constraint and the one that decides where this lives. The lock's identity IS
+    its inode, so the file has to outlive everything that clears a drawing.
+    `server/guest_uploads.py` wipes a failed upload attempt by deleting every
+    child of the drawing directory except `upload.state.json`
+    (`_wipe_failed_attempt_files`) and leaves the DRAWING itself alive. A lock
+    file in there would be unlinked from under a live holder: on POSIX the
+    holder keeps the unlinked inode and its lock, the next caller creates a
+    fresh inode and locks that instead, and both then run inside the section
+    this exists to keep to one. The guest purge (`purge_expired`) removes the
+    whole drawing directory for the same reason of being a directory cleaner.
+
+    So the lock lives under its own top-level prefix that no drawing-directory
+    walker descends into, and is created once and never unlinked.
+
+    ONE FILE PER DRAWING, and deliberately not a bounded pool of shared files.
+    A shared pool was tried and reverted: because `put_drawing` and
+    `ingest_drawing` write the version blob inside the guard (a durable,
+    `fsync`ed write), any two drawings sharing a lock file would serialize across
+    that write, so one tenant's slow DWG could push an unrelated tenant's
+    checkout past `_CHECKOUT_LOCK_TIMEOUT_S` and FAIL its request rather than
+    merely delay it. Trading unrelated-tenant availability for inodes is the
+    wrong way round. Per drawing, contention is only ever between callers of the
+    same drawing, which is the contention that has to exist.
+
+    NAMED BY DIGEST, not by the ids. The prefix is never cleaned, so a raw name
+    would leave a tenant id and drawing id readable in a filename long after the
+    drawing itself was purged. The digest is stable, so it still identifies the
+    drawing to every process, without carrying the ids around.
+
+    WHAT THIS LEAVES OPEN, stated rather than papered over: the prefix
+    accumulates one EMPTY file per drawing ever created and nothing removes them.
+    Bounding that needs the guest purge and the store to hold one shared lock so
+    a lock file can be retired while provably unheld -- the same shared-lock work
+    `_legacy_checkout_guard` already defers -- and not a shared pool, which the
+    paragraph above rules out.
+
+    THE NAMING IS PART OF THE CROSS-PROCESS PROTOCOL. Two processes agree on a
+    drawing's lock only by deriving the same path, so this function cannot be
+    changed under a rolling deploy: mixed versions would take different files and
+    both enter the section, which is the very defect the guard exists to prevent.
+    Any change here needs a full drain. `test_the_lock_key_mapping_is_pinned`
+    pins the mapping against literals so a change cannot be made by accident.
+    """
+    ident = f"{sanitize_id(tenant_id)}/{sanitize_id(drawing_id)}"
+    digest = hashlib.sha256(ident.encode("utf-8")).hexdigest()
+    # Two levels so one directory does not collect every drawing's lock file.
+    return f"checkout-locks/{digest[:2]}/{digest}.lock"
+
+
+# --------------------------------------------------------------------------- #
+# OS-level advisory locking (the cross-process half of the legacy checkout)
+# --------------------------------------------------------------------------- #
+try:  # POSIX (the production deployment)
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:  # Windows (the development host)
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
+
+
+# Budget for ONE guarded section to hold the drawing. Usually that is a manifest
+# load, an edit and a save; for `put_drawing` and `ingest_drawing` it also
+# includes the durable write of the version blob, which is why this is seconds
+# rather than milliseconds. A holder that has not finished inside this is stuck
+# rather than busy, and the caller is better served by an error than by a request
+# that never returns. Waiters are only ever contending for the SAME drawing (see
+# `checkout_lock_key`), so a timeout here names real contention, never a
+# coincidence of hashing.
+_CHECKOUT_LOCK_TIMEOUT_S = 30.0
+
+
+class CrossProcessLockUnavailable(RuntimeError):
+    """This backend has no OS-level lock to take, so it cannot serialize a
+    read-modify-write against a second process."""
+
+
+class CheckoutLockTimeout(RuntimeError):
+    """The checkout lock stayed held past its budget.
+
+    Raised rather than reported as a refused acquire. "Someone else holds the
+    checkout" and "this host could not find out" are different answers, and
+    returning None for the second would name a lease holder that may not exist.
+    """
+
+
+class CrossProcessCheckoutLockMissing(RuntimeWarning):
+    """Emitted per legacy checkout served by a backend that cannot exclude a
+    second OS process, so the degradation is visible in logs and assertable in
+    tests instead of silent."""
+
+
+# The errnos that mean "another holder has it". Anything else is a lock that
+# waiting cannot win — a bad descriptor, exhausted lock resources, a filesystem
+# with no lock support — and is raised straight away, because retrying it for
+# the whole budget and then reporting contention would name a holder that does
+# not exist.
+_LOCK_CONTENDED = frozenset(
+    code for code in (
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EAGAIN", None),
+        getattr(errno, "EWOULDBLOCK", None),
+        getattr(errno, "EDEADLK", None),
+        getattr(errno, "EDEADLOCK", None),
+    ) if code is not None
+)
+
+
+def _try_os_lock(handle) -> bool:
+    """Take an exclusive OS lock on an open file WITHOUT blocking.
+
+    Non-blocking on both platforms on purpose. The blocking primitives disagree:
+    POSIX `LOCK_EX` waits forever, while Windows `LK_LOCK` gives up after about
+    ten seconds and raises. Polling a non-blocking attempt against one deadline
+    makes the dev host and the production host fail the same way at the same
+    point, which is the only version of this that can be tested on either.
+    """
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt is not None:
+            # Locks a byte range from the CURRENT position, so anchor it: every
+            # caller must contend for the same byte 0 or they exclude nobody.
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:  # pragma: no cover - no such host is supported
+            raise CrossProcessLockUnavailable(
+                "neither fcntl nor msvcrt is available on this interpreter")
+        return True
+    except OSError as exc:
+        if exc.errno in _LOCK_CONTENDED:
+            return False
+        raise
+
+
 # --------------------------------------------------------------------------- #
 # Storage backend abstraction (so tests run fully offline)
 # --------------------------------------------------------------------------- #
 class StorageBackend:
     """Minimal blob interface: get/put/exists over opaque string keys."""
+
+    # Is a checkout read-modify-write on this backend safe against a SECOND OS
+    # process? A declared, inspectable property of the backend rather than a
+    # thing the caller infers, because the answer changes what a successful
+    # acquire actually promises. False here so a backend added later has to
+    # answer the question deliberately instead of inheriting a guarantee it
+    # cannot keep.
+    cross_process_checkout_safe = False
+
+    def cross_process_lock(self, key: str):
+        """Return a context manager holding an exclusive OS lock for `key`.
+
+        Raises rather than handing back a no-op: a lock that excludes nobody but
+        reports success is worse than no lock, because the caller then believes
+        the read-modify-write it wraps is serialized.
+        """
+        raise CrossProcessLockUnavailable(
+            f"{type(self).__name__} cannot take an OS-level lock")
 
     def get(self, key: str) -> bytes:
         raise NotImplementedError
@@ -221,6 +386,16 @@ class StorageBackend:
 
 class InMemoryBackend(StorageBackend):
     """In-memory dict backend for tests — makes ZERO network calls."""
+
+    # A dict on one interpreter's heap. No second process can reach these blobs
+    # at all, so a checkout read-modify-write here is already excluded from
+    # every other process and the no-op below is the CORRECT implementation
+    # rather than a missing one.
+    cross_process_checkout_safe = True
+
+    @contextlib.contextmanager
+    def cross_process_lock(self, key: str):
+        yield
 
     def __init__(self) -> None:
         self._blobs: dict[str, bytes] = {}
@@ -249,6 +424,16 @@ class InMemoryBackend(StorageBackend):
 
 class OSSBackend(StorageBackend):
     """Live backend delegating to da/client.py's OSS helpers (LIVE calls)."""
+
+    # Object storage has no file descriptor to lock and no compare-and-swap, so
+    # there is nothing here that could exclude a second process. Stated
+    # explicitly rather than inherited so the gap is greppable, and left as a
+    # REFUSAL (the inherited `cross_process_lock` raises) rather than a no-op:
+    # a lock object that grants everyone would make the legacy OSS path look
+    # fixed while leaving it exactly as it is. The caller reads this flag,
+    # warns, and proceeds with the in-process lock alone. The real answer for a
+    # multi-replica deployment is the postgres authority.
+    cross_process_checkout_safe = False
 
     def get(self, key: str) -> bytes:
         return client.download_object(key)
@@ -291,8 +476,45 @@ class FilesystemBackend(StorageBackend):
     check refuses any key that would escape `root_dir`.
     """
 
+    # One shared filesystem, so a sidecar lockfile beside the manifest gives a
+    # real OS-level exclusion between processes. See `cross_process_lock`.
+    cross_process_checkout_safe = True
+
     def __init__(self, root_dir: str) -> None:
         self.root = os.path.abspath(root_dir)
+
+    @contextlib.contextmanager
+    def cross_process_lock(self, key: str):
+        """Hold an exclusive OS lock on the sidecar file at `key`.
+
+        Advisory locking on an open descriptor, not a lock directory with a
+        staleness heuristic. That choice is the point: the kernel drops the lock
+        when the descriptor closes, which covers a normal exit, an exception in
+        the body, and the holder being killed. So a crashed process cannot wedge
+        the drawing, and nothing here ever has to guess whether a live holder is
+        dead. Guessing would be unsound at any threshold, since evicting a
+        merely-slow holder puts two writers inside the section this exists to
+        keep to one.
+
+        Bounded, so a wedged holder surfaces as a timeout rather than a request
+        that never returns.
+        """
+        path = self._path(key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        deadline = time.monotonic() + _CHECKOUT_LOCK_TIMEOUT_S
+        # "a+b" creates on first use and never truncates, so an existing lock
+        # file is opened, not replaced -- replacing it would hand this caller a
+        # different inode from the one the current holder owns.
+        with open(path, "a+b") as handle:
+            while not _try_os_lock(handle):
+                if time.monotonic() >= deadline:
+                    raise CheckoutLockTimeout(
+                        f"checkout lock held by another process past "
+                        f"{_CHECKOUT_LOCK_TIMEOUT_S}s: {path}")
+                time.sleep(0.01)
+            # Closing the handle releases the lock on EVERY exit path, so the
+            # body needs no unlock of its own.
+            yield
 
     def _path(self, key: str) -> str:
         p = os.path.normpath(os.path.join(self.root, key))
@@ -939,23 +1161,38 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
         return _pg_ingest(
             backend, tid, did, _read(local_path), authority_guard)
 
-    if backend.exists(manifest_key(tid, did)):
-        raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
-
+    # Guarded, and it is the WORST of the legacy writers to leave out. The
+    # "already exists" check below and the save at the end are a read and a
+    # write with nothing holding the record between them, so two ingests of one
+    # drawing id both pass the check and both write. Worse, what they write is a
+    # FRESH `_new_manifest`: not a stale copy of the checkout fields but no
+    # checkout and no `checkout_fence` at all. An ingest that passed the check
+    # before a concurrent acquire therefore erases the lease AND resets the
+    # generation counter, so `_next_fence` starts over from 1 and the next
+    # acquire reissues a generation an outstanding capability still carries.
+    # Read the payload BEFORE taking the lock: it does not depend on anything the
+    # guard protects, and reading a large DWG inside the section would hold the
+    # drawing for the duration for no reason.
     data = _read(local_path)
-    vkey = drawing_version_key(tid, did, 1)
-    if backend.exists(vkey):  # immutability guard
-        raise ValueError(f"refuse to overwrite immutable version key {vkey}")
-    backend.put(vkey, data)
+    # `creating=True`: this is the one writer whose drawing is SUPPOSED to be
+    # absent, so it is the one that may bring a lock file into existence.
+    with _legacy_checkout_guard(backend, tid, did, creating=True):
+        if backend.exists(manifest_key(tid, did)):
+            raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
 
-    m = _new_manifest(tid, did)
-    m["versions"].append({
-        "v": 1, "parent": None, "created": _now_iso(),
-        "bytes": len(data), "sha256": _sha256(data),
-        "workitem_id": None, "tool": None, "note": "initial ingest",
-    })
-    save_manifest(backend, tid, did, m)
-    return {"drawing_id": did, "version": 1}
+        vkey = drawing_version_key(tid, did, 1)
+        if backend.exists(vkey):  # immutability guard
+            raise ValueError(f"refuse to overwrite immutable version key {vkey}")
+        backend.put(vkey, data)
+
+        m = _new_manifest(tid, did)
+        m["versions"].append({
+            "v": 1, "parent": None, "created": _now_iso(),
+            "bytes": len(data), "sha256": _sha256(data),
+            "workitem_id": None, "tool": None, "note": "initial ingest",
+        })
+        save_manifest(backend, tid, did, m)
+        return {"drawing_id": did, "version": 1}
 
 
 def _refuse_unless_owner(current_holder: Any, current_fence: Any,
@@ -1148,29 +1385,43 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
             int(parent_version) if parent_version is not None else None,
             meta or {}, holder=holder, fence=fence,
         )
-    m = load_manifest(backend, tid, did)
-    _authorize_checkout_view(m.get("checkout"), holder, fence)
-
-    new_v = int(m["latest"]) + 1
-    vkey = drawing_version_key(tid, did, new_v)
-    if backend.exists(vkey):  # immutability guard (monotonic latest => never true in practice)
-        raise ValueError(f"refuse to overwrite immutable version key {vkey}")
-
+    # Under the SAME guard as acquire/release, because this is a load, edit,
+    # save of the same one manifest document and `save_manifest` writes the
+    # WHOLE document back. Publishing a version therefore rewrites `checkout`
+    # and `checkout_fence` to whatever this caller happened to read, so a commit
+    # whose load precedes a concurrent acquire erases the new lease and restores
+    # the older generation. The next acquire then hands out that generation a
+    # SECOND time, and two capabilities verify against one lease -- the same
+    # ownership bypass the guard on acquire exists to prevent, reached through a
+    # different door. Two concurrent commits also lose a version from
+    # `m["versions"]` the same way.
+    # Read the payload BEFORE taking the lock; see `ingest_drawing`. The blob
+    # WRITE has to stay inside, because its key depends on the version number the
+    # guarded manifest read produces.
     data = _read(local_path)
-    backend.put(vkey, data)
+    with _legacy_checkout_guard(backend, tid, did):
+        m = load_manifest(backend, tid, did)
+        _authorize_checkout_view(m.get("checkout"), holder, fence)
 
-    meta = meta or {}
-    parent = int(parent_version) if parent_version is not None else None
-    m["versions"].append({
-        "v": new_v, "parent": parent, "created": _now_iso(),
-        "bytes": len(data), "sha256": _sha256(data),
-        "workitem_id": meta.get("workitem_id"), "tool": meta.get("tool"),
-        "note": meta.get("note"),
-    })
-    m["head"] = new_v
-    m["latest"] = new_v
-    save_manifest(backend, tid, did, m)
-    return new_v
+        new_v = int(m["latest"]) + 1
+        vkey = drawing_version_key(tid, did, new_v)
+        if backend.exists(vkey):  # immutability guard (monotonic latest => never true in practice)
+            raise ValueError(f"refuse to overwrite immutable version key {vkey}")
+
+        backend.put(vkey, data)
+
+        meta = meta or {}
+        parent = int(parent_version) if parent_version is not None else None
+        m["versions"].append({
+            "v": new_v, "parent": parent, "created": _now_iso(),
+            "bytes": len(data), "sha256": _sha256(data),
+            "workitem_id": meta.get("workitem_id"), "tool": meta.get("tool"),
+            "note": meta.get("note"),
+        })
+        m["head"] = new_v
+        m["latest"] = new_v
+        save_manifest(backend, tid, did, m)
+        return new_v
 
 
 def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
@@ -1253,20 +1504,24 @@ def undo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
             return parent
 
         return db.run_transaction(operation, isolation="serializable")
-    m = load_manifest(backend, tid, did)
-    _authorize_checkout_view(m.get("checkout"), holder, fence, action="undo")
+    # Guarded for the reason spelled out in `put_drawing`: moving head is a
+    # whole-manifest rewrite, so it carries `checkout` and `checkout_fence` back
+    # with it and can erase a lease acquired since this load.
+    with _legacy_checkout_guard(backend, tid, did):
+        m = load_manifest(backend, tid, did)
+        _authorize_checkout_view(m.get("checkout"), holder, fence, action="undo")
 
-    cur = int(m["head"])
-    entry = next((e for e in m["versions"] if int(e["v"]) == cur), None)
-    if entry is None:
-        raise ValueError(f"head version {cur} missing from manifest {tid}/{did}")
-    parent = entry["parent"]
-    if parent is None:
-        raise ValueError("nothing to undo: head is the root version")
+        cur = int(m["head"])
+        entry = next((e for e in m["versions"] if int(e["v"]) == cur), None)
+        if entry is None:
+            raise ValueError(f"head version {cur} missing from manifest {tid}/{did}")
+        parent = entry["parent"]
+        if parent is None:
+            raise ValueError("nothing to undo: head is the root version")
 
-    m["head"] = int(parent)
-    save_manifest(backend, tid, did, m)
-    return int(parent)
+        m["head"] = int(parent)
+        save_manifest(backend, tid, did, m)
+        return int(parent)
 
 
 def redo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
@@ -1361,31 +1616,33 @@ def redo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
             return target
 
         return db.run_transaction(operation, isolation="serializable")
-    m = load_manifest(backend, tid, did)
-    _authorize_checkout_view(m.get("checkout"), holder, fence, action="redo")
+    # Guarded for the reason spelled out in `put_drawing`.
+    with _legacy_checkout_guard(backend, tid, did):
+        m = load_manifest(backend, tid, did)
+        _authorize_checkout_view(m.get("checkout"), holder, fence, action="redo")
 
-    head = int(m["head"])
-    latest = int(m["latest"])
-    if head == latest:
-        raise ValueError("nothing to redo: head is already the latest version")
+        head = int(m["head"])
+        latest = int(m["latest"])
+        if head == latest:
+            raise ValueError("nothing to redo: head is already the latest version")
 
-    parent_of = {int(e["v"]): (int(e["parent"]) if e["parent"] is not None else None)
-                 for e in m["versions"]}
-    cur = latest
-    target = None
-    seen = set()
-    while cur is not None and cur not in seen:
-        seen.add(cur)
-        if parent_of.get(cur) == head:
-            target = cur
-            break
-        cur = parent_of.get(cur)
-    if target is None:
-        raise ValueError(f"nothing to redo: no child of head {head} leads to latest {latest}")
+        parent_of = {int(e["v"]): (int(e["parent"]) if e["parent"] is not None else None)
+                     for e in m["versions"]}
+        cur = latest
+        target = None
+        seen = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            if parent_of.get(cur) == head:
+                target = cur
+                break
+            cur = parent_of.get(cur)
+        if target is None:
+            raise ValueError(f"nothing to redo: no child of head {head} leads to latest {latest}")
 
-    m["head"] = target
-    save_manifest(backend, tid, did, m)
-    return target
+        m["head"] = target
+        save_manifest(backend, tid, did, m)
+        return target
 
 
 # --------------------------------------------------------------------------- #
@@ -1419,8 +1676,51 @@ _LEGACY_CHECKOUT_LOCKS: dict[str, threading.Lock] = {}
 _LEGACY_CHECKOUT_LOCKS_GUARD = threading.Lock()
 
 
-def _legacy_checkout_lock(tid: str, did: str) -> threading.Lock:
-    """Serialize the legacy authority's checkout read-modify-write, per drawing.
+@contextlib.contextmanager
+def _legacy_checkout_lock(tid: str, did: str):
+    """The per-drawing, per-PROCESS half of the checkout guard.
+
+    Kept as the outer layer of `_legacy_checkout_guard` because it is far
+    cheaper than a syscall: threads of one app process settle here and never
+    reach the filesystem. It excludes only threads. The cross-process half is
+    the backend's OS lock.
+
+    REFERENCE COUNTED, so the map does not grow for the life of the process.
+    Round 6 caught that: with all six writers routed through here, a process
+    handling a long tail of distinct drawings accumulated one `Lock` per drawing
+    it had ever touched and never dropped one, so the heap grew with churn.
+
+    The entry is removed when the last interested caller leaves, and the count is
+    maintained under `_LEGACY_CHECKOUT_LOCKS_GUARD`, which is what makes the
+    removal safe. Evicting on "the lock looks unheld" instead would be a race:
+    callers take the lock AFTER this returns, so an entry can legitimately be
+    unheld while a caller is on its way to it, and dropping it there would hand
+    the next caller a DIFFERENT `Lock` for the same drawing and let both into the
+    section.
+    """
+    key = f"{tid}/{did}"
+    with _LEGACY_CHECKOUT_LOCKS_GUARD:
+        entry = _LEGACY_CHECKOUT_LOCKS.get(key)
+        if entry is None:
+            entry = [threading.Lock(), 0]
+            _LEGACY_CHECKOUT_LOCKS[key] = entry
+        entry[1] += 1
+        lock = entry[0]
+    try:
+        yield lock
+    finally:
+        with _LEGACY_CHECKOUT_LOCKS_GUARD:
+            entry = _LEGACY_CHECKOUT_LOCKS.get(key)
+            if entry is not None:
+                entry[1] -= 1
+                if entry[1] <= 0:
+                    del _LEGACY_CHECKOUT_LOCKS[key]
+
+
+@contextlib.contextmanager
+def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
+                           creating: bool = False):
+    """Serialize EVERY legacy read-modify-write of one drawing's manifest.
 
     The legacy manifest is a load, edit, save with nothing holding the record in
     between (see the module note on non-atomic writes). Two concurrent acquires
@@ -1432,20 +1732,98 @@ def _legacy_checkout_lock(tid: str, did: str) -> threading.Lock:
     racing an acquire loses the same update in the other direction and lets a
     generation repeat.
 
-    The postgres authority does not need this: it reads `FOR UPDATE` and
-    increments in the same statement. This closes the window for the DOCUMENTED
-    legacy deployment, which is a single app process (docker-compose pins one
-    for the SQLite write path). It does NOT make the legacy manifest atomic
-    across processes — two app replicas on the legacy store can still lose an
-    update, and the fix for that is postgres, which is what production runs.
+    EVERY writer, not just acquire and release. `save_manifest` writes the whole
+    document, so `put_drawing`, `undo` and `redo` each carry `checkout` and
+    `checkout_fence` back with them from whenever they loaded. A commit that
+    loaded before a concurrent acquire will, on save, erase the new lease and
+    restore the older generation, and the next acquire then issues that
+    generation a SECOND time — the same bypass by a different route.
+    `ingest_drawing` is worse again: it writes a fresh `_new_manifest`, so it
+    erases the lease and drops `checkout_fence` entirely, resetting the
+    generation counter to its start. Guarding only the checkout calls would
+    leave all of those open, so all six writers run here.
+    `test_no_legacy_manifest_writer_escapes_the_guard` holds the line at the
+    source level, because the failure mode is a seventh writer added later.
+
+    Two layers close the window, because one process is two different problems.
+    The threading lock settles the app's own threads without a syscall. Under it
+    an OS advisory lock on a separate lock file settles a SECOND PROCESS reading
+    the same store directory, which the threading lock cannot see: a per-process
+    dict is not shared state, so two replicas each hold their own uncontended
+    lock and both walk into the section.
+
+    NOT REENTRANT. The threading half is a plain `Lock`, so a guarded function
+    calling another guarded function would wait out `_CHECKOUT_LOCK_TIMEOUT_S`
+    and then raise. None of the six writers listed above calls another; keep it
+    that way, `ingest_drawing` included.
+
+    WHAT THIS DOES NOT DO. It is not a distributed lock and must not grow into
+    one. It reaches exactly as far as the OS lock does, which is one shared
+    filesystem — so replicas on one host, or on a shared volume, and nothing
+    beyond that. A backend with no descriptor to lock (`OSSBackend`) cannot be
+    covered at all; rather than pretend otherwise this warns
+    `CrossProcessCheckoutLockMissing` and runs with the threading lock alone,
+    which is the behaviour that was previously silent and unlabelled.
+
+    It also does not coordinate with the guest-upload purge, which deletes a
+    whole drawing directory on its own per-drawing lock. `FilesystemBackend.put`
+    recreates missing parents, so a manifest save that was already in flight can
+    put the drawing back after the purge recorded it deleted. That is unchanged
+    by this guard — every legacy writer, including the pre-existing acquire, has
+    always been able to do it — and closing it means giving the purge and the
+    store one shared lock, which is tracked separately.
+
+    RESOURCES IT HOLDS, and exactly how far each is bounded. The in-process lock
+    map is reference counted and drops an entry when its last caller leaves, so it
+    is bounded by CONCURRENT callers rather than by drawings ever seen. The lock
+    FILES are bounded by the number of drawings that have genuinely existed: a
+    missing drawing is refused above before the file is created, so no caller can
+    mint lock files for ids that were never drawings. What is still NOT reclaimed
+    is the lock file of a drawing that existed and was later purged. Deleting one
+    safely needs the same purge-and-store shared lock as the paragraph above,
+    because unlinking a lock file that a live holder owns is precisely how two
+    callers end up inside this section (it is why the file is not in the drawing's
+    own directory). One empty file per purged drawing is the price of not
+    reintroducing that.
+
+    The documented answer above that boundary is unchanged and is postgres: it
+    reads `FOR UPDATE` and increments in one statement, so it needs none of
+    this. What this removes is the narrower, previously-standing caveat that the
+    legacy path was safe only for a SINGLE app process.
     """
-    key = f"{tid}/{did}"
-    with _LEGACY_CHECKOUT_LOCKS_GUARD:
-        lock = _LEGACY_CHECKOUT_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _LEGACY_CHECKOUT_LOCKS[key] = lock
-        return lock
+    with _legacy_checkout_lock(tid, did) as thread_lock:
+        # Bounded, so a queue of in-process callers cannot wait without a limit
+        # before the cross-process deadline below even starts counting.
+        if not thread_lock.acquire(timeout=_CHECKOUT_LOCK_TIMEOUT_S):
+            raise CheckoutLockTimeout(
+                f"in-process checkout lock busy past {_CHECKOUT_LOCK_TIMEOUT_S}s: "
+                f"{tid}/{did}")
+        try:
+            if not backend.cross_process_checkout_safe:
+                warnings.warn(
+                    f"{type(backend).__name__} cannot take an OS-level checkout "
+                    f"lock, so the {tid}/{did} checkout is serialized within this "
+                    f"process only; a second replica can still lose an update. Use "
+                    f"the postgres authority for a multi-replica deployment.",
+                    CrossProcessCheckoutLockMissing, stacklevel=3)
+                yield
+                return
+            # Refuse a MISSING drawing before the lock file exists. Taking the
+            # lock creates the file, and nothing reclaims it, so without this an
+            # authenticated caller could mint an empty lock file per made-up
+            # drawing id and grow the prefix without ever creating a drawing.
+            # Every writer but `ingest_drawing` needs the manifest to be there
+            # already and would raise this exact `KeyError` from `load_manifest`
+            # a moment later, so this only moves the refusal earlier. Racing a
+            # concurrent ingest can turn into a not-found for a drawing that
+            # appears immediately afterwards, which was already possible and
+            # costs nothing, because this path never writes.
+            if not creating and not backend.exists(manifest_key(tid, did)):
+                raise KeyError(manifest_key(tid, did))
+            with backend.cross_process_lock(checkout_lock_key(tid, did)):
+                yield
+        finally:
+            thread_lock.release()
 
 
 def _next_fence(m: dict) -> int:
@@ -1596,7 +1974,7 @@ def acquire_checkout_fence(backend: StorageBackend, tenant_id: str, drawing_id: 
             return int(written["checkout_fence"])
 
         return db.run_transaction(operation, isolation="serializable")
-    with _legacy_checkout_lock(tid, did):
+    with _legacy_checkout_guard(backend, tid, did):
         m = load_manifest(backend, tid, did)
         now = datetime.now(timezone.utc)
         co = m.get("checkout")
@@ -1680,7 +2058,7 @@ def release_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
             return True
 
         return db.run_transaction(operation, isolation="serializable")
-    with _legacy_checkout_lock(tid, did):
+    with _legacy_checkout_guard(backend, tid, did):
         m = load_manifest(backend, tid, did)
         co = m.get("checkout")
         if not co:
