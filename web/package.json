@@ -11,7 +11,8 @@
     "proof:cat": "playwright test e2e/cat-operator-proof.spec.mjs e2e/cat-standards-surface.spec.mjs",
     "check:customization": "node scripts/check_customization.mjs",
     "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs && node scripts/check_checkout_identity.mjs",
-    "check:checkout-identity": "node scripts/check_checkout_identity.mjs"
+    "check:checkout-identity": "node scripts/check_checkout_identity.mjs",
+    "check:deployed-acceptance-contract": "node --test scripts/test_deployed_authored_cad_acceptance.mjs"
   },
   "dependencies": {
     "@auth0/auth0-spa-js": "^2.23.0",

@@ -355,7 +355,9 @@ export default function ToolCast({ active, onIntakeChange, onViewModeChange }) {
               onChange={(event) => setPrompt(event.target.value)}
               onKeyDown={runOnEnter}
               aria-label="Command bar"
-              placeholder={`Try: ${CAT_REQUEST}`}
+              placeholder={PROOF_MODE
+                ? `Try: ${CAT_REQUEST}`
+                : 'Describe a change to this drawing. Nothing runs until you submit it.'}
             />
             <button type="button" className="tc-run" onClick={runRequest} disabled={busy || phase === 'loading'}>Run</button>
           </div>
@@ -371,7 +373,7 @@ export default function ToolCast({ active, onIntakeChange, onViewModeChange }) {
       <div className={`tc-caption${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool">
         {PROOF_MODE
           ? 'Deterministic browser proof. This surface does not claim a live Claude or APS run.'
-          : 'Live local stack: web → app → harness → broker. Requests are not preloaded or simulated.'}
+          : 'Live service chain: web → app → harness → broker. Requests are not preloaded or simulated.'}
       </div>
     </>
   )

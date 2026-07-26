@@ -229,7 +229,13 @@ Risks:
   - [x] Keep the Claude grant outside the broker and generated-code sandbox.
   - [x] Require the broker test run before a candidate can be returned.
   - [x] Prove a novel `drawing.write` proposal through hermetic boundary tests.
-- [ ] Add a non-mocked deployed-environment acceptance driver.
+- [x] Add a non-mocked deployed-environment acceptance driver.
+  - [x] Require an HTTPS staging target, exact source revision, two distinct tenant JWTs, and acceptance-only drawing IDs.
+  - [x] Prove readiness, coherent build identity, linked grants, tenant isolation, and a blank unique browser workbench without route interception.
+  - [x] Put all mutations behind an explicit staging-only execute flag and emit a secret-free receipt.
+  - [x] Require separate approval authority for the exact staged change and reject generic browser approvals.
+  - [x] Add hermetic negative tests for production targets, missing identity, mixed revisions, degraded dependencies, token leakage, and cross-tenant access.
+  - [x] Register the driver contract tests in the canonical gate.
 - [ ] Enable and verify one coherent release in staging.
 - [ ] Wire the proven posture into production.
 - [ ] Promote exact staging digests and complete the cutover receipt.
@@ -237,7 +243,8 @@ Risks:
 Risks:
 
 - A healthy service with authored execution off does not satisfy the product contract.
-- The current E2B author runner cannot create a novel drawing-write tool.
+- The E2B author runner can propose a novel drawing-write tool, but staging has
+  not yet produced the live broker execution receipt.
 - Enabling authored execution without PostgreSQL sessions, an E2B credential, and an
   explicit allowlisted probe fails production startup.
 - The live staging services currently use images from several source commits.

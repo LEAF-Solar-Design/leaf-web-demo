@@ -696,6 +696,9 @@ def build_suites() -> List[Suite]:
         # reports as the checkout lock rather than as a generic staging-fix chain.
         Suite("web-checkout-identity-check", "web single-writer checkout lock identity", "script", WEB,
               [_npm(), "run", "check:checkout-identity"], None),
+        Suite("web-deployed-acceptance-contract",
+              "web deployed authored CAD acceptance contract", "script", WEB,
+              [_npm(), "run", "check:deployed-acceptance-contract"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #

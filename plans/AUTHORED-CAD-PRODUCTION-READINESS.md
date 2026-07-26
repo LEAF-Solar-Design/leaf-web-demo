@@ -118,7 +118,8 @@ acceptance run, and the production infrastructure and rollback gates.
 - Merge the recovered cat workflow onto current application `main`.
 - Keep the current drawing-binding and exact-catalog approval fixes.
 - Pass server, harness, web, and browser suites.
-- Add a non-mocked acceptance driver that can target a deployed environment.
+- Run the non-mocked deployed acceptance driver documented in
+  `docs/DEPLOYED-AUTHORED-CAD-ACCEPTANCE.md`.
 
 ### Gate B: general sandboxed authoring
 
@@ -190,12 +191,12 @@ Run with two real Auth0 users in two tenants:
 
 | Lane | Owner | State |
 |---|---|---|
-| Application integration, structured author boundary, and cat browser flow | `codex/cat-production-integration-20260726` | implemented locally, pending full gate and review |
+| Application integration, structured author boundary, cat browser flow, and deployed acceptance driver | `codex/cat-production-integration-20260726` | implemented on PR 210, pending review and staging run |
 | Production rollback workflow | infrastructure PR 183 owner | blocked by RED adversarial review |
 | Docker build-context cleanup | application PRs 207 and 208 owners | merged |
 | Live E2B boundary proof and staging activation workflow | unowned | waits for credential, allowlist, and merged application boundary |
 | Production Postgres and canonical-worker wiring | unowned | blocking |
-| Authenticated two-tenant staging acceptance | unowned | waits for staging activation |
+| Authenticated two-tenant staging acceptance | `codex/cat-production-integration-20260726` driver, staging operator executes | driver implemented, waits for staging activation |
 
 ## Stop conditions
 
