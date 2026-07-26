@@ -37,12 +37,14 @@ def test_required_config_manifests_fail_closed_for_postgres_authority():
 
     assert {
         "LEAF_BLOB_STORE",
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE",
         "LEAF_PLATFORM_POSTGRES_REQUIRED",
         "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED",
     }.issubset(app_environment)
     assert {
         "LEAF_BLOB_STORE",
         "LEAF_BROKER_STORE",
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE",
     }.issubset(broker_environment)
     assert "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED" not in broker_environment
 
@@ -52,6 +54,9 @@ def test_upload_import_boundary_has_a_real_postgres_pr_gate():
 
     for protected_path in (
         "platform/api.py",
+        # The shared cutover fence IS part of this boundary: without it listed,
+        # a change to the fence alone would skip the gate entirely.
+        "platform/mutation_fence.py",
         "platform/tests/test_drawing_import.py",
         "server/routers/uploads.py",
         "server/write_loop.py",

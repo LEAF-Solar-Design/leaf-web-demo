@@ -39,7 +39,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 _lock = threading.Lock()
 # spine_job_id -> {"platform_job_id": uuid.UUID, "org_id": uuid.UUID}
@@ -149,6 +149,10 @@ def validate_canonical_upload_authority() -> None:
     if os.environ.get("LEAF_BLOB_STORE", "legacy").strip().lower() != "filesystem":
         raise RuntimeError(
             "LEAF_PLATFORM_POSTGRES_REQUIRED requires LEAF_BLOB_STORE=filesystem")
+    if not os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip():
+        raise RuntimeError(
+            "LEAF_PLATFORM_POSTGRES_REQUIRED requires "
+            "LEAF_DRAWING_MUTATIONS_FENCE_FILE")
 
 
 def validate_postgres_startup() -> Optional[Dict[str, Any]]:
@@ -333,6 +337,38 @@ def on_running(spine_job_id: str) -> None:
         _log(f"running link failed (run unaffected): {type(exc).__name__}: {exc}")
 
 
+def mirror_configured() -> bool:
+    """True when a terminal mirror would actually be attempted for this process.
+
+    Lets the SQLite authority decide, INSIDE its own transaction, whether a row
+    needs an outstanding-mirror marker. Without this the DB-less demo would take
+    a marker write and an immediate clearing write on every terminal callback.
+    """
+    return _db_configured()
+
+
+def try_terminal(spine_job_id: str, spine_status: str,
+                 result_env: Optional[Dict[str, Any]] = None,
+                 error: Optional[Dict[str, Any]] = None) -> bool:
+    """Attempt the terminal mirror and raise when delivery fails.
+
+    Returns True when no mirror is needed (no linkage configured) or the UPDATE
+    committed. The SQLite authority cannot share a transaction with PostgreSQL,
+    so it records an outstanding-mirror marker in its OWN terminal transaction
+    and clears it only after this call returns. A raised failure leaves durable
+    work for the sweep to retry.
+
+    Contrast ``terminal_in_transaction``, which CAN share the authority's
+    transaction because there both tables live in the same database.
+    """
+    _pop(spine_job_id)  # housekeeping only: drop any in-process correlation (not depended on)
+    if not _db_configured():
+        return True
+    status, result_json, cost_usd = _terminal_fields(spine_status, result_env)
+    _update_by_spine(spine_job_id, status=status, result=result_json, cost_usd=cost_usd)
+    return True
+
+
 def on_terminal(spine_job_id: str, spine_status: str,
                 result_env: Optional[Dict[str, Any]] = None,
                 error: Optional[Dict[str, Any]] = None) -> None:
@@ -343,24 +379,46 @@ def on_terminal(spine_job_id: str, spine_status: str,
     mock run). Finds the row by ``spine_ref`` — so it works even after an app restart
     dropped the in-process map (the durable-sync property, Contract 5a). Best-effort +
     env-gated; a spine_ref with no matching row is a harmless 0-row UPDATE. Never raises.
+
+    Delegates to the raising ``try_terminal`` boundary and swallows only here,
+    so legacy callers stay best-effort while durable callers can retain retry
+    work on failure.
     """
-    _pop(spine_job_id)  # housekeeping only: drop any in-process correlation (not depended on)
-    if not _db_configured():
-        return
     try:
-        status = _STATUS_MAP.get(spine_status, "failed")
-        result_json = None
-        cost_usd = None
-        if status == "succeeded" and isinstance(result_env, dict):
-            result_json = result_env
-            cost = result_env.get("cost")
-            if isinstance(cost, dict):
-                usd = cost.get("usd_est")
-                if isinstance(usd, (int, float)):
-                    cost_usd = float(usd)
-        _update_by_spine(spine_job_id, status=status, result=result_json, cost_usd=cost_usd)
+        try_terminal(spine_job_id, spine_status, result_env, error)
     except Exception as exc:  # noqa: BLE001
         _log(f"terminal link failed (run unaffected): {type(exc).__name__}: {exc}")
+
+
+def forget(spine_job_id: str) -> None:
+    """Drop any in-process correlation for a spine job. Housekeeping only.
+
+    Callers that sync the platform row inside the authority's own transaction (see
+    ``terminal_in_transaction``) still need this, because they do not go through
+    ``on_terminal``.
+    """
+    _pop(spine_job_id)
+
+
+def terminal_in_transaction(conn, spine_job_id: str, spine_status: str,
+                            result_env: Optional[Dict[str, Any]] = None,
+                            error: Optional[Dict[str, Any]] = None) -> None:
+    """Sync the linked platform Job on the caller's OWN connection, inside its transaction.
+
+    The PostgreSQL job authority (``async_jobs``) and this linkage (``jobs``) are two
+    tables in one database. Writing them in one transaction is what makes a terminal
+    result atomic: either both land or neither does. Contrast ``on_terminal``, which
+    runs after an already-committed authority write and therefore MUST swallow failure
+    to avoid double-reporting a run that really did finish.
+
+    Deliberately raises. A failure here must roll the authority write back with it, so
+    the callback is retried against a clean state rather than leaving a caller polling
+    a nonterminal platform Job forever. A spine_ref with no matching row stays a
+    harmless 0-row UPDATE.
+    """
+    status, result_json, cost_usd = _terminal_fields(spine_status, result_env)
+    _update_by_spine(spine_job_id, status=status, result=result_json,
+                     cost_usd=cost_usd, conn=conn)
 
 
 # --------------------------------------------------------------------------- #
@@ -371,13 +429,36 @@ def _pop(spine_job_id: str) -> Optional[Dict[str, Any]]:
         return _MAP.pop(str(spine_job_id), None)
 
 
+def _terminal_fields(spine_status: str,
+                     result_env: Optional[Dict[str, Any]]) -> Tuple[str, Optional[Dict[str, Any]], Optional[float]]:
+    """Derive the platform-side (status, result, cost_usd) from a spine terminal callback.
+
+    Shared so the best-effort and in-transaction paths cannot drift apart.
+    """
+    status = _STATUS_MAP.get(spine_status, "failed")
+    result_json = None
+    cost_usd = None
+    if status == "succeeded" and isinstance(result_env, dict):
+        result_json = result_env
+        cost = result_env.get("cost")
+        if isinstance(cost, dict):
+            usd = cost.get("usd_est")
+            if isinstance(usd, (int, float)):
+                cost_usd = float(usd)
+    return status, result_json, cost_usd
+
+
 def _update_by_spine(spine_job_id: str, *, status: str,
                      result: Optional[Dict[str, Any]] = None,
-                     cost_usd: Optional[float] = None) -> None:
+                     cost_usd: Optional[float] = None,
+                     conn=None) -> None:
     """Issue the DURABLE terminal/running UPDATE via the platform pool, matched by the
     globally-unique ``spine_ref``. Survives an app restart (no in-process state needed).
     ``result``/``cost_usd`` are only touched on a terminal sync (passed None for the
-    'running' flip, and left as-is by assigning them only when provided)."""
+    'running' flip, and left as-is by assigning them only when provided).
+
+    When ``conn`` is given the statement runs on that connection, joining the caller's
+    open transaction instead of taking its own pooled one."""
     from psycopg.types.json import Jsonb  # noqa: PLC0415
 
     _store, db, _platform_deps = _load_platform()
@@ -396,5 +477,8 @@ def _update_by_spine(spine_job_id: str, *, status: str,
     sql = ("UPDATE jobs SET " + ", ".join(sets)
            + " WHERE spine_ref = %(spine_ref)s"
            + " AND status NOT IN ('succeeded', 'failed', 'cancelled')")
+    if conn is not None:
+        conn.execute(sql, args)
+        return
     with db.cursor() as cur:
         cur.execute(sql, args)

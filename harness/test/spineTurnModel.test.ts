@@ -195,14 +195,15 @@ describe("mount your LLM — a credential pasted into the prompt", () => {
     const runner = new FakeConverseRunner();
     const store = new FakeSessionStore();
     const gate = new FakeGateClient();
+    const appRun = new FakeAppRunClient();
     const adapter = new SpineTurnAdapter({
       oauth: new UnusedOAuthProvider(),
-      appRun: new FakeAppRunClient(),
+      appRun,
       gate,
       store,
       runnerFor: () => runner,
     });
-    return { adapter, runner, store, gate };
+    return { adapter, runner, store, gate, appRun };
   }
 
   it("never reaches the model, so it cannot be echoed back", async () => {
@@ -257,12 +258,43 @@ describe("mount your LLM — a credential pasted into the prompt", () => {
     // it scrubbed the harness copy while the app gate kept the raw one, so the
     // two args hashes disagreed and approval replay failed as args_mismatch.
     // Scrubbing the source means every copy derives from the same scrubbed text.
-    const { adapter, runner, store, gate } = build();
+    const { adapter, runner, store, gate, appRun } = build();
+    gate.nextConfirmationId = "credential-dwg-confirm";
+    const proposedEvents = await drain(
+      adapter.runTurn(
+        turnInput({
+          text:
+            `RUN:add-panel DWG:tenant-drawing-7 ` +
+            `PARAMS:{"note":"${PASTED}"}`,
+          credential_grant: { kind: "api_key", api_key: PASTED },
+        }),
+      ),
+    );
+    const proposal = proposedEvents.find((event) => event.type === "proposed_run");
+    expect(proposal).toBeDefined();
+    expect(proposal!.data.dwg).toBe("tenant-drawing-7");
+    expect(gate.checks).toHaveLength(1);
+
+    // Reproduce the real recovery seam: the app approval remains authoritative,
+    // but the harness mirror row is gone while the session itself survives.
+    gate.grant("credential-dwg-confirm");
+    store.confirmations.delete("credential-dwg-confirm");
+
     await drain(
       adapter.runTurn(
         turnInput({
-          text: `use ${PASTED} now`,
+          turn_id: "app-turn-2",
           credential_grant: { kind: "api_key", api_key: PASTED },
+          confirm: {
+            confirmation_id: "credential-dwg-confirm",
+            approved: true,
+            proposal: {
+              tool: String(proposal!.data.tool),
+              params: proposal!.data.params as Record<string, unknown>,
+              dwg: String(proposal!.data.dwg),
+              capability: String(proposal!.data.capability),
+            },
+          },
         }),
       ),
     );
@@ -274,6 +306,10 @@ describe("mount your LLM — a credential pasted into the prompt", () => {
     ]) {
       expect(view).not.toContain(PASTED);
     }
+    expect(gate.checks).toHaveLength(2);
+    expect(gate.checks[1]!.decision).toBe("allow");
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]!.dwg).toBe("tenant-drawing-7");
   });
 
   it("leaves ordinary content alone, including token-shaped strings", async () => {

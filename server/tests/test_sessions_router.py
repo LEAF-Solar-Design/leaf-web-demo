@@ -392,14 +392,15 @@ def test_classifier_hint_durable_in_turn_started_but_never_on_the_wire(client, w
 
 
 def _seed_decided_approval(sess, *, approved: bool, tool="write_home_run",
-                           params=None, capability="drawing.write") -> str:
+                           params=None, capability="drawing.write",
+                           dwg=None) -> str:
     _counter[0] += 1
     cid = f"confirm-router-{_counter[0]}"
     session_store.create_approval(
         cid, sess["session_id"], sess["tenant_id"], turn_id=f"turn-{_counter[0]}",
         tool=tool, params=params if params is not None else {"length_ft": 12},
         capability=capability, rationale="adds a home-run", kind="run_capability",
-        payload=None, ttl_s=300,
+        payload={"dwg": dwg} if dwg is not None else None, ttl_s=300,
     )
     session_store.decide_approval(cid, approved, by=sess["tenant_id"])
     return cid
@@ -408,10 +409,12 @@ def _seed_decided_approval(sess, *, approved: bool, tool="write_home_run",
 def test_confirm_forwards_durable_proposal_not_client_shape(client, wired):
     """The confirm resume body carries the frozen snake_case confirm built from
     the DURABLE approval row ({confirmation_id, approved, proposal{tool,
-    params, capability}}) — never the client's camelCase shape, and no text."""
+    params, dwg, capability}}) — never the client's camelCase shape, and no text."""
     url, state = wired
     sess = _new_session()
-    cid = _seed_decided_approval(sess, approved=True)
+    cid = _seed_decided_approval(
+        sess, approved=True, dwg="server-stored-drawing",
+    )
 
     r = client.post(f"/api/sessions/{sess['session_id']}/messages",
                     json={"confirm": {"confirmationId": cid, "approved": True}},
@@ -425,6 +428,7 @@ def test_confirm_forwards_durable_proposal_not_client_shape(client, wired):
         "confirmation_id": cid,
         "approved": True,
         "proposal": {"tool": "write_home_run", "params": {"length_ft": 12},
+                     "dwg": "server-stored-drawing",
                      "capability": "drawing.write"},
     }
     assert "confirmationId" not in json.dumps(body)  # client shape never leaks
@@ -435,7 +439,9 @@ def test_confirm_forwarded_approved_is_stored_value_not_clients(client, wired):
     confirm message — the WIRE must carry the stored False."""
     url, state = wired
     sess = _new_session()
-    cid = _seed_decided_approval(sess, approved=False)
+    cid = _seed_decided_approval(
+        sess, approved=False, dwg=sess["drawing_id"],
+    )
 
     r = client.post(f"/api/sessions/{sess['session_id']}/messages",
                     json={"confirm": {"confirmationId": cid, "approved": True}},
@@ -443,6 +449,28 @@ def test_confirm_forwarded_approved_is_stored_value_not_clients(client, wired):
     assert r.status_code == 202, r.text
     _wait_terminal(sess["session_id"])
     assert state.bodies[0]["confirm"]["approved"] is False
+
+
+def test_confirm_rejects_legacy_tool_approval_without_stored_drawing(client, wired):
+    """A pre-binding approval has no payload_json.dwg. It must not fall back to
+    the session drawing, because that target was never stored in the approval."""
+    _url, state = wired
+    sess = _new_session()
+    cid = _seed_decided_approval(sess, approved=True, dwg=None)
+
+    r = client.post(
+        f"/api/sessions/{sess['session_id']}/messages",
+        json={"confirm": {"confirmationId": cid, "approved": True}},
+        headers=_h(sess["tenant_id"]),
+    )
+
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["error"]["error_code"] == "BAD_PARAMS"
+    assert body["error"]["retryable"] is False
+    assert "no stored drawing" in body["error"]["message"]
+    assert state.bodies == [], "legacy approval reached the harness"
+    assert session_store.get_approval(cid)["consumed"] is True
 
 
 def test_prior_turn_context_folded_into_messages(client, wired):

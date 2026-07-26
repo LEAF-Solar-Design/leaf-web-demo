@@ -162,3 +162,29 @@ Risks:
 - A tenant must not select or remove another tenant's account.
 - Removing the active account must select a deterministic survivor or report no active grant.
 - The existing v1 record and single-account API fields must remain compatible during rollout.
+
+# Active tenant authority for drawing routes
+
+- [x] Reproduce the stale JWT tenant claim selecting the demo bootstrap.
+- [x] Resolve live account drawing routes through the active platform binding.
+- [x] Prove account intake serves the uploaded DXF and creates no stale-tenant manifest.
+- [x] Run the focused and full backend gates.
+
+Risks:
+
+- Guest sessions and trusted broker back-edges must keep their existing tenant identity.
+- All drawing reads and mutations must use one tenant key.
+
+# Approval drawing binding recovery
+
+- [x] Persist the proposed drawing in the app approval row without a schema migration.
+- [x] Forward the stored drawing on the server-authored confirmation wire.
+- [x] Rebuild a missing harness confirmation mirror with the exact drawing-bound args.
+- [x] Replace the vacuous hash-mismatch check with a real proposal, mirror loss, approval, and replay test.
+- [ ] Run focused server and harness tests, type-check, build, and the full repository gate.
+
+Risks:
+
+- Approval arguments are security-sensitive and must remain byte-equivalent across the app and harness.
+- Existing approvals without a stored drawing must fail closed instead of gaining a new target.
+- The client cannot choose or alter the drawing during confirmation replay.

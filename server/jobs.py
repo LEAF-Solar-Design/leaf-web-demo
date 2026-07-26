@@ -203,7 +203,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   authority_mode TEXT NOT NULL DEFAULT 'legacy_sqlite',
   idempotency_key TEXT,
   submission_fingerprint TEXT,
-  dwg_version INTEGER
+  dwg_version INTEGER,
+  platform_mirror_pending INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -222,6 +223,7 @@ _MIGRATIONS = {
     "idempotency_key": "TEXT",
     "submission_fingerprint": "TEXT",
     "dwg_version": "INTEGER",
+    "platform_mirror_pending": "INTEGER NOT NULL DEFAULT 0",
 }
 
 _DWG_VERSION_BACKFILL_MIGRATION = "backfill_dwg_version"
@@ -782,14 +784,18 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             fingerprint, worker_id, now, allow_closed=_allow_closed,
         )
         if outcome == "applied":
-            platform_link.on_terminal(job_id, status, result_env, error)
+            # The platform mirror already landed inside _pg_store.complete()'s own
+            # transaction, atomically with the authority row. Only the in-process
+            # correlation housekeeping is left to do here.
+            platform_link.forget(job_id)
             _emit_job_terminal(status)
         return outcome
     applied = False
     with _lock:
         conn = _db()
         durable = conn.execute(
-            "SELECT attempt, execution_json FROM jobs WHERE job_id = ?", (job_id,)
+            "SELECT attempt, execution_json, org_id, project_id "
+            "FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
         if durable is None:
             return "missing"
@@ -799,13 +805,23 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             json.loads(durable["execution_json"] or "{}"),
         )
         fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
+        # The PostgreSQL mirror lives in a DIFFERENT database, so it cannot join
+        # this transaction the way _pg_store.complete() joins its own. Commit an
+        # outstanding-mirror marker WITH the terminal row instead: an undelivered
+        # mirror then survives as durable state that the sweep drains, rather than
+        # as a swallowed exception that leaves the platform Job nonterminal forever.
+        # Project linkage is durable job state. Do not derive retry intent from
+        # the current process configuration: a restart with a temporarily
+        # missing DATABASE_URL must not erase a mirror that becomes deliverable
+        # after configuration is restored.
+        mirror_pending = 1 if durable["org_id"] and durable["project_id"] else 0
         owner_clause = "" if _allow_closed else " AND progress <> ?"
         args: List[Any] = [
             status, "done" if status == "complete" else "error", now, now, now, now,
             json.dumps(result_env) if result_env is not None else None,
             json.dumps(error) if error is not None else None,
             json.dumps(provenance) if provenance is not None else None,
-            fingerprint, job_id, durable_attempt,
+            fingerprint, mirror_pending, job_id, durable_attempt,
         ]
         if not _allow_closed:
             args.append(CLOSED_PROGRESS)
@@ -816,7 +832,8 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             "UPDATE jobs SET status = ?, progress = ?, updated_at = ?, finished_at = ?, "
             "elapsed_ms = CAST((? - COALESCE(started_at, ?)) * 1000 AS INTEGER), "
             "result_json = ?, error_json = ?, provenance_json = ?, "
-            "terminal_fingerprint = ?, lease_owner = NULL, lease_expires_at = NULL "
+            "terminal_fingerprint = ?, platform_mirror_pending = ?, "
+            "lease_owner = NULL, lease_expires_at = NULL "
             "WHERE job_id = ? AND attempt = ? AND status NOT IN ('complete', 'failed')" + owner_clause,
             tuple(args))
         conn.commit()
@@ -841,7 +858,21 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             conn.commit()
             return "conflict"
     if applied:
-        platform_link.on_terminal(job_id, status, result_env, error)
+        # Clear the marker only on a confirmed mirror. A missing configuration
+        # or raised delivery failure leaves durable work for the sweep; neither
+        # may escape and double-report a run whose authority write did land.
+        if not mirror_pending:
+            platform_link.forget(job_id)
+        elif not platform_link.mirror_configured():
+            pass  # durable marker remains until configuration is restored
+        else:
+            try:
+                platform_link.try_terminal(job_id, status, result_env, error)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[leaf-jobs] terminal platform mirror deferred for {job_id}: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            else:
+                _clear_platform_mirror_pending(job_id)
         _emit_job_terminal(status)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
@@ -1117,6 +1148,10 @@ def _reap_orphans_once() -> int:
             "(lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
             (stale_before, CLOSED_PROGRESS, time.time()))
     _retry_pending_reaps()
+    if job_store_mode() != "postgres":
+        # Legacy authority only: the PostgreSQL authority already mirrors inside
+        # its own transaction, so it never leaves a marker to drain.
+        _retry_pending_platform_mirrors()
     handled = 0
     for row in rows:
         if row["progress"] == CLOSED_PROGRESS:
@@ -1241,6 +1276,67 @@ def _forget_pending_reap(job_id: str) -> None:
 
 
 _pending_reaps.update(_load_pending_reaps())
+
+
+PLATFORM_MIRROR_BATCH = 25
+
+
+def _clear_platform_mirror_pending(job_id: str) -> None:
+    """Mark this row's platform mirror delivered. Never raises."""
+    try:
+        with _lock:
+            conn = _db()
+            conn.execute(
+                "UPDATE jobs SET platform_mirror_pending = 0 WHERE job_id = ?", (job_id,))
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        # Worst case the marker survives a delivered mirror and the sweep replays
+        # it. _update_by_spine is spine_ref-keyed and refuses already-terminal
+        # rows, so a replay is a harmless 0-row UPDATE, never a relabel.
+        print(f"[leaf-jobs] could not clear the platform-mirror marker for {job_id}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+
+def _retry_pending_platform_mirrors() -> None:
+    """Deliver terminal mirrors that failed when their authority row committed.
+
+    The SQLite authority and the PostgreSQL linkage are separate databases, so a
+    terminal write cannot carry the mirror in one transaction the way the
+    PostgreSQL authority can. It commits ``platform_mirror_pending`` alongside the
+    terminal row instead, and this drains that marker.
+
+    Bounded exactly like the reap queue, and for the same reason: at most
+    PLATFORM_MIRROR_BATCH per sweep, oldest first, and the batch is abandoned on
+    the first failure, because linkage that is down for one row is down for all
+    and grinding through the rest would only stall the sweep behind it.
+    """
+    if not platform_link.mirror_configured():
+        return
+    rows = _query(
+        "SELECT job_id, status, result_json, error_json FROM jobs "
+        "WHERE platform_mirror_pending = 1 AND status IN ('complete', 'failed') "
+        "ORDER BY updated_at LIMIT ?",
+        (PLATFORM_MIRROR_BATCH,))
+    for row in rows:
+        try:
+            result_env = json.loads(row["result_json"]) if row["result_json"] else None
+            error = json.loads(row["error_json"]) if row["error_json"] else None
+        except (TypeError, ValueError) as exc:
+            # A row we can never rebuild would otherwise sit at the head forever
+            # and starve every mirror behind it (ORDER BY updated_at is stable).
+            print(f"[leaf-jobs] dropping an unreplayable platform mirror for "
+                  f"{row['job_id']}: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
+            _clear_platform_mirror_pending(row["job_id"])
+            continue
+        try:
+            platform_link.try_terminal(row["job_id"], row["status"], result_env, error)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[leaf-jobs] deferred platform mirror still unavailable for "
+                  f"{row['job_id']}: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
+            break
+        _clear_platform_mirror_pending(row["job_id"])
 
 
 def _retry_pending_reaps() -> None:

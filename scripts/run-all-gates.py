@@ -38,6 +38,10 @@ Special handling, all documented on the scoreboard:
     crash that loses the scoreboard. Drill it with
     LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" (first attempt only; see
     scripts/test_gate_runner.py, registered as gate-runner-selftest).
+  * `--only` is REPEATABLE and unions its matches, a substring that matches no
+    suite exits 2 rather than silently shrinking the run, and the scoreboard
+    echoes the exact selection that produced it — so the printed result can be
+    checked against the command that was typed.
 
 USAGE
 -----
@@ -45,11 +49,14 @@ USAGE
     python scripts/run-all-gates.py --fail-fast  # stop at the first failing gate
     python scripts/run-all-gates.py --continue    # explicit default (run everything)
     python scripts/run-all-gates.py --only server # substring filter on suite ids
+    python scripts/run-all-gates.py --only server-backbone --only harness-vitest
+                                                 # repeatable: runs the UNION of both
     python scripts/run-all-gates.py --log-dir DIR # where per-suite logs land
 
 EXIT CODE
 ---------
     0  iff every gate passed and every test-level skip was explicitly allowlisted
+    2  nothing ran: an --only substring matched no suite (never a gate verdict)
     1  otherwise
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
@@ -213,11 +220,24 @@ def normalize_spawn_command(
 def build_suites() -> List[Suite]:
     repo_name = REPO.name  # "leaf-web-demo"
     suites: List[Suite] = [
+        # Executed-count floors: seventeen were re-baselined on 2026-07-25
+        # because they sat BELOW their suite's real executed count. A low floor
+        # is legal, coverage_verdict PASSes it with an "(executed-count drift:
+        # ...)" note, which is exactly the hazard: such a suite can silently
+        # lose tests down to the floor and still report green. Every
+        # replacement is a MEASURED executed count (passed, skips excluded),
+        # taken one file per pytest subprocess from the suite's registered cwd
+        # and re-confirmed through this runner at --retry 0.
+        # Two were deliberately left alone, each for a reason recorded at its
+        # own Suite(...) below: `platform` (re-baselining it needs a live
+        # Postgres, and the test-gate workflow is hermetic) and
+        # `server-customization-adversarial` (Linux and Windows execute
+        # different counts, so no single number is honest for both).
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
-              _py_pytest("tests/test_backbone.py"), 11),
+              _py_pytest("tests/test_backbone.py"), 13),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
-              SERVER, _py_pytest("tests/test_dependency_health.py"), 13),
+              SERVER, _py_pytest("tests/test_dependency_health.py"), 17),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 11),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
@@ -233,6 +253,23 @@ def build_suites() -> List[Suite]:
         Suite("server-wave2", "server tests/test_wave2.py", "pytest", SERVER,
               _py_pytest("tests/test_wave2.py"), 6,
               allowed_skip_reasons=(r"platform DB unreachable: .+",)),
+        # Floor 13 is the count that EXECUTES on the CI runner. It is NOT the
+        # collected count and NOT the local count. 19 tests collect in both
+        # environments (19 `def test_` functions, zero parametrize). CI run
+        # 30161760318 reported `got 19, 6 skipped`, so CI executes 13. This dev
+        # host executes 18 with 1 skip (`platform DB unreachable: DATABASE_URL
+        # is not set`), measured 2026-07-25 from server/ via `python -m pytest
+        # tests/test_wave3.py -q --color=no -r s -p no:cacheprovider`.
+        # The 5-test gap is INFERRED, not confirmed: CI's per-test skip list is
+        # not in the job log. Exactly 5 tests carry @requires_tenant_repo, whose
+        # repo (default C:/tmp/leaf-tenants/demo-tenant) is present here and
+        # absent on a clean runner, which accounts for 1 DB + 5 tenant = 6.
+        # `expected` is a MIN across environments because the gate must pass
+        # where it runs, and CI is the binding environment. PR #178 raised this
+        # to the local 18 and CI red-failed: `executed-count regression:
+        # expected >= 18, got 13`. A local `(executed-count drift: expected 13)`
+        # note is this host overshooting the CI floor and is correct, not stale.
+        # server-wave2 above uses the same convention: pinned 6, CI executes 6.
         Suite("server-wave3", "server tests/test_wave3.py", "pytest", SERVER,
               _py_pytest("tests/test_wave3.py"), 13,
               allowed_skip_reasons=(
@@ -267,7 +304,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_router.py"), 26,
               allowed_skip_reasons=(_PARKED_AGENT_ROUTER_REASON,)),
         Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
-              _py_pytest("tests/test_sessions_router.py"), 25),
+              _py_pytest("tests/test_sessions_router.py"), 45),
         Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
               _py_pytest("tests/test_context_packet.py"), 16),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
@@ -285,9 +322,9 @@ def build_suites() -> List[Suite]:
         # these toggle LEAF_AUTH_LIVE / LEAF_GUEST_* env and share the guest
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_uploads.py"), 33),
+              _py_pytest("tests/test_guest_uploads.py"), 57),
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
-              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 11),
+              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 18),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_purge.py"), 9),
         Suite("server-guest-session-auth", "server tests/test_guest_session_auth.py", "pytest",
@@ -312,9 +349,9 @@ def build_suites() -> List[Suite]:
         Suite("server-jobs-reaper-start-race", "server tests/test_jobs_reaper_start_race.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_reaper_start_race.py"), 2),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
-              SERVER, _py_pytest("tests/test_canonical_worker.py"), 23),
+              SERVER, _py_pytest("tests/test_canonical_worker.py"), 24),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
-              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 15),
+              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 17),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_inverter_placement_adapter.py"), 1,
               allowed_skip_reasons=(
@@ -333,9 +370,9 @@ def build_suites() -> List[Suite]:
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 19),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
-              SERVER, _py_pytest("tests/test_approval_consume.py"), 13),
+              SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
-              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 17),
+              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 18),
         # NOT db_gated on purpose: this file's authority-selector and legacy-contract
         # tests need no database, and its DB-only tests skip themselves via
         # @requires_database. Gating the whole suite would hide the un-gated half on
@@ -366,7 +403,7 @@ def build_suites() -> List[Suite]:
         # HTTP suites because the SUBJECT binding only exists with auth live, and
         # those suites run against the LEAF_AUTH_LIVE=0 header stub.
         Suite("server-checkout-capability", "server tests/test_checkout_capability.py",
-              "pytest", SERVER, _py_pytest("tests/test_checkout_capability.py"), 15),
+              "pytest", SERVER, _py_pytest("tests/test_checkout_capability.py"), 29),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
@@ -374,15 +411,15 @@ def build_suites() -> List[Suite]:
         Suite("server-session-store", "server tests/test_session_store.py", "pytest", SERVER,
               _py_pytest("tests/test_session_store.py"), 20),
         Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
-              SERVER, _py_pytest("tests/test_sessions_routes.py"), 33),
+              SERVER, _py_pytest("tests/test_sessions_routes.py"), 41),
         Suite("server-turn-runner", "server tests/test_turn_runner.py", "pytest", SERVER,
-              _py_pytest("tests/test_turn_runner.py"), 16),
+              _py_pytest("tests/test_turn_runner.py"), 21),
         # g1a canonical e2e self-skips without a reachable Postgres; gate it the
         # same way as the platform suite so the skip is visible, not silent.
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
               SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
         Suite("server-engine-registry-scripts", "server tests/test_engine_registry_scripts.py",
-              "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 4),
+              "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 5),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
         # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
         # were purely its module `harness` fixture failing `npm run build` in a
@@ -419,16 +456,16 @@ def build_suites() -> List[Suite]:
         # The no-da-imports static invariant + §8 ledger-line schema freeze
         # gates ride the same lane.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_boundary.py"), 45),
+              SERVER, _py_pytest("tests/test_broker_boundary.py"), 46),
         Suite("server-authored-execution-live-gate",
               "server tests/test_authored_execution_live_gate.py", "pytest",
-              SERVER, _py_pytest("tests/test_authored_execution_live_gate.py"), 10),
+              SERVER, _py_pytest("tests/test_authored_execution_live_gate.py"), 13),
         Suite("server-authored-tenant-isolation",
               "server tests/test_authored_tenant_isolation.py", "pytest",
               SERVER, _py_pytest("tests/test_authored_tenant_isolation.py"), 5),
         Suite("server-wave2-trust-boundary",
               "server tests/test_wave2_trust_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_wave2_trust_boundary.py"), 8),
+              SERVER, _py_pytest("tests/test_wave2_trust_boundary.py"), 13),
         Suite("server-no-da-imports", "server tests/test_no_da_imports_static.py", "pytest",
               SERVER, _py_pytest("tests/test_no_da_imports_static.py"), 8),
         Suite("server-broker-ledger-schema", "server tests/test_broker_ledger_schema_static.py",
@@ -494,6 +531,20 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_jobs_callbacks_postgres.py"), 1,
               allowed_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
+        # No allowed_skip_reasons ON PURPOSE. This suite proves the terminal write
+        # and its platform mirror share one transaction, using a fake connection
+        # rather than DATABASE_URL, so every test must execute on every runner. A
+        # skip here means the atomicity guarantee went unchecked.
+        Suite("server-jobs-terminal-mirror-atomic",
+              "server tests/test_jobs_terminal_mirror_atomic.py", "pytest", SERVER,
+              _py_pytest("tests/test_jobs_terminal_mirror_atomic.py"), 5),
+        # The SQLite half of the same guarantee. No allowed_skip_reasons for the same
+        # reason: the platform boundary is faked at _update_by_spine, never DATABASE_URL,
+        # so every test must execute on every runner. A skip here means an undelivered
+        # mirror could silently go back to being lost.
+        Suite("server-jobs-terminal-mirror-durable",
+              "server tests/test_jobs_terminal_mirror_durable.py", "pytest", SERVER,
+              _py_pytest("tests/test_jobs_terminal_mirror_durable.py"), 14),
         # Floor 13, re-measured after main added four offline tests. It was 9 when
         # this suite was first registered; leaving it there would have let all
         # four of main's new tests disappear without reddening the gate.
@@ -507,11 +558,14 @@ def build_suites() -> List[Suite]:
         # reports an explicit SKIP row until a DB is reachable, then executes.
         Suite("server-ops-metrics-pg", "server tests/test_ops_metrics_pg.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
+        Suite("server-postgres-authority-inventory",
+              "server tests/test_postgres_authority_inventory_contract.py", "pytest",
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 4),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
-              _py_pytest("test_multitenant.py"), 5),
+              _py_pytest("test_multitenant.py"), 10),
         # Both are fully offline (no APS, no network) but were never registered,
         # so 11 tests sat outside the gate entirely.
         Suite("da-client-credentials", "da test_client_credentials.py", "pytest", DA,
@@ -528,7 +582,7 @@ def build_suites() -> List[Suite]:
         Suite("server-customization-contract", "server customization contract freeze", "pytest",
               SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
         Suite("server-customization-runtime", "server customization runtime", "pytest",
-              SERVER, _py_pytest("tests/test_customization_runtime.py"), 9),
+              SERVER, _py_pytest("tests/test_customization_runtime.py"), 23),
         # The two OS-file-lock probes are skipif(fcntl is None): they EXECUTE on
         # the Linux CI runner and skip only on a Windows operator box. Named here
         # so a Windows run stays green without the fail-closed skip rule having to
@@ -548,49 +602,47 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # 199 COLLECTED with a DB configured, measured on this tree 2026-07-25
-        # via `cd server && DATABASE_URL=... python -m pytest ../platform/tests
-        # --collect-only -q`. Collecting needs no reachable server: the conftest
-        # ignore-hook keys off DATABASE_URL (or platform/.env.local) merely
-        # being present, so every module collects, not just the *_static.py
-        # proofs.
-        # The floor below is NOT that number. Per coverage_verdict, `expected`
-        # is an EXECUTED-test floor. Provenance of 145: commit 80e3762
-        # (2026-07-23) measured 145/145 executed, zero skips, on a throwaway
-        # Neon branch. 54 tests have been added since.
-        # 199 is the floor this suite should carry, and the 54-test gap is a
-        # real hole, not a safe margin. This suite allowlists NO skip reason, a
-        # non-allowlisted skip fails it outright, and every skip path under
-        # platform/tests is gated on the DB being unconfigured. That is exactly
-        # why the 2026-07-23 run came back 145/145 with zero skips: on a
-        # reachable DB nothing skips, so a green run executes everything
-        # collected. At a floor of 145 the suite can therefore lose up to 54
-        # tests and still report green -- 146..198 pass with only a drift note,
-        # and exactly 145 passes silently, with no note at all.
-        # Not raised here because that is an executable change and this host has
-        # no Postgres. Re-baseline it to the collected count on a live-DB run.
+        # Floor is 199, the EXECUTED count measured 2026-07-25 against a live
+        # PostgreSQL 17 (throwaway Neon branch): 199 passed, 0 skipped, 0
+        # failed. It replaces 145, which commit 80e3762 (2026-07-23) measured
+        # the same way. 54 tests were added after that and the floor never
+        # moved, so the suite could have lost 54 of them and still reported
+        # green: 146..198 passed with only a drift note, and exactly 145 passed
+        # silently, with no note at all.
+        # Collected and executed are both 199 because this suite allowlists NO
+        # skip reason, and every skip path under platform/tests is gated on the
+        # DB being unconfigured -- on a reachable DB nothing skips, so a green
+        # run executes everything collected.
+        # Re-baselining this needs a PRISTINE database, not just a reachable
+        # one. Several tests bind fixed external subjects (e.g.
+        # "auth0|1b-cross-org") that are unique per tenant, so a second run
+        # against the same branch fails on the first run's rows instead of
+        # measuring anything.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 145, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 199, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
-        # This list must name EVERY platform/tests/*_static.py. The two db_*
-        # ones were missing, and because the `platform` suite above is db_gated
-        # they ran NOWHERE on a clean checkout -- 26 tests outside the gate
-        # entirely, 24 of them dependency-free and 2 DB-gated (both skips live
-        # in test_db_primitives_static.py).
+        # This list must name EVERY platform/tests/*_static.py. The db_primitives
+        # and db_readiness files were missing, and because the `platform` suite
+        # above is db_gated they ran NOWHERE on a clean checkout -- 26 tests
+        # outside the gate entirely, 24 of them dependency-free and 2 DB-gated
+        # (both skips live in test_db_primitives_static.py). The schema proof is
+        # also explicit here so this PR cannot ship its dependency-free
+        # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
-        # invariant to DB presence: 61 collected either way, measured on this
+        # invariant to DB presence: 71 collected either way, measured on this
         # tree 2026-07-25. The floor below is the EXECUTED count on a host with
-        # no DATABASE_URL -- 61 collected minus the 2 DB-gated skips named in
-        # allowed_skip_reasons = 59.
+        # no DATABASE_URL -- 71 collected minus the 2 DB-gated skips named in
+        # allowed_skip_reasons = 69.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
                  f"{repo_name}/platform/tests/test_replay_static.py",
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
-                 f"{repo_name}/platform/tests/test_db_readiness_static.py"], 59,
+                 f"{repo_name}/platform/tests/test_db_readiness_static.py",
+                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 69,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -608,7 +660,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 15),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 22),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
@@ -1027,9 +1079,44 @@ def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int) -> Result:
 
 
 # --------------------------------------------------------------------------- #
+# --only selection
+# --------------------------------------------------------------------------- #
+NO_FILTER = "all suites (no --only filter)"
+
+
+def select_suites(suites: List[Suite],
+                  patterns: List[str]) -> tuple[List[Suite], List[str]]:
+    """Union filter for `--only`: a suite is selected when its id contains ANY
+    of the given substrings, in the runner's declared suite order.
+
+    Returns (selected, dead_patterns). A pattern matching no suite is reported
+    rather than absorbed. Both halves exist for the same reason: on 2026-07-25
+    two sessions typed `--only a --only b`, argparse kept only `b`, and the run
+    printed a perfectly truthful `1 PASS 0 FAIL 0 SKIP` for a set nobody asked
+    for. Unioning fixes the flag; refusing to run on a dead substring stops a
+    typo from re-opening the same gap one pattern at a time.
+    """
+    selected = [s for s in suites if any(p in s.id for p in patterns)]
+    dead = [p for p in patterns if not any(p in s.id for s in suites)]
+    return selected, dead
+
+
+def describe_selection(patterns: List[str]) -> str:
+    """The `--only` selection, rendered so the scoreboard can be read straight
+    back against the command line that produced it."""
+    if not patterns:
+        return NO_FILTER
+    flags = " ".join(f"--only {p}" for p in patterns)
+    if len(patterns) == 1:
+        return flags
+    return f"{flags}  (union of {len(patterns)} substrings)"
+
+
+# --------------------------------------------------------------------------- #
 # scoreboard
 # --------------------------------------------------------------------------- #
-def print_scoreboard(results: List[Result], log_dir: Path, wall: float) -> None:
+def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
+                     selection: str = NO_FILTER) -> None:
     rows = []
     for r in results:
         exp = "-" if r.suite.expected is None else str(r.suite.expected)
@@ -1071,6 +1158,10 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float) -> None:
     print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP   "
           f"| test cases passed: {total_tests}  skipped: {total_skipped}   "
           f"| wall: {wall:.1f}s")
+    # The counts above are only meaningful next to WHICH suites they counted.
+    # Echo the selection so a scoreboard can be checked against the command that
+    # produced it instead of being trusted to answer the question that was asked.
+    print(f"  filter: {selection}")
     print(f"  logs:   {log_dir}")
 
     # A suite that only went green on a retry is NOT the same as a green suite,
@@ -1094,8 +1185,11 @@ def main() -> int:
                     help="stop at the first failing gate (default: run all)")
     ap.add_argument("--continue", dest="cont", action="store_true",
                     help="run every gate even if one fails (this is the default)")
-    ap.add_argument("--only", default=None,
-                    help="only run suites whose id contains this substring")
+    ap.add_argument("--only", action="append", default=None, metavar="SUBSTR",
+                    help="only run suites whose id contains SUBSTR. REPEATABLE: each "
+                         "occurrence adds to a union, so `--only a --only b` runs every "
+                         "suite matching a OR b. Exits 2 if any SUBSTR matches no suite, "
+                         "so a typo can never silently shrink the run.")
     ap.add_argument("--retry", type=int, default=1,
                     help="re-run a FAILED suite up to N more times before calling it "
                          "red (default 1). These suites boot real servers and can flake "
@@ -1110,14 +1204,22 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     suites = build_suites()
-    if args.only:
-        suites = [s for s in suites if args.only in s.id]
-        if not suites:
-            print(f"no suites match --only {args.only!r}")
+    total = len(suites)
+    only: List[str] = args.only or []
+    selection = describe_selection(only)
+    if only:
+        suites, dead = select_suites(suites, only)
+        if dead:
+            for pattern in dead:
+                print(f"no suites match --only {pattern!r}")
+            print(f"nothing ran: every --only substring must match at least one "
+                  f"suite. Selection was: {selection}")
             return 2
+        selection += f"  -> {len(suites)} of {total} suites"
 
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "
           f"separate processes, logs -> {log_dir}")
+    print(f"  selection: {selection}")
 
     # Preserve the operator's authored_tools.json: the nl-router gate resets it to
     # clean (gitignored runtime pollution otherwise flakes NL routing), but we
@@ -1168,7 +1270,7 @@ def main() -> int:
             AUTHORED_TOOLS.unlink(missing_ok=True)
 
     wall = time.perf_counter() - wall0
-    print_scoreboard(results, log_dir, wall)
+    print_scoreboard(results, log_dir, wall, selection)
 
     # EXIT 0 iff every non-skipped gate passed.
     any_fail = any(r.status == "FAIL" for r in results)

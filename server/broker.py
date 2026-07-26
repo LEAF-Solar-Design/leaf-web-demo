@@ -697,6 +697,9 @@ def validate_runtime_safety() -> None:
         raise RuntimeError("production broker requires LEAF_BLOB_STORE=filesystem")
     if not os.environ.get("DATABASE_URL", "").strip():
         raise RuntimeError("production broker requires DATABASE_URL")
+    if not os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip():
+        raise RuntimeError(
+            "production broker requires LEAF_DRAWING_MUTATIONS_FENCE_FILE")
     if _authored_execution_enabled() and not _sandbox_configured():
         raise RuntimeError(
             "production authored execution requires LEAF_TOOL_SANDBOX_PROVIDER=e2b"
@@ -1843,6 +1846,27 @@ async def da_callback(request: Request,
 
 @app.post("/broker/extract", dependencies=[Depends(require_broker_auth)])
 def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
+    # ONLY the upload lane commits drawing state here. A library/session
+    # extraction (`upload=False`, what routers/session.py sends) is a READ: it
+    # must stay available during a cutover drain, and must not hold the shared
+    # fence across an APS call that can run for minutes -- doing so would also
+    # delay the exclusive lock the cutover control needs to flip the fence.
+    if not req.upload:
+        return _broker_extract(req)
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return JSONResponse(
+                status_code=503,
+                content=err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "drawing mutations are temporarily disabled for a storage cutover",
+                    retryable=True,
+                ),
+            )
+        return _broker_extract(req)
+
+
+def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     """Extract intake through the credential-holding process only."""
     if tenant_disabled(req.tenant_id):
         return JSONResponse(
@@ -1851,6 +1875,16 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
                 ErrorCode.TENANT_DISABLED,
                 f"tenant {req.tenant_id!r} is disabled by the kill-switch",
                 retryable=False,
+            ),
+        )
+    # Upload-lane only: a read extraction is not a drawing commit.
+    if req.upload and not write_loop.fence_open():
+        return JSONResponse(
+            status_code=503,
+            content=err_envelope(
+                ErrorCode.APS_UNAVAILABLE,
+                "drawing mutations are temporarily disabled for a storage cutover",
+                retryable=True,
             ),
         )
     try:
@@ -1874,9 +1908,19 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
         )
     if _broker_store_mode() != "postgres":
         try:
+            intake = da.extract(str(local))
+            if req.upload and not write_loop.fence_open():
+                return JSONResponse(
+                    status_code=503,
+                    content=err_envelope(
+                        ErrorCode.APS_UNAVAILABLE,
+                        "drawing mutations were drained before extraction commit",
+                        retryable=True,
+                    ),
+                )
             return JSONResponse(
                 status_code=200,
-                content=with_envelope_fields({"intake": da.extract(str(local))}),
+                content=with_envelope_fields({"intake": intake}),
             )
         except EgressBlocked as exc:
             return JSONResponse(
@@ -2009,11 +2053,20 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
                 )
                 terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE]
             else:
-                terminal_env = with_envelope_fields(
-                    {"intake": da.extract(str(local))})
-                terminal_status = 200
+                intake = da.extract(str(local))
                 entry["usd_est"] = estimate
-                entry["status"] = "ok"
+                if req.upload and not write_loop.fence_open():
+                    terminal_env = err_envelope(
+                        ErrorCode.APS_UNAVAILABLE,
+                        "drawing mutations were drained before extraction commit",
+                        retryable=True,
+                    )
+                    terminal_status = 503
+                    entry["status"] = ErrorCode.APS_UNAVAILABLE
+                else:
+                    terminal_env = with_envelope_fields({"intake": intake})
+                    terminal_status = 200
+                    entry["status"] = "ok"
         else:
             raise BrokerStateError(
                 f"unknown broker extraction admission result {decision!r}")
@@ -2056,6 +2109,23 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
 
 @app.post("/broker/run", dependencies=[Depends(require_broker_auth)])
 def broker_run(req: BrokerRunRequest) -> JSONResponse:
+    if not write_loop.is_write_tool(req.tool or {}):
+        return _broker_run(req)
+    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return JSONResponse(
+                status_code=503,
+                content=err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "drawing mutations are temporarily disabled for a storage cutover",
+                    retryable=True,
+                    tool=(req.tool or {}).get("name"),
+                ),
+            )
+        return _broker_run(req)
+
+
+def _broker_run(req: BrokerRunRequest) -> JSONResponse:
     """Run one tool for one tenant. Appends exactly ONE attribution line."""
     t0 = time.perf_counter()
     tool = req.tool or {}

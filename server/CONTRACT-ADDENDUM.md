@@ -977,7 +977,7 @@ One JSON object per SSE `data:` line; the SSE event name equals `type`. Envelope
 | `tool_call` | `{tool, args_summary}` | `args_summary` is a short human string — never full params. |
 | `tool_result` | `{tool, ok, summary}` | |
 | `job_linked` | `{job_id, tool}` | Dispatch handoff; job progress rides the existing per-job SSE (`server/routers/jobs.py:110`), not this stream. |
-| `proposed_run` | `{confirmation_id, tool, params, capability, rationale}` | `params` is the full dict — the UI renders server truth, never a model paraphrase. |
+| `proposed_run` | `{confirmation_id, tool, params, dwg, capability, rationale}` | `params` and `dwg` are the full server-stored target. The UI renders server truth, never a model paraphrase. |
 | `confirmation_required` | `{confirmation_id, kind, payload}` | |
 | `confirmation_resolved` | `{confirmation_id, approved, by}` | First approval wins; other tabs observe this event. |
 | `turn_usage` | `{turns, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_tokens, total_cost_usd?, models?}` | `total_cost_usd` is an estimate (no balance API exists — `research/agentsdk-usage-visibility.md`). |
@@ -1249,15 +1249,27 @@ output metadata, pending-job leases and heartbeats, and concurrency accounting.
 
 ## §23 Authored-body persistence is per-tenant (supersedes §15.C)
 
-Provenance: recorded 2026-07-25 on operator instruction to land this section. NO
-operator ruling was made on §15.C, and this section previously claimed one. PR
-#131 (merged 2026-07-25) shipped the per-tenant layout without the operator
-ruling the §15/§16/§17 freeze requires, and changed no documentation; PR #144
-then left the resulting documentation gap open rather than closing it. The freeze
-requires a new section rather than an in-place edit, which is the shape used
-here: §15.C keeps its now-false sentence byte-for-byte and this section carries
-the correct contract. The ruling the freeze note calls for is recorded here as
-OWED, not as given.
+Provenance: NO operator ruling was made on §15.C. Asked directly on 2026-07-25
+whether they had ruled, the operator stated that no ruling was made. That answer
+is the record, and it retracts the claim PR #177 put here -- that the operator had
+"confirmed the ruling as their own" -- which was never true. It restores what PR
+#174 said: the ruling the freeze note calls for is OWED, not given.
+
+What did happen, and is auditable, is narrower: the operator instructed a session
+to land this section on 2026-07-25. Landing it ratifies the SHAPE the section uses,
+which is what the freeze note requires. That is not a ruling on §15.C.
+
+Do not restore the ruling claim without an operator statement recorded at the time
+it is made. Two prior attempts asserted one from inference -- the original bare
+"Ruling: operator, 2026-07-25", then PR #177 -- and both were wrong. A commit
+message reporting what the operator said is not the operator saying it.
+
+The queries that prompted this were raised on PR #156 and carried forward on PR
+#168. PR #131 (merged 2026-07-25) shipped the per-tenant layout and changed no
+documentation; PR #144 then left the resulting documentation gap open rather than
+closing it. The freeze requires a new section rather than an in-place edit, which is
+the shape used here: §15.C keeps its now-false sentence byte-for-byte and this
+section carries the correct contract.
 
 The template author path no longer persists to a flat `server/authored/<name>.py`.
 A template-authored body is written to

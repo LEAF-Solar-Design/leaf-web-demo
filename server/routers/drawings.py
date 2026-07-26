@@ -69,7 +69,7 @@ def _backend(tenant_id: str = ""):
 
 @router.get("/api/drawings/{drawing_id}/intake")
 def get_intake(drawing_id: str, version: str = "head",
-               tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+               tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     ver: Any = version
     if isinstance(version, str) and version not in ("head", "latest") and version.lstrip("-").isdigit():
         ver = int(version)
@@ -83,7 +83,7 @@ def get_intake(drawing_id: str, version: str = "head",
 
 @router.get("/api/drawings/{drawing_id}/summary")
 def get_summary(drawing_id: str, version: str = "head",
-                tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+                tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     """Return a bounded drawing digest for assistant context.
 
     The intake endpoint remains the lossless geometry surface. This route keeps
@@ -151,7 +151,7 @@ def get_summary(drawing_id: str, version: str = "head",
 
 
 @router.post("/api/drawings/{drawing_id}/undo")
-def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant),
+def undo(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant),
          x_checkout_capability: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """Step head back one version.
 
@@ -193,7 +193,7 @@ def undo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant),
 
 
 @router.post("/api/drawings/{drawing_id}/redo")
-def redo(drawing_id: str, tenant_id: str = Depends(deps.require_tenant),
+def redo(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant),
          x_checkout_capability: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """Step head forward one version. Same single-writer gate as `undo` — the two
     are one surface, and a check on only one of them is no check at all."""
@@ -301,7 +301,7 @@ def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.get("/api/drawings/{drawing_id}/versions")
-def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_tenant)) -> Dict[str, Any]:
+def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     """Full version-history chain straight from the store manifest — the read the
     UI's version-chain popover needs (undo/redo only stepped head one hop).
 
@@ -316,8 +316,15 @@ def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_tenant))
     backend = _backend(str(tenant_id))
     try:
         write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
-        m = store.load_manifest(backend, str(tenant_id), drawing_id)
     except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
+                              retryable=False, status_code=404)
+    try:
+        m = store.load_manifest(backend, str(tenant_id), drawing_id)
+    except KeyError as exc:
+        # Missing is a caller-visible 404. A malformed manifest raises a
+        # ValueError subclass and must remain a server fault instead of being
+        # mislabeled as an unavailable drawing.
         return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                               retryable=False, status_code=404)
     view = {
@@ -375,7 +382,7 @@ class CheckoutRequest(BaseModel):
 
 @router.post("/api/drawings/{drawing_id}/checkout")
 def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = None,
-                           tenant_id: str = Depends(deps.require_tenant),
+                           tenant_id: str = Depends(deps.require_active_tenant),
                            x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
     """Take the single-writer lock, and mint the capability that proves it.
 
@@ -414,52 +421,64 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     holder = (req.holder if req else None) or str(tenant_id)
     ttl_s = (req.ttl_s if req and req.ttl_s is not None else None) or DEFAULT_CHECKOUT_TTL_S
 
-    # A refresh needs the CURRENT generation, and only a valid capability yields
-    # one. A caller without it gets expected_fence=None, which `strict_owner`
-    # refuses against any live lease — so an unprovable refresh comes back as the
-    # ordinary 409 conflict below rather than silently taking the lock over.
-    prior = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
-    expected_fence: Optional[int] = None
-    if store.checkout_active(prior):
+    # The shared cutover fence is held across the whole acquire. `_mutation_gate`
+    # above is the deployment default; this is the LIVE drain, so a cutover that
+    # starts after that check still cannot be crossed by this request.
+    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return error_response(
+                ErrorCode.INTERNAL,
+                "drawing mutations are temporarily disabled for a storage cutover",
+                retryable=True,
+                status_code=503,
+            )
+
+        # A refresh needs the CURRENT generation, and only a valid capability yields
+        # one. A caller without it gets expected_fence=None, which `strict_owner`
+        # refuses against any live lease — so an unprovable refresh comes back as the
+        # ordinary 409 conflict below rather than silently taking the lock over.
+        prior = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
+        expected_fence: Optional[int] = None
+        if store.checkout_active(prior):
+            try:
+                _, expected_fence = checkout_capability.verify(
+                    x_checkout_capability, tenant_id, drawing_id, prior)
+            except checkout_capability.CapabilityUnavailable as exc:
+                return _denied(exc)
+            except checkout_capability.CapabilityRejected:
+                expected_fence = None
+
+        # Refuse a deployment that could not mint BEFORE taking the lock. Doing it
+        # after would leave an active lease with no capability ever issued, which
+        # nobody can then release or write — a server misconfiguration turning into
+        # a locked drawing for the whole TTL.
         try:
-            _, expected_fence = checkout_capability.verify(
-                x_checkout_capability, tenant_id, drawing_id, prior)
+            checkout_capability.ensure_mintable(tenant_id, drawing_id)
         except checkout_capability.CapabilityUnavailable as exc:
             return _denied(exc)
-        except checkout_capability.CapabilityRejected:
-            expected_fence = None
 
-    # Refuse a deployment that could not mint BEFORE taking the lock. Doing it
-    # after would leave an active lease with no capability ever issued, which
-    # nobody can then release or write — a server misconfiguration turning into
-    # a locked drawing for the whole TTL.
-    try:
-        checkout_capability.ensure_mintable(tenant_id, drawing_id)
-    except checkout_capability.CapabilityUnavailable as exc:
-        return _denied(exc)
-
-    try:
-        # The generation comes back from the acquire ITSELF. Re-reading the
-        # manifest to find one would ask what is current now, not what this call
-        # wrote: with a short ttl_s this lease can already have lapsed and
-        # another session acquired, and minting against that generation would
-        # hand this caller a valid capability for someone else's lease.
-        granted_fence = store.acquire_checkout_fence(
-            backend, str(tenant_id), drawing_id, holder, ttl_s,
-            expected_fence=expected_fence, strict_owner=True)
-    except store.CheckoutParamError as exc:
-        # ONLY the input faults: a reserved holder (store.ANONYMOUS_HOLDER, the
-        # id a run with no `holder` presents) and a non-positive ttl. Answer 400
-        # with the reason; without this the error escaped as a 500, which reads
-        # as a server fault and tells the caller nothing about what to send.
-        #
-        # Deliberately NOT a bare `except ValueError`: acquire_checkout also
-        # decodes the stored manifest, and a corrupt one raises JSONDecodeError,
-        # which IS a ValueError. Catching broadly would blame the caller for
-        # damaged storage and hide a real fault behind a 400 nobody can act on.
-        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                              status_code=400)
-    acquired = granted_fence is not None
+        try:
+            # The generation comes back from the acquire ITSELF. Re-reading the
+            # manifest to find one would ask what is current now, not what this call
+            # wrote: with a short ttl_s this lease can already have lapsed and
+            # another session acquired, and minting against that generation would
+            # hand this caller a valid capability for someone else's lease.
+            granted_fence = store.acquire_checkout_fence(
+                backend, str(tenant_id), drawing_id, holder, ttl_s,
+                expected_fence=expected_fence, strict_owner=True)
+        except store.CheckoutParamError as exc:
+            # ONLY the input faults: a reserved holder (store.ANONYMOUS_HOLDER, the
+            # id a run with no `holder` presents) and a non-positive ttl. Answer 400
+            # with the reason; without this the error escaped as a 500, which reads
+            # as a server fault and tells the caller nothing about what to send.
+            #
+            # Deliberately NOT a bare `except ValueError`: acquire_checkout also
+            # decodes the stored manifest, and a corrupt one raises JSONDecodeError,
+            # which IS a ValueError. Catching broadly would blame the caller for
+            # damaged storage and hide a real fault behind a 400 nobody can act on.
+            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                  status_code=400)
+        acquired = granted_fence is not None
     m = store.load_manifest(backend, str(tenant_id), drawing_id)
     co = m.get("checkout")
 
@@ -501,7 +520,7 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
 
 @router.delete("/api/drawings/{drawing_id}/checkout")
 def release_checkout_route(drawing_id: str,
-                           tenant_id: str = Depends(deps.require_tenant),
+                           tenant_id: str = Depends(deps.require_active_tenant),
                            x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
     """Release the single-writer lock. Only a caller that can PROVE it holds the
     active lease may release it — `X-Checkout-Capability`, from the acquire
@@ -521,24 +540,40 @@ def release_checkout_route(drawing_id: str,
     backend = _backend(str(tenant_id))
     try:
         write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+    except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
+                              retryable=False, status_code=404)
+    try:
         holder, fence = _lock_authorization(drawing_id, tenant_id, backend,
                                             x_checkout_capability)
     except (checkout_capability.CapabilityRejected,
             checkout_capability.CapabilityUnavailable) as exc:
         return _denied(exc)
-    except (KeyError, ValueError) as exc:
+    except KeyError as exc:
+        # Do not catch ValueError here. JSONDecodeError inherits from it, and
+        # damaged storage is a server fault rather than a missing drawing.
         return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                               retryable=False, status_code=404)
 
-    if fence is None:
-        # Nothing ACTIVE to release: idempotent. An expired lock is cleared (the
-        # store grants those to anyone), an absent one reports released=False.
-        released = store.release_checkout(backend, str(tenant_id), drawing_id)
-    else:
-        # Release by PROVEN generation, not by holder label, so the clear cannot
-        # land on a different lease that started since the check above.
-        released = store.release_checkout(backend, str(tenant_id), drawing_id,
-                                          holder=holder, expected_fence=fence)
+    # Held across the release for the same reason as the acquire: a drain that
+    # starts after `_mutation_gate` must not be crossed by an in-flight clear.
+    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return error_response(
+                ErrorCode.INTERNAL,
+                "drawing mutations are temporarily disabled for a storage cutover",
+                retryable=True,
+                status_code=503,
+            )
+        if fence is None:
+            # Nothing ACTIVE to release: idempotent. An expired lock is cleared (the
+            # store grants those to anyone), an absent one reports released=False.
+            released = store.release_checkout(backend, str(tenant_id), drawing_id)
+        else:
+            # Release by PROVEN generation, not by holder label, so the clear cannot
+            # land on a different lease that started since the check above.
+            released = store.release_checkout(backend, str(tenant_id), drawing_id,
+                                              holder=holder, expected_fence=fence)
 
     m2 = store.load_manifest(backend, str(tenant_id), drawing_id)
     view = deps.tenant_echo({

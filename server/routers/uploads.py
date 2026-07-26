@@ -102,30 +102,7 @@ def _resolve_upload_read_identity(tenant: Any) -> Any:
     Guest sessions have no platform subject and auth-off callers are plain
     strings; both keep their existing identity unchanged.
     """
-    if not deps.auth_live() or not isinstance(tenant, deps.TenantContext):
-        return tenant
-    if tenant.tier == "guest" and guest_uploads.is_guest_tenant(str(tenant)):
-        return tenant
-    if tenant.subject is None and tenant.org_id is None:
-        # Verified broker/harness back-edge identities are server-owned tenant
-        # contexts without an Auth0 subject. Keep that existing trust boundary
-        # intact instead of trying to resolve it through the account binding
-        # table. A JWT-backed account without a subject still fails closed
-        # below because its claimed org is present.
-        return tenant
-
-    import tenancy  # noqa: PLC0415 - lazy, mirrors upload creation
-
-    platform_tenant_id, platform_tier = (
-        deps.resolve_active_platform_tenant_authority(tenant.subject))
-    ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
-    return deps.TenantContext(
-        platform_tenant_id,
-        org_id=platform_tenant_id,
-        tier=platform_tier,
-        workspace=ws.workspace_dir if ws is not None else None,
-        subject=tenant.subject,
-    )
+    return deps.resolve_active_tenant_context(tenant)
 
 
 @router.post("/api/drawings/upload")
@@ -160,6 +137,33 @@ def upload_drawing(
                 retryable=False,
                 status_code=503,
             )
+    # The admission checks above are deployment defaults. The shared fence is
+    # the LIVE drain and is held across the whole ingest, so a cutover starting
+    # mid-request cannot be crossed by an upload already past those checks.
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return error_response(
+                ErrorCode.INTERNAL,
+                "drawing mutations are temporarily disabled for a storage cutover",
+                retryable=True,
+                status_code=503,
+            )
+        return _upload_drawing(
+            request,
+            file,
+            x_tenant_id,
+            authorization,
+            x_guest_session,
+        )
+
+
+def _upload_drawing(
+    request: Request,
+    file: UploadFile,
+    x_tenant_id: Optional[str],
+    authorization: Optional[str],
+    x_guest_session: Optional[str],
+) -> Any:
 
     tenant, tenant_kind, _minted = _resolve_upload_identity(
         x_tenant_id, authorization, x_guest_session)
