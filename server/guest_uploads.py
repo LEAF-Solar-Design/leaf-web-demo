@@ -919,7 +919,7 @@ def guest_drawing_dir(tenant_id: str, drawing_id: str) -> Path:
 def wipe_failed_attempt_residue(
     tenant_id: str, drawing_id: str, attempt: Optional[str] = None,
 ) -> bool:
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             return False
         return _wipe_failed_attempt_residue(tenant_id, drawing_id, attempt)
@@ -1041,7 +1041,7 @@ def _wipe_failed_attempt_files(tenant_id: str, drawing_id: str) -> bool:
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
                  error_code: str, message: str, retryable: bool,
                  *, extraction_owner: str = "", extraction_fence: int = 0) -> bool:
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             return False
         return _mark_failed_committed(
@@ -1147,7 +1147,7 @@ def _verify_staged_source(
 
 
 def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             return
         _run_extraction(tenant_id, drawing_id, ext)
@@ -1162,7 +1162,7 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
 
     backend = write_loop.upload_backend_for_tenant(tenant_id)
     extraction_owner, extraction_fence = "", 0
-    if not write_loop.drawing_mutations_enabled():
+    if not write_loop.fence_open():
         return
     if upload_store_mode() == "postgres":
         claim = _claim_extraction(tenant_id, drawing_id)
@@ -1250,7 +1250,7 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         contextlib.nullcontext() if upload_store_mode() == "postgres"
         else drawing_lock(tenant_id, drawing_id)
     )
-    with authority_lock, write_loop.drawing_mutation_commit_guard() as commit_enabled:
+    with authority_lock, write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             # The cutover fence protects every canonical commit, including
             # marker transitions.  Leave the attempt unchanged so the
@@ -1682,7 +1682,7 @@ def _purge_expired_postgres(now: datetime) -> Dict[str, Any]:
 
 
 def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             return {"count": 0, "freed_bytes": 0, "purged": []}
         return _purge_expired(now)

@@ -1846,7 +1846,7 @@ async def da_callback(request: Request,
 
 @app.post("/broker/extract", dependencies=[Depends(require_broker_auth)])
 def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             return JSONResponse(
                 status_code=503,
@@ -1870,7 +1870,7 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
                 retryable=False,
             ),
         )
-    if not write_loop.drawing_mutations_enabled():
+    if not write_loop.fence_open():
         return JSONResponse(
             status_code=503,
             content=err_envelope(
@@ -1901,7 +1901,7 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     if _broker_store_mode() != "postgres":
         try:
             intake = da.extract(str(local))
-            if not write_loop.drawing_mutations_enabled():
+            if not write_loop.fence_open():
                 return JSONResponse(
                     status_code=503,
                     content=err_envelope(
@@ -2047,7 +2047,7 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
             else:
                 intake = da.extract(str(local))
                 entry["usd_est"] = estimate
-                if not write_loop.drawing_mutations_enabled():
+                if not write_loop.fence_open():
                     terminal_env = err_envelope(
                         ErrorCode.APS_UNAVAILABLE,
                         "drawing mutations were drained before extraction commit",

@@ -104,6 +104,33 @@ def test_env_drain_beats_an_open_fence(monkeypatch, tmp_path):
     assert write_loop.drawing_mutations_enabled() is False
 
 
+def test_upload_guard_ignores_the_authored_lane_drain(monkeypatch):
+    """The two lanes share the fence FILE but NOT their env flags.
+
+    With no fence configured neither guard needs fcntl, so this runs anywhere.
+    An authored drain must close the authored guard and leave the upload guard
+    open; the upload lane's own gate is upload_import_mutations_enabled.
+    """
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+
+    with write_loop.drawing_mutation_commit_guard() as authored:
+        assert authored is False
+    with write_loop.upload_mutation_commit_guard() as upload:
+        assert upload is True
+
+
+def test_both_guards_close_on_a_drained_fence(monkeypatch, tmp_path):
+    """The fence FILE is shared: a real storage cutover drains BOTH lanes."""
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text("0\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    assert write_loop.fence_open() is False
+    assert write_loop.drawing_mutations_enabled() is False
+
+
 def test_shared_fence_blocks_mock_write_at_commit(monkeypatch, tmp_path):
     import store
 
@@ -177,7 +204,7 @@ def test_shared_fence_blocks_extraction_commit_without_marker_write(
         write_loop, "upload_backend_for_tenant", lambda _tenant: backend
     )
     monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "legacy")
-    monkeypatch.setattr(write_loop, "drawing_mutations_enabled", lambda: True)
+    monkeypatch.setattr(write_loop, "fence_open", lambda: True)
     monkeypatch.setattr(
         dxf_intake,
         "parse_dxf_file",
@@ -188,8 +215,10 @@ def test_shared_fence_blocks_extraction_commit_without_marker_write(
     def drained_commit():
         yield False
 
+    # Extraction is the UPLOAD lane, so it holds the upload guard. Patching the
+    # authored guard here would leave extraction running and the test vacuous.
     monkeypatch.setattr(
-        write_loop, "drawing_mutation_commit_guard", drained_commit
+        write_loop, "upload_mutation_commit_guard", drained_commit
     )
 
     guest_uploads.run_extraction(tenant, drawing, ".dxf")

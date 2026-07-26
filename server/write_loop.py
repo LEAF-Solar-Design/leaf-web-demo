@@ -127,16 +127,14 @@ def _cleanup_scratch_objects(da: Any, scratch_keys) -> None:
             )
 
 
-def drawing_mutations_enabled() -> bool:
-    """Global cutover drain for every drawing-authority mutation surface.
+def fence_open() -> bool:
+    """Live cutover state from the shared EFS fence FILE alone.
 
-    The environment flag is the deployment default.  A configured shared EFS
-    fence is the live authority, so already-running app and broker tasks observe
-    a drain without waiting for an ECS rollout.  Missing, unreadable, or
-    malformed fence state fails closed.
+    The fence is the one authority EVERY drawing-authority lane shares, so a
+    storage cutover drains already-running app and broker tasks without waiting
+    for an ECS rollout. No fence configured means no cutover is in progress.
+    Missing, unreadable, or malformed fence state fails CLOSED.
     """
-    if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
-        return False
     fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
     if not fence:
         return True
@@ -146,17 +144,32 @@ def drawing_mutations_enabled() -> bool:
         return False
 
 
+def drawing_mutations_enabled() -> bool:
+    """Authored / checkout / broker-run lane: the env default AND the fence.
+
+    Scoped to THAT lane on purpose. The upload/import lane has its own env gate
+    (``upload_import_mutations_enabled``) and must not be closed by this one --
+    see ``upload_mutation_commit_guard``.
+    """
+    if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
+        return False
+    return fence_open()
+
+
 @contextmanager
-def drawing_mutation_commit_guard():
+def _fence_held(decide):
     """Hold the shared cutover fence across one durable drawing commit.
 
     Linux tasks take a shared flock.  The protected cutover control takes the
     matching exclusive lock before changing the fence, so it waits for every
     admitted commit and prevents a late old-task write from crossing the drain.
+
+    ``decide`` is the lane's own open/closed rule, evaluated INSIDE the lock so
+    the answer cannot go stale between the check and the commit.
     """
     fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
     if not fence:
-        yield drawing_mutations_enabled()
+        yield decide()
         return
     lock_path = f"{fence}.lock"
     Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
@@ -168,9 +181,31 @@ def drawing_mutation_commit_guard():
             return
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
         try:
-            yield drawing_mutations_enabled()
+            yield decide()
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def drawing_mutation_commit_guard():
+    """Commit guard for the authored / checkout / broker-run lane."""
+    with _fence_held(drawing_mutations_enabled) as commit_enabled:
+        yield commit_enabled
+
+
+@contextmanager
+def upload_mutation_commit_guard():
+    """Commit guard for the upload / import lane: ONLY the shared fence.
+
+    That lane's env gate is ``upload_import_mutations_enabled``, checked by the
+    caller. Folding ``LEAF_DRAWING_MUTATIONS_ENABLED`` in here would let an
+    authored-lane drain silently close uploads too -- exactly the coupling
+    ``test_upload_gate_is_independent_from_authored_mutation_gate`` forbids.
+    The fence FILE still applies, because a storage cutover really does drain
+    every lane.
+    """
+    with _fence_held(fence_open) as commit_enabled:
+        yield commit_enabled
 
 
 def upload_import_mutations_enabled() -> bool:

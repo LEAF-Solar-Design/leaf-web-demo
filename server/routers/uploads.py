@@ -140,7 +140,7 @@ def upload_drawing(
     # The admission checks above are deployment defaults. The shared fence is
     # the LIVE drain and is held across the whole ingest, so a cutover starting
     # mid-request cannot be crossed by an upload already past those checks.
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             return error_response(
                 ErrorCode.INTERNAL,
