@@ -116,13 +116,56 @@ def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_p
 
     monkeypatch.setattr(
         broker.write_loop, "upload_mutation_commit_guard", admitted_commit)
+    monkeypatch.setattr(
+        broker, "_resolve_upload_dwg", lambda _dwg, _tenant: drawing)
+    monkeypatch.setattr(broker, "_get_da", lambda: _Da())
+
+    response = broker.broker_extract(
+        broker.BrokerExtractRequest(
+            tenant_id="tenant-a", dwg="drawing", upload=True))
+
+    assert response.status_code == 503
+    assert calls == [str(drawing)]
+
+
+def test_broker_extract_read_lane_ignores_the_mutation_fence(monkeypatch, tmp_path):
+    """`upload=False` is a READ (routers/session.py's live intake path).
+
+    It must not 503 during a cutover drain, and must not enter the commit guard
+    at all -- holding the shared fence across an APS call that can run for
+    minutes would delay the exclusive lock the cutover control needs.
+    """
+    from contextlib import contextmanager
+
+    drawing = tmp_path / "drawing.dwg"
+    drawing.write_bytes(b"DWG")
+    calls = []
+
+    class _Da:
+        def extract(self, path):
+            calls.append(path)
+            return {"layers": [], "polylines": []}
+
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    # Fence fully drained: a read must still be served.
+    monkeypatch.setattr(broker.write_loop, "fence_open", lambda: False)
+
+    @contextmanager
+    def must_not_be_entered():
+        raise AssertionError(
+            "read-lane extraction entered the upload commit guard")
+        yield  # pragma: no cover - unreachable, keeps this a generator
+
+    monkeypatch.setattr(
+        broker.write_loop, "upload_mutation_commit_guard", must_not_be_entered)
     monkeypatch.setattr(broker, "_resolve_live_dwg", lambda _dwg: drawing)
     monkeypatch.setattr(broker, "_get_da", lambda: _Da())
 
     response = broker.broker_extract(
         broker.BrokerExtractRequest(tenant_id="tenant-a", dwg="drawing"))
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     assert calls == [str(drawing)]
 
 
