@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   authoredExecutionEnabled,
+  authorRunnerMode,
   authorSandboxProvider,
   validateProductionHarnessEnv,
 } from "../src/runtimeSafety.js";
@@ -71,72 +72,35 @@ describe("production harness runtime safety", () => {
     })).toBe("e2b");
   });
 
-  it("requires the E2B author provider before production authored execution", () => {
-    expect(() => validateProductionHarnessEnv({
+  it("always selects AgentSdkRunner outside the explicit fake mode", () => {
+    expect(authorRunnerMode({})).toBe("agent-sdk");
+    expect(authorRunnerMode({ LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b" })).toBe("agent-sdk");
+    expect(authorRunnerMode({ LEAF_AGENT_MOCK: "1" })).toBe("fake");
+  });
+
+  it("keeps the Claude grant on the harness and the E2B credential on the broker", () => {
+    const authored = {
       ...VALID,
       LEAF_AUTHORED_EXECUTION: "1",
-      LEAF_SANDBOX: "e2b",
-    })).toThrow(/LEAF_AUTHOR_SANDBOX_PROVIDER=e2b/);
-    expect(() => validateProductionHarnessEnv({ ...VALID, LEAF_AUTHORED_EXECUTION: "1" }))
-      .toThrow(/LEAF_AUTHOR_SANDBOX_PROVIDER=e2b/);
-    expect(() => validateProductionHarnessEnv({
-      ...VALID,
-      LEAF_AUTHORED_EXECUTION: "1",
-      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
       LEAF_HARNESS_SESSION_STORE: "postgres",
-    })).toThrow(/credential source/);
+      LEAF_TOOL_SANDBOX_PROVIDER: "e2b",
+    };
+    expect(() => validateProductionHarnessEnv(authored)).not.toThrow();
     expect(() => validateProductionHarnessEnv({
-      ...VALID,
-      LEAF_AUTHORED_EXECUTION: "1",
+      ...authored,
       LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
-      E2B_API_KEY: "test-key",
-      LEAF_HARNESS_SESSION_STORE: "postgres",
-    })).toThrow(/broker gateway host/);
+    })).toThrow(/trusted harness host/);
     expect(() => validateProductionHarnessEnv({
-      ...VALID,
-      LEAF_AUTHORED_EXECUTION: "1",
-      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
-      E2B_API_KEY: "test-key",
-      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
-      LEAF_HARNESS_SESSION_STORE: "postgres",
-    })).toThrow(/probe URL/);
-    expect(() => validateProductionHarnessEnv({
-      ...VALID,
-      LEAF_AUTHORED_EXECUTION: "1",
-      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
-      E2B_API_KEY: "test-key",
-      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
-      LEAF_SANDBOX_BROKER_PROBE_URL: "https://other.internal/api/health",
-      LEAF_HARNESS_SESSION_STORE: "postgres",
-    })).toThrow(/hostname must equal/);
-    expect(() => validateProductionHarnessEnv({
-      ...VALID,
-      LEAF_AUTHORED_EXECUTION: "1",
-      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
-      E2B_API_KEY: "test-key",
-      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
-      LEAF_SANDBOX_BROKER_PROBE_URL: "http://broker.internal/api/health",
-      LEAF_HARNESS_SESSION_STORE: "postgres",
-    })).toThrow(/must use HTTPS/);
-    expect(() => validateProductionHarnessEnv({
-      ...VALID,
-      LEAF_AUTHORED_EXECUTION: "1",
-      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
-      E2B_API_KEY: "test-key",
-      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
-      LEAF_SANDBOX_BROKER_PROBE_URL: "https://broker.internal/api/health",
-      LEAF_HARNESS_SESSION_STORE: "postgres",
-    })).not.toThrow();
+      ...authored,
+      E2B_API_KEY: "must-belong-to-broker",
+    })).toThrow(/must not receive E2B credentials/);
   });
 
   it("requires PostgreSQL session authority for production authored execution", () => {
     const authored = {
       ...VALID,
       LEAF_AUTHORED_EXECUTION: "1",
-      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
-      E2B_API_KEY: "test-key",
-      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
-      LEAF_SANDBOX_BROKER_PROBE_URL: "https://broker.internal/api/health",
+      LEAF_TOOL_SANDBOX_PROVIDER: "e2b",
     };
     expect(() => validateProductionHarnessEnv({
       ...authored,
@@ -144,5 +108,13 @@ describe("production harness runtime safety", () => {
     })).toThrow(/LEAF_HARNESS_SESSION_STORE=postgres/);
     expect(() => validateProductionHarnessEnv(authored))
       .toThrow(/LEAF_HARNESS_SESSION_STORE=postgres/);
+  });
+
+  it("requires the broker E2B tool sandbox before production authored execution", () => {
+    expect(() => validateProductionHarnessEnv({
+      ...VALID,
+      LEAF_AUTHORED_EXECUTION: "1",
+      LEAF_HARNESS_SESSION_STORE: "postgres",
+    })).toThrow(/LEAF_TOOL_SANDBOX_PROVIDER=e2b/);
   });
 });

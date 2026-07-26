@@ -221,7 +221,14 @@ Risks:
 - [x] Reconcile the recovered cat branch with current application main.
 - [x] Verify live staging and production service, image, database, and runtime posture.
 - [x] Freeze the production product, security, durability, staging, and cutover gates.
-- [ ] Replace the fixed-template E2B author step with a general sandboxed author boundary.
+- [x] Replace the fixed-template E2B author step with a general sandboxed author boundary.
+  - [x] Remove model-controlled repository writes while retaining read-only inspection.
+  - [x] Accept source and manifest metadata through one structured harness tool.
+  - [x] Reject duplicate, unsafe, oversized, or mismatched proposals before any write.
+  - [x] Write only `tools/<name>/tool.py` and `tool.json`, then verify exact bytes before commit.
+  - [x] Keep the Claude grant outside the broker and generated-code sandbox.
+  - [x] Require the broker test run before a candidate can be returned.
+  - [x] Prove a novel `drawing.write` proposal through hermetic boundary tests.
 - [ ] Add a non-mocked deployed-environment acceptance driver.
 - [ ] Enable and verify one coherent release in staging.
 - [ ] Wire the proven posture into production.

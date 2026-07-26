@@ -2,15 +2,14 @@
  * REAL AgentRunner - the ONLY Anthropic egress in the whole harness, behind the
  * AgentRunner port. This is the LIVE Agent SDK author loop: a real Claude session
  * (authorized by ONE tenant's own OAuth grant) authors a deterministic CAD tool by
- * driving exactly three in-process MCP tools (fs_tenant_repo / validate_tool /
+ * driving exactly three in-process MCP tools (read-only fs_tenant_repo / validate_tool /
  * aps_test_run) and nothing else, then the tool runs later with ZERO LLM.
  *
  * Shape shipped (documented in the receipt): FULL in-process tool-loop.
- *   - The model WRITES the tool's Python `run(intake, params)` body itself, via the
- *     scoped `fs_tenant_repo` tool (genuine authoring - never a template).
- *   - `validate_tool` assembles the CONTRACT section 2 registry package from the
- *     model's chosen metadata (deterministic, harness-owned - so a malformed
- *     manifest can never break the pipeline) and runs the section-2 oracle.
+ *   - The model PROPOSES the tool's Python `run(intake, params)` source itself
+ *     through `validate_tool` (genuine authoring, never a template).
+ *   - `validate_tool` validates the source and metadata, then the trusted harness
+ *     atomically writes only tool.py and tool.json. The model has no write tool.
  *   - `aps_test_run` executes the just-authored tool against the REAL intake through
  *     the REAL broker (mock path, aps_live=false) so the model can sanity-check the
  *     numbers while authoring.
@@ -34,12 +33,13 @@ import type {
   AgentRunResult,
   AgentRunner,
   AuthorTelemetry,
+  ToolExecutionReceipt,
   ToolPackage,
+  ToolSubmissionResult,
 } from "../index.js";
+import { acceptBrokerTestResult } from "../../agent/tools/toolExecutionReceipt.js";
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
 import { scrubSecrets } from "./envScrub.js";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces we rely on (documented, not
@@ -131,6 +131,7 @@ const AUTHOR_TOOL_NAMES = [
   "mcp__author__validate_tool",
   "mcp__author__aps_test_run",
 ];
+export const AUTHOR_FS_ACTIONS = ["read", "list", "exists"] as const;
 
 /**
  * Runner-specific authoring guide appended to the shared system prompt. Names the
@@ -141,25 +142,25 @@ const AUTHOR_TOOL_NAMES = [
 const RUNNER_GUIDE = `
 === How to author (drive these three tools, nothing else) ===
 1. Choose a kebab-case tool NAME and a snake_case ENGINE_OP.
-2. Write the entry script to "tools/<name>/tool.py" using fs_tenant_repo(action:"write").
-   Contract of tool.py (runs later with ZERO LLM):
+2. Write the entry-script source in your validate_tool call. Do not write repo files.
+   Contract of the submitted source (runs later with ZERO LLM):
      def run(intake, params):
          # pure standard-library Python; deterministic; no I/O, no network.
          # return (result, overlay)  where result is a JSON object (dict) and
          # overlay is None (or a small dict of highlights).
          return (result_dict, None)
-3. Call validate_tool with your metadata (name, description, engine_op,
-   params_schema_json, returns_schema_json, capabilities). It assembles + writes
-   the tool.json manifest and runs the CONTRACT section 2 oracle. Fix any
-   diagnostics and re-validate until it says VALID.
+3. Call validate_tool with source plus your metadata (name, description, engine_op,
+   params_schema_json, returns_schema_json, capabilities). The trusted harness
+   validates and writes exactly tools/<name>/tool.py and tool.json. Fix any
+   diagnostics and resubmit until it says VALID.
 4. Call aps_test_run (optionally with params_json) to run your tool on the REAL
    drawing intake through the broker and inspect the computed result. Confirm the
    numbers look sane; fix tool.py + re-validate if not.
 5. Stop once validate_tool says VALID and aps_test_run returned ok:true with a
    sensible result. Do not write anything outside tools/<name>/.
 
-Be efficient: you do NOT need to read the repo or other tools first. Write tool.py,
-validate once (fix and re-validate only if it reports diagnostics), aps_test_run
+Be efficient: you do NOT need to read the repo or other tools first. Submit once
+(fix and resubmit only if it reports diagnostics), call aps_test_run
 once to confirm the numbers, then stop. Avoid unnecessary exploration.
 
 === Platform Intake JSON shape (what your tool.py receives as "intake") ===
@@ -240,32 +241,29 @@ export class AgentSdkRunner implements AgentRunner {
     const sdk = (await dynImport(["@anthropic-ai", "claude-agent-sdk"])) as unknown as SdkModule;
     const { z } = (await dynImport(["zod"])) as unknown as ZodModule;
 
-    // 3) The three author tools, bound to the harness toolset. The candidate is the
-    //    assembled+validated package the harness will register (no disk read-back of
-    //    a model-written manifest -> robust).
+    // 3) The three author tools, bound to the harness toolset. The model can inspect
+    //    its tenant repo but cannot write a path. Source and metadata cross one
+    //    structured submit boundary owned by the harness.
     let candidate: ToolPackage | null = null;
+    let candidateSubmission: ReturnType<AgentRunInput["toolset"]["submitTool"]> | null = null;
+    let candidateTested = false;
+    let candidateExecutionReceipt: ToolExecutionReceipt | null = null;
     const fs = input.toolset.fsTenantRepo;
     const ok = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
     const bad = (text: string): CallToolResult => ({ content: [{ type: "text", text }], isError: true });
 
     const fsTool = sdk.tool(
       "fs_tenant_repo",
-      "Read/write files scoped to the tenant repo. action:'write' creates a file (e.g. tools/<name>/tool.py); 'read'/'list'/'exists' inspect. Paths are repo-relative; escapes are rejected.",
+      "Read-only inspection scoped to the tenant repo. action is read, list, or exists. Paths are repo-relative; escapes are rejected. This tool cannot write.",
       {
-        action: z.enum(["read", "write", "list", "exists"]),
+        action: z.enum([...AUTHOR_FS_ACTIONS]),
         path: z.string(),
-        content: (z.string() as { optional(): unknown }).optional(),
       },
       async (args): Promise<CallToolResult> => {
         const action = String(args.action);
         const path = String(args.path ?? "");
         try {
           if (action === "read") return ok(fs.readFile(path));
-          if (action === "write") {
-            const content = typeof args.content === "string" ? args.content : "";
-            fs.writeFile(path, content);
-            return ok(`wrote ${path} (${content.length} bytes)`);
-          }
           if (action === "list") return ok(JSON.stringify(fs.listDir(path || ".")));
           if (action === "exists") return ok(String(fs.exists(path)));
           return bad(`unknown action ${action}`);
@@ -277,11 +275,12 @@ export class AgentSdkRunner implements AgentRunner {
 
     const validateTool = sdk.tool(
       "validate_tool",
-      "Assemble the CONTRACT section 2 tool package from your metadata, write tools/<name>/tool.json, and run the section-2 oracle. The entry file tools/<name>/tool.py must already exist. Returns VALID or a list of diagnostics.",
+      "Submit Python source and manifest metadata. The trusted harness validates them and atomically writes only tools/<name>/tool.py and tool.json. Returns VALID plus exact-byte hashes or diagnostics.",
       {
         name: z.string(),
         description: z.string(),
         engine_op: z.string(),
+        source: z.string(),
         params_schema_json: z.string(),
         returns_schema_json: z.string(),
         capabilities: z.array(z.string()),
@@ -289,38 +288,29 @@ export class AgentSdkRunner implements AgentRunner {
       async (a): Promise<CallToolResult> => {
         try {
           const name = String(a.name);
-          const entryRel = `tools/${name}/tool.py`;
-          if (!fs.exists(entryRel)) {
-            return bad(`entry file ${entryRel} does not exist yet - write it via fs_tenant_repo(write) before validating.`);
-          }
           const params = JSON.parse(String(a.params_schema_json));
           const returns = JSON.parse(String(a.returns_schema_json));
           const caps = Array.isArray(a.capabilities) ? (a.capabilities as unknown[]).map(String) : [];
-          const now = new Date().toISOString();
-          const pkg = {
+          const submitted = input.toolset.submitTool({
             name,
-            version: "1.0.0",
             description: String(a.description),
-            kind: "script",
             engine_op: String(a.engine_op),
-            entry: entryRel,
             params,
             returns,
-            capabilities: caps,
-            timeout_ms: 30000,
-            idempotent: true,
-            review: { status: "unreviewed" },
-            provenance: { author: "agent", created: now, modified: now, session: "agent-sdk", static_scan: [] },
-          } as unknown as ToolPackage;
-          const diagnostics = validateToolPackage(pkg);
-          // Always persist the manifest (package-relative entry per SPEC section 7.1).
-          const manifest = { ...pkg, entry: "tool.py" };
-          fs.writeFile(`tools/${name}/tool.json`, JSON.stringify(manifest, null, 2) + "\n");
-          if (diagnostics.length === 0) {
-            candidate = pkg;
-            return ok('VALID: tool package passes CONTRACT section 2. Next: aps_test_run to confirm the numbers, then stop.');
-          }
-          return bad("INVALID (fix and re-validate):\n- " + diagnostics.join("\n- "));
+            capabilities: caps as ToolPackage["capabilities"],
+            source: String(a.source),
+            session: "agent-sdk",
+          });
+          candidate = submitted.tool;
+          candidateSubmission = submitted;
+          candidateTested = false;
+          candidateExecutionReceipt = null;
+          return ok(JSON.stringify({
+            status: "VALID",
+            tool: submitted.tool,
+            source_receipt: submitted.receipt,
+            next: "Call aps_test_run. The author result is refused until that broker test passes.",
+          }));
         } catch (e) {
           return bad(`validate error: ${(e as Error).message}`);
         }
@@ -338,8 +328,13 @@ export class AgentSdkRunner implements AgentRunner {
             ? JSON.parse(a.params_json)
             : {};
           const env = await input.toolset.apsTestRun(candidate, params);
+          const accepted = acceptBrokerTestResult(env);
+          candidateTested = accepted.ok;
+          candidateExecutionReceipt = accepted.receipt;
           const text = JSON.stringify(env, null, 2);
-          return env.ok ? ok(text) : bad(text);
+          return accepted.ok
+            ? ok(text)
+            : bad(JSON.stringify({ ...env, receipt_error: accepted.reason }, null, 2));
         } catch (e) {
           return bad(`test-run error: ${(e as Error).message}`);
         }
@@ -497,22 +492,29 @@ export class AgentSdkRunner implements AgentRunner {
     }
 
     // 7) The candidate must be a validated package (defense in depth: re-validate).
-    if (!candidate) {
+    const finalSubmission = candidateSubmission as ToolSubmissionResult | null;
+    if (!candidate || !finalSubmission) {
       throw new Error(
         `author session ended without a validated tool (result subtype=${this.lastRun.result_subtype ?? "n/a"}, turns=${turn}).`,
       );
+    }
+    if (!candidateTested) {
+      throw new Error("author session ended without a passing broker test run for the submitted source.");
     }
     const finalPkg: ToolPackage = candidate;
     const diagnostics = validateToolPackage(finalPkg);
     if (diagnostics.length > 0) {
       throw new Error(`authored tool failed re-validation: ${diagnostics.join("; ")}`);
     }
-    const code = finalPkg.entry ? safeRead(join(input.repoDir, finalPkg.entry)) : "";
     return {
       tool: finalPkg,
-      code,
+      code: finalSubmission.code,
       preview: `Tool "${finalPkg.name}" authored via the Agent SDK (engine_op=${finalPkg.engine_op}); runs zero-LLM at runtime.`,
-      files: finalPkg.entry ? [finalPkg.entry, `tools/${finalPkg.name}/tool.json`] : [],
+      files: finalSubmission.files,
+      sourceReceipt: finalSubmission.receipt,
+      ...(candidateExecutionReceipt
+        ? { executionReceipt: candidateExecutionReceipt }
+        : {}),
       // A1: surface the REAL self-metered authoring telemetry (turns/tokens/cost/models)
       // from the run just completed, so /author can carry a provenance/telemetry chip.
       // `lastRun` is unconditionally assigned in step 6 above before we reach here.
@@ -536,12 +538,4 @@ function telemetryFromSummary(summary: RunUsageSummary): AuthorTelemetry {
   if (typeof summary.total_cost_usd === "number") t.total_cost_usd = summary.total_cost_usd;
   if (summary.models.length > 0) t.models = summary.models;
   return t;
-}
-
-function safeRead(path: string): string {
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return "";
-  }
 }

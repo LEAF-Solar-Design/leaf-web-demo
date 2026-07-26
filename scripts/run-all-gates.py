@@ -323,8 +323,13 @@ def build_suites() -> List[Suite]:
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_uploads.py"), 57),
+        # The cross-process fence probe uses POSIX fcntl and therefore skips on
+        # Windows operator boxes. Linux CI executes it. Keep the Windows run
+        # honest with the exact measured floor for every portable test and an
+        # allowlist for only that named deployment-contract skip.
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
-              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 18),
+              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 34,
+              allowed_skip_reasons=(r"fcntl is a Linux deployment contract",)),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_purge.py"), 9),
         Suite("server-guest-session-auth", "server tests/test_guest_session_auth.py", "pytest",

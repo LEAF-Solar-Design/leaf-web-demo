@@ -1,12 +1,11 @@
 /**
  * Fake AgentRunner - a SCRIPTED stand-in for the real Agent SDK session. It drives
- * the SAME three tools the real session would (fsTenantRepo, validateTool,
- * apsTestRun), deterministically, with NO network and NO Anthropic auth:
+ * the SAME three tools the real session would (read-only fsTenantRepo,
+ * submitTool, apsTestRun), deterministically, with NO network and NO Anthropic auth:
  *
  *   1. classify the description into a deterministic engine_op + template;
- *   2. write the tool package (tools/<name>/tool.json + entry script) into the
- *      tenant checkout via fsTenantRepo;
- *   3. validate it with the validate-tool oracle;
+ *   2. submit source + manifest metadata through the trusted structured writer;
+ *   3. receive its exact-byte validation receipt;
  *   4. test-run it once via aps-test-run (broker only);
  *   5. return { tool, code, preview, files }.
  *
@@ -146,53 +145,29 @@ export class FakeAgentRunner implements AgentRunner {
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     this.calls += 1;
-    const now = new Date().toISOString();
     const tmpl = classify(input.description);
     const name = toKebab(input.description);
-    const pkgDir = `tools/${name}`;
-
-    // The registry entry (CONTRACT section 2 + SPEC section 7 fields). Its `entry`
-    // is repo-root-relative (matches the demo dynamic loader + the fixture).
-    const tool: ToolPackage = {
+    const submitted = input.toolset.submitTool({
       name,
-      version: "1.0.0",
       description: input.description,
-      kind: "script",
       engine_op: tmpl.engineOp,
-      entry: `${pkgDir}/tool.py`,
       params: tmpl.params,
       returns: tmpl.returns,
       capabilities: ["drawing.read"],
-      timeout_ms: 30000,
-      idempotent: true,
-      review: { status: "unreviewed" },
-      provenance: {
-        author: "agent",
-        created: now,
-        modified: now,
-        session: "fake-agent-runner",
-        static_scan: [],
-      },
-    };
-
-    // The per-package tool.json manifest (SPEC section 7.1). Its `entry` is
-    // package-relative ("tool.py"), per the SPEC convention.
-    const manifest: ToolPackage = { ...tool, entry: "tool.py" };
-
-    // (2) write the package into the tenant repo via the scoped fs tool.
-    input.toolset.fsTenantRepo.writeFile(`${pkgDir}/tool.json`, JSON.stringify(manifest, null, 2) + "\n");
-    input.toolset.fsTenantRepo.writeFile(`${pkgDir}/tool.py`, tmpl.code);
-
-    // (3) validate with the oracle (would loop/repair on failure in the real SDK).
-    const vr = input.toolset.validateTool(tool);
-    if (!vr.ok) {
-      throw new Error(`fake author produced an invalid tool: ${vr.diagnostics.join("; ")}`);
-    }
+      source: tmpl.code,
+      session: "fake-agent-runner",
+    });
 
     // (4) test-run once through the broker (broker only, aps_live=false).
-    await input.toolset.apsTestRun(tool, {});
+    await input.toolset.apsTestRun(submitted.tool, {});
 
     const preview = `Tool "${name}" ${tmpl.previewVerb} (engine_op=${tmpl.engineOp}, kind=script, zero-LLM at runtime).`;
-    return { tool, code: tmpl.code, preview, files: [`${pkgDir}/tool.json`, `${pkgDir}/tool.py`] };
+    return {
+      tool: submitted.tool,
+      code: submitted.code,
+      preview,
+      files: submitted.files,
+      sourceReceipt: submitted.receipt,
+    };
   }
 }

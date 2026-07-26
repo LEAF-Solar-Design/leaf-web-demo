@@ -24,8 +24,9 @@ Acceptance covered here:
 """
 from __future__ import annotations
 
-import sys
 import hashlib
+import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -302,6 +303,20 @@ def test_tool_provider_requires_complete_matching_audit_receipt(
         tool, {"layers": ["A", "B", "C"]}, {}, aps_live=False, da=None,
         tenant_id="tenant-a")
     assert env["ok"] is True
+    provenance = env["execution_provenance"]
+    assert provenance["contract"] == "leaf.tool-execution.v1"
+    assert provenance["provider"] == "e2b"
+    assert provenance["isolation"] == "microvm"
+    assert provenance["passed"] is True
+    assert provenance["tenant_hash"] == hashlib.sha256(b"tenant-a").hexdigest()
+    assert provenance["source_sha256"] == hashlib.sha256(
+        BENIGN_SRC.encode("utf-8")).hexdigest()
+    assert provenance["input_sha256"] == hashlib.sha256(json.dumps(
+        {"intake": {"layers": ["A", "B", "C"]}, "params": {}},
+        sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert provenance["result_sha256"]
+    assert provenance["policy_version"] == "leaf.sandbox-policy.v1"
+    assert provenance["resource_use"] == {"wallMs": 1000}
 
     monkeypatch.setattr(
         tool_loader, "_microvm_cmd",

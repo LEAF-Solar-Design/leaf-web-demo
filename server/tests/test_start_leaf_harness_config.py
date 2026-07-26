@@ -31,6 +31,31 @@ def test_with_harness_uses_file_sessions_without_database():
     launcher = _launcher_module()
     assert launcher.harness_session_store_default({}) == "file"
     assert launcher.agent_store_default({}) == "legacy"
+    assert launcher.platform_database_configured({}) is False
+
+
+def test_shared_database_enables_canonical_worker():
+    launcher = _launcher_module()
+    assert launcher.platform_database_configured({
+        "DATABASE_URL": "postgresql://local/leaf",
+    }) is True
+    assert launcher.platform_database_configured({
+        "LEAF_HARNESS_DATABASE_URL": "postgresql://local/leaf",
+    }) is False
+
+
+def test_source_revision_prefers_operator_value(monkeypatch):
+    launcher = _launcher_module()
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("git must not run when revision is explicit")
+        ),
+    )
+    assert launcher.source_revision({
+        "LEAF_BUILD_REVISION": "a" * 40,
+    }) == "a" * 40
 
 
 def test_live_turn_budget_outlives_spine_and_authoring():

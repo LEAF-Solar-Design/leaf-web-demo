@@ -19,7 +19,27 @@ const PROOF_MODE =
   import.meta.env.VITE_CAT_PROOF === '1' ||
   new URLSearchParams(window.location.search).get('proof') === '1'
 const DRAWING_SOURCE = PROOF_MODE ? 'cat' : 'rooftop_demo'
-const DRAWING_ID = PROOF_MODE ? 'cat-panels' : 'cat-workbench'
+const freshDrawingId = () => {
+  const randomId = globalThis.crypto?.randomUUID?.()
+  if (randomId) return `cat-workbench-${randomId}`
+  return `cat-workbench-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+const liveDrawingId = () => {
+  const key = 'leaf.cat.workbench.id.v1'
+  try {
+    const existing = globalThis.sessionStorage?.getItem(key)
+    if (/^cat-workbench-[0-9a-z-]+$/.test(existing || '')) return existing
+    const created = freshDrawingId()
+    globalThis.sessionStorage?.setItem(key, created)
+    return created
+  } catch {
+    return freshDrawingId()
+  }
+}
+// The deterministic proof keeps its frozen fixture identity. Every live page
+// session gets a separate workbench so one visitor never inherits another
+// visitor's cat, while reload still proves version persistence.
+const DRAWING_ID = PROOF_MODE ? 'cat-panels' : liveDrawingId()
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 

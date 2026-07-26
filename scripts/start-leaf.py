@@ -149,6 +149,36 @@ def agent_store_default(env: dict[str, str]) -> str:
     )
 
 
+def platform_database_configured(env: dict[str, str]) -> bool:
+    """Return true when the canonical worker's PostgreSQL authority is available."""
+    return bool(env.get("DATABASE_URL", "").strip())
+
+
+def source_revision(env: dict[str, str]) -> str | None:
+    """Resolve the checkout revision without overriding an operator value."""
+    for name in (
+        "LEAF_BUILD_REVISION",
+        "LEAF_SOURCE_SHA",
+        "SOURCE_REVISION",
+        "GIT_COMMIT",
+    ):
+        value = env.get(name, "").strip()
+        if value:
+            return value
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    revision = completed.stdout.strip().lower()
+    return revision or None
+
+
 # ---- Child-process management ----------------------------------------------
 class Child:
     def __init__(self, name: str, proc: subprocess.Popen):
@@ -343,6 +373,9 @@ def main() -> int:
 
     base_env = os.environ.copy()
     base_env["APS_LIVE"] = "0"  # local dev is always mock — no cloud, no secrets
+    revision = source_revision(base_env)
+    if revision:
+        base_env.setdefault("LEAF_BUILD_REVISION", revision)
     # The harness authors into this tenant repo root. The app must catalog the
     # same files and the broker must resolve their entry scripts from it.
     # Without one shared value, authoring appears to work but every design-time
@@ -372,7 +405,20 @@ def main() -> int:
     broker_env = dict(base_env, BROKER_PORT=str(broker_port))
     spawn("broker", [sys.executable, "broker.py"], SERVER_DIR, broker_env)
 
-    # ---- 2) harness sidecar (optional Build lane) ----------------------------
+    # ---- 2) canonical solver worker (shared PostgreSQL authority) -----------
+    # Local Projects should exercise the same queued job boundary as staging.
+    # Without this process, readiness is degraded and string-autofill is offline.
+    worker_enabled = platform_database_configured(base_env)
+    if worker_enabled:
+        base_env.setdefault("LEAF_CANONICAL_WORKER_REQUIRED", "1")
+        spawn(
+            "worker",
+            [sys.executable, "canonical_worker.py"],
+            SERVER_DIR,
+            base_env,
+        )
+
+    # ---- 3) harness sidecar (optional Build lane) ----------------------------
     if want_harness:
         node = resolve_exe("node") or "node"
         authored_execution, authoring_mode = harness_authoring_defaults(base_env)
@@ -403,7 +449,7 @@ def main() -> int:
         )
         spawn("harness", [node, str(HARNESS_ENTRY)], HARNESS_DIR, harness_env)
 
-    # ---- 3) app (talks to broker over HTTP; never holds the APS credential) --
+    # ---- 4) app (talks to broker over HTTP; never holds the APS credential) --
     app_env = dict(
         base_env,
         APP_PORT=str(app_port),
@@ -430,7 +476,7 @@ def main() -> int:
         )
     spawn("app", [sys.executable, "app.py"], SERVER_DIR, app_env)
 
-    # ---- 4) web (Vite dev; VITE_MOCK=0 so the browser hits the live app) -----
+    # ---- 5) web (Vite dev; VITE_MOCK=0 so the browser hits the live app) -----
     if want_web:
         web_env = dict(base_env, VITE_MOCK="0", VITE_API_BASE=app_url)
         # Bind Vite to IPv4 explicitly: its default `localhost` resolves to IPv6
@@ -449,6 +495,8 @@ def main() -> int:
     if want_harness:
         wait_healthy("harness", f"{harness_url}/health")
     wait_healthy("app", f"{app_url}/api/health")
+    if worker_enabled:
+        wait_healthy("worker", f"{app_url}/api/ready")
     if want_web:
         wait_healthy("web", f"{web_url}/")
 
@@ -472,6 +520,8 @@ def main() -> int:
         if authored_execution != "1" or authoring_mode != "singleton":
             say("    NOTE: Build repo mutation is read-only until PostgreSQL")
             say("          writer-lease configuration is provided.")
+    if worker_enabled:
+        say("    Worker     canonical PostgreSQL solve worker ENABLED")
     say("")
     say("Everything runs at APS_LIVE=0 (pure-python results from real geometry).")
     say("Press Ctrl-C to stop the whole stack.")
@@ -496,7 +546,7 @@ def main() -> int:
         signal.signal(signal.SIGTERM, _request_stop)
 
     # ---- Monitor loop: block until a stop signal, watching for a core crash --
-    core = {"broker", "app"}
+    core = {"broker", "app"} | ({"worker"} if worker_enabled else set())
     rc = 0
     try:
         while not stop["requested"]:

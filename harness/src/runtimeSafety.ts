@@ -5,11 +5,22 @@ function flagOn(value: string | undefined): boolean {
 }
 
 export type AuthorSandboxProvider = "off" | "e2b";
+export type AuthorRunnerMode = "fake" | "agent-sdk";
 
 export function authoredExecutionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return flagOn(env.LEAF_AUTHORED_EXECUTION);
 }
 
+/**
+ * Generated source is data until the broker executes it in E2B. The author model
+ * stays on the trusted harness host so its tenant Claude grant never enters the
+ * generated-code sandbox.
+ */
+export function authorRunnerMode(env: NodeJS.ProcessEnv = process.env): AuthorRunnerMode {
+  return (env.LEAF_AGENT_MOCK ?? "").trim() === "1" ? "fake" : "agent-sdk";
+}
+
+/** @deprecated Kept only to parse legacy configuration during migration. */
 export function authorSandboxProvider(env: NodeJS.ProcessEnv = process.env): AuthorSandboxProvider {
   const explicit = env.LEAF_AUTHOR_SANDBOX_PROVIDER;
   if (explicit === undefined) {
@@ -19,34 +30,6 @@ export function authorSandboxProvider(env: NodeJS.ProcessEnv = process.env): Aut
   if (!value || value === "off") return "off";
   if (value === "e2b") return "e2b";
   throw new Error(`unsupported LEAF_AUTHOR_SANDBOX_PROVIDER: ${value}`);
-}
-
-function validateSandboxProbe(env: NodeJS.ProcessEnv): void {
-  const brokerHost = (env.LEAF_SANDBOX_BROKER_HOST ?? "").trim().toLowerCase();
-  if (!brokerHost || brokerHost === "httpbingo.org") {
-    throw new Error("production author sandbox requires an explicit broker gateway host");
-  }
-  const rawUrl = (env.LEAF_SANDBOX_BROKER_PROBE_URL ?? "").trim();
-  if (!rawUrl) {
-    throw new Error("production author sandbox requires an explicit broker probe URL");
-  }
-  let probe: URL;
-  try {
-    probe = new URL(rawUrl);
-  } catch {
-    throw new Error("production author sandbox broker probe URL is invalid");
-  }
-  if (probe.protocol !== "https:") {
-    throw new Error("production author sandbox broker probe URL must use HTTPS");
-  }
-  if (probe.username || probe.password) {
-    throw new Error("production author sandbox broker probe URL cannot contain credentials");
-  }
-  if (probe.hostname.toLowerCase() !== brokerHost) {
-    throw new Error(
-      "production author sandbox broker probe hostname must equal LEAF_SANDBOX_BROKER_HOST",
-    );
-  }
 }
 
 export function validateProductionHarnessEnv(env: NodeJS.ProcessEnv = process.env): void {
@@ -66,21 +49,30 @@ export function validateProductionHarnessEnv(env: NodeJS.ProcessEnv = process.en
   if (!['0', '1'].includes((env.LEAF_AUTHORED_EXECUTION ?? '').trim())) {
     throw new Error("production harness requires explicit LEAF_AUTHORED_EXECUTION=0 or 1");
   }
-  if (authoredExecutionEnabled(env) &&
-      (env.LEAF_AUTHOR_SANDBOX_PROVIDER ?? "").trim().toLowerCase() !== "e2b") {
-    throw new Error(
-      "production authored execution requires LEAF_AUTHOR_SANDBOX_PROVIDER=e2b",
-    );
-  }
   if (authoredExecutionEnabled(env)) {
     if ((env.LEAF_HARNESS_SESSION_STORE ?? "").trim().toLowerCase() !== "postgres") {
       throw new Error(
         "production authored execution requires LEAF_HARNESS_SESSION_STORE=postgres",
       );
     }
-    if (!(env.E2B_API_KEY ?? "").trim() && !(env.E2B_API_KEY_FILE ?? "").trim()) {
-      throw new Error("production author sandbox requires an E2B credential source");
+    if ((env.LEAF_TOOL_SANDBOX_PROVIDER ?? "").trim().toLowerCase() !== "e2b") {
+      throw new Error(
+        "production authored execution requires LEAF_TOOL_SANDBOX_PROVIDER=e2b",
+      );
     }
-    validateSandboxProbe(env);
+    if (
+      (env.LEAF_AUTHOR_SANDBOX_PROVIDER ?? "").trim() &&
+      (env.LEAF_AUTHOR_SANDBOX_PROVIDER ?? "").trim().toLowerCase() !== "off"
+    ) {
+      throw new Error(
+        "production authoring runs AgentSdkRunner on the trusted harness host; " +
+        "LEAF_AUTHOR_SANDBOX_PROVIDER must be off or unset",
+      );
+    }
+    if ((env.E2B_API_KEY ?? "").trim() || (env.E2B_API_KEY_FILE ?? "").trim()) {
+      throw new Error(
+        "production harness must not receive E2B credentials; the broker owns the tool sandbox",
+      );
+    }
   }
 }

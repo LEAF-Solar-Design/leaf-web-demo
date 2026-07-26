@@ -77,35 +77,39 @@ Read-only AWS inspection on 2026-07-26 found:
 | Tool sandbox credential | no E2B secret exists | no E2B secret exists |
 | Database | Aurora PostgreSQL and TLS-only RDS Proxy are available | Aurora PostgreSQL and TLS-only RDS Proxy are available |
 | Database wiring | app, broker, and canonical worker consume the staging URL | live application task does not consume the production URL |
-| Browser proof | fixture-backed cat proof and a real-service no-preload proof exist | no authenticated production smoke |
+| Browser proof | fixture-backed cat proof and a clean real-service flow with a unique per-browser-session workbench exist | no authenticated production smoke |
 
 The integrated application branch is
 `codex/cat-production-integration-20260726`.
 
-## Blocking design gap
+## General author boundary status
 
-Production startup correctly requires the E2B author provider when authored
-execution is on. The current `E2bAgentRunner` does not run the general Claude
-author loop. It selects one of three fixed, read-only count, list, or measure
-templates. It cannot author a drawing-write tool such as the cat panel
-transformation.
+The application branch now implements the accepted general boundary:
 
-Do not enable authored execution in staging or production until this gap is
-closed. A green health endpoint with this fixed-template runner would still
-fail the product contract.
+1. The Agent SDK runs on the trusted harness host and can inspect the tenant
+   repository only through read, list, and exists operations.
+2. Claude submits arbitrary tool source and manifest metadata through one
+   structured call. It cannot choose filesystem paths or write files.
+3. The trusted harness validates the proposal and writes exactly `tool.py` and
+   `tool.json`, returning a `leaf.tool-source.v1` receipt with exact hashes and
+   byte counts.
+4. A broker test must pass before the runner can return a candidate.
+5. In E2B mode, the broker returns a `leaf.tool-execution.v1` receipt bound to
+   the submitted source hash and tenant hash.
+6. `AuthorLoop` verifies the source receipt, execution receipt, tenant binding,
+   package bytes, and exact Git diff before registration and commit.
+7. The Claude grant stays in the harness. The E2B credential stays in the
+   broker.
 
-The accepted author boundary must:
+Hermetic tests prove a novel `drawing.write` proposal and reject unsafe,
+oversized, duplicate, forged, mismatched, and model-controlled write attempts.
+Local real-service testing proves the clean request surface and connected
+service flow. It does not prove the production sandbox because this machine has
+no E2B credential.
 
-1. Let Claude propose arbitrary source and a manifest through structured,
-   tenant-scoped tools.
-2. Keep the tenant's Claude credential outside the generated-code sandbox.
-3. Validate the manifest and source without executing generated code in the
-   harness process.
-4. Run generated code, tests, and preview only in the E2B sandbox.
-5. Allow only the reviewed broker or health probe host and deny every other
-   network target.
-6. Return source and validation receipts to the harness.
-7. Commit only the exact validated bytes under the tenant writer lease.
+Status remains NOT READY. Staging still needs the broker E2B credential and
+allowlist, a coherent deployed release, live receipt evidence, the two-tenant
+acceptance run, and the production infrastructure and rollback gates.
 
 ## Release gates
 
@@ -118,9 +122,9 @@ The accepted author boundary must:
 
 ### Gate B: general sandboxed authoring
 
-- Replace the fixed-template E2B author step with the accepted general author
-  boundary.
-- Prove that a novel write request can generate a new tool.
+- Merge the structured source-submission and broker execution-receipt boundary.
+- Prove that a novel write request can generate a new tool in a live E2B
+  sandbox, not only in the hermetic broker fake.
 - Prove sandbox denial for metadata, loopback, private ranges, public sites,
   and a second tenant.
 - Prove that Claude, E2B, broker, harness, and platform secrets do not cross
@@ -134,7 +138,10 @@ The accepted author boundary must:
 - Confirm migration `0017_harness_sessions.sql` and all earlier migrations.
 - Set harness sessions to PostgreSQL.
 - Set harness authoring mode to `singleton`.
-- Set the author and tool sandbox providers to E2B.
+- Keep the author runner on the trusted harness host with
+  `LEAF_AUTHOR_SANDBOX_PROVIDER=off` or unset.
+- Set `LEAF_TOOL_SANDBOX_PROVIDER=e2b` on the broker and the declarative harness
+  gate. Give the E2B credential only to the broker.
 - Enable authored execution together on app, broker, and harness.
 - Select PostgreSQL authorities one at a time and verify each before the next.
 - Deploy app, broker, harness, web, and canonical worker from one exact
@@ -183,11 +190,10 @@ Run with two real Auth0 users in two tenants:
 
 | Lane | Owner | State |
 |---|---|---|
-| Application integration and cat browser flow | `codex/cat-production-integration-20260726` | in progress |
-| Production rollback workflow | infrastructure PR 183 owner | blocked by adversarial review |
+| Application integration, structured author boundary, and cat browser flow | `codex/cat-production-integration-20260726` | implemented locally, pending full gate and review |
+| Production rollback workflow | infrastructure PR 183 owner | blocked by RED adversarial review |
 | Docker build-context cleanup | application PRs 207 and 208 owners | merged |
-| General E2B author boundary | unowned | blocking |
-| Staging authored-execution activation workflow | unowned | waits for general E2B boundary |
+| Live E2B boundary proof and staging activation workflow | unowned | waits for credential, allowlist, and merged application boundary |
 | Production Postgres and canonical-worker wiring | unowned | blocking |
 | Authenticated two-tenant staging acceptance | unowned | waits for staging activation |
 

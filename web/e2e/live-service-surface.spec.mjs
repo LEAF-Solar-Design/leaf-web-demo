@@ -8,6 +8,7 @@ const INTAKE = JSON.parse(readFileSync(join(HERE, '..', '..', 'data', 'rooftop_d
 
 test('live surface starts empty and reports the real Claude grant gate', async ({ page }) => {
   let messageBody = null
+  let drawingId = null
 
   await page.route('http://leaf-proof.invalid/api/**', async (route) => {
     const request = route.request()
@@ -21,7 +22,8 @@ test('live surface starts empty and reports the real Claude grant gate', async (
     } else if (request.method() === 'GET' && url.pathname === '/api/tenant/claude-grant') {
       body = { linked: false, linked_at: null, kind: null }
     } else if (request.method() === 'POST' && url.pathname === '/api/sessions') {
-      expect(request.postDataJSON()).toEqual({ drawing_id: 'cat-workbench' })
+      drawingId = request.postDataJSON().drawing_id
+      expect(drawingId).toMatch(/^cat-workbench-[0-9a-z-]+$/)
       body = { session_id: 'live-session', status: 'active', created_at: '2026-07-25T00:00:00Z' }
     } else if (request.method() === 'POST' && url.pathname === '/api/sessions/live-session/messages') {
       messageBody = request.postDataJSON()
@@ -50,6 +52,10 @@ test('live surface starts empty and reports the real Claude grant gate', async (
   await expect(page.getByText('Live services')).toBeVisible()
   await expect(page.getByText('Requests are not preloaded or simulated.')).toBeVisible()
   await expect(page.getByText('Deterministic browser proof.')).toHaveCount(0)
+  const workbench = await page.getByText(/^cat-workbench-[0-9a-z-]+$/).textContent()
+  await page.reload()
+  await expect(page.getByText(workbench)).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Command bar' })).toHaveValue('')
 
   const request = 'Rearrange these panels into a sitting cat.'
   await page.getByRole('textbox', { name: 'Command bar' }).fill(request)
@@ -57,5 +63,6 @@ test('live surface starts empty and reports the real Claude grant gate', async (
 
   await expect(page.getByText('Link a Claude account to plan this request. Nothing has run.')).toBeVisible()
   await expect(page.getByRole('dialog', { name: 'Claude account' })).toBeVisible()
+  expect(drawingId).not.toBe('cat-workbench')
   expect(messageBody).toEqual({ text: request })
 })
