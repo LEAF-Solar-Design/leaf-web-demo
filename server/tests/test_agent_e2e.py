@@ -280,6 +280,7 @@ def test_full_split_turn_journey(fake_harness):
         {"type": "proposed_run", "data": {
             "confirmation_id": cid, "tool": "add-panel",
             "params": {"secret_payload": "never-log-me"},
+            "dwg": "demo",
             "capability": "run_write", "rationale": "user asked for a panel"}},
         {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
     ])
@@ -326,6 +327,7 @@ def test_full_split_turn_journey(fake_harness):
         "confirmation_id": cid, "approved": True,
         "proposal": {"tool": "add-panel",
                      "params": {"secret_payload": "never-log-me"},
+                     "dwg": "demo",
                      "capability": "run_write"},
     }
     assert _wait_until(lambda: _terminal_count(sid) >= 2)

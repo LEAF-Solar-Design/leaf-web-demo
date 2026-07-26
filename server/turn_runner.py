@@ -565,7 +565,16 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                 tool=data.get("tool"), params=data.get("params"),
                                 capability=data.get("capability"),
                                 rationale=data.get("rationale"),
-                                kind="run_capability", payload=None,
+                                # Reuse payload_json for the additive drawing
+                                # binding. This avoids a schema migration while
+                                # keeping the server-authored confirmation wire
+                                # argument-exact with the app gate.
+                                kind="run_capability",
+                                payload=(
+                                    {"dwg": data.get("dwg")}
+                                    if isinstance(data.get("dwg"), str)
+                                    else None
+                                ),
                                 ttl_s=approval_ttl_s(),
                             )
                         except sqlite3.IntegrityError:

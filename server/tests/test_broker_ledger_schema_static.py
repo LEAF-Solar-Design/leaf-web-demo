@@ -46,20 +46,26 @@ def test_schema_parses_and_freezes_exactly_the_nine_keys():
 
 
 def test_broker_entry_literal_initializes_every_frozen_key():
-    """broker_run's `entry = {...}` literal (the ONE ledger append per run)
+    """The run path's `entry = {...}` literal (the ONE ledger append per run)
     must initialize exactly the frozen key set — a key added there without a
-    schema/contract update fails here, and vice versa."""
+    schema/contract update fails here, and vice versa.
+
+    `broker_run` is a thin wrapper that holds the storage-cutover commit guard
+    and delegates the body to `_broker_run`, so the literal lives in either one.
+    Both names are accepted, but exactly one literal must still be found: this
+    must not degrade into a test that passes because it matched nothing."""
     tree = ast.parse((SERVER_DIR / "broker.py").read_text(encoding="utf-8"))
+    run_entry_points = {"broker_run", "_broker_run"}
     literals: list[list[str]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "broker_run":
+        if isinstance(node, ast.FunctionDef) and node.name in run_entry_points:
             for sub in ast.walk(node):
                 if isinstance(sub, ast.Dict):
                     keys = [k.value for k in sub.keys
                             if isinstance(k, ast.Constant) and isinstance(k.value, str)]
                     if "ts" in keys and "tenant_id" in keys:
                         literals.append(keys)
-    assert literals, "broker_run's ledger entry literal not found"
+    assert literals, "the broker run path's ledger entry literal not found"
     assert sorted(literals[0]) == sorted(FROZEN_KEYS)
 
 

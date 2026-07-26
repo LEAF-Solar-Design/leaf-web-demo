@@ -919,6 +919,15 @@ def guest_drawing_dir(tenant_id: str, drawing_id: str) -> Path:
 def wipe_failed_attempt_residue(
     tenant_id: str, drawing_id: str, attempt: Optional[str] = None,
 ) -> bool:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return False
+        return _wipe_failed_attempt_residue(tenant_id, drawing_id, attempt)
+
+
+def _wipe_failed_attempt_residue(
+    tenant_id: str, drawing_id: str, attempt: Optional[str] = None,
+) -> bool:
     """Delete a failed attempt's ingest residue (manifest, version blobs,
     intake cache — everything under the drawing dir EXCEPT the upload
     marker), then VERIFY the deletion (round-6 review, MAJOR: an unchecked
@@ -1032,6 +1041,21 @@ def _wipe_failed_attempt_files(tenant_id: str, drawing_id: str) -> bool:
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
                  error_code: str, message: str, retryable: bool,
                  *, extraction_owner: str = "", extraction_fence: int = 0) -> bool:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return False
+        return _mark_failed_committed(
+            backend, tenant_id, drawing_id, marker, error_code, message,
+            retryable, extraction_owner=extraction_owner,
+            extraction_fence=extraction_fence,
+        )
+
+
+def _mark_failed_committed(
+    backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
+    error_code: str, message: str, retryable: bool,
+    *, extraction_owner: str = "", extraction_fence: int = 0,
+) -> bool:
     # Under the drawing's lock, and only onto a marker that still IS this
     # attempt AND is still non-terminal: a purged drawing must not get a
     # marker resurrected behind its deletion receipt; a failed-retry's
@@ -1123,6 +1147,13 @@ def _verify_staged_source(
 
 
 def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return
+        _run_extraction(tenant_id, drawing_id, ext)
+
+
+def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     """Synchronous extraction body (the thread target calls this; tests call it
     directly). Reads the staged file, produces intake, ingests it as v1 under
     the tenant's backend, and transitions the marker. NEVER raises out — every
@@ -1131,6 +1162,8 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
 
     backend = write_loop.upload_backend_for_tenant(tenant_id)
     extraction_owner, extraction_fence = "", 0
+    if not write_loop.fence_open():
+        return
     if upload_store_mode() == "postgres":
         claim = _claim_extraction(tenant_id, drawing_id)
         if claim is None:
@@ -1217,7 +1250,12 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         contextlib.nullcontext() if upload_store_mode() == "postgres"
         else drawing_lock(tenant_id, drawing_id)
     )
-    with authority_lock:
+    with authority_lock, write_loop.upload_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            # The cutover fence protects every canonical commit, including
+            # marker transitions.  Leave the attempt unchanged so the
+            # operator can recover or retry it after the drain.
+            return
         current = read_marker(backend, tenant_id, drawing_id)
         if current is None:
             return  # purged while extracting; the receipt stands, nothing returns
@@ -1644,6 +1682,13 @@ def _purge_expired_postgres(now: datetime) -> Dict[str, Any]:
 
 
 def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return {"count": 0, "freed_bytes": 0, "purged": []}
+        return _purge_expired(now)
+
+
+def _purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
     """Delete every guest drawing whose STAMPED retention_expires_at has passed
     (plus its staged upload file), drop empty tenant dirs, and append one
     purge.log.jsonl line per deletion. Idempotent; safe to run concurrently

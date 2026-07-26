@@ -127,6 +127,7 @@ export class FakeTurnRunner implements ConverseRunner {
         confirmation_id: confirmationId,
         tool: SCRIPTED_TOOL,
         params,
+        dwg: input.drawing_id,
         capability: "drawing.write",
         rationale: `Running "${SCRIPTED_TOOL}" needs your approval before it changes drawing state.`,
       },

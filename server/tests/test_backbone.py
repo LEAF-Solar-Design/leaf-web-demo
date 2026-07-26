@@ -27,7 +27,8 @@ SCHEMA = json.loads((SERVER_DIR / "envelope_schema.json").read_text(encoding="ut
 
 sys.path.insert(0, str(SERVER_DIR))
 from envelopes import ErrorCode  # noqa: E402
-from _test_readiness import wait_ready  # noqa: E402
+from _test_readiness import (  # noqa: E402
+    BOOT_TIMEOUT_ENV, calibrate_boot_timeout_s, wait_ready)
 from _test_run_confirmation import confirmed_requests_payload  # noqa: E402
 
 import jsonschema  # noqa: E402
@@ -208,6 +209,142 @@ def test_stop_forced_kill_records_receipt_and_reports_failure(tmp_path):
     receipt = json.loads(Path(failure["receipt_path"]).read_text(encoding="utf-8"))
     assert receipt["schema"] == "leaf.test-shutdown-failure.v1"
     assert receipt["log_size_bytes"] == log_path.stat().st_size
+
+
+def test_boot_timeout_is_calibrated_to_host_speed_not_a_fixed_wall_clock():
+    """The boot budget must track how slow the host is, and stay bounded.
+
+    Sits next to the `stop()` test above: both pin harness helpers whose failure
+    mode is a MISLEADING gate rather than a wrong product behaviour. This one is
+    pure, because `calibrate_boot_timeout_s` takes the measured spawn latency as
+    an argument, so it exercises the arithmetic without spawning anything.
+
+    Without it the calibration could silently collapse to a constant (the clamps
+    swallowing the scaling, or a bad env parse winning) and nothing would fail;
+    the flake it exists to prevent would just come back, still wearing the
+    costume of a broken backbone.
+    """
+    # The slowest boot/spawn ratio actually measured on a saturated EVANS-DEKSTOP
+    # (73.8s broker boot at 1.610s/spawn). The budget must COVER this ratio, which
+    # is the real property: "a host this slow still gets enough time". Asserting
+    # that instead of `loaded > idle` is what makes a weakened multiple or a
+    # lowered ceiling fail here rather than pass while quietly losing the headroom.
+    worst_ratio = 45.9
+
+    def budget(spawn_s, env=None):
+        return calibrate_boot_timeout_s(lambda: spawn_s, env or {})[0]
+
+    for spawn_s in (2.4, 4.336, 1.610):
+        got = budget(spawn_s)
+        assert got >= spawn_s * worst_ratio, (
+            f"a {spawn_s}s/spawn host got {got:.0f}s, under the {worst_ratio}x "
+            f"ratio already measured on this box ({spawn_s * worst_ratio:.0f}s): "
+            f"the budget no longer covers a boot we have actually seen")
+    # ...and still bounded, so a genuine hang cannot park the gate indefinitely.
+    assert budget(4.336) <= 300.0, f"budget {budget(4.336):.0f}s exceeds the 300s ceiling"
+    # The floor holds the idle case at no less than the fixed budget main shipped.
+    assert budget(0.15) == 90.0, f"idle host got {budget(0.15):.0f}s, below the 90s floor"
+
+    # An operator-supplied budget is taken exactly, floor and ceiling included:
+    # CI and a loaded dev box are allowed to disagree.
+    exact, how = calibrate_boot_timeout_s(lambda: 0.15, {BOOT_TIMEOUT_ENV: "600"})
+    assert exact == 600.0 and BOOT_TIMEOUT_ENV in how
+    assert budget(0.15, {BOOT_TIMEOUT_ENV: "5"}) == 5.0
+
+    # An override that settles the budget must not pay for a probe it cannot use.
+    calls = []
+
+    def counted_probe():
+        calls.append(1)
+        return 0.15
+
+    calibrate_boot_timeout_s(counted_probe, {BOOT_TIMEOUT_ENV: "600"})
+    assert calls == [], "a valid override still spawned a spawn-latency probe"
+    calibrate_boot_timeout_s(counted_probe, {})
+    assert calls == [1], "the probe was not used when there was no override"
+
+    # Garbage and non-finite values are IGNORED, not obeyed. A 0s budget would
+    # error every stack-dependent test at setup and read as a total collapse; an
+    # INFINITE one is the mirror hazard, making the deadline infinite so the wait
+    # loop never exits and the gate hangs on a boot that will never come. Note
+    # `float()` yields inf for "inf" AND for any literal that overflows (1e309).
+    for bad in ("", "   ", "abc", "0", "-30", "nan", "inf", "-inf", "1e309"):
+        assert budget(0.15, {BOOT_TIMEOUT_ENV: bad}) == 90.0, (
+            f"{bad!r} was obeyed instead of ignored")
+
+    # A probe that could not measure must not raise, and must fall back UPWARD.
+    # An unmeasurable probe means the host could not start a process at all, so
+    # it is the worst reading available, not a missing one. Pinning the floor
+    # here would hand the smallest budget to the most degraded host, which is how
+    # a real gate run failed two tests at "not ready in 90s" while saturated.
+    assert budget(None) == 300.0, (
+        "an unmeasurable probe fell back to the floor; on a host too loaded to "
+        "start a process that is the smallest budget at the worst moment")
+
+
+def test_wait_ready_re_measures_once_when_the_host_degrades_mid_wait(monkeypatch):
+    """A budget sized at launch must not condemn a host that got slower since.
+
+    Observed on 2026-07-25: the budget was calibrated at 1.316s/spawn and the
+    deadline arrived when the box had degraded to 16.781s/spawn, 12x worse. The
+    server was fine; the machine changed underneath it. Uses a fake process and a
+    dead port so no server is booted, and shrinks the constants so it is fast.
+    """
+    import _test_readiness as rd
+
+    class NeverExits:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    # The ceiling must comfortably exceed ONE poll iteration (a requests timeout
+    # of 2s plus the sleep), or the re-measure can never buy time it has not
+    # already spent and the extension correctly declines. That is real behaviour,
+    # not a quirk: an extension is only worth taking if it beats the clock.
+    monkeypatch.setattr(rd, "_BOOT_TIMEOUT_FLOOR_S", 0.5)
+    monkeypatch.setattr(rd, "_BOOT_TIMEOUT_CEILING_S", 8.0)
+    monkeypatch.setattr(rd, "_BOOT_COST_IN_SPAWNS", 10)
+    monkeypatch.setattr(rd, "_calibrated", None)  # defeat the per-process cache
+
+    probes = []
+
+    def degrading_probe():
+        probes.append(1)
+        return 0.02 if len(probes) == 1 else 5.0
+
+    monkeypatch.setattr(rd, "spawn_latency_s", degrading_probe)
+
+    # Record when each poll happened. This is the assertion that has teeth: the
+    # message and the probe count would BOTH still appear if the deadline update
+    # were deleted, so only "polling actually continued past the original budget"
+    # proves the extension bought real time. Polls are made instant so the gap
+    # between 0.5s and 8s is unmistakable rather than a narrow timing window.
+    polls = []
+    started = time.monotonic()
+
+    def refused(*_args, **_kwargs):
+        polls.append(time.monotonic() - started)
+        raise requests.RequestException("nothing is listening")
+
+    monkeypatch.setattr(rd.requests, "get", refused)
+
+    dead_url = f"http://127.0.0.1:{free_port()}/api/health"
+    with pytest.raises(TimeoutError) as exc:
+        rd.wait_ready(dead_url, NeverExits())
+    message = str(exc.value)
+
+    assert "re-measured mid-wait" in message, message
+    # Polling ran well past the 0.5s the original budget allowed. Without the
+    # deadline update the last poll lands at ~0.5s and this fails.
+    assert max(polls) > 2.0, (
+        f"last poll was at {max(polls):.2f}s; polling stopped at the original "
+        f"0.5s budget, so the re-measure never granted any extra wait")
+    # Exactly three probes pins "once": initial calibration, one regrade at
+    # expiry, one final diagnostic. A second regrade would make this four.
+    assert len(probes) == 3, f"expected 3 probes (initial, regrade, diagnostic), got {len(probes)}"
+    # Still bounded by the ceiling: a true hang must not park the gate.
+    assert "not ready in 8s" in message, message
 
 
 def submit(stack, tool="count-by-layer", params=None, tenant=None, wait=False):

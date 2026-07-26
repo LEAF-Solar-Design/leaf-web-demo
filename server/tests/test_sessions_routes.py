@@ -113,11 +113,13 @@ def _seed_approval(session_id: str, tenant_id: str, *, ttl_s: float = 300,
                     capability: str = "drawing.write") -> str:
     _counter[0] += 1
     confirmation_id = f"confirm-{_counter[0]}"
+    session = session_store.get_session(session_id)
+    assert session is not None
     session_store.create_approval(
         confirmation_id, session_id, tenant_id, turn_id=f"turn-{_counter[0]}",
         tool=tool, params=params if params is not None else {"length_ft": 12},
         capability=capability, rationale="adds a home-run", kind="proposed_run",
-        payload={"preview": "ok"}, ttl_s=ttl_s,
+        payload={"preview": "ok", "dwg": session["drawing_id"]}, ttl_s=ttl_s,
     )
     return confirmation_id
 
@@ -398,6 +400,7 @@ def test_messages_confirm_valid_builds_frozen_proposal_shape_from_approval_row(c
         "proposal": {
             "tool": "write_home_run",
             "params": {"length_ft": 12},
+            "dwg": sess["drawing_id"],
             "capability": "drawing.write",
         },
     }
@@ -564,6 +567,7 @@ def test_messages_confirm_busy_gives_the_approval_back(client, monkeypatch):
         "proposal": {
             "tool": "write_home_run",
             "params": {"length_ft": 12},
+            "dwg": sess["drawing_id"],
             "capability": "drawing.write",
         },
     }]
