@@ -78,6 +78,17 @@ data/agent_session_grants.json*
 data/agent_rate_state.json*
 data/workspaces/
 
+# Compiled output from the LeafWriteTools .NET appbundle
+# (engine/appbundle-write/BUILD.md). Both Dockerfiles COPY engine/ wholesale
+# (deploy/Dockerfile.app, deploy/Dockerfile.broker), so a dev who built the
+# bundle and then ran `docker compose build` (RUN.md, deploy/README.md) bakes
+# their own build tree into both images. Already git-ignored, so a clean CI
+# checkout has none of them. Per-directory on purpose: a bare `engine/` would
+# drop the tracked appbundle sources the images need.
+engine/appbundle-write/bin/
+engine/appbundle-write/obj/
+engine/appbundle-write/build/
+
 # Local env / secrets — must never enter an image layer
 **/.env.local
 .env
