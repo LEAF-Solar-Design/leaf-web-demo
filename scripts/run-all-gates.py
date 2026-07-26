@@ -404,6 +404,12 @@ def build_suites() -> List[Suite]:
         # those suites run against the LEAF_AUTH_LIVE=0 header stub.
         Suite("server-checkout-capability", "server tests/test_checkout_capability.py",
               "pytest", SERVER, _py_pytest("tests/test_checkout_capability.py"), 29),
+        # The legacy checkout's CROSS-PROCESS acceptance. Spawns real OS
+        # processes, so it is the only suite that can catch the ownership bypass
+        # a per-process threading lock cannot see. No skipif: `fcntl` is the
+        # Linux path and `msvcrt` the Windows one, and both must execute.
+        Suite("server-checkout-crossproc", "server tests/test_checkout_crossproc.py",
+              "pytest", SERVER, _py_pytest("tests/test_checkout_crossproc.py"), 21),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
