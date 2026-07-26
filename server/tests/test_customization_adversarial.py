@@ -277,7 +277,7 @@ def test_shared_sqlite_fails_closed_for_r6_only_configuration(monkeypatch):
         effective_catalog_dir("tenant-a")
 
 
-def test_enabled_customization_uses_base_catalog_when_pin_is_absent(
+def test_enabled_customization_never_falls_back_when_pin_is_absent(
     tmp_path, monkeypatch
 ):
     database = tmp_path / "customization.db"
@@ -285,7 +285,8 @@ def test_enabled_customization_uses_base_catalog_when_pin_is_absent(
     monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))
     monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
 
-    assert effective_catalog_dir("tenant-a") is None
+    with pytest.raises(CustomizationServiceError, match="effective_catalog_unavailable"):
+        effective_catalog_dir("tenant-a")
 
 
 def test_effective_catalog_reuses_initialized_store(tmp_path, monkeypatch):
@@ -303,7 +304,10 @@ def test_effective_catalog_reuses_initialized_store(tmp_path, monkeypatch):
     CustomizationService.configured()
 
     for _ in range(2):
-        assert effective_catalog_dir("tenant-a") is None
+        with pytest.raises(
+            CustomizationServiceError, match="effective_catalog_unavailable"
+        ):
+            effective_catalog_dir("tenant-a")
 
     assert calls == [str(database)]
 

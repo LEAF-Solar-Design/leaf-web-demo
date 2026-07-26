@@ -252,8 +252,8 @@ def _legacy_drawing_head(tenant_id: str, drawing_id: str) -> int:
 
     backend = write_loop.backend_for_tenant(
         tenant_id,
-        aps_live=deps.APS_LIVE,
-        da=deps.get_da_client() if deps.APS_LIVE else None,
+        aps_live=False,
+        da=None,
     )
     write_loop.ensure_demo_drawing(backend, tenant_id, drawing_id)
     manifest = store.load_manifest(backend, tenant_id, drawing_id)
