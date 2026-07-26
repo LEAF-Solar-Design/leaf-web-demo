@@ -102,6 +102,13 @@ engine/appbundle-write/build/
 
 # Local env / secrets — must never enter an image layer
 **/.env.local
+# Vite's other local-env files. The line above is one exact name; Vite also
+# loads `.env.<mode>.local` (`.env.production.local` and friends), which is why
+# web/.gitignore:4 lists a bare `*.local` beside `.env.local`. Docker reads no
+# nested ignore file, so that rule covers nothing here, and `COPY web/ /web/`
+# (deploy/Dockerfile.web:23) would put such a file into the build-stage layer.
+# Repo-wide like the neighboring patterns; no tracked file matches it.
+**/*.local
 .env
 .secrets/
 **/.grant/
