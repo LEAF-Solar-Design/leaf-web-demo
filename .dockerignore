@@ -19,6 +19,27 @@ server/jobs.db-shm
 server/jobs.db-wal
 server/broker_ledger.jsonl
 server/broker_tenants.json
+# _save_tenants mkstemps its replacement as `.broker_tenants.json.<rand>.tmp`
+# beside the snapshot (server/broker.py); the leading dot keeps it outside a
+# `broker_tenants.json*` widening.
+server/.broker_tenants.json.*
+# Broker/jobs restart-survival sidecars and the site-demo solve cache. All three
+# Dockerfiles that `COPY server/` (app, broker, canonical-worker) would bake a
+# dev's local copies into the image, and none is read from /app/server at
+# runtime: BROKER_LEDGER and JOBS_DB point these at /data/state
+# (docker-compose.yml), which is where broker.py and jobs.py derive them from.
+# The trailing * / dotted glob cover the .tmp siblings each writer replaces
+# through, one of which embeds a pid and a thread id.
+server/active_workitems.jsonl*
+server/pending_reaps.jsonl*
+server/site_demo_cache.json
+server/.site_demo_cache.json.*
+# Materialized tenant catalog worktrees plus the `.materialize.lock` one level
+# in (server/customization_service.py). Checked out at runtime from the tenant
+# bare repo, and the deployed containers set LEAF_EFFECTIVE_TENANTS_DIR
+# explicitly (deploy/required-config.{app,broker}.json), so nothing reads this
+# path inside an image.
+server/customization-worktrees/
 server/agent_tenants.json*
 server/authored_tools.json
 server/drawings/
