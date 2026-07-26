@@ -103,15 +103,19 @@ def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_p
 
     monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
     monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    # Extraction is the UPLOAD lane, so it reads the shared fence directly
+    # (fence_open) rather than the authored lane's drawing_mutations_enabled.
+    # Patching the authored names here would leave the real fence in charge and
+    # the test would never reach its post-work recheck.
     monkeypatch.setattr(
-        broker.write_loop, "drawing_mutations_enabled", lambda: next(checks))
+        broker.write_loop, "fence_open", lambda: next(checks))
 
     @contextmanager
     def admitted_commit():
         yield True
 
     monkeypatch.setattr(
-        broker.write_loop, "drawing_mutation_commit_guard", admitted_commit)
+        broker.write_loop, "upload_mutation_commit_guard", admitted_commit)
     monkeypatch.setattr(broker, "_resolve_live_dwg", lambda _dwg: drawing)
     monkeypatch.setattr(broker, "_get_da", lambda: _Da())
 
