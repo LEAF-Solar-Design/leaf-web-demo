@@ -43,19 +43,17 @@ server/customization-worktrees/
 server/agent_tenants.json*
 server/authored_tools.json
 server/drawings/
-# Session + customization SQLite DBs (with WAL/SHM sidecars) and the broker
-# work queues. Written at runtime, redirected to the leaf-state volume in the
-# containers (SESSIONS_DB, docker-compose.yml), and never git-tracked, so a
-# clean CI checkout has none of them. Without these lines a dev who ran the
-# server locally bakes their own sessions into both images.
+# Session + customization SQLite DBs, with their WAL/SHM sidecars. Written at
+# runtime, redirected to the leaf-state volume in the containers (SESSIONS_DB,
+# docker-compose.yml), and never git-tracked, so a clean CI checkout has none
+# of them. Without these lines a dev who ran the server locally bakes their own
+# sessions into both images.
 server/sessions.db
 server/sessions.db-shm
 server/sessions.db-wal
 server/customization.db
 server/customization.db-shm
 server/customization.db-wal
-server/active_workitems.jsonl
-server/pending_reaps.jsonl
 # Guest drawing store: raw user-supplied DWG/DXF written at runtime under
 # guest_store_dir() (server/write_loop.py, LEAF_GUEST_STORE_DIR). Same
 # customer-data class as data/uploads/ below.
@@ -77,6 +75,17 @@ data/agent_approvals/
 data/agent_session_grants.json*
 data/agent_rate_state.json*
 data/workspaces/
+
+# Compiled output from the LeafWriteTools .NET appbundle
+# (engine/appbundle-write/BUILD.md). Both Dockerfiles COPY engine/ wholesale
+# (deploy/Dockerfile.app, deploy/Dockerfile.broker), so a dev who built the
+# bundle and then ran `docker compose build` (RUN.md, deploy/README.md) bakes
+# their own build tree into both images. Already git-ignored, so a clean CI
+# checkout has none of them. Per-directory on purpose: a bare `engine/` would
+# drop the tracked appbundle sources the images need.
+engine/appbundle-write/bin/
+engine/appbundle-write/obj/
+engine/appbundle-write/build/
 
 # Local env / secrets — must never enter an image layer
 **/.env.local
