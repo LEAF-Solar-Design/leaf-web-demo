@@ -397,13 +397,14 @@ export type { StopReason, HarnessTurnEvent, ConverseTurnInput, ConverseRunner, C
 // enforced by test/converseRuntimeSeparation.test.ts).
 // --------------------------------------------------------------------------- //
 
-/** The six spine tool names — the catalog is DATA, not tools, so this set is fixed. */
+/** The seven spine tool names. The catalog is data, not model-owned code. */
 export const SPINE_TOOL_NAMES = [
   "catalog_search",
   "drawing_state",
   "run_capability",
   "job_status",
   "author_tool",
+  "request_publication",
   "request_confirmation",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
@@ -466,11 +467,11 @@ export interface SpineToolResult {
 
 /**
  * The tool-execution surface the ConverseLoop hands the runner. The runner invokes
- * spine tools ONLY through this; the loop implements the six tools (gate check +
+ * spine tools ONLY through this; the loop implements the seven tools (gate check +
  * AppRunClient dispatch) and emits the wire events around each call.
  */
 export interface ToolExecutor {
-  /** The mounted tool names (always the six spine tools). */
+  /** The mounted tool names (always the seven spine tools). */
   list(): readonly string[];
   execute(tool: string, args: Record<string, unknown>): Promise<SpineToolResult>;
 }
@@ -537,6 +538,9 @@ export interface CapabilityEntry {
   capabilities: Capability[];
   params_schema?: JsonSchema;
   catalog_digest?: string;
+  tool_manifest_sha256?: string;
+  catalog_commit?: string;
+  effective_catalog_digest?: string;
   [k: string]: unknown;
 }
 
@@ -547,6 +551,13 @@ export interface SubmitRunRequest {
   params: Record<string, unknown>;
   dwg: string;
   catalogDigest: string;
+  /** Immutable drawing version approved for this run. */
+  drawingVersion?: number;
+  /** Optimistic head precondition checked by the app before job submission. */
+  expectedDrawingHead?: number;
+  catalogCommit?: string;
+  effectiveCatalogDigest?: string;
+  toolManifestSha256?: string;
   /** Fast-tool read path: hold the request open (?wait=1) up to waitTimeoutS. */
   wait?: boolean;
   waitTimeoutS?: number;
@@ -570,7 +581,16 @@ export interface AppRunClient {
     what: "summary" | "versions" | "checkout",
   ): Promise<Record<string, unknown>>;
   /** POST /api/author after the author_tool gate grants an approved request. */
-  authorTool(tenantId: string, description: string): Promise<Record<string, unknown>>;
+  authorTool(
+    tenantId: string,
+    description: string,
+    idempotencyKey: string,
+  ): Promise<Record<string, unknown>>;
+  /** Request or resume publication of one durable staged change set. */
+  requestPublication(
+    tenantId: string,
+    changeSetId: string,
+  ): Promise<Record<string, unknown>>;
   /** POST /api/run for registered deterministic tool execution. */
   submitRun(req: SubmitRunRequest): Promise<SubmitRunResponse>;
   /** GET /api/jobs/{id} — section-7 job row. */

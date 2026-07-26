@@ -509,13 +509,162 @@ class CustomizationService:
             raise CustomizationServiceError("independent_approval_pending", 409)
         return {"confirmation_id": record["confirmation_id"]}
 
+    @staticmethod
+    def _publication_status(change: ChangeSet, status: str) -> dict[str, Any]:
+        """Return the bounded agent-facing view, without approval material."""
+        result: dict[str, Any] = {
+            "contract": CONTRACT,
+            "change_set_id": change.change_set_id,
+            "status": status,
+        }
+        if status == "published":
+            result["catalog_digest"] = change.catalog_digest
+        return result
+
+    def request_publication(
+        self, *, tenant: Any, change_set_id: str
+    ) -> dict[str, Any]:
+        """Continue an independently approved publish from durable server data."""
+        tenant_id = _tenant_id(tenant)
+        if not deps.auth_live():
+            raise CustomizationServiceError("customization_auth_required", 503)
+        if not enabled(6, tenant_id):
+            raise CustomizationServiceError("customization_publish_disabled", 404)
+
+        # JWT callers still need a current owner/editor binding. A subject-less
+        # TenantContext is produced only by require_tenant's exact dispatch
+        # back-edge allowlist, whose authority can request continuation but can
+        # neither issue nor supply the independent confirmation.
+        if getattr(tenant, "subject", None) is not None:
+            binding = _binding(tenant)
+            if binding.role not in {"owner", "editor"}:
+                raise CustomizationServiceError("tenant_role_denied", 403)
+
+        try:
+            change = self.store.get_change_set(
+                tenant_id=tenant_id, change_set_id=change_set_id
+            )
+            continuation = self.store.get_or_create_publication_request(
+                tenant_id=tenant_id, change_set_id=change.change_set_id
+            )
+        except ChangeSetNotFoundError as exc:
+            raise CustomizationServiceError(
+                "publication_request_not_available", 404
+            ) from exc
+
+        if change.state is ChangeState.PUBLISHED:
+            try:
+                effective = self.store.get_effective_catalog(tenant_id=tenant_id)
+            except ChangeSetNotFoundError as exc:
+                raise CustomizationServiceError("publish_not_available") from exc
+            if effective.change_set_id != change.change_set_id:
+                raise CustomizationServiceError("publish_not_available")
+            return self._publication_status(change, "published")
+
+        if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING}:
+            raise CustomizationServiceError("publication_request_not_available")
+
+        confirmation_id = continuation.get("confirmation_id")
+        if change.state is ChangeState.STAGED:
+            record = self.store.find_unconsumed_confirmation(
+                tenant_id=tenant_id, change_set_id=change.change_set_id
+            )
+            if record is None:
+                if continuation.get("status") == "denied":
+                    return self._publication_status(change, "denied")
+                return self._publication_status(change, "awaiting_approval")
+            if confirmation_id != record["confirmation_id"]:
+                continuation = self.store.bind_publication_confirmation(
+                    tenant_id=tenant_id,
+                    change_set_id=change.change_set_id,
+                    confirmation_id=record["confirmation_id"],
+                )
+                confirmation_id = continuation["confirmation_id"]
+        elif confirmation_id is None:
+            raise CustomizationServiceError(
+                "publish_recovery_authority_invalid", 403
+            )
+
+        request = PublishRequest(
+            change.change_set_id,
+            change.staged_commit or "",
+            change.catalog_digest or "",
+            change.desired_platform_release,
+            change.workspace_contract_digest,
+        )
+        key_material = json.dumps(
+            {"tenant_id": tenant_id, "change_set_id": change.change_set_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        idempotency_key = (
+            "publication-request:"
+            + hashlib.sha256(key_material).hexdigest()
+        )
+        self._publish(
+            tenant=tenant,
+            request=request,
+            confirmation_id=confirmation_id,
+            idempotency_key=idempotency_key,
+            require_actor_binding=False,
+        )
+        durable = self.store.get_change_set(
+            tenant_id=tenant_id, change_set_id=change.change_set_id
+        )
+        if durable.state is not ChangeState.PUBLISHED:
+            raise CustomizationServiceError("customization_publish_incomplete", 503)
+        return self._publication_status(durable, "published")
+
+    def deny_publication(
+        self, *, tenant_id: str, change_set_id: str
+    ) -> dict[str, Any]:
+        """Record an independent trusted denial without issuing authority."""
+        tenant_id = _tenant_id(tenant_id)
+        if not deps.auth_live():
+            raise CustomizationServiceError("customization_auth_required", 503)
+        if not enabled(6, tenant_id):
+            raise CustomizationServiceError("customization_publish_disabled", 404)
+        change = self.store.get_change_set(
+            tenant_id=tenant_id, change_set_id=change_set_id
+        )
+        if change.state is not ChangeState.STAGED:
+            raise CustomizationServiceError("publication_denial_not_available")
+        staff = os.environ.get(
+            "LEAF_CUSTOMIZATION_INTERNAL_APPROVER_SUBJECT", ""
+        ).strip()
+        if not staff:
+            raise CustomizationServiceError("staff_authority_unavailable", 503)
+        self.store.get_or_create_publication_request(
+            tenant_id=tenant_id,
+            change_set_id=change.change_set_id,
+        )
+        self.store.deny_publication_request(
+            tenant_id=tenant_id,
+            change_set_id=change.change_set_id,
+            reason_code="independent_approver_denied",
+        )
+        return self._publication_status(change, "denied")
+
     def publish(self, *, tenant: Any, request: PublishRequest, confirmation_id: str, idempotency_key: str) -> dict[str, Any]:
+        return self._publish(
+            tenant=tenant,
+            request=request,
+            confirmation_id=confirmation_id,
+            idempotency_key=idempotency_key,
+            require_actor_binding=True,
+        )
+
+    def _publish(
+        self, *, tenant: Any, request: PublishRequest, confirmation_id: str,
+        idempotency_key: str, require_actor_binding: bool,
+    ) -> dict[str, Any]:
         tenant_id = _tenant_id(tenant)
         if not enabled(6, tenant_id):
             raise CustomizationServiceError("customization_publish_disabled", 404)
-        binding = _binding(tenant)
-        if binding.role not in {"owner", "editor"}:
-            raise CustomizationServiceError("tenant_role_denied", 403)
+        if require_actor_binding:
+            binding = _binding(tenant)
+            if binding.role not in {"owner", "editor"}:
+                raise CustomizationServiceError("tenant_role_denied", 403)
         change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=request.change_set_id)
         if (change.staged_commit, change.catalog_digest, change.desired_platform_release, change.workspace_contract_digest) != (
             request.staged_commit, request.catalog_digest, request.platform_release, request.workspace_contract_digest):
@@ -1109,3 +1258,21 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
         raise
     except (OSError, sqlite3.DatabaseError, subprocess.SubprocessError) as exc:
         raise _unavailable(f"{type(exc).__name__}: {exc}") from exc
+
+
+def effective_catalog_pin(tenant_id: str) -> dict[str, str] | None:
+    """Return the durable effective catalog generation without materializing it."""
+    tenant_id = _tenant_id(tenant_id)
+    path = database_path()
+    if not path.exists():
+        return None
+    try:
+        pin = CustomizationService.configured().store.get_effective_catalog(
+            tenant_id=tenant_id
+        )
+    except ChangeSetNotFoundError:
+        return None
+    return {
+        "catalog_commit": pin.catalog_commit,
+        "effective_catalog_digest": pin.catalog_digest,
+    }

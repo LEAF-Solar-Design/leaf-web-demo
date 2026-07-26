@@ -12,6 +12,7 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 from uuid import uuid4
@@ -100,6 +101,19 @@ CREATE TABLE IF NOT EXISTS customization_confirmations (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS customization_publication_requests (
+  tenant_id TEXT NOT NULL,
+  change_set_id TEXT NOT NULL,
+  confirmation_id TEXT,
+  status TEXT NOT NULL DEFAULT 'awaiting_approval',
+  reason_code TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (tenant_id, change_set_id),
+  FOREIGN KEY (change_set_id) REFERENCES customization_change_sets(change_set_id),
+  FOREIGN KEY (confirmation_id) REFERENCES customization_confirmations(confirmation_id)
+);
+
 CREATE TABLE IF NOT EXISTS customization_deployment_snapshots (
   snapshot_id TEXT PRIMARY KEY,
   payload_json TEXT NOT NULL,
@@ -165,6 +179,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     self._migrate_confirmation_bindings(conn)
+                    self._migrate_publication_requests(conn)
                 except Exception:
                     conn.rollback()
                     raise
@@ -209,6 +224,26 @@ class SQLiteCustomizationStore(CustomizationRepository):
             "ON customization_confirmations "
             "(tenant_id, change_set_id, consumed, created_at DESC)"
         )
+
+    @staticmethod
+    def _migrate_publication_requests(conn: sqlite3.Connection) -> None:
+        """Add request status without changing the staged change state."""
+        columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(customization_publication_requests)"
+            )
+        }
+        if "status" not in columns:
+            conn.execute(
+                "ALTER TABLE customization_publication_requests "
+                "ADD COLUMN status TEXT NOT NULL DEFAULT 'awaiting_approval'"
+            )
+        if "reason_code" not in columns:
+            conn.execute(
+                "ALTER TABLE customization_publication_requests "
+                "ADD COLUMN reason_code TEXT"
+            )
 
     ensure_started = initialize
 
@@ -441,29 +476,147 @@ class SQLiteCustomizationStore(CustomizationRepository):
         """Return an already-issued independent approval, never mint one."""
         self.initialize()
         with self._connection() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 "SELECT confirmation_id, payload_json, signature, consumed "
                 "FROM customization_confirmations "
                 "WHERE tenant_id = ? AND change_set_id = ? AND consumed = 0 "
-                "ORDER BY created_at DESC LIMIT 1",
+                "ORDER BY created_at DESC, rowid DESC",
+                (tenant_id, change_set_id),
+            ).fetchall()
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            expires_at = None
+            if "expires_at" in payload:
+                try:
+                    expires_at = datetime.fromisoformat(
+                        str(payload["expires_at"]).replace("Z", "+00:00")
+                    )
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    continue
+            if (payload.get("tenant_id"), payload.get("change_set_id")) != (
+                tenant_id, change_set_id
+            ) or (
+                expires_at is not None
+                and now >= expires_at.astimezone(timezone.utc)
+            ):
+                continue
+            return {
+                "confirmation_id": row["confirmation_id"],
+                "payload": payload,
+                "signature": row["signature"],
+                "consumed": False,
+            }
+        return None
+
+    def get_or_create_publication_request(
+        self, *, tenant_id: str, change_set_id: str
+    ) -> dict:
+        """Durably record one publication continuation per tenant change set."""
+        tenant_id = require_bounded(tenant_id, "tenant_id", 200)
+        change_set_id = require_uuid(change_set_id)
+        with self._transaction() as conn:
+            self._find_change_set(conn, tenant_id, change_set_id)
+            conn.execute(
+                "INSERT OR IGNORE INTO customization_publication_requests "
+                "(tenant_id, change_set_id) VALUES (?, ?)",
+                (tenant_id, change_set_id),
+            )
+            row = conn.execute(
+                "SELECT tenant_id, change_set_id, confirmation_id, status, reason_code, "
+                "created_at, updated_at "
+                "FROM customization_publication_requests "
+                "WHERE tenant_id = ? AND change_set_id = ?",
                 (tenant_id, change_set_id),
             ).fetchone()
-        if row is None:
-            return None
-        try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, json.JSONDecodeError):
-            return None
-        if (payload.get("tenant_id"), payload.get("change_set_id")) != (
-            tenant_id, change_set_id
-        ):
-            return None
-        return {
-            "confirmation_id": row["confirmation_id"],
-            "payload": payload,
-            "signature": row["signature"],
-            "consumed": False,
-        }
+            return dict(row)
+
+    def bind_publication_confirmation(
+        self, *, tenant_id: str, change_set_id: str, confirmation_id: str
+    ) -> dict:
+        """Bind an already-issued exact approval to the durable continuation."""
+        tenant_id = require_bounded(tenant_id, "tenant_id", 200)
+        change_set_id = require_uuid(change_set_id)
+        confirmation_id = require_bounded(
+            confirmation_id, "confirmation_id", 200
+        )
+
+        with self._transaction() as conn:
+            change = self._find_change_set(conn, tenant_id, change_set_id)
+            request = conn.execute(
+                "SELECT confirmation_id FROM customization_publication_requests "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            if request is None:
+                raise ChangeSetNotFoundError("publication request was not found")
+            if (
+                request["confirmation_id"] not in (None, confirmation_id)
+                and change.state is not ChangeState.STAGED
+            ):
+                raise ChangeSetConflictError(
+                    "publication request is bound to another confirmation"
+                )
+            confirmation = conn.execute(
+                "SELECT 1 FROM customization_confirmations "
+                "WHERE confirmation_id = ? AND tenant_id = ? AND change_set_id = ?",
+                (confirmation_id, tenant_id, change_set_id),
+            ).fetchone()
+            if confirmation is None:
+                raise ChangeSetConflictError(
+                    "confirmation is not bound to this publication request"
+                )
+            conn.execute(
+                "UPDATE customization_publication_requests "
+                "SET confirmation_id = ?, status = 'awaiting_approval', reason_code = NULL, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (confirmation_id, tenant_id, change_set_id),
+            )
+            row = conn.execute(
+                "SELECT tenant_id, change_set_id, confirmation_id, status, reason_code, "
+                "created_at, updated_at "
+                "FROM customization_publication_requests "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            return dict(row)
+
+    def deny_publication_request(
+        self, *, tenant_id: str, change_set_id: str, reason_code: str
+    ) -> dict:
+        """Deny one continuation while leaving its staged change reusable."""
+        tenant_id = require_bounded(tenant_id, "tenant_id", 200)
+        change_set_id = require_uuid(change_set_id)
+        reason_code = require_bounded(reason_code, "reason_code", 200)
+        with self._transaction() as conn:
+            self._find_change_set(conn, tenant_id, change_set_id)
+            conn.execute(
+                "UPDATE customization_confirmations SET consumed = 1 "
+                "WHERE tenant_id = ? AND change_set_id = ? AND consumed = 0",
+                (tenant_id, change_set_id),
+            )
+            result = conn.execute(
+                "UPDATE customization_publication_requests "
+                "SET status = 'denied', reason_code = ?, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (reason_code, tenant_id, change_set_id),
+            )
+            if result.rowcount != 1:
+                raise ChangeSetNotFoundError("publication request was not found")
+            row = conn.execute(
+                "SELECT tenant_id, change_set_id, confirmation_id, status, reason_code, "
+                "created_at, updated_at FROM customization_publication_requests "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            return dict(row)
 
     def prepare_publish(
         self,

@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 
 import {
   BadMessageError,
@@ -299,6 +300,32 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(ofType(events, "turn_usage")[0]!.data).toMatchObject({ cost_tokens: 170 });
     expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
   });
+
+  it("a local write tool dry run uses the read rung and creates no write proposal", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, 'RUN:add-panel PARAMS:{"dry_run":true}');
+
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).toMatchObject({
+      tool: "add-panel",
+      params: { dry_run: true },
+      wait: false,
+    });
+    expect(gate.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "run_read_tool",
+          decision: "allow",
+          args: expect.objectContaining({
+            tool: "add-panel",
+            params: { dry_run: true },
+          }),
+        }),
+      ]),
+    );
+    expect(ofType(await store.eventsAfter(s.session_id, 0), "proposed_run")).toHaveLength(0);
+  });
 });
 
 describe("ConverseLoop — write split turns (wire contract section 7)", () => {
@@ -374,13 +401,53 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
 
     // ...and dispatch happened (write: async row, no inline wait).
     expect(appRun.submitCalls).toHaveLength(1);
-    expect(appRun.submitCalls[0]).toMatchObject({ tool: "add-panel", dwg: "rooftop_demo", wait: false });
+    expect(appRun.submitCalls[0]).toMatchObject({
+      tool: "add-panel",
+      dwg: "rooftop_demo",
+      catalogDigest: expect.stringMatching(/^sha256:/),
+      drawingVersion: 3,
+      expectedDrawingHead: 3,
+      catalogCommit: "a".repeat(40),
+      effectiveCatalogDigest: "b".repeat(64),
+      toolManifestSha256: `sha256:${"3".repeat(64)}`,
+      wait: false,
+    });
     expect(ofType(events2, "job_linked")).toHaveLength(1);
     expect(ofType(events2, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
 
     // The resume turn resumed the SDK session captured on turn 1.
     expect(runner.runs[1]!.resumeSdkSessionId).toBe("fake-sdk-session-1");
     expect(runner.runs[1]!.userMessage).toContain(`CONFIRMATION ${cid} APPROVED — dispatch it now.`);
+  });
+
+  it("rejects an approved write when the drawing head changed", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, "RUN:add-panel");
+    const cid = String(
+      ofType(await store.eventsAfter(s.session_id, 0), "proposed_run")[0]!.data.confirmation_id,
+    );
+
+    gate.grant(cid);
+    appRun.drawingHead = 4;
+    const { done } = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    });
+    await done;
+
+    expect(appRun.submitCalls).toHaveLength(0);
+    expect(gate.checks).toContainEqual(expect.objectContaining({
+      action: "run_write_tool",
+      args: expect.objectContaining({
+        confirmation_id: cid,
+        drawing_version: 4,
+        expected_drawing_head: 4,
+      }),
+      decision: "deny",
+    }));
   });
 
   it("a denied confirm message resumes without dispatching", async () => {
@@ -586,11 +653,12 @@ describe("ConverseLoop — gate action vocabulary (app policy catalog)", () => {
     expect(gate.checks[0]!.args).toEqual({ what: "capabilities" });
     expect(gate.checks[1]!.args).toEqual({ what: "versions" });
     expect(gate.checks[2]!.args).toEqual({ what: "jobs" });
-    // run_* args normalize the target drawing onto the approval-bound schema.
+    // run_* args include the exact catalog and drawing target pins.
     expect(gate.checks[3]!.args).toEqual({
       tool: "count-by-layer",
       params: {},
       dwg: "rooftop_demo",
+      catalog_digest: `sha256:${"1".repeat(64)}`,
     });
   });
 });
@@ -655,14 +723,41 @@ describe("ConverseLoop — remaining spine tools", () => {
     });
     await done;
 
+    const idempotencyKey = `author:${createHash("sha256")
+      .update(JSON.stringify({
+        action: "author_tool",
+        tenant_id: "demo-tenant",
+        session_id: s.session_id,
+        description: "panel-gap-checker",
+      }))
+      .digest("hex")}`;
     expect(appRun.authorCalls).toEqual([
-      { tenantId: "demo-tenant", description: "panel-gap-checker" },
+      { tenantId: "demo-tenant", description: "panel-gap-checker", idempotencyKey },
     ]);
     expect(gate.checks).toContainEqual(expect.objectContaining({
       action: "author_tool",
       args: expect.objectContaining({ confirmation_id: cid }),
       decision: "allow",
     }));
+  });
+
+  it("request_publication sends only the durable change-set id", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const changeSetId = "7f3a51f0-9d9a-43be-8d29-cbdba31249c8";
+
+    await sendText(loop, s, `PUBLISH:${changeSetId}`);
+
+    expect(appRun.publicationCalls).toEqual([
+      { tenantId: "demo-tenant", changeSetId },
+    ]);
+    expect(gate.checks).toContainEqual(expect.objectContaining({
+      action: "request_publication",
+      args: { change_set_id: changeSetId },
+      decision: "allow",
+    }));
+    const result = ofType(await store.eventsAfter(s.session_id, 0), "tool_result")[0]!;
+    expect(JSON.stringify(result.data)).not.toContain("confirmation_id");
   });
 
   it("request_confirmation emits the chip carrying the id the GATE minted", async () => {

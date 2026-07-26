@@ -37,6 +37,9 @@ export const FAKE_CATALOG: CapabilityEntry[] = [
   {
     name: "add-panel",
     catalog_digest: `sha256:${"3".repeat(64)}`,
+    tool_manifest_sha256: `sha256:${"3".repeat(64)}`,
+    catalog_commit: "a".repeat(40),
+    effective_catalog_digest: "b".repeat(64),
     description: "Add a solar panel block to the drawing (writes a new version).",
     capabilities: ["drawing.read", "drawing.write"],
   },
@@ -45,6 +48,9 @@ export const FAKE_CATALOG: CapabilityEntry[] = [
     // the submit_live_solve (R4, real-USD) gate rung.
     name: "solve-live",
     catalog_digest: `sha256:${"4".repeat(64)}`,
+    tool_manifest_sha256: `sha256:${"4".repeat(64)}`,
+    catalog_commit: "a".repeat(40),
+    effective_catalog_digest: "b".repeat(64),
     description: "Run the live APS solve on the drawing (real-USD compute).",
     capabilities: ["drawing.read", "drawing.write"],
     aps_live: true,
@@ -68,10 +74,16 @@ function envelopeFor(tool: string): ResultEnvelope {
 export class FakeAppRunClient implements AppRunClient {
   /** Every submitRun payload, verbatim (the invariant spy inspects these). */
   readonly submitCalls: SubmitRunRequest[] = [];
-  readonly authorCalls: Array<{ tenantId: string; description: string }> = [];
+  readonly authorCalls: Array<{
+    tenantId: string;
+    description: string;
+    idempotencyKey: string;
+  }> = [];
+  readonly publicationCalls: Array<{ tenantId: string; changeSetId: string }> = [];
   /** Ordered method-name log: proof of which surfaces were touched, and when. */
   readonly methodLog: string[] = [];
   catalog: CapabilityEntry[] = [...FAKE_CATALOG];
+  drawingHead = 3;
   private readonly jobs = new Map<string, Record<string, unknown>>();
   private counter = 0;
 
@@ -92,9 +104,9 @@ export class FakeAppRunClient implements AppRunClient {
     if (what === "versions") {
       return {
         drawing_id: drawingId,
-        head: 3,
-        latest: 3,
-        versions: [{ v: 3, tool: "add-panel", created: "2026-07-20T00:00:00Z" }],
+        head: this.drawingHead,
+        latest: this.drawingHead,
+        versions: [{ v: this.drawingHead, tool: "add-panel", created: "2026-07-20T00:00:00Z" }],
         checkout: null,
       };
     }
@@ -119,9 +131,13 @@ export class FakeAppRunClient implements AppRunClient {
     return { job_id: jobId, status: "submitted" };
   }
 
-  async authorTool(tenantId: string, description: string): Promise<Record<string, unknown>> {
+  async authorTool(
+    tenantId: string,
+    description: string,
+    idempotencyKey: string,
+  ): Promise<Record<string, unknown>> {
     this.methodLog.push("authorTool");
-    this.authorCalls.push({ tenantId, description });
+    this.authorCalls.push({ tenantId, description, idempotencyKey });
     return {
       tool: { name: "panel-gap-checker", capabilities: ["drawing.read"] },
       preview: "Created panel-gap-checker.",
@@ -134,5 +150,14 @@ export class FakeAppRunClient implements AppRunClient {
     const row = this.jobs.get(jobId);
     if (!row) return { job_id: jobId, status: "unknown" };
     return row;
+  }
+
+  async requestPublication(
+    tenantId: string,
+    changeSetId: string,
+  ): Promise<Record<string, unknown>> {
+    this.methodLog.push("requestPublication");
+    this.publicationCalls.push({ tenantId, changeSetId });
+    return { change_set_id: changeSetId, status: "awaiting_approval" };
   }
 }

@@ -10,8 +10,9 @@ server/broker.py delegates here for any tool whose package declares
 Two representations of a stored version (documented in CONTRACT-ADDENDUM §11):
 
   * APS_LIVE=0 (mock): a version's payload IS the intake JSON. The write tool's
-    `run(intake, params)` returns `result.mutations = {added, removed}`; the chain
-    applies them to the CURRENT version's intake -> new intake -> put_drawing.
+    `run(intake, params)` returns additive `result.mutations` with `added`,
+    `removed`, and/or first-class `transforms`; the chain applies them to the
+    CURRENT version's intake -> new intake -> put_drawing.
   * APS_LIVE=1 (live): a version's payload is real DWG bytes; a sibling
     `*.intake.json` cache key holds the re-extracted intake. The chain runs the
     proven LeafWriteProbe Activity (HostDwg = current version, Result = output.dwg),
@@ -28,6 +29,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import sys
@@ -341,11 +343,120 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
     return v, json.loads(raw.decode("utf-8"))
 
 
+def _transform_number(value: Any, field: str, handle: str) -> float:
+    """Return one finite transform number, rejecting JSON booleans as numbers."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"transform {handle!r} has non-numeric {field}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"transform {handle!r} has non-finite {field}")
+    return number
+
+
+def _rounded_coordinate(value: float) -> float:
+    """Round transformed XY values and canonicalize both forms of zero."""
+    rounded = round(value, 9)
+    return 0.0 if rounded == 0 else rounded
+
+
+def _validated_transforms(intake: Dict[str, Any], mutations: Dict[str, Any]):
+    """Validate the complete panel-transform/v1 batch before anything is copied.
+
+    The returned map is keyed by handle, so transform declaration order cannot
+    affect the resulting intake.
+    """
+    if "transforms" not in mutations:
+        return {}
+    transforms = mutations["transforms"]
+    if not isinstance(transforms, list):
+        raise ValueError("mutations.transforms must be a list")
+    if not transforms:
+        raise ValueError("mutations.transforms must not be empty")
+
+    polylines = (intake or {}).get("polylines") or []
+    by_handle = {}
+    for polyline in polylines:
+        if not isinstance(polyline, dict):
+            continue
+        handle = polyline.get("handle")
+        if isinstance(handle, str) and handle:
+            if handle in by_handle:
+                by_handle[handle] = None
+            else:
+                by_handle[handle] = polyline
+
+    validated = {}
+    for index, transform in enumerate(transforms):
+        if not isinstance(transform, dict):
+            raise ValueError(f"transform at index {index} must be an object")
+        handle = transform.get("handle")
+        if not isinstance(handle, str) or not handle:
+            raise ValueError(f"transform at index {index} has an invalid handle")
+        if handle in validated:
+            raise ValueError(f"duplicate transform handle {handle!r}")
+        polyline = by_handle.get(handle)
+        if polyline is None:
+            if handle in by_handle:
+                raise ValueError(f"transform handle {handle!r} is ambiguous")
+            raise ValueError(f"unknown transform handle {handle!r}")
+
+        if "dx" not in transform or "dy" not in transform:
+            raise ValueError(f"transform {handle!r} requires dx and dy")
+        dx = _transform_number(transform["dx"], "dx", handle)
+        dy = _transform_number(transform["dy"], "dy", handle)
+        rotation = _transform_number(
+            transform.get("rotation_deg", 0), "rotation_deg", handle)
+        if abs(dx) > 10000 or abs(dy) > 10000:
+            raise ValueError(f"transform {handle!r} translation exceeds 10000")
+        if not -360 <= rotation <= 360:
+            raise ValueError(f"transform {handle!r} rotation is outside [-360, 360]")
+
+        points = polyline.get("pts")
+        if not isinstance(points, list) or len(points) < 3:
+            raise ValueError(f"transform {handle!r} requires at least 3 points")
+        for point_index, point in enumerate(points):
+            if not isinstance(point, list) or len(point) < 2:
+                raise ValueError(
+                    f"transform {handle!r} has malformed point {point_index}")
+            _transform_number(point[0], f"pts[{point_index}].x", handle)
+            _transform_number(point[1], f"pts[{point_index}].y", handle)
+        validated[handle] = (dx, dy, rotation)
+    return validated
+
+
 def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply `{added:[<intake entities>], removed:[<handles>]}` to a copy of the
-    current intake and return the NEW intake. Removes polylines by handle; appends
-    added entities and registers any new layer they introduce."""
+    """Apply additive, remove, and panel-transform/v1 mutations to a copy.
+
+    A transform rotates an existing polyline in XY about its source vertex
+    centroid, then translates it. Z coordinates and all other data are retained.
+    The entire transform batch is validated before mutation, so failures are
+    atomic from the caller's perspective.
+    """
+    transforms = _validated_transforms(intake, mutations)
     new = copy.deepcopy(intake or {})
+    if transforms:
+        for polyline in new.get("polylines") or []:
+            handle = polyline.get("handle")
+            if handle not in transforms:
+                continue
+            dx, dy, rotation = transforms[handle]
+            points = polyline["pts"]
+            center_x = sum(float(point[0]) for point in points) / len(points)
+            center_y = sum(float(point[1]) for point in points) / len(points)
+            radians = math.radians(rotation)
+            cosine, sine = math.cos(radians), math.sin(radians)
+            transformed_points = []
+            for point in points:
+                relative_x = float(point[0]) - center_x
+                relative_y = float(point[1]) - center_y
+                transformed = list(point)
+                transformed[0] = _rounded_coordinate(
+                    center_x + relative_x * cosine - relative_y * sine + dx)
+                transformed[1] = _rounded_coordinate(
+                    center_y + relative_x * sine + relative_y * cosine + dy)
+                transformed_points.append(transformed)
+            polyline["pts"] = transformed_points
+
     removed = {str(h) for h in (mutations.get("removed") or [])}
     if removed:
         new["polylines"] = [p for p in (new.get("polylines") or [])
@@ -602,6 +713,15 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
 
     result = env.get("result") or {}
     mutations = result.get("mutations") or {}
+    if params.get("dry_run") is True:
+        # Design-time validation and user previews must never advance drawing
+        # history. Return the deterministic proposal exactly as the tool
+        # computed it, but stop before applying mutations or publishing vN+1.
+        result["dry_run"] = True
+        env["result"] = result
+        if degraded:
+            env["degraded_mode"] = True
+        return env, 200
     try:
         new_intake = apply_mutations(cur_intake, mutations)
         with drawing_mutation_commit_guard() as commit_enabled:

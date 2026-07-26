@@ -881,12 +881,18 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
 # --------------------------------------------------------------------------- #
 # execution
 # --------------------------------------------------------------------------- #
-def _progress_phase(tool: Dict[str, Any], aps_live: bool) -> str:
+def _progress_phase(
+    tool: Dict[str, Any],
+    aps_live: bool,
+    params: Optional[Dict[str, Any]] = None,
+) -> str:
     """The progress phase a run ENTERS before the (blocking) broker call (Contract 5c,
     §15). Read tools -> 'executing'; write tools -> 'storing version' (mock APS_LIVE=0)
     / 'extracting' (live re-extract APS_LIVE=1). Short + stable strings; documented in
     §15 as the vocabulary SSE/poll consumers can render."""
     caps = (tool or {}).get("capabilities") or []
+    if isinstance(params, dict) and params.get("dry_run") is True:
+        return "executing"
     if "drawing.write" in caps:
         return "extracting" if aps_live else "storing version"
     return "executing"
@@ -971,7 +977,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
     # Richer progress (Contract 5c, §15): mark the real phase this run is ENTERING
     # before the (blocking) broker call, so SSE/poll consumers see more than status flips.
-    _heartbeat(job_id, worker_id, _progress_phase(tool, aps_live))
+    _heartbeat(job_id, worker_id, _progress_phase(tool, aps_live, params))
 
     holder: Dict[str, Any] = {}
 

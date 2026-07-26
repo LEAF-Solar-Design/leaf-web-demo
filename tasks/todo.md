@@ -16,6 +16,19 @@ Risks:
 - Web build arguments must remain staging-only and must never move production aliases.
 - Database and worker rollout stays operator-gated and uses named or federated AWS identity.
 
+# Standards surface cat operator flow
+
+- [x] Replace the `/try` command-bar redirect with an in-scene request flow.
+- [x] Show proposal approval, execution, result, version, Undo, and Redo in the same scene.
+- [x] Add browser coverage that proves `/try` stays on `/try` throughout the flow.
+- [x] Run the frontend build and focused browser proof, then inspect the final scene.
+
+Risks:
+
+- Keep `/app` and its backend contracts unchanged.
+- Keep the cat data labeled as a deterministic proof fixture, not a live Claude or APS run.
+- Preserve the committed motion and calm-surface standards.
+
 # Live edge-contract repair
 
 - [x] Bound `drawing_state` summary output while preserving useful counts.
@@ -188,3 +201,17 @@ Risks:
 - Approval arguments are security-sensitive and must remain byte-equivalent across the app and harness.
 - Existing approvals without a stored drawing must fail closed instead of gaining a new target.
 - The client cannot choose or alter the drawing during confirmation replay.
+
+# Orbitable 3D cat proof
+
+- [x] Add a browser assertion for real panel depth and camera orbit.
+- [x] Render the cat version as an extruded panel sculpture without changing its drawing evidence.
+- [x] Enable orbit, pan, and zoom only on the interactive cat surface.
+- [x] Keep proposal, approval, version, Undo, and Redo behavior unchanged.
+- [x] Run the browser proof, production build, focused server tests, and self-review.
+
+Risks:
+
+- The display treatment must not alter panel identity or the oracle input.
+- Default CAD viewers must retain their top-down pan and zoom controls.
+- Camera interaction must remain available without covering the operator controls.
