@@ -17,9 +17,12 @@ guard that quietly no-ops on one of them is exactly the failure this closes.
 """
 from __future__ import annotations
 
+import contextlib
 import multiprocessing
 import os
+import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -35,9 +38,10 @@ import store  # noqa: E402  (needs the da/ path appended above)
 TENANT = "t-crossproc"
 DRAWING = "d-crossproc"
 
-# Long enough that process startup jitter after the barrier cannot separate the
-# two read-modify-writes on its own, short enough to stay a unit test.
-_WINDOW_S = 0.6
+# How long a racer holds the manifest read open waiting for the OTHER racer to
+# reach it too. Only spent on a PASSING run (see `WidenedBackend`), so it buys
+# determinism rather than trading it for speed.
+_READ_RENDEZVOUS_S = 3.0
 # The parent never waits on a child forever; a wedged child fails the test.
 _JOIN_S = 90.0
 
@@ -55,30 +59,47 @@ def _child_store(da_dir: str):
 
 
 class WidenedBackend(store.FilesystemBackend):
-    """A FilesystemBackend that holds the manifest read open for `delay_s`.
+    """A FilesystemBackend that holds the manifest read open until the OTHER
+    racer has taken it too, or `_READ_RENDEZVOUS_S` passes.
 
-    Only the timing changes. Widening the load/edit/save window turns a race
-    that is real but rarely observed into one that is observed every run, which
-    is the difference between a test that pins the defect and a test that
-    happens to pass. `test_drawing_upload_authority_postgres.py` slows a backend
-    the same way for the same reason.
+    A rendezvous rather than a fixed sleep, because a sleep only makes the
+    overlap LIKELY and the whole value of this file is a race that reproduces
+    every run. Under a BROKEN guard both processes reach the read, the barrier
+    trips the moment the second arrives, and both then compute the same
+    generation from the same free manifest — so the defect appears on any host,
+    however loaded, rather than only when scheduling cooperates.
+
+    Under a WORKING guard the second process is still blocked on the lock and
+    never reaches the read at all, so the holder waits the barrier out and goes
+    on alone. That wait is the price of a PASS, not a source of flakiness: a
+    timeout cannot turn a broken implementation green, it can only make a
+    correct one slower. `test_drawing_upload_authority_postgres.py` slows a
+    backend for the same reason.
     """
 
-    def __init__(self, root_dir: str, delay_s: float) -> None:
+    def __init__(self, root_dir: str, read_barrier=None,
+                 rendezvous_s: float = _READ_RENDEZVOUS_S) -> None:
         super().__init__(root_dir)
-        self.delay_s = delay_s
+        self.read_barrier = read_barrier
+        self.rendezvous_s = rendezvous_s
 
     def get(self, key: str) -> bytes:
         data = super().get(key)
-        if key.endswith("manifest.json"):
-            time.sleep(self.delay_s)
+        if key.endswith("manifest.json") and self.read_barrier is not None:
+            try:
+                self.read_barrier.wait(timeout=self.rendezvous_s)
+            except threading.BrokenBarrierError:
+                # Either this racer timed out (the guard held the other one back,
+                # which is the correct outcome) or a previous timeout already
+                # broke the barrier. Both mean "proceed alone".
+                pass
         return data
 
 
-def _acquire_child(da_dir, root, delay_s, holder, barrier, results):
+def _acquire_child(da_dir, root, read_barrier, holder, barrier, results):
     """Acquire a checkout on a FREE drawing, reporting the generation stamped."""
     child_store = _child_store(da_dir)
-    backend = WidenedBackend(root, delay_s)
+    backend = WidenedBackend(root, read_barrier)
     try:
         barrier.wait(timeout=_JOIN_S)  # both processes enter the window together
         fence = child_store.acquire_checkout_fence(
@@ -86,6 +107,24 @@ def _acquire_child(da_dir, root, delay_s, holder, barrier, results):
         results.put((holder, "ok", fence))
     except Exception as exc:  # reported, not raised: the parent asserts on it
         results.put((holder, "err", f"{type(exc).__name__}: {exc}"))
+
+
+def _commit_child(da_dir, root, local_path, read_barrier, barrier, results):
+    """Publish a version, which rewrites the WHOLE manifest.
+
+    The other half of the lost-update pair: `put_drawing` carries `checkout` and
+    `checkout_fence` back from whenever it loaded, so unguarded it can erase a
+    lease acquired in between.
+    """
+    child_store = _child_store(da_dir)
+    backend = WidenedBackend(root, read_barrier)
+    try:
+        barrier.wait(timeout=_JOIN_S)
+        version = child_store.put_drawing(
+            backend, TENANT, DRAWING, local_path, None)
+        results.put(("commit", "ok", version))
+    except Exception as exc:
+        results.put(("commit", "err", f"{type(exc).__name__}: {exc}"))
 
 
 def _hold_lock_forever_child(da_dir, root, ready):
@@ -137,8 +176,11 @@ def test_two_processes_acquiring_a_free_drawing_yield_exactly_one_lease(tmp_path
     root = _free_drawing(tmp_path / "store")
     ctx = multiprocessing.get_context("spawn")
     barrier, results = ctx.Barrier(2), ctx.Queue()
+    # Both racers must have READ the free manifest before either may save; see
+    # `WidenedBackend`. This is what makes the pre-fix failure deterministic.
+    read_barrier = ctx.Barrier(2)
 
-    procs = [_spawn(_acquire_child, _DA_DIR, root, _WINDOW_S, holder, barrier, results)
+    procs = [_spawn(_acquire_child, _DA_DIR, root, read_barrier, holder, barrier, results)
              for holder in ("session-a", "session-b")]
     outcomes = [results.get(timeout=_JOIN_S) for _ in procs]
     for proc in procs:
@@ -176,8 +218,9 @@ def test_second_process_is_refused_not_merely_delayed(tmp_path):
     root = _free_drawing(tmp_path / "store")
     ctx = multiprocessing.get_context("spawn")
     barrier, results = ctx.Barrier(2), ctx.Queue()
+    read_barrier = ctx.Barrier(2)
 
-    procs = [_spawn(_acquire_child, _DA_DIR, root, _WINDOW_S, holder, barrier, results)
+    procs = [_spawn(_acquire_child, _DA_DIR, root, read_barrier, holder, barrier, results)
              for holder in ("first", "second")]
     outcomes = [results.get(timeout=_JOIN_S) for _ in procs]
     for proc in procs:
@@ -185,6 +228,58 @@ def test_second_process_is_refused_not_merely_delayed(tmp_path):
 
     assert sorted(f is None for _, _, f in outcomes) == [False, True], (
         f"expected one grant and one refusal, got {outcomes}")
+
+
+def test_a_commit_racing_an_acquire_loses_neither_write(tmp_path):
+    """The SECOND door onto the same bypass, closed by guarding every writer.
+
+    `put_drawing` rewrites the whole manifest, so unguarded it carries
+    `checkout`/`checkout_fence` back from whenever it loaded. A commit that
+    loaded before a concurrent acquire erases the new lease and restores the
+    older generation, and the next acquire then issues that generation a SECOND
+    time — two capabilities verifying against one lease, which is exactly what
+    the fence exists to prevent.
+
+    Both contributions are asserted, not just the lease, so the test fails
+    whichever writer happens to save last: a commit saving last erases the
+    lease, an acquire saving last erases the published version.
+    """
+    root = _free_drawing(tmp_path / "store")
+    payload = tmp_path / "payload.dwg"
+    payload.write_bytes(b"dwg-bytes")
+    ctx = multiprocessing.get_context("spawn")
+    barrier, results = ctx.Barrier(2), ctx.Queue()
+    read_barrier = ctx.Barrier(2)
+
+    procs = [
+        _spawn(_acquire_child, _DA_DIR, root, read_barrier, "holder", barrier,
+               results),
+        _spawn(_commit_child, _DA_DIR, root, str(payload), read_barrier, barrier,
+               results),
+    ]
+    outcomes = {name: (status, value)
+                for name, status, value in
+                (results.get(timeout=_JOIN_S) for _ in procs)}
+    for proc in procs:
+        proc.join(timeout=_JOIN_S)
+        assert proc.exitcode == 0, f"child died: exit {proc.exitcode}"
+
+    assert outcomes["holder"][0] == "ok", outcomes["holder"]
+    assert outcomes["commit"][0] == "ok", outcomes["commit"]
+    granted, committed = outcomes["holder"][1], outcomes["commit"][1]
+    assert granted is not None, "the acquire was refused a FREE drawing"
+
+    final = store.load_manifest(store.FilesystemBackend(root), TENANT, DRAWING)
+    checkout = final["checkout"]
+    assert checkout is not None, (
+        "the commit erased the lease the acquire persisted; the next acquire "
+        "would reuse that generation and two capabilities would verify")
+    assert checkout["fence"] == granted, (
+        f"persisted lease is generation {checkout['fence']}, the acquire was "
+        f"told {granted}")
+    assert any(int(e["v"]) == committed for e in final["versions"]), (
+        "the acquire erased the version the commit published")
+    assert int(final["latest"]) == committed
 
 
 # --------------------------------------------------------------------------- #
@@ -245,7 +340,7 @@ def test_lock_is_released_when_the_body_raises(tmp_path):
                            expected_fence=fence)
     ctx = multiprocessing.get_context("spawn")
     barrier, results = ctx.Barrier(1), ctx.Queue()
-    proc = _spawn(_acquire_child, _DA_DIR, root, 0.0, "other-process",
+    proc = _spawn(_acquire_child, _DA_DIR, root, None, "other-process",
                   barrier, results)
     _, status, value = results.get(timeout=_JOIN_S)
     proc.join(timeout=_JOIN_S)
@@ -317,13 +412,12 @@ def test_in_memory_and_filesystem_checkouts_emit_no_warning(recwarn):
                 if issubclass(w.category, store.CrossProcessCheckoutLockMissing)]
 
 
-def test_lock_sidecar_sits_beside_the_manifest_and_is_never_the_manifest(tmp_path):
+def test_lock_file_is_not_the_manifest_and_survives_a_manifest_save(tmp_path):
     """`save_manifest` replaces the manifest inode on every save, so a lock held
-    on that inode would exclude nobody. The sidecar is a separate file."""
+    on that inode would be held against a file no later caller can open."""
     root = str(tmp_path / "store")
     key = store.checkout_lock_key(TENANT, DRAWING)
     assert key != store.manifest_key(TENANT, DRAWING)
-    assert os.path.dirname(key) == os.path.dirname(store.manifest_key(TENANT, DRAWING))
 
     backend = store.FilesystemBackend(root)
     store.save_manifest(backend, TENANT, DRAWING,
@@ -332,13 +426,94 @@ def test_lock_sidecar_sits_beside_the_manifest_and_is_never_the_manifest(tmp_pat
         backend, TENANT, DRAWING, "holder", 300.0) is not None
 
     lock_path = Path(backend._path(key))
-    assert lock_path.exists(), "the sidecar lockfile was never created"
+    assert lock_path.exists(), "the lock file was never created"
     # Surviving a save is the whole point: the next caller must open the SAME
     # inode a current holder owns.
     inode_before = lock_path.stat().st_ino
     store.save_manifest(backend, TENANT, DRAWING,
                         store.load_manifest(backend, TENANT, DRAWING))
     assert lock_path.stat().st_ino == inode_before
+
+
+def test_lock_file_lives_outside_the_drawing_directory(tmp_path):
+    """The lock's identity IS its inode, so it must outlive every cleaner that
+    clears a drawing while leaving the DRAWING alive.
+
+    `server/guest_uploads.py::_wipe_failed_attempt_files` deletes every child of
+    the drawing directory except `upload.state.json` after a failed upload
+    attempt. A lock file in there would be unlinked from under a live holder: on
+    POSIX the holder keeps the unlinked inode and its lock, the next caller
+    creates a fresh inode and locks THAT, and two callers run inside the section.
+    So the structural claim is the one worth pinning — not "nothing deletes it
+    today", but "no drawing-directory walker can reach it at all".
+    """
+    manifest_dir = os.path.dirname(store.manifest_key(TENANT, DRAWING))
+    key = store.checkout_lock_key(TENANT, DRAWING)
+    assert not key.startswith(manifest_dir), (
+        f"lock key {key!r} is inside the drawing directory {manifest_dir!r}, "
+        f"where a failed-attempt wipe would unlink it under a live holder")
+
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    store.save_manifest(backend, TENANT, DRAWING,
+                        store._new_manifest(TENANT, DRAWING))
+    fence = store.acquire_checkout_fence(backend, TENANT, DRAWING, "holder", 300.0)
+    assert fence is not None
+
+    lock_path = Path(backend._path(key))
+    inode_before = lock_path.stat().st_ino
+
+    # Exactly what the failed-attempt wipe does to the drawing directory.
+    drawing_dir = Path(backend._path(store.manifest_key(TENANT, DRAWING))).parent
+    for child in drawing_dir.iterdir():
+        if child.name == "upload.state.json":
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink()
+
+    assert lock_path.exists(), "a failed-attempt wipe destroyed the lock file"
+    assert lock_path.stat().st_ino == inode_before, (
+        "the lock file was replaced, so a holder and a newcomer would own "
+        "different inodes and both enter the section")
+
+
+def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatch):
+    """`save_manifest` writes the WHOLE document, so every legacy writer can
+    carry `checkout`/`checkout_fence` backwards — not just acquire and release.
+
+    Asserted structurally over all five, because the failure mode of the fix is
+    a writer being ADDED later without the guard, which no single race test
+    would notice.
+    """
+    seen = []
+    real_guard = store._legacy_checkout_guard
+
+    @contextlib.contextmanager
+    def spy(backend, tid, did):
+        seen.append((tid, did))
+        with real_guard(backend, tid, did):
+            yield
+
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    store.save_manifest(backend, TENANT, DRAWING,
+                        store._new_manifest(TENANT, DRAWING))
+    payload = tmp_path / "payload.dwg"
+    payload.write_bytes(b"dwg-bytes")
+
+    monkeypatch.setattr(store, "_legacy_checkout_guard", spy)
+    first = store.put_drawing(backend, TENANT, DRAWING, str(payload), None)
+    # Parented on the first, so head has a parent to walk back to.
+    store.put_drawing(backend, TENANT, DRAWING, str(payload), first)
+    store.undo(backend, TENANT, DRAWING)
+    store.redo(backend, TENANT, DRAWING)
+    fence = store.acquire_checkout_fence(backend, TENANT, DRAWING, "holder", 300.0)
+    store.release_checkout(backend, TENANT, DRAWING, expected_fence=fence)
+
+    assert len(seen) == 6, (
+        f"expected every legacy manifest writer to take the guard, saw {seen}")
 
 
 def test_release_is_guarded_the_same_way_as_acquire(tmp_path):

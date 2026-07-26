@@ -198,18 +198,29 @@ def manifest_key(tenant_id: str, drawing_id: str) -> str:
 
 
 def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
-    """Sidecar object key carrying the drawing's cross-process checkout lock.
+    """Object key of the drawing's cross-process checkout lock file.
 
-    Beside the manifest, and deliberately NOT the manifest itself: `save_manifest`
-    writes through a temp file plus `os.replace`, so the manifest's inode changes
-    on every save. A lock taken on that inode would be held against a file no
-    later caller can open, which is a lock that excludes nobody.
+    NOT the manifest. `save_manifest` replaces the manifest's inode on every
+    save, and a lock held on a replaced inode is one no later caller can reach,
+    which is a lock that excludes nobody.
 
-    For the same reason the sidecar is created once and never unlinked. Removing
-    it would let the next caller open a fresh inode while a holder still owns the
-    old one, and two holders would again run at once.
+    NOT inside the drawing's own directory either, which is the harder
+    constraint and the one that decides where this lives. The lock's identity IS
+    its inode, so the file has to outlive everything that clears a drawing.
+    `server/guest_uploads.py` wipes a failed upload attempt by deleting every
+    child of the drawing directory except `upload.state.json`
+    (`_wipe_failed_attempt_files`) and leaves the DRAWING itself alive. A lock
+    file in there would be unlinked from under a live holder: on POSIX the
+    holder keeps the unlinked inode and its lock, the next caller creates a
+    fresh inode and locks that instead, and both then run inside the section
+    this exists to keep to one. The guest purge (`purge_expired`) removes the
+    whole drawing directory for the same reason of being a directory cleaner.
+
+    So the lock lives under its own top-level prefix that no drawing-directory
+    walker descends into, and is created once and never unlinked.
     """
-    return manifest_key(tenant_id, drawing_id) + ".checkout-lock"
+    return (f"checkout-locks/{sanitize_id(tenant_id)}/"
+            f"{sanitize_id(drawing_id)}.checkout-lock")
 
 
 # --------------------------------------------------------------------------- #
@@ -1324,29 +1335,40 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
             int(parent_version) if parent_version is not None else None,
             meta or {}, holder=holder, fence=fence,
         )
-    m = load_manifest(backend, tid, did)
-    _authorize_checkout_view(m.get("checkout"), holder, fence)
+    # Under the SAME guard as acquire/release, because this is a load, edit,
+    # save of the same one manifest document and `save_manifest` writes the
+    # WHOLE document back. Publishing a version therefore rewrites `checkout`
+    # and `checkout_fence` to whatever this caller happened to read, so a commit
+    # whose load precedes a concurrent acquire erases the new lease and restores
+    # the older generation. The next acquire then hands out that generation a
+    # SECOND time, and two capabilities verify against one lease -- the same
+    # ownership bypass the guard on acquire exists to prevent, reached through a
+    # different door. Two concurrent commits also lose a version from
+    # `m["versions"]` the same way.
+    with _legacy_checkout_guard(backend, tid, did):
+        m = load_manifest(backend, tid, did)
+        _authorize_checkout_view(m.get("checkout"), holder, fence)
 
-    new_v = int(m["latest"]) + 1
-    vkey = drawing_version_key(tid, did, new_v)
-    if backend.exists(vkey):  # immutability guard (monotonic latest => never true in practice)
-        raise ValueError(f"refuse to overwrite immutable version key {vkey}")
+        new_v = int(m["latest"]) + 1
+        vkey = drawing_version_key(tid, did, new_v)
+        if backend.exists(vkey):  # immutability guard (monotonic latest => never true in practice)
+            raise ValueError(f"refuse to overwrite immutable version key {vkey}")
 
-    data = _read(local_path)
-    backend.put(vkey, data)
+        data = _read(local_path)
+        backend.put(vkey, data)
 
-    meta = meta or {}
-    parent = int(parent_version) if parent_version is not None else None
-    m["versions"].append({
-        "v": new_v, "parent": parent, "created": _now_iso(),
-        "bytes": len(data), "sha256": _sha256(data),
-        "workitem_id": meta.get("workitem_id"), "tool": meta.get("tool"),
-        "note": meta.get("note"),
-    })
-    m["head"] = new_v
-    m["latest"] = new_v
-    save_manifest(backend, tid, did, m)
-    return new_v
+        meta = meta or {}
+        parent = int(parent_version) if parent_version is not None else None
+        m["versions"].append({
+            "v": new_v, "parent": parent, "created": _now_iso(),
+            "bytes": len(data), "sha256": _sha256(data),
+            "workitem_id": meta.get("workitem_id"), "tool": meta.get("tool"),
+            "note": meta.get("note"),
+        })
+        m["head"] = new_v
+        m["latest"] = new_v
+        save_manifest(backend, tid, did, m)
+        return new_v
 
 
 def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
@@ -1429,20 +1451,24 @@ def undo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
             return parent
 
         return db.run_transaction(operation, isolation="serializable")
-    m = load_manifest(backend, tid, did)
-    _authorize_checkout_view(m.get("checkout"), holder, fence, action="undo")
+    # Guarded for the reason spelled out in `put_drawing`: moving head is a
+    # whole-manifest rewrite, so it carries `checkout` and `checkout_fence` back
+    # with it and can erase a lease acquired since this load.
+    with _legacy_checkout_guard(backend, tid, did):
+        m = load_manifest(backend, tid, did)
+        _authorize_checkout_view(m.get("checkout"), holder, fence, action="undo")
 
-    cur = int(m["head"])
-    entry = next((e for e in m["versions"] if int(e["v"]) == cur), None)
-    if entry is None:
-        raise ValueError(f"head version {cur} missing from manifest {tid}/{did}")
-    parent = entry["parent"]
-    if parent is None:
-        raise ValueError("nothing to undo: head is the root version")
+        cur = int(m["head"])
+        entry = next((e for e in m["versions"] if int(e["v"]) == cur), None)
+        if entry is None:
+            raise ValueError(f"head version {cur} missing from manifest {tid}/{did}")
+        parent = entry["parent"]
+        if parent is None:
+            raise ValueError("nothing to undo: head is the root version")
 
-    m["head"] = int(parent)
-    save_manifest(backend, tid, did, m)
-    return int(parent)
+        m["head"] = int(parent)
+        save_manifest(backend, tid, did, m)
+        return int(parent)
 
 
 def redo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
@@ -1537,31 +1563,33 @@ def redo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
             return target
 
         return db.run_transaction(operation, isolation="serializable")
-    m = load_manifest(backend, tid, did)
-    _authorize_checkout_view(m.get("checkout"), holder, fence, action="redo")
+    # Guarded for the reason spelled out in `put_drawing`.
+    with _legacy_checkout_guard(backend, tid, did):
+        m = load_manifest(backend, tid, did)
+        _authorize_checkout_view(m.get("checkout"), holder, fence, action="redo")
 
-    head = int(m["head"])
-    latest = int(m["latest"])
-    if head == latest:
-        raise ValueError("nothing to redo: head is already the latest version")
+        head = int(m["head"])
+        latest = int(m["latest"])
+        if head == latest:
+            raise ValueError("nothing to redo: head is already the latest version")
 
-    parent_of = {int(e["v"]): (int(e["parent"]) if e["parent"] is not None else None)
-                 for e in m["versions"]}
-    cur = latest
-    target = None
-    seen = set()
-    while cur is not None and cur not in seen:
-        seen.add(cur)
-        if parent_of.get(cur) == head:
-            target = cur
-            break
-        cur = parent_of.get(cur)
-    if target is None:
-        raise ValueError(f"nothing to redo: no child of head {head} leads to latest {latest}")
+        parent_of = {int(e["v"]): (int(e["parent"]) if e["parent"] is not None else None)
+                     for e in m["versions"]}
+        cur = latest
+        target = None
+        seen = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            if parent_of.get(cur) == head:
+                target = cur
+                break
+            cur = parent_of.get(cur)
+        if target is None:
+            raise ValueError(f"nothing to redo: no child of head {head} leads to latest {latest}")
 
-    m["head"] = target
-    save_manifest(backend, tid, did, m)
-    return target
+        m["head"] = target
+        save_manifest(backend, tid, did, m)
+        return target
 
 
 # --------------------------------------------------------------------------- #
@@ -1614,7 +1642,7 @@ def _legacy_checkout_lock(tid: str, did: str) -> threading.Lock:
 
 @contextlib.contextmanager
 def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str):
-    """Serialize the legacy authority's checkout read-modify-write, per drawing.
+    """Serialize EVERY legacy read-modify-write of one drawing's manifest.
 
     The legacy manifest is a load, edit, save with nothing holding the record in
     between (see the module note on non-atomic writes). Two concurrent acquires
@@ -1626,12 +1654,24 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str):
     racing an acquire loses the same update in the other direction and lets a
     generation repeat.
 
-    Two layers close that window, because one process is two different problems.
+    EVERY writer, not just acquire and release. `save_manifest` writes the whole
+    document, so `put_drawing`, `undo` and `redo` each carry `checkout` and
+    `checkout_fence` back with them from whenever they loaded. A commit that
+    loaded before a concurrent acquire will, on save, erase the new lease and
+    restore the older generation, and the next acquire then issues that
+    generation a SECOND time — the same bypass by a different route. Guarding
+    only the checkout calls would leave that route open, so all five run here.
+
+    Two layers close the window, because one process is two different problems.
     The threading lock settles the app's own threads without a syscall. Under it
-    an OS advisory lock on a sidecar file settles a SECOND PROCESS reading the
-    same store directory, which the threading lock cannot see: a per-process
+    an OS advisory lock on a separate lock file settles a SECOND PROCESS reading
+    the same store directory, which the threading lock cannot see: a per-process
     dict is not shared state, so two replicas each hold their own uncontended
     lock and both walk into the section.
+
+    NOT REENTRANT. The threading half is a plain `Lock`, so a guarded function
+    calling another guarded function would wait out `_CHECKOUT_LOCK_TIMEOUT_S`
+    and then raise. None of the five call each other; keep it that way.
 
     WHAT THIS DOES NOT DO. It is not a distributed lock and must not grow into
     one. It reaches exactly as far as the OS lock does, which is one shared
@@ -1640,6 +1680,14 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str):
     covered at all; rather than pretend otherwise this warns
     `CrossProcessCheckoutLockMissing` and runs with the threading lock alone,
     which is the behaviour that was previously silent and unlabelled.
+
+    It also does not coordinate with the guest-upload purge, which deletes a
+    whole drawing directory on its own per-drawing lock. `FilesystemBackend.put`
+    recreates missing parents, so a manifest save that was already in flight can
+    put the drawing back after the purge recorded it deleted. That is unchanged
+    by this guard — every legacy writer, including the pre-existing acquire, has
+    always been able to do it — and closing it means giving the purge and the
+    store one shared lock, which is tracked separately.
 
     The documented answer above that boundary is unchanged and is postgres: it
     reads `FOR UPDATE` and increments in one statement, so it needs none of
