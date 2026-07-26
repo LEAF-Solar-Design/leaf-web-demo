@@ -21,17 +21,19 @@ server/broker_ledger.jsonl
 server/broker_tenants.json
 server/authored_tools.json
 server/drawings/
-# Agent gate-chain state. Both Dockerfiles do `COPY data/ /app/data/`, but at
-# runtime every one of these is redirected to /data/state on the leaf-state
-# volume (docker-compose.yml). A dev who ran the server locally would otherwise
-# bake stale gate decisions, tenant ids and session grants into both images,
-# where nothing ever reads them.
+# Agent gate-chain state, written at runtime. Both Dockerfiles do
+# `COPY data/ /app/data/`, but the gate-state files are redirected to
+# /data/state on the leaf-state volume (docker-compose.yml), and no current
+# code provisions or reads data/workspaces/, so nothing in either image reads
+# any of them. A dev who ran the server locally would otherwise bake stale gate
+# decisions and session grants into both images. The trailing * covers the
+# sibling .tmp and .lock files (server/agent_gate.py).
 data/agent_audit.jsonl
 data/agent_ledger.jsonl
 data/agent.disabled
 data/agent_approvals/
-data/agent_session_grants.json
-data/agent_rate_state.json
+data/agent_session_grants.json*
+data/agent_rate_state.json*
 data/workspaces/
 
 # Local env / secrets — must never enter an image layer

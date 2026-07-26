@@ -27,9 +27,12 @@ server/customization.db-shm
 server/customization.db-wal
 server/guest_drawings/
 data/uploads/
+# Agent gate-chain runtime state. The trailing * covers the sibling .tmp and
+# .lock files these writers leave beside the snapshot (server/agent_gate.py).
 data/agent_audit.jsonl
+data/agent_ledger.jsonl
 data/agent.disabled
 data/agent_approvals/
-data/agent_session_grants.json
-data/agent_rate_state.json
+data/agent_session_grants.json*
+data/agent_rate_state.json*
 data/workspaces/
