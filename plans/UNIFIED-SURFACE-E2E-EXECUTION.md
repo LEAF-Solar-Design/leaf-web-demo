@@ -2,6 +2,15 @@
 
 Date: 2026-07-24
 
+> **Provenance, added when this file was landed on `main` (2026-07-26).** This
+> plan was written on the branch behind PR #137 and is copied here unchanged
+> apart from this note, so that the map stops living only on a branch. **Every
+> status, "Progress", and completion claim below describes that branch, not
+> `main`.** Several capabilities the text calls implemented exist only on
+> #137, which is not merged. Read this document as the agreed plan and the
+> agreed proof ladder; do NOT read any status word in it as the state of
+> `main`. For what `main` actually contains, check `main`.
+
 Status: active. The cat flow is one deterministic proof case. It is not proof
 that the unified product works end to end.
 
