@@ -46,6 +46,64 @@ def test_non_upload_extract_event_key_keeps_legacy_digest():
     )
 
 
+@pytest.mark.parametrize(
+    "contents, expected",
+    [
+        ("1\n", True),
+        ("1", True),
+        ("0\n", False),
+        ("", False),
+        ("banana", False),
+        ("2", False),
+        ("true", False),
+    ],
+)
+def test_fence_file_contents_decide_the_drain(monkeypatch, tmp_path, contents, expected):
+    """Only a literal "1" keeps mutations open; anything else fails CLOSED.
+
+    Deliberately tests `drawing_mutations_enabled` DIRECTLY rather than through
+    `drawing_mutation_commit_guard`. The guard needs fcntl, so on a Windows unit
+    host it yields False for EVERY configured fence — which makes the
+    commit-path fence tests below pass without ever reading the fence. This one
+    is the platform-independent check that the fence contents are actually what
+    decides, and it fails on any host if that parsing regresses.
+    """
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    assert write_loop.drawing_mutations_enabled() is expected
+
+
+def test_missing_fence_file_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(tmp_path / "never-written"))
+
+    assert write_loop.drawing_mutations_enabled() is False
+
+
+def test_unconfigured_fence_leaves_the_env_default_in_charge(monkeypatch):
+    """No fence configured is the pre-cutover shape: the env flag alone decides."""
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    assert write_loop.drawing_mutations_enabled() is True
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    assert write_loop.drawing_mutations_enabled() is False
+
+
+def test_env_drain_beats_an_open_fence(monkeypatch, tmp_path):
+    """The two gates are AND, not OR: an open fence cannot re-enable a drained
+    deployment flag."""
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text("1\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    assert write_loop.drawing_mutations_enabled() is False
+
+
 def test_shared_fence_blocks_mock_write_at_commit(monkeypatch, tmp_path):
     import store
 
