@@ -10,7 +10,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 20)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 21)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
@@ -28,6 +28,7 @@ EXPECTED_SELECTOR_DEFAULTS = {
     "LEAF_HARNESS_AUTHORING_MODE": "disabled",
     "LEAF_CUSTOMIZATION_R5_MODE": "off",
     "LEAF_CUSTOMIZATION_R6_MODE": "off",
+    "LEAF_CUSTOMIZATION_STORE": "sqlite",
 }
 REQUIRED_COVERAGE = {
     "jobs",
@@ -75,6 +76,15 @@ REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
     "LEAF_HARNESS_SESSION_STORE": {
         "harness_sessions", "harness_turns", "harness_events",
         "harness_confirmations", "harness_usage", "harness_tenant_repo_leases",
+    },
+    "LEAF_CUSTOMIZATION_STORE": {
+        "customization_change_sets",
+        "effective_catalogs",
+        "customization_audit_events",
+        "customization_confirmations",
+        "customization_publication_requests",
+        "customization_deployment_snapshots",
+        "customization_deployment_audit",
     },
 }
 
@@ -173,7 +183,7 @@ def _inventory_errors(inventory: dict) -> list[str]:
 
     scope = inventory.get("scope", {})
     if scope.get("migration_ids") != EXPECTED_MIGRATIONS:
-        errors.append("scope migration_ids must be exactly 0001 through 0019")
+        errors.append("scope migration_ids must be exactly 0001 through 0020")
     if scope.get("completeness") == "complete":
         unresolved = [
             authority["id"]
