@@ -189,7 +189,10 @@ function buildPorts(): HarnessPorts {
     agentRunner: mockAgent
       ? new FakeAgentRunner()
       : useE2b
-        ? new E2bAgentRunner({ brokerHost: process.env.LEAF_SANDBOX_BROKER_HOST || undefined })
+        ? new E2bAgentRunner({
+            brokerHost: process.env.LEAF_SANDBOX_BROKER_HOST || undefined,
+            brokerProbeUrl: process.env.LEAF_SANDBOX_BROKER_PROBE_URL || undefined,
+          })
         : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
     ...(mockAgent
       ? { converseRunner: new FakeTurnRunner() }

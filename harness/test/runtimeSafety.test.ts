@@ -99,6 +99,33 @@ describe("production harness runtime safety", () => {
       E2B_API_KEY: "test-key",
       LEAF_SANDBOX_BROKER_HOST: "broker.internal",
       LEAF_HARNESS_SESSION_STORE: "postgres",
+    })).toThrow(/probe URL/);
+    expect(() => validateProductionHarnessEnv({
+      ...VALID,
+      LEAF_AUTHORED_EXECUTION: "1",
+      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
+      E2B_API_KEY: "test-key",
+      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
+      LEAF_SANDBOX_BROKER_PROBE_URL: "https://other.internal/api/health",
+      LEAF_HARNESS_SESSION_STORE: "postgres",
+    })).toThrow(/hostname must equal/);
+    expect(() => validateProductionHarnessEnv({
+      ...VALID,
+      LEAF_AUTHORED_EXECUTION: "1",
+      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
+      E2B_API_KEY: "test-key",
+      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
+      LEAF_SANDBOX_BROKER_PROBE_URL: "http://broker.internal/api/health",
+      LEAF_HARNESS_SESSION_STORE: "postgres",
+    })).toThrow(/must use HTTPS/);
+    expect(() => validateProductionHarnessEnv({
+      ...VALID,
+      LEAF_AUTHORED_EXECUTION: "1",
+      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
+      E2B_API_KEY: "test-key",
+      LEAF_SANDBOX_BROKER_HOST: "broker.internal",
+      LEAF_SANDBOX_BROKER_PROBE_URL: "https://broker.internal/api/health",
+      LEAF_HARNESS_SESSION_STORE: "postgres",
     })).not.toThrow();
   });
 
@@ -109,6 +136,7 @@ describe("production harness runtime safety", () => {
       LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
       E2B_API_KEY: "test-key",
       LEAF_SANDBOX_BROKER_HOST: "broker.internal",
+      LEAF_SANDBOX_BROKER_PROBE_URL: "https://broker.internal/api/health",
     };
     expect(() => validateProductionHarnessEnv({
       ...authored,

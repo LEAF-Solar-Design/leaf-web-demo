@@ -196,6 +196,25 @@ const LIMITS = Object.freeze({
   inputBytes: 512 * 1024,
 });
 
+function validatedProbeUrl(brokerHost: string, rawUrl: string): string {
+  let probe: URL;
+  try {
+    probe = new URL(rawUrl);
+  } catch {
+    throw new Error("E2B broker probe URL is invalid");
+  }
+  if (probe.protocol !== "https:") {
+    throw new Error("E2B broker probe URL must use HTTPS");
+  }
+  if (probe.username || probe.password) {
+    throw new Error("E2B broker probe URL cannot contain credentials");
+  }
+  if (probe.hostname.toLowerCase() !== brokerHost.trim().toLowerCase()) {
+    throw new Error("E2B broker probe hostname must match the allowlisted broker host");
+  }
+  return probe.toString();
+}
+
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -398,7 +417,10 @@ export class E2bAgentRunner implements AgentRunner {
 
   constructor(private readonly opts: E2bAgentRunnerOptions = {}) {
     this.brokerHost = opts.brokerHost ?? DEFAULT_BROKER_HOST;
-    this.brokerProbeUrl = opts.brokerProbeUrl ?? `https://${this.brokerHost}/post`;
+    this.brokerProbeUrl = validatedProbeUrl(
+      this.brokerHost,
+      opts.brokerProbeUrl ?? `https://${this.brokerHost}/post`,
+    );
     this.deniedTargets = opts.deniedTargets ?? DEFAULT_DENIED_TARGETS;
     this.timeoutMs = opts.timeoutMs ?? 120_000;
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 45_000;

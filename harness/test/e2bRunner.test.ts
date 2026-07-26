@@ -157,6 +157,25 @@ describe("E2bAgentRunner — egress-locked author session (hermetic, fake sandbo
     );
   });
 
+  it("binds the HTTPS probe URL to the one allowlisted egress host", () => {
+    expect(() => new E2bAgentRunner({
+      brokerHost: "broker.internal",
+      brokerProbeUrl: "https://other.internal/api/health",
+    })).toThrow(/hostname must match/);
+    expect(() => new E2bAgentRunner({
+      brokerHost: "broker.internal",
+      brokerProbeUrl: "http://broker.internal/api/health",
+    })).toThrow(/must use HTTPS/);
+    expect(() => new E2bAgentRunner({
+      brokerHost: "broker.internal",
+      brokerProbeUrl: "https://user:secret@broker.internal/api/health",
+    })).toThrow(/cannot contain credentials/);
+    expect(() => new E2bAgentRunner({
+      brokerHost: "broker.internal",
+      brokerProbeUrl: "https://broker.internal/api/health",
+    })).not.toThrow();
+  });
+
   it("boots ONE egress-locked sandbox and returns a valid CONTRACT §2 tool package", async () => {
     const { factory, captured } = makeFactory({ network: lockedNetwork(), stdout: cannedStdout() });
     const { toolset, files, apsTestCalls } = makeToolset();

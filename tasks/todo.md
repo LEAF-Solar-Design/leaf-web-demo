@@ -215,3 +215,23 @@ Risks:
 - The display treatment must not alter panel identity or the oracle input.
 - Default CAD viewers must retain their top-down pan and zoom controls.
 - Camera interaction must remain available without covering the operator controls.
+
+# Authored CAD production readiness
+
+- [x] Reconcile the recovered cat branch with current application main.
+- [x] Verify live staging and production service, image, database, and runtime posture.
+- [x] Freeze the production product, security, durability, staging, and cutover gates.
+- [ ] Replace the fixed-template E2B author step with a general sandboxed author boundary.
+- [ ] Add a non-mocked deployed-environment acceptance driver.
+- [ ] Enable and verify one coherent release in staging.
+- [ ] Wire the proven posture into production.
+- [ ] Promote exact staging digests and complete the cutover receipt.
+
+Risks:
+
+- A healthy service with authored execution off does not satisfy the product contract.
+- The current E2B author runner cannot create a novel drawing-write tool.
+- Enabling authored execution without PostgreSQL sessions, an E2B credential, and an
+  explicit allowlisted probe fails production startup.
+- The live staging services currently use images from several source commits.
+- Cloud mutation must use a named federated identity, never the root identity.

@@ -21,6 +21,34 @@ export function authorSandboxProvider(env: NodeJS.ProcessEnv = process.env): Aut
   throw new Error(`unsupported LEAF_AUTHOR_SANDBOX_PROVIDER: ${value}`);
 }
 
+function validateSandboxProbe(env: NodeJS.ProcessEnv): void {
+  const brokerHost = (env.LEAF_SANDBOX_BROKER_HOST ?? "").trim().toLowerCase();
+  if (!brokerHost || brokerHost === "httpbingo.org") {
+    throw new Error("production author sandbox requires an explicit broker gateway host");
+  }
+  const rawUrl = (env.LEAF_SANDBOX_BROKER_PROBE_URL ?? "").trim();
+  if (!rawUrl) {
+    throw new Error("production author sandbox requires an explicit broker probe URL");
+  }
+  let probe: URL;
+  try {
+    probe = new URL(rawUrl);
+  } catch {
+    throw new Error("production author sandbox broker probe URL is invalid");
+  }
+  if (probe.protocol !== "https:") {
+    throw new Error("production author sandbox broker probe URL must use HTTPS");
+  }
+  if (probe.username || probe.password) {
+    throw new Error("production author sandbox broker probe URL cannot contain credentials");
+  }
+  if (probe.hostname.toLowerCase() !== brokerHost) {
+    throw new Error(
+      "production author sandbox broker probe hostname must equal LEAF_SANDBOX_BROKER_HOST",
+    );
+  }
+}
+
 export function validateProductionHarnessEnv(env: NodeJS.ProcessEnv = process.env): void {
   if ((env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase() !== "production") return;
   if ((env.LEAF_AGENT_MOCK ?? "").trim() !== "0") {
@@ -53,9 +81,6 @@ export function validateProductionHarnessEnv(env: NodeJS.ProcessEnv = process.en
     if (!(env.E2B_API_KEY ?? "").trim() && !(env.E2B_API_KEY_FILE ?? "").trim()) {
       throw new Error("production author sandbox requires an E2B credential source");
     }
-    const brokerHost = (env.LEAF_SANDBOX_BROKER_HOST ?? "").trim().toLowerCase();
-    if (!brokerHost || brokerHost === "httpbingo.org") {
-      throw new Error("production author sandbox requires an explicit broker gateway host");
-    }
+    validateSandboxProbe(env);
   }
 }
