@@ -645,40 +645,55 @@ def test_no_legacy_manifest_writer_escapes_the_guard():
         f"the guard itself rather than rely on its callers.")
 
 
-def test_the_lock_pool_is_bounded_stable_and_anonymous():
-    """Nothing ever cleans the lock prefix, so the pool must be bounded rather
-    than swept, must not name the drawings it protects, and must map a given
-    drawing to the same file every time.
+def test_the_lock_key_mapping_is_pinned():
+    """Pinned against literals, because the mapping is part of the CROSS-PROCESS
+    PROTOCOL, not an implementation detail.
 
-    Round 4: a file per drawing grew without limit and left a tenant and drawing
-    id in a filename after the drawing itself was purged.
+    Round 5: two processes agree on a drawing's lock only by deriving the same
+    path, so any change to this function under a rolling deploy lets mixed
+    versions take different files and both enter the same drawing's section. That
+    is the defect the guard exists to prevent, reintroduced by a refactor. A
+    literal makes the change impossible to miss: if you are here because this
+    test failed, the deploy needs a full drain, not a new expected value.
     """
-    keys = {store.checkout_lock_key(f"t{t}", f"d{d}")
-            for t in range(40) for d in range(40)}
-    assert len(keys) <= store._CHECKOUT_LOCK_SHARDS, (
-        f"1600 drawings produced {len(keys)} lock files; the pool is not bounded")
-    # Genuinely spread, or "bounded" would just mean one lock for everything.
-    assert len(keys) > store._CHECKOUT_LOCK_SHARDS // 2, (
-        f"1600 drawings collapsed onto {len(keys)} of "
-        f"{store._CHECKOUT_LOCK_SHARDS} shards; needless contention")
+    assert store.checkout_lock_key("t-pin", "d-pin") == (
+        "checkout-locks/0f/"
+        "0f2b2ab24a1343d4d3710930eb646b11534c221ced293e8ae17b196bc5686d82.lock")
+    assert store.checkout_lock_key(TENANT, DRAWING) == (
+        "checkout-locks/fd/"
+        "fd53576023d002c02b324b9a600d3dcd505ab53e63268267d024958225614d1d.lock")
 
-    # Anonymous: no tenant or drawing id survives in the path.
-    assert store.checkout_lock_key("acme-corp", "secret-drawing-42") \
-        .find("acme-corp") == -1
-    assert store.checkout_lock_key("acme-corp", "secret-drawing-42") \
-        .find("secret-drawing-42") == -1
 
-    # Stable: the lock is only a lock if the same drawing lands on it every time.
+def test_each_drawing_gets_its_own_lock_and_no_ids_leak():
+    """One lock per drawing, named by digest.
+
+    Per drawing (round 5): `put_drawing` and `ingest_drawing` hold the guard
+    across a durable blob write, so two drawings sharing a lock file could push
+    each other past `_CHECKOUT_LOCK_TIMEOUT_S` and fail an unrelated tenant's
+    request. A bounded shared pool was tried for round 4's file-accumulation
+    finding and reverted for exactly that reason.
+
+    By digest (round 4): the prefix is never cleaned, so a raw name would leave a
+    tenant and drawing id readable long after the drawing was purged.
+    """
+    keys = [store.checkout_lock_key(f"t{t}", f"d{d}")
+            for t in range(20) for d in range(20)]
+    assert len(set(keys)) == len(keys), (
+        "two different drawings share a lock file, so one drawing's slow write "
+        "can time out an unrelated one")
+
+    leaky = store.checkout_lock_key("acme-corp", "secret-drawing-42")
+    assert "acme-corp" not in leaky and "secret-drawing-42" not in leaky, (
+        f"the lock path carries the ids it protects: {leaky}")
+
+    # Stable, or it is not a lock at all.
     assert (store.checkout_lock_key(TENANT, DRAWING)
             == store.checkout_lock_key(TENANT, DRAWING))
-
-    # Keyed on BOTH ids. If the tenant were ignored, two tenants' same-named
-    # drawings would share a lock; if the drawing were ignored, a tenant would
-    # serialize on all of its drawings at once.
-    per_tenant = {store.checkout_lock_key(f"t{t}", DRAWING) for t in range(40)}
-    per_drawing = {store.checkout_lock_key(TENANT, f"d{d}") for d in range(40)}
-    assert len(per_tenant) > 1, "the shard ignores the tenant id"
-    assert len(per_drawing) > 1, "the shard ignores the drawing id"
+    # Keyed on BOTH ids, so neither is silently ignored.
+    assert (store.checkout_lock_key("t-a", DRAWING)
+            != store.checkout_lock_key("t-b", DRAWING))
+    assert (store.checkout_lock_key(TENANT, "d-a")
+            != store.checkout_lock_key(TENANT, "d-b"))
 
 
 def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatch):

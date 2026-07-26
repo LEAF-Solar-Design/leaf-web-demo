@@ -197,11 +197,6 @@ def manifest_key(tenant_id: str, drawing_id: str) -> str:
     return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}/manifest.json"
 
 
-# Size of the checkout lock-file pool. Nothing ever cleans the pool, so it is
-# bounded by construction rather than by a sweep; see `checkout_lock_key`.
-_CHECKOUT_LOCK_SHARDS = 256
-
-
 def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     """Object key of the drawing's cross-process checkout lock file.
 
@@ -224,25 +219,39 @@ def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     So the lock lives under its own top-level prefix that no drawing-directory
     walker descends into, and is created once and never unlinked.
 
-    A BOUNDED POOL, not one file per drawing. Because nothing cleans this prefix
-    -- that is the whole point of it -- a file per drawing would grow without
-    limit and would leave a tenant and drawing id in a filename after the drawing
-    itself had been purged. Instead a drawing hashes to one of
-    `_CHECKOUT_LOCK_SHARDS` files, so the prefix holds at most that many entries
-    and none of them names anything. The mapping is a pure function of the ids, so
-    a drawing always lands on the same shard, which is the property the lock needs.
+    ONE FILE PER DRAWING, and deliberately not a bounded pool of shared files.
+    A shared pool was tried and reverted: because `put_drawing` and
+    `ingest_drawing` write the version blob inside the guard (a durable,
+    `fsync`ed write), any two drawings sharing a lock file would serialize across
+    that write, so one tenant's slow DWG could push an unrelated tenant's
+    checkout past `_CHECKOUT_LOCK_TIMEOUT_S` and FAIL its request rather than
+    merely delay it. Trading unrelated-tenant availability for inodes is the
+    wrong way round. Per drawing, contention is only ever between callers of the
+    same drawing, which is the contention that has to exist.
 
-    The cost is FALSE CONTENTION: two different drawings that hash together
-    serialize against each other. That is safe (it over-excludes, never
-    under-excludes) and bounded by the shard count, and the guarded section is a
-    manifest read plus a write. Raise `_CHECKOUT_LOCK_SHARDS` if that ever shows
-    up in a profile; it can change freely, because the pool is not persistent
-    state that anything else reads.
+    NAMED BY DIGEST, not by the ids. The prefix is never cleaned, so a raw name
+    would leave a tenant id and drawing id readable in a filename long after the
+    drawing itself was purged. The digest is stable, so it still identifies the
+    drawing to every process, without carrying the ids around.
+
+    WHAT THIS LEAVES OPEN, stated rather than papered over: the prefix
+    accumulates one EMPTY file per drawing ever created and nothing removes them.
+    Bounding that needs the guest purge and the store to hold one shared lock so
+    a lock file can be retired while provably unheld -- the same shared-lock work
+    `_legacy_checkout_guard` already defers -- and not a shared pool, which the
+    paragraph above rules out.
+
+    THE NAMING IS PART OF THE CROSS-PROCESS PROTOCOL. Two processes agree on a
+    drawing's lock only by deriving the same path, so this function cannot be
+    changed under a rolling deploy: mixed versions would take different files and
+    both enter the section, which is the very defect the guard exists to prevent.
+    Any change here needs a full drain. `test_the_lock_key_mapping_is_pinned`
+    pins the mapping against literals so a change cannot be made by accident.
     """
     ident = f"{sanitize_id(tenant_id)}/{sanitize_id(drawing_id)}"
     digest = hashlib.sha256(ident.encode("utf-8")).hexdigest()
-    shard = int(digest[:8], 16) % _CHECKOUT_LOCK_SHARDS
-    return f"checkout-locks/{shard:04d}.lock"
+    # Two levels so one directory does not collect every drawing's lock file.
+    return f"checkout-locks/{digest[:2]}/{digest}.lock"
 
 
 # --------------------------------------------------------------------------- #
@@ -258,10 +267,14 @@ except ImportError:  # pragma: no cover - POSIX
     msvcrt = None
 
 
-# Budget for ONE checkout read-modify-write to hold the drawing. The section is
-# a manifest load, an edit, and a save, so a holder that has not finished inside
-# this is stuck rather than busy, and the caller is better served by an error
-# than by a request that never returns.
+# Budget for ONE guarded section to hold the drawing. Usually that is a manifest
+# load, an edit and a save; for `put_drawing` and `ingest_drawing` it also
+# includes the durable write of the version blob, which is why this is seconds
+# rather than milliseconds. A holder that has not finished inside this is stuck
+# rather than busy, and the caller is better served by an error than by a request
+# that never returns. Waiters are only ever contending for the SAME drawing (see
+# `checkout_lock_key`), so a timeout here names real contention, never a
+# coincidence of hashing.
 _CHECKOUT_LOCK_TIMEOUT_S = 30.0
 
 
@@ -1157,11 +1170,14 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
     # before a concurrent acquire therefore erases the lease AND resets the
     # generation counter, so `_next_fence` starts over from 1 and the next
     # acquire reissues a generation an outstanding capability still carries.
+    # Read the payload BEFORE taking the lock: it does not depend on anything the
+    # guard protects, and reading a large DWG inside the section would hold the
+    # drawing for the duration for no reason.
+    data = _read(local_path)
     with _legacy_checkout_guard(backend, tid, did):
         if backend.exists(manifest_key(tid, did)):
             raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
 
-        data = _read(local_path)
         vkey = drawing_version_key(tid, did, 1)
         if backend.exists(vkey):  # immutability guard
             raise ValueError(f"refuse to overwrite immutable version key {vkey}")
@@ -1377,6 +1393,10 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     # ownership bypass the guard on acquire exists to prevent, reached through a
     # different door. Two concurrent commits also lose a version from
     # `m["versions"]` the same way.
+    # Read the payload BEFORE taking the lock; see `ingest_drawing`. The blob
+    # WRITE has to stay inside, because its key depends on the version number the
+    # guarded manifest read produces.
+    data = _read(local_path)
     with _legacy_checkout_guard(backend, tid, did):
         m = load_manifest(backend, tid, did)
         _authorize_checkout_view(m.get("checkout"), holder, fence)
@@ -1386,7 +1406,6 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         if backend.exists(vkey):  # immutability guard (monotonic latest => never true in practice)
             raise ValueError(f"refuse to overwrite immutable version key {vkey}")
 
-        data = _read(local_path)
         backend.put(vkey, data)
 
         meta = meta or {}
