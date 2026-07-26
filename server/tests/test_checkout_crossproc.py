@@ -664,6 +664,77 @@ def test_the_lock_key_mapping_is_pinned():
         "fd53576023d002c02b324b9a600d3dcd505ab53e63268267d024958225614d1d.lock")
 
 
+def test_the_in_process_lock_map_does_not_grow_with_churn(tmp_path):
+    """The map is bounded by CONCURRENT callers, not by drawings ever touched.
+
+    Round 6: with all six writers routed through the guard, a process serving a
+    long tail of distinct drawings kept one `threading.Lock` per drawing forever
+    and the heap grew with churn.
+    """
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    payload = tmp_path / "payload.dwg"
+    payload.write_bytes(b"dwg-bytes")
+
+    before = len(store._LEGACY_CHECKOUT_LOCKS)
+    for n in range(25):
+        did = f"churn-{n}"
+        store.ingest_drawing(backend, TENANT, str(payload), did)
+        fence = store.acquire_checkout_fence(backend, TENANT, did, "holder", 300.0)
+        store.release_checkout(backend, TENANT, did, expected_fence=fence)
+
+    assert len(store._LEGACY_CHECKOUT_LOCKS) == before, (
+        f"25 drawings left {len(store._LEGACY_CHECKOUT_LOCKS) - before} lock-map "
+        f"entries behind; the map grows for the life of the process")
+
+
+def test_the_entry_survives_while_a_caller_still_holds_it(tmp_path):
+    """The counterpart risk: evicting too eagerly would hand two callers
+    DIFFERENT locks for one drawing and let both into the section."""
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    store.save_manifest(backend, TENANT, DRAWING,
+                        store._new_manifest(TENANT, DRAWING))
+
+    seen = []
+    with store._legacy_checkout_lock(TENANT, DRAWING) as outer:
+        # A second interested caller must be handed the SAME lock object.
+        with store._legacy_checkout_lock(TENANT, DRAWING) as inner:
+            assert inner is outer, "two callers got different locks for one drawing"
+            seen.append(len(store._LEGACY_CHECKOUT_LOCKS))
+        # Inner left; the entry must still be there for the outer caller.
+        assert f"{TENANT}/{DRAWING}" in store._LEGACY_CHECKOUT_LOCKS, (
+            "the entry was dropped while a caller still held it")
+    assert f"{TENANT}/{DRAWING}" not in store._LEGACY_CHECKOUT_LOCKS, (
+        "the entry outlived its last caller")
+    assert seen == [1]
+
+
+def test_a_missing_drawing_does_not_create_a_lock_file(tmp_path):
+    """Taking the lock creates the file and nothing reclaims it, so a caller must
+    not be able to mint one for a drawing id that was never a drawing.
+
+    Round 6: otherwise an authenticated caller grows the prefix by inventing ids.
+    """
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    lock_root = Path(backend._path("checkout-locks"))
+
+    for did in ("never-existed-1", "never-existed-2"):
+        with pytest.raises(KeyError):
+            store.acquire_checkout_fence(backend, TENANT, did, "holder", 300.0)
+
+    existing = list(lock_root.rglob("*.lock")) if lock_root.exists() else []
+    assert not existing, f"missing drawings still created lock files: {existing}"
+
+    # And a drawing that DOES exist still gets one, so the check is not blanket.
+    store.save_manifest(backend, TENANT, DRAWING,
+                        store._new_manifest(TENANT, DRAWING))
+    assert store.acquire_checkout_fence(
+        backend, TENANT, DRAWING, "holder", 300.0) is not None
+    assert list(lock_root.rglob("*.lock")), "a real drawing got no lock file"
+
+
 def test_each_drawing_gets_its_own_lock_and_no_ids_leak():
     """One lock per drawing, named by digest.
 
@@ -734,11 +805,11 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
                 os_depth["n"] -= 1
 
     @contextlib.contextmanager
-    def spy(backend, tid, did):
+    def spy(backend, tid, did, **kwargs):
         seen.append((tid, did))
         depth["n"] += 1
         try:
-            with real_guard(backend, tid, did):
+            with real_guard(backend, tid, did, **kwargs):
                 yield
         finally:
             depth["n"] -= 1

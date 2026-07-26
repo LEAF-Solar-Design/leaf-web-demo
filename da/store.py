@@ -1174,7 +1174,9 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
     # guard protects, and reading a large DWG inside the section would hold the
     # drawing for the duration for no reason.
     data = _read(local_path)
-    with _legacy_checkout_guard(backend, tid, did):
+    # `creating=True`: this is the one writer whose drawing is SUPPOSED to be
+    # absent, so it is the one that may bring a lock file into existence.
+    with _legacy_checkout_guard(backend, tid, did, creating=True):
         if backend.exists(manifest_key(tid, did)):
             raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
 
@@ -1674,25 +1676,50 @@ _LEGACY_CHECKOUT_LOCKS: dict[str, threading.Lock] = {}
 _LEGACY_CHECKOUT_LOCKS_GUARD = threading.Lock()
 
 
-def _legacy_checkout_lock(tid: str, did: str) -> threading.Lock:
+@contextlib.contextmanager
+def _legacy_checkout_lock(tid: str, did: str):
     """The per-drawing, per-PROCESS half of the checkout guard.
 
     Kept as the outer layer of `_legacy_checkout_guard` because it is far
     cheaper than a syscall: threads of one app process settle here and never
     reach the filesystem. It excludes only threads. The cross-process half is
     the backend's OS lock.
+
+    REFERENCE COUNTED, so the map does not grow for the life of the process.
+    Round 6 caught that: with all six writers routed through here, a process
+    handling a long tail of distinct drawings accumulated one `Lock` per drawing
+    it had ever touched and never dropped one, so the heap grew with churn.
+
+    The entry is removed when the last interested caller leaves, and the count is
+    maintained under `_LEGACY_CHECKOUT_LOCKS_GUARD`, which is what makes the
+    removal safe. Evicting on "the lock looks unheld" instead would be a race:
+    callers take the lock AFTER this returns, so an entry can legitimately be
+    unheld while a caller is on its way to it, and dropping it there would hand
+    the next caller a DIFFERENT `Lock` for the same drawing and let both into the
+    section.
     """
     key = f"{tid}/{did}"
     with _LEGACY_CHECKOUT_LOCKS_GUARD:
-        lock = _LEGACY_CHECKOUT_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _LEGACY_CHECKOUT_LOCKS[key] = lock
-        return lock
+        entry = _LEGACY_CHECKOUT_LOCKS.get(key)
+        if entry is None:
+            entry = [threading.Lock(), 0]
+            _LEGACY_CHECKOUT_LOCKS[key] = entry
+        entry[1] += 1
+        lock = entry[0]
+    try:
+        yield lock
+    finally:
+        with _LEGACY_CHECKOUT_LOCKS_GUARD:
+            entry = _LEGACY_CHECKOUT_LOCKS.get(key)
+            if entry is not None:
+                entry[1] -= 1
+                if entry[1] <= 0:
+                    del _LEGACY_CHECKOUT_LOCKS[key]
 
 
 @contextlib.contextmanager
-def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str):
+def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
+                           creating: bool = False):
     """Serialize EVERY legacy read-modify-write of one drawing's manifest.
 
     The legacy manifest is a load, edit, save with nothing holding the record in
@@ -1746,32 +1773,57 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str):
     always been able to do it — and closing it means giving the purge and the
     store one shared lock, which is tracked separately.
 
+    RESOURCES IT HOLDS, and exactly how far each is bounded. The in-process lock
+    map is reference counted and drops an entry when its last caller leaves, so it
+    is bounded by CONCURRENT callers rather than by drawings ever seen. The lock
+    FILES are bounded by the number of drawings that have genuinely existed: a
+    missing drawing is refused above before the file is created, so no caller can
+    mint lock files for ids that were never drawings. What is still NOT reclaimed
+    is the lock file of a drawing that existed and was later purged. Deleting one
+    safely needs the same purge-and-store shared lock as the paragraph above,
+    because unlinking a lock file that a live holder owns is precisely how two
+    callers end up inside this section (it is why the file is not in the drawing's
+    own directory). One empty file per purged drawing is the price of not
+    reintroducing that.
+
     The documented answer above that boundary is unchanged and is postgres: it
     reads `FOR UPDATE` and increments in one statement, so it needs none of
     this. What this removes is the narrower, previously-standing caveat that the
     legacy path was safe only for a SINGLE app process.
     """
-    thread_lock = _legacy_checkout_lock(tid, did)
-    # Bounded, so a queue of in-process callers cannot wait without a limit
-    # before the cross-process deadline below even starts counting.
-    if not thread_lock.acquire(timeout=_CHECKOUT_LOCK_TIMEOUT_S):
-        raise CheckoutLockTimeout(
-            f"in-process checkout lock busy past {_CHECKOUT_LOCK_TIMEOUT_S}s: "
-            f"{tid}/{did}")
-    try:
-        if not backend.cross_process_checkout_safe:
-            warnings.warn(
-                f"{type(backend).__name__} cannot take an OS-level checkout "
-                f"lock, so the {tid}/{did} checkout is serialized within this "
-                f"process only; a second replica can still lose an update. Use "
-                f"the postgres authority for a multi-replica deployment.",
-                CrossProcessCheckoutLockMissing, stacklevel=3)
-            yield
-            return
-        with backend.cross_process_lock(checkout_lock_key(tid, did)):
-            yield
-    finally:
-        thread_lock.release()
+    with _legacy_checkout_lock(tid, did) as thread_lock:
+        # Bounded, so a queue of in-process callers cannot wait without a limit
+        # before the cross-process deadline below even starts counting.
+        if not thread_lock.acquire(timeout=_CHECKOUT_LOCK_TIMEOUT_S):
+            raise CheckoutLockTimeout(
+                f"in-process checkout lock busy past {_CHECKOUT_LOCK_TIMEOUT_S}s: "
+                f"{tid}/{did}")
+        try:
+            if not backend.cross_process_checkout_safe:
+                warnings.warn(
+                    f"{type(backend).__name__} cannot take an OS-level checkout "
+                    f"lock, so the {tid}/{did} checkout is serialized within this "
+                    f"process only; a second replica can still lose an update. Use "
+                    f"the postgres authority for a multi-replica deployment.",
+                    CrossProcessCheckoutLockMissing, stacklevel=3)
+                yield
+                return
+            # Refuse a MISSING drawing before the lock file exists. Taking the
+            # lock creates the file, and nothing reclaims it, so without this an
+            # authenticated caller could mint an empty lock file per made-up
+            # drawing id and grow the prefix without ever creating a drawing.
+            # Every writer but `ingest_drawing` needs the manifest to be there
+            # already and would raise this exact `KeyError` from `load_manifest`
+            # a moment later, so this only moves the refusal earlier. Racing a
+            # concurrent ingest can turn into a not-found for a drawing that
+            # appears immediately afterwards, which was already possible and
+            # costs nothing, because this path never writes.
+            if not creating and not backend.exists(manifest_key(tid, did)):
+                raise KeyError(manifest_key(tid, did))
+            with backend.cross_process_lock(checkout_lock_key(tid, did)):
+                yield
+        finally:
+            thread_lock.release()
 
 
 def _next_fence(m: dict) -> int:

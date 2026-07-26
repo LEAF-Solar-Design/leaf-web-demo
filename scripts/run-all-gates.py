@@ -409,7 +409,7 @@ def build_suites() -> List[Suite]:
         # a per-process threading lock cannot see. No skipif: `fcntl` is the
         # Linux path and `msvcrt` the Windows one, and both must execute.
         Suite("server-checkout-crossproc", "server tests/test_checkout_crossproc.py",
-              "pytest", SERVER, _py_pytest("tests/test_checkout_crossproc.py"), 18),
+              "pytest", SERVER, _py_pytest("tests/test_checkout_crossproc.py"), 21),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
