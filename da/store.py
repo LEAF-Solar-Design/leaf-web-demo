@@ -1686,7 +1686,8 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str):
 
     NOT REENTRANT. The threading half is a plain `Lock`, so a guarded function
     calling another guarded function would wait out `_CHECKOUT_LOCK_TIMEOUT_S`
-    and then raise. None of the five call each other; keep it that way.
+    and then raise. None of the six writers listed above calls another; keep it
+    that way, `ingest_drawing` included.
 
     WHAT THIS DOES NOT DO. It is not a distributed lock and must not grow into
     one. It reaches exactly as far as the OS lock does, which is one shared

@@ -599,34 +599,83 @@ def test_no_legacy_manifest_writer_escapes_the_guard():
     import ast
     import inspect
 
-    tree = ast.parse(inspect.getsource(store))
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        called = {c.func.id for c in ast.walk(node)
-                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
-        if "save_manifest" in called and "_legacy_checkout_guard" not in called:
-            offenders.append(node.name)
+    def _is_guard_with(node: ast.With) -> bool:
+        return any(isinstance(item.context_expr, ast.Call)
+                   and isinstance(item.context_expr.func, ast.Name)
+                   and item.context_expr.func.id == "_legacy_checkout_guard"
+                   for item in node.items)
+
+    def _is_save_call(node) -> bool:
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "save_manifest")
+
+    offenders: list[int] = []
+
+    def _visit(node, inside_guard: bool) -> None:
+        """Descend tracking whether we are LEXICALLY inside a guarded `with`.
+
+        Ancestry, not mere co-occurrence in the same function. The round-3 review
+        showed why: dedenting a `save_manifest` so it runs AFTER the guard exits
+        leaves both names present in the function and is still valid Python, so a
+        co-occurrence check reports no offenders while the save is once again
+        unprotected.
+        """
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.With):
+                guarded = inside_guard or _is_guard_with(child)
+                # A with-item's own expression is evaluated BEFORE the block is
+                # entered, so it does not inherit the block's protection.
+                for item in child.items:
+                    _visit(item, inside_guard)
+                for stmt in child.body:
+                    _visit(stmt, guarded)
+                continue
+            if _is_save_call(child) and not inside_guard:
+                offenders.append(child.lineno)
+            _visit(child, inside_guard)
+
+    _visit(ast.parse(inspect.getsource(store)), False)
 
     assert not offenders, (
-        f"these functions write the manifest without taking the guard: "
-        f"{offenders}. A whole-document save carries `checkout` and "
-        f"`checkout_fence` back to whatever the caller last read, which erases a "
-        f"concurrently acquired lease and lets its generation be reissued.")
+        f"da/store.py writes the manifest OUTSIDE a `_legacy_checkout_guard` "
+        f"block at line(s) {offenders}. A whole-document save carries "
+        f"`checkout` and `checkout_fence` back to whatever the caller last read, "
+        f"which erases a concurrently acquired lease and lets its generation be "
+        f"reissued. Note this is deliberately lexical: a helper that saves on a "
+        f"guarded caller's behalf will be flagged, and should be inlined or take "
+        f"the guard itself rather than rely on its callers.")
 
 
 def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatch):
-    """The runtime half of the check above: the guard is actually ENTERED, not
-    merely mentioned in the function body."""
+    """The runtime half of the check above: every save actually HAPPENS with the
+    guard held.
+
+    Not just that the guard was entered somewhere in the call — the round-3
+    review's mutation (a save dedented to run after the guard exits) satisfies
+    that weaker reading. This counts guard depth and fails a save taken at depth
+    zero, so it catches the dedent dynamically, and also catches the one case the
+    static check can only judge lexically: a save reached through a helper.
+    """
     seen = []
+    depth = {"n": 0}
+    saves_at_depth_zero = []
     real_guard = store._legacy_checkout_guard
+    real_save = store.save_manifest
 
     @contextlib.contextmanager
     def spy(backend, tid, did):
         seen.append((tid, did))
-        with real_guard(backend, tid, did):
-            yield
+        depth["n"] += 1
+        try:
+            with real_guard(backend, tid, did):
+                yield
+        finally:
+            depth["n"] -= 1
+
+    def checked_save(*args, **kwargs):
+        if depth["n"] == 0:
+            saves_at_depth_zero.append(args[1:3])
+        return real_save(*args, **kwargs)
 
     root = str(tmp_path / "store")
     backend = store.FilesystemBackend(root)
@@ -634,6 +683,7 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
     payload.write_bytes(b"dwg-bytes")
 
     monkeypatch.setattr(store, "_legacy_checkout_guard", spy)
+    monkeypatch.setattr(store, "save_manifest", checked_save)
     store.ingest_drawing(backend, TENANT, str(payload), DRAWING)
     first = store.put_drawing(backend, TENANT, DRAWING, str(payload), None)
     # Parented on the first, so head has a parent to walk back to.
@@ -643,6 +693,9 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
     fence = store.acquire_checkout_fence(backend, TENANT, DRAWING, "holder", 300.0)
     store.release_checkout(backend, TENANT, DRAWING, expected_fence=fence)
 
+    assert not saves_at_depth_zero, (
+        f"the manifest was saved with NO guard held for {saves_at_depth_zero}; "
+        f"a save that escapes the guard can erase a concurrently acquired lease")
     assert len(seen) == 7, (
         f"expected every legacy manifest writer to take the guard, saw {seen}")
 
