@@ -175,19 +175,6 @@ def _hold_lock_forever_child(da_dir, root, ready):
         time.sleep(3600)
 
 
-def _timed_lock_child(da_dir, root, ready, results):
-    """Report how long the OS checkout lock took to acquire."""
-    child_store = _child_store(da_dir)
-    backend = child_store.FilesystemBackend(root)
-    ready.set()
-    started = time.monotonic()
-    try:
-        with backend.cross_process_lock(child_store.checkout_lock_key(TENANT, DRAWING)):
-            results.put(("ok", time.monotonic() - started))
-    except Exception as exc:
-        results.put(("err", f"{type(exc).__name__}: {exc}"))
-
-
 def _ingest_child(da_dir, root, local_path, peer_started, self_started, barrier,
                   results):
     """Create version 1 of a NEW drawing. Unguarded, its "does this already
@@ -392,29 +379,41 @@ def test_a_commit_racing_an_acquire_loses_neither_write(tmp_path):
 # 2. The lock is real, and it lets go.
 # --------------------------------------------------------------------------- #
 def test_cross_process_lock_actually_excludes_a_second_process(tmp_path):
-    """Guards against a VACUOUS pass.
+    """The anti-vacuity check, and it contains NO TIMING.
 
-    If the platform primitive silently granted everyone, every test above would
-    still pass on a fast enough machine. This one asserts the contender was
-    genuinely made to wait, so the lock cannot quietly become a no-op.
+    An earlier version timed how long a contender waited and required half a
+    second. The round-4 review killed it: a contender that is descheduled while
+    the holder sleeps reports a long wait caused purely by scheduling, so a
+    no-op primitive passed. Any assertion of the form "it took a while" has that
+    hole, because slowness is not evidence of exclusion.
+
+    So this asks the primitive a BOOLEAN question instead. The holder signals only
+    after it owns the lock, and `_try_os_lock` is non-blocking: a real lock cannot
+    return True while another process holds it, and a no-op cannot return False.
+    No scheduling can change either answer.
     """
     root = str(tmp_path / "store")
+    key = store.checkout_lock_key(TENANT, DRAWING)
     ctx = multiprocessing.get_context("spawn")
-    contender_ready, results = ctx.Event(), ctx.Queue()
+    ready = ctx.Event()
 
-    backend = store.FilesystemBackend(root)
-    with backend.cross_process_lock(store.checkout_lock_key(TENANT, DRAWING)):
-        proc = _spawn(_timed_lock_child, _DA_DIR, root, contender_ready, results)
-        assert contender_ready.wait(timeout=_JOIN_S), "contender never started"
-        time.sleep(1.0)  # held here; the contender must still be blocked
-        assert results.empty(), "contender took a lock this process holds"
+    holder = _spawn(_hold_lock_forever_child, _DA_DIR, root, ready)
+    try:
+        assert ready.wait(timeout=_JOIN_S), "holder never took the lock"
+        path = store.FilesystemBackend(root)._path(key)
+        with open(path, "a+b") as handle:
+            assert store._try_os_lock(handle) is False, (
+                "took a lock another process demonstrably holds: the OS lock "
+                "grants everyone, so every race test above is vacuous")
+    finally:
+        holder.kill()
+        holder.join(timeout=_JOIN_S)
 
-    status, waited = results.get(timeout=_JOIN_S)
-    proc.join(timeout=_JOIN_S)
-    assert status == "ok", waited
-    assert waited >= 0.5, (
-        f"contender acquired in {waited:.3f}s while the lock was held for ~1s: "
-        f"the OS lock is not excluding anything")
+    # And it was the HOLDER excluding us, not the file being permanently
+    # unavailable: with the holder gone the same call succeeds.
+    with open(store.FilesystemBackend(root)._path(key), "a+b") as handle:
+        assert store._try_os_lock(handle) is True, (
+            "the lock stayed unavailable after its holder died")
 
 
 def test_lock_is_released_when_the_body_raises(tmp_path):
@@ -646,6 +645,42 @@ def test_no_legacy_manifest_writer_escapes_the_guard():
         f"the guard itself rather than rely on its callers.")
 
 
+def test_the_lock_pool_is_bounded_stable_and_anonymous():
+    """Nothing ever cleans the lock prefix, so the pool must be bounded rather
+    than swept, must not name the drawings it protects, and must map a given
+    drawing to the same file every time.
+
+    Round 4: a file per drawing grew without limit and left a tenant and drawing
+    id in a filename after the drawing itself was purged.
+    """
+    keys = {store.checkout_lock_key(f"t{t}", f"d{d}")
+            for t in range(40) for d in range(40)}
+    assert len(keys) <= store._CHECKOUT_LOCK_SHARDS, (
+        f"1600 drawings produced {len(keys)} lock files; the pool is not bounded")
+    # Genuinely spread, or "bounded" would just mean one lock for everything.
+    assert len(keys) > store._CHECKOUT_LOCK_SHARDS // 2, (
+        f"1600 drawings collapsed onto {len(keys)} of "
+        f"{store._CHECKOUT_LOCK_SHARDS} shards; needless contention")
+
+    # Anonymous: no tenant or drawing id survives in the path.
+    assert store.checkout_lock_key("acme-corp", "secret-drawing-42") \
+        .find("acme-corp") == -1
+    assert store.checkout_lock_key("acme-corp", "secret-drawing-42") \
+        .find("secret-drawing-42") == -1
+
+    # Stable: the lock is only a lock if the same drawing lands on it every time.
+    assert (store.checkout_lock_key(TENANT, DRAWING)
+            == store.checkout_lock_key(TENANT, DRAWING))
+
+    # Keyed on BOTH ids. If the tenant were ignored, two tenants' same-named
+    # drawings would share a lock; if the drawing were ignored, a tenant would
+    # serialize on all of its drawings at once.
+    per_tenant = {store.checkout_lock_key(f"t{t}", DRAWING) for t in range(40)}
+    per_drawing = {store.checkout_lock_key(TENANT, f"d{d}") for d in range(40)}
+    assert len(per_tenant) > 1, "the shard ignores the tenant id"
+    assert len(per_drawing) > 1, "the shard ignores the drawing id"
+
+
 def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatch):
     """The runtime half of the check above: every save actually HAPPENS with the
     guard held.
@@ -658,9 +693,30 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
     """
     seen = []
     depth = {"n": 0}
+    os_depth = {"n": 0}
     saves_at_depth_zero = []
+    saves_without_os_lock = []
     real_guard = store._legacy_checkout_guard
     real_save = store.save_manifest
+
+    class SpyBackend(store.FilesystemBackend):
+        """Counts time spent inside the BACKEND's lock.
+
+        Round 4: being inside `_legacy_checkout_guard` proves nothing on its own,
+        because replacing the guard's `with backend.cross_process_lock(...)` with
+        a bare `yield` leaves every save both lexically and dynamically inside the
+        guard. The cross-process half would be gone and every structural check
+        would still pass. So the assertion has to be about the OS lock itself.
+        """
+
+        @contextlib.contextmanager
+        def cross_process_lock(self, key):
+            os_depth["n"] += 1
+            try:
+                with super().cross_process_lock(key):
+                    yield
+            finally:
+                os_depth["n"] -= 1
 
     @contextlib.contextmanager
     def spy(backend, tid, did):
@@ -675,10 +731,12 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
     def checked_save(*args, **kwargs):
         if depth["n"] == 0:
             saves_at_depth_zero.append(args[1:3])
+        if os_depth["n"] == 0:
+            saves_without_os_lock.append(args[1:3])
         return real_save(*args, **kwargs)
 
     root = str(tmp_path / "store")
-    backend = store.FilesystemBackend(root)
+    backend = SpyBackend(root)
     payload = tmp_path / "payload.dwg"
     payload.write_bytes(b"dwg-bytes")
 
@@ -696,6 +754,10 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
     assert not saves_at_depth_zero, (
         f"the manifest was saved with NO guard held for {saves_at_depth_zero}; "
         f"a save that escapes the guard can erase a concurrently acquired lease")
+    assert not saves_without_os_lock, (
+        f"the manifest was saved without the BACKEND's cross-process lock held "
+        f"for {saves_without_os_lock}; the guard would then exclude only threads "
+        f"of this process, which is the defect this whole file exists to close")
     assert len(seen) == 7, (
         f"expected every legacy manifest writer to take the guard, saw {seen}")
 

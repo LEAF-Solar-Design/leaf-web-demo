@@ -197,6 +197,11 @@ def manifest_key(tenant_id: str, drawing_id: str) -> str:
     return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}/manifest.json"
 
 
+# Size of the checkout lock-file pool. Nothing ever cleans the pool, so it is
+# bounded by construction rather than by a sweep; see `checkout_lock_key`.
+_CHECKOUT_LOCK_SHARDS = 256
+
+
 def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     """Object key of the drawing's cross-process checkout lock file.
 
@@ -218,9 +223,26 @@ def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
 
     So the lock lives under its own top-level prefix that no drawing-directory
     walker descends into, and is created once and never unlinked.
+
+    A BOUNDED POOL, not one file per drawing. Because nothing cleans this prefix
+    -- that is the whole point of it -- a file per drawing would grow without
+    limit and would leave a tenant and drawing id in a filename after the drawing
+    itself had been purged. Instead a drawing hashes to one of
+    `_CHECKOUT_LOCK_SHARDS` files, so the prefix holds at most that many entries
+    and none of them names anything. The mapping is a pure function of the ids, so
+    a drawing always lands on the same shard, which is the property the lock needs.
+
+    The cost is FALSE CONTENTION: two different drawings that hash together
+    serialize against each other. That is safe (it over-excludes, never
+    under-excludes) and bounded by the shard count, and the guarded section is a
+    manifest read plus a write. Raise `_CHECKOUT_LOCK_SHARDS` if that ever shows
+    up in a profile; it can change freely, because the pool is not persistent
+    state that anything else reads.
     """
-    return (f"checkout-locks/{sanitize_id(tenant_id)}/"
-            f"{sanitize_id(drawing_id)}.checkout-lock")
+    ident = f"{sanitize_id(tenant_id)}/{sanitize_id(drawing_id)}"
+    digest = hashlib.sha256(ident.encode("utf-8")).hexdigest()
+    shard = int(digest[:8], 16) % _CHECKOUT_LOCK_SHARDS
+    return f"checkout-locks/{shard:04d}.lock"
 
 
 # --------------------------------------------------------------------------- #
