@@ -7,6 +7,7 @@ on:
       - 'da/store.py'
       - 'platform/migrations/0016_drawing_upload_authority.sql'
       - 'platform/api.py'
+      - 'platform/mutation_fence.py'
       - 'platform/tests/conftest.py'
       - 'platform/tests/test_drawing_import.py'
       - 'deploy/required-config.app.json'

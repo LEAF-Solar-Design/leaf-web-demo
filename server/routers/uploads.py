@@ -137,6 +137,33 @@ def upload_drawing(
                 retryable=False,
                 status_code=503,
             )
+    # The admission checks above are deployment defaults. The shared fence is
+    # the LIVE drain and is held across the whole ingest, so a cutover starting
+    # mid-request cannot be crossed by an upload already past those checks.
+    with write_loop.upload_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return error_response(
+                ErrorCode.INTERNAL,
+                "drawing mutations are temporarily disabled for a storage cutover",
+                retryable=True,
+                status_code=503,
+            )
+        return _upload_drawing(
+            request,
+            file,
+            x_tenant_id,
+            authorization,
+            x_guest_session,
+        )
+
+
+def _upload_drawing(
+    request: Request,
+    file: UploadFile,
+    x_tenant_id: Optional[str],
+    authorization: Optional[str],
+    x_guest_session: Optional[str],
+) -> Any:
 
     tenant, tenant_kind, _minted = _resolve_upload_identity(
         x_tenant_id, authorization, x_guest_session)

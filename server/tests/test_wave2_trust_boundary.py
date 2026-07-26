@@ -23,6 +23,8 @@ def _safe_production(monkeypatch):
     monkeypatch.setenv("LEAF_UPLOAD_STORE", "postgres")
     monkeypatch.setenv("LEAF_BLOB_STORE", "filesystem")
     monkeypatch.setenv("DATABASE_URL", "postgresql://safe.example/test")
+    monkeypatch.setenv(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", "/data/state/drawing-mutations")
 
 
 def test_broker_accepts_explicit_safe_production_contract(monkeypatch):
@@ -52,6 +54,7 @@ def test_broker_rejects_production_without_live_auth(monkeypatch):
         ("LEAF_UPLOAD_STORE", "legacy", "LEAF_UPLOAD_STORE=postgres"),
         ("LEAF_BLOB_STORE", "aps_oss", "LEAF_BLOB_STORE=filesystem"),
         ("DATABASE_URL", "", "DATABASE_URL"),
+        ("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "", "FENCE_FILE"),
     ],
 )
 def test_broker_rejects_nondurable_production_authority(

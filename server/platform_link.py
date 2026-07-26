@@ -149,6 +149,10 @@ def validate_canonical_upload_authority() -> None:
     if os.environ.get("LEAF_BLOB_STORE", "legacy").strip().lower() != "filesystem":
         raise RuntimeError(
             "LEAF_PLATFORM_POSTGRES_REQUIRED requires LEAF_BLOB_STORE=filesystem")
+    if not os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip():
+        raise RuntimeError(
+            "LEAF_PLATFORM_POSTGRES_REQUIRED requires "
+            "LEAF_DRAWING_MUTATIONS_FENCE_FILE")
 
 
 def validate_postgres_startup() -> Optional[Dict[str, Any]]:

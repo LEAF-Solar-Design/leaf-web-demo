@@ -6,12 +6,14 @@ import io
 from pathlib import Path
 import sys
 import uuid
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from psycopg.types.json import Jsonb
 
 import leaf_platform.store as store
+import leaf_platform.api as platform_api
 from leaf_platform.db import cursor
 
 
@@ -112,6 +114,35 @@ def test_import_gate_defaults_closed_before_store_write(
     assert response.status_code == 503
     assert response.json()["detail"] == (
         "drawing upload/import mutations are temporarily disabled"
+    )
+    assert store.list_drawing_versions(org.org_id, project.project_id) == []
+
+
+def test_import_commit_fails_closed_when_shared_fence_is_drained(
+    client, make_org, monkeypatch
+):
+    # The lane's own gate is OPEN here on purpose: without it this would 503
+    # for the wrong reason and never exercise the fence at all.
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+    org, project = _canonical_project(make_org, "Drained fence import org")
+    binding = _binding(org.org_id)
+
+    @contextmanager
+    def drained_commit():
+        yield False
+
+    monkeypatch.setattr(
+        platform_api, "drawing_mutation_commit_guard", drained_commit
+    )
+    response = client.post(
+        f"/api/projects/{project.project_id}/drawing-versions/import",
+        headers=_headers(org.org_id, binding.binding_id, "drained-import"),
+        json=_body(uuid.uuid4()),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "drawing mutations are temporarily disabled for a storage cutover"
     )
     assert store.list_drawing_versions(org.org_id, project.project_id) == []
 
