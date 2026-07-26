@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ import secrets
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -125,9 +127,85 @@ def _cleanup_scratch_objects(da: Any, scratch_keys) -> None:
             )
 
 
+def fence_open() -> bool:
+    """Live cutover state from the shared EFS fence FILE alone.
+
+    The fence is the one authority EVERY drawing-authority lane shares, so a
+    storage cutover drains already-running app and broker tasks without waiting
+    for an ECS rollout. No fence configured means no cutover is in progress.
+    Missing, unreadable, or malformed fence state fails CLOSED.
+    """
+    fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
+    if not fence:
+        return True
+    try:
+        return Path(fence).read_text(encoding="utf-8").strip() == "1"
+    except (OSError, UnicodeError):
+        return False
+
+
 def drawing_mutations_enabled() -> bool:
-    """Cutover gate for authored, checkout, and broker drawing mutations."""
-    return os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") == "1"
+    """Authored / checkout / broker-run lane: the env default AND the fence.
+
+    Scoped to THAT lane on purpose. The upload/import lane has its own env gate
+    (``upload_import_mutations_enabled``) and must not be closed by this one --
+    see ``upload_mutation_commit_guard``.
+    """
+    if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
+        return False
+    return fence_open()
+
+
+@contextmanager
+def _fence_held(decide):
+    """Hold the shared cutover fence across one durable drawing commit.
+
+    Linux tasks take a shared flock.  The protected cutover control takes the
+    matching exclusive lock before changing the fence, so it waits for every
+    admitted commit and prevents a late old-task write from crossing the drain.
+
+    ``decide`` is the lane's own open/closed rule, evaluated INSIDE the lock so
+    the answer cannot go stale between the check and the commit.
+    """
+    fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
+    if not fence:
+        yield decide()
+        return
+    lock_path = f"{fence}.lock"
+    Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as lock_file:
+        try:
+            import fcntl  # Linux deployment; unavailable on Windows unit hosts.
+        except ImportError:
+            yield False
+            return
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+        try:
+            yield decide()
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def drawing_mutation_commit_guard():
+    """Commit guard for the authored / checkout / broker-run lane."""
+    with _fence_held(drawing_mutations_enabled) as commit_enabled:
+        yield commit_enabled
+
+
+@contextmanager
+def upload_mutation_commit_guard():
+    """Commit guard for the upload / import lane: ONLY the shared fence.
+
+    That lane's env gate is ``upload_import_mutations_enabled``, checked by the
+    caller. Folding ``LEAF_DRAWING_MUTATIONS_ENABLED`` in here would let an
+    authored-lane drain silently close uploads too -- exactly the coupling
+    ``test_upload_gate_is_independent_from_authored_mutation_gate`` forbids.
+    The fence FILE still applies, because a storage cutover really does drain
+    every lane.
+    """
+    with _fence_held(fence_open) as commit_enabled:
+        yield commit_enabled
 
 
 def upload_import_mutations_enabled() -> bool:
@@ -235,7 +313,31 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
     import store
     v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
     ckey = intake_cache_key(tenant_id, drawing_id, v)
-    raw = backend.get(ckey) if backend.exists(ckey) else backend.get(vkey)
+    raw = None
+    if store.authority_mode() == "postgres":
+        import guest_uploads
+        if guest_uploads.upload_store_mode() == "postgres":
+            marker = guest_uploads.read_marker(
+                backend, tenant_id, drawing_id)
+            if marker is not None and marker.get("extracted_version") == v:
+                ref = marker.get("intake_ref")
+                digest = marker.get("intake_sha256")
+                if (
+                    marker.get("status") != "ready"
+                    or ref != ckey
+                    or not isinstance(digest, str)
+                    or len(digest) != 64
+                ):
+                    raise ValueError(
+                        "ready upload has no source-bound intake proof")
+                candidate = backend.get(ref)
+                if not hmac.compare_digest(
+                    hashlib.sha256(candidate).hexdigest(), digest):
+                    raise ValueError(
+                        "ready upload intake does not match its source proof")
+                raw = candidate
+    if raw is None:
+        raw = backend.get(ckey) if backend.exists(ckey) else backend.get(vkey)
     return v, json.loads(raw.decode("utf-8"))
 
 
@@ -350,19 +452,25 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
             f"drawing {drawing_id!r} was uploaded but extraction has not "
             f"produced geometry (see /api/drawings/{drawing_id}/upload-status); "
             f"refusing the demo-intake bootstrap")
-    data = CACHED_INTAKE_PATH.read_bytes()
-    fd, tmp = tempfile.mkstemp(suffix=".intake.json")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-        store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
-    except ValueError:
-        pass  # race: another request bootstrapped it first
-    finally:
+    with drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            raise ValueError(
+                "drawing mutations are temporarily disabled for a storage cutover")
+        if backend.exists(store.manifest_key(tenant_id, drawing_id)):
+            return
+        data = CACHED_INTAKE_PATH.read_bytes()
+        fd, tmp = tempfile.mkstemp(suffix=".intake.json")
         try:
-            os.remove(tmp)
-        except OSError:
-            pass
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
+        except ValueError:
+            pass  # race: another request bootstrapped it first
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -390,7 +498,12 @@ def undo_view(tenant_id: str, drawing_id: str, *, backend=None,
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    new_head = store.undo(backend, tenant_id, drawing_id, holder=holder, fence=fence)
+    with drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            raise ValueError(
+                "drawing mutations are temporarily disabled for a storage cutover")
+        new_head = store.undo(backend, tenant_id, drawing_id,
+                              holder=holder, fence=fence)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
     m = store.load_manifest(backend, tenant_id, drawing_id)
     return {"version": new_head, "head": int(m["head"]), "latest": int(m["latest"]), "intake": intake}
@@ -403,7 +516,12 @@ def redo_view(tenant_id: str, drawing_id: str, *, backend=None,
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    new_head = store.redo(backend, tenant_id, drawing_id, holder=holder, fence=fence)
+    with drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            raise ValueError(
+                "drawing mutations are temporarily disabled for a storage cutover")
+        new_head = store.redo(backend, tenant_id, drawing_id,
+                              holder=holder, fence=fence)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
     m = store.load_manifest(backend, tenant_id, drawing_id)
     return {"version": new_head, "head": int(m["head"]), "latest": int(m["latest"]), "intake": intake}
@@ -486,12 +604,19 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     mutations = result.get("mutations") or {}
     try:
         new_intake = apply_mutations(cur_intake, mutations)
-        new_v = _put_bytes_version(
-            backend, tenant_id, drawing_id,
-            json.dumps(new_intake, separators=(",", ":")).encode("utf-8"),
-            parent_version=head_v,
-            meta={"tool": name, "note": "mock write (intake payload)"},
-            holder=holder, fence=fence)
+        with drawing_mutation_commit_guard() as commit_enabled:
+            if not commit_enabled:
+                return (err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "drawing mutations were drained before write commit",
+                    retryable=True, tool=name, version=tool_version,
+                ), 503)
+            new_v = _put_bytes_version(
+                backend, tenant_id, drawing_id,
+                json.dumps(new_intake, separators=(",", ":")).encode("utf-8"),
+                parent_version=head_v,
+                meta={"tool": name, "note": "mock write (intake payload)"},
+                holder=holder, fence=fence)
     except store.CheckoutDenied as exc:
         # Caught BEFORE the blanket handler below: publishing under another
         # session's lock is an authorization answer (403), not a persist fault
@@ -674,13 +799,6 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                                  retryable=True, tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
 
-        wi_id = status.get("id")
-        new_v = _put_bytes_version(backend, tenant_id, drawing_id, out_bytes,
-                                   parent_version=head_v,
-                                   meta={"tool": name, "workitem_id": wi_id,
-                                         "note": "live write (output.dwg)"},
-                                   holder=holder, fence=fence)
-
         # re-extract the new version's DWG for the intake cache
         fd, tmp = tempfile.mkstemp(suffix=".dwg")
         try:
@@ -692,8 +810,24 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 os.remove(tmp)
             except OSError:
                 pass
-        backend.put(intake_cache_key(tenant_id, drawing_id, new_v),
-                    json.dumps(intake, separators=(",", ":")).encode("utf-8"))
+        wi_id = status.get("id")
+        with drawing_mutation_commit_guard() as commit_enabled:
+            if not commit_enabled:
+                return (err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "drawing mutations were drained before write commit",
+                    retryable=True, tool=name, version=tool_version,
+                ), 503)
+            new_v = _put_bytes_version(
+                backend, tenant_id, drawing_id, out_bytes,
+                parent_version=head_v,
+                meta={"tool": name, "workitem_id": wi_id,
+                      "note": "live write (output.dwg)"},
+                holder=holder, fence=fence)
+            backend.put(
+                intake_cache_key(tenant_id, drawing_id, new_v),
+                json.dumps(intake, separators=(",", ":")).encode("utf-8"),
+            )
 
         eng_s = da._engine_seconds(status)
         cost = None if eng_s is None else {

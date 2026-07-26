@@ -18,7 +18,8 @@
  * pending record is redeemed at the resume's gate consult). The loop's local
  * mirror row normally exists from the propose turn; if it is missing (store
  * wiped, first mount over pre-spine approvals) it is re-seeded from the wire's
- * `confirm.proposal` — {tool, params} exactly, the propose-time consult shape.
+ * `confirm.proposal` — {tool, params, dwg} exactly, the propose-time consult
+ * shape. The drawing is server-stored proposal truth, never a client choice.
  * NOTE the reseed changes the failure MODE, not the outcome: the gate binds an
  * approval to the loop-session identity that proposed it, so after a store wipe
  * the redemption is DENIED (foreign session — that binding is the security
@@ -255,8 +256,8 @@ export class SpineTurnAdapter implements ConverseRunner {
   }
 
   /** Re-create a missing confirmation mirror row from the wire's app-authoritative
-   *  proposal so a store-loss never strands a consumed approval. args are exactly
-   *  {tool, params} — the propose-time gate consult shape (hash compatibility). */
+   *  proposal so a store-loss never strands a consumed approval. Args are exactly
+   *  {tool, params, dwg} — the normalized propose-time gate consult shape. */
   private async seedConfirmationMirror(
     store: SessionStore,
     loopSessionId: string,
@@ -275,6 +276,9 @@ export class SpineTurnAdapter implements ConverseRunner {
       args_json: JSON.stringify({
         tool: confirm.proposal.tool,
         params: confirm.proposal.params,
+        ...(typeof confirm.proposal.dwg === "string"
+          ? { dwg: confirm.proposal.dwg }
+          : {}),
       }),
       kind: "run_capability",
       status: "pending",

@@ -19,8 +19,64 @@ server/jobs.db-shm
 server/jobs.db-wal
 server/broker_ledger.jsonl
 server/broker_tenants.json
+# _save_tenants mkstemps its replacement as `.broker_tenants.json.<rand>.tmp`
+# beside the snapshot (server/broker.py); the leading dot keeps it outside a
+# `broker_tenants.json*` widening.
+server/.broker_tenants.json.*
+# Broker/jobs restart-survival sidecars and the site-demo solve cache. All three
+# Dockerfiles that `COPY server/` (app, broker, canonical-worker) would bake a
+# dev's local copies into the image, and none is read from /app/server at
+# runtime: BROKER_LEDGER and JOBS_DB point these at /data/state
+# (docker-compose.yml), which is where broker.py and jobs.py derive them from.
+# The trailing * / dotted glob cover the .tmp siblings each writer replaces
+# through, one of which embeds a pid and a thread id.
+server/active_workitems.jsonl*
+server/pending_reaps.jsonl*
+server/site_demo_cache.json
+server/.site_demo_cache.json.*
+# Materialized tenant catalog worktrees plus the `.materialize.lock` one level
+# in (server/customization_service.py). Checked out at runtime from the tenant
+# bare repo, and the deployed containers set LEAF_EFFECTIVE_TENANTS_DIR
+# explicitly (deploy/required-config.{app,broker}.json), so nothing reads this
+# path inside an image.
+server/customization-worktrees/
+server/agent_tenants.json*
 server/authored_tools.json
 server/drawings/
+# Session + customization SQLite DBs (with WAL/SHM sidecars) and the broker
+# work queues. Written at runtime, redirected to the leaf-state volume in the
+# containers (SESSIONS_DB, docker-compose.yml), and never git-tracked, so a
+# clean CI checkout has none of them. Without these lines a dev who ran the
+# server locally bakes their own sessions into both images.
+server/sessions.db
+server/sessions.db-shm
+server/sessions.db-wal
+server/customization.db
+server/customization.db-shm
+server/customization.db-wal
+server/active_workitems.jsonl
+server/pending_reaps.jsonl
+# Guest drawing store: raw user-supplied DWG/DXF written at runtime under
+# guest_store_dir() (server/write_loop.py, LEAF_GUEST_STORE_DIR). Same
+# customer-data class as data/uploads/ below.
+server/guest_drawings/
+# Guest uploads: raw user-supplied DWG/DXF written at runtime
+# (server/routers/uploads.py). Already git-ignored; keep them out of images too.
+data/uploads/
+# Agent gate-chain state, written at runtime. Both Dockerfiles do
+# `COPY data/ /app/data/`, but the gate-state files are redirected to
+# /data/state on the leaf-state volume (docker-compose.yml), and no current
+# code provisions or reads data/workspaces/, so nothing in either image reads
+# any of them. A dev who ran the server locally would otherwise bake stale gate
+# decisions and session grants into both images. The trailing * covers the
+# sibling .tmp and .lock files (server/agent_gate.py).
+data/agent_audit.jsonl
+data/agent_ledger.jsonl
+data/agent.disabled
+data/agent_approvals/
+data/agent_session_grants.json*
+data/agent_rate_state.json*
+data/workspaces/
 
 # Local env / secrets — must never enter an image layer
 **/.env.local

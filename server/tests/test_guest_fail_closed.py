@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,232 @@ def test_non_upload_extract_event_key_keeps_legacy_digest():
     assert broker_client.extract_event_key("tenant-a", "drawing-a") == (
         "extract:cb0acff9bdde9af6b2a44562d8f8f12e1e679add31c0ce5afe69d6f50899a725"
     )
+
+
+@pytest.mark.parametrize(
+    "contents, expected",
+    [
+        ("1\n", True),
+        ("1", True),
+        ("0\n", False),
+        ("", False),
+        ("banana", False),
+        ("2", False),
+        ("true", False),
+    ],
+)
+def test_fence_file_contents_decide_the_drain(monkeypatch, tmp_path, contents, expected):
+    """Only a literal "1" keeps mutations open; anything else fails CLOSED.
+
+    Deliberately tests `drawing_mutations_enabled` DIRECTLY rather than through
+    `drawing_mutation_commit_guard`. The guard needs fcntl, so on a Windows unit
+    host it yields False for EVERY configured fence — which makes the
+    commit-path fence tests below pass without ever reading the fence. This one
+    is the platform-independent check that the fence contents are actually what
+    decides, and it fails on any host if that parsing regresses.
+    """
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    assert write_loop.drawing_mutations_enabled() is expected
+
+
+def test_missing_fence_file_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(tmp_path / "never-written"))
+
+    assert write_loop.drawing_mutations_enabled() is False
+
+
+def test_unconfigured_fence_leaves_the_env_default_in_charge(monkeypatch):
+    """No fence configured is the pre-cutover shape: the env flag alone decides."""
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    assert write_loop.drawing_mutations_enabled() is True
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    assert write_loop.drawing_mutations_enabled() is False
+
+
+def test_env_drain_beats_an_open_fence(monkeypatch, tmp_path):
+    """The two gates are AND, not OR: an open fence cannot re-enable a drained
+    deployment flag."""
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text("1\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    assert write_loop.drawing_mutations_enabled() is False
+
+
+def test_upload_guard_ignores_the_authored_lane_drain(monkeypatch):
+    """The two lanes share the fence FILE but NOT their env flags.
+
+    With no fence configured neither guard needs fcntl, so this runs anywhere.
+    An authored drain must close the authored guard and leave the upload guard
+    open; the upload lane's own gate is upload_import_mutations_enabled.
+    """
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+
+    with write_loop.drawing_mutation_commit_guard() as authored:
+        assert authored is False
+    with write_loop.upload_mutation_commit_guard() as upload:
+        assert upload is True
+
+
+def test_both_guards_close_on_a_drained_fence(monkeypatch, tmp_path):
+    """The fence FILE is shared: a real storage cutover drains BOTH lanes."""
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text("0\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    assert write_loop.fence_open() is False
+    assert write_loop.drawing_mutations_enabled() is False
+
+
+def test_shared_fence_blocks_mock_write_at_commit(monkeypatch, tmp_path):
+    import store
+
+    backend = store.InMemoryBackend()
+    tenant, drawing = "tenant-a", "drawing-a"
+    payload = json.dumps({"layers": [], "polylines": []}).encode()
+    backend.put(store.drawing_version_key(tenant, drawing, 1), payload)
+    backend.put(
+        store.manifest_key(tenant, drawing),
+        json.dumps({
+            "schema": 1,
+            "tenant_id": tenant,
+            "drawing_id": drawing,
+            "head": 1,
+            "latest": 1,
+            "versions": [{
+                "v": 1, "parent": None, "created": "now",
+                "bytes": len(payload), "sha256": "source",
+                "workitem_id": None, "tool": None, "note": None,
+            }],
+            "checkout": None,
+        }).encode(),
+    )
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text("0\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    env, status = write_loop.run_write_mock(
+        {"name": "writer", "version": "1.0.0"},
+        {"drawing_id": drawing},
+        tenant,
+        backend=backend,
+        t0=0.0,
+        run_tool_dynamic_fn=lambda *_args, **_kwargs: {
+            "ok": True,
+            "result": {"mutations": {"added": [], "removed": []}},
+        },
+    )
+
+    assert status == 503
+    assert env["error"]["retryable"] is True
+    assert store.load_manifest(backend, tenant, drawing)["latest"] == 1
+
+
+def test_shared_fence_blocks_extraction_commit_without_marker_write(
+    monkeypatch, tmp_path
+):
+    from contextlib import contextmanager
+
+    import dxf_intake
+    import store
+
+    backend = store.InMemoryBackend()
+    tenant, drawing = "tenant-a", "drawing-a"
+    marker = guest_uploads.new_marker(
+        filename="drawing.dxf",
+        data=b"DXF",
+        tenant_kind="account",
+        source_ext=".dxf",
+    )
+    guest_uploads.write_marker(backend, tenant, drawing, marker)
+    before = {key: backend.get(key) for key in backend.keys()}
+
+    uploads = tmp_path / "uploads"
+    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(uploads))
+    staged = guest_uploads.staged_path(tenant, drawing, ".dxf")
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(b"DXF")
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend
+    )
+    monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "legacy")
+    monkeypatch.setattr(write_loop, "fence_open", lambda: True)
+    monkeypatch.setattr(
+        dxf_intake,
+        "parse_dxf_file",
+        lambda *_args, **_kwargs: {"layers": [], "polylines": []},
+    )
+
+    @contextmanager
+    def drained_commit():
+        yield False
+
+    # Extraction is the UPLOAD lane, so it holds the upload guard. Patching the
+    # authored guard here would leave extraction running and the test vacuous.
+    monkeypatch.setattr(
+        write_loop, "upload_mutation_commit_guard", drained_commit
+    )
+
+    guest_uploads.run_extraction(tenant, drawing, ".dxf")
+
+    assert {key: backend.get(key) for key in backend.keys()} == before
+    assert guest_uploads.read_marker(backend, tenant, drawing) == marker
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is a Linux deployment contract")
+def test_exclusive_fence_transition_waits_for_shared_commit(monkeypatch, tmp_path):
+    import fcntl
+    import threading
+
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text("1\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+    commit_entered = threading.Event()
+    release_commit = threading.Event()
+    exclusive_acquired = threading.Event()
+
+    def commit():
+        with write_loop.drawing_mutation_commit_guard() as enabled:
+            assert enabled
+            commit_entered.set()
+            assert release_commit.wait(5)
+
+    def drain():
+        assert commit_entered.wait(5)
+        with open(f"{fence}.lock", "a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            exclusive_acquired.set()
+            temp = fence.with_suffix(".tmp")
+            with open(temp, "w", encoding="utf-8") as output:
+                output.write("0\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temp, fence)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    commit_thread = threading.Thread(target=commit)
+    drain_thread = threading.Thread(target=drain)
+    commit_thread.start()
+    drain_thread.start()
+    assert commit_entered.wait(5)
+    assert not exclusive_acquired.wait(0.1)
+    release_commit.set()
+    commit_thread.join(5)
+    drain_thread.join(5)
+    assert exclusive_acquired.is_set()
+    assert not write_loop.drawing_mutations_enabled()
 
 
 def test_scratch_cleanup_failure_logs_only_key_digest(caplog):
@@ -126,6 +353,35 @@ def test_ensure_demo_drawing_postgres_upload_row_guard_raises(monkeypatch):
 
     assert "upload-status" in str(exc.value)
     assert backend.keys() == []
+
+
+def test_postgres_upload_intake_read_rejects_cache_without_matching_proof(
+        monkeypatch):
+    import store
+
+    backend = _in_memory_backend()
+    tenant, drawing = "acme-solar", "source-drawing"
+    cache_key = write_loop.intake_cache_key(tenant, drawing, 1)
+    backend.put(cache_key, b'{"layers":["wrong"],"polylines":[]}')
+    monkeypatch.setattr(store, "authority_mode", lambda: "postgres")
+    monkeypatch.setattr(
+        store, "resolve_version",
+        lambda *_args, **_kwargs: (
+            1, store.drawing_version_key(tenant, drawing, 1)),
+    )
+    monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "postgres")
+    monkeypatch.setattr(
+        guest_uploads, "read_marker",
+        lambda *_args, **_kwargs: {
+            "status": "ready",
+            "extracted_version": 1,
+            "intake_ref": cache_key,
+            "intake_sha256": "0" * 64,
+        },
+    )
+
+    with pytest.raises(ValueError, match="does not match its source proof"):
+        write_loop.read_intake(backend, tenant, drawing, 1)
 
 
 def test_guest_unknown_drawing_404_no_bootstrap(client, tmp_path):
@@ -228,7 +484,17 @@ def test_storage_cutover_gate_blocks_authored_app_drawing_mutations(client, monk
     platform_api = (
         Path(__file__).resolve().parents[2] / "platform" / "api.py"
     ).read_text(encoding="utf-8")
+    platform_fence = (
+        Path(__file__).resolve().parents[2] / "platform" / "mutation_fence.py"
+    ).read_text(encoding="utf-8")
     assert 'os.environ.get("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "0")' in platform_api
+    assert "with drawing_mutation_commit_guard() as commit_enabled" in platform_api
+    assert 'os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "")' in platform_fence
+    # The import lane keeps its OWN env flag; folding the authored-lane drain
+    # into the platform fence would block canonical import on an unrelated
+    # cutover. Pinned so a future edit cannot quietly re-couple the two lanes.
+    # Matches the CALL, not the word, so the docstring may still explain why.
+    assert 'os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED"' not in platform_fence
 
 
 def test_purge_extraction_race_cannot_resurrect(client, monkeypatch, tmp_path):

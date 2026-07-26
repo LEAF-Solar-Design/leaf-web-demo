@@ -283,6 +283,7 @@ def test_spine_proposed_run_creates_approval_row_at_awaiting_approval_end(monkey
     assert approval["capability"] == "drawing.write"
     assert approval["rationale"] == "approval required by policy"
     assert approval["kind"] == "run_capability"
+    assert approval["payload"] == {"dwg": "d-1"}
     assert approval["decided"] is False
 
     _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None)

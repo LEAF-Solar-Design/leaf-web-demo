@@ -7,13 +7,16 @@ on:
       - 'da/store.py'
       - 'platform/migrations/0016_drawing_upload_authority.sql'
       - 'platform/api.py'
+      - 'platform/mutation_fence.py'
       - 'platform/tests/conftest.py'
       - 'platform/tests/test_drawing_import.py'
       - 'deploy/required-config.app.json'
       - 'deploy/required-config.broker.json'
       - 'server/guest_uploads.py'
       - 'server/broker.py'
+      - 'server/ops_metrics_read.py'
       - 'server/routers/drawings.py'
+      - 'server/routers/ops.py'
       - 'server/routers/uploads.py'
       - 'server/write_loop.py'
       - 'server/tests/conftest.py'
@@ -23,6 +26,8 @@ on:
       - 'server/tests/test_guest_fail_closed.py'
       - 'server/tests/test_guest_session_auth.py'
       - 'server/tests/test_guest_uploads.py'
+      - 'server/tests/test_ops_metrics.py'
+      - 'server/tests/test_ops_metrics_pg.py'
       - 'server/tests/test_postgres_container_wiring.py'
   workflow_dispatch:
 
@@ -80,6 +85,10 @@ jobs:
       - name: Run PostgreSQL authority and race tests
         working-directory: server
         run: python -m pytest -q tests/test_drawing_upload_authority_postgres.py
+
+      - name: Run observability read-model PostgreSQL verifier
+        working-directory: server
+        run: python -m pytest -q tests/test_ops_metrics_pg.py
 
       - name: Run upload and authored-mutation boundary tests
         working-directory: server
