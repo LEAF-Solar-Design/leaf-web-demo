@@ -7,13 +7,26 @@ web/dist/
 .serena/
 server/jobs.db
 server/broker_ledger.jsonl
-server/active_workitems.jsonl
-server/pending_reaps.jsonl
+# Broker/jobs restart-survival sidecars. The trailing * covers the sibling
+# .jsonl.tmp each writer replaces the snapshot through
+# (server/broker.py _compact_persisted_workitems,
+# server/jobs.py _persist_pending_reaps_locked).
+server/active_workitems.jsonl*
+server/pending_reaps.jsonl*
+# Write-through site-demo solve cache and the dotted temp _write_file_cache
+# renames over it (server/site_demo.py). The temp embeds a pid and a thread id,
+# so the glob is anchored to the base filename rather than spelled out.
+server/site_demo_cache.json
+server/.site_demo_cache.json.*
 .env.local
 platform/.env.local
 server/jobs.db-shm
 server/jobs.db-wal
 server/broker_tenants.json
+# _save_tenants mkstemps its replacement as `.broker_tenants.json.<rand>.tmp`
+# (server/broker.py). The leading dot puts it outside a `broker_tenants.json*`
+# widening, so it needs its own anchored entry.
+server/.broker_tenants.json.*
 server/authored_tools.json
 server/drawings/
 engine/appbundle-write/bin/
@@ -25,6 +38,11 @@ server/sessions.db-wal
 server/customization.db
 server/customization.db-shm
 server/customization.db-wal
+# Materialized tenant catalog worktrees and the `.materialize.lock` beside them
+# (server/customization_service.py). The whole tree is checked out at runtime
+# from the tenant bare repo; the lock sits one level in, at
+# <root>/<tenant_id>/.materialize.lock, so ignoring the root covers both.
+server/customization-worktrees/
 server/guest_drawings/
 data/uploads/
 # Agent gate-chain runtime state. The trailing * covers the sibling .tmp and
