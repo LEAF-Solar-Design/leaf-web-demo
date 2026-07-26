@@ -26,6 +26,8 @@ da/client.py OSS helpers).
 """
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import importlib.util
 import json
@@ -36,6 +38,7 @@ import tempfile
 import threading
 import time
 import uuid
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -194,11 +197,127 @@ def manifest_key(tenant_id: str, drawing_id: str) -> str:
     return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}/manifest.json"
 
 
+def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
+    """Sidecar object key carrying the drawing's cross-process checkout lock.
+
+    Beside the manifest, and deliberately NOT the manifest itself: `save_manifest`
+    writes through a temp file plus `os.replace`, so the manifest's inode changes
+    on every save. A lock taken on that inode would be held against a file no
+    later caller can open, which is a lock that excludes nobody.
+
+    For the same reason the sidecar is created once and never unlinked. Removing
+    it would let the next caller open a fresh inode while a holder still owns the
+    old one, and two holders would again run at once.
+    """
+    return manifest_key(tenant_id, drawing_id) + ".checkout-lock"
+
+
+# --------------------------------------------------------------------------- #
+# OS-level advisory locking (the cross-process half of the legacy checkout)
+# --------------------------------------------------------------------------- #
+try:  # POSIX (the production deployment)
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:  # Windows (the development host)
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
+
+
+# Budget for ONE checkout read-modify-write to hold the drawing. The section is
+# a manifest load, an edit, and a save, so a holder that has not finished inside
+# this is stuck rather than busy, and the caller is better served by an error
+# than by a request that never returns.
+_CHECKOUT_LOCK_TIMEOUT_S = 30.0
+
+
+class CrossProcessLockUnavailable(RuntimeError):
+    """This backend has no OS-level lock to take, so it cannot serialize a
+    read-modify-write against a second process."""
+
+
+class CheckoutLockTimeout(RuntimeError):
+    """The checkout lock stayed held past its budget.
+
+    Raised rather than reported as a refused acquire. "Someone else holds the
+    checkout" and "this host could not find out" are different answers, and
+    returning None for the second would name a lease holder that may not exist.
+    """
+
+
+class CrossProcessCheckoutLockMissing(RuntimeWarning):
+    """Emitted per legacy checkout served by a backend that cannot exclude a
+    second OS process, so the degradation is visible in logs and assertable in
+    tests instead of silent."""
+
+
+# The errnos that mean "another holder has it". Anything else is a lock that
+# waiting cannot win — a bad descriptor, exhausted lock resources, a filesystem
+# with no lock support — and is raised straight away, because retrying it for
+# the whole budget and then reporting contention would name a holder that does
+# not exist.
+_LOCK_CONTENDED = frozenset(
+    code for code in (
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EAGAIN", None),
+        getattr(errno, "EWOULDBLOCK", None),
+        getattr(errno, "EDEADLK", None),
+        getattr(errno, "EDEADLOCK", None),
+    ) if code is not None
+)
+
+
+def _try_os_lock(handle) -> bool:
+    """Take an exclusive OS lock on an open file WITHOUT blocking.
+
+    Non-blocking on both platforms on purpose. The blocking primitives disagree:
+    POSIX `LOCK_EX` waits forever, while Windows `LK_LOCK` gives up after about
+    ten seconds and raises. Polling a non-blocking attempt against one deadline
+    makes the dev host and the production host fail the same way at the same
+    point, which is the only version of this that can be tested on either.
+    """
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt is not None:
+            # Locks a byte range from the CURRENT position, so anchor it: every
+            # caller must contend for the same byte 0 or they exclude nobody.
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:  # pragma: no cover - no such host is supported
+            raise CrossProcessLockUnavailable(
+                "neither fcntl nor msvcrt is available on this interpreter")
+        return True
+    except OSError as exc:
+        if exc.errno in _LOCK_CONTENDED:
+            return False
+        raise
+
+
 # --------------------------------------------------------------------------- #
 # Storage backend abstraction (so tests run fully offline)
 # --------------------------------------------------------------------------- #
 class StorageBackend:
     """Minimal blob interface: get/put/exists over opaque string keys."""
+
+    # Is a checkout read-modify-write on this backend safe against a SECOND OS
+    # process? A declared, inspectable property of the backend rather than a
+    # thing the caller infers, because the answer changes what a successful
+    # acquire actually promises. False here so a backend added later has to
+    # answer the question deliberately instead of inheriting a guarantee it
+    # cannot keep.
+    cross_process_checkout_safe = False
+
+    def cross_process_lock(self, key: str):
+        """Return a context manager holding an exclusive OS lock for `key`.
+
+        Raises rather than handing back a no-op: a lock that excludes nobody but
+        reports success is worse than no lock, because the caller then believes
+        the read-modify-write it wraps is serialized.
+        """
+        raise CrossProcessLockUnavailable(
+            f"{type(self).__name__} cannot take an OS-level lock")
 
     def get(self, key: str) -> bytes:
         raise NotImplementedError
@@ -221,6 +340,16 @@ class StorageBackend:
 
 class InMemoryBackend(StorageBackend):
     """In-memory dict backend for tests — makes ZERO network calls."""
+
+    # A dict on one interpreter's heap. No second process can reach these blobs
+    # at all, so a checkout read-modify-write here is already excluded from
+    # every other process and the no-op below is the CORRECT implementation
+    # rather than a missing one.
+    cross_process_checkout_safe = True
+
+    @contextlib.contextmanager
+    def cross_process_lock(self, key: str):
+        yield
 
     def __init__(self) -> None:
         self._blobs: dict[str, bytes] = {}
@@ -249,6 +378,16 @@ class InMemoryBackend(StorageBackend):
 
 class OSSBackend(StorageBackend):
     """Live backend delegating to da/client.py's OSS helpers (LIVE calls)."""
+
+    # Object storage has no file descriptor to lock and no compare-and-swap, so
+    # there is nothing here that could exclude a second process. Stated
+    # explicitly rather than inherited so the gap is greppable, and left as a
+    # REFUSAL (the inherited `cross_process_lock` raises) rather than a no-op:
+    # a lock object that grants everyone would make the legacy OSS path look
+    # fixed while leaving it exactly as it is. The caller reads this flag,
+    # warns, and proceeds with the in-process lock alone. The real answer for a
+    # multi-replica deployment is the postgres authority.
+    cross_process_checkout_safe = False
 
     def get(self, key: str) -> bytes:
         return client.download_object(key)
@@ -291,8 +430,45 @@ class FilesystemBackend(StorageBackend):
     check refuses any key that would escape `root_dir`.
     """
 
+    # One shared filesystem, so a sidecar lockfile beside the manifest gives a
+    # real OS-level exclusion between processes. See `cross_process_lock`.
+    cross_process_checkout_safe = True
+
     def __init__(self, root_dir: str) -> None:
         self.root = os.path.abspath(root_dir)
+
+    @contextlib.contextmanager
+    def cross_process_lock(self, key: str):
+        """Hold an exclusive OS lock on the sidecar file at `key`.
+
+        Advisory locking on an open descriptor, not a lock directory with a
+        staleness heuristic. That choice is the point: the kernel drops the lock
+        when the descriptor closes, which covers a normal exit, an exception in
+        the body, and the holder being killed. So a crashed process cannot wedge
+        the drawing, and nothing here ever has to guess whether a live holder is
+        dead. Guessing would be unsound at any threshold, since evicting a
+        merely-slow holder puts two writers inside the section this exists to
+        keep to one.
+
+        Bounded, so a wedged holder surfaces as a timeout rather than a request
+        that never returns.
+        """
+        path = self._path(key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        deadline = time.monotonic() + _CHECKOUT_LOCK_TIMEOUT_S
+        # "a+b" creates on first use and never truncates, so an existing lock
+        # file is opened, not replaced -- replacing it would hand this caller a
+        # different inode from the one the current holder owns.
+        with open(path, "a+b") as handle:
+            while not _try_os_lock(handle):
+                if time.monotonic() >= deadline:
+                    raise CheckoutLockTimeout(
+                        f"checkout lock held by another process past "
+                        f"{_CHECKOUT_LOCK_TIMEOUT_S}s: {path}")
+                time.sleep(0.01)
+            # Closing the handle releases the lock on EVERY exit path, so the
+            # body needs no unlock of its own.
+            yield
 
     def _path(self, key: str) -> str:
         p = os.path.normpath(os.path.join(self.root, key))
@@ -1420,6 +1596,24 @@ _LEGACY_CHECKOUT_LOCKS_GUARD = threading.Lock()
 
 
 def _legacy_checkout_lock(tid: str, did: str) -> threading.Lock:
+    """The per-drawing, per-PROCESS half of the checkout guard.
+
+    Kept as the outer layer of `_legacy_checkout_guard` because it is far
+    cheaper than a syscall: threads of one app process settle here and never
+    reach the filesystem. It excludes only threads. The cross-process half is
+    the backend's OS lock.
+    """
+    key = f"{tid}/{did}"
+    with _LEGACY_CHECKOUT_LOCKS_GUARD:
+        lock = _LEGACY_CHECKOUT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LEGACY_CHECKOUT_LOCKS[key] = lock
+        return lock
+
+
+@contextlib.contextmanager
+def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str):
     """Serialize the legacy authority's checkout read-modify-write, per drawing.
 
     The legacy manifest is a load, edit, save with nothing holding the record in
@@ -1432,20 +1626,47 @@ def _legacy_checkout_lock(tid: str, did: str) -> threading.Lock:
     racing an acquire loses the same update in the other direction and lets a
     generation repeat.
 
-    The postgres authority does not need this: it reads `FOR UPDATE` and
-    increments in the same statement. This closes the window for the DOCUMENTED
-    legacy deployment, which is a single app process (docker-compose pins one
-    for the SQLite write path). It does NOT make the legacy manifest atomic
-    across processes — two app replicas on the legacy store can still lose an
-    update, and the fix for that is postgres, which is what production runs.
+    Two layers close that window, because one process is two different problems.
+    The threading lock settles the app's own threads without a syscall. Under it
+    an OS advisory lock on a sidecar file settles a SECOND PROCESS reading the
+    same store directory, which the threading lock cannot see: a per-process
+    dict is not shared state, so two replicas each hold their own uncontended
+    lock and both walk into the section.
+
+    WHAT THIS DOES NOT DO. It is not a distributed lock and must not grow into
+    one. It reaches exactly as far as the OS lock does, which is one shared
+    filesystem — so replicas on one host, or on a shared volume, and nothing
+    beyond that. A backend with no descriptor to lock (`OSSBackend`) cannot be
+    covered at all; rather than pretend otherwise this warns
+    `CrossProcessCheckoutLockMissing` and runs with the threading lock alone,
+    which is the behaviour that was previously silent and unlabelled.
+
+    The documented answer above that boundary is unchanged and is postgres: it
+    reads `FOR UPDATE` and increments in one statement, so it needs none of
+    this. What this removes is the narrower, previously-standing caveat that the
+    legacy path was safe only for a SINGLE app process.
     """
-    key = f"{tid}/{did}"
-    with _LEGACY_CHECKOUT_LOCKS_GUARD:
-        lock = _LEGACY_CHECKOUT_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _LEGACY_CHECKOUT_LOCKS[key] = lock
-        return lock
+    thread_lock = _legacy_checkout_lock(tid, did)
+    # Bounded, so a queue of in-process callers cannot wait without a limit
+    # before the cross-process deadline below even starts counting.
+    if not thread_lock.acquire(timeout=_CHECKOUT_LOCK_TIMEOUT_S):
+        raise CheckoutLockTimeout(
+            f"in-process checkout lock busy past {_CHECKOUT_LOCK_TIMEOUT_S}s: "
+            f"{tid}/{did}")
+    try:
+        if not backend.cross_process_checkout_safe:
+            warnings.warn(
+                f"{type(backend).__name__} cannot take an OS-level checkout "
+                f"lock, so the {tid}/{did} checkout is serialized within this "
+                f"process only; a second replica can still lose an update. Use "
+                f"the postgres authority for a multi-replica deployment.",
+                CrossProcessCheckoutLockMissing, stacklevel=3)
+            yield
+            return
+        with backend.cross_process_lock(checkout_lock_key(tid, did)):
+            yield
+    finally:
+        thread_lock.release()
 
 
 def _next_fence(m: dict) -> int:
@@ -1596,7 +1817,7 @@ def acquire_checkout_fence(backend: StorageBackend, tenant_id: str, drawing_id: 
             return int(written["checkout_fence"])
 
         return db.run_transaction(operation, isolation="serializable")
-    with _legacy_checkout_lock(tid, did):
+    with _legacy_checkout_guard(backend, tid, did):
         m = load_manifest(backend, tid, did)
         now = datetime.now(timezone.utc)
         co = m.get("checkout")
@@ -1680,7 +1901,7 @@ def release_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
             return True
 
         return db.run_transaction(operation, isolation="serializable")
-    with _legacy_checkout_lock(tid, did):
+    with _legacy_checkout_guard(backend, tid, did):
         m = load_manifest(backend, tid, did)
         co = m.get("checkout")
         if not co:
