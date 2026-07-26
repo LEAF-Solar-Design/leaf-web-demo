@@ -22,6 +22,23 @@ server/broker_tenants.json
 server/agent_tenants.json*
 server/authored_tools.json
 server/drawings/
+# Session + customization SQLite DBs (with WAL/SHM sidecars) and the broker
+# work queues. Written at runtime, redirected to the leaf-state volume in the
+# containers (SESSIONS_DB, docker-compose.yml), and never git-tracked, so a
+# clean CI checkout has none of them. Without these lines a dev who ran the
+# server locally bakes their own sessions into both images.
+server/sessions.db
+server/sessions.db-shm
+server/sessions.db-wal
+server/customization.db
+server/customization.db-shm
+server/customization.db-wal
+server/active_workitems.jsonl
+server/pending_reaps.jsonl
+# Guest drawing store: raw user-supplied DWG/DXF written at runtime under
+# guest_store_dir() (server/write_loop.py, LEAF_GUEST_STORE_DIR). Same
+# customer-data class as data/uploads/ below.
+server/guest_drawings/
 # Guest uploads: raw user-supplied DWG/DXF written at runtime
 # (server/routers/uploads.py). Already git-ignored; keep them out of images too.
 data/uploads/
