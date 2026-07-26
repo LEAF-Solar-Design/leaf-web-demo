@@ -19,8 +19,12 @@ server/jobs.db-shm
 server/jobs.db-wal
 server/broker_ledger.jsonl
 server/broker_tenants.json
+server/agent_tenants.json*
 server/authored_tools.json
 server/drawings/
+# Guest uploads: raw user-supplied DWG/DXF written at runtime
+# (server/routers/uploads.py). Already git-ignored; keep them out of images too.
+data/uploads/
 # Agent gate-chain state, written at runtime. Both Dockerfiles do
 # `COPY data/ /app/data/`, but the gate-state files are redirected to
 # /data/state on the leaf-state volume (docker-compose.yml), and no current

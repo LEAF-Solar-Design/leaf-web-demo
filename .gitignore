@@ -36,3 +36,7 @@ data/agent_approvals/
 data/agent_session_grants.json*
 data/agent_rate_state.json*
 data/workspaces/
+# Per-tenant agent kill flag + overlay, written beside the policy file by the
+# ops route (server/agent_policy.py). The agent-side twin of
+# server/broker_tenants.json above.
+server/agent_tenants.json*
