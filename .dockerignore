@@ -42,6 +42,19 @@ server/.site_demo_cache.json.*
 server/customization-worktrees/
 server/agent_tenants.json*
 server/authored_tools.json
+# Tenant-authored tool bodies, written at runtime by the mounted author route.
+# server/routers/author.py:242 writes
+# server/authored/<sha256(tenant_id)[:32]>/<tool>.py, and the loader resolves
+# that same directory inside the image (server/tool_loader.py:825), so a dev
+# who authored a tool locally and then ran `docker compose build` would bake
+# one tenant's executable Python into the app and broker images. Git ignores
+# these only through a NESTED server/authored/.gitignore, which docker never
+# reads. Not a bare `server/authored/`: .gitignore and .gitkeep there are
+# tracked and the loader needs the directory to exist. The `**` is
+# load-bearing, because a dockerignore `*` does not cross `/`: plain
+# `server/authored/*.py` would miss the per-tenant depth, and `**/` also
+# covers the direct child that the loader's single-part fallback root reads.
+server/authored/**/*.py
 server/drawings/
 # Session + customization SQLite DBs, with their WAL/SHM sidecars. Written at
 # runtime, redirected to the leaf-state volume in the containers (SESSIONS_DB,
