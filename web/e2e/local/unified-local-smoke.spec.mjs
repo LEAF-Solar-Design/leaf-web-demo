@@ -1,19 +1,13 @@
 import { expect, test } from '@playwright/test'
 import { join, relative } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
+import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 
 test('real local stack runs a catalog tool and restores its durable receipt', async ({ page, request }, testInfo) => {
-  let ready
-  try {
-    const response = await request.get(`${API_BASE}/api/ready`, { timeout: 3_000 })
-    if (response.ok()) ready = await response.json()
-  } catch {
-    ready = null
-  }
-  test.skip(!ready?.ready, `real local stack is not ready at ${API_BASE}`)
+  const ready = await requireLocalReady(request, test, API_BASE)
   const capabilityResponse = await request.get(`${API_BASE}/api/capabilities`, {
     headers: { 'X-Tenant-Id': 'demo-tenant' },
   })

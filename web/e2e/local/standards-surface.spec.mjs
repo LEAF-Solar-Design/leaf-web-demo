@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { join, relative } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
+import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
@@ -8,9 +9,7 @@ const REQUEST = 'Count the panels by layer in this drawing'
 
 test('real local operator flow preserves unified accessibility, keyboard, responsive, and motion standards', async ({ page, request }, testInfo) => {
   test.setTimeout(120_000)
-  const readyResponse = await request.get(`${API_BASE}/api/ready`, { timeout: 3_000 })
-  test.skip(!readyResponse.ok(), `real local stack is not ready at ${API_BASE}`)
-  test.skip(!(await readyResponse.json())?.ready, `real local stack is not ready at ${API_BASE}`)
+  await requireLocalReady(request, test, API_BASE)
 
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto('/try')

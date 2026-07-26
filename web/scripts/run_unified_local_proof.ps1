@@ -74,6 +74,8 @@ $env:LEAF_TENANTS_DIR = Join-Path $runRoot 'tenants'
 $env:LEAF_TENANT_GIT_DIR = Join-Path $runRoot 'tenant-git'
 $env:LEAF_E2E_BASE_URL = "http://127.0.0.1:$WebPort"
 $env:LEAF_E2E_API_BASE = "http://127.0.0.1:$AppPort"
+$env:LEAF_E2E_MANAGED = '1'
+$env:VITE_STARTUP_FETCH_TIMEOUT_MS = '15000'
 $env:LEAF_CORS_ORIGINS = $env:LEAF_E2E_BASE_URL
 
 $stdout = Join-Path $runRoot 'stack.out.log'

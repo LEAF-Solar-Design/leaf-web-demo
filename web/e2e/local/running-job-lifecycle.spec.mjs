@@ -1,16 +1,14 @@
 import { expect, test } from '@playwright/test'
 import { join } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
+import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 
 async function requireReady(request) {
-  const response = await request.get(`${API_BASE}/api/ready`, { timeout: 3_000 })
-  test.skip(!response.ok(), `real local stack is not ready at ${API_BASE}`)
-  const ready = await response.json()
-  test.skip(!ready?.ready, `real local stack is not ready at ${API_BASE}`)
+  await requireLocalReady(request, test, API_BASE)
 }
 
 async function submitSlowJob(request, seconds = 6) {

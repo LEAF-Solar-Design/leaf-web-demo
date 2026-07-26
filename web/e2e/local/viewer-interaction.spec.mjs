@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { join, relative } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
+import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
@@ -28,9 +29,7 @@ function polygonCentroid(points) {
 }
 
 test('resident viewer uses the real local drawing for layers, navigation, and picking', async ({ page, request }, testInfo) => {
-  const readyResponse = await request.get(`${API_BASE}/api/ready`, { timeout: 3_000 })
-  test.skip(!readyResponse.ok(), `real local stack is not ready at ${API_BASE}`)
-  test.skip(!(await readyResponse.json())?.ready, `real local stack is not ready at ${API_BASE}`)
+  await requireLocalReady(request, test, API_BASE)
 
   const sessionResponse = await request.get(`${API_BASE}/api/session?dwg=rooftop_demo`, {
     headers: TENANT_HEADERS,

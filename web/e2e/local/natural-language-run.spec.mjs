@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { join, relative } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
+import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
@@ -8,9 +9,7 @@ const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof'
 const REQUEST = 'Count the panels by layer in this drawing'
 
 test('natural language routes through real catalog review, dispatch, and result', async ({ page, request }, testInfo) => {
-  const readyResponse = await request.get(`${API_BASE}/api/ready`, { timeout: 3_000 })
-  test.skip(!readyResponse.ok(), `real local stack is not ready at ${API_BASE}`)
-  test.skip(!(await readyResponse.json())?.ready, `real local stack is not ready at ${API_BASE}`)
+  await requireLocalReady(request, test, API_BASE)
 
   const routeProbe = await request.post(`${API_BASE}/api/nl-prompt`, {
     headers: TENANT_HEADERS,

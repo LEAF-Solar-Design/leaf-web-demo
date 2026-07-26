@@ -21,6 +21,7 @@ import { fetchWithBudget } from './fetchBudget.js'
 import * as mockVersions from './mock/mockVersions.js'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8130'
+const STARTUP_FETCH_TIMEOUT_MS = Number(import.meta.env.VITE_STARTUP_FETCH_TIMEOUT_MS || 5000)
 // Default to mock unless explicitly disabled (VITE_MOCK=0).
 const MOCK_DEFAULT = import.meta.env.VITE_MOCK !== '0'
 // Tenant stub (X-Tenant-Id header) until real auth lands — matches the
@@ -115,7 +116,7 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
     if (!res.ok) throw new Error('failed to load sample.intake.json')
     return { intake: await res.json(), tenant: null, tier: null, org: null }
   }
-  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, 5000)
+  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, STARTUP_FETCH_TIMEOUT_MS)
   // tier/org_id are echoed by deps.tenant_echo only when auth is live; null off-auth.
   return {
     intake: data.intake,
@@ -173,7 +174,7 @@ export async function getTools(mock) {
     await nap(150)
     return listMockCatalogTools()
   }
-  const data = await http('/api/tools', undefined, 5000)
+  const data = await http('/api/tools', undefined, STARTUP_FETCH_TIMEOUT_MS)
   return data.tools
 }
 
@@ -209,7 +210,7 @@ export async function getCapabilities(mock) {
     return { families: normalizeFamilies(groupToolsByFamily(tools)), source: 'mock' }
   }
   try {
-    const data = await http('/api/capabilities', undefined, 5000)
+    const data = await http('/api/capabilities', undefined, STARTUP_FETCH_TIMEOUT_MS)
     return { families: normalizeFamilies(data.families || []), source: 'endpoint' }
   } catch (error) {
     if (error?.status !== 404) throw error
@@ -662,7 +663,7 @@ export async function getDrawingIntake(mock, drawingId, version = 'head') {
 
 // --- Drawing upload and extraction (CONTRACT-ADDENDUM section 19) -------
 export async function getGuestUploadPolicy() {
-  return http('/api/site/guest-upload-policy', undefined, 5000)
+  return http('/api/site/guest-upload-policy', undefined, STARTUP_FETCH_TIMEOUT_MS)
 }
 
 export async function uploadDrawing(file, guestSession = null) {

@@ -1,15 +1,14 @@
 import { expect, test } from '@playwright/test'
 import { join, relative } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
+import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 const REQUEST = 'Please approve this proposed drawing change.'
 
 test('conversation proposal and approval resume share the unified scene', async ({ page, request }, testInfo) => {
-  const readyResponse = await request.get(`${API_BASE}/api/ready`, { timeout: 3_000 })
-  test.skip(!readyResponse.ok(), `real local stack is not ready at ${API_BASE}`)
-  test.skip(!(await readyResponse.json())?.ready, `real local stack is not ready at ${API_BASE}`)
+  await requireLocalReady(request, test, API_BASE)
 
   const observed = []
   page.on('response', (response) => {

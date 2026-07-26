@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { join, relative } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
+import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const OPS_SECRET = process.env.LEAF_E2E_OPS_SECRET
@@ -8,9 +9,7 @@ const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof'
 
 test('internal Operations uses real local authority without leaking its credential', async ({ page, request }, testInfo) => {
   test.skip(!OPS_SECRET, 'managed local stack did not supply a disposable ops credential')
-  const readyResponse = await request.get(`${API_BASE}/api/ready`, { timeout: 3_000 })
-  test.skip(!readyResponse.ok(), `real local stack is not ready at ${API_BASE}`)
-  test.skip(!(await readyResponse.json())?.ready, `real local stack is not ready at ${API_BASE}`)
+  await requireLocalReady(request, test, API_BASE)
 
   const observed = []
   let opsRequests = 0
