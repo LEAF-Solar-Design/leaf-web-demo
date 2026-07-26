@@ -1126,23 +1126,33 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
         return _pg_ingest(
             backend, tid, did, _read(local_path), authority_guard)
 
-    if backend.exists(manifest_key(tid, did)):
-        raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
+    # Guarded, and it is the WORST of the legacy writers to leave out. The
+    # "already exists" check below and the save at the end are a read and a
+    # write with nothing holding the record between them, so two ingests of one
+    # drawing id both pass the check and both write. Worse, what they write is a
+    # FRESH `_new_manifest`: not a stale copy of the checkout fields but no
+    # checkout and no `checkout_fence` at all. An ingest that passed the check
+    # before a concurrent acquire therefore erases the lease AND resets the
+    # generation counter, so `_next_fence` starts over from 1 and the next
+    # acquire reissues a generation an outstanding capability still carries.
+    with _legacy_checkout_guard(backend, tid, did):
+        if backend.exists(manifest_key(tid, did)):
+            raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
 
-    data = _read(local_path)
-    vkey = drawing_version_key(tid, did, 1)
-    if backend.exists(vkey):  # immutability guard
-        raise ValueError(f"refuse to overwrite immutable version key {vkey}")
-    backend.put(vkey, data)
+        data = _read(local_path)
+        vkey = drawing_version_key(tid, did, 1)
+        if backend.exists(vkey):  # immutability guard
+            raise ValueError(f"refuse to overwrite immutable version key {vkey}")
+        backend.put(vkey, data)
 
-    m = _new_manifest(tid, did)
-    m["versions"].append({
-        "v": 1, "parent": None, "created": _now_iso(),
-        "bytes": len(data), "sha256": _sha256(data),
-        "workitem_id": None, "tool": None, "note": "initial ingest",
-    })
-    save_manifest(backend, tid, did, m)
-    return {"drawing_id": did, "version": 1}
+        m = _new_manifest(tid, did)
+        m["versions"].append({
+            "v": 1, "parent": None, "created": _now_iso(),
+            "bytes": len(data), "sha256": _sha256(data),
+            "workitem_id": None, "tool": None, "note": "initial ingest",
+        })
+        save_manifest(backend, tid, did, m)
+        return {"drawing_id": did, "version": 1}
 
 
 def _refuse_unless_owner(current_holder: Any, current_fence: Any,
@@ -1659,8 +1669,13 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str):
     `checkout_fence` back with them from whenever they loaded. A commit that
     loaded before a concurrent acquire will, on save, erase the new lease and
     restore the older generation, and the next acquire then issues that
-    generation a SECOND time — the same bypass by a different route. Guarding
-    only the checkout calls would leave that route open, so all five run here.
+    generation a SECOND time — the same bypass by a different route.
+    `ingest_drawing` is worse again: it writes a fresh `_new_manifest`, so it
+    erases the lease and drops `checkout_fence` entirely, resetting the
+    generation counter to its start. Guarding only the checkout calls would
+    leave all of those open, so all six writers run here.
+    `test_no_legacy_manifest_writer_escapes_the_guard` holds the line at the
+    source level, because the failure mode is a seventh writer added later.
 
     Two layers close the window, because one process is two different problems.
     The threading lock settles the app's own threads without a syscall. Under it
