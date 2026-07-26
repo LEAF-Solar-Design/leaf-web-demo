@@ -25,8 +25,8 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
     })
   })
 
-  await page.goto('/try')
-  await expect(page).toHaveURL(/\/try$/)
+  await page.goto('/try?proof=1')
+  await expect(page).toHaveURL(/\/try\?proof=1$/)
   await expect(page.getByTestId('operator-phase')).toContainText('Backend ready')
   await page.waitForTimeout(2_600)
 
@@ -38,7 +38,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(surface).toContainText('Rearrange the existing panels')
   await expect(surface.getByRole('button', { name: 'Approve' })).toBeVisible({ timeout: 12_000 })
   await page.screenshot({ path: join(PROOF_DIR, 'standards-01-approval.png'), fullPage: true })
-  await expect(page).toHaveURL(/\/try$/)
+  await expect(page).toHaveURL(/\/try\?proof=1$/)
 
   await surface.getByRole('button', { name: 'Approve' }).click()
   await expect(page.getByTestId('operator-phase')).toContainText('3D cat ready', { timeout: 15_000 })
@@ -61,7 +61,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   const afterOrbit = await viewer.evaluate((node) => node.__cadviewer.cameraPose())
   expect(afterOrbit.position).not.toEqual(beforeOrbit.position)
   await page.screenshot({ path: join(PROOF_DIR, 'standards-02-cat-complete.png'), fullPage: true })
-  await expect(page).toHaveURL(/\/try$/)
+  await expect(page).toHaveURL(/\/try\?proof=1$/)
 
   await page.getByRole('button', { name: 'Undo' }).click()
   await expect(page.getByTestId('operator-phase')).toContainText('Original restored')
@@ -72,5 +72,5 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByTestId('operator-phase')).toContainText('3D cat ready')
   await expect(page.getByTestId('version-head')).toContainText('Version 2')
   await page.screenshot({ path: join(PROOF_DIR, 'standards-04-redo.png'), fullPage: true })
-  await expect(page).toHaveURL(/\/try$/)
+  await expect(page).toHaveURL(/\/try\?proof=1$/)
 })

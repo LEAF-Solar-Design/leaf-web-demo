@@ -13,6 +13,11 @@ export function makeApsTestRun(
   tenantId: string,
   dwg = "rooftop_demo",
 ): (tool: ToolPackage, params?: Record<string, unknown>) => Promise<ResultEnvelope> {
-  return (tool, params = {}) =>
-    broker.runTool({ tenantId, tool, params, dwg, apsLive: false });
+  return (tool, params = {}) => {
+    const capabilities = Array.isArray(tool.capabilities) ? tool.capabilities : [];
+    const safeParams = capabilities.includes("drawing.write")
+      ? { ...params, dry_run: true }
+      : params;
+    return broker.runTool({ tenantId, tool, params: safeParams, dwg, apsLive: false });
+  };
 }

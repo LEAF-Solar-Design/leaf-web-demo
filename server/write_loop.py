@@ -595,6 +595,15 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
 
     result = env.get("result") or {}
     mutations = result.get("mutations") or {}
+    if params.get("dry_run") is True:
+        # Design-time validation and user previews must never advance drawing
+        # history. Return the deterministic proposal exactly as the tool
+        # computed it, but stop before applying mutations or publishing vN+1.
+        result["dry_run"] = True
+        env["result"] = result
+        if degraded:
+            env["degraded_mode"] = True
+        return env, 200
     try:
         new_intake = apply_mutations(cur_intake, mutations)
         new_v = _put_bytes_version(

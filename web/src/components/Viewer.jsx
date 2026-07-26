@@ -439,6 +439,18 @@ const Viewer = forwardRef(function Viewer(
       controls.update()
     }
     fitToBounds()
+    const recordCameraPose = () => {
+      mount.dataset.cameraPosition = camera.position
+        .toArray()
+        .map((value) => Number(value.toFixed(4)))
+        .join(',')
+      mount.dataset.cameraTarget = controls.target
+        .toArray()
+        .map((value) => Number(value.toFixed(4)))
+        .join(',')
+    }
+    recordCameraPose()
+    controls.addEventListener('change', recordCameraPose)
 
     // --- picking: click (not drag) -> raycast -> handle ---------------------
     const raycaster = new THREE.Raycaster()
@@ -542,12 +554,15 @@ const Viewer = forwardRef(function Viewer(
       ro.disconnect()
       dom.removeEventListener('pointerdown', onPointerDown)
       dom.removeEventListener('pointerup', onPointerUp)
+      controls.removeEventListener('change', recordCameraPose)
       controls.dispose()
       renderer.dispose()
       if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement)
       scene.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.() })
       delete mount.dataset.viewMode
       delete mount.dataset.depthSpan
+      delete mount.dataset.cameraPosition
+      delete mount.dataset.cameraTarget
       delete mount.__cadviewer
       stateRef.current = null
     }

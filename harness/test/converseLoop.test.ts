@@ -300,6 +300,32 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(ofType(events, "turn_usage")[0]!.data).toMatchObject({ cost_tokens: 170 });
     expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
   });
+
+  it("a local write tool dry run uses the read rung and creates no write proposal", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, 'RUN:add-panel PARAMS:{"dry_run":true}');
+
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).toMatchObject({
+      tool: "add-panel",
+      params: { dry_run: true },
+      wait: false,
+    });
+    expect(gate.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "run_read_tool",
+          decision: "allow",
+          args: expect.objectContaining({
+            tool: "add-panel",
+            params: { dry_run: true },
+          }),
+        }),
+      ]),
+    );
+    expect(ofType(await store.eventsAfter(s.session_id, 0), "proposed_run")).toHaveLength(0);
+  });
 });
 
 describe("ConverseLoop — write split turns (wire contract section 7)", () => {

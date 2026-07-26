@@ -24,7 +24,7 @@ from customization_authority import AuthorityError, PublishRequest
 from customization_service import CustomizationServiceError, CustomizationService
 from customization_flags import enabled as customization_enabled
 from deps import fb
-from envelopes import error_obj, with_envelope_fields
+from envelopes import ErrorCode, error_obj, with_envelope_fields
 from tenant_id_validator import is_valid_tenant_id
 from tool_validate import static_scan
 
@@ -44,6 +44,7 @@ GRANT_REQUIRED = "GRANT_REQUIRED"
 # templater / harness pipeline (security-audit F15). An over-cap body is rejected at
 # the validation layer before any harness/template work runs.
 MAX_AUTHOR_DESCRIPTION = 8_000
+DEFAULT_AUTHOR_TIMEOUT_S = 120.0
 
 
 class AuthorRequest(BaseModel):
@@ -141,6 +142,37 @@ def _grant_required_response(tenant_id: str, harness_message: str | None) -> JSO
     return JSONResponse(status_code=401, content=body)
 
 
+def _author_timeout_s() -> float:
+    """Return a bounded synchronous harness budget for compatibility authoring."""
+    try:
+        value = float(os.environ.get(
+            "LEAF_AUTHOR_TIMEOUT_S", str(DEFAULT_AUTHOR_TIMEOUT_S)
+        ))
+    except ValueError:
+        value = DEFAULT_AUTHOR_TIMEOUT_S
+    if not 5 <= value <= 900:
+        return DEFAULT_AUTHOR_TIMEOUT_S
+    return value
+
+
+def _harness_unavailable_response(*, timed_out: bool) -> JSONResponse:
+    code = ErrorCode.TIMEOUT if timed_out else ErrorCode.BROKER_UNREACHABLE
+    status = 504 if timed_out else 502
+    message = (
+        "tool authoring exceeded its configured time budget"
+        if timed_out
+        else "the tool-authoring harness did not return a usable result"
+    )
+    return JSONResponse(status_code=status, content=with_envelope_fields({
+        "tool": None,
+        "code": None,
+        "preview": message,
+        "source": "harness_unavailable",
+        "static_scan": [],
+        "error": error_obj(code, message, retryable=True),
+    }))
+
+
 def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     """Generate a tool package from a description, PERSIST its code to a real
     file, register it so it appears in /api/tools, and return
@@ -166,6 +198,7 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     source = "template"
     _telemetry = None  # A1: real authoring telemetry from the harness (harness path only)
     harness_url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
+    harness_failure: Exception | None = None
     if harness_url:
         # Contract 6: forward the RESOLVED tenant so the harness resolves THAT tenant's
         # grant + repo (per-tenant author loop). The token is never sent by the app —
@@ -177,8 +210,10 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
             resp = requests.post(f"{harness_url}/author",
                                  json={"description": req.description,
                                        "tenant_id": str(tenant)},
-                                 headers=broker_client.harness_headers(), timeout=120)
+                                 headers=broker_client.harness_headers(),
+                                 timeout=_author_timeout_s())
         except Exception as exc:
+            harness_failure = exc
             print(f"[author] harness unreachable, templated fallback: {exc}")
         if resp is not None:
             try:
@@ -199,8 +234,18 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
                 source = "harness"
             except Exception as exc:
                 tool = None
+                harness_failure = exc
                 print(f"[author] harness error, templated fallback: {exc}")
     if tool is None:
+        if harness_url and os.environ.get(
+            "LEAF_AUTHOR_TEMPLATE_FALLBACK", "1"
+        ) != "1":
+            try:
+                import requests
+                timed_out = isinstance(harness_failure, requests.Timeout)
+            except ImportError:
+                timed_out = False
+            return _harness_unavailable_response(timed_out=timed_out)
         tool, code, preview = fb.author_tool(req.description)
         source = "template"
         if harness_url:

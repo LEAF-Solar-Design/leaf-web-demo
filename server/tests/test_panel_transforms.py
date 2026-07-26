@@ -218,3 +218,39 @@ def test_transform_persists_as_new_undoable_version(tmp_path, monkeypatch):
     restored = next(p for p in undone["intake"]["polylines"]
                     if p["handle"] == captured["handle"])
     assert restored["pts"] == captured["before"]
+
+
+def test_dry_run_returns_proposal_without_creating_a_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    backend = default_backend()
+
+    def transform_tool(_tool, source, _params, **_kwargs):
+        target = source["polylines"][0]
+        return {
+            "ok": True,
+            "result": {
+                "mutations": {
+                    "transforms": [{
+                        "handle": target["handle"],
+                        "dx": 12.5,
+                        "dy": -3.25,
+                        "rotation_deg": 0,
+                    }]
+                }
+            },
+        }
+
+    envelope, status = run_write_mock(
+        {"name": "arrange-panels", "version": "1.0.0"},
+        {"drawing_id": "demo", "dry_run": True},
+        "cat-litmus",
+        backend=backend,
+        t0=time.perf_counter(),
+        run_tool_dynamic_fn=transform_tool,
+    )
+
+    assert status == 200
+    assert envelope["result"]["dry_run"] is True
+    assert "new_version" not in envelope["result"]
+    version, _ = read_intake(backend, "cat-litmus", "demo", "head")
+    assert version == 1

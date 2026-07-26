@@ -519,14 +519,20 @@ export class ConverseLoop {
           const target = String(args.tool ?? "");
           const entry = (await catalogFor()).find((c) => c.name === target);
           const catalogDigest = entry?.catalog_digest;
+          const params = asRecord(args.params);
           if (typeof catalogDigest !== "string" || !catalogDigest) {
             throw new Error("run_capability requires a current server-issued catalog digest");
           }
-          // Unknown tool => the WRITE rung (same fail-toward-safe rule as capabilityOf).
+          // A local dry run is non-mutating, so it uses the read rung. This
+          // prevents preview approval from becoming a confirm-once grant for
+          // the later real write. Live APS stays on its cost-bearing rung.
+          // Unknown tools still fail toward the WRITE rung.
           const action =
             entry?.aps_live === true
               ? "submit_live_solve"
-              : !entry || entry.capabilities.includes("drawing.write")
+              : entry && params.dry_run === true
+                ? "run_read_tool"
+                : !entry || entry.capabilities.includes("drawing.write")
                 ? "run_write_tool"
                 : "run_read_tool";
           const dwg = String(args.dwg ?? session.drawing_id);
@@ -556,7 +562,7 @@ export class ConverseLoop {
             action,
             args: {
               tool: target,
-              params: asRecord(args.params),
+              params,
               dwg,
               catalog_digest: catalogDigest,
               ...drawingPins,

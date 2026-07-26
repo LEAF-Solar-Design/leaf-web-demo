@@ -58,6 +58,14 @@ DEFAULT_APP_PORT = 8130      # server/app.py     (APP_PORT)
 DEFAULT_HARNESS_PORT = 8150  # harness serve.ts  (HARNESS_PORT)
 DEFAULT_WEB_PORT = 5175      # web/vite.config.js
 
+# A cold subscription-backed turn can spend several minutes in the spine and
+# then several more in authoring. The app timeout and busy-session lease must
+# outlive the harness timeout, or the UI reports failure while the harness
+# continues and commits in the background.
+DEFAULT_SPINE_TURN_TIMEOUT_S = "900"
+DEFAULT_TURN_MAX_S = "930"
+DEFAULT_AUTHOR_TIMEOUT_S = "600"
+
 
 # ---- Small terminal helpers -------------------------------------------------
 def say(msg: str) -> None:
@@ -110,6 +118,35 @@ def wait_healthy(name: str, url: str, deadline_s: float = 40.0) -> bool:
         time.sleep(0.5)
     say(f"WARN {name:<8} did not report healthy within {int(deadline_s)}s ({url})")
     return False
+
+
+def harness_authoring_defaults(env: dict[str, str]) -> tuple[str, str]:
+    """Enable local repo mutation only when its PostgreSQL lease is configured."""
+    has_database = bool(
+        env.get("LEAF_HARNESS_DATABASE_URL", "").strip()
+        or env.get("DATABASE_URL", "").strip()
+    )
+    return ("1", "singleton") if has_database else ("0", "disabled")
+
+
+def harness_session_store_default(env: dict[str, str]) -> str:
+    """Use the configured PostgreSQL authority instead of silently using files."""
+    return (
+        "postgres"
+        if env.get("LEAF_HARNESS_DATABASE_URL", "").strip()
+        or env.get("DATABASE_URL", "").strip()
+        else "file"
+    )
+
+
+def agent_store_default(env: dict[str, str]) -> str:
+    """Keep approvals, grants, rates, and audit on the configured shared database."""
+    return (
+        "postgres"
+        if env.get("LEAF_HARNESS_DATABASE_URL", "").strip()
+        or env.get("DATABASE_URL", "").strip()
+        else "legacy"
+    )
 
 
 # ---- Child-process management ----------------------------------------------
@@ -306,6 +343,14 @@ def main() -> int:
 
     base_env = os.environ.copy()
     base_env["APS_LIVE"] = "0"  # local dev is always mock — no cloud, no secrets
+    # The harness authors into this tenant repo root. The app must catalog the
+    # same files and the broker must resolve their entry scripts from it.
+    # Without one shared value, authoring appears to work but every design-time
+    # test and later runtime dispatch reports "no local implementation".
+    base_env.setdefault(
+        "LEAF_TENANTS_DIR",
+        "C:/tmp/leaf-tenants" if os.name == "nt" else "/tmp/leaf-tenants",
+    )
 
     # Converse back-edge secret (wire contract §0): the harness authenticates to
     # the app with X-Dispatch-Secret. Unset in EITHER child => /internal/agent/gate
@@ -330,11 +375,27 @@ def main() -> int:
     # ---- 2) harness sidecar (optional Build lane) ----------------------------
     if want_harness:
         node = resolve_exe("node") or "node"
+        authored_execution, authoring_mode = harness_authoring_defaults(base_env)
         harness_env = dict(
             base_env,
             HARNESS_PORT=str(harness_port),
             BROKER_URL=broker_url,
             LEAF_REPO_ROOT=str(REPO),
+            # Repo mutation also needs the PostgreSQL writer lease. Keep the
+            # sidecar read-only when that database is not configured.
+            LEAF_AUTHORED_EXECUTION=os.environ.get(
+                "LEAF_AUTHORED_EXECUTION", authored_execution
+            ),
+            LEAF_HARNESS_AUTHORING_MODE=os.environ.get(
+                "LEAF_HARNESS_AUTHORING_MODE", authoring_mode
+            ),
+            LEAF_HARNESS_SESSION_STORE=os.environ.get(
+                "LEAF_HARNESS_SESSION_STORE",
+                harness_session_store_default(base_env),
+            ),
+            LEAF_SPINE_TURN_TIMEOUT_S=os.environ.get(
+                "LEAF_SPINE_TURN_TIMEOUT_S", DEFAULT_SPINE_TURN_TIMEOUT_S
+            ),
             # Converse back-edge: the harness must call the SAME app this launcher
             # boots even when the app moved off its default port (stale squatter).
             LEAF_APP_URL=app_url,
@@ -343,11 +404,30 @@ def main() -> int:
         spawn("harness", [node, str(HARNESS_ENTRY)], HARNESS_DIR, harness_env)
 
     # ---- 3) app (talks to broker over HTTP; never holds the APS credential) --
-    app_env = dict(base_env, APP_PORT=str(app_port), BROKER_URL=broker_url)
+    app_env = dict(
+        base_env,
+        APP_PORT=str(app_port),
+        BROKER_URL=broker_url,
+        LEAF_AGENT_STORE=os.environ.get(
+            "LEAF_AGENT_STORE", agent_store_default(base_env)
+        ),
+    )
     if harness_url:
         app_env["LEAF_AUTHOR_HARNESS_URL"] = harness_url
         app_env["LEAF_CONVERSE_HARNESS_URL"] = harness_url
         app_env["LEAF_APP_DISPATCH_SECRET"] = dispatch_secret
+        # A live harness can take longer than the historical synchronous proxy
+        # budget. Keep both sides aligned and never mask a harness failure with
+        # the deterministic template path in this real-service launcher.
+        app_env["LEAF_AUTHOR_TIMEOUT_S"] = os.environ.get(
+            "LEAF_AUTHOR_TIMEOUT_S", DEFAULT_AUTHOR_TIMEOUT_S
+        )
+        app_env["TURN_MAX_S"] = os.environ.get(
+            "TURN_MAX_S", DEFAULT_TURN_MAX_S
+        )
+        app_env["LEAF_AUTHOR_TEMPLATE_FALLBACK"] = os.environ.get(
+            "LEAF_AUTHOR_TEMPLATE_FALLBACK", "0"
+        )
     spawn("app", [sys.executable, "app.py"], SERVER_DIR, app_env)
 
     # ---- 4) web (Vite dev; VITE_MOCK=0 so the browser hits the live app) -----
@@ -389,6 +469,9 @@ def main() -> int:
         say("    NOTE: authoring a tool needs a linked Claude grant per tenant")
         say("          (POST /api/tenant/claude-grant); without it /api/author")
         say("          returns a calm GRANT_REQUIRED (401) — no LLM credit spent.")
+        if authored_execution != "1" or authoring_mode != "singleton":
+            say("    NOTE: Build repo mutation is read-only until PostgreSQL")
+            say("          writer-lease configuration is provided.")
     say("")
     say("Everything runs at APS_LIVE=0 (pure-python results from real geometry).")
     say("Press Ctrl-C to stop the whole stack.")

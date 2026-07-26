@@ -171,7 +171,34 @@ A dict extracted from the drawing:
   intake["inserts"]   -> list of {"layer": str, ...} (block references; may be empty).
   intake["faces3d"]   -> list of {"layer": str, ...} (3D faces; may be empty).
 "params" is a dict of optional caller inputs matching your params JSON Schema.
-Capabilities: this is a read-only analysis tool -> capabilities: ["drawing.read"].`;
+
+=== Capability and drawing-write contract ===
+Choose capabilities from the request:
+- Read-only analysis: ["drawing.read"].
+- A tool that changes panel positions or drawing geometry: ["drawing.write"].
+
+For drawing.write, tool.py stays pure. It does not write files or versions. Return
+the proposed edit in result["mutations"]. To move existing panels, use:
+  {"transforms": [
+    {"handle": "AB12", "dx": 10.0, "dy": -5.0, "rotation_deg": 0.0}
+  ]}
+Each handle must name one existing intake polyline. dx and dy are offsets from the
+panel's current centroid, not absolute coordinates. Preserve panels by emitting
+exactly one transform for every selected panel and no added or removed entities.
+Keep abs(dx) and abs(dy) <= 10000 and rotation_deg in [-360, 360].
+
+Every drawing.write params schema must include:
+  "drawing_id": string, default "cat-workbench"
+  "dry_run": boolean, default false
+When dry_run is true, compute and return the same proposed mutations and preview;
+the platform will not apply them or create a version. aps_test_run automatically
+forces dry_run=true for drawing.write candidates, so it is safe. A normal approved
+runtime call applies the mutations and the platform creates immutable vN+1.
+
+For a panel silhouette, derive target centroids deterministically, sort source
+panels by stable handle, pair them in that order, and return one transform per
+panel. Do not invent a special engine_op implementation. The persisted tool.py is
+the implementation and may use any descriptive snake_case engine_op.`;
 
 // --------------------------------------------------------------------------- //
 // The runner

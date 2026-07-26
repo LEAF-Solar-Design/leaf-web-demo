@@ -143,6 +143,7 @@
 .tc-solve .dot { background: #22c55e; }
 .tc-back { border: 0; background: none; padding: 0; font-size: 12px; color: #22c55e; cursor: pointer; }
 .tc-back:hover { color: #4ade80; }
+.tc-focus-hidden { display: none !important; }
 
 /* ---------------- landing: statement block (z 20) ---------------- */
 
