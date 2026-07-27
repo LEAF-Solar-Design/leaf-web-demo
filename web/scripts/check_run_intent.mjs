@@ -49,20 +49,21 @@ for (const [label, change] of [
 assert(!confirmRunIntent(staged.state, request, { now: 1000 + 5 * 60 * 1000 + 1 }).ok,
   'an expired confirmation must fail closed')
 
-// Normalize newlines before matching. The assertions below are exact source
-// substrings and one of them spans a line break, so on a checkout made with
-// core.autocrlf=true (any default Windows clone) the CRLF in the working copy
-// missed the '\n' in the needle and this check failed on Windows only. The
-// committed blobs are LF, so this is a no-op on a Linux CI runner.
+// Normalize newlines before matching. Some assertions span a line break, so
+// Windows CRLF checkouts must use the same source form as Linux CI.
 const readSource = (rel) =>
   readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 
 const app = readSource('../src/App.jsx')
+const catalogController = readSource('../src/controllers/catalog/createCatalogController.js')
 const routePanel = readSource('../src/components/RoutePanel.jsx')
 assert(app.includes('const armDecision = useCallback((decision) =>'),
   'all route decisions must cross the shared intent staging seam')
-assert(app.includes('armDecision(r)'), 'NL routes do not use the shared intent seam')
-assert(app.includes('armDecision({\n          lane: \'run\', tool: t.name'),
+assert(app.includes('commitDecision: (decision) => catalogUiRef.current.armDecision?.(decision)'),
+  'the catalog controller is not connected to the shared intent seam')
+assert(catalogController.includes('commitDecision(decision)'),
+  'NL routes do not use the shared intent seam')
+assert(catalogController.includes('slash.decision ? commitDecision(slash.decision) : undefined'),
   'slash routes do not use the shared intent seam')
 assert(app.includes('runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)'),
   'route dismissal does not invalidate the active intent')

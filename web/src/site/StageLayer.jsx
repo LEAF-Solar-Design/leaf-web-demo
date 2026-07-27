@@ -6,7 +6,7 @@
 // will-change is removed and it never transitions again. If WebGL is
 // unavailable (or the intake fails), it degrades to the Canvas2D mock port.
 
-import React, { Suspense, useEffect, useRef, useState } from 'react'
+import React, { Suspense, forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { loadIntake, loadDemoSolve } from './intakeCache.js'
 import StageFallback2D from './StageFallback2D.jsx'
 
@@ -28,24 +28,49 @@ function ReadySentinel({ onReady }) {
   return null
 }
 
-export default function StageLayer({ intakeOverride = null, viewMode = 'flat' }) {
+const StageLayer = forwardRef(function StageLayer({
+  intakeOverride = null,
+  viewMode = 'flat',
+  visibleLayers = null,
+  selectedHandle = null,
+  onSelectEntity,
+  overlay = null,
+}, ref) {
   const [intake, setIntake] = useState(null)
   const [routes, setRoutes] = useState([])
   const [fallback, setFallback] = useState(false)
   const [entered, setEntered] = useState(false)
   const [settled, setSettled] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
   const settleTimer = useRef(null)
+  const viewerRef = useRef(null)
+  const sculpture = viewMode === 'panel-sculpture'
 
   useEffect(() => {
     let live = true
-    loadIntake()
-      .then((d) => { if (live) setIntake(d) })
-      .catch(() => { if (live) setFallback(true) })
+    setFallback(false)
+    if (!intakeOverride) {
+      loadIntake()
+        .then((d) => { if (live) setIntake(d) })
+        .catch(() => { if (live) setFallback(true) })
+    }
     loadDemoSolve()
       .then((d) => { if (live) setRoutes(Array.isArray(d.strings) ? d.strings : []) })
       .catch(() => { if (live) setRoutes([]) })
     return () => { live = false; if (settleTimer.current) clearTimeout(settleTimer.current) }
+  }, [intakeOverride, retryKey])
+
+  const retryViewer = useCallback(() => {
+    setEntered(false)
+    setSettled(false)
+    setFallback(false)
+    setRetryKey((current) => current + 1)
   }, [])
+
+  useImperativeHandle(ref, () => ({
+    fit: () => viewerRef.current?.fit(),
+    retry: retryViewer,
+  }), [retryViewer])
 
   const handleReady = () => {
     setEntered(true)
@@ -53,10 +78,9 @@ export default function StageLayer({ intakeOverride = null, viewMode = 'flat' })
     // the drawing never transitions again for the life of the session.
     settleTimer.current = setTimeout(() => setSettled(true), 2400)
   }
-  const sculpture = viewMode === 'panel-sculpture'
 
   return (
-    <div className="stage-layer" aria-hidden="true">
+    <div className="stage-layer" role={intakeOverride ? 'region' : undefined} aria-label={intakeOverride ? 'Drawing viewer' : undefined} aria-hidden={intakeOverride ? undefined : true}>
       <div className="stage-grid" />
       {fallback ? (
         <StageFallback2D />
@@ -66,10 +90,18 @@ export default function StageLayer({ intakeOverride = null, viewMode = 'flat' })
             {(intakeOverride || intake) && (
               <>
                 <Viewer
+                  key={retryKey}
+                  ref={viewerRef}
                   intake={intakeOverride || intake}
                   colorForLayer={stageColorForLayer}
+                  visibleLayers={visibleLayers}
+                  selectedHandle={selectedHandle}
+                  onSelectEntity={onSelectEntity}
+                  highlightHandles={overlay?.highlight_handles}
+                  markers={overlay?.markers}
+                  overlayPolylines={overlay?.polylines}
                   background="transparent"
-                  controlsEnabled={sculpture}
+                  controlsEnabled={!!intakeOverride}
                   rotateEnabled={sculpture}
                   panelSculpture={sculpture}
                   stringRoutes={intakeOverride ? [] : routes}
@@ -81,7 +113,15 @@ export default function StageLayer({ intakeOverride = null, viewMode = 'flat' })
           </Suspense>
         </div>
       )}
+      {fallback && intakeOverride && (
+        <div className="stage-viewer-notice" role="alert">
+          <span>Interactive viewer unavailable. A 2D drawing remains visible.</span>
+          <button type="button" onClick={retryViewer}>Retry viewer</button>
+        </div>
+      )}
       <div className="stage-scrim" />
     </div>
   )
-}
+})
+
+export default StageLayer

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getOpsTenants, setTenantDisabled } from '../api.js'
 import './popovers.css'
 
@@ -14,6 +14,9 @@ import './popovers.css'
 // tenant-facing app. Esc (key or cap) hides the drawer.
 // `exiting`: App holds the mount through the 180 ms M1 exit fade (useExit).
 export default function OpsDrawer({ onDismiss, exiting }) {
+  const drawerRef = useRef(null)
+  const closeRef = useRef(null)
+  const restoreRef = useRef(null)
   const [tenants, setTenants] = useState(null)
   const [err, setErr] = useState(null)
   const [forbidden, setForbidden] = useState(false)
@@ -35,13 +38,49 @@ export default function OpsDrawer({ onDismiss, exiting }) {
 
   useEffect(() => { load() }, [load])
 
-  // Esc closes — the header cap is the affordance, the key must actually work.
+  useEffect(() => {
+    restoreRef.current = document.activeElement
+    closeRef.current?.focus()
+    return () => {
+      const target = restoreRef.current
+      if (target?.isConnected && typeof target.focus === 'function') target.focus()
+    }
+  }, [])
+
+  // Own Escape before the scene-level ladder can navigate away from /try.
   useEffect(() => {
     if (!onDismiss) return
-    const onKey = (e) => { if (e.key === 'Escape') onDismiss() }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    const onKey = (event) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      onDismiss()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [onDismiss])
+
+  const ownKeyboard = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      onDismiss?.()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const focusable = [...(drawerRef.current?.querySelectorAll('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') || [])]
+      .filter((element) => element.getClientRects().length > 0)
+    if (!focusable.length) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (focusable.length === 1 || (!event.shiftKey && document.activeElement === last)) {
+      event.preventDefault()
+      first.focus()
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    }
+  }
 
   const act = useCallback(async (tid, disabled) => {
     setActing(tid); setConfirming(null); setErr(null)
@@ -63,12 +102,12 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   }, [load])
 
   return (
-    <aside className={`drawer${exiting ? ' exit' : ''}`} role="region" aria-label="Internal ops">
+    <aside ref={drawerRef} className={`drawer${exiting ? ' exit' : ''}`} role="dialog" aria-modal="true" aria-label="Internal ops" onKeyDown={ownKeyboard}>
       <div className="drawer-head">
         <span className="ops-badge">Internal</span>
         <span className="drawer-title">Ops · tenants</span>
         {onDismiss && (
-          <button className="key hot" onClick={onDismiss} aria-label="Hide drawer">Esc</button>
+          <button ref={closeRef} className="key hot" onClick={onDismiss} aria-label="Hide drawer">Esc</button>
         )}
       </div>
 
@@ -156,7 +195,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
         </button>
       </div>
 
-      <div className="drawer-foot">GET /api/ops/tenants · X-Internal-Role: qa</div>
+      <div className="drawer-foot">GET /api/ops/tenants · server-authorized internal access</div>
     </aside>
   )
 }
