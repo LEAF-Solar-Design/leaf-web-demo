@@ -695,10 +695,11 @@ INDEPENDENCE_SLEEP_S = 4.0
 # and an earlier form of this test that ran with NO warmup at all read a
 # systematic -33.7ms over 64 runs (grand mean 40.6ms slow against 74.3ms fast).
 # So under-covering roughly doubles the SPREAD of the statistic, which is why
-# the count is derived rather than fixed, and the worst reading ever produced is
-# 33.7ms against the 47.5ms ceiling. Neither can flake this bound, which needs
-# 500ms. Both are charged against the detection floor in the docstring below
-# rather than assumed away. After a covering warmup the two groups are
+# the count is derived rather than fixed, and 33.7ms is the worst reading ever
+# produced -- a MEASUREMENT, well under the 190ms the docstring charges and
+# nowhere near flaking a bound that needs 500ms. The charge, not this number, is
+# what the detection floor is stated against. After a covering warmup the two
+# groups are
 # indistinguishable: 1792 measured samples put the grand mean at 9.6ms for BOTH.
 SUBMIT_WARMUP_MARGIN = 4
 # The pool is read from the ENVIRONMENT, so the count it implies is capped. An
@@ -744,6 +745,16 @@ MEAN_SUBMIT_DIFF_BUDGET_S = 0.5
 # budget for the WHOLE drain, spent across every job the test has to poll, not a
 # per-job allowance: see the deadline in the `finally` for why.
 INDEPENDENCE_DRAIN_TIMEOUT_S = INDEPENDENCE_SLEEP_S * INDEPENDENCE_PAIRS + 30.0
+# The same reasoning applied to the SUBMIT phase, which needs its own bound: the
+# per-request timeout is 120s and this test issues up to
+# SUBMIT_WARMUP_MAX_POSTS + 2*INDEPENDENCE_PAIRS of them, so a hung app could
+# spend hours here and never reach the `finally` at all. The gate kills the
+# suite at 900s and reports nothing, so an unbounded submit phase would convert
+# every drain report below into an opaque timeout. Sized against reality with
+# enormous slack: the phase costs about 1s when the app is healthy (96 POSTs at
+# the ~10ms warm floor), and this plus the drain budget still leaves better than
+# 5 minutes of headroom under the suite timeout.
+SUBMIT_PHASE_BUDGET_S = 300.0
 
 
 def test_1b_submit_cost_is_independent_of_execution_time(stack):
@@ -837,12 +848,29 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     the next POST, and this test never observes job state between calls, so it
     could not support that.
 
-    Every job is drained in a `finally`, for the reason test 1 documents at
-    length. And as in test 1a, a job id is only readable AFTER its POST returns
-    and parses, so the count of POSTs that reached the server is taken BEFORE
-    each call and compared against the ids actually recovered: a POST that dies
-    on the way back leaves a job accepted server-side with no id here to drain,
-    and that is REPORTED rather than passing quietly as a clean drain.
+    Jobs are drained in a `finally`, for the reason test 1 documents at length,
+    but under a BOUNDED budget rather than unconditionally, and the difference
+    is deliberate. Both phases carry a deadline -- SUBMIT_PHASE_BUDGET_S over
+    the POSTs, INDEPENDENCE_DRAIN_TIMEOUT_S over the whole drain -- because this
+    test issues up to SUBMIT_WARMUP_MAX_POSTS + 2*INDEPENDENCE_PAIRS requests
+    and a per-request allowance multiplies: the gate kills a suite at 900s
+    (scripts/run-all-gates.py Suite.timeout_s) and a killed suite reports
+    NOTHING, so an unbounded phase converts a named failure into an opaque
+    timeout.
+
+    What that costs, stated plainly: if the drain budget is spent, the jobs it
+    did not reach are named in the failure and MAY STILL BE RUNNING. The `stack`
+    fixture is module-scoped, so those jobs share an app process with tests 2
+    through 10. This is a real trade and it is taken on purpose -- the budget is
+    only ever spent when jobs are not finishing, which fails this test either
+    way, and a named failure plus possible contamination beats a suite-wide
+    timeout that reports neither. It is not a silent path: the ids are printed.
+
+    As in test 1a, a job id is only readable AFTER its POST returns and parses,
+    so the count of POSTs that reached the server is taken BEFORE each call and
+    compared against the ids actually recovered: a POST that dies on the way back
+    leaves a job accepted server-side with no id here to drain, and that is
+    REPORTED rather than passing quietly as a clean drain.
     """
     url = f"{stack['app']}/api/run"
     # Built OUTSIDE every timed window: the catalog GET is not the property here.
@@ -858,15 +886,33 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     # the server may have accepted. Comparing this against len(job_ids) in the
     # `finally` is what keeps an unrecoverable job from reading as a clean drain.
     sent = 0
+    # The warmup POSTs carry no `_qa_sleep_s`, so clearing the thread-spawn
+    # regime costs instant jobs rather than that many more on the drain bill.
+    warmup_posts = min(
+        fast_lane_workers(stack) + SUBMIT_WARMUP_MARGIN,
+        SUBMIT_WARMUP_MAX_POSTS)
+    total_posts = warmup_posts + 2 * INDEPENDENCE_PAIRS
+    # ONE deadline over every POST this test makes, warmup and measured alike.
+    submit_deadline = time.monotonic() + SUBMIT_PHASE_BUDGET_S
+
+    def post_timeout_s() -> float:
+        """Per-request timeout, clamped so the submit phase cannot overrun.
+
+        Failing HERE rather than letting the suite time out is the whole point:
+        this raises inside the `try`, so the `finally` still runs and still
+        reports the jobs it could not drain.
+        """
+        remaining = submit_deadline - time.monotonic()
+        assert remaining > 0, (
+            f"the submit phase spent its {SUBMIT_PHASE_BUDGET_S:g}s budget after "
+            f"{sent} of {total_posts} POSTs, so the app is not accepting "
+            f"submissions at anything near the ~10ms this test measures")
+        return min(120.0, remaining)
+
     try:
-        # The warmup POSTs carry no `_qa_sleep_s`, so clearing the thread-spawn
-        # regime costs instant jobs rather than that many more on the drain bill.
-        warmup_posts = min(
-            fast_lane_workers(stack) + SUBMIT_WARMUP_MARGIN,
-            SUBMIT_WARMUP_MAX_POSTS)
         for _ in range(warmup_posts):
             sent += 1
-            warm = requests.post(url, json=fast_payload, timeout=120)
+            warm = requests.post(url, json=fast_payload, timeout=post_timeout_s())
             assert warm.status_code == 202
             job_ids.append(warm.json()["job_id"])
 
@@ -876,8 +922,11 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
                 pair = pair[::-1]
             for bucket, payload in pair:
                 sent += 1
+                # Resolved BEFORE the clock starts: the deadline arithmetic is
+                # not part of what this test is timing.
+                timeout_s = post_timeout_s()
                 start = time.perf_counter()
-                r = requests.post(url, json=payload, timeout=120)
+                r = requests.post(url, json=payload, timeout=timeout_s)
                 bucket.append(time.perf_counter() - start)
                 assert r.status_code == 202
                 job_ids.append(r.json()["job_id"])
