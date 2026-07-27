@@ -1457,12 +1457,15 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
             #
             # `None` from `drawing_object_keys` means the backend cannot tell,
             # and cannot-tell forbids the removal.
+            #
+            # There is deliberately no separate `exists(manifest_key(...))` here.
+            # The manifest lives UNDER this prefix, so an existing drawing is
+            # already a non-empty answer and a second check could only ever agree
+            # -- a mutation test confirmed it never changes the outcome. One
+            # question, asked once, is what keeps the two from drifting apart.
             try:
                 remaining = backend.drawing_object_keys(tid, did)
-                orphaned = (
-                    remaining is not None
-                    and not (remaining - {vkey})
-                    and not backend.exists(manifest_key(tid, did)))
+                orphaned = remaining is not None and not (remaining - {vkey})
             except Exception:
                 # Nothing here may raise over the failure that brought us: that
                 # error is the one worth reporting, and a secondary one would

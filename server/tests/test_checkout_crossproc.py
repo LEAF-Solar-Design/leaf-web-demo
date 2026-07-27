@@ -1570,6 +1570,43 @@ def test_a_failed_ingest_keeps_a_live_uploads_lock_file(tmp_path):
         "on its marker, which its _mark_failed and purge both still need")
 
 
+def test_a_backend_that_cannot_enumerate_never_gets_its_lock_file_reclaimed(tmp_path):
+    """The fail-safe, made falsifiable.
+
+    `StorageBackend.drawing_object_keys` returns None by default, meaning "I
+    cannot tell" — never "empty". A backend added later inherits that, and must
+    inherit the answer that FORBIDS the removal rather than a proof it cannot
+    make. Without this test the distinction is unexercised: every other test
+    uses `FilesystemBackend`, which always enumerates, so treating None as empty
+    would pass the whole suite.
+    """
+    class BlindBackend(store.FilesystemBackend):
+        """Cross-process safe, but cannot answer what is under a drawing."""
+
+        def drawing_object_keys(self, tenant_id, drawing_id):
+            return None
+
+    root = str(tmp_path / "store")
+    backend = BlindBackend(root)
+    payload = tmp_path / "payload.dwg"
+    payload.write_bytes(b"dwg-bytes")
+
+    real_put = backend.put
+
+    def exploding_put(key, data):
+        if key.endswith(".dwg"):
+            raise OSError(28, "No space left on device")
+        return real_put(key, data)
+
+    backend.put = exploding_put
+    with pytest.raises(OSError):
+        store.ingest_drawing(backend, TENANT, str(payload), DRAWING)
+
+    assert _lock_files(root), (
+        "a backend that cannot prove the drawing is empty still had its lock "
+        "file retired, so 'cannot tell' was read as 'nothing is there'")
+
+
 def test_a_marker_only_uploads_lock_file_survives_a_failed_section(tmp_path):
     """The reason the reclaim lives in `ingest_drawing` and NOT in the guard.
 
