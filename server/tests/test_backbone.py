@@ -747,13 +747,34 @@ MEAN_SUBMIT_DIFF_BUDGET_S = 0.5
 INDEPENDENCE_DRAIN_TIMEOUT_S = INDEPENDENCE_SLEEP_S * INDEPENDENCE_PAIRS + 30.0
 # The same reasoning applied to the SUBMIT phase, which needs its own bound: the
 # per-request timeout is 120s and this test issues up to
-# SUBMIT_WARMUP_MAX_POSTS + 2*INDEPENDENCE_PAIRS of them, so a hung app could
-# spend hours here and never reach the `finally` at all. The gate kills the
-# suite at 900s and reports nothing, so an unbounded submit phase would convert
-# every drain report below into an opaque timeout. Sized against reality with
-# enormous slack: the phase costs about 1s when the app is healthy (96 POSTs at
-# the ~10ms warm floor), and this plus the drain budget still leaves better than
-# 5 minutes of headroom under the suite timeout.
+# SUBMIT_WARMUP_MAX_POSTS + 2*INDEPENDENCE_PAIRS of them, so an app that stalls
+# on each one could spend hours here and never reach the `finally` at all. The
+# gate kills the suite at 900s and reports nothing, so an unbounded submit phase
+# would convert every drain report below into an opaque timeout. Sized against
+# reality with enormous slack: the phase costs about 1s when the app is healthy
+# (96 POSTs at the ~10ms warm floor).
+#
+# Be precise about what this is, because it is NOT a wall-clock guarantee. A
+# `requests` timeout is an INACTIVITY timeout -- time waiting for the connection,
+# then time between received bytes -- not a cap on total request duration. A
+# response that delivers a byte before each interval can therefore outlive any
+# value set here. What the deadline does bound is the count and pacing of
+# requests: it stops the failure mode that actually occurs, N stalled requests
+# each paying the full per-request timeout in series. A single trickling
+# response is not covered, and no timeout argument here could cover it; that
+# would need a watchdog, which is not worth carrying for a failure mode this
+# app's small JSON 202 cannot produce.
+#
+# Nor does the sum of the two budgets bound the SUITE. Accounting honestly:
+# ~30s for the two catalog GETs that build the payloads (they are outside this
+# deadline, being built before the phase starts), up to 300s here, up to ~104s
+# draining (94s budget plus a final 10s GET already in flight), so about 434s
+# nominal for this test. Tests 2 through 10 then run on the same module-scoped
+# stack with their own multi-second request paths, and after a failure here they
+# run against jobs that may still be executing. So the 900s suite kill is still
+# reachable in aggregate. The claim made here is narrower and is the one that
+# matters: THIS test reaches its own `finally` and reports named job ids, rather
+# than dying silently inside its POST loop.
 SUBMIT_PHASE_BUDGET_S = 300.0
 
 
@@ -856,7 +877,11 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     and a per-request allowance multiplies: the gate kills a suite at 900s
     (scripts/run-all-gates.py Suite.timeout_s) and a killed suite reports
     NOTHING, so an unbounded phase converts a named failure into an opaque
-    timeout.
+    timeout. What those deadlines do and do not bound -- in particular that a
+    `requests` timeout is an inactivity timeout and not a wall-clock cap, and
+    that the two budgets do not add up to a bound on the SUITE -- is spelled out
+    at SUBMIT_PHASE_BUDGET_S and is deliberately not restated as a guarantee
+    here.
 
     What that costs, stated plainly: if the drain budget is spent, the jobs it
     did not reach are named in the failure and MAY STILL BE RUNNING. The `stack`
@@ -864,7 +889,8 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     through 10. This is a real trade and it is taken on purpose -- the budget is
     only ever spent when jobs are not finishing, which fails this test either
     way, and a named failure plus possible contamination beats a suite-wide
-    timeout that reports neither. It is not a silent path: the ids are printed.
+    timeout that reports neither. It is not a silent path: EVERY unpolled id is
+    printed, not a sample of them.
 
     As in test 1a, a job id is only readable AFTER its POST returns and parses,
     so the count of POSTs that reached the server is taken BEFORE each call and
@@ -975,10 +1001,15 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
                 drain_errors.append(f"{job_id}: {type(exc).__name__}: {exc}")
         if undrained:
             drain_errors.append(
+                # EVERY id, not a sample: these jobs may still be running against
+                # the module-scoped stack that tests 2-10 share, so a truncated
+                # list would hide exactly the ones needed to explain a later
+                # failure. The count is bounded by SUBMIT_WARMUP_MAX_POSTS +
+                # 2*INDEPENDENCE_PAIRS, so this cannot run away.
                 f"{len(undrained)} of {len(job_ids)} jobs were never polled: the "
                 f"{INDEPENDENCE_DRAIN_TIMEOUT_S:g}s drain budget for the whole "
                 f"test was already spent on earlier ones "
-                f"({', '.join(undrained[:5])}{'...' if len(undrained) > 5 else ''})")
+                f"({', '.join(undrained)})")
         assert not drain_errors, (
             "this test could not confirm every job it started had finished: "
             + "; ".join(drain_errors))
