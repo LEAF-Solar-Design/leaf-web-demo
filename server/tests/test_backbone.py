@@ -515,6 +515,133 @@ def test_1_run_returns_202_fast(stack):
 
 
 # --------------------------------------------------------------------------- #
+# 1a. a FLAT submit-path regression -- one that costs the same on every POST --
+#     is invisible to every bound in test 1. This is the bound that sees it.
+# --------------------------------------------------------------------------- #
+SUBMIT_SAMPLES = 10
+# Measured 2026-07-26 against this repo, not guessed. 91 real samples of the
+# WARM submit cost (the second POST on an already-booted app process): 45 idle,
+# 44 under an 8-way CPU load and 2 under a 16-way load, on a 20-core host.
+# Single samples ran a median of 56ms, p95 402ms, worst 1098ms. Bootstrapping
+# the MEAN of 10 from those same samples (200k draws) put the worst mean at
+# 439ms, so this budget sits 2.3x above the worst mean the real distribution
+# produced.
+MEAN_SUBMIT_BUDGET_S = 1.0
+
+
+def test_1a_flat_submit_cost_does_not_regress(stack):
+    """Submitting must stay CHEAP, not merely cheaper than the job it starts.
+
+    Test 1 proves the 202 does not wait on EXECUTION. It cannot prove submitting
+    is cheap, and all three of its bounds miss a regression that costs a flat
+    ~3s on every POST:
+
+      * the job is still non-terminal, because 3s is not the 10s job;
+      * `elapsed < sleep_s` is a 10s budget, and 3s passes it;
+      * `delta < sleep_s / 2` is blind BY CONSTRUCTION, not merely by margin --
+        the control POST pays the same flat 3s, so it cancels out of the
+        subtraction and `delta` stays near zero.
+
+    A single-sample bound cannot close that gap here. The regression to catch is
+    ~3s and the noise tail reaches ~1.7s (this file's own history: 8 of 89 local
+    runs between 210ms and 1720ms), and the gate runs on `ubuntu-latest`, a
+    shared 2-to-4-core VM whose tail is worse than anything measurable here.
+    There is no defensible threshold in a 1.8x window.
+
+    A MEAN escapes that squeeze, because the two quantities behave differently
+    under averaging. A flat regression is ADDITIVE -- it survives at full size
+    however many samples are taken -- while a ONE-OFF stall of S seconds
+    contributes only S/N to the mean. That 1/N dilution of a single large stall
+    is what this bound leans on. It is NOT the usual 1/sqrt(N) shrinkage of
+    independent random noise, which is the weaker and less relevant effect here:
+    the tail that threatens this gate is one big stall, not many small ones. So
+    the budget is spent on the mean of `SUBMIT_SAMPLES` warm submits rather than
+    on any one of them.
+
+    What that buys, stated as the stall budget it takes to flake: with a warm
+    mean near 80ms, breaching 1.0s over 10 samples needs ~9.2 SECONDS of
+    cumulative stall inside the window. The worst single stall ever recorded on
+    this test is 1.72s, so it would take six of the worst events back to back,
+    while the 3s regression overshoots the budget threefold on its own.
+
+    The first POST is DISCARDED. On a cold app process it pays import and
+    connection cost no later POST pays -- measured up to 6363ms against a warm
+    median of 56ms -- and `stack` is module-scoped, so whether this test runs
+    first decides whether that cost lands. Discarding it makes the measurement
+    independent of test order rather than quietly dependent on it.
+
+    Bursting is safe to measure: 20-POST bursts against a real stack ran the
+    second half FASTER than the first (drift -12ms to -27ms across 4 boots), so
+    the executor applies no backpressure that would inflate later samples and
+    masquerade as a regression.
+
+    Every job is drained in a `finally`, for the reason test 1 documents at
+    length: these are real jobs, and one left executing is state the rest of the
+    file would then run against.
+
+    A job id is only readable AFTER its POST returns and parses, so a POST that
+    dies on the way back -- or answers 202 with a body this test cannot read --
+    leaves a job that was accepted server-side and has no id here to drain. The
+    count of POSTs that reached the server is therefore taken BEFORE each call
+    and compared against the ids actually recovered, so that case is REPORTED
+    rather than passing quietly as a clean drain. It is not repaired: recovering
+    the id would mean diffing the job list around every call, which is exactly
+    the machinery test 1 declined to add for the same case, in the one place
+    that has to stay boring.
+    """
+    url = f"{stack['app']}/api/run"
+    # Built OUTSIDE the timed window: the catalog GET is not the property here.
+    payload = confirmed_requests_payload(
+        stack["app"], "count-by-layer", {}, "rooftop_demo")
+
+    job_ids = []
+    samples = []
+    # Incremented BEFORE each call, so a POST that raises still counts as work
+    # the server may have accepted. Comparing this against len(job_ids) in the
+    # `finally` is what keeps an unrecoverable job from reading as a clean drain.
+    sent = 0
+    try:
+        sent += 1
+        warmup = requests.post(url, json=payload, timeout=120)
+        assert warmup.status_code == 202
+        job_ids.append(warmup.json()["job_id"])
+
+        for _ in range(SUBMIT_SAMPLES):
+            sent += 1
+            start = time.perf_counter()
+            r = requests.post(url, json=payload, timeout=120)
+            samples.append(time.perf_counter() - start)
+            assert r.status_code == 202
+            job_ids.append(r.json()["job_id"])
+
+        mean_s = sum(samples) / len(samples)
+        assert mean_s < MEAN_SUBMIT_BUDGET_S, (
+            f"submitting cost a mean of {mean_s*1000:.0f}ms across "
+            f"{SUBMIT_SAMPLES} warm POSTs, over the {MEAN_SUBMIT_BUDGET_S:g}s "
+            f"budget. Individual samples (ms): "
+            f"{', '.join(f'{v*1000:.0f}' for v in samples)}. A mean this high is "
+            f"a submit path that got expensive for every caller, not scheduling "
+            f"noise: noise would have to stall ~"
+            f"{(MEAN_SUBMIT_BUDGET_S*SUBMIT_SAMPLES):.0f}s inside this window")
+    finally:
+        drain_errors = []
+        unrecovered = sent - len(job_ids)
+        if unrecovered > 0:
+            drain_errors.append(
+                f"{unrecovered} of {sent} POSTs did not yield a readable job_id, "
+                f"so a job may have been accepted with an id this test never saw "
+                f"and cannot drain")
+        for job_id in job_ids:
+            try:
+                poll_until_terminal(stack, job_id, timeout_s=30.0)
+            except Exception as exc:  # noqa: BLE001 - drain every job, then report
+                drain_errors.append(f"{job_id}: {type(exc).__name__}: {exc}")
+        assert not drain_errors, (
+            "this test could not confirm every job it started had finished: "
+            + "; ".join(drain_errors))
+
+
+# --------------------------------------------------------------------------- #
 # 2. submitted->running->complete; result is a section-3 envelope; SQLite
 #    record survives a FULL app-process kill + restart
 # --------------------------------------------------------------------------- #
