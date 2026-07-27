@@ -717,13 +717,13 @@ def fast_lane_workers(stack) -> int:
 
     Resolved in the same order the app process resolves it: `start_uvicorn`
     copies os.environ and then applies the fixture's overrides, and `jobs`
-    reads JOB_WORKERS_FAST at executor creation with a default of 8. A value
-    the app itself would reject at construction is left to fail the same way
-    here rather than being silently repaired into a different pool size.
+    reads JOB_WORKERS_FAST at executor creation with a default of 8. A value the
+    app rejects at construction is not repaired here; the first POST then fails
+    the 202 assertion below, which is the honest outcome.
     """
     raw = stack["app_env"].get(
         "JOB_WORKERS_FAST", os.environ.get("JOB_WORKERS_FAST", "8"))
-    return max(1, int(raw))
+    return int(raw)
 # Measured 2026-07-27 against this repo, not guessed, and derived from the NOISE
 # rather than from any particular regression size. 56 runs of the exact sequence
 # below against a real booted stack, one full broker+app boot per run, 28 idle
@@ -773,8 +773,11 @@ INDEPENDENCE_DRAIN_TIMEOUT_S = INDEPENDENCE_SLEEP_S * INDEPENDENCE_PAIRS + 30.0
 # stack with their own multi-second request paths, and after a failure here they
 # run against jobs that may still be executing. So the 900s suite kill is still
 # reachable in aggregate. The claim made here is narrower and is the one that
-# matters: THIS test reaches its own `finally` and reports named job ids, rather
-# than dying silently inside its POST loop.
+# matters: for the failure mode this can catch -- requests that STALL, each
+# otherwise paying the full per-request timeout in series -- THIS test reaches
+# its own `finally` and reports named job ids rather than dying silently inside
+# its POST loop. A single trickling response defeats that too, and is the same
+# uncovered case named above; it is not claimed to be handled.
 SUBMIT_PHASE_BUDGET_S = 300.0
 
 
@@ -922,11 +925,14 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     submit_deadline = time.monotonic() + SUBMIT_PHASE_BUDGET_S
 
     def post_timeout_s() -> float:
-        """Per-request timeout, clamped so the submit phase cannot overrun.
+        """Per-request timeout, trimmed to the time left in the submit phase.
 
-        Failing HERE rather than letting the suite time out is the whole point:
-        this raises inside the `try`, so the `finally` still runs and still
-        reports the jobs it could not drain.
+        This bounds what the REMAINING requests may spend, not what any single
+        one can: a `requests` timeout measures inactivity, so one trickling
+        response still outlives it. See SUBMIT_PHASE_BUDGET_S. For the failure
+        mode it does cover -- requests that stall -- the assert below raises
+        inside the `try`, so the `finally` still runs and still reports the jobs
+        it could not drain.
         """
         remaining = submit_deadline - time.monotonic()
         assert remaining > 0, (
