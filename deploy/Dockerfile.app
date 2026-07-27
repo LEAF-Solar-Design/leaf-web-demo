@@ -37,6 +37,7 @@ COPY engine/    /app/engine/
 COPY platform/  /app/platform/
 COPY contract/  /app/contract/
 COPY data/      /app/data/
+COPY scripts/reconcile_customization_authority.py /app/scripts/reconcile_customization_authority.py
 
 # The stdlib `platform` module is shadowed by /app/platform once /app is on
 # sys.path; app.py loads the platform package under a `leaf_platform` alias and

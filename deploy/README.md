@@ -104,6 +104,7 @@ authority keeps its legacy default:
 | app guest upload caps | `LEAF_GUEST_CAP_STORE` | `memory` | `DATABASE_URL` |
 | app drawing manifests and leases | `LEAF_DRAWING_STORE` | `legacy` | `DATABASE_URL` |
 | app upload attempts and purge leases | `LEAF_UPLOAD_STORE` | `legacy` | `DATABASE_URL` |
+| app customization changes and publication | `LEAF_CUSTOMIZATION_STORE` | `sqlite` | `DATABASE_URL` |
 | broker tenant and ledger state | `LEAF_BROKER_STORE` | `legacy` | broker-only `DATABASE_URL` |
 | broker async job callback completion | `LEAF_JOBS_STORE` | `legacy` | broker-only `DATABASE_URL` |
 | broker drawing manifests and leases | `LEAF_DRAWING_STORE` | `legacy` | broker-only `DATABASE_URL` |
@@ -129,7 +130,7 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml \
 ```
 
 For staging, run the same migration command in a one-shot task built from the
-release commit. Confirm that migrations `0011` through `0017` exist before
+release commit. Confirm that migrations `0011` through `0020` exist before
 changing any selector. Then enable and verify one authority at a time. Session
 migration may first use `dual_write`, `dual_write_shadow`, and `shadow`; the
 other selectors accept only their documented legacy and PostgreSQL values. Do
@@ -175,6 +176,7 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 | `LEAF_GUEST_CAP_STORE` | app | `memory` | guest daily-cap authority selector; PostgreSQL remains opt-in |
 | `LEAF_DRAWING_STORE` | app, broker | `legacy` | drawing manifest, version, checkout, and extraction authority selector |
 | `LEAF_UPLOAD_STORE` | app | `legacy` | upload-attempt and purge authority selector |
+| `LEAF_CUSTOMIZATION_STORE` | app, broker | `sqlite` | customization authority selector; `postgres` requires migration `0020`, a backfill, and an exact parity receipt |
 | `LEAF_GUEST_CAP_HMAC_SECRET` | app | empty | required keyed IP pseudonymization secret in PostgreSQL guest-cap mode |
 | `LEAF_GUEST_SECRET` | app | empty | required guest-upload session signing secret; staging generates it in Secrets Manager and injects it into the app task |
 | `LEAF_CHECKOUT_CAP_SECRET` | app | empty | signing secret for the drawing-checkout capability (the proof of single-writer ownership). REQUIRED and at least 32 bytes when `LEAF_RUNTIME_ENV=production`. The app refuses to mint or verify without it because a weak or per-process fallback could not safely prove ownership across callers, replicas, or restarts. Off production, unset means a per-process random secret and checkouts do not survive an app restart. |

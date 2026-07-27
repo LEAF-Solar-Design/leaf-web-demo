@@ -228,6 +228,40 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "tenant_id", "owner_token", "generation", "acquired_at", "heartbeat_at", "expires_at",
         },
     },
+    "customization": {
+        "customization_change_sets": {
+            "change_set_id", "tenant_id", "idempotency_key", "state", "version",
+            "base_commit", "staged_commit", "catalog_digest",
+            "desired_platform_release", "workspace_contract_digest",
+            "author_subject", "approver_subject", "created_at", "updated_at",
+        },
+        "effective_catalogs": {
+            "tenant_id", "change_set_id", "catalog_commit", "catalog_digest",
+            "effective_platform_release", "workspace_contract_digest", "updated_at",
+        },
+        "customization_audit_events": {
+            "event_id", "tenant_id", "change_set_id", "prior_state", "next_state",
+            "author_subject", "approver_subject", "base_commit", "staged_commit",
+            "catalog_digest", "platform_release", "workspace_contract_digest",
+            "idempotency_key", "result", "reason_code", "payload_json", "created_at",
+        },
+        "customization_confirmations": {
+            "confirmation_id", "tenant_id", "change_set_id", "payload_json",
+            "signature", "consumed", "created_at",
+        },
+        "customization_publication_requests": {
+            "tenant_id", "change_set_id", "confirmation_id", "status",
+            "reason_code", "created_at", "updated_at",
+        },
+        "customization_deployment_snapshots": {
+            "snapshot_id", "payload_json", "effective_catalog_digest",
+            "platform_release", "idempotency_key", "created_at",
+        },
+        "customization_deployment_audit": {
+            "audit_id", "snapshot_id", "action", "result", "idempotency_key",
+            "created_at",
+        },
+    },
 }
 
 # Names below are stable database API. They enforce idempotency, fencing, state
@@ -268,6 +302,25 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
                          "harness_events_session_id_fkey", "harness_confirmations_pkey",
                          "harness_confirmations_session_id_fkey", "harness_usage_pkey",
                          "harness_usage_session_id_fkey", "harness_tenant_repo_leases_pkey"},
+    "customization": {
+        "customization_change_sets_pkey",
+        "customization_change_sets_tenant_id_idempotency_key_key",
+        "effective_catalogs_pkey",
+        "effective_catalogs_change_set_id_fkey",
+        "customization_audit_events_pkey",
+        "customization_audit_events_change_set_id_fkey",
+        "customization_audit_events_tenant_id_idempotency_key_key",
+        "customization_confirmations_pkey",
+        "customization_confirmations_consumed_check",
+        "customization_publication_requests_pkey",
+        "customization_publication_requests_change_set_id_fkey",
+        "customization_publication_requests_confirmation_id_fkey",
+        "customization_deployment_snapshots_pkey",
+        "customization_deployment_snapshots_idempotency_key_key",
+        "customization_deployment_audit_pkey",
+        "customization_deployment_audit_snapshot_id_fkey",
+        "customization_deployment_audit_idempotency_key_key",
+    },
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
@@ -284,6 +337,10 @@ _AUTHORITY_REQUIRED_INDEXES = {
     "harness_sessions": {"harness_one_active_session", "harness_one_active_turn",
                          "idx_harness_events_turn", "idx_harness_confirmations_session",
                          "idx_harness_usage_session", "idx_harness_tenant_repo_leases_expiry"},
+    "customization": {
+        "customization_recovery_idx",
+        "customization_confirmation_lookup_idx",
+    },
 }
 
 _AUTHORITY_REQUIRED_TRIGGERS = {
@@ -306,6 +363,7 @@ _AUTHORITY_SELECTORS = {
     "LEAF_DRAWING_STORE": {"postgres": "drawing"},
     "LEAF_UPLOAD_STORE": {"postgres": "upload"},
     "LEAF_HARNESS_SESSION_STORE": {"postgres": "harness_sessions"},
+    "LEAF_CUSTOMIZATION_STORE": {"postgres": "customization"},
 }
 _RECONCILIATION_TABLES = (
     "orgs", "projects", "drawing_artifacts", "drawing_versions", "jobs",
