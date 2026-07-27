@@ -18,18 +18,21 @@ guard that quietly no-ops on one of them is exactly the failure this closes.
 from __future__ import annotations
 
 import contextlib
+import json
 import multiprocessing
 import os
 import shutil
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DA_DIR = str(_PROJECT_ROOT / "da")
+_SERVER_DIR = str(_PROJECT_ROOT / "server")
 if _DA_DIR not in sys.path:
     sys.path.append(_DA_DIR)
 
@@ -190,12 +193,202 @@ def _ingest_child(da_dir, root, local_path, peer_started, self_started, barrier,
         results.put(("ingest", "err", f"{type(exc).__name__}: {exc}"))
 
 
+class PausedAtPrecheckBackend(store.FilesystemBackend):
+    """Parks a writer in the window the purge has to fit through.
+
+    `_legacy_checkout_guard` asks whether the drawing exists BEFORE it waits for
+    the lock, and that answer can go stale while it waits. This backend stops the
+    writer at exactly that point: it computes the honest answer FIRST, then holds
+    until the purge has finished, then returns what it saw. So the writer really
+    did observe a live drawing, and really does reach the lock afterwards, which
+    is the sequence a purge running in a second process produces on its own.
+
+    The pause is ONE-SHOT, so the guard's re-check inside the lock is a genuine
+    unpaused read of the post-purge filesystem rather than a second wait.
+    """
+
+    def __init__(self, root_dir: str, precheck_done=None, purge_done=None) -> None:
+        super().__init__(root_dir)
+        self.precheck_done = precheck_done
+        self.purge_done = purge_done
+        self.paused = False
+
+    def exists(self, key: str) -> bool:
+        answer = super().exists(key)
+        if (key.endswith("manifest.json") and not self.paused
+                and self.precheck_done is not None):
+            self.paused = True
+            self.precheck_done.set()
+            self.purge_done.wait(timeout=_PEER_START_S)
+        return answer
+
+
+def _paused_writer_child(da_dir, root, precheck_done, purge_done, results):
+    """A legacy writer that passes the pre-lock existence check, is held there
+    while the drawing is purged, and then reaches the lock."""
+    child_store = _child_store(da_dir)
+    backend = PausedAtPrecheckBackend(root, precheck_done, purge_done)
+    try:
+        fence = child_store.acquire_checkout_fence(
+            backend, TENANT, DRAWING, "parked-writer", 300.0)
+        results.put(("writer", "ok", fence))
+    except Exception as exc:
+        results.put(("writer", "err", f"{type(exc).__name__}: {exc}"))
+
+
+class HoldsTheManifestOpenBackend(store.FilesystemBackend):
+    """Parks a writer INSIDE the guard, between its manifest read and its save.
+
+    This is where the resurrect-after-purge gap actually lives. A writer stopped
+    BEFORE the lock is refused by the guard's existence check, and one stopped
+    after its save has already finished; only a writer holding the record open
+    across a deletion can put the drawing back. The read is the load every legacy
+    writer does as its first act inside the guard.
+    """
+
+    def __init__(self, root_dir: str, inside=None, release=None) -> None:
+        super().__init__(root_dir)
+        self.inside = inside
+        self.release = release
+        self.held = False
+
+    def get(self, key: str) -> bytes:
+        data = super().get(key)
+        if key.endswith("manifest.json") and not self.held and self.inside is not None:
+            self.held = True
+            self.inside.set()
+            self.release.wait(timeout=_PEER_START_S)
+        return data
+
+
+def _midwrite_writer_child(da_dir, root, inside, release, results):
+    """A legacy writer holding one drawing's manifest open across a purge."""
+    child_store = _child_store(da_dir)
+    backend = HoldsTheManifestOpenBackend(root, inside, release)
+    try:
+        fence = child_store.acquire_checkout_fence(
+            backend, TENANT, DRAWING, "mid-write", 300.0)
+        results.put(("writer", "ok", fence))
+    except Exception as exc:
+        results.put(("writer", "err", f"{type(exc).__name__}: {exc}"))
+
+
+def _purge_child(server_dir, da_dir, guest_root, uploads_dir, results,
+                 lock_budget_s=None):
+    """Run the REAL guest purge, in its own OS process.
+
+    `lock_budget_s` shortens the store's checkout budget so a test that expects
+    the purge to be BLOCKED does not have to sit through the production 30s.
+    """
+    for path in (server_dir, da_dir):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    os.environ["LEAF_GUEST_STORE_DIR"] = guest_root
+    os.environ["LEAF_UPLOADS_DIR"] = uploads_dir
+    os.environ["LEAF_DRAWING_STORE"] = "legacy"
+    try:
+        if lock_budget_s is not None:
+            import store as child_store
+            child_store._CHECKOUT_LOCK_TIMEOUT_S = float(lock_budget_s)
+        import guest_uploads
+        results.put(("ok", guest_uploads.purge_expired()))
+    except Exception as exc:
+        results.put(("err", f"{type(exc).__name__}: {exc}"))
+
+
+def _receipts(guest_root) -> list:
+    log = Path(guest_root) / "purge.log.jsonl"
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in
+            log.read_text(encoding="utf-8").strip().splitlines() if line]
+
+
+def _purge_holder_child(da_dir, root, ready, release, results=None):
+    """Sit inside `legacy_purge_guard` until told to leave."""
+    child_store = _child_store(da_dir)
+    try:
+        backend = child_store.FilesystemBackend(root)
+        with child_store.legacy_purge_guard(backend, TENANT, DRAWING):
+            ready.set()
+            release.wait(timeout=_JOIN_S)
+        if results is not None:
+            results.put(("holder", "ok", None))
+    except BaseException as exc:  # reported, not raised: the parent asserts on it
+        if results is not None:
+            results.put(("holder", "err", f"{type(exc).__name__}: {exc}"))
+        raise
+
+
+def _ingest_after_purge_child(da_dir, root, local_path, marker_path, ready, go,
+                              results):
+    """The CREATING writer: an extraction that finishes after its upload was
+    purged. Its precondition is the same marker read `run_extraction` does."""
+    child_store = _child_store(da_dir)
+    backend = child_store.FilesystemBackend(root)
+    ready.set()
+    go.wait(timeout=_PEER_START_S)
+    try:
+        out = child_store.ingest_drawing(
+            backend, TENANT, local_path, drawing_id=DRAWING,
+            precondition=lambda: os.path.exists(marker_path))
+        results.put(("ingest", "ok", out["version"]))
+    except Exception as exc:
+        results.put(("ingest", "err", f"{type(exc).__name__}: {exc}"))
+
+
+def _lock_waiter_child(da_dir, root, parked, acquired, release, results):
+    """Park on the lock file's CURRENT inode, then take whatever it gets.
+
+    `parked` is set from inside the wait loop's first sleep, which is reached
+    only after the file is open and one lock attempt has already been refused.
+    That makes "this child is holding the pre-retirement inode open" a fact the
+    parent can wait for rather than a delay it has to guess at.
+    """
+    child_store = _child_store(da_dir)
+    real_sleep = time.sleep
+
+    def announce_then_sleep(seconds):
+        parked.set()
+        real_sleep(seconds)
+
+    child_store.time.sleep = announce_then_sleep
+    backend = child_store.FilesystemBackend(root)
+    try:
+        with backend.cross_process_lock(child_store.checkout_lock_key(TENANT, DRAWING)):
+            acquired.set()
+            release.wait(timeout=_JOIN_S)
+        results.put(("waiter", "ok", None))
+    except Exception as exc:
+        results.put(("waiter", "err", f"{type(exc).__name__}: {exc}"))
+
+
 def _free_drawing(root: Path) -> str:
     """Create a manifest with NO checkout, the state both racers will read."""
     backend = store.FilesystemBackend(str(root))
     store.save_manifest(backend, TENANT, DRAWING,
                         store._new_manifest(TENANT, DRAWING))
     return str(root)
+
+
+def _expired_guest_drawing(guest_root: Path) -> Path:
+    """A guest drawing the purge will consider due: a real store manifest plus
+    an upload marker stamped in the past."""
+    backend = store.FilesystemBackend(str(guest_root))
+    store.save_manifest(backend, TENANT, DRAWING,
+                        store._new_manifest(TENANT, DRAWING))
+    ddir = guest_root / "tenants" / TENANT / "drawings" / DRAWING
+    stale = datetime.now(timezone.utc) - timedelta(hours=1)
+    (ddir / "upload.state.json").write_text(
+        json.dumps({"attempt": "a1", "status": "ready",
+                    "retention_expires_at": stale.isoformat()}),
+        encoding="utf-8")
+    return ddir
+
+
+def _lock_files(root) -> list:
+    prefix = Path(store.FilesystemBackend(str(root))._path("checkout-locks"))
+    return sorted(prefix.rglob("*.lock")) if prefix.exists() else []
 
 
 def _spawn(target, *args):
@@ -799,8 +992,11 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
         def cross_process_lock(self, key):
             os_depth["n"] += 1
             try:
-                with super().cross_process_lock(key):
-                    yield
+                # Forwarded, not swallowed: the guard reclaims the lock FILE
+                # through this value when it refuses a purged drawing, and a spy
+                # that yielded None would turn that into an AttributeError.
+                with super().cross_process_lock(key) as held:
+                    yield held
             finally:
                 os_depth["n"] -= 1
 
@@ -809,8 +1005,8 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
         seen.append((tid, did))
         depth["n"] += 1
         try:
-            with real_guard(backend, tid, did, **kwargs):
-                yield
+            with real_guard(backend, tid, did, **kwargs) as held:
+                yield held
         finally:
             depth["n"] -= 1
 
@@ -863,3 +1059,438 @@ def test_release_is_guarded_the_same_way_as_acquire(tmp_path):
     # for the released lease cannot verify against the next one.
     again = store.acquire_checkout_fence(backend, TENANT, DRAWING, "next", 300.0)
     assert again is not None and again > fence
+
+
+# --------------------------------------------------------------------------- #
+# 6. The purge and the store hold ONE lock, so a receipt cannot be undone.
+# --------------------------------------------------------------------------- #
+def test_the_purge_takes_the_same_lock_the_writers_take(tmp_path):
+    """The premise everything below rests on, asked as a BOOLEAN.
+
+    The purge used to hold only `guest_uploads.drawing_lock`, a dict on one
+    interpreter's heap that a second process cannot see, so "both take a lock"
+    was true and meant nothing. What has to be true is that they take the SAME
+    one. `_try_os_lock` is non-blocking: it cannot return True while another
+    process holds the file, and cannot return False if the purge is holding
+    something else. No scheduling changes either answer.
+    """
+    root = _free_drawing(tmp_path / "store")
+    path = store.FilesystemBackend(root)._path(store.checkout_lock_key(TENANT, DRAWING))
+    ctx = multiprocessing.get_context("spawn")
+    ready, release = ctx.Event(), ctx.Event()
+    results = ctx.Queue()
+
+    holder = _spawn(_purge_holder_child, _DA_DIR, root, ready, release, results)
+    try:
+        if not ready.wait(timeout=_JOIN_S):
+            holder.join(timeout=5)
+            raise AssertionError(
+                f"the purge never entered the guard; child said "
+                f"{results.get(timeout=5) if not results.empty() else 'nothing'} "
+                f"(exit {holder.exitcode})")
+        with open(path, "a+b") as handle:
+            assert store._try_os_lock(handle) is False, (
+                "took the drawing's checkout lock while the purge was inside its "
+                "own guard: the two are not the same lock, so the purge and the "
+                "store never exclude each other across processes")
+    finally:
+        release.set()
+        holder.join(timeout=_JOIN_S)
+
+    # And it was the purge excluding us, not the file being unavailable forever.
+    with open(path, "a+b") as handle:
+        assert store._try_os_lock(handle) is True
+
+
+def test_the_purge_cannot_delete_a_drawing_a_writer_is_mid_write_on(tmp_path):
+    """GAP 1, end to end, with the REAL purge in its own OS process.
+
+    The writer is parked where the gap actually is: inside the guard, holding
+    one drawing's manifest open between its read and its save. Before this fix
+    the purge held only its own `drawing_lock`, which that writer's process
+    cannot see, so the purge deleted the directory and wrote a "deleted" receipt
+    while the writer was mid-record — and `FilesystemBackend.put` recreates
+    missing parents, so the save put the drawing straight back behind the
+    receipt.
+
+    The invariant asserted is the receipt's meaning, not a lock's presence: a
+    drawing named in a "deleted" line must be gone once every writer that was in
+    flight has finished. The purge blocking and reporting the drawing as not
+    deleted is the honest outcome, and the sweep after the writer leaves proves
+    the drawing is delayed rather than made immortal.
+
+    Nothing here is timed. The purge starts only once the writer announces it is
+    inside, and the writer is released only once the purge has reported.
+    """
+    guest_root = tmp_path / "guest"
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    ddir = _expired_guest_drawing(guest_root)
+    ctx = multiprocessing.get_context("spawn")
+    inside, release = ctx.Event(), ctx.Event()
+    writer_results, purge_results = ctx.Queue(), ctx.Queue()
+
+    writer = _spawn(_midwrite_writer_child, _DA_DIR, str(guest_root),
+                    inside, release, writer_results)
+    try:
+        assert inside.wait(timeout=_JOIN_S), (
+            "the writer never reached its manifest read")
+        purger = _spawn(_purge_child, _SERVER_DIR, _DA_DIR, str(guest_root),
+                        str(uploads), purge_results, 2.0)
+        status, first = purge_results.get(timeout=_JOIN_S)
+        purger.join(timeout=_JOIN_S)
+        assert status == "ok", first
+    finally:
+        release.set()
+
+    _, writer_status, writer_value = writer_results.get(timeout=_JOIN_S)
+    writer.join(timeout=_JOIN_S)
+    assert writer_status == "ok", (
+        f"the writer lost its write to the purge: {writer_value}")
+
+    deleted = [r for r in _receipts(guest_root) if r["status"] == "deleted"]
+    assert not deleted, (
+        f"the purge wrote a 'deleted' receipt for a drawing a writer was "
+        f"mid-write on, and that writer then saved: {deleted}")
+    assert first["count"] == 0, f"the purge deleted a drawing under a writer: {first}"
+    assert ddir.exists(), "the writer's own save was destroyed mid-write"
+    assert [r["status"] for r in _receipts(guest_root)] == ["failed"], (
+        f"a purge that deleted nothing must say so: {_receipts(guest_root)}")
+
+    # Delayed, not immortal: with the writer gone the next sweep takes it, and
+    # THAT receipt is true.
+    purger = _spawn(_purge_child, _SERVER_DIR, _DA_DIR, str(guest_root),
+                    str(uploads), purge_results)
+    status, second = purge_results.get(timeout=_JOIN_S)
+    purger.join(timeout=_JOIN_S)
+    assert status == "ok", second
+    assert second["count"] == 1, f"the drawing was never collected: {second}"
+    assert not ddir.exists()
+    assert [r["status"] for r in _receipts(guest_root)] == ["failed", "deleted"]
+
+
+def test_a_writer_that_wakes_up_behind_a_purge_is_refused(tmp_path):
+    """The other half: a writer whose pre-lock existence check went stale.
+
+    It passes that check while the drawing is still there, is held at exactly
+    that point, and reaches the lock only after a REAL `purge_expired` in another
+    process has deleted the drawing. It must find the drawing gone and refuse,
+    rather than saving a whole manifest into a directory `put` would recreate.
+    """
+    guest_root = tmp_path / "guest"
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    ddir = _expired_guest_drawing(guest_root)
+    ctx = multiprocessing.get_context("spawn")
+    precheck_done, purge_done = ctx.Event(), ctx.Event()
+    writer_results, purge_results = ctx.Queue(), ctx.Queue()
+
+    writer = _spawn(_paused_writer_child, _DA_DIR, str(guest_root),
+                    precheck_done, purge_done, writer_results)
+    try:
+        assert precheck_done.wait(timeout=_JOIN_S), (
+            "the writer never reached its pre-lock existence check")
+        purger = _spawn(_purge_child, _SERVER_DIR, _DA_DIR, str(guest_root),
+                        str(uploads), purge_results)
+        status, payload = purge_results.get(timeout=_JOIN_S)
+        purger.join(timeout=_JOIN_S)
+        assert status == "ok", payload
+        assert payload["count"] == 1, f"the purge did not delete the drawing: {payload}"
+    finally:
+        purge_done.set()
+
+    _, writer_status, writer_value = writer_results.get(timeout=_JOIN_S)
+    writer.join(timeout=_JOIN_S)
+
+    assert not ddir.exists(), (
+        f"the writer recreated {ddir} after the purge had already written its "
+        f"'deleted' receipt")
+    assert writer_status == "err" and "KeyError" in writer_value, (
+        f"a writer that woke up behind a purge was allowed to proceed "
+        f"({writer_status}: {writer_value})")
+    assert [r["status"] for r in _receipts(guest_root)] == ["deleted"], (
+        _receipts(guest_root))
+
+
+def test_an_extraction_that_finishes_after_the_purge_does_not_resurrect_it(tmp_path):
+    """GAP 1 for the one writer the existence check cannot cover.
+
+    `ingest_drawing` CREATES, so "the drawing is missing" is its normal case and
+    it has no manifest to re-read. It carries its own evidence instead: the
+    upload marker its extraction belongs to, re-read inside the lock. The purge
+    deletes that marker with the rest of the drawing, so an extraction that
+    finishes afterwards aborts rather than writing version 1 into a directory a
+    receipt already called gone.
+    """
+    guest_root = tmp_path / "guest"
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    ddir = _expired_guest_drawing(guest_root)
+    payload = tmp_path / "payload.dwg"
+    payload.write_bytes(b"extracted-bytes")
+    marker = ddir / "upload.state.json"
+
+    ctx = multiprocessing.get_context("spawn")
+    ready, go = ctx.Event(), ctx.Event()
+    ingest_results, purge_results = ctx.Queue(), ctx.Queue()
+
+    child = _spawn(_ingest_after_purge_child, _DA_DIR, str(guest_root),
+                   str(payload), str(marker), ready, go, ingest_results)
+    try:
+        assert ready.wait(timeout=_JOIN_S), "the ingest child never started"
+        purger = _spawn(_purge_child, _SERVER_DIR, _DA_DIR, str(guest_root),
+                        str(uploads), purge_results)
+        status, result = purge_results.get(timeout=_JOIN_S)
+        purger.join(timeout=_JOIN_S)
+        assert status == "ok", result
+        assert result["count"] == 1, result
+    finally:
+        go.set()
+
+    _, ingest_status, ingest_value = ingest_results.get(timeout=_JOIN_S)
+    child.join(timeout=_JOIN_S)
+
+    assert not ddir.exists(), (
+        f"a late extraction recreated {ddir} behind a 'deleted' receipt")
+    assert ingest_status == "err" and "DrawingVanished" in ingest_value, (
+        f"the creating writer was allowed to commit after its upload was purged "
+        f"({ingest_status}: {ingest_value})")
+
+
+def test_the_precondition_is_refused_on_the_postgres_authority(monkeypatch):
+    """Two mechanisms for one question, and neither may be silently dropped.
+
+    The postgres path settles "is this attempt still mine" with row-level
+    authority through `authority_guard`. If `ingest_drawing` merely ignored a
+    precondition there, a caller would believe it had protection it did not have.
+    """
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
+    with pytest.raises(ValueError, match="legacy-authority mechanism"):
+        store.ingest_drawing(store.InMemoryBackend(), TENANT, "unused",
+                             DRAWING, precondition=lambda: True)
+
+
+# --------------------------------------------------------------------------- #
+# 7. The lock FILE is reclaimed, and only ever by a caller holding it.
+# --------------------------------------------------------------------------- #
+def test_a_purged_drawings_lock_file_is_reclaimed(tmp_path):
+    """GAP 2. The prefix is never walked by any drawing cleaner, so without this
+    it grows by one empty file per drawing ever purged, forever."""
+    guest_root = tmp_path / "guest"
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    _expired_guest_drawing(guest_root)
+
+    # A real checkout, so the lock file genuinely exists before the purge.
+    backend = store.FilesystemBackend(str(guest_root))
+    fence = store.acquire_checkout_fence(backend, TENANT, DRAWING, "holder", 300.0)
+    assert fence is not None
+    assert _lock_files(guest_root), "the drawing never got a lock file"
+
+    ctx = multiprocessing.get_context("spawn")
+    results = ctx.Queue()
+    purger = _spawn(_purge_child, _SERVER_DIR, _DA_DIR, str(guest_root),
+                    str(uploads), results)
+    status, payload = results.get(timeout=_JOIN_S)
+    purger.join(timeout=_JOIN_S)
+    assert status == "ok", payload
+    assert payload["count"] == 1, payload
+
+    assert _lock_files(guest_root) == [], (
+        f"the purged drawing's lock file survived the purge: "
+        f"{_lock_files(guest_root)}")
+
+
+def test_a_failed_purge_leaves_the_lock_file_alone(tmp_path):
+    """The counterpart. A purge that could NOT delete leaves a LIVE drawing, and
+    a live drawing's writers still need their lock file. Retiring it on the way
+    out would hand the next two callers two different files."""
+    guest_root = tmp_path / "guest"
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    _expired_guest_drawing(guest_root)
+    backend = store.FilesystemBackend(str(guest_root))
+    store.acquire_checkout_fence(backend, TENANT, DRAWING, "holder", 300.0)
+    before = _lock_files(guest_root)
+    assert before
+
+    import guest_uploads
+    os.environ["LEAF_GUEST_STORE_DIR"] = str(guest_root)
+    os.environ["LEAF_UPLOADS_DIR"] = str(uploads)
+    real_rmtree = guest_uploads.shutil.rmtree
+    guest_uploads.shutil.rmtree = lambda *a, **k: None
+    try:
+        result = guest_uploads.purge_expired()
+    finally:
+        guest_uploads.shutil.rmtree = real_rmtree
+
+    assert result["count"] == 0, "a surviving drawing must not count as purged"
+    assert _lock_files(guest_root) == before, (
+        "a purge that deleted nothing still retired the drawing's lock file")
+
+
+def test_the_reclaim_refuses_a_file_it_no_longer_holds(tmp_path):
+    """The identity rule, at the one place that removes a file.
+
+    A lock's identity is its inode. If the name has since been re-created — the
+    drawing came back as a fresh upload — the file at that path belongs to
+    somebody else's lock, and removing it is the two-callers-one-section defect
+    rather than a cleanup.
+    """
+    mine = tmp_path / "mine.lock"
+    theirs = tmp_path / "theirs.lock"
+    mine.write_bytes(b"")
+    theirs.write_bytes(b"")
+    with open(mine, "a+b") as handle:
+        # Holding `mine`, pointed at `theirs`: the path no longer names the
+        # inode this hold is for.
+        held = store._HeldCheckoutLock(str(theirs), handle)
+        assert held.reclaim() is False, (
+            "reclaimed a lock file this hold does not own")
+    assert theirs.exists(), "a file belonging to another lock was removed"
+
+
+def test_the_identity_check_can_actually_tell_two_files_apart(tmp_path):
+    """Anti-vacuity for the check the whole retirement design rests on.
+
+    If `st_ino`/`st_dev` came back as constants on this platform, every
+    comparison would answer True, the retired-inode case would never be detected,
+    and the tests above would pass while the guard they rely on did nothing. So
+    assert both answers, not just the one the happy path needs.
+    """
+    a = tmp_path / "a.lock"
+    b = tmp_path / "b.lock"
+    a.write_bytes(b"")
+    b.write_bytes(b"")
+    with open(a, "a+b") as handle:
+        assert store._holds_the_live_file(handle, str(a)) is True
+        assert store._holds_the_live_file(handle, str(b)) is False, (
+            "two distinct files compare EQUAL on this platform, so a retired "
+            "lock file could never be detected")
+        assert store._holds_the_live_file(handle, str(tmp_path / "gone.lock")) is False
+
+
+def test_a_lock_file_is_never_retired_out_from_under_a_live_holder(tmp_path):
+    """The trap, and the reason the reclaim is not just an `os.remove`.
+
+    Retiring a file a live holder owns is how two callers end up inside one
+    section: on POSIX the holder keeps the unlinked inode and its lock while the
+    next caller creates and locks a fresh one. The two platforms rule that out by
+    different mechanisms, and this asserts whichever one is real here rather than
+    asserting a branch that cannot happen on this host.
+
+    POSIX: a waiter parked on the retired inode is caught by the identity check
+    and sent to the live file. Proven by asking whether the LIVE file is still
+    lockable while the waiter says it holds the lock — if the waiter were sitting
+    on the ghost, it would be.
+
+    Windows: an open handle blocks the unlink outright, so the retirement cannot
+    happen at all while any process holds the file. That is the same guarantee
+    reached from the other end, and `_HeldCheckoutLock.reclaim` defers to release
+    because of it.
+    """
+    root = _free_drawing(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    path = backend._path(store.checkout_lock_key(TENANT, DRAWING))
+    ctx = multiprocessing.get_context("spawn")
+    parked, acquired, release = ctx.Event(), ctx.Event(), ctx.Event()
+    results = ctx.Queue()
+
+    if not store._CAN_UNLINK_OPEN_FILE:
+        holder = _spawn(_purge_holder_child, _DA_DIR, root, parked, release)
+        try:
+            assert parked.wait(timeout=_JOIN_S), "the holder never took the lock"
+            with pytest.raises(OSError):
+                os.remove(path)
+            assert os.path.exists(path)
+        finally:
+            release.set()
+            holder.join(timeout=_JOIN_S)
+        return
+
+    waiter = None
+    try:
+        with store.legacy_purge_guard(backend, TENANT, DRAWING) as held:
+            waiter = _spawn(_lock_waiter_child, _DA_DIR, root, parked, acquired,
+                            release, results)
+            assert parked.wait(timeout=_JOIN_S), (
+                "the waiter never parked on the pre-retirement inode")
+            assert held.reclaim() is True, "the holder could not retire its own file"
+        assert acquired.wait(timeout=_JOIN_S), "the waiter never got a lock"
+        with open(path, "a+b") as handle:
+            assert store._try_os_lock(handle) is False, (
+                "the LIVE lock file was free while a waiter believed it held the "
+                "drawing: the waiter is holding the retired inode, so two callers "
+                "can now be inside the section at once")
+    finally:
+        release.set()
+        if waiter is not None:
+            waiter.join(timeout=_JOIN_S)
+
+
+def test_a_refused_writer_does_not_leave_a_fresh_lock_file_behind(tmp_path):
+    """Taking the lock CREATES the file, so a writer that wakes up behind a purge
+    re-mints one for a drawing that no longer exists. It holds that file
+    exclusively at the moment it learns the drawing is gone, which is the same
+    proof the purge itself uses, so it retires it on the way out.
+
+    The deletion has to land in the WINDOW, not before it. A drawing already gone
+    when the writer starts is refused by the pre-lock check, which never opens
+    the lock file and so proves nothing about this path.
+    """
+    root = _free_drawing(tmp_path / "store")
+    store.acquire_checkout_fence(
+        store.FilesystemBackend(root), TENANT, DRAWING, "holder", 300.0)
+    assert _lock_files(root), "the drawing never got a lock file"
+
+    class PurgeInTheWindowBackend(store.FilesystemBackend):
+        """Answers the pre-lock check honestly, then deletes the drawing —
+        the interleaving a purge in another process produces by itself."""
+
+        fired = False
+
+        def exists(self, key: str) -> bool:
+            answer = super().exists(key)
+            if key.endswith("manifest.json") and not self.fired:
+                self.fired = True
+                shutil.rmtree(Path(self.root) / "tenants")
+            return answer
+
+    backend = PurgeInTheWindowBackend(root)
+    with pytest.raises(KeyError):
+        store.acquire_checkout_fence(backend, TENANT, DRAWING, "late", 300.0)
+    assert backend.fired, "the deletion never landed inside the window"
+
+    assert _lock_files(root) == [], (
+        f"a writer refused inside the lock left its lock file behind for a "
+        f"drawing that no longer exists: {_lock_files(root)}")
+
+
+def test_the_store_never_reaches_back_into_the_upload_module():
+    """The lock ORDER, held at the source level.
+
+    Callers take `guest_uploads.drawing_lock` first and the store's checkout
+    guard second (`purge_expired` and `run_extraction` both do). That is only
+    safe while the store never takes them the other way round, and the cheapest
+    proof is that the store cannot reach `guest_uploads` at all. A store function
+    that imported it and took a drawing lock inside the guard would complete an
+    AB-BA cycle and deadlock the two.
+
+    Checked as IMPORTS rather than as text: the module names `guest_uploads` in
+    prose all over this area, and a substring search would either fail on a
+    comment or have to be loosened until it stopped meaning anything.
+    """
+    import ast
+    import inspect
+
+    imported: list[str] = []
+    for node in ast.walk(ast.parse(inspect.getsource(store))):
+        if isinstance(node, ast.Import):
+            imported += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+
+    assert not [name for name in imported if name.split(".")[0] == "guest_uploads"], (
+        "da/store.py now imports guest_uploads. The purge takes the upload "
+        "module's drawing lock BEFORE the store's checkout guard; anything here "
+        "taking them the other way round closes an AB-BA cycle.")
