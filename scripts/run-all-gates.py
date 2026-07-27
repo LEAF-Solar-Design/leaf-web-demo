@@ -235,7 +235,7 @@ def build_suites() -> List[Suite]:
         # different counts, so no single number is honest for both).
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
-              _py_pytest("tests/test_backbone.py"), 13),
+              _py_pytest("tests/test_backbone.py"), 14),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py"), 17),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
