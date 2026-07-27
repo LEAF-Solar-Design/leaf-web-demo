@@ -38,6 +38,14 @@ socket, not a mock), and asserts:
       not this module. On a loaded host the stub's own server thread starves,
       chunks stop arriving, the margin collapses to zero and the terminal
       event became a scheduling coin flip.
+  (g) the arbitration MECHANISM, not just its two decision functions:
+      `resolve()` is evaluated INSIDE the one-shot lock, and `_eof_terminal`
+      is actually WIRED into `_drain`'s `finally:` leg. Both properties are
+      invisible to (f) — the helpers are pure functions and keep passing when
+      the call moves out of the critical section or disappears entirely. These
+      drive `_spawn_relay` directly with a fake response and a captured-thread
+      `threading` stand-in, so the drain and the watchdog interleave in a
+      FIXED order across a real barrier rather than by wall clock.
 
 Run:  cd server && python -m pytest tests/test_turn_runner.py -q
 """
@@ -663,6 +671,251 @@ def test_watchdog_wins_even_when_the_harness_is_silent_from_the_first_byte(
         f"{terminal[0]}"
     )
     assert terminal[0]["data"] == {"stop_reason": "timeout"}
+
+
+# =========================================================================== #
+# (g) the arbitration MECHANISM — the one-shot lock, and the EOF wiring
+#
+# The four helper tests above assert `_drain_terminal` / `_eof_terminal` as
+# pure functions. Two things they structurally cannot see:
+#
+#   1. WHERE the decision is taken. `_end_once` evaluates `resolve()` inside
+#      `terminal_lock`; move that call above the `with` and both helpers still
+#      pass, while the terminal event goes back to depending on the scheduler.
+#   2. WHETHER the EOF helper is called at all. Revert `_drain`'s `finally:`
+#      leg to a bare `_end_once()` and, again, both helpers still pass.
+#
+# Both tests below therefore drive `_spawn_relay` directly with a fake
+# response and a captured-thread `threading` stand-in, so the drain and the
+# watchdog can be interleaved in a FIXED order across a real barrier. No sleep
+# and no wall clock decides either outcome. (sol-critic PR #222, the two
+# optional test-coverage gaps.)
+# =========================================================================== #
+class _ObservableLock:
+    """A mutex that reports whether a SECOND thread ever had to wait for it.
+
+    That is the entire observable difference between resolving the terminal
+    event inside the critical section and resolving it outside: inside, the
+    other thread blocks here; outside, it walks straight in."""
+
+    def __init__(self, real: threading.Lock, contended: threading.Event) -> None:
+        self._real = real
+        self._contended = contended
+
+    def __enter__(self):
+        if not self._real.acquire(blocking=False):
+            self._contended.set()
+            self._real.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self._real.release()
+        return False
+
+
+class _CapturedThread:
+    """`start()` is a no-op — the test starts the target itself."""
+
+    daemon = True
+
+    def start(self) -> None:
+        return None
+
+
+class _RelayHarness:
+    """The slice of the `threading` module `_spawn_relay` actually uses, with
+    the one-shot lock instrumented and both relay threads captured rather than
+    started.
+
+    `_spawn_relay` starts the drain and the watchdog itself, so from outside
+    there is no way to interleave them and the ordering these tests need could
+    only be bought with a sleep. Capturing the targets makes the order exact."""
+
+    def __init__(self) -> None:
+        self.lock_contended = threading.Event()
+        self.targets: Dict[str, Any] = {}
+        self.Event = threading.Event  # noqa: N803  mirrors the real module
+
+    def Lock(self):  # noqa: N802  mirrors threading.Lock
+        return _ObservableLock(threading.Lock(), self.lock_contended)
+
+    def Thread(self, *, target, daemon=None, name=None):  # noqa: N802
+        self.targets[name] = target
+        return _CapturedThread()
+
+    def launch(self, name_prefix: str) -> threading.Thread:
+        matches = [n for n in self.targets if n.startswith(name_prefix)]
+        assert len(matches) == 1, f"{name_prefix!r} matched {matches}"
+        t = threading.Thread(target=self.targets[matches[0]],
+                             name=f"test-{matches[0]}", daemon=True)
+        t.start()
+        return t
+
+
+class _FakeStream:
+    """The two attributes `_drain` touches on a `requests.Response`."""
+
+    def __init__(self, lines: Optional[List[str]] = None,
+                 raise_at_end: Optional[BaseException] = None) -> None:
+        self._lines = list(lines or [])
+        self._raise = raise_at_end
+        self.closed = 0
+
+    def iter_lines(self, decode_unicode: bool = False):
+        for line in self._lines:
+            yield line
+        if self._raise is not None:
+            raise self._raise
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_terminal_event_is_resolved_inside_the_one_shot_lock(monkeypatch):
+    """`resolve()` must be evaluated INSIDE `terminal_lock`, never before it.
+
+    Deciding first and claiming second reopens the window this whole
+    arbitration exists to close: between the decision and the claim the
+    deciding thread can be descheduled, the other thread can take the flag,
+    and which terminal event the caller observes is a coin flip again.
+
+    The distinguishing observation, with no sleep in it: park the drain thread
+    inside its resolver, then start the watchdog. If the resolver runs inside
+    the lock, the watchdog BLOCKS on it and the drain's own event is the one
+    that lands. If it runs outside, the watchdog walks straight through, takes
+    the flag, and its `turn_complete{timeout}` lands instead.
+    """
+    harness = _RelayHarness()
+    monkeypatch.setattr(turn_runner, "threading", harness)
+
+    inside_resolver = threading.Event()
+    contention_seen: List[bool] = []
+    _DRAIN_MARK = "resolved-by-the-drain-thread"
+
+    def _parked_resolver(deadline, exc):
+        # Stands in for `_drain_terminal`. Parks here holding exactly whatever
+        # the caller holds, until the watchdog has PROVABLY queued on the
+        # one-shot lock (or until it is clear it never will).
+        inside_resolver.set()
+        contention_seen.append(harness.lock_contended.wait(timeout=5.0))
+        return "error", {"error": {"error_code": ErrorCode.INTERNAL,
+                                   "message": _DRAIN_MARK}}
+
+    monkeypatch.setattr(turn_runner, "_drain_terminal", _parked_resolver)
+
+    sess = _new_session("tenant-arb-lock")
+    session_id = sess["session_id"]
+    turn_id = "turn-arb-lock"
+    assert session_store.try_begin_turn(session_id, turn_id, 60.0)
+
+    # max_s=0 puts the SHARED deadline in the past, so the watchdog's
+    # `finished.wait()` returns at once and the only thing that can hold it
+    # back is the one-shot lock itself.
+    resp = _FakeStream(raise_at_end=RuntimeError("connection reset by peer"))
+    turn_runner._spawn_relay("tenant-arb-lock", session_id, turn_id, resp, 0.0)
+
+    drain = harness.launch("turn-drain")
+    assert inside_resolver.wait(timeout=5.0), "the drain never reached its resolver"
+    watchdog = harness.launch("turn-watchdog")
+
+    drain.join(timeout=15.0)
+    watchdog.join(timeout=15.0)
+    assert not drain.is_alive() and not watchdog.is_alive()
+
+    assert contention_seen == [True], (
+        "the watchdog never had to wait for the one-shot lock while the drain "
+        "thread sat inside its resolver, so `resolve()` is being evaluated "
+        "OUTSIDE `with terminal_lock:` — which puts a descheduling window "
+        "between the decision and the claim and makes the terminal event "
+        "scheduler-dependent again"
+    )
+
+    terminal = [e for e in session_store.recent_events(session_id, 100)
+                if e["type"] in ("turn_complete", "error")]
+    assert len(terminal) == 1, terminal
+    assert terminal[0]["data"].get("error", {}).get("message") == _DRAIN_MARK, (
+        "the watchdog terminalized the turn while the drain thread was still "
+        f"inside its resolver: {terminal[0]}"
+    )
+    assert session_store.get_session(session_id)["active_turn_id"] is None
+
+
+def test_clean_eof_past_the_deadline_is_wired_into_the_drain_finally(monkeypatch):
+    """`_drain`'s `finally:` leg must ASK `_eof_terminal`, not merely release
+    the CAS.
+
+    `_eof_terminal` is a pure function, so it passes whether or not anything
+    calls it: revert that leg to a bare `_end_once()` and every direct
+    assertion on it still holds. Only this test fails — the expired turn is
+    terminalized with NO event at all, CAS released, client left showing a
+    turn still in flight.
+
+    The watchdog is captured and deliberately NEVER started. It appends the
+    very same `turn_complete{stop_reason:'timeout'}`, so letting it run would
+    mask a reverted `finally:` leg completely.
+    """
+    harness = _RelayHarness()
+    monkeypatch.setattr(turn_runner, "threading", harness)
+
+    sess = _new_session("tenant-eof-wiring")
+    session_id = sess["session_id"]
+    turn_id = "turn-eof-wired"
+    assert session_store.try_begin_turn(session_id, turn_id, 60.0)
+
+    # one ordinary relayed line, then a clean end of stream — the harness never
+    # sends a terminal event — and max_s=0 puts the shared deadline in the past.
+    resp = _FakeStream(lines=[json.dumps({"type": "text_delta", "data": {"text": "hi"}})])
+    turn_runner._spawn_relay("tenant-eof-wiring", session_id, turn_id, resp, 0.0)
+
+    assert any(n.startswith("turn-watchdog") for n in harness.targets), \
+        "the watchdog must exist and stay unstarted for this test to mean anything"
+    drain = harness.launch("turn-drain")
+    drain.join(timeout=15.0)
+    assert not drain.is_alive()
+
+    events = session_store.recent_events(session_id, 100)
+    terminal = [e for e in events if e["type"] in ("turn_complete", "error")]
+    assert len(terminal) == 1, (
+        "the drain's EOF cleanup appended no terminal event for a turn already "
+        "past its deadline, so `_eof_terminal` is not wired into the `finally:` "
+        f"leg of `_drain`. events={[e['type'] for e in events]}"
+    )
+    assert terminal[0]["type"] == "turn_complete"
+    assert terminal[0]["data"] == {"stop_reason": "timeout"}
+    assert session_store.get_session(session_id)["active_turn_id"] is None
+    assert resp.closed >= 1
+
+
+def test_clean_eof_before_the_deadline_is_wired_to_the_turns_own_deadline(monkeypatch):
+    """The control for that wiring: the `finally:` leg must pass the turn's OWN
+    deadline, not append a timeout unconditionally.
+
+    Without this, `finally: _end_once('turn_complete', {'stop_reason':
+    'timeout'})` would satisfy the test above while manufacturing a timeout for
+    every stream that merely ended early."""
+    harness = _RelayHarness()
+    monkeypatch.setattr(turn_runner, "threading", harness)
+
+    sess = _new_session("tenant-eof-early")
+    session_id = sess["session_id"]
+    turn_id = "turn-eof-early"
+    assert session_store.try_begin_turn(session_id, turn_id, 60.0)
+
+    resp = _FakeStream(lines=[json.dumps({"type": "text_delta", "data": {"text": "hi"}})])
+    turn_runner._spawn_relay("tenant-eof-early", session_id, turn_id, resp, 30.0)
+
+    drain = harness.launch("turn-drain")   # watchdog again never started
+    drain.join(timeout=15.0)
+    assert not drain.is_alive()
+
+    events = session_store.recent_events(session_id, 100)
+    terminal = [e for e in events if e["type"] in ("turn_complete", "error")]
+    assert terminal == [], (
+        "a stream that ended WELL INSIDE the turn's budget was terminalized as "
+        f"an expired turn: {terminal}"
+    )
+    assert [e["type"] for e in events] == ["text_delta"]
+    assert session_store.get_session(session_id)["active_turn_id"] is None
 
 
 # =========================================================================== #
