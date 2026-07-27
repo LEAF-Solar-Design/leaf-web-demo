@@ -239,6 +239,10 @@ def build_suites() -> List[Suite]:
         # Postgres, and the test-gate workflow is hermetic) and
         # `server-customization-adversarial` (Linux and Windows execute
         # different counts, so no single number is honest for both).
+        # `platform` has since moved 199 -> 223, but it is still NOT
+        # re-baselined: the bump is exactly the case count one new file added,
+        # so the pre-existing margin stays put instead of growing. Re-baselining
+        # it still needs a pristine database, for the reason recorded there.
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
@@ -655,8 +659,21 @@ def build_suites() -> List[Suite]:
         # "auth0|1b-cross-org") that are unique per tenant, so a second run
         # against the same branch fails on the first run's rows instead of
         # measuring anything.
+        # 199 -> 223 when test_schema_status_postgres_authority.py added its 24
+        # cases. This is 199 PLUS EXACTLY WHAT THAT FILE ADDS, not a fresh clean
+        # baseline: it holds the pre-existing margin constant so a new file
+        # cannot widen the band in which tests may silently vanish. It is NOT a
+        # claim that 223 is the pristine count. Measured 2026-07-27 against a
+        # live PostgreSQL 16.14 from this suite's registered cwd: 234 collected
+        # and 234 executed with the new file, 210 without it, 0 skipped -- so
+        # the real count clears 223 by 11, the same slack 199 left over 210.
+        # The 4 failures in that run were pre-existing test_signing.py cases in
+        # a bespoke validation venv, unrelated to this suite's count.
+        # Raising it cannot red-fail CI: this suite is db_gated and the
+        # test-gate workflow is hermetic, so run_suite returns SKIP with
+        # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 199, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 223, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
