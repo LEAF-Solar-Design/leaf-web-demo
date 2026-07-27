@@ -1476,8 +1476,9 @@ def test_an_ingest_that_fails_to_write_does_not_leave_its_lock_file_behind(tmp_p
     retire the file. One empty file is stranded per occurrence, forever.
 
     Asserted at BOTH failure points, because they leave different amounts of the
-    drawing on disk (a version blob and no manifest, versus neither) and the
-    reclaim's proof is about the MANIFEST.
+    drawing on disk — a version blob and no manifest, versus neither — and the
+    reclaim's proof is about the whole key PREFIX, of which a lone version-1 blob
+    is the one thing that does not count as an owner.
     """
     for fail_on, label in ((".dwg", "version blob"), ("manifest.json", "manifest")):
         root = str(tmp_path / f"store-{label.replace(' ', '-')}")

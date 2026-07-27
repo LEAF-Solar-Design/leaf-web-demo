@@ -195,10 +195,15 @@ def drawing_version_key(tenant_id: str, drawing_id: str, version) -> str:
 def drawing_prefix(tenant_id: str, drawing_id: str) -> str:
     """Object-key prefix holding EVERYTHING that belongs to one drawing.
 
-    Every other key in this module is built from it, and so is the guest
-    upload's marker, which the store does not name but does have to notice. That
-    is what lets `StorageBackend.drawing_object_keys` ask "is anything left under
-    this drawing" without the store knowing what any particular file is for.
+    Every per-drawing key is built from it -- `manifest_key` and
+    `drawing_version_key` here, and the guest upload's marker, which the store
+    does not name but does have to notice. `checkout_lock_key` is the deliberate
+    exception and lives OUTSIDE this prefix; see its own docstring for why that
+    is the whole point.
+
+    Having one prefix is what lets `StorageBackend.drawing_object_keys` ask "is
+    anything left under this drawing" without the store knowing what any
+    particular file is for.
     """
     return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}"
 
@@ -266,7 +271,7 @@ def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     that proof. A guest upload is alive on `upload.state.json` with no manifest
     at all, so `_mark_failed` requires its marker to be gone AS WELL, and
     `ingest_drawing` requires the drawing's whole key prefix to be empty apart
-    from the version blob it wrote itself. That is why this is a per-caller
+    from a version-1 blob. That is why this is a per-caller
     obligation and not something the guard does for everyone: the guard knows
     which flags a section carries, never who is still waiting on the drawing.
 
@@ -1480,11 +1485,12 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
             #
             # The v1 blob is discounted, and NOT on the grounds that this call
             # wrote it -- on the immutability path above it was written by an
-            # earlier one. The grounds are that a v1 blob is the only thing that
-            # can sit under a drawing with no manifest and no owner: it is
-            # version-1 residue of an ingest that never completed, so nothing
-            # reads it and no writer is waiting on it. Anything ELSE under the
-            # prefix belongs to somebody.
+            # earlier one, and either way it is the same orphan. The grounds are
+            # that a version-1 blob with no manifest over it is residue of an
+            # ingest that never completed: no manifest lists it, so nothing
+            # reads it and no writer is waiting on it. It is the ONLY key
+            # discounted; anything else still under the prefix is taken as an
+            # owner, which is the conservative direction.
             #
             # `None` from `drawing_object_keys` means the backend cannot tell,
             # and cannot-tell forbids the removal.
@@ -2129,21 +2135,23 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
     An ingest that takes the lock and then FAILS to write (a disk error between
     the version blob and the manifest) leaves a drawing that never came to
     exist, so nothing would ever walk its directory again. `ingest_drawing`
-    re-checks the manifest on the way out of an abnormal exit and retires the
-    file when the drawing is still absent.
+    re-reads the drawing's key prefix on the way out of an abnormal exit and
+    retires the file when nothing is left under it.
 
     IT IS DELIBERATELY NOT DONE HERE, and the reason is what `creating` actually
     means. `creating` says only "do not refuse a missing drawing"; it does not
     say "a missing manifest means a missing drawing", and nothing about a
     section's flags says whether ANYONE is left to serve. Three entries set it —
     `ingest_drawing`, `legacy_drawing_guard(must_exist=False)` (which serves
-    `_mark_failed`) and `legacy_purge_guard` — and the last two routinely run
-    over a drawing that is alive on `upload.state.json` with no manifest at all.
-    A blanket reclaim on abnormal exit would retire those live drawings' files.
+    `_mark_failed`) and `legacy_purge_guard` — and neither of the last two can
+    read an absent manifest as an absent drawing. `_mark_failed`'s upload is
+    alive on `upload.state.json` before any manifest exists, and a purge that
+    has deleted the manifest but not finished has a drawing that still needs
+    finishing. A blanket reclaim on abnormal exit would retire both their files.
     So the rule stays where it has always been: with the caller that can prove
     its own drawing has nothing left to serve. `ingest_drawing` proves it by
-    finding the drawing's whole key prefix empty apart from the version blob it
-    just wrote itself, not merely by finding no manifest.
+    finding the drawing's whole key prefix empty apart from a version-1 blob,
+    not merely by finding no manifest.
 
     The documented answer above that boundary is unchanged and is postgres: it
     reads `FOR UPDATE` and increments in one statement, so it needs none of
