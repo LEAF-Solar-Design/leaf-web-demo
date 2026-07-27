@@ -8,10 +8,15 @@ on:
       - 'da/store.py'
       - 'platform/authority-inventory.json'
       - 'platform/db.py'
-      # Every migration, not the two the upload/customization steps happen to
-      # read: the schema_status authority gate below asserts catalog objects
-      # from 0014_broker.sql, and a trigger this workflow can break but is not
-      # triggered by is the same gap in a new place.
+      # The two explicit entries are pinned by
+      # server/tests/test_postgres_container_wiring.py so nobody can quietly
+      # drop the upload and customization migrations from this gate; keep them.
+      # The glob is additive: the schema_status authority gate below asserts
+      # catalog objects created by 0014_broker.sql, and a migration this
+      # workflow can break but is not triggered by is the same gap in a new
+      # place. Overlapping entries are harmless -- `paths` is a union.
+      - 'platform/migrations/0016_drawing_upload_authority.sql'
+      - 'platform/migrations/0020_customization_authority.sql'
       - 'platform/migrations/**'
       - 'platform/api.py'
       - 'platform/mutation_fence.py'
