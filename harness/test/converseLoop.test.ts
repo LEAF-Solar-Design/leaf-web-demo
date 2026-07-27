@@ -342,7 +342,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
     expect(proposed).toHaveLength(1);
     expect(proposed[0]!.data).toMatchObject({
       tool: "add-panel",
-      params: { row: 2 },
+      params: { row: 2, drawing_id: "rooftop_demo" },
       // The chip renders the TARGET drawing (resolved exactly as dispatch will).
       dwg: "rooftop_demo",
       capability: "drawing.write",
@@ -355,7 +355,10 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
     const cid = String(proposed[0]!.data.confirmation_id);
     const rec = await store.getConfirmation(cid);
     expect(rec).toMatchObject({ status: "pending", action: "run_capability" });
-    expect(JSON.parse(rec!.args_json)).toMatchObject({ tool: "add-panel", params: { row: 2 } });
+    expect(JSON.parse(rec!.args_json)).toMatchObject({
+      tool: "add-panel",
+      params: { row: 2, drawing_id: "rooftop_demo" },
+    });
 
     // The 300s TTL (wire contract section 7) is pinned at CREATION, not just
     // enforced at read time: expires_at = created_at + 300s, still in the future.
@@ -403,6 +406,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
     expect(appRun.submitCalls).toHaveLength(1);
     expect(appRun.submitCalls[0]).toMatchObject({
       tool: "add-panel",
+      params: { drawing_id: "rooftop_demo" },
       dwg: "rooftop_demo",
       catalogDigest: expect.stringMatching(/^sha256:/),
       drawingVersion: 3,

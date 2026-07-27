@@ -191,8 +191,9 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "rate_limit_category": "medium", "timeout_s": 60, "audit_extra": ["tool", "dwg"],
         },
         "run_write_tool": {
-            "description": "Dispatch a registered drawing.write tool via POST /api/run (R3; creates vN+1, undoable).",
-            "rung": 3, "required_capability": "run_write", "policy": "confirm-once",
+            "description": "Dispatch a registered drawing.write tool via POST /api/run (R3; creates vN+1, undoable). Every execution requires a fresh approval.",
+            "rung": 3, "required_capability": "run_write", "policy": "always-confirm",
+            "tenant_tightenable": False,
             "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
             "args_schema": _RUN_TOOL_SCHEMA,
             "rate_limit_category": "medium", "timeout_s": 120,

@@ -43,10 +43,11 @@
       "audit_extra": ["tool", "dwg"]
     },
     "run_write_tool": {
-      "description": "Dispatch a registered drawing.write tool via POST /api/run (R3; creates vN+1, undoable).",
+      "description": "Dispatch a registered drawing.write tool via POST /api/run (R3; creates vN+1, undoable). Every execution requires a fresh approval.",
       "rung": 3,
       "required_capability": "run_write",
-      "policy": "confirm-once",
+      "policy": "always-confirm",
+      "tenant_tightenable": false,
       "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
       "args_schema": {"type": "object", "properties": {"tool": {"type": "string"}, "params": {"type": "object"}, "dwg": {"type": "string"}, "catalog_digest": {"type": "string"}, "drawing_version": {"type": "integer"}, "expected_drawing_head": {"type": "integer"}, "catalog_commit": {"type": "string"}, "effective_catalog_digest": {"type": "string"}, "tool_manifest_sha256": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["tool"], "additionalProperties": false},
       "rate_limit_category": "medium",

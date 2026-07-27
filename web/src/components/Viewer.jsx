@@ -195,6 +195,10 @@ const Viewer = forwardRef(function Viewer(
     const cx = (minX + maxX) / 2
     const cy = (minY + maxY) / 2
     const dataSpan = Math.max(dataW, dataH)
+    const clipSpan = Math.max(dataSpan * 4, 1000)
+    camera.near = -clipSpan
+    camera.far = clipSpan
+    camera.updateProjectionMatrix()
     const sculpture = panelSculpture === true
     const sculptureDepth = sculpture ? dataSpan * 0.24 : 0
     const panelThickness = sculpture ? Math.max(dataSpan * 0.006, 0.45) : 0
@@ -541,6 +545,8 @@ const Viewer = forwardRef(function Viewer(
           return {
             position: camera.position.toArray().map((value) => Number(value.toFixed(4))),
             target: controls.target.toArray().map((value) => Number(value.toFixed(4))),
+            near: camera.near,
+            far: camera.far,
           }
         },
       }

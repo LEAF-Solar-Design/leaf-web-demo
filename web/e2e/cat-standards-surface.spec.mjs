@@ -51,6 +51,11 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   const depth = Number(await viewer.getAttribute('data-depth-span'))
   expect(depth).toBeGreaterThan(8)
   const beforeOrbit = await viewer.evaluate((node) => node.__cadviewer.cameraPose())
+  const cameraDistance = Math.hypot(
+    ...beforeOrbit.position.map((value, index) => value - beforeOrbit.target[index]),
+  )
+  expect(beforeOrbit.near).toBeLessThan(-cameraDistance)
+  expect(beforeOrbit.far).toBeGreaterThan(cameraDistance)
   const box = await viewer.boundingBox()
   expect(box).not.toBeNull()
   await page.mouse.move(box.x + box.width * 0.58, box.y + box.height * 0.46)
