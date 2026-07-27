@@ -484,6 +484,20 @@ def _drain_terminal(deadline: float, exc: BaseException) -> tuple:
                                "message": f"{type(exc).__name__}: {exc}"}}
 
 
+def _eof_terminal(deadline: float) -> tuple:
+    """The terminal event for a stream that simply ENDED without one.
+
+    Same arbitration as _drain_terminal: past the turn's deadline a stream
+    that stopped producing is turn expiry, and must read exactly like the
+    watchdog's terminal event. Before the deadline the historical behavior is
+    preserved — release the CAS, append nothing — because that case is an
+    unexpectedly short stream rather than an expired turn.
+    """
+    if time.monotonic() >= deadline:
+        return "turn_complete", {"stop_reason": "timeout"}
+    return None, None
+
+
 def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                  resp: "requests.Response", max_s: float) -> None:
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
@@ -497,13 +511,24 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
     turn_usage: Dict[str, Any] = {}
     tools_called: List[str] = []
 
-    def _end_once(event_type: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> None:
+    def _end_once(event_type: Optional[str] = None, data: Optional[Dict[str, Any]] = None,
+                  *, resolve: Optional[Any] = None) -> None:
         """Append (at most once, across BOTH threads) the terminal event — if
         one is given AND nobody has already terminalized this turn — then
-        release the CAS. Idempotent: a second call is a harmless no-op."""
+        release the CAS. Idempotent: a second call is a harmless no-op.
+
+        `resolve`, when given, is a zero-arg callable evaluated INSIDE the
+        one-shot critical section, supplying (event_type, data). Every
+        deadline-sensitive caller must use it rather than deciding first and
+        calling second: between an outside-the-lock decision and the claim,
+        the deciding thread can be descheduled, the other thread can win, and
+        the terminal event the caller observes goes back to depending on the
+        scheduler — the exact property this arbitration exists to remove."""
         with terminal_lock:
             if terminal_flag.is_set():
                 return
+            if resolve is not None:
+                event_type, data = resolve()
             terminal_flag.set()
         terminal_data = data or {}
         if event_type is not None:
@@ -643,9 +668,16 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
             # Past the shared deadline this is turn EXPIRY, not a transport
             # fault, and must read identically to the watchdog's own terminal
             # event — otherwise which one the caller sees is a coin flip.
-            _end_once(*_drain_terminal(deadline, exc))
+            # Decided INSIDE the one-shot lock (see `resolve`), never before it.
+            _end_once(resolve=lambda: _drain_terminal(deadline, exc))
         finally:
-            _end_once()  # stream ended with no terminal event seen -> still release the CAS
+            # A stream that simply ENDED without a terminal event gets the same
+            # treatment: past the deadline it is expiry and must read like the
+            # watchdog's, or a clean EOF landing just after the deadline would
+            # terminalize the turn with NO event at all when the drain wins and
+            # `turn_complete{timeout}` when the watchdog wins — leaving the CAS
+            # released but the client still showing the turn in flight.
+            _end_once(resolve=lambda: _eof_terminal(deadline))
             try:
                 resp.close()
             except Exception:  # noqa: BLE001

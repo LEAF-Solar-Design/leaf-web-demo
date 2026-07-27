@@ -600,6 +600,32 @@ def test_drain_failure_before_the_deadline_still_reports_error():
     assert "connection reset by peer" in data["error"]["message"]
 
 
+def test_clean_eof_past_the_deadline_also_reports_timeout():
+    """A stream that simply ENDS past the deadline must read like the
+    watchdog's terminal event too.
+
+    Otherwise the same expired turn yields NO terminal event when the drain
+    thread notices the EOF first, and turn_complete{stop_reason:'timeout'}
+    when the watchdog fires first — the CAS released either way, but the
+    client left showing a turn still in flight in the first case.
+    """
+    already_past = time.monotonic() - 1.0
+    ev_type, data = turn_runner._eof_terminal(already_past)
+    assert ev_type == "turn_complete"
+    assert data == {"stop_reason": "timeout"}
+
+
+def test_clean_eof_before_the_deadline_appends_no_terminal_event():
+    """The control for the EOF path: an unexpectedly SHORT stream is not an
+    expired turn. Historical behavior is preserved — release the CAS, append
+    nothing — so this arbitration cannot manufacture a timeout for a stream
+    that ended early."""
+    not_yet = time.monotonic() + 30.0
+    ev_type, data = turn_runner._eof_terminal(not_yet)
+    assert ev_type is None
+    assert data is None
+
+
 def test_watchdog_wins_even_when_the_harness_is_silent_from_the_first_byte(
         monkeypatch, turn_stub):
     """The canonical hang: the harness answers 200 + headers and then sends
