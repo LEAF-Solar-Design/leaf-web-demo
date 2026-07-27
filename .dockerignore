@@ -42,20 +42,32 @@ server/.site_demo_cache.json.*
 server/customization-worktrees/
 server/agent_tenants.json*
 server/authored_tools.json
+# Tenant-authored tool bodies, written at runtime by the mounted author route.
+# _legacy_author in server/routers/author.py writes
+# server/authored/<sha256(tenant_id)[:32]>/<tool>.py, and server/tool_loader.py
+# resolves that same directory inside the image, so a dev who authored a tool
+# locally and then ran `docker compose build` would bake one tenant's
+# executable Python into the app and broker images. Git ignores these only
+# through a NESTED server/authored/.gitignore, which docker never reads.
+# Scoped to *.py rather than a bare `server/authored/`, so the directory's
+# tracked .gitignore and .gitkeep still reach the build context. The `**` is
+# load-bearing, because a dockerignore `*` does not cross `/`: plain
+# `server/authored/*.py` would miss the per-tenant depth, and `**/` also
+# covers the direct child that the loader's single-part fallback root reads.
+# test_authored_tool_bodies_never_enter_the_build_context guards this rule.
+server/authored/**/*.py
 server/drawings/
-# Session + customization SQLite DBs (with WAL/SHM sidecars) and the broker
-# work queues. Written at runtime, redirected to the leaf-state volume in the
-# containers (SESSIONS_DB, docker-compose.yml), and never git-tracked, so a
-# clean CI checkout has none of them. Without these lines a dev who ran the
-# server locally bakes their own sessions into both images.
+# Session + customization SQLite DBs, with their WAL/SHM sidecars. Written at
+# runtime, redirected to the leaf-state volume in the containers (SESSIONS_DB,
+# docker-compose.yml), and never git-tracked, so a clean CI checkout has none
+# of them. Without these lines a dev who ran the server locally bakes their own
+# sessions into both images.
 server/sessions.db
 server/sessions.db-shm
 server/sessions.db-wal
 server/customization.db
 server/customization.db-shm
 server/customization.db-wal
-server/active_workitems.jsonl
-server/pending_reaps.jsonl
 # Guest drawing store: raw user-supplied DWG/DXF written at runtime under
 # guest_store_dir() (server/write_loop.py, LEAF_GUEST_STORE_DIR). Same
 # customer-data class as data/uploads/ below.
@@ -78,8 +90,26 @@ data/agent_session_grants.json*
 data/agent_rate_state.json*
 data/workspaces/
 
+# Compiled output from the LeafWriteTools .NET appbundle
+# (engine/appbundle-write/BUILD.md). Both Dockerfiles COPY engine/ wholesale
+# (deploy/Dockerfile.app, deploy/Dockerfile.broker), so a dev who built the
+# bundle and then ran `docker compose build` (RUN.md, deploy/README.md) bakes
+# their own build tree into both images. Already git-ignored, so a clean CI
+# checkout has none of them. Per-directory on purpose: a bare `engine/` would
+# drop the tracked appbundle sources the images need.
+engine/appbundle-write/bin/
+engine/appbundle-write/obj/
+engine/appbundle-write/build/
+
 # Local env / secrets — must never enter an image layer
 **/.env.local
+# Vite's other local-env files. The line above is one exact name; Vite also
+# loads `.env.<mode>.local` (`.env.production.local` and friends), which is why
+# web/.gitignore:4 lists a bare `*.local` beside `.env.local`. Docker reads no
+# nested ignore file, so that rule covers nothing here, and `COPY web/ /web/`
+# (deploy/Dockerfile.web:23) would put such a file into the build-stage layer.
+# Repo-wide like the neighboring patterns; no tracked file matches it.
+**/*.local
 .env
 .secrets/
 **/.grant/

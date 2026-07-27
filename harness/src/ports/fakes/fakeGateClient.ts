@@ -37,6 +37,7 @@ const KNOWN_ACTIONS = new Set([
   "submit_live_solve",
   "undo_drawing_version",
   "author_tool",
+  "request_publication",
   "register_tool",
   "request_confirmation",
 ]);

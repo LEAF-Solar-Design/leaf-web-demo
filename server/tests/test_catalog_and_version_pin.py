@@ -256,6 +256,98 @@ def test_run_request_threads_dwg_version_through_router_to_submit_job(monkeypatc
     assert captured["dwg_version"] is None
 
 
+def test_run_request_rejects_drawing_head_drift_after_approval(monkeypatch):
+    from routers import jobs as jobs_router
+
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: WRITE_TOOL)
+    monkeypatch.setattr(jobs_router, "_legacy_drawing_head", lambda *_args: 8)
+    monkeypatch.setattr(
+        jobs_router.customization_service,
+        "effective_catalog_pin",
+        lambda *_args: {
+            "catalog_commit": "a" * 40,
+            "effective_catalog_digest": "b" * 64,
+        },
+    )
+    submitted = []
+    monkeypatch.setattr(
+        jobs_router.jobs,
+        "submit_job",
+        lambda *_args, **_kwargs: submitted.append(True) or "unexpected-job",
+    )
+    req = jobs_router.RunRequest(
+        tool=WRITE_TOOL["name"],
+        params={},
+        dwg="rooftop_demo",
+        dwg_version=7,
+        expected_drawing_head=7,
+        catalog_commit="a" * 40,
+        effective_catalog_digest="b" * 64,
+        tool_manifest_sha256=jobs_router.deps.catalog_tool_digest(WRITE_TOOL),
+        catalog_digest=jobs_router.deps.catalog_tool_digest(WRITE_TOOL),
+    )
+
+    response = jobs_router.run(
+        req,
+        wait=0,
+        tenant_id="demo-tenant",
+        x_org_id=None,
+        x_project_id=None,
+        idempotency_key=None,
+        authorization=None,
+    )
+
+    assert response.status_code == 409
+    assert submitted == []
+    assert "drawing head changed after approval" in response.body.decode("utf-8")
+
+
+def test_run_request_submits_when_approved_head_is_current(monkeypatch):
+    from routers import jobs as jobs_router
+
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: WRITE_TOOL)
+    monkeypatch.setattr(jobs_router, "_legacy_drawing_head", lambda *_args: 7)
+    monkeypatch.setattr(
+        jobs_router.customization_service,
+        "effective_catalog_pin",
+        lambda *_args: {
+            "catalog_commit": "a" * 40,
+            "effective_catalog_digest": "b" * 64,
+        },
+    )
+    captured = {}
+
+    def fake_submit_job(*_args, dwg_version=None, **_kwargs):
+        captured["dwg_version"] = dwg_version
+        return "fake-job-id"
+
+    monkeypatch.setattr(jobs_router.jobs, "submit_job", fake_submit_job)
+    req = jobs_router.RunRequest(
+        tool=WRITE_TOOL["name"],
+        params={},
+        dwg="rooftop_demo",
+        dwg_version=7,
+        expected_drawing_head=7,
+        catalog_commit="a" * 40,
+        effective_catalog_digest="b" * 64,
+        tool_manifest_sha256=jobs_router.deps.catalog_tool_digest(WRITE_TOOL),
+        catalog_digest=jobs_router.deps.catalog_tool_digest(WRITE_TOOL),
+    )
+
+    response = jobs_router.run(
+        req,
+        wait=0,
+        tenant_id="demo-tenant",
+        x_org_id=None,
+        x_project_id=None,
+        idempotency_key=None,
+        authorization=None,
+    )
+
+    assert response.status_code == 202
+    assert captured == {"dwg_version": 7}
+
+
 def test_submit_job_threads_dwg_version_to_broker_client(monkeypatch, tmp_path):
     import jobs as jobs_mod
 
@@ -574,8 +666,7 @@ def test_dwg_version_survives_local_fallback(monkeypatch, tmp_path):
     assert captured["cloud_event_key"] == f"{job_id}:broker-run"
     assert captured["fallback_event_key"] == f"{job_id}:broker-fallback"
     assert captured["cloud_event_key"] != captured["fallback_event_key"]
-    if jobs._conn is not None:
-        jobs._conn.close()
+    jobs.reset_connection()
 
 
 def test_idempotency_fingerprint_includes_dwg_version(monkeypatch, tmp_path):
@@ -601,8 +692,7 @@ def test_idempotency_fingerprint_includes_dwg_version(monkeypatch, tmp_path):
     # same key, DIFFERENT pin -> rejected
     with pytest.raises(ValueError, match="different run input"):
         jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=2, **kw)
-    if jobs._conn is not None:
-        jobs._conn.close()
+    jobs.reset_connection()
 
 
 def test_restart_recovery_recovers_the_version_pin(monkeypatch, tmp_path):
@@ -628,8 +718,7 @@ def test_restart_recovery_recovers_the_version_pin(monkeypatch, tmp_path):
     # simulate a fresh process picking the durable row back up
     assert jobs._redispatch_record(job_id) is True
     assert captured["dwg_version"] == 7
-    if jobs._conn is not None:
-        jobs._conn.close()
+    jobs.reset_connection()
 
 
 def test_restart_recovery_fails_closed_on_row_predating_pin_persistence(monkeypatch, tmp_path):
@@ -660,5 +749,4 @@ def test_restart_recovery_fails_closed_on_row_predating_pin_persistence(monkeypa
     assert jobs._redispatch_record(job_id) is False
     assert dispatched["called"] is False
     assert jobs.get_job(job_id)["status"] == "failed"
-    if jobs._conn is not None:
-        jobs._conn.close()
+    jobs.reset_connection()

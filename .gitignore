@@ -58,3 +58,5 @@ data/workspaces/
 # ops route (server/agent_policy.py). The agent-side twin of
 # server/broker_tenants.json above.
 server/agent_tenants.json*
+artifacts/
+artifacts/

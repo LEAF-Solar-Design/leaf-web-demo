@@ -348,6 +348,46 @@ def _db() -> sqlite3.Connection:
     return _conn
 
 
+def reset_connection() -> None:
+    """Drop the module's SQLite singleton, closing the handle we are dropping.
+
+    THIS MODULE OWNS ITS CONNECTION. ``_db()`` hands the SAME object to every
+    caller, so a closed handle left in ``_conn`` is not a local problem: every
+    later job read or write raises ``sqlite3.ProgrammingError: Cannot operate on
+    a closed database`` and the reaper daemon spins on the dead handle every
+    interval. Callers that need the connection rebuilt (a test re-pointing
+    ``DB_PATH``, say) must come through here rather than closing ``_conn`` in
+    place, because closing in place leaves exactly that dead handle behind.
+
+    BOTH locks, in the documented ``_lock -> _conn_lock`` order. ``_conn_lock``
+    alone serializes CONSTRUCTION, not USE, and that is not enough: ``_exec``
+    (and ``update_progress``, ``release_for_retry``) read ``_db()`` separately
+    for the execute and the commit, so a reset landing between them closes the
+    connection the write is sitting on -- rolling that write back -- and then
+    the commit lands on a freshly built second connection with no transaction
+    and returns success. That is a silent lost write, the same failure the
+    double-checked locking in ``_db()`` was added to prevent; holding ``_lock``
+    keeps a reset from ever landing mid-statement-pair. No caller takes
+    ``_lock`` before calling this, so the plain (non-reentrant) ``_lock``
+    cannot deadlock here.
+
+    Clearing is done BEFORE the close, so a ``close()`` that raises (SQLite
+    refuses to close over unfinalized statements) still leaves the singleton
+    clean for the next ``_db()`` to rebuild. The close stays INSIDE both locks
+    so no second connection is built while this one is still open.
+
+    A reference already borrowed from ``_db()`` and used outside ``_lock`` is
+    still the caller's problem: nothing here can revive a handle someone else
+    is holding.
+    """
+    global _conn
+    with _lock:
+        with _conn_lock:
+            conn, _conn = _conn, None
+            if conn is not None:
+                conn.close()
+
+
 def _exec(sql: str, args: tuple = ()) -> None:
     with _lock:
         _db().execute(sql, args)
@@ -881,12 +921,18 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
 # --------------------------------------------------------------------------- #
 # execution
 # --------------------------------------------------------------------------- #
-def _progress_phase(tool: Dict[str, Any], aps_live: bool) -> str:
+def _progress_phase(
+    tool: Dict[str, Any],
+    aps_live: bool,
+    params: Optional[Dict[str, Any]] = None,
+) -> str:
     """The progress phase a run ENTERS before the (blocking) broker call (Contract 5c,
     §15). Read tools -> 'executing'; write tools -> 'storing version' (mock APS_LIVE=0)
     / 'extracting' (live re-extract APS_LIVE=1). Short + stable strings; documented in
     §15 as the vocabulary SSE/poll consumers can render."""
     caps = (tool or {}).get("capabilities") or []
+    if isinstance(params, dict) and params.get("dry_run") is True:
+        return "executing"
     if "drawing.write" in caps:
         return "extracting" if aps_live else "storing version"
     return "executing"
@@ -971,7 +1017,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
     # Richer progress (Contract 5c, §15): mark the real phase this run is ENTERING
     # before the (blocking) broker call, so SSE/poll consumers see more than status flips.
-    _heartbeat(job_id, worker_id, _progress_phase(tool, aps_live))
+    _heartbeat(job_id, worker_id, _progress_phase(tool, aps_live, params))
 
     holder: Dict[str, Any] = {}
 

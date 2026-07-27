@@ -18,6 +18,24 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 const CLICK_MOVE_PX = 5      // pointer travel under this = click (not a pan/drag)
 const CLICK_MAX_MS = 500
 
+function configureControls(controls, enabled, rotate) {
+  controls.enabled = enabled !== false
+  controls.enableRotate = rotate === true
+  controls.screenSpacePanning = true
+  controls.mouseButtons = rotate ? {
+    LEFT: THREE.MOUSE.ROTATE,
+    MIDDLE: THREE.MOUSE.DOLLY,
+    RIGHT: THREE.MOUSE.PAN,
+  } : {
+    LEFT: THREE.MOUSE.PAN,
+    MIDDLE: THREE.MOUSE.DOLLY,
+    RIGHT: THREE.MOUSE.PAN,
+  }
+  controls.zoomSpeed = 1.3
+  controls.rotateSpeed = 0.65
+  controls.panSpeed = 0.8
+}
+
 function readTokens() {
   const cs = getComputedStyle(document.documentElement)
   const v = (name, fallback) => {
@@ -50,6 +68,10 @@ function readTokens() {
 //                     opaque --cv-bg scene, byte-identical.
 //   controlsEnabled : false disables OrbitControls (the landing stage is a
 //                     static hero, not an editor). Default true.
+//   rotateEnabled   : true changes left-drag from pan to orbit. Default false,
+//                     preserving the top-down CAD editor.
+//   panelSculpture  : true extrudes panels in display space as a curved relief.
+//                     It never changes intake coordinates or evidence.
 //   stringRoutes    : [{id, color?, pts:[[x,y],...]}] world-coord routes drawn
 //                     as THREE.Line overlays and animated in the existing rAF
 //                     loop — sequential draw-on at ~650 world-units/s with a
@@ -79,7 +101,8 @@ const Viewer = forwardRef(function Viewer(
     intake, colorForLayer, visibleLayers,
     highlightHandles, markers, overlayPolylines,
     selectedHandle, onSelectEntity, pendingEdit,
-    background, controlsEnabled = true, stringRoutes, onGlError,
+    background, controlsEnabled = true, rotateEnabled = false,
+    panelSculpture = false, stringRoutes, onGlError,
   },
   ref,
 ) {
@@ -95,6 +118,8 @@ const Viewer = forwardRef(function Viewer(
   // effect) so toggling it never forces a scene rebuild.
   const controlsEnabledRef = useRef(controlsEnabled)
   controlsEnabledRef.current = controlsEnabled
+  const rotateEnabledRef = useRef(rotateEnabled)
+  rotateEnabledRef.current = rotateEnabled
 
   // Internal override intake set by the imperative applyVersion(). Drives a
   // rebuild without the parent having to swap the `intake` prop. Reset whenever
@@ -142,15 +167,11 @@ const Viewer = forwardRef(function Viewer(
     mount.appendChild(renderer.domElement)
 
     const controls = new OrbitControls(camera, renderer.domElement)
-    controls.enabled = controlsEnabledRef.current !== false
-    controls.enableRotate = false
-    controls.screenSpacePanning = true
-    controls.mouseButtons = {
-      LEFT: THREE.MOUSE.PAN,
-      MIDDLE: THREE.MOUSE.DOLLY,
-      RIGHT: THREE.MOUSE.PAN,
-    }
-    controls.zoomSpeed = 1.3
+    configureControls(
+      controls,
+      controlsEnabledRef.current,
+      rotateEnabledRef.current,
+    )
 
     const polylines = activeIntake.polylines || []
     const inserts = activeIntake.inserts || []
@@ -174,6 +195,41 @@ const Viewer = forwardRef(function Viewer(
     const cx = (minX + maxX) / 2
     const cy = (minY + maxY) / 2
     const dataSpan = Math.max(dataW, dataH)
+    const clipSpan = Math.max(dataSpan * 4, 1000)
+    camera.near = -clipSpan
+    camera.far = clipSpan
+    camera.updateProjectionMatrix()
+    const sculpture = panelSculpture === true
+    const sculptureDepth = sculpture ? dataSpan * 0.24 : 0
+    const panelThickness = sculpture ? Math.max(dataSpan * 0.006, 0.45) : 0
+    let minDisplayZ = Infinity
+    let maxDisplayZ = -Infinity
+
+    const displayZ = (pl) => {
+      const pts = pl.pts || []
+      const baseZ = pts.length
+        ? pts.reduce((sum, point) => sum + (Number(point[2]) || 0), 0) / pts.length
+        : 0
+      if (!sculpture) return 0
+      if (pts.length === 0) return baseZ
+      const px = pts.reduce((sum, point) => sum + point[0], 0) / pts.length
+      const py = pts.reduce((sum, point) => sum + point[1], 0) / pts.length
+      const nx = (px - cx) / Math.max(dataW / 2, 1)
+      const ny = (py - cy) / Math.max(dataH / 2, 1)
+      const dome = Math.sqrt(Math.max(0, 1 - Math.min(1, nx * nx * 0.82 + ny * ny * 0.18)))
+      const facets = 0.04 * Math.sin(px * 0.48) * Math.cos(py * 0.31)
+      return baseZ + sculptureDepth * Math.max(0.12, dome + facets)
+    }
+
+    if (sculpture) {
+      scene.add(new THREE.HemisphereLight(0xd8efff, 0x17202a, 1.9))
+      const keyLight = new THREE.DirectionalLight(0xffffff, 2.8)
+      keyLight.position.set(cx + dataSpan, cy - dataSpan * 0.4, dataSpan * 1.4)
+      scene.add(keyLight)
+      const rimLight = new THREE.DirectionalLight(0x39ff88, 1.15)
+      rimLight.position.set(cx - dataSpan, cy + dataSpan * 0.5, dataSpan * 0.6)
+      scene.add(rimLight)
+    }
 
     // pickIndex: handle -> geometry descriptor (for selection highlight redraw)
     const pickIndex = new Map()
@@ -197,28 +253,56 @@ const Viewer = forwardRef(function Viewer(
       const triHandles = [] // triangle index -> polyline handle (fill pick map)
       for (const pl of polys) {
         const pts = pl.pts
+        const topZ = displayZ(pl)
+        const bottomZ = topZ - panelThickness
+        minDisplayZ = Math.min(minDisplayZ, bottomZ)
+        maxDisplayZ = Math.max(maxDisplayZ, topZ)
         pickIndex.set(pl.handle, { kind: 'poly', layer: pl.layer, pts })
         // fan-triangulate (panels are convex quads) for a subtle fill
         for (let i = 1; i < pts.length - 1; i++) {
-          fillPos.push(pts[0][0], pts[0][1], 0)
-          fillPos.push(pts[i][0], pts[i][1], 0)
-          fillPos.push(pts[i + 1][0], pts[i + 1][1], 0)
+          fillPos.push(pts[0][0], pts[0][1], topZ)
+          fillPos.push(pts[i][0], pts[i][1], topZ)
+          fillPos.push(pts[i + 1][0], pts[i + 1][1], topZ)
           triHandles.push(pl.handle)
+        }
+        if (sculpture) {
+          // Bottom and four walls turn each unchanged panel into a thin tile.
+          // The depth is a display-space treatment, not drawing geometry.
+          for (let i = 1; i < pts.length - 1; i++) {
+            fillPos.push(pts[0][0], pts[0][1], bottomZ)
+            fillPos.push(pts[i + 1][0], pts[i + 1][1], bottomZ)
+            fillPos.push(pts[i][0], pts[i][1], bottomZ)
+            triHandles.push(pl.handle)
+          }
+          for (let i = 0; i < pts.length; i++) {
+            const a = pts[i]
+            const b = pts[(i + 1) % pts.length]
+            fillPos.push(a[0], a[1], bottomZ, b[0], b[1], bottomZ, b[0], b[1], topZ)
+            fillPos.push(a[0], a[1], bottomZ, b[0], b[1], topZ, a[0], a[1], topZ)
+            triHandles.push(pl.handle, pl.handle)
+            linePos.push(a[0], a[1], bottomZ, a[0], a[1], topZ)
+          }
         }
         // border segments
         for (let i = 0; i < pts.length; i++) {
           const a = pts[i]
           const b = pts[(i + 1) % pts.length]
           if (i === pts.length - 1 && !pl.closed) break
-          linePos.push(a[0], a[1], 0.1, b[0], b[1], 0.1)
+          linePos.push(a[0], a[1], topZ + 0.05, b[0], b[1], topZ + 0.05)
         }
       }
 
       const fillGeom = new THREE.BufferGeometry()
       fillGeom.setAttribute('position', new THREE.Float32BufferAttribute(fillPos, 3))
-      const fillMat = new THREE.MeshBasicMaterial({
-        color: col, transparent: true, opacity: 0.14, depthWrite: false,
-      })
+      const fillMat = sculpture
+        ? new THREE.MeshStandardMaterial({
+          color: col, roughness: 0.72, metalness: 0.14,
+          emissive: col, emissiveIntensity: 0.18, flatShading: true,
+          transparent: true, opacity: 0.82, side: THREE.DoubleSide,
+        })
+        : new THREE.MeshBasicMaterial({
+          color: col, transparent: true, opacity: 0.14, depthWrite: false,
+        })
       const fillMesh = new THREE.Mesh(fillGeom, fillMat)
       fillMesh.userData = { kind: 'polyfill', triHandles }
       group.add(fillMesh)
@@ -325,7 +409,7 @@ const Viewer = forwardRef(function Viewer(
       const w = mount.clientWidth, h = mount.clientHeight
       const viewAspect = w / h
       const dataAspect = dataW / dataH
-      const margin = 1.08
+      const margin = sculpture ? 1.28 : 1.08
       let halfW, halfH
       if (dataAspect > viewAspect) {
         halfW = (dataW / 2) * margin
@@ -341,13 +425,36 @@ const Viewer = forwardRef(function Viewer(
 
     function fitToBounds() {
       applyFrustum()
-      camera.position.set(cx, cy, 100)
+      const targetZ = isFinite(minDisplayZ) && isFinite(maxDisplayZ)
+        ? (minDisplayZ + maxDisplayZ) / 2
+        : 0
+      if (sculpture && rotateEnabledRef.current) {
+        camera.position.set(
+          cx + dataSpan * 0.42,
+          cy - dataSpan * 0.2,
+          targetZ + dataSpan * 1.15,
+        )
+      } else {
+        camera.position.set(cx, cy, 100)
+      }
       camera.zoom = 1
       camera.updateProjectionMatrix()
-      controls.target.set(cx, cy, 0)
+      controls.target.set(cx, cy, targetZ)
       controls.update()
     }
     fitToBounds()
+    const recordCameraPose = () => {
+      mount.dataset.cameraPosition = camera.position
+        .toArray()
+        .map((value) => Number(value.toFixed(4)))
+        .join(',')
+      mount.dataset.cameraTarget = controls.target
+        .toArray()
+        .map((value) => Number(value.toFixed(4)))
+        .join(',')
+    }
+    recordCameraPose()
+    controls.addEventListener('change', recordCameraPose)
 
     // --- picking: click (not drag) -> raycast -> handle ---------------------
     const raycaster = new THREE.Raycaster()
@@ -415,6 +522,12 @@ const Viewer = forwardRef(function Viewer(
       fitToBounds, dataSpan, tokens,
     }
 
+    const depthSpan = isFinite(minDisplayZ) && isFinite(maxDisplayZ)
+      ? maxDisplayZ - minDisplayZ
+      : 0
+    mount.dataset.viewMode = sculpture ? 'panel-sculpture' : 'flat'
+    mount.dataset.depthSpan = depthSpan.toFixed(3)
+
     // DEV-only test hook: project a world point to a client pixel so automated
     // verification can dispatch a real click on a known entity. Stripped from
     // production builds (dead-code eliminated when import.meta.env.DEV is false).
@@ -428,6 +541,14 @@ const Viewer = forwardRef(function Viewer(
             y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
           }
         },
+        cameraPose() {
+          return {
+            position: camera.position.toArray().map((value) => Number(value.toFixed(4))),
+            target: controls.target.toArray().map((value) => Number(value.toFixed(4))),
+            near: camera.near,
+            far: camera.far,
+          }
+        },
       }
     }
 
@@ -439,13 +560,19 @@ const Viewer = forwardRef(function Viewer(
       ro.disconnect()
       dom.removeEventListener('pointerdown', onPointerDown)
       dom.removeEventListener('pointerup', onPointerUp)
+      controls.removeEventListener('change', recordCameraPose)
       controls.dispose()
       renderer.dispose()
       if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement)
       scene.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.() })
+      delete mount.dataset.viewMode
+      delete mount.dataset.depthSpan
+      delete mount.dataset.cameraPosition
+      delete mount.dataset.cameraTarget
+      delete mount.__cadviewer
       stateRef.current = null
     }
-  }, [activeIntake, colorForLayer, background])
+  }, [activeIntake, colorForLayer, background, panelSculpture])
 
   useImperativeHandle(ref, () => ({
     fit: () => stateRef.current?.fitToBounds(),
@@ -470,8 +597,8 @@ const Viewer = forwardRef(function Viewer(
   // --- controls enable/disable (site stage: static hero) --------------------
   useEffect(() => {
     const s = stateRef.current
-    if (s) s.controls.enabled = controlsEnabled !== false
-  }, [controlsEnabled, buildTick])
+    if (s) configureControls(s.controls, controlsEnabled, rotateEnabled)
+  }, [controlsEnabled, rotateEnabled, buildTick])
 
   // --- string routes (site stage draw-on animation) --------------------------
   // [{id, color?, pts:[[x,y],...]}] -> THREE.Line per route in stringGroup.

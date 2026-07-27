@@ -13,6 +13,7 @@
  *   STATE:<what>                -> drawing_state {what}
  *   JOB:<job_id>                -> job_status {job_id}
  *   AUTHOR:<description>        -> author_tool {description, mode:"build"}
+ *   PUBLISH:<change_set_id>     -> request_publication {change_set_id}
  *   CONFIRM_REQ:<kind>          -> request_confirmation {kind, payload:{}}
  *   FORBIDDEN_TOOL              -> attempts a non-spine tool via canUseTool
  *   FAIL:<stop_reason>          -> terminal failure (quota/rate-limit drills)
@@ -88,7 +89,7 @@ export class FakeConverseRunner implements SpineConverseRunner {
       }
     } else {
       const directive =
-        /(RUN|SEARCH|STATE|JOB|AUTHOR|CONFIRM_REQ):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
+        /(RUN|SEARCH|STATE|JOB|AUTHOR|PUBLISH|CONFIRM_REQ):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
       if (tail.includes("FORBIDDEN_TOOL")) {
         const verdict = await input.canUseTool("mcp__other__shell", {});
         yield say(
@@ -108,6 +109,7 @@ export class FakeConverseRunner implements SpineConverseRunner {
           STATE: ["drawing_state", { what: value }],
           JOB: ["job_status", { job_id: value }],
           AUTHOR: ["author_tool", { description: value, mode: "build" }],
+          PUBLISH: ["request_publication", { change_set_id: value }],
           CONFIRM_REQ: ["request_confirmation", { kind: value, payload: {} }],
         };
         const [toolName, args] = argsByKind[kind!]!;

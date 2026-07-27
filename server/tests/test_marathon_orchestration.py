@@ -35,9 +35,6 @@ class RecordingExecutor:
 
 @pytest.fixture(autouse=True)
 def isolated_jobs(monkeypatch, tmp_path):
-    # Preserve any connection established by an earlier test module. Closing it
-    # here would make pytest restore a dead connection after this fixture and
-    # cause unrelated later API tests to fail with a 500.
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "marathon.db")
     monkeypatch.setattr(jobs, "_conn", None)
     monkeypatch.setattr(jobs, "_reaper_started", True)
@@ -47,8 +44,9 @@ def isolated_jobs(monkeypatch, tmp_path):
     monkeypatch.setattr(jobs.platform_link, "on_running", lambda *a, **k: None)
     monkeypatch.setattr(jobs.platform_link, "on_terminal", lambda *a, **k: None)
     yield
-    if jobs._conn is not None:
-        jobs._conn.close()
+    # reset_connection(), never jobs._conn.close(): closing in place would leave
+    # the dead handle in the singleton for the monkeypatch undo above to restore.
+    jobs.reset_connection()
 
 
 def _submit(*, aps_live=False, tool=None):

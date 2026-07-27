@@ -9,11 +9,13 @@
  */
 
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
+import { submitToolProposal } from "./tools/submitToolProposal.js";
 import { validateTool } from "./tools/validateTool.js";
 import {
   HARNESS_IDENTITY,
@@ -28,12 +30,14 @@ import {
 } from "../ports/impl/tenantChangeRepo.js";
 import type {
   AuthorResponse,
+  AgentRunResult,
   AuthorToolset,
   HarnessPorts,
   ResultEnvelope,
   StagedCustomizationReceipt,
   TenantMutationFence,
   ToolPackage,
+  ToolSourceReceipt,
 } from "../ports/index.js";
 
 export interface StageCustomizationRequest {
@@ -109,11 +113,94 @@ export class AuthorLoop {
 
   /** Build the exactly-three-tool toolset the author session is granted. */
   private toolsetFor(repoDir: string, tenantId: string): AuthorToolset {
+    let previousReceipt: ToolSourceReceipt | undefined;
     return {
       fsTenantRepo: new FsTenantRepo(repoDir),
-      validateTool,
+      submitTool: (proposal) => {
+        const submitted = submitToolProposal(repoDir, proposal, new Date(), previousReceipt);
+        previousReceipt = submitted.receipt;
+        return submitted;
+      },
       apsTestRun: makeApsTestRun(this.ports.broker, tenantId),
     };
+  }
+
+  /**
+   * Defense in depth after the runner returns. The structured-submit receipt,
+   * returned source, package manifest, and actual Git changes must all bind to
+   * the same two exact files. A runner cannot smuggle an unrelated repo edit
+   * into the later harness commit.
+   */
+  private verifySubmittedTool(tenantId: string, repoDir: string, run: AgentRunResult): void {
+    const expectedEntry = `tools/${run.tool.name}/tool.py`;
+    const expectedManifest = `tools/${run.tool.name}/tool.json`;
+    if (run.tool.entry !== expectedEntry) {
+      throw new AuthorLoopError("authored tool entry does not match its package path", 422);
+    }
+    if (!run.sourceReceipt || run.sourceReceipt.contract !== "leaf.tool-source.v1") {
+      throw new AuthorLoopError("authored tool is missing an exact source receipt", 422);
+    }
+    if (
+      run.sourceReceipt.entry !== expectedEntry ||
+      run.sourceReceipt.manifest !== expectedManifest
+    ) {
+      throw new AuthorLoopError("authored tool source receipt path mismatch", 422);
+    }
+    const expectedFiles = [expectedEntry, expectedManifest].sort();
+    if (run.files.length !== 2 || JSON.stringify([...run.files].sort()) !== JSON.stringify(expectedFiles)) {
+      throw new AuthorLoopError("authored tool reported unexpected repository changes", 422);
+    }
+
+    const source = readFileSync(join(repoDir, expectedEntry), "utf8");
+    const manifestBytes = readFileSync(join(repoDir, expectedManifest));
+    if (source !== run.code) {
+      throw new AuthorLoopError("authored source does not match the exact returned code", 422);
+    }
+    if (
+      createHash("sha256").update(source).digest("hex") !== run.sourceReceipt.source_sha256 ||
+      createHash("sha256").update(manifestBytes).digest("hex") !== run.sourceReceipt.manifest_sha256
+    ) {
+      throw new AuthorLoopError("authored source receipt digest mismatch", 422);
+    }
+    if (
+      Buffer.byteLength(source, "utf8") !== run.sourceReceipt.source_bytes ||
+      manifestBytes.byteLength !== run.sourceReceipt.manifest_bytes
+    ) {
+      throw new AuthorLoopError("authored source receipt byte-count mismatch", 422);
+    }
+    if (
+      run.executionReceipt &&
+      (
+        run.executionReceipt.source_sha256 !== run.sourceReceipt.source_sha256 ||
+        run.executionReceipt.tenant_hash !==
+          createHash("sha256").update(tenantId).digest("hex")
+      )
+    ) {
+      throw new AuthorLoopError(
+        "broker execution receipt does not match the submitted source and tenant",
+        422,
+      );
+    }
+
+    const manifest = JSON.parse(manifestBytes.toString("utf8")) as ToolPackage;
+    const expectedPackageManifest = { ...run.tool, entry: "tool.py" };
+    if (JSON.stringify(manifest) !== JSON.stringify(expectedPackageManifest)) {
+      throw new AuthorLoopError("authored manifest does not match the validated tool", 422);
+    }
+
+    const status = execFileSync(
+      "git",
+      ["-C", repoDir, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      { encoding: "utf8" },
+    );
+    const changed = status
+      .split("\0")
+      .filter(Boolean)
+      .map((entry) => entry.slice(3).replaceAll("\\", "/"))
+      .sort();
+    if (JSON.stringify(changed) !== JSON.stringify(expectedFiles)) {
+      throw new AuthorLoopError("author runner changed files outside the submitted tool package", 422);
+    }
   }
 
   /**
@@ -132,6 +219,8 @@ export class AuthorLoop {
       grant,
       toolset,
     });
+
+    this.verifySubmittedTool(tenantId, repoDir, run);
 
     // Defense in depth: re-run the CONTRACT section 2 oracle on the result.
     const vr = validateTool(run.tool);

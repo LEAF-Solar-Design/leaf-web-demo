@@ -417,6 +417,12 @@ def test_C5c_progress_phase_vocabulary():
     assert jobs._progress_phase({"capabilities": ["drawing.read"]}, True) == "executing"
     assert jobs._progress_phase({"capabilities": ["drawing.write"]}, False) == "storing version"
     assert jobs._progress_phase({"capabilities": ["drawing.write"]}, True) == "extracting"
+    assert jobs._progress_phase(
+        {"capabilities": ["drawing.write"]}, False, {"dry_run": True}
+    ) == "executing"
+    assert jobs._progress_phase(
+        {"capabilities": ["drawing.write"]}, True, {"dry_run": True}
+    ) == "executing"
     assert jobs._progress_phase({}, False) == "executing"  # no capabilities -> read default
 
 

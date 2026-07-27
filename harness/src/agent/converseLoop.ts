@@ -7,13 +7,13 @@
  * persisted seq.
  *
  * Invariant v2 (enforced by test/converseRuntimeSeparation.test.ts): this module
- * never imports the Agent SDK — the runner is an injected port. The six spine
+ * never imports the Agent SDK — the runner is an injected port. The seven spine
  * tools execute here. Side effects are limited to registered job dispatch and
  * approved authoring through the app back-edge. A GateClient check precedes
  * every tool execution; a deny becomes an isError result the model can relay.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { redactTokens } from "../redact.js";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
 import { SPINE_TOOL_NAMES } from "../ports/index.js";
@@ -466,7 +466,7 @@ export class ConverseLoop {
   }
 
   // ------------------------------------------------------------------------- //
-  // The six spine tools (wire contract section 5) — gate check before EVERY one.
+  // The seven spine tools (wire contract section 5) — gate check before EVERY one.
   // ------------------------------------------------------------------------- //
 
   private buildExecutor(
@@ -518,23 +518,61 @@ export class ConverseLoop {
         case "run_capability": {
           const target = String(args.tool ?? "");
           const entry = (await catalogFor()).find((c) => c.name === target);
-          // Unknown tool => the WRITE rung (same fail-toward-safe rule as capabilityOf).
+          const catalogDigest = entry?.catalog_digest;
+          let params = asRecord(args.params);
+          if (typeof catalogDigest !== "string" || !catalogDigest) {
+            throw new Error("run_capability requires a current server-issued catalog digest");
+          }
+          // A local dry run is non-mutating, so it uses the read rung. This
+          // prevents preview approval from becoming a confirm-once grant for
+          // the later real write. Live APS stays on its cost-bearing rung.
+          // Unknown tools still fail toward the WRITE rung.
           const action =
             entry?.aps_live === true
               ? "submit_live_solve"
-              : !entry || entry.capabilities.includes("drawing.write")
+              : entry && params.dry_run === true
+                ? "run_read_tool"
+                : !entry || entry.capabilities.includes("drawing.write")
                 ? "run_write_tool"
                 : "run_read_tool";
+          const dwg = String(args.dwg ?? session.drawing_id);
+          if (
+            action !== "run_read_tool" &&
+            entry?.capabilities.includes("drawing.write") &&
+            params.drawing_id == null
+          ) {
+            params = { ...params, drawing_id: dwg };
+          }
+          let drawingPins: Record<string, unknown> = {};
+          if (action !== "run_read_tool") {
+            if (
+              typeof entry?.tool_manifest_sha256 !== "string" ||
+              typeof entry.catalog_commit !== "string" ||
+              typeof entry.effective_catalog_digest !== "string"
+            ) {
+              throw new Error("write approval requires an effective catalog generation");
+            }
+            const versions = await appRun.getDrawingState(tenantId, dwg, "versions");
+            const head = Number(versions.head);
+            if (!Number.isInteger(head) || head < 0) {
+              throw new Error("run_capability requires a current drawing head");
+            }
+            drawingPins = {
+              drawing_version: head,
+              expected_drawing_head: head,
+              catalog_commit: entry.catalog_commit,
+              effective_catalog_digest: entry.effective_catalog_digest,
+              tool_manifest_sha256: entry.tool_manifest_sha256,
+            };
+          }
           return {
             action,
             args: {
               tool: target,
-              params: asRecord(args.params),
-              // Normalize the default onto the approval-bound args. The app's
-              // proposal row and a rebuilt harness mirror both carry this exact
-              // drawing, so an omitted SDK arg cannot become a different hash
-              // during confirmation replay.
-              dwg: String(args.dwg ?? session.drawing_id),
+              params,
+              dwg,
+              catalog_digest: catalogDigest,
+              ...drawingPins,
               ...(typeof args.confirmation_id === "string"
                 ? { confirmation_id: args.confirmation_id }
                 : {}),
@@ -551,6 +589,11 @@ export class ConverseLoop {
                 ? { confirmation_id: args.confirmation_id }
                 : {}),
             },
+          };
+        case "request_publication":
+          return {
+            action: "request_publication",
+            args: { change_set_id: String(args.change_set_id ?? "") },
           };
         case "request_confirmation":
           // The catalog carries this UI-only action at rung 0 with policy
@@ -638,10 +681,10 @@ export class ConverseLoop {
           state.proposalMade = true;
           if (tool === "run_capability") {
             const target = String(args.tool ?? "");
-            const params = asRecord(args.params);
+            const params = asRecord(consult.args.params);
             // dwg resolves exactly as dispatchAllowed will resolve it — the chip
             // must render the TARGET drawing, not just the one on screen.
-            const dwg = String(args.dwg ?? session.drawing_id);
+            const dwg = String(consult.args.dwg ?? session.drawing_id);
             await emit("proposed_run", {
               confirmation_id: confirmationId,
               tool: target,
@@ -662,10 +705,23 @@ export class ConverseLoop {
             result = ok(JSON.stringify({ pending: true, confirmation_id: confirmationId }));
           }
         } else {
+          const executionArgs = tool === "run_capability"
+            ? { ...args, ...consult.args }
+            : args;
           result = await this.dispatchAllowed(
             tool,
-            args,
-            { session, turnId, emit, catalogFor, capabilityOf },
+            executionArgs,
+            {
+              session,
+              turnId,
+              emit,
+              catalogFor,
+              capabilityOf,
+              invalidateCatalog: () => {
+                state.catalogFetched = false;
+                state.catalog = null;
+              },
+            },
           );
         }
       } catch (e) {
@@ -693,6 +749,7 @@ export class ConverseLoop {
       emit: (type: ConverseEventType, data: Record<string, unknown>) => Promise<void>;
       catalogFor: () => Promise<CapabilityEntry[]>;
       capabilityOf: (toolName: string) => Promise<"drawing.read" | "drawing.write">;
+      invalidateCatalog: () => void;
     },
   ): Promise<SpineToolResult> {
     const { appRun } = this.ports;
@@ -730,6 +787,11 @@ export class ConverseLoop {
           return err("run_capability requires a current server-issued catalog digest");
         }
         const capability = await ctx.capabilityOf(target);
+        const drawingVersion = Number(args.drawing_version);
+        const expectedDrawingHead = Number(args.expected_drawing_head);
+        const catalogCommit = args.catalog_commit;
+        const effectiveCatalogDigest = args.effective_catalog_digest;
+        const toolManifestSha256 = args.tool_manifest_sha256;
         // Read tools may wait inline (fast path); writes are long jobs — async row.
         const res = await appRun.submitRun({
           tenantId,
@@ -737,6 +799,21 @@ export class ConverseLoop {
           params,
           dwg,
           catalogDigest,
+          ...(capability === "drawing.write" && Number.isInteger(drawingVersion)
+            ? { drawingVersion }
+            : {}),
+          ...(capability === "drawing.write" && Number.isInteger(expectedDrawingHead)
+            ? { expectedDrawingHead }
+            : {}),
+          ...(capability === "drawing.write" && typeof catalogCommit === "string"
+            ? { catalogCommit }
+            : {}),
+          ...(capability === "drawing.write" && typeof effectiveCatalogDigest === "string"
+            ? { effectiveCatalogDigest }
+            : {}),
+          ...(capability === "drawing.write" && typeof toolManifestSha256 === "string"
+            ? { toolManifestSha256 }
+            : {}),
           wait: capability === "drawing.read",
           waitTimeoutS: this.readWaitS,
         });
@@ -760,8 +837,33 @@ export class ConverseLoop {
       case "author_tool": {
         const description = String(args.description ?? "").trim();
         if (!description) return err("author_tool requires args.description");
-        const authored = await appRun.authorTool(tenantId, description);
+        const normalizedDescription = description.replace(/\s+/g, " ");
+        const idempotencyKey = `author:${createHash("sha256")
+          .update(JSON.stringify({
+            action: "author_tool",
+            tenant_id: tenantId,
+            session_id: ctx.session.session_id,
+            description: normalizedDescription,
+          }))
+          .digest("hex")}`;
+        const authored = await appRun.authorTool(
+          tenantId,
+          normalizedDescription,
+          idempotencyKey,
+        );
         return ok(JSON.stringify(authored));
+      }
+
+      case "request_publication": {
+        const changeSetId = String(args.change_set_id ?? "").trim();
+        if (!changeSetId) {
+          return err("request_publication requires args.change_set_id");
+        }
+        const publication = await appRun.requestPublication(tenantId, changeSetId);
+        if (publication.status === "published") {
+          ctx.invalidateCatalog();
+        }
+        return ok(JSON.stringify(publication));
       }
 
       case "request_confirmation": {
@@ -848,6 +950,8 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `job_id=${String(args.job_id ?? "?")}`;
     case "author_tool":
       return `mode=${String(args.mode ?? "build")}`;
+    case "request_publication":
+      return `change_set_id=${String(args.change_set_id ?? "?")}`;
     case "request_confirmation":
       return `kind=${String(args.kind ?? "confirm")}`;
   }

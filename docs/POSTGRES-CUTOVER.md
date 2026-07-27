@@ -1,6 +1,6 @@
 # PostgreSQL production cutover
 
-PostgreSQL support now spans migrations `0001` through `0019`. Production
+PostgreSQL support now spans migrations `0001` through `0020`. Production
 authority has not been proven to have moved. Repository defaults still select
 SQLite, files, process memory, or disabled mutation for every opt-in shared
 authority.
@@ -16,7 +16,7 @@ default.
 
 ## Migration inventory
 
-The migration runner applies every sorted `NNNN_*.sql` file, which is all 19
+The migration runner applies every sorted `NNNN_*.sql` file, which is all 20
 files in this commit. `assert_schema_current()` validates the API and canonical
 worker's required table and column subset and reports the shipped manifest
 count. It is not an applied-migration ledger and does not prove that every
@@ -43,6 +43,7 @@ authority table exists.
 | `0017` | harness sessions, turns, events, confirmations, usage, tenant repository leases |
 | `0018` | drawing import provenance and replay protection |
 | `0019` | per-session model selection |
+| `0020` | customization changes, confirmations, publication requests, effective catalogs, deployment snapshots, and audit |
 
 Schema availability is not data migration. Most selectors have no historical
 backfill command and no live-data parity command. The inventory states this
@@ -50,6 +51,22 @@ explicitly. App sessions are the exception in part: `LEAF_SESSIONS_STORE`
 supports `dual_write`, `dual_write_shadow`, and `shadow` for new writes and
 runtime read comparison, but it still has no historical SQLite backfill
 command.
+
+Customization is also an exception. The app can select
+`LEAF_CUSTOMIZATION_STORE=postgres` after migration `0020`. The reconciliation
+command reads SQLite without write access, refuses a non-empty mismatched
+PostgreSQL target, and reports only table counts plus an aggregate digest:
+
+```shell
+python scripts/reconcile_customization_authority.py --mode backfill \
+  --sqlite /data/state/customization.db
+python scripts/reconcile_customization_authority.py --mode parity \
+  --sqlite /data/state/customization.db
+```
+
+Run both commands from the exact release image before selecting PostgreSQL.
+Save their output as staging evidence. The commands do not make a live selector
+change.
 
 ## Current authority summary
 
@@ -66,12 +83,12 @@ command.
 | Harness sessions and repository leases | `LEAF_HARNESS_SESSION_STORE` | `file` | implemented in `0017`; no historical backfill command |
 | Harness grants | `LEAF_GRANT_STORE` | `file` | `vault` is an unimplemented fail-closed seam; tokens are not in PostgreSQL |
 | Tenant repository mutation | `LEAF_HARNESS_AUTHORING_MODE` | `disabled` | `singleton` exists; `fleet` is blocked until the vault exists |
-| Customization R5 and R6 | `LEAF_CUSTOMIZATION_R5_MODE`, `LEAF_CUSTOMIZATION_R6_MODE` | `off` | SQLite only; no PostgreSQL implementation |
+| Customization R5 and R6 | `LEAF_CUSTOMIZATION_STORE` plus the R5 and R6 rollout modes | `sqlite`, with both rollout modes `off` | implemented in `0020`; reviewed backfill and parity commands exist, but have not run against staging |
 
 `LEAF_PLATFORM_POSTGRES_REQUIRED=1` is a startup gate, not an authority
 selector. It requires live auth, a direct `DATABASE_URL`, current migrations,
-PostgreSQL drawing and upload metadata, and filesystem blob storage. A database
-connection alone does not select any authority.
+PostgreSQL drawing, upload, and customization metadata, and filesystem blob
+storage. A database connection alone does not select any authority.
 
 ## Migration and reconciliation contract
 

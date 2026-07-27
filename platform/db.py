@@ -229,6 +229,40 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "tenant_id", "owner_token", "generation", "acquired_at", "heartbeat_at", "expires_at",
         },
     },
+    "customization": {
+        "customization_change_sets": {
+            "change_set_id", "tenant_id", "idempotency_key", "state", "version",
+            "base_commit", "staged_commit", "catalog_digest",
+            "desired_platform_release", "workspace_contract_digest",
+            "author_subject", "approver_subject", "created_at", "updated_at",
+        },
+        "effective_catalogs": {
+            "tenant_id", "change_set_id", "catalog_commit", "catalog_digest",
+            "effective_platform_release", "workspace_contract_digest", "updated_at",
+        },
+        "customization_audit_events": {
+            "event_id", "tenant_id", "change_set_id", "prior_state", "next_state",
+            "author_subject", "approver_subject", "base_commit", "staged_commit",
+            "catalog_digest", "platform_release", "workspace_contract_digest",
+            "idempotency_key", "result", "reason_code", "payload_json", "created_at",
+        },
+        "customization_confirmations": {
+            "confirmation_id", "tenant_id", "change_set_id", "payload_json",
+            "signature", "consumed", "created_at",
+        },
+        "customization_publication_requests": {
+            "tenant_id", "change_set_id", "confirmation_id", "status",
+            "reason_code", "created_at", "updated_at",
+        },
+        "customization_deployment_snapshots": {
+            "snapshot_id", "payload_json", "effective_catalog_digest",
+            "platform_release", "idempotency_key", "created_at",
+        },
+        "customization_deployment_audit": {
+            "audit_id", "snapshot_id", "action", "result", "idempotency_key",
+            "created_at",
+        },
+    },
 }
 
 # Each catalog contract names the owning relation and stable semantic fragments
@@ -392,6 +426,48 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "harness_tenant_repo_leases_pkey": _catalog_contract(
             "harness_tenant_repo_leases", "PRIMARY KEY (tenant_id)"),
     },
+    "customization": {
+        "customization_change_sets_pkey": _catalog_contract(
+            "customization_change_sets", "PRIMARY KEY (change_set_id)"),
+        "customization_change_sets_tenant_id_idempotency_key_key": _catalog_contract(
+            "customization_change_sets", "UNIQUE (tenant_id, idempotency_key)"),
+        "effective_catalogs_pkey": _catalog_contract(
+            "effective_catalogs", "PRIMARY KEY (tenant_id)"),
+        "effective_catalogs_change_set_id_fkey": _catalog_contract(
+            "effective_catalogs", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_audit_events_pkey": _catalog_contract(
+            "customization_audit_events", "PRIMARY KEY (event_id)"),
+        "customization_audit_events_change_set_id_fkey": _catalog_contract(
+            "customization_audit_events", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_audit_events_tenant_id_idempotency_key_key": _catalog_contract(
+            "customization_audit_events", "UNIQUE (tenant_id, idempotency_key)"),
+        "customization_confirmations_pkey": _catalog_contract(
+            "customization_confirmations", "PRIMARY KEY (confirmation_id)"),
+        "customization_confirmations_consumed_check": _catalog_contract(
+            "customization_confirmations", "CHECK", "consumed"),
+        "customization_publication_requests_pkey": _catalog_contract(
+            "customization_publication_requests",
+            "PRIMARY KEY (tenant_id, change_set_id)"),
+        "customization_publication_requests_change_set_id_fkey": _catalog_contract(
+            "customization_publication_requests", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_publication_requests_confirmation_id_fkey": _catalog_contract(
+            "customization_publication_requests", "FOREIGN KEY (confirmation_id)",
+            "REFERENCES customization_confirmations(confirmation_id)"),
+        "customization_deployment_snapshots_pkey": _catalog_contract(
+            "customization_deployment_snapshots", "PRIMARY KEY (snapshot_id)"),
+        "customization_deployment_snapshots_idempotency_key_key": _catalog_contract(
+            "customization_deployment_snapshots", "UNIQUE (idempotency_key)"),
+        "customization_deployment_audit_pkey": _catalog_contract(
+            "customization_deployment_audit", "PRIMARY KEY (audit_id)"),
+        "customization_deployment_audit_snapshot_id_fkey": _catalog_contract(
+            "customization_deployment_audit", "FOREIGN KEY (snapshot_id)",
+            "REFERENCES customization_deployment_snapshots(snapshot_id)"),
+        "customization_deployment_audit_idempotency_key_key": _catalog_contract(
+            "customization_deployment_audit", "UNIQUE (idempotency_key)"),
+    },
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
@@ -465,6 +541,13 @@ _AUTHORITY_REQUIRED_INDEXES = {
         "idx_harness_tenant_repo_leases_expiry": _catalog_contract(
             "harness_tenant_repo_leases", "(expires_at)"),
     },
+    "customization": {
+        "customization_recovery_idx": _catalog_contract(
+            "customization_change_sets", "(state, tenant_id)"),
+        "customization_confirmation_lookup_idx": _catalog_contract(
+            "customization_confirmations",
+            "(tenant_id, change_set_id, consumed, created_at DESC)"),
+    },
 }
 
 _AUTHORITY_REQUIRED_TRIGGERS = {
@@ -493,6 +576,7 @@ _AUTHORITY_SELECTORS = {
     "LEAF_DRAWING_STORE": {"postgres": "drawing"},
     "LEAF_UPLOAD_STORE": {"postgres": "upload"},
     "LEAF_HARNESS_SESSION_STORE": {"postgres": "harness_sessions"},
+    "LEAF_CUSTOMIZATION_STORE": {"postgres": "customization"},
 }
 _RECONCILIATION_TABLES = (
     "orgs", "projects", "drawing_artifacts", "drawing_versions", "jobs",

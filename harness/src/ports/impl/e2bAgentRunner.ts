@@ -50,7 +50,6 @@ import type {
   Capability,
   ToolPackage,
 } from "../index.js";
-import { validateToolPackage } from "../../registry/toolPackageSchema.js";
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { createHash } from "node:crypto";
@@ -195,6 +194,25 @@ const LIMITS = Object.freeze({
   outputBytes: 1024 * 1024,
   inputBytes: 512 * 1024,
 });
+
+function validatedProbeUrl(brokerHost: string, rawUrl: string): string {
+  let probe: URL;
+  try {
+    probe = new URL(rawUrl);
+  } catch {
+    throw new Error("E2B broker probe URL is invalid");
+  }
+  if (probe.protocol !== "https:") {
+    throw new Error("E2B broker probe URL must use HTTPS");
+  }
+  if (probe.username || probe.password) {
+    throw new Error("E2B broker probe URL cannot contain credentials");
+  }
+  if (probe.hostname.toLowerCase() !== brokerHost.trim().toLowerCase()) {
+    throw new Error("E2B broker probe hostname must match the allowlisted broker host");
+  }
+  return probe.toString();
+}
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -398,7 +416,10 @@ export class E2bAgentRunner implements AgentRunner {
 
   constructor(private readonly opts: E2bAgentRunnerOptions = {}) {
     this.brokerHost = opts.brokerHost ?? DEFAULT_BROKER_HOST;
-    this.brokerProbeUrl = opts.brokerProbeUrl ?? `https://${this.brokerHost}/post`;
+    this.brokerProbeUrl = validatedProbeUrl(
+      this.brokerHost,
+      opts.brokerProbeUrl ?? `https://${this.brokerHost}/post`,
+    );
     this.deniedTargets = opts.deniedTargets ?? DEFAULT_DENIED_TARGETS;
     this.timeoutMs = opts.timeoutMs ?? 120_000;
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 45_000;
@@ -592,53 +613,30 @@ export class E2bAgentRunner implements AgentRunner {
     // Harness-side, deterministic + robust: assemble the CONTRACT §2 package from the
     // sandbox's author output, write it into the tenant checkout, re-validate, test-run.
     const author = probe.author;
-    const now = new Date().toISOString();
     const name = author.name;
-    const pkgDir = `tools/${name}`;
-    const tool: ToolPackage = {
+    const submitted = input.toolset.submitTool({
       name,
-      version: "1.0.0",
       description: author.description,
-      kind: "script",
       engine_op: author.engine_op,
-      entry: `${pkgDir}/tool.py`,
       params: author.params_schema,
       returns: author.returns_schema,
       capabilities: author.capabilities.map(String) as Capability[],
-      timeout_ms: 30000,
-      idempotent: true,
-      review: { status: "unreviewed" },
-      provenance: {
-        author: "agent",
-        created: now,
-        modified: now,
-        session: `e2b:${receipt.sandboxId}`,
-        static_scan: [],
-      },
-    };
-    const manifest: ToolPackage = { ...tool, entry: "tool.py" };
-
-    const fs = input.toolset.fsTenantRepo;
-    fs.writeFile(`${pkgDir}/tool.json`, JSON.stringify(manifest, null, 2) + "\n");
-    fs.writeFile(`${pkgDir}/tool.py`, author.code);
-
-    // Defense in depth: re-run the §2 oracle harness-side (a malformed sandbox manifest
-    // can never break the pipeline).
-    const diagnostics = validateToolPackage(tool);
-    if (diagnostics.length > 0) {
-      throw new Error(`E2B-authored tool failed CONTRACT §2 re-validation: ${diagnostics.join("; ")}`);
-    }
-    const vr = input.toolset.validateTool(tool);
-    if (!vr.ok) {
-      throw new Error(`E2B-authored tool failed the harness validate oracle: ${vr.diagnostics.join("; ")}`);
-    }
+      source: author.code,
+      session: `e2b:${receipt.sandboxId}`,
+    });
 
     // Test-run once through the broker (broker only, aps_live=false) to confirm the numbers.
-    await input.toolset.apsTestRun(tool, {});
+    await input.toolset.apsTestRun(submitted.tool, {});
 
     const preview =
       `Tool "${name}" ${author.preview_verb} (engine_op=${author.engine_op}); ` +
       `authored inside an egress-locked E2B sandbox (${receipt.sandboxId}); runs zero-LLM at runtime.`;
-    return { tool, code: author.code, preview, files: [`${pkgDir}/tool.json`, `${pkgDir}/tool.py`] };
+    return {
+      tool: submitted.tool,
+      code: submitted.code,
+      preview,
+      files: submitted.files,
+      sourceReceipt: submitted.receipt,
+    };
   }
 }

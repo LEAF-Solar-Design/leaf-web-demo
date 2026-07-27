@@ -35,6 +35,7 @@ from routers import (
     agent,
     author,
     capabilities,
+    deployment_identity,
     drawings,
     jobs as jobs_router,
     ops,
@@ -109,6 +110,7 @@ app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_
 app.include_router(tools.router)
 app.include_router(jobs_router.router)
 app.include_router(capabilities.router)
+app.include_router(deployment_identity.router)
 app.include_router(author.router)
 app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoints
 app.include_router(prompt.router)  # M3: NL prompt router (MATRIX gap #2 — one prompt box -> lanes)
