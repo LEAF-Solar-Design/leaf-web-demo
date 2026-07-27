@@ -429,7 +429,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
               SERVER, _py_pytest("tests/test_sessions_routes.py"), 41),
         Suite("server-turn-runner", "server tests/test_turn_runner.py", "pytest", SERVER,
-              _py_pytest("tests/test_turn_runner.py"), 21),
+              _py_pytest("tests/test_turn_runner.py"), 24),
         # g1a canonical e2e self-skips without a reachable Postgres; gate it the
         # same way as the platform suite so the skip is visible, not silent.
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
