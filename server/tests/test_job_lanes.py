@@ -120,7 +120,7 @@ def test_jobs_db_creates_missing_parent_directory(monkeypatch, tmp_path):
     assert jobs.list_jobs("parent-create-test", limit=1) == []
     assert db_path.is_file()
 
-    jobs._conn.close()
+    jobs.reset_connection()
 
 
 class _RecordingExecutor:

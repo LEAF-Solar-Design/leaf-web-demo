@@ -105,8 +105,9 @@ def _use_predecessor_database(monkeypatch):
     monkeypatch.setattr(jobs, "DB_PATH", _DB_PATH)
     monkeypatch.setattr(jobs, "_conn", None)
     yield
-    if jobs._conn is not None:
-        jobs._conn.close()
+    # reset_connection(), never jobs._conn.close(): closing in place would leave
+    # the dead handle in the singleton for the monkeypatch undo above to restore.
+    jobs.reset_connection()
 
 
 def _submit(monkeypatch, **kwargs) -> str:
@@ -173,8 +174,11 @@ def test_completed_backfill_is_not_rescanned_on_second_connect(monkeypatch):
         "SELECT id FROM schema_migrations WHERE id = ?",
         (jobs._DWG_VERSION_BACKFILL_MIGRATION,)).fetchone()
     assert applied is not None
-    first_conn.close()
-    monkeypatch.setattr(jobs, "_conn", None)
+    # Drop the singleton so the traced connect below IS a second first-connect.
+    # first_conn.close() plus monkeypatch.setattr(_conn, None) would do it too,
+    # but the setattr would record the just-closed handle as the value to
+    # restore on teardown, handing it to every later test.
+    jobs.reset_connection()
 
     statements = []
     connect = sqlite3.connect
@@ -185,8 +189,8 @@ def test_completed_backfill_is_not_rescanned_on_second_connect(monkeypatch):
         return second_conn
 
     monkeypatch.setattr(jobs.sqlite3, "connect", traced_connect)
-    second_conn = jobs._db()
-    second_conn.close()
+    jobs._db()  # the traced SECOND first-connect; `statements` is the evidence
+    jobs.reset_connection()
 
     assert not any(
         "SELECT job_id, execution_json FROM jobs" in statement

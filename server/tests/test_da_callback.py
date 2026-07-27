@@ -274,8 +274,15 @@ def test_callback_completes_the_durable_job_and_poll_duplicate_is_a_noop(monkeyp
         def submit(self, *args, **kwargs):
             return None
 
-    # Keep the process-global connection alive. monkeypatch restores it after
-    # this isolated database test, so closing it here poisons later modules.
+    # This is an isolated-database test, and monkeypatch restores the singleton
+    # after it. reset_connection(), never jobs._conn.close(): closing in place
+    # leaves the dead handle IN the singleton, and the monkeypatch below then
+    # records that dead handle as the value to restore on teardown --
+    # reinstating it for every later module that touches the job store.
+    # reset_connection() clears as well as closes, so what gets restored is
+    # None and the next _db() rebuilds; simply not closing would leave this
+    # test's own connection open for the life of the process.
+    jobs.reset_connection()
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
     monkeypatch.setattr(jobs, "_conn", None)
     monkeypatch.setattr(jobs, "_reaper_started", True)
@@ -348,8 +355,11 @@ def test_a_stale_attempts_callback_cannot_complete_a_newer_attempt(monkeypatch, 
         def submit(self, *args, **kwargs):
             return None
 
-    if jobs._conn is not None:
-        jobs._conn.close()
+    # reset_connection(), never jobs._conn.close(): closing in place leaves the
+    # dead handle IN the singleton, and the monkeypatch below then records that
+    # dead handle as the value to restore on teardown -- reinstating it for
+    # every later test that touches the job store.
+    jobs.reset_connection()
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
     monkeypatch.setattr(jobs, "_conn", None)
     monkeypatch.setattr(jobs, "_reaper_started", True)
@@ -416,8 +426,11 @@ def test_a_callback_with_no_attempt_is_refused_outright(monkeypatch, tmp_path):
         def submit(self, *args, **kwargs):
             return None
 
-    if jobs._conn is not None:
-        jobs._conn.close()
+    # reset_connection(), never jobs._conn.close(): closing in place leaves the
+    # dead handle IN the singleton, and the monkeypatch below then records that
+    # dead handle as the value to restore on teardown -- reinstating it for
+    # every later test that touches the job store.
+    jobs.reset_connection()
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
     monkeypatch.setattr(jobs, "_conn", None)
     monkeypatch.setattr(jobs, "_reaper_started", True)
@@ -477,8 +490,11 @@ def test_a_stale_failure_cannot_fail_a_newer_attempt_even_if_it_races(monkeypatc
         def submit(self, *args, **kwargs):
             return None
 
-    if jobs._conn is not None:
-        jobs._conn.close()
+    # reset_connection(), never jobs._conn.close(): closing in place leaves the
+    # dead handle IN the singleton, and the monkeypatch below then records that
+    # dead handle as the value to restore on teardown -- reinstating it for
+    # every later test that touches the job store.
+    jobs.reset_connection()
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
     monkeypatch.setattr(jobs, "_conn", None)
     monkeypatch.setattr(jobs, "_reaper_started", True)
@@ -515,8 +531,11 @@ def test_a_failure_with_no_provenance_is_still_accepted(monkeypatch, tmp_path):
         def submit(self, *args, **kwargs):
             return None
 
-    if jobs._conn is not None:
-        jobs._conn.close()
+    # reset_connection(), never jobs._conn.close(): closing in place leaves the
+    # dead handle IN the singleton, and the monkeypatch below then records that
+    # dead handle as the value to restore on teardown -- reinstating it for
+    # every later test that touches the job store.
+    jobs.reset_connection()
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
     monkeypatch.setattr(jobs, "_conn", None)
     monkeypatch.setattr(jobs, "_reaper_started", True)

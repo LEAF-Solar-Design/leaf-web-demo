@@ -63,8 +63,9 @@ def isolated_jobs(monkeypatch, tmp_path):
     monkeypatch.setattr(jobs.platform_link, "on_running", lambda *a, **k: None)
     monkeypatch.setattr(jobs.platform_link, "on_terminal", lambda *a, **k: None)
     yield
-    if jobs._conn is not None:
-        jobs._conn.close()
+    # reset_connection(), never jobs._conn.close(): closing in place would leave
+    # the dead handle in the singleton for the monkeypatch undo above to restore.
+    jobs.reset_connection()
 
 
 @pytest.fixture(autouse=True)

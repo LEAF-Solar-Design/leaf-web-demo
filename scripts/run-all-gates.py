@@ -315,6 +315,11 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_billing_tiers.py"), 30),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
               _py_pytest("tests/test_job_lanes.py"), 12),
+        # One process per file (below) is exactly why the cross-file connection
+        # leak this pins was invisible to CI: every file passed alone.
+        Suite("server-jobs-connection-ownership",
+              "server tests/test_jobs_connection_ownership.py", "pytest", SERVER,
+              _py_pytest("tests/test_jobs_connection_ownership.py"), 12),
         Suite("server-agent-e2e", "server tests/test_agent_e2e.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_e2e.py"), 4),
         # --- guest drawing uploads (CONTRACT-ADDENDUM section 19) --- #
