@@ -672,30 +672,41 @@ INDEPENDENCE_SLEEP_S = 4.0
 # prefix. At the contract default of 8 this still resolves to 12 POSTs, which is
 # what every measurement quoted here was taken at.
 #
-# What the warmup buys -- and what it costs to lose it -- is bounded, not
-# argued. Over the first 8 POSTs the per-POST cost runs 60-250ms against that
-# 7ms floor, so a group owning more of those slots carries a bias that has
-# nothing to do with the submit path. But the pair order ALTERNATES, so for an
-# expensive prefix of ANY length the two groups differ by at most ONE slot, and
-# the residual is a difference between neighbouring slots divided by
-# INDEPENDENCE_PAIRS rather than a sum. Measured at that worst case: an earlier
-# form of this test ran with no warmup at all, and 64 runs of it read a
-# systematic -33.7ms (grand mean 40.6ms slow against 74.3ms fast). That is 6.7%
-# of the budget below. So a warmup that under-covers erodes margin and nudges
-# the detection floor; it cannot flake this bound, which needs 500ms.
+# The warmup is BEST-EFFORT, and the honest statement of what it buys is the
+# measured one, not a structural guarantee. Over the first 8 POSTs the per-POST
+# cost runs 60-250ms against that 7ms floor, so a group owning more of the
+# expensive slots carries a bias that has nothing to do with the submit path.
+# The alternating pair order splits an expensive prefix of ANY length between
+# the two groups to within ONE SLOT -- but that bounds the COUNT of slots, NOT
+# their weighted cost, and the two come apart when the slots differ in price.
+# The adversarial worst case is real: 8 prefix slots split 4/4 with the whole
+# 60-250ms spread landing the expensive four on one side is 4*190ms/16 pairs =
+# 47.5ms of bias. That is the ceiling this bound is stated against.
 #
-# Measured directly at the raised pools this derivation exists for, by pinning
-# the count at 12 while the pool was 16 and then 64:
+# What actually occurs is much smaller, measured by pinning the count at 12
+# while raising the pool, which is the under-covered case in its worst regime
+# (at pool 64 the entire measured window sits inside the spawn prefix):
 #
 #     pool 16, 6 runs   count 12: -0.7 .. +2.7ms   derived 20: -1.5 .. +1.2ms
 #     pool 64, 4 runs   count 12: -9.8 .. +6.9ms   derived 68: -4.9 .. +2.2ms
 #
-# Under-covering roughly doubles the spread of the statistic, which is why the
-# count is derived rather than fixed. It does NOT reach a false pass: the worst
-# single reading it produced was 9.8ms, 2% of the budget. After a covering
-# warmup the two groups are indistinguishable: 1792 measured samples put the
-# grand mean at 9.6ms for BOTH.
+# and an earlier form of this test that ran with NO warmup at all read a
+# systematic -33.7ms over 64 runs (grand mean 40.6ms slow against 74.3ms fast).
+# So under-covering roughly doubles the SPREAD of the statistic, which is why
+# the count is derived rather than fixed, and the worst reading ever produced is
+# 33.7ms against the 47.5ms ceiling. Neither can flake this bound, which needs
+# 500ms. Both are charged against the detection floor in the docstring below
+# rather than assumed away. After a covering warmup the two groups are
+# indistinguishable: 1792 measured samples put the grand mean at 9.6ms for BOTH.
 SUBMIT_WARMUP_MARGIN = 4
+# The pool is read from the ENVIRONMENT, so the count it implies is capped. An
+# inherited JOB_WORKERS_FAST is any positive integer -- ThreadPoolExecutor only
+# rejects <= 0 at construction -- and an uncapped warmup would turn an absurd
+# value into a gate that never finishes (a million POSTs, each later polled to
+# terminal) instead of a test that reports something. Past this ceiling the
+# warmup simply under-covers, which costs the bounded, measured bias above. A
+# hang tells you nothing; a slightly wider statistic still tests the property.
+SUBMIT_WARMUP_MAX_POSTS = 64
 
 
 def fast_lane_workers(stack) -> int:
@@ -703,7 +714,9 @@ def fast_lane_workers(stack) -> int:
 
     Resolved in the same order the app process resolves it: `start_uvicorn`
     copies os.environ and then applies the fixture's overrides, and `jobs`
-    reads JOB_WORKERS_FAST at executor creation with a default of 8.
+    reads JOB_WORKERS_FAST at executor creation with a default of 8. A value
+    the app itself would reject at construction is left to fail the same way
+    here rather than being silently repaired into a different pool size.
     """
     raw = stack["app_env"].get(
         "JOB_WORKERS_FAST", os.environ.get("JOB_WORKERS_FAST", "8"))
@@ -782,19 +795,30 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     same event as the flake above and just as unlikely.
 
     The budget is derived from the measured noise, NOT reverse-engineered from a
-    regression size. What it buys, stated as a detection floor, is
-    k > 0.125 -- any submit path whose cost grows faster than an eighth of
-    execution time. That floor is a CONSEQUENCE of the noise measurement, which
-    matters because the mutant used to check this test uses k = 0.3: that
+    regression size. Stated as a detection floor, the budget alone would buy
+    k > 0.125 -- an eighth of execution time. But the warmup above is
+    best-effort, and a prefix of thread-spawn slots it fails to cover can seat a
+    bias of up to 47.5ms on the FAST side, which subtracts from a real
+    regression before this bound sees it. The floor charged for that is
+    therefore
+
+        k > (MEAN_SUBMIT_DIFF_BUDGET_S + 0.0475) / INDEPENDENCE_SLEEP_S = 0.14
+
+    -- any submit path whose cost grows faster than about a seventh of execution
+    time. Both numbers are CONSEQUENCES of measurement rather than targets,
+    which matters because the mutant used to check this test uses k = 0.3: that
     constant is an arbitrary parameter of the mutation, not a contract, and
     sizing a bound to catch exactly it would be fitting to the mutant. It is
     reported here only as a margin -- k = 0.3 costs 1.2s and overshoots this
-    budget 2.4x.
+    budget 2.4x, clearing even the charged floor by better than 2x.
 
     The pair order ALTERNATES, (slow, fast) then (fast, slow). The second POST of
     a pair always runs with one more job in flight than the first, and letting
     one group own that slot every time would measure the ordering rather than the
-    property.
+    property. Note what this does and does NOT buy: it holds the two groups to
+    within ONE slot of an expensive prefix, which is a bound on the COUNT of
+    slots and not on their weighted cost. The 47.5ms charged above is exactly
+    the gap between those two things.
 
     Every job is drained in a `finally`, for the reason test 1 documents at
     length. And as in test 1a, a job id is only readable AFTER its POST returns
@@ -820,7 +844,9 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     try:
         # The warmup POSTs carry no `_qa_sleep_s`, so clearing the thread-spawn
         # regime costs instant jobs rather than that many more on the drain bill.
-        warmup_posts = fast_lane_workers(stack) + SUBMIT_WARMUP_MARGIN
+        warmup_posts = min(
+            fast_lane_workers(stack) + SUBMIT_WARMUP_MARGIN,
+            SUBMIT_WARMUP_MAX_POSTS)
         for _ in range(warmup_posts):
             sent += 1
             warm = requests.post(url, json=fast_payload, timeout=120)
