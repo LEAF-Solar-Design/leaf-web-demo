@@ -392,6 +392,53 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "harness_tenant_repo_leases_pkey": _catalog_contract(
             "harness_tenant_repo_leases", "PRIMARY KEY (tenant_id)"),
     },
+    "customization": {
+        "customization_change_sets_pkey": _catalog_contract(
+            "customization_change_sets", "PRIMARY KEY (change_set_id)"),
+        "customization_change_sets_tenant_id_idempotency_key_key": _catalog_contract(
+            "customization_change_sets", "UNIQUE (tenant_id, idempotency_key)"),
+        "effective_catalogs_pkey": _catalog_contract(
+            "effective_catalogs", "PRIMARY KEY (tenant_id)"),
+        "effective_catalogs_change_set_id_fkey": _catalog_contract(
+            "effective_catalogs", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_audit_events_pkey": _catalog_contract(
+            "customization_audit_events", "PRIMARY KEY (event_id)"),
+        "customization_audit_events_change_set_id_fkey": _catalog_contract(
+            "customization_audit_events", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_audit_events_tenant_id_idempotency_key_key": _catalog_contract(
+            "customization_audit_events", "UNIQUE (tenant_id, idempotency_key)"),
+        "customization_confirmations_pkey": _catalog_contract(
+            "customization_confirmations", "PRIMARY KEY (confirmation_id)"),
+        # PostgreSQL deparses the migration's ``consumed IN (0,1)`` into this
+        # canonical form (confirmed against a live PostgreSQL 16 catalog). Pin
+        # the whole predicate, closing bracket included, so widening the allowed
+        # set to ``ARRAY[0, 1, 2]`` fails the contract instead of matching a
+        # prefix of it.
+        "customization_confirmations_consumed_check": _catalog_contract(
+            "customization_confirmations", "CHECK (consumed = ANY (ARRAY[0, 1]))"),
+        "customization_publication_requests_pkey": _catalog_contract(
+            "customization_publication_requests",
+            "PRIMARY KEY (tenant_id, change_set_id)"),
+        "customization_publication_requests_change_set_id_fkey": _catalog_contract(
+            "customization_publication_requests", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_publication_requests_confirmation_id_fkey": _catalog_contract(
+            "customization_publication_requests", "FOREIGN KEY (confirmation_id)",
+            "REFERENCES customization_confirmations(confirmation_id)"),
+        "customization_deployment_snapshots_pkey": _catalog_contract(
+            "customization_deployment_snapshots", "PRIMARY KEY (snapshot_id)"),
+        "customization_deployment_snapshots_idempotency_key_key": _catalog_contract(
+            "customization_deployment_snapshots", "UNIQUE (idempotency_key)"),
+        "customization_deployment_audit_pkey": _catalog_contract(
+            "customization_deployment_audit", "PRIMARY KEY (audit_id)"),
+        "customization_deployment_audit_snapshot_id_fkey": _catalog_contract(
+            "customization_deployment_audit", "FOREIGN KEY (snapshot_id)",
+            "REFERENCES customization_deployment_snapshots(snapshot_id)"),
+        "customization_deployment_audit_idempotency_key_key": _catalog_contract(
+            "customization_deployment_audit", "UNIQUE (idempotency_key)"),
+    },
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
@@ -467,13 +514,18 @@ _AUTHORITY_REQUIRED_INDEXES = {
     },
 }
 
+# 0014_broker.sql writes ``BEFORE UPDATE OR DELETE``, but pg_get_triggerdef
+# emits the events in catalog bit order, so the deparsed text is always
+# ``BEFORE DELETE OR UPDATE`` (confirmed against a live PostgreSQL 16 catalog).
+# Contracts compare against the deparse, never the migration source.
 _AUTHORITY_REQUIRED_TRIGGERS = {
     "broker": {
         "broker_usage_ledger_immutable": _catalog_contract(
-            "broker_usage_ledger", "BEFORE UPDATE OR DELETE",
+            "broker_usage_ledger", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
             "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
         "broker_admission_resolution_audit_immutable": _catalog_contract(
-            "broker_admission_resolution_audit", "BEFORE UPDATE OR DELETE",
+            "broker_admission_resolution_audit", "BEFORE DELETE OR UPDATE",
+            "FOR EACH ROW",
             "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
     },
 }
