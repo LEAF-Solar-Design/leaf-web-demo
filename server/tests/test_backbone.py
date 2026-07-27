@@ -679,9 +679,11 @@ INDEPENDENCE_SLEEP_S = 4.0
 # The alternating pair order splits an expensive prefix of ANY length between
 # the two groups to within ONE SLOT -- but that bounds the COUNT of slots, NOT
 # their weighted cost, and the two come apart when the slots differ in price.
-# The adversarial worst case is real: 8 prefix slots split 4/4 with the whole
-# 60-250ms spread landing the expensive four on one side is 4*190ms/16 pairs =
-# 47.5ms of bias. That is the ceiling this bound is stated against.
+# No ceiling is derived from the alternation here, because every attempt to do
+# so has been wrong: an even 8-slot prefix gives 4*190ms/16 = 47.5ms, but the
+# ODD 7-slot prefix splits 4/3 and gives 51.25ms, and a window the warmup covers
+# none of gives 190ms. The docstring charges the 190ms worst case, which assumes
+# nothing about the cost profile at all.
 #
 # What actually occurs is much smaller, measured by pinning the count at 12
 # while raising the pool, which is the under-covered case in its worst regime
@@ -738,7 +740,9 @@ def fast_lane_workers(stack) -> int:
 MEAN_SUBMIT_DIFF_BUDGET_S = 0.5
 # A hang is the only thing this should ever wait out, so it is sized for the
 # fully-serialised worst case (every slow job running one after another) plus
-# slack, not for the ~2-wave drain an 8-worker lane actually performs.
+# slack, not for the ~2-wave drain an 8-worker lane actually performs. It is the
+# budget for the WHOLE drain, spent across every job the test has to poll, not a
+# per-job allowance: see the deadline in the `finally` for why.
 INDEPENDENCE_DRAIN_TIMEOUT_S = INDEPENDENCE_SLEEP_S * INDEPENDENCE_PAIRS + 30.0
 
 
@@ -797,28 +801,41 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     The budget is derived from the measured noise, NOT reverse-engineered from a
     regression size. Stated as a detection floor, the budget alone would buy
     k > 0.125 -- an eighth of execution time. But the warmup above is
-    best-effort, and a prefix of thread-spawn slots it fails to cover can seat a
-    bias of up to 47.5ms on the FAST side, which subtracts from a real
-    regression before this bound sees it. The floor charged for that is
-    therefore
+    best-effort, and thread-spawn slots it fails to cover can seat a bias on the
+    FAST side that subtracts from a real regression before this bound sees it.
+    That bias is charged at its WORST CASE, which assumes nothing about the
+    shape of the cost profile: if the warmup covers nothing, all 2*16 measured
+    slots sit in the spawn regime, and the documented 60-250ms per-POST range
+    put entirely in anti-phase with the pair order gives
+    16*(250-60)ms / 16 pairs = 190ms. So the floor this test claims is
 
-        k > (MEAN_SUBMIT_DIFF_BUDGET_S + 0.0475) / INDEPENDENCE_SLEEP_S = 0.14
+        k > (MEAN_SUBMIT_DIFF_BUDGET_S + 0.190) / INDEPENDENCE_SLEEP_S
+          = 0.18
 
-    -- any submit path whose cost grows faster than about a seventh of execution
-    time. Both numbers are CONSEQUENCES of measurement rather than targets,
-    which matters because the mutant used to check this test uses k = 0.3: that
-    constant is an arbitrary parameter of the mutation, not a contract, and
-    sizing a bound to catch exactly it would be fitting to the mutant. It is
-    reported here only as a margin -- k = 0.3 costs 1.2s and overshoots this
-    budget 2.4x, clearing even the charged floor by better than 2x.
+    -- any submit path whose cost grows faster than about a fifth of execution
+    time. Do NOT tighten that number by arguing the profile is really monotone,
+    or that alternation balances the slots. Alternation bounds the COUNT of
+    slots each group owns, to within one; it does NOT bound their weighted cost,
+    and every attempt to derive a tighter ceiling from it has been wrong. The
+    measured bias is far smaller -- worst ever recorded 33.7ms, from the form of
+    this test with no warmup at all -- but 190ms is what is CLAIMED, because it
+    is the only figure that holds without assuming a cost profile.
 
-    The pair order ALTERNATES, (slow, fast) then (fast, slow). The second POST of
-    a pair always runs with one more job in flight than the first, and letting
-    one group own that slot every time would measure the ordering rather than the
-    property. Note what this does and does NOT buy: it holds the two groups to
-    within ONE slot of an expensive prefix, which is a bound on the COUNT of
-    slots and not on their weighted cost. The 47.5ms charged above is exactly
-    the gap between those two things.
+    Both numbers are consequences rather than targets, which matters because the
+    mutant used to check this test uses k = 0.3: that constant is an arbitrary
+    parameter of the mutation, not a contract, and sizing a bound to catch
+    exactly it would be fitting to the mutant. It is reported here only as a
+    margin -- k = 0.3 costs 1.2s, which overshoots the budget 2.4x and still
+    clears the charged floor by 1.7x.
+
+    The pair order ALTERNATES, (slow, fast) then (fast, slow). Within a pair the
+    second POST is issued after the first has already been submitted, so any
+    per-position effect would land on the same group every time if the order
+    were fixed, and the test would measure the ordering rather than the
+    property. It is deliberately NOT claimed that the second POST runs with one
+    more job in flight: a 0s job can reach terminal between its own response and
+    the next POST, and this test never observes job state between calls, so it
+    could not support that.
 
     Every job is drained in a `finally`, for the reason test 1 documents at
     length. And as in test 1a, a job id is only readable AFTER its POST returns
@@ -888,12 +905,31 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
                 f"{unrecovered} of {sent} POSTs did not yield a readable job_id, "
                 f"so a job may have been accepted with an id this test never saw "
                 f"and cannot drain")
+        # ONE deadline for the whole drain, not one per job. Per-job timeouts
+        # multiply: this test can hold up to SUBMIT_WARMUP_MAX_POSTS warmup jobs
+        # plus 2*INDEPENDENCE_PAIRS measured ones, and a per-job budget would let
+        # cleanup run to hours. The gate kills a suite at 900s
+        # (scripts/run-all-gates.py Suite.timeout_s), and a killed suite reports
+        # NOTHING -- the accumulated drain_errors below would never be seen, so
+        # the failure would surface as an opaque timeout instead of the named
+        # jobs that would not finish. A total deadline keeps the report reachable.
+        drain_deadline = time.monotonic() + INDEPENDENCE_DRAIN_TIMEOUT_S
+        undrained = []
         for job_id in job_ids:
+            remaining = drain_deadline - time.monotonic()
+            if remaining <= 0:
+                undrained.append(job_id)
+                continue
             try:
-                poll_until_terminal(
-                    stack, job_id, timeout_s=INDEPENDENCE_DRAIN_TIMEOUT_S)
+                poll_until_terminal(stack, job_id, timeout_s=remaining)
             except Exception as exc:  # noqa: BLE001 - drain every job, then report
                 drain_errors.append(f"{job_id}: {type(exc).__name__}: {exc}")
+        if undrained:
+            drain_errors.append(
+                f"{len(undrained)} of {len(job_ids)} jobs were never polled: the "
+                f"{INDEPENDENCE_DRAIN_TIMEOUT_S:g}s drain budget for the whole "
+                f"test was already spent on earlier ones "
+                f"({', '.join(undrained[:5])}{'...' if len(undrained) > 5 else ''})")
         assert not drain_errors, (
             "this test could not confirm every job it started had finished: "
             + "; ".join(drain_errors))
