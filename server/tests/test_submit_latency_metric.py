@@ -110,7 +110,8 @@ def _drain(job_id: str) -> Dict[str, Any]:
 # =========================================================================== #
 # emitter shape — what the alarm actually queries
 # =========================================================================== #
-def test_submit_latency_publishes_milliseconds_under_aps_live(captured):
+def test_submit_latency_publishes_milliseconds_under_env(captured, monkeypatch):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
     emf_metrics.emit_submit_latency(
         11.5, aps_live=True, tenant_id="acme", tool="panelize", job_id="job-abc")
 
@@ -120,18 +121,54 @@ def test_submit_latency_publishes_milliseconds_under_aps_live(captured):
     # consumer sums across them (the rule the module docstring states).
     assert len(directives) == 1
     assert directives[0]["Namespace"] == "Leaf/Platform/APS"
-    assert directives[0]["Dimensions"] == [["aps_live"]]
+    assert directives[0]["Dimensions"] == [["env"]]
     assert directives[0]["Metrics"] == [
         {"Name": "SubmitLatency", "Unit": "Milliseconds"}]
     assert doc["SubmitLatency"] == 11.5
-    # aps_live is the dimension the p99 alarm scopes to, and CloudWatch requires
-    # a dimension value to be a string.
-    assert doc["aps_live"] == "true"
+    # env is the dimension the p99 alarm scopes to, and CloudWatch requires a
+    # dimension value to be a string.
+    assert doc["env"] == "production"
     # High-cardinality attribution rides as LOG fields, never as dimensions.
     assert doc["tenant_id"] == "acme"
     assert doc["tool"] == "panelize"
     assert doc["job_id"] == "job-abc"
     assert "tenant_id" not in directives[0]["Dimensions"][0]
+
+
+def test_submit_latency_keeps_aps_live_as_a_log_field_only(captured, monkeypatch):
+    """`aps_live` must survive as attribution but must NOT be a dimension.
+
+    It was the dimension until 2026-07-27, which pointed the production alarm at
+    staging: production ships APS_LIVE=0 and staging ships APS_LIVE=1, so
+    aps_live="true" selected the wrong environment. Guarding both halves here
+    means a future edit cannot quietly reinstate it as a dimension.
+    """
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    emf_metrics.emit_submit_latency(11.5, aps_live=False)
+
+    doc = _only_submit_latency(captured)
+    assert doc["aps_live"] == "false"
+    assert doc["env"] == "production"
+    assert doc["_aws"]["CloudWatchMetrics"][0]["Dimensions"] == [["env"]]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("production", "production"), ("staging", "staging"),
+     ("PRODUCTION", "production"), ("  staging  ", "staging"),
+     ("", "unknown"), ("prod", "unknown"), ("../etc", "unknown")])
+def test_submit_latency_env_dimension_is_clamped(captured, monkeypatch, raw, expected):
+    """The env dimension is bounded, so no caller can mint unbounded series."""
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", raw)
+    emf_metrics.emit_submit_latency(11.5, aps_live=True)
+    assert _only_submit_latency(captured)["env"] == expected
+
+
+def test_submit_latency_env_dimension_when_var_is_absent(captured, monkeypatch):
+    """A missing LEAF_RUNTIME_ENV must not raise and must not go unlabelled."""
+    monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
+    emf_metrics.emit_submit_latency(11.5, aps_live=True)
+    assert _only_submit_latency(captured)["env"] == "unknown"
 
 
 @pytest.mark.parametrize(

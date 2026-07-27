@@ -71,21 +71,36 @@ docstring records why no single-sample threshold fits that host's tail.
 
 So the absolute bound is alarmed on in production. `POST /api/run` emits
 **`SubmitLatency`** (`Unit: Milliseconds`, namespace `Leaf/Platform/APS`,
-dimension `{aps_live}`) from `server/emf_metrics.py::emit_submit_latency`,
+dimension `{env}`) from `server/emf_metrics.py::emit_submit_latency`,
 measured from handler entry to the 202. `?wait=1` blocks on execution and is
 deliberately NOT sampled: one gauge does not carry two request populations with
 two different contracts.
 
 | | |
 | --- | --- |
-| metric | `Leaf/Platform/APS` `SubmitLatency`, dimension `aps_live="true"` |
+| metric | `Leaf/Platform/APS` `SubmitLatency`, dimension `env="production"` |
 | statistic | p99 over a 5-minute period |
 | threshold | `> 200` ms for 3 consecutive periods |
 | missing data | `notBreaching` (no traffic is not a breach) |
-| environment | production (`aps_live="true"` scopes out demo/mock traffic, which would otherwise both mask and trigger it) |
+| environment | production, selected by `env` (from `LEAF_RUNTIME_ENV`) |
 
 Alarm creation is an AWS action for the observability plane, not a repo change.
 Emission is gated by `server/tests/test_submit_latency_metric.py`.
+
+> **Dimension corrected 2026-07-27, from `{aps_live}` to `{env}`.** The original
+> shape could never have worked. `aps_live` is not an environment selector, and
+> as an environment proxy it was inverted: production ships `APS_LIVE=0` while
+> staging ships `APS_LIVE=1`, so an alarm scoped to `aps_live="true"` pointed at
+> STAGING under a production name. It was also sourced differently from the
+> identically-named dimension on `BrokerRun` — this metric read the container env
+> var `deps.APS_LIVE`, `BrokerRun` reads the per-request `req.aps_live` ledger
+> field. Submit cost is measured before any APS call, so APS liveness cannot
+> affect it in the first place. `aps_live` is retained as a LOG field, so
+> attribution is unchanged. No metric history was orphaned: `SubmitLatency` had
+> never been emitted in the account (`list-metrics` returned `{"Metrics": []}` on
+> 2026-07-27). **The CloudWatch alarm in `leaf-automation-aws-terraform`
+> (`cloudwatch_aps.tf`) must be re-scoped from `aps_live="true"` to
+> `env="production"` or it will keep measuring nothing.**
 
 ## §8 APS broker boundary
 

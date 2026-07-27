@@ -78,6 +78,26 @@ except Exception:  # pragma: no cover - defensive fallback, never expected
 STATUS_ALLOW = frozenset(_ENUM) | {"ok", "unknown", "error"}
 JOB_STATUS_ALLOW = frozenset({"complete", "failed", "unknown"})
 
+# Bounded allowlist for the `env` dimension, clamped for the same reason
+# STATUS_ALLOW exists: a dimension whose values are not bounded is a cardinality
+# leak. LEAF_RUNTIME_ENV is operator-set, so an unrecognised or missing value
+# becomes "unknown" rather than minting a new metric series. It is read at EMIT
+# time, not import time, so a test (or a process that sets it late) sees the
+# current value.
+ENV_ALLOW = frozenset({"production", "staging", "development"})
+
+
+def _runtime_env() -> str:
+    """The deployment posture this process is running under, as a dimension
+    value. Sourced from LEAF_RUNTIME_ENV, which is a REQUIRED env var on every
+    service enforcing the posture — unlike APS_LIVE, it actually names the
+    environment (and is not inverted against it)."""
+    try:
+        raw = os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower()
+    except Exception:  # pragma: no cover - os.environ access must not raise here
+        return "unknown"
+    return raw if raw in ENV_ALLOW else "unknown"
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -261,20 +281,47 @@ def emit_submit_latency(
     itself. Nothing observable existed for the absolute bound until this metric.
 
     ALARM INTENT (create in the observability plane, not here):
-        metric     Leaf/Platform/APS SubmitLatency, dimension aps_live="true"
+        metric     Leaf/Platform/APS SubmitLatency, dimension env="production"
         statistic  p99 over a 5-minute period
         threshold  > 200 (ms) for 3 consecutive periods
         treat missing data as `notBreaching` (no traffic is not a breach)
-      Scope it to aps_live="true" so demo/mock traffic cannot mask or trigger
-      it. p99 (not Average) is the documented statistic: a 202 that is fast on
+      p99 (not Average) is the documented statistic: a 202 that is fast on
       average and 2 seconds at the tail has already broken the contract for the
       users who hit the tail.
 
-    Published ONCE under {aps_live} — the same dimension set EngineSeconds
-    uses, so submit cost and engine cost are queryable side by side. tenant_id,
-    tool and job_id are LOW-VALUE-AS-DIMENSIONS and high cardinality: they are
-    log fields, so a breaching p99 can still be attributed by querying the logs
-    behind the metric.
+    Published ONCE under {env}, NOT {aps_live}. This dimension was `aps_live`
+    until 2026-07-27; it was wrong twice over, and the alarm built on it could
+    never have worked:
+
+      1. WRONG MEANING. Submit cost is measured on the 202 path, BEFORE any APS
+         call — execution runs on a background worker afterwards. Whether a run
+         would later touch live APS cannot affect this number, so scoping an
+         HTTP-contract SLO by APS liveness scopes it by something unrelated.
+      2. WRONG SOURCE, AND INVERTED. This emitter took `aps_live` from
+         `deps.APS_LIVE`, a container ENV VAR, while emit_broker_run takes the
+         identically-named dimension from `bool(req.aps_live)`, a PER-REQUEST
+         ledger field. One dimension name, two meanings. Worse, that env var runs
+         INVERTED against environment: production ships APS_LIVE=0 while staging
+         ships APS_LIVE=1, so an alarm scoped to aps_live="true" pointed at
+         STAGING while carrying a production name.
+
+    `env` comes from LEAF_RUNTIME_ENV, already a REQUIRED environment variable on
+    every service that enforces the deployment posture
+    (server/tests/test_deployment_source_identity.py), so it is a real
+    environment selector rather than a proxy for one. It is CLAMPED to a bounded
+    allowlist for the same reason `status` is: a dimension must never be able to
+    take an unbounded set of values.
+
+    Changing a published metric's dimension set normally orphans its history.
+    Not here: SubmitLatency has never been emitted in this account (verified
+    2026-07-27; `list-metrics --namespace Leaf/Platform/APS --metric-name
+    SubmitLatency` returns `{"Metrics": []}`), so there is no series to break and
+    no alarm that has ever seen a datapoint. This is the last moment it is free.
+
+    tenant_id, tool and job_id are LOW-VALUE-AS-DIMENSIONS and high cardinality:
+    they are log fields, so a breaching p99 can still be attributed by querying
+    the logs behind the metric. `aps_live` is kept as a LOG FIELD for exactly
+    that reason — the attribution stays available without being a dimension.
 
     A NON-FINITE OR NEGATIVE reading is DROPPED, not floored to 0. A clock that
     produced garbage must not publish a fast sample: that would pull the p99
@@ -290,10 +337,14 @@ def emit_submit_latency(
         if not math.isfinite(value) or value < 0.0:
             return
         directives = [
-            {"Namespace": NAMESPACE, "Dimensions": [["aps_live"]],
+            {"Namespace": NAMESPACE, "Dimensions": [["env"]],
              "Metrics": [{"Name": "SubmitLatency", "Unit": "Milliseconds"}]}
         ]
         root: Dict[str, Any] = {
+            "env": _runtime_env(),
+            # Log field, not a dimension. See the docstring: this is the value
+            # that used to BE the dimension, and it is neither an environment
+            # selector nor sourced the same way as emit_broker_run's `aps_live`.
             "aps_live": "true" if aps_live else "false",
             "SubmitLatency": value,
         }
