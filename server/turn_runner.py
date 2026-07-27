@@ -26,13 +26,7 @@ Semantics (frozen order):
       -> append_event(..., 'turn_started', {text|confirm, classifier_hint})
       -> build bounded prior-context `messages[]` from the event log
       -> POST {LEAF_CONVERSE_HARNESS_URL|LEAF_AUTHOR_HARNESS_URL}/turn,
-         stream=True, timeout=(5, TURN_MAX_S + READ_TIMEOUT_SLACK_S)
-         (converse var preferred; the read leg is deliberately LATER than the
-         watchdog's deadline so the watchdog always owns turn expiry — see
-         READ_TIMEOUT_SLACK_S. requests cannot split the header-read timeout
-         from the body-read timeout, so a harness that connects but never
-         sends headers is rejected after TURN_MAX_S + slack rather than
-         TURN_MAX_S.)
+         stream=True, timeout=(5, TURN_MAX_S)   (converse var preferred)
            immediate 401              -> TurnRejected(401, GRANT_REQUIRED, extra={grant_required:True})
            immediate 429              -> TurnRejected(429, llm_quota_exhausted|llm_rate_limited)
            immediate connection error -> TurnRejected(502, BROKER_UNREACHABLE)
@@ -162,31 +156,6 @@ def _scrub_secret(value: Optional[str], secret: Optional[str]) -> Optional[str]:
 
 def turn_max_s() -> float:
     return float(os.environ.get("TURN_MAX_S", "300"))
-
-
-# The request-level READ timeout is a lower-level safety net, NOT the turn's
-# duration limit — the `TURN_MAX_S` watchdog in _spawn_relay owns that. The two
-# must never share a deadline.
-#
-# urllib3's read timeout restarts on every chunk received, so the ONLY thing
-# separating it from the watchdog is how late the harness's last chunk arrived
-# — the harness's behavior, not something this module controls. A harness that
-# sends response headers and then goes silent (the canonical hang this watchdog
-# exists for) leaves BOTH deadlines at spawn + TURN_MAX_S, and which one
-# terminalizes the turn — a drain-thread `error` vs the watchdog's documented
-# `turn_complete{stop_reason:'timeout'}` — is then decided by thread scheduling.
-# Measured before this slack existed: the read timeout won 11 of 12 zero-chunk
-# hangs on an IDLE host, i.e. the contract above was the MINORITY outcome.
-#
-# Strict separation makes the watchdog win by construction under every arrival
-# pattern. It costs nothing in the normal path: the watchdog closes `resp` the
-# moment it fires, which unblocks the drain thread's read immediately.
-READ_TIMEOUT_SLACK_S = 5.0
-
-
-def read_timeout_s(max_s: float) -> float:
-    """Socket read timeout — STRICTLY later than the watchdog's deadline."""
-    return max_s + READ_TIMEOUT_SLACK_S
 
 
 def approval_ttl_s() -> float:
@@ -419,7 +388,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     try:
         resp = requests.post(f"{harness_url}/turn", json=payload,
                              headers=broker_client.harness_headers(),
-                             stream=True, timeout=(5, read_timeout_s(max_s)))
+                             stream=True, timeout=(5, max_s))
     except requests.exceptions.ConnectTimeout as exc:
         # The ONLY pre_harness leg here. A connect-phase timeout means the TCP
         # connection was never established, so no byte of this request reached
@@ -485,8 +454,42 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
 # --------------------------------------------------------------------------- #
 # streaming relay (daemon thread) + watchdog (daemon thread)
 # --------------------------------------------------------------------------- #
+def _drain_terminal(deadline: float, exc: BaseException) -> tuple:
+    """The terminal event for a drain-side stream failure, decided by the
+    turn's own deadline rather than by which thread noticed first.
+
+    The drain thread and the watchdog race for the same condition. The drain
+    thread is started FIRST and its socket read timeout is also TURN_MAX_S, and
+    urllib3 restarts that timeout on every chunk received — so when the harness
+    goes silent (the canonical hang) BOTH deadlines land at the same instant
+    and the winner is whichever thread the scheduler happens to run. Measured
+    on an IDLE host, the drain won 11 of 12 zero-chunk hangs, and the caller
+    saw `error{INTERNAL}` where this module documents
+    `turn_complete{stop_reason:'timeout'}`.
+
+    Widening one side's budget cannot fix that: any fixed margin is only a
+    scheduling allowance, and the loser can still win under enough delay. So
+    the two paths are not raced — they are made to AGREE. Past the turn's own
+    deadline, a stream failure IS turn expiry, and both paths report expiry
+    identically. Which thread got there first stops being observable.
+
+    Note the deliberate consequence: a genuine transport fault that happens to
+    land after the deadline is reported as a timeout. That is correct — the
+    turn had already outlived TURN_MAX_S, so the watchdog was entitled to
+    terminalize it as a timeout in the very next instant regardless.
+    """
+    if time.monotonic() >= deadline:
+        return "turn_complete", {"stop_reason": "timeout"}
+    return "error", {"error": {"error_code": ErrorCode.INTERNAL,
+                               "message": f"{type(exc).__name__}: {exc}"}}
+
+
 def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                  resp: "requests.Response", max_s: float) -> None:
+    # ONE deadline, shared by both terminal paths (see _drain_terminal). The
+    # watchdog's own wait is anchored here too, so neither path can drift from
+    # the other.
+    deadline = time.monotonic() + max_s
     terminal_lock = threading.Lock()
     terminal_flag = threading.Event()
     finished = threading.Event()
@@ -637,8 +640,10 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                     _end_once(data=terminal_data)
                     break
         except Exception as exc:  # noqa: BLE001  network drop / decode failure mid-stream
-            _end_once("error", {"error": {"error_code": ErrorCode.INTERNAL,
-                                          "message": f"{type(exc).__name__}: {exc}"}})
+            # Past the shared deadline this is turn EXPIRY, not a transport
+            # fault, and must read identically to the watchdog's own terminal
+            # event — otherwise which one the caller sees is a coin flip.
+            _end_once(*_drain_terminal(deadline, exc))
         finally:
             _end_once()  # stream ended with no terminal event seen -> still release the CAS
             try:
@@ -648,17 +653,19 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
             finished.set()
 
     def _watchdog() -> None:
-        if finished.wait(timeout=max_s):
+        # Wait to the SHARED deadline, not `max_s` from whenever this thread
+        # happened to be scheduled — the drain thread is started first, so
+        # anchoring here would let watchdog expiry drift later under load by
+        # exactly the thread-start delay.
+        if finished.wait(timeout=max(0.0, deadline - time.monotonic())):
             return  # the drain thread already terminalized this turn
         _end_once("turn_complete", {"stop_reason": "timeout"})
         # The drain thread is very likely still blocked inside
         # `resp.iter_lines()` waiting on the socket (the harness never sent a
         # terminal event, which is exactly why we're here) — its own
-        # read-timeout is deliberately later than this deadline (see
-        # READ_TIMEOUT_SLACK_S) and so wouldn't fire for at least another
-        # READ_TIMEOUT_SLACK_S, leaking a thread + connection for that whole
-        # extra window even though the turn has already been terminalized
-        # above. Closing the response here
+        # read-timeout wouldn't fire for up to another TURN_MAX_S, leaking a
+        # thread + connection for that whole extra window even though the
+        # turn has already been terminalized above. Closing the response here
         # unblocks `iter_lines()` immediately (it raises inside `_drain`,
         # which is swallowed by its own `except Exception` and is a no-op
         # against `_end_once` since `terminal_flag` is already set).
