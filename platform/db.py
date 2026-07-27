@@ -445,8 +445,13 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "customization_audit_events", "UNIQUE (tenant_id, idempotency_key)"),
         "customization_confirmations_pkey": _catalog_contract(
             "customization_confirmations", "PRIMARY KEY (confirmation_id)"),
+        # PostgreSQL deparses the migration's ``consumed IN (0,1)`` into this
+        # canonical form (confirmed against a live PostgreSQL 16 catalog). Pin
+        # the whole predicate, closing bracket included, so widening the allowed
+        # set to ``ARRAY[0, 1, 2]`` fails the contract instead of matching a
+        # prefix of it.
         "customization_confirmations_consumed_check": _catalog_contract(
-            "customization_confirmations", "CHECK", "consumed"),
+            "customization_confirmations", "CHECK (consumed = ANY (ARRAY[0, 1]))"),
         "customization_publication_requests_pkey": _catalog_contract(
             "customization_publication_requests",
             "PRIMARY KEY (tenant_id, change_set_id)"),
@@ -550,13 +555,18 @@ _AUTHORITY_REQUIRED_INDEXES = {
     },
 }
 
+# 0014_broker.sql writes ``BEFORE UPDATE OR DELETE``, but pg_get_triggerdef
+# emits the events in catalog bit order, so the deparsed text is always
+# ``BEFORE DELETE OR UPDATE`` (confirmed against a live PostgreSQL 16 catalog).
+# Contracts compare against the deparse, never the migration source.
 _AUTHORITY_REQUIRED_TRIGGERS = {
     "broker": {
         "broker_usage_ledger_immutable": _catalog_contract(
-            "broker_usage_ledger", "BEFORE UPDATE OR DELETE",
+            "broker_usage_ledger", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
             "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
         "broker_admission_resolution_audit_immutable": _catalog_contract(
-            "broker_admission_resolution_audit", "BEFORE UPDATE OR DELETE",
+            "broker_admission_resolution_audit", "BEFORE DELETE OR UPDATE",
+            "FOR EACH ROW",
             "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
     },
 }
