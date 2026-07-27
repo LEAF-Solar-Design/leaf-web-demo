@@ -1540,8 +1540,8 @@ def test_a_failed_ingest_keeps_a_live_uploads_lock_file(tmp_path):
     retired it anyway.
 
     The proof therefore has to be about the whole drawing, not the manifest:
-    anything left under the prefix that this call did not write itself means
-    somebody is still to be served.
+    anything under the prefix other than a version-1 blob means somebody is
+    still to be served.
     """
     root = str(tmp_path / "store")
     backend = store.FilesystemBackend(root)
@@ -1578,8 +1578,8 @@ def test_a_backend_that_cannot_enumerate_never_gets_its_lock_file_reclaimed(tmp_
     cannot tell" — never "empty". A backend added later inherits that, and must
     inherit the answer that FORBIDS the removal rather than a proof it cannot
     make. Without this test the distinction is unexercised: every other test
-    uses `FilesystemBackend`, which always enumerates, so treating None as empty
-    would pass the whole suite.
+    drives a `FilesystemBackend` over a readable directory, where the answer is
+    always a real set, so treating None as empty would pass the whole suite.
     """
     class BlindBackend(store.FilesystemBackend):
         """Cross-process safe, but cannot answer what is under a drawing."""
@@ -1604,8 +1604,8 @@ def test_a_backend_that_cannot_enumerate_never_gets_its_lock_file_reclaimed(tmp_
         store.ingest_drawing(backend, TENANT, str(payload), DRAWING)
 
     assert _lock_files(root), (
-        "a backend that cannot prove the drawing is empty still had its lock "
-        "file retired, so 'cannot tell' was read as 'nothing is there'")
+        "a backend that could not say what was under the drawing still had its "
+        "lock file retired, so 'cannot tell' was read as 'nothing is there'")
 
 
 def test_a_failed_scan_is_never_reported_as_an_empty_drawing(tmp_path, monkeypatch):
@@ -1614,9 +1614,9 @@ def test_a_failed_scan_is_never_reported_as_an_empty_drawing(tmp_path, monkeypat
     Round 3 found this: `os.path.isdir` answers False for a directory it could
     not stat, and `os.walk` swallows the `scandir` error and yields nothing
     unless given `onerror`. Both turn a transient permission or I/O fault into a
-    confident, wrong "empty" — and empty is exactly what authorizes retiring the
-    lock file. No exception escapes, so the handler's own `except` cannot catch
-    it either; the suite passed while the bug was live.
+    confident, wrong "empty" — and an empty answer is what authorizes retiring
+    the lock file. No exception escapes, so the handler's own `except` cannot
+    catch it either; the suite passed while the bug was live.
 
     Asserted at both stages, because they fail independently.
     """
@@ -1665,9 +1665,10 @@ def test_a_marker_only_uploads_lock_file_survives_a_failed_section(tmp_path):
     any failure in those sections retires a LIVE drawing's lock file, which is
     the two-callers-one-section defect rather than a cleanup.
 
-    So the proof is not "the manifest is missing". It is "the manifest is
-    missing AND this caller knows that means its drawing is gone", which only
-    the ingest can say, because an absent drawing is its premise.
+    So the proof is not "the manifest is missing" — the ingest does not check
+    the manifest at all. It is "nothing is under this drawing's prefix but a
+    version-1 blob", which only a caller that owns the whole drawing can read as
+    "gone".
     """
     root = str(tmp_path / "store")
     backend = store.FilesystemBackend(root)

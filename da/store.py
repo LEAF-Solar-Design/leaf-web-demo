@@ -803,9 +803,11 @@ class FilesystemBackend(StorageBackend):
     def drawing_object_keys(self, tenant_id: str, drawing_id: str) -> set | None:
         """Walk the drawing's prefix, separating ABSENCE from a FAILED SCAN.
 
-        The separation is the whole job. An empty set is what authorizes the
-        caller to remove a lock file, so every way this can report empty without
-        having actually looked is a way to retire a LIVE drawing's file. The two
+        The separation is the whole job. The caller removes a lock file only
+        when this comes back with nothing in it that names an owner, so every
+        way this can report FEWER keys than are really there -- above all, a
+        bare `set()` from a scan that never looked -- is a way to retire a LIVE
+        drawing's file. Over-reporting is harmless; under-reporting is not. The two
         standard-library defaults both do exactly that: `os.path.isdir` answers
         False for a directory it could not stat, and `os.walk` swallows the
         `scandir` error and simply yields nothing unless it is given `onerror`.
@@ -2136,7 +2138,7 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
     the version blob and the manifest) leaves a drawing that never came to
     exist, so nothing would ever walk its directory again. `ingest_drawing`
     re-reads the drawing's key prefix on the way out of an abnormal exit and
-    retires the file when nothing is left under it.
+    retires the file when nothing is left under it but a version-1 blob.
 
     IT IS DELIBERATELY NOT DONE HERE, and the reason is what `creating` actually
     means. `creating` says only "do not refuse a missing drawing"; it does not
