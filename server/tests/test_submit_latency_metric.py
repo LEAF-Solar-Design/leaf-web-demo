@@ -110,28 +110,108 @@ def _drain(job_id: str) -> Dict[str, Any]:
 # =========================================================================== #
 # emitter shape — what the alarm actually queries
 # =========================================================================== #
-def test_submit_latency_publishes_milliseconds_under_aps_live(captured):
+def test_submit_latency_publishes_milliseconds_under_environment_and_aps_live(
+        captured, monkeypatch):
+    monkeypatch.setenv("LEAF_METRICS_ENVIRONMENT", "production")
     emf_metrics.emit_submit_latency(
         11.5, aps_live=True, tenant_id="acme", tool="panelize", job_id="job-abc")
 
     doc = _only_submit_latency(captured)
     directives = doc["_aws"]["CloudWatchMetrics"]
-    # ONE directive: a metric published under two dimension sets doubles when a
-    # consumer sums across them (the rule the module docstring states).
+    # ONE directive with ONE dimension set: a metric published under two sets
+    # doubles when a consumer sums across them (the module docstring's rule).
+    # Adding `environment` EXTENDED the existing set rather than adding a second
+    # one, precisely so that rule still holds.
     assert len(directives) == 1
     assert directives[0]["Namespace"] == "Leaf/Platform/APS"
-    assert directives[0]["Dimensions"] == [["aps_live"]]
+    assert directives[0]["Dimensions"] == [["environment", "aps_live"]]
     assert directives[0]["Metrics"] == [
         {"Name": "SubmitLatency", "Unit": "Milliseconds"}]
     assert doc["SubmitLatency"] == 11.5
-    # aps_live is the dimension the p99 alarm scopes to, and CloudWatch requires
-    # a dimension value to be a string.
+    # Both dimensions the p99 alarm scopes to, as strings (CloudWatch requires
+    # a dimension value to be a string).
+    assert doc["environment"] == "production"
     assert doc["aps_live"] == "true"
     # High-cardinality attribution rides as LOG fields, never as dimensions.
     assert doc["tenant_id"] == "acme"
     assert doc["tool"] == "panelize"
     assert doc["job_id"] == "job-abc"
     assert "tenant_id" not in directives[0]["Dimensions"][0]
+
+
+# --------------------------------------------------------------------------- #
+# the `environment` dimension — this namespace is shared by staging and
+# production, so the value has to be right or an alarm watches the wrong fleet
+# --------------------------------------------------------------------------- #
+def test_environment_dimension_distinguishes_the_two_deployments(
+        captured, monkeypatch):
+    """The whole point: two deployments must land on two different series."""
+    monkeypatch.setenv("LEAF_METRICS_ENVIRONMENT", "production")
+    emf_metrics.emit_submit_latency(1.0, aps_live=True)
+    monkeypatch.setenv("LEAF_METRICS_ENVIRONMENT", "staging")
+    emf_metrics.emit_submit_latency(2.0, aps_live=True)
+
+    docs = _submit_latency_docs(captured)
+    assert [d["environment"] for d in docs] == ["production", "staging"]
+    # Same metric, same aps_live, different series. An alarm scoped to
+    # environment="production" sees the first and not the second.
+    assert {d["aps_live"] for d in docs} == {"true"}
+
+
+def test_environment_is_not_read_from_leaf_runtime_env(captured, monkeypatch):
+    """`LEAF_RUNTIME_ENV` must NOT be the source.
+
+    It selects the fail-closed posture, not the deployment, and measured live
+    2026-07-27 it is inconsistent even within one deployment: staging's app says
+    "staging" while staging's broker says "production", and the PRODUCTION app --
+    the container that emits this metric -- does not set it at all. Reading it
+    would therefore publish a real value in staging and an empty one in
+    production: correct where you test, blank where you page.
+
+    This test pins the emitter's indifference to it by setting it to a value
+    that would be visibly wrong if it were ever read.
+    """
+    monkeypatch.delenv("LEAF_METRICS_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    emf_metrics.emit_submit_latency(1.0, aps_live=True)
+
+    assert _only_submit_latency(captured)["environment"] == "unset"
+
+
+def test_unconfigured_environment_publishes_unset_not_a_missing_dimension(
+        captured, monkeypatch):
+    """An unconfigured deployment must stay VISIBLE.
+
+    Dropping the dimension would remove the series from an environment-scoped
+    alarm's view with no symptom anywhere, which is the failure this dimension
+    exists to prevent, not a form of it.
+    """
+    monkeypatch.delenv("LEAF_METRICS_ENVIRONMENT", raising=False)
+    emf_metrics.emit_submit_latency(1.0, aps_live=True)
+
+    doc = _only_submit_latency(captured)
+    assert doc["environment"] == "unset"
+    assert doc["_aws"]["CloudWatchMetrics"][0]["Dimensions"] == [
+        ["environment", "aps_live"]]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("production", "production"), ("staging", "staging"),
+     ("  Production  ", "production"), ("PRODUCTION", "production"),
+     ("", "unset"), ("   ", "unset"),
+     ("prod", "other"), ("dev", "other"), ("production-2", "other")])
+def test_environment_value_is_bounded(captured, monkeypatch, raw, expected):
+    """The value becomes a CloudWatch dimension, so it is clamped like `status`.
+
+    A typo in a task definition must not be able to mint an unbounded series,
+    and must not be silently dropped either: it lands on "other", which is
+    visible and alarmable.
+    """
+    monkeypatch.setenv("LEAF_METRICS_ENVIRONMENT", raw)
+    emf_metrics.emit_submit_latency(1.0, aps_live=True)
+
+    assert _only_submit_latency(captured)["environment"] == expected
 
 
 @pytest.mark.parametrize(
