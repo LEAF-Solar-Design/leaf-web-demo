@@ -236,8 +236,50 @@ def _paused_writer_child(da_dir, root, precheck_done, purge_done, results):
         results.put(("writer", "err", f"{type(exc).__name__}: {exc}"))
 
 
-def _purge_child(server_dir, da_dir, guest_root, uploads_dir, results):
-    """Run the REAL guest purge, in its own OS process."""
+class HoldsTheManifestOpenBackend(store.FilesystemBackend):
+    """Parks a writer INSIDE the guard, between its manifest read and its save.
+
+    This is where the resurrect-after-purge gap actually lives. A writer stopped
+    BEFORE the lock is refused by the guard's existence check, and one stopped
+    after its save has already finished; only a writer holding the record open
+    across a deletion can put the drawing back. The read is the load every legacy
+    writer does as its first act inside the guard.
+    """
+
+    def __init__(self, root_dir: str, inside=None, release=None) -> None:
+        super().__init__(root_dir)
+        self.inside = inside
+        self.release = release
+        self.held = False
+
+    def get(self, key: str) -> bytes:
+        data = super().get(key)
+        if key.endswith("manifest.json") and not self.held and self.inside is not None:
+            self.held = True
+            self.inside.set()
+            self.release.wait(timeout=_PEER_START_S)
+        return data
+
+
+def _midwrite_writer_child(da_dir, root, inside, release, results):
+    """A legacy writer holding one drawing's manifest open across a purge."""
+    child_store = _child_store(da_dir)
+    backend = HoldsTheManifestOpenBackend(root, inside, release)
+    try:
+        fence = child_store.acquire_checkout_fence(
+            backend, TENANT, DRAWING, "mid-write", 300.0)
+        results.put(("writer", "ok", fence))
+    except Exception as exc:
+        results.put(("writer", "err", f"{type(exc).__name__}: {exc}"))
+
+
+def _purge_child(server_dir, da_dir, guest_root, uploads_dir, results,
+                 lock_budget_s=None):
+    """Run the REAL guest purge, in its own OS process.
+
+    `lock_budget_s` shortens the store's checkout budget so a test that expects
+    the purge to be BLOCKED does not have to sit through the production 30s.
+    """
     for path in (server_dir, da_dir):
         if path not in sys.path:
             sys.path.insert(0, path)
@@ -245,10 +287,21 @@ def _purge_child(server_dir, da_dir, guest_root, uploads_dir, results):
     os.environ["LEAF_UPLOADS_DIR"] = uploads_dir
     os.environ["LEAF_DRAWING_STORE"] = "legacy"
     try:
+        if lock_budget_s is not None:
+            import store as child_store
+            child_store._CHECKOUT_LOCK_TIMEOUT_S = float(lock_budget_s)
         import guest_uploads
         results.put(("ok", guest_uploads.purge_expired()))
     except Exception as exc:
         results.put(("err", f"{type(exc).__name__}: {exc}"))
+
+
+def _receipts(guest_root) -> list:
+    log = Path(guest_root) / "purge.log.jsonl"
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in
+            log.read_text(encoding="utf-8").strip().splitlines() if line]
 
 
 def _purge_holder_child(da_dir, root, ready, release, results=None):
@@ -939,8 +992,11 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
         def cross_process_lock(self, key):
             os_depth["n"] += 1
             try:
-                with super().cross_process_lock(key):
-                    yield
+                # Forwarded, not swallowed: the guard reclaims the lock FILE
+                # through this value when it refuses a purged drawing, and a spy
+                # that yielded None would turn that into an AttributeError.
+                with super().cross_process_lock(key) as held:
+                    yield held
             finally:
                 os_depth["n"] -= 1
 
@@ -949,8 +1005,8 @@ def test_every_legacy_manifest_writer_runs_inside_the_guard(tmp_path, monkeypatc
         seen.append((tid, did))
         depth["n"] += 1
         try:
-            with real_guard(backend, tid, did, **kwargs):
-                yield
+            with real_guard(backend, tid, did, **kwargs) as held:
+                yield held
         finally:
             depth["n"] -= 1
 
@@ -1046,19 +1102,80 @@ def test_the_purge_takes_the_same_lock_the_writers_take(tmp_path):
         assert store._try_os_lock(handle) is True
 
 
-def test_a_writer_parked_behind_the_purge_cannot_bring_the_drawing_back(tmp_path):
-    """GAP 1, end to end, across three OS processes.
+def test_the_purge_cannot_delete_a_drawing_a_writer_is_mid_write_on(tmp_path):
+    """GAP 1, end to end, with the REAL purge in its own OS process.
 
-    The writer passes the guard's pre-lock existence check while the drawing is
-    still there, is held at exactly that point, and reaches the lock only after
-    a REAL `purge_expired` in another process has deleted the drawing and written
-    its "deleted" receipt. Every legacy writer saves the WHOLE manifest through a
-    `put` that recreates missing parents, so before this fix the writer put the
-    drawing back and the receipt became a lie.
+    The writer is parked where the gap actually is: inside the guard, holding
+    one drawing's manifest open between its read and its save. Before this fix
+    the purge held only its own `drawing_lock`, which that writer's process
+    cannot see, so the purge deleted the directory and wrote a "deleted" receipt
+    while the writer was mid-record — and `FilesystemBackend.put` recreates
+    missing parents, so the save put the drawing straight back behind the
+    receipt.
 
-    Nothing here is timed. The purge starts only once the writer has announced it
-    is parked, and the writer resumes only once the purge has returned its
-    result, so the interleaving is fixed by events on both sides.
+    The invariant asserted is the receipt's meaning, not a lock's presence: a
+    drawing named in a "deleted" line must be gone once every writer that was in
+    flight has finished. The purge blocking and reporting the drawing as not
+    deleted is the honest outcome, and the sweep after the writer leaves proves
+    the drawing is delayed rather than made immortal.
+
+    Nothing here is timed. The purge starts only once the writer announces it is
+    inside, and the writer is released only once the purge has reported.
+    """
+    guest_root = tmp_path / "guest"
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    ddir = _expired_guest_drawing(guest_root)
+    ctx = multiprocessing.get_context("spawn")
+    inside, release = ctx.Event(), ctx.Event()
+    writer_results, purge_results = ctx.Queue(), ctx.Queue()
+
+    writer = _spawn(_midwrite_writer_child, _DA_DIR, str(guest_root),
+                    inside, release, writer_results)
+    try:
+        assert inside.wait(timeout=_JOIN_S), (
+            "the writer never reached its manifest read")
+        purger = _spawn(_purge_child, _SERVER_DIR, _DA_DIR, str(guest_root),
+                        str(uploads), purge_results, 2.0)
+        status, first = purge_results.get(timeout=_JOIN_S)
+        purger.join(timeout=_JOIN_S)
+        assert status == "ok", first
+    finally:
+        release.set()
+
+    _, writer_status, writer_value = writer_results.get(timeout=_JOIN_S)
+    writer.join(timeout=_JOIN_S)
+    assert writer_status == "ok", (
+        f"the writer lost its write to the purge: {writer_value}")
+
+    deleted = [r for r in _receipts(guest_root) if r["status"] == "deleted"]
+    assert not deleted, (
+        f"the purge wrote a 'deleted' receipt for a drawing a writer was "
+        f"mid-write on, and that writer then saved: {deleted}")
+    assert first["count"] == 0, f"the purge deleted a drawing under a writer: {first}"
+    assert ddir.exists(), "the writer's own save was destroyed mid-write"
+    assert [r["status"] for r in _receipts(guest_root)] == ["failed"], (
+        f"a purge that deleted nothing must say so: {_receipts(guest_root)}")
+
+    # Delayed, not immortal: with the writer gone the next sweep takes it, and
+    # THAT receipt is true.
+    purger = _spawn(_purge_child, _SERVER_DIR, _DA_DIR, str(guest_root),
+                    str(uploads), purge_results)
+    status, second = purge_results.get(timeout=_JOIN_S)
+    purger.join(timeout=_JOIN_S)
+    assert status == "ok", second
+    assert second["count"] == 1, f"the drawing was never collected: {second}"
+    assert not ddir.exists()
+    assert [r["status"] for r in _receipts(guest_root)] == ["failed", "deleted"]
+
+
+def test_a_writer_that_wakes_up_behind_a_purge_is_refused(tmp_path):
+    """The other half: a writer whose pre-lock existence check went stale.
+
+    It passes that check while the drawing is still there, is held at exactly
+    that point, and reaches the lock only after a REAL `purge_expired` in another
+    process has deleted the drawing. It must find the drawing gone and refuse,
+    rather than saving a whole manifest into a directory `put` would recreate.
     """
     guest_root = tmp_path / "guest"
     uploads = tmp_path / "uploads"
@@ -1087,16 +1204,12 @@ def test_a_writer_parked_behind_the_purge_cannot_bring_the_drawing_back(tmp_path
 
     assert not ddir.exists(), (
         f"the writer recreated {ddir} after the purge had already written its "
-        f"'deleted' receipt; the receipt this module exists to keep honest is "
-        f"now false")
+        f"'deleted' receipt")
     assert writer_status == "err" and "KeyError" in writer_value, (
         f"a writer that woke up behind a purge was allowed to proceed "
-        f"({writer_status}: {writer_value}); it must find the drawing gone and "
-        f"refuse, because its pre-lock check is stale by then")
-
-    log = (guest_root / "purge.log.jsonl").read_text(encoding="utf-8")
-    receipts = [json.loads(line) for line in log.strip().splitlines()]
-    assert [r["status"] for r in receipts] == ["deleted"], receipts
+        f"({writer_status}: {writer_value})")
+    assert [r["status"] for r in _receipts(guest_root)] == ["deleted"], (
+        _receipts(guest_root))
 
 
 def test_an_extraction_that_finishes_after_the_purge_does_not_resurrect_it(tmp_path):
