@@ -43,9 +43,12 @@ router = APIRouter()
 def _emit_submit_latency(ms: float, aps_live: Any, tenant_id: Any,
                          tool: Any, job_id: Any) -> None:
     """Best-effort SubmitLatency emission. The emitter already swallows its own
-    failures; this wrapper covers the import being absent and any surprise from
-    stringifying the caller's values, so observability can never turn a
-    successful 202 into a 500."""
+    failures; this wrapper covers the import being absent, so observability can
+    never turn a successful 202 into a 500.
+
+    It does NOT cover the call site's own argument expressions, which Python
+    evaluates before this function is entered. Keep them incapable of raising
+    (they are today: a module constant, a str(), a dict .get(), and a local)."""
     if emf_metrics is None:
         return
     try:
