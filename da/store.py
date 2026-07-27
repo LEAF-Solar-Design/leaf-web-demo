@@ -187,7 +187,7 @@ def drawing_version_key(tenant_id: str, drawing_id: str, version) -> str:
         raise ValueError(f"version must be >= 1, got {version!r}")
     if v > 99999999:
         raise ValueError(f"version {v} overflows the 8-digit key field")
-    key = f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}/v/{v:08d}.dwg"
+    key = f"{drawing_prefix(tenant_id, drawing_id)}/v/{v:08d}.dwg"
     assert VERSION_KEY_RE.match(key), key  # invariant guard
     return key
 
@@ -195,9 +195,10 @@ def drawing_version_key(tenant_id: str, drawing_id: str, version) -> str:
 def drawing_prefix(tenant_id: str, drawing_id: str) -> str:
     """Object-key prefix holding EVERYTHING that belongs to one drawing.
 
-    Every key above is built from this, and so is the guest upload's marker,
-    which the store does not name but does have to notice. See
-    `StorageBackend.drawing_object_keys`.
+    Every other key in this module is built from it, and so is the guest
+    upload's marker, which the store does not name but does have to notice. That
+    is what lets `StorageBackend.drawing_object_keys` ask "is anything left under
+    this drawing" without the store knowing what any particular file is for.
     """
     return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}"
 
@@ -795,15 +796,39 @@ class FilesystemBackend(StorageBackend):
         return os.path.exists(self._path(key))
 
     def drawing_object_keys(self, tenant_id: str, drawing_id: str) -> set | None:
-        prefix = drawing_prefix(tenant_id, drawing_id)
-        root = self._path(prefix)
-        if not os.path.isdir(root):
-            return set()
+        """Walk the drawing's prefix, separating ABSENCE from a FAILED SCAN.
+
+        The separation is the whole job. An empty set is what authorizes the
+        caller to remove a lock file, so every way this can report empty without
+        having actually looked is a way to retire a LIVE drawing's file. The two
+        standard-library defaults both do exactly that: `os.path.isdir` answers
+        False for a directory it could not stat, and `os.walk` swallows the
+        `scandir` error and simply yields nothing unless it is given `onerror`.
+        Either turns a transient permission or I/O fault into a confident,
+        wrong "there is nothing here".
+
+        So absence is only ever `FileNotFoundError`, every other `OSError`
+        becomes None ("cannot tell"), and the walk is told to raise.
+        """
+        root = self._path(drawing_prefix(tenant_id, drawing_id))
+
+        def _reraise(exc: OSError) -> None:
+            raise exc
+
         found = set()
-        for dirpath, _dirs, files in os.walk(root):
-            for name in files:
-                rel = os.path.relpath(os.path.join(dirpath, name), self.root)
-                found.add(rel.replace(os.sep, "/"))
+        try:
+            os.stat(root)  # absence must be PROVED, not inferred from a failure
+        except FileNotFoundError:
+            return set()
+        except OSError:
+            return None
+        try:
+            for dirpath, _dirs, files in os.walk(root, onerror=_reraise):
+                for name in files:
+                    rel = os.path.relpath(os.path.join(dirpath, name), self.root)
+                    found.add(rel.replace(os.sep, "/"))
+        except OSError:
+            return None
         return found
 
 
@@ -1451,9 +1476,15 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
             # So the question is asked in the store's own vocabulary: is there
             # ANY object left under this drawing? A marker answers yes without
             # the store having to know what a marker is, which is what keeps it
-            # from importing `guest_uploads` and inverting the lock order. Only
-            # the v1 blob THIS call just wrote is discounted, because nobody else
-            # put it there. Empty, plus no manifest, is "nothing left to serve".
+            # from importing `guest_uploads` and inverting the lock order.
+            #
+            # The v1 blob is discounted, and NOT on the grounds that this call
+            # wrote it -- on the immutability path above it was written by an
+            # earlier one. The grounds are that a v1 blob is the only thing that
+            # can sit under a drawing with no manifest and no owner: it is
+            # version-1 residue of an ingest that never completed, so nothing
+            # reads it and no writer is waiting on it. Anything ELSE under the
+            # prefix belongs to somebody.
             #
             # `None` from `drawing_object_keys` means the backend cannot tell,
             # and cannot-tell forbids the removal.

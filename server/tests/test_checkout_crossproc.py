@@ -1607,6 +1607,52 @@ def test_a_backend_that_cannot_enumerate_never_gets_its_lock_file_reclaimed(tmp_
         "file retired, so 'cannot tell' was read as 'nothing is there'")
 
 
+def test_a_failed_scan_is_never_reported_as_an_empty_drawing(tmp_path, monkeypatch):
+    """A scan that could not look must not answer "there is nothing here".
+
+    Round 3 found this: `os.path.isdir` answers False for a directory it could
+    not stat, and `os.walk` swallows the `scandir` error and yields nothing
+    unless given `onerror`. Both turn a transient permission or I/O fault into a
+    confident, wrong "empty" — and empty is exactly what authorizes retiring the
+    lock file. No exception escapes, so the handler's own `except` cannot catch
+    it either; the suite passed while the bug was live.
+
+    Asserted at both stages, because they fail independently.
+    """
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    payload = tmp_path / "payload.dwg"
+    payload.write_bytes(b"dwg-bytes")
+
+    # A live drawing: a real manifest, so anything that reports "empty" is wrong.
+    store.save_manifest(backend, TENANT, DRAWING, store._new_manifest(TENANT, DRAWING))
+    prefix = store.drawing_prefix(TENANT, DRAWING)
+
+    def blind_stat(path, *a, **k):
+        if str(path).endswith(prefix.replace("/", os.sep)):
+            raise PermissionError(13, "Permission denied")
+        return real_stat(path, *a, **k)
+
+    real_stat = os.stat
+    monkeypatch.setattr(os, "stat", blind_stat)
+    assert backend.drawing_object_keys(TENANT, DRAWING) is None, (
+        "a drawing whose directory could not be stat'd was reported as absent")
+    monkeypatch.undo()
+
+    def blind_scandir(path, *a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "scandir", blind_scandir)
+    assert backend.drawing_object_keys(TENANT, DRAWING) is None, (
+        "a drawing whose directory could not be walked was reported as empty")
+    monkeypatch.undo()
+
+    # And the honest answer is still produced when the scan CAN look.
+    keys = backend.drawing_object_keys(TENANT, DRAWING)
+    assert keys and store.manifest_key(TENANT, DRAWING) in keys, (
+        f"the walk failed to find the drawing's own manifest: {keys}")
+
+
 def test_a_marker_only_uploads_lock_file_survives_a_failed_section(tmp_path):
     """The reason the reclaim lives in `ingest_drawing` and NOT in the guard.
 
