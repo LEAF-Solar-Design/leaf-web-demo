@@ -326,7 +326,7 @@ def build_suites() -> List[Suite]:
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
               SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 18),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_purge.py"), 9),
+              _py_pytest("tests/test_guest_purge.py"), 10),
         Suite("server-guest-session-auth", "server tests/test_guest_session_auth.py", "pytest",
               SERVER, _py_pytest("tests/test_guest_session_auth.py"), 14),
         Suite("server-broker-upload-resolver", "server tests/test_broker_upload_resolver.py",
@@ -409,7 +409,7 @@ def build_suites() -> List[Suite]:
         # a per-process threading lock cannot see. No skipif: `fcntl` is the
         # Linux path and `msvcrt` the Windows one, and both must execute.
         Suite("server-checkout-crossproc", "server tests/test_checkout_crossproc.py",
-              "pytest", SERVER, _py_pytest("tests/test_checkout_crossproc.py"), 21),
+              "pytest", SERVER, _py_pytest("tests/test_checkout_crossproc.py"), 32),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,

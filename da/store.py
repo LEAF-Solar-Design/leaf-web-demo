@@ -41,7 +41,7 @@ import uuid
 import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # da/ sibling imports (highest precedence)
 # The shared F13 tenant/opaque-id validator lives in server/; APPEND it (lowest
@@ -234,12 +234,18 @@ def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     drawing itself was purged. The digest is stable, so it still identifies the
     drawing to every process, without carrying the ids around.
 
-    WHAT THIS LEAVES OPEN, stated rather than papered over: the prefix
-    accumulates one EMPTY file per drawing ever created and nothing removes them.
-    Bounding that needs the guest purge and the store to hold one shared lock so
-    a lock file can be retired while provably unheld -- the same shared-lock work
-    `_legacy_checkout_guard` already defers -- and not a shared pool, which the
-    paragraph above rules out.
+    RETIRED ONLY BY THE DRAWING'S DELETER, WHILE IT HOLDS THE LOCK. The file is
+    created once and outlives every drawing-directory walker, so the only caller
+    that may remove it is the one that has just deleted the drawing itself --
+    `server/guest_uploads.py::purge_expired`, which now takes THIS lock
+    (`legacy_purge_guard`) rather than only its own `drawing_lock`. It removes
+    the file as the last act inside the section, where an exclusive lock proves
+    it is the sole holder, and `_HeldCheckoutLock.reclaim` refuses if the path no
+    longer names the inode it holds. A caller that was parked on the retired
+    inode is caught by the identity check in `FilesystemBackend.cross_process_lock`
+    and sent back around to the live file, so it never runs on a lock that
+    excludes nobody. Anything else that unlinks this file reintroduces exactly
+    the two-callers-one-section defect the paragraph above describes.
 
     THE NAMING IS PART OF THE CROSS-PROCESS PROTOCOL. Two processes agree on a
     drawing's lock only by deriving the same path, so this function cannot be
@@ -341,6 +347,127 @@ def _try_os_lock(handle) -> bool:
         raise
 
 
+# Can this platform unlink a file THIS process holds open? POSIX can (the name
+# goes, the inode lives on for every open descriptor); Windows cannot, because
+# CPython opens without FILE_SHARE_DELETE, so the unlink fails while ANY process
+# has a handle. The two facts drive the same reclaim rule from opposite ends and
+# both are safe: see `_HeldCheckoutLock.reclaim`.
+_CAN_UNLINK_OPEN_FILE = os.name != "nt"
+
+
+def _file_identity(handle) -> tuple:
+    """The (device, inode) an OPEN descriptor actually refers to."""
+    st = os.fstat(handle.fileno())
+    return (st.st_dev, st.st_ino)
+
+
+def _path_identity(path: str) -> tuple | None:
+    """The (device, inode) the NAME currently resolves to, or None if it is gone."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _holds_the_live_file(handle, path: str) -> bool:
+    """Is the locked descriptor still the file this PATH names?
+
+    A lock's identity is its inode, not its name. Once anything may retire a lock
+    file, "I locked the descriptor I opened" stops being enough: a caller parked
+    on an inode that was unlinked while it waited wins that lock the moment the
+    holder lets go, while the next caller opens the freshly created file and wins
+    a different lock, and both then believe they own the drawing. Comparing the
+    descriptor against the name is what separates those two cases, and it is
+    checked AFTER the lock is taken, because before it the answer can change.
+
+    Both fields matter. `st_ino` alone can repeat across devices, and the store
+    root can be a mount of its own.
+    """
+    return _path_identity(path) == _file_identity(handle)
+
+
+class _HeldCheckoutLock:
+    """A live, VALIDATED hold on one drawing's checkout lock file.
+
+    Handed to the body of `cross_process_lock` so the one caller that is allowed
+    to retire the file -- the one that has just deleted the drawing -- can do it
+    without reaching around the lock to find the path.
+    """
+
+    def __init__(self, path: str, handle) -> None:
+        self.path = path
+        self.handle = handle
+        self.identity = _file_identity(handle)
+        # Set when `reclaim` could not unlink in place; see below.
+        self.reclaim_on_release = False
+
+    def reclaim(self) -> bool:
+        """Retire this lock file. The LAST act inside the section, never earlier.
+
+        Safe on POSIX because the unlink happens while this caller holds the lock
+        EXCLUSIVELY, so no second caller is inside the section to be robbed of
+        its file, and any caller parked on the retired inode is turned away by
+        the identity check in `cross_process_lock` and sent to the live file.
+        Nothing may follow it here: the moment the name is gone this caller is
+        out of the section, because a later caller can now create a new file and
+        legitimately take a different lock.
+
+        Safe on Windows by a different mechanism with the same effect. There an
+        open handle blocks the unlink outright, including this caller's own, so
+        the removal is deferred to the release below -- and it then succeeds only
+        when NO process holds the file, which is precisely "provably unheld".
+
+        Returns whether the file is gone (or provably will be). Advisory: the
+        caller's receipt is about the DRAWING, and a lock file left behind is a
+        stale inode, not a broken promise.
+        """
+        if not _holds_the_live_file(self.handle, self.path):
+            # Someone re-created the drawing and this name is now THEIR lock.
+            # Removing it would hand two callers two different files.
+            return False
+        if not _CAN_UNLINK_OPEN_FILE:
+            self.reclaim_on_release = True
+            return True
+        try:
+            os.remove(self.path)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _release_reclaim(self) -> None:
+        """The Windows half: unlink after the handle is closed.
+
+        Re-checks identity first so a file re-created in between is left alone,
+        and tolerates the refusal that means another process still has it open,
+        which is the case where leaving it is the CORRECT outcome.
+        """
+        if _path_identity(self.path) != self.identity:
+            return
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+
+class _NoFileCheckoutLock:
+    """The held-lock token for a backend whose lock has no file behind it.
+
+    `reclaim` reports True because there is genuinely nothing left to reclaim,
+    not because the request was dropped: `InMemoryBackend` keeps its blobs on one
+    interpreter's heap, so a purged drawing leaves no lock file anywhere. Given
+    as a real object rather than None so the purge calls the same method on every
+    backend and cannot grow a "does this backend have one" branch.
+    """
+
+    reclaim_on_release = False
+
+    def reclaim(self) -> bool:
+        return True
+
+
 # --------------------------------------------------------------------------- #
 # Storage backend abstraction (so tests run fully offline)
 # --------------------------------------------------------------------------- #
@@ -395,7 +522,7 @@ class InMemoryBackend(StorageBackend):
 
     @contextlib.contextmanager
     def cross_process_lock(self, key: str):
-        yield
+        yield _NoFileCheckoutLock()
 
     def __init__(self) -> None:
         self._blobs: dict[str, bytes] = {}
@@ -498,23 +625,48 @@ class FilesystemBackend(StorageBackend):
 
         Bounded, so a wedged holder surfaces as a timeout rather than a request
         that never returns.
+
+        VALIDATED, because the file can now be retired. Taking the lock is only
+        half the question; the other half is whether the descriptor holding it is
+        still the file the path names. A caller that was waiting when the file
+        was retired wakes up owning an inode with no name, which excludes nobody,
+        so it is sent back around to open and lock the live file instead. See
+        `_holds_the_live_file`. Retirement is rare (one purged drawing), so the
+        retry costs nothing on the ordinary path.
         """
         path = self._path(key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         deadline = time.monotonic() + _CHECKOUT_LOCK_TIMEOUT_S
-        # "a+b" creates on first use and never truncates, so an existing lock
-        # file is opened, not replaced -- replacing it would hand this caller a
-        # different inode from the one the current holder owns.
-        with open(path, "a+b") as handle:
-            while not _try_os_lock(handle):
-                if time.monotonic() >= deadline:
-                    raise CheckoutLockTimeout(
-                        f"checkout lock held by another process past "
-                        f"{_CHECKOUT_LOCK_TIMEOUT_S}s: {path}")
-                time.sleep(0.01)
-            # Closing the handle releases the lock on EVERY exit path, so the
-            # body needs no unlock of its own.
-            yield
+        while True:
+            # "a+b" creates on first use and never truncates, so an existing lock
+            # file is opened, not replaced -- replacing it would hand this caller
+            # a different inode from the one the current holder owns.
+            handle = open(path, "a+b")
+            held = None
+            try:
+                while not _try_os_lock(handle):
+                    if time.monotonic() >= deadline:
+                        raise CheckoutLockTimeout(
+                            f"checkout lock held by another process past "
+                            f"{_CHECKOUT_LOCK_TIMEOUT_S}s: {path}")
+                    time.sleep(0.01)
+                if not _holds_the_live_file(handle, path):
+                    # Retired while we waited. Drop it and take the live one; the
+                    # same deadline applies, so this cannot spin without a limit.
+                    if time.monotonic() >= deadline:
+                        raise CheckoutLockTimeout(
+                            f"checkout lock file kept being retired past "
+                            f"{_CHECKOUT_LOCK_TIMEOUT_S}s: {path}")
+                    continue
+                # Closing the handle releases the lock on EVERY exit path, so the
+                # body needs no unlock of its own.
+                held = _HeldCheckoutLock(path, handle)
+                yield held
+                return
+            finally:
+                handle.close()
+                if held is not None and held.reclaim_on_release:
+                    held._release_reclaim()
 
     def _path(self, key: str) -> str:
         p = os.path.normpath(os.path.join(self.root, key))
@@ -1149,15 +1301,32 @@ def _pg_put(
 # --------------------------------------------------------------------------- #
 def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
                    drawing_id: str | None = None, *,
-                   authority_guard: Optional[dict] = None) -> dict:
+                   authority_guard: Optional[dict] = None,
+                   precondition: Callable[[], bool] | None = None) -> dict:
     """PUT version 1 of a new drawing + write its initial manifest.
 
     Returns {"drawing_id": <id>, "version": 1}. Refuses to clobber an existing
     drawing (use put_drawing to append versions).
+
+    `precondition` is the CREATING writer's answer to the resurrect-after-purge
+    problem. Every other legacy writer proves the drawing still exists by loading
+    its manifest inside the checkout guard; this one cannot, because an absent
+    drawing is its normal case, so a caller whose work can be cancelled out from
+    under it (an extraction whose upload was purged mid-flight) passes a callable
+    that re-reads its own evidence. It runs INSIDE the guard, which is the whole
+    point — checked outside, it is a read with an unbounded wait after it — and a
+    False raises `DrawingVanished` before anything is written. Legacy authority
+    only: the postgres path already settles the same question with row-level
+    authority through `authority_guard`, so supplying both is refused rather than
+    silently ignoring one.
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id) if drawing_id else new_drawing_id()
     if authority_mode() == "postgres":
+        if precondition is not None:
+            raise ValueError(
+                "precondition is a legacy-authority mechanism; the postgres "
+                "authority uses authority_guard")
         return _pg_ingest(
             backend, tid, did, _read(local_path), authority_guard)
 
@@ -1176,7 +1345,8 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
     data = _read(local_path)
     # `creating=True`: this is the one writer whose drawing is SUPPOSED to be
     # absent, so it is the one that may bring a lock file into existence.
-    with _legacy_checkout_guard(backend, tid, did, creating=True):
+    with _legacy_checkout_guard(backend, tid, did, creating=True,
+                                precondition=precondition):
         if backend.exists(manifest_key(tid, did)):
             raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
 
@@ -1717,9 +1887,21 @@ def _legacy_checkout_lock(tid: str, did: str):
                     del _LEGACY_CHECKOUT_LOCKS[key]
 
 
+class DrawingVanished(RuntimeError):
+    """The drawing a writer was about to create stopped being its drawing while
+    it waited for the checkout lock.
+
+    Its own class, not a `ValueError`, because the callers that pass a
+    `precondition` treat "it was deleted underneath me" as a clean abort and
+    every other ingest failure as an error to record. Recording this one would
+    itself write to the drawing that was just deleted.
+    """
+
+
 @contextlib.contextmanager
 def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
-                           creating: bool = False):
+                           creating: bool = False,
+                           precondition: Callable[[], bool] | None = None):
     """Serialize EVERY legacy read-modify-write of one drawing's manifest.
 
     The legacy manifest is a load, edit, save with nothing holding the record in
@@ -1765,26 +1947,33 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
     `CrossProcessCheckoutLockMissing` and runs with the threading lock alone,
     which is the behaviour that was previously silent and unlabelled.
 
-    It also does not coordinate with the guest-upload purge, which deletes a
-    whole drawing directory on its own per-drawing lock. `FilesystemBackend.put`
-    recreates missing parents, so a manifest save that was already in flight can
-    put the drawing back after the purge recorded it deleted. That is unchanged
-    by this guard — every legacy writer, including the pre-existing acquire, has
-    always been able to do it — and closing it means giving the purge and the
-    store one shared lock, which is tracked separately.
+    IT DOES COORDINATE WITH THE GUEST-UPLOAD PURGE, which is what closes the
+    resurrect-after-purge hole. `server/guest_uploads.py::purge_expired` used to
+    delete a whole drawing directory under its own `drawing_lock` alone, a lock
+    this module cannot see; `FilesystemBackend.put` recreates missing parents, so
+    a save already in flight put the drawing back AFTER the purge had appended a
+    "deleted" line to `purge.log.jsonl`, making the receipt a lie. The purge now
+    enters this same guard through `legacy_purge_guard` and holds it across the
+    deletion and the receipt, and the two checks below run INSIDE the lock rather
+    than only before it, so a writer that was parked while the purge ran finds
+    the drawing gone and refuses instead of recreating it.
+
+    Both checks have to be inside. The pre-lock check is still worth keeping —
+    it stops a made-up drawing id from minting a lock file — but on its own it is
+    a read followed by a wait, and the purge fits in the gap.
 
     RESOURCES IT HOLDS, and exactly how far each is bounded. The in-process lock
     map is reference counted and drops an entry when its last caller leaves, so it
     is bounded by CONCURRENT callers rather than by drawings ever seen. The lock
-    FILES are bounded by the number of drawings that have genuinely existed: a
-    missing drawing is refused above before the file is created, so no caller can
-    mint lock files for ids that were never drawings. What is still NOT reclaimed
-    is the lock file of a drawing that existed and was later purged. Deleting one
-    safely needs the same purge-and-store shared lock as the paragraph above,
-    because unlinking a lock file that a live holder owns is precisely how two
-    callers end up inside this section (it is why the file is not in the drawing's
-    own directory). One empty file per purged drawing is the price of not
-    reintroducing that.
+    FILES are bounded by the drawings that currently exist: a missing drawing is
+    refused before the file is created, so no caller can mint lock files for ids
+    that were never drawings, and a purged drawing's file is retired by the purge
+    itself (`_HeldCheckoutLock.reclaim`) as the last act inside this section,
+    where holding the lock exclusively is the proof that no live holder is being
+    robbed of it. Retiring it from anywhere else — under the drawing's own lock,
+    or by sweeping files whose lock can be taken — puts two callers in here at
+    once, which is why the file is not in the drawing's own directory to begin
+    with.
 
     The documented answer above that boundary is unchanged and is postgres: it
     reads `FOR UPDATE` and increments in one statement, so it needs none of
@@ -1806,7 +1995,11 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
                     f"process only; a second replica can still lose an update. Use "
                     f"the postgres authority for a multi-replica deployment.",
                     CrossProcessCheckoutLockMissing, stacklevel=3)
-                yield
+                if precondition is not None and not precondition():
+                    raise DrawingVanished(f"{tid}/{did} vanished before the write")
+                # No lock file exists on this path, so there is nothing for a
+                # deleter to reclaim and the token says so honestly.
+                yield _NoFileCheckoutLock()
                 return
             # Refuse a MISSING drawing before the lock file exists. Taking the
             # lock creates the file, and nothing reclaims it, so without this an
@@ -1820,10 +2013,70 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
             # costs nothing, because this path never writes.
             if not creating and not backend.exists(manifest_key(tid, did)):
                 raise KeyError(manifest_key(tid, did))
-            with backend.cross_process_lock(checkout_lock_key(tid, did)):
-                yield
+            with backend.cross_process_lock(checkout_lock_key(tid, did)) as held:
+                # RE-CHECK, now that nothing else can be mid-delete. The check
+                # above ran before the wait, so a purge that started after it and
+                # finished before the lock was granted is invisible to it, and
+                # every writer here rewrites the WHOLE manifest through a `put`
+                # that recreates missing parents. Without this a writer parked
+                # behind the purge recreates the drawing directory it had just
+                # been told was gone, and the "deleted" receipt already written
+                # for it becomes false.
+                if not creating and not backend.exists(manifest_key(tid, did)):
+                    # Opening the lock RE-CREATED the file a moment ago, for a
+                    # drawing the purge has already finished with and will never
+                    # look at again. Retire it here, where holding it exclusively
+                    # is the same proof the purge itself relies on; otherwise
+                    # every writer that lost this race leaves permanent residue.
+                    held.reclaim()
+                    raise KeyError(manifest_key(tid, did))
+                # The CREATING writer cannot use the check above — an absent
+                # drawing is its normal case — so it brings its own proof that
+                # the work it is about to commit is still wanted. Evaluated here
+                # rather than by the caller for the same reason: outside the lock
+                # it is a read with a wait after it.
+                if precondition is not None and not precondition():
+                    if not backend.exists(manifest_key(tid, did)):
+                        held.reclaim()
+                    raise DrawingVanished(f"{tid}/{did} vanished before the write")
+                yield held
         finally:
             thread_lock.release()
+
+
+@contextlib.contextmanager
+def legacy_purge_guard(backend: StorageBackend, tid: str, did: str):
+    """The DELETER's entry into a drawing's checkout guard.
+
+    One shared lock is the whole point. The guest purge holding only its own
+    `drawing_lock` and the store holding only this one meant the two never
+    excluded each other across processes, so the purge could delete a drawing
+    directory and write its receipt while a legacy writer sat between its
+    manifest read and its save, and `FilesystemBackend.put` then recreated the
+    directory behind the receipt. Taking the SAME lock the writers take is what
+    makes the receipt true, and it costs the purge nothing it should not already
+    be paying: it is deleting the drawing, so serializing against the drawing's
+    own writers is the correct behaviour.
+
+    `creating=True`, because a deleter's drawing may already be half gone (a
+    previous sweep that failed after the directory but before the receipt), and
+    refusing on a missing manifest would strand exactly the case that most needs
+    finishing.
+
+    Yields the held lock so the caller can `reclaim()` the lock FILE once it has
+    confirmed the drawing is gone and written its receipt. It is the caller's
+    call and not automatic, because a purge that FAILED to delete leaves a live
+    drawing whose writers still need that file.
+
+    ORDERING. Callers take their own per-drawing lock first and this second
+    (`purge_expired` -> `drawing_lock` -> here, matching `run_extraction` ->
+    `drawing_lock` -> `ingest_drawing` -> the guard). Nothing in this module ever
+    takes a `guest_uploads` lock, so the order cannot invert and there is no
+    AB-BA cycle; keep it that way, and `test_the_store_never_reaches_back_into_
+    the_upload_module` holds the line.
+    """
+    with _legacy_checkout_guard(backend, tid, did, creating=True) as held:
+        yield held
 
 
 def _next_fence(m: dict) -> int:

@@ -232,3 +232,55 @@ def test_retry_landing_between_expiry_read_and_lock_survives(client, monkeypatch
     marker = guest_uploads.read_marker(
         write_loop.backend_for_tenant(tenant, aps_live=False, da=None), tenant, did)
     assert marker is not None and marker["status"] == "ready"
+
+
+def test_the_extraction_hands_the_store_a_marker_check_it_can_run_in_the_lock(
+        client, monkeypatch):
+    """The CREATING writer's half of the retention promise, at its wiring.
+
+    Every other legacy writer proves the drawing survived by loading its
+    manifest inside the store's checkout lock. `ingest_drawing` cannot: an
+    absent drawing is its normal case. So `run_extraction` hands it a callable
+    that re-reads the upload marker, and the store runs that INSIDE the lock —
+    the only place where the answer cannot go stale before the write. Checked
+    outside, it is a read with an unbounded wait after it, and a purge sweep in a
+    second process fits through that window and writes a receipt.
+
+    Two assertions, because passing a callable that always says yes would satisfy
+    the first one alone: it is really wired through, and it really flips once the
+    purge has taken the drawing.
+    """
+    import store
+
+    seen = {}
+    real_ingest = store.ingest_drawing
+
+    def spy(backend, tenant_id, local_path, drawing_id=None, **kwargs):
+        check = kwargs.get("precondition")
+        seen["precondition"] = check
+        # Sampled HERE, the only moment it means "this extraction is still the
+        # live attempt". By the time the upload call returns, the marker has
+        # moved on to `ready` and the honest answer is already no.
+        seen["at_ingest"] = check() if callable(check) else None
+        return real_ingest(backend, tenant_id, local_path, drawing_id, **kwargs)
+
+    monkeypatch.setattr(store, "ingest_drawing", spy)
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")  # ~72 ms
+    tenant, did = _upload(client)
+
+    check = seen.get("precondition")
+    assert callable(check), (
+        "run_extraction ingested without a precondition; the creating writer "
+        "then has nothing to stop it recreating a purged drawing")
+    assert seen["at_ingest"] is True, (
+        "the check said no for a live extraction that WAS still its drawing's "
+        "own attempt; a check that never says yes blocks real uploads")
+
+    time.sleep(0.2)
+    assert guest_uploads.purge_expired()["count"] == 1
+    assert not _drawing_dir(tenant, did).exists()
+
+    assert check() is False, (
+        "the check still says yes after the purge wrote its 'deleted' receipt, "
+        "so it would wave an in-flight extraction through and resurrect the "
+        "drawing behind that receipt")
