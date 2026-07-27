@@ -717,9 +717,12 @@ def fast_lane_workers(stack) -> int:
 
     Resolved in the same order the app process resolves it: `start_uvicorn`
     copies os.environ and then applies the fixture's overrides, and `jobs`
-    reads JOB_WORKERS_FAST at executor creation with a default of 8. A value the
-    app rejects at construction is not repaired here; the first POST then fails
-    the 202 assertion below, which is the honest outcome.
+    reads JOB_WORKERS_FAST at executor creation with a default of 8, through the
+    same bare `int` used here. Values the app would reject are not repaired, and
+    the two rejected classes fail in DIFFERENT places. Measured: 0 or negative
+    leaves the app's own rejection to fail the 202 assert on the first POST. A
+    non-integer raises out of this `int` instead, before the `try` and before any
+    POST -- nothing has been submitted, so the `finally` has nothing to drain.
     """
     raw = stack["app_env"].get(
         "JOB_WORKERS_FAST", os.environ.get("JOB_WORKERS_FAST", "8"))
