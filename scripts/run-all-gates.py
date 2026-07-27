@@ -652,12 +652,12 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # Floor 235 is a MEASURED, GREEN, pristine-database baseline: 235
+        # Floor 236 is a MEASURED, GREEN, pristine-database baseline: 236
         # passed, 0 skipped, 0 failed, pytest exit 0, taken 2026-07-27 against
         # PostgreSQL 16.14 from this suite's registered cwd (the repo parent,
         # target <repo_name>/platform/tests) and reproduced on a second freshly
         # created database. It supersedes the 234 measured earlier the same day
-        # (this branch adds exactly one test), 199 (2026-07-25, PostgreSQL 17) and
+        # (this branch adds exactly two tests), 199 (2026-07-25, PostgreSQL 17) and
         # the interim 223, which was only 199 plus the 24 cases one new file
         # added -- deliberately NOT a clean baseline, so it left an 11-test gap
         # between the floor and the real count. Losing 1 to 10 tests printed
@@ -665,7 +665,7 @@ def build_suites() -> List[Suite]:
         # NOTHING, because coverage_verdict returns with no note once executed
         # == expected. That gap is now zero: the floor IS the count, so losing
         # any single test trips "executed-count regression" instead.
-        # Collected and executed are both 235 because every skip path under
+        # Collected and executed are both 236 because every skip path under
         # platform/tests is gated on the DB being unconfigured -- on a reachable
         # DB nothing skips, so a green run executes everything collected. The
         # empty skip allowlist does not prevent skips; it makes any skip FAIL
@@ -683,12 +683,16 @@ def build_suites() -> List[Suite]:
         # normalizes to UTC first) and pinned by
         # test_signature_verifies_when_the_reader_session_is_not_utc, which
         # forces a non-UTC session itself rather than trusting the ambient one.
-        # 235 was measured both ways -- TimeZone=America/Chicago and UTC.
+        # The WRITE side is canonicalized too: _now() converts a caller-supplied
+        # `now=` to UTC, so the signed rendering cannot disagree with the one
+        # verification re-derives; pinned by
+        # test_signature_verifies_when_countersigned_with_a_non_utc_now.
+        # 236 was measured both ways -- TimeZone=America/Chicago and UTC.
         # Raising this cannot red-fail CI: the suite is db_gated and the
         # test-gate workflow is hermetic, so run_suite returns SKIP with
         # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 235, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 236, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.

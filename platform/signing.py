@@ -75,7 +75,15 @@ def _now(value: Optional[datetime] = None) -> datetime:
     result = value or datetime.now(timezone.utc)
     if result.tzinfo is None:
         raise ValueError("signature timestamps must be timezone-aware")
-    return result
+    # Canonicalize to UTC so the SIGNED rendering cannot disagree with the
+    # rendering verify_signature() re-derives from the stored TIMESTAMPTZ.
+    # countersign() signs signed_at.isoformat(); verification re-derives it as
+    # astimezone(utc).isoformat(). Returning a caller's non-UTC `now=` unchanged
+    # would sign "...-05:00" and verify "...+00:00" -- the same instant spelled
+    # two ways -- so every such signature would fail with payload_mismatch.
+    # Normalizing here keeps the two sides symmetric at the source instead of
+    # relying on no caller ever passing a non-UTC clock.
+    return result.astimezone(timezone.utc)
 
 
 def register_credential(org_id: uuid.UUID, binding_id: uuid.UUID, *, jurisdiction: str,

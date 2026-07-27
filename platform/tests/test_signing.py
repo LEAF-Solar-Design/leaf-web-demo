@@ -123,9 +123,13 @@ def _non_utc_reader_session():
     """Force every pooled connection onto a non-UTC session timezone.
 
     psycopg renders TIMESTAMPTZ in the SESSION timezone, so this is the only
-    thing that makes verify_signature()'s signedAt round-trip observable. CI
-    runs a UTC postgres, where the unfixed re-derivation happens to agree, so
-    the test has to pin the timezone itself rather than trust the ambient one.
+    thing that makes verify_signature()'s signedAt round-trip observable.
+    Whoever runs this suite decides the ambient timezone, and a UTC session is
+    exactly where the unfixed re-derivation happens to agree, so the test pins
+    the timezone itself rather than trusting the ambient one. (The hermetic CI
+    test-gate provides no database at all and SKIPS this suite, so the only
+    place this executes today is a developer/reviewer run against a live
+    Postgres.)
     """
     original = db._configure
 
@@ -173,6 +177,35 @@ def test_signature_verifies_when_the_reader_session_is_not_utc(make_org):
         assert rendered.utcoffset() != timedelta(0)
         verified = signing.verify_signature(
             org.org_id, project.project_id, uuid.UUID(signed["signature_id"]))
+    assert verified["errors"] == []
+    assert verified["cryptographic_valid"] is True
+    assert verified["valid"] is True
+
+
+def test_signature_verifies_when_countersigned_with_a_non_utc_now(make_org):
+    """A caller-supplied non-UTC `now=` must still produce a verifiable signature.
+
+    countersign() signs signed_at.isoformat(), while verify_signature()
+    re-derives that string as astimezone(utc).isoformat(). If _now() returned a
+    caller's aware non-UTC value unchanged, the two sides would spell the SAME
+    instant two ways ("...-05:00" vs "...+00:00") and the signature would fail
+    with payload_mismatch. _now() canonicalizes to UTC so the write and read
+    renderings cannot diverge. No production caller passes `now=` today
+    (api.py's countersign call omits it), but the parameter is public API, so
+    this pins the symmetry at the source rather than relying on that.
+    """
+    org, project, bundle, actor, credential, key = _fixture(make_org, "tz-writer")
+    signing.configure_signature_provider(
+        signing.LocalEd25519Provider({"local:tz-writer": key}))
+    non_utc_now = datetime.now(timezone(timedelta(hours=-5)))
+    # Guard the premise: a UTC-offset clock here would prove nothing.
+    assert non_utc_now.utcoffset() != timedelta(0)
+    signed = signing.countersign(
+        org.org_id, project.project_id, uuid.UUID(bundle["bundle_id"]),
+        uuid.UUID(credential["credential_id"]), actor.binding_id,
+        "tz-writer-sign", now=non_utc_now)
+    verified = signing.verify_signature(
+        org.org_id, project.project_id, uuid.UUID(signed["signature_id"]))
     assert verified["errors"] == []
     assert verified["cryptographic_valid"] is True
     assert verified["valid"] is True
