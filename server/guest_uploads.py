@@ -1097,7 +1097,18 @@ def _mark_failed_committed(
                 },
             ).fetchone()
         return row is not None
-    with drawing_lock(tenant_id, drawing_id):
+    import store  # write_loop installs da/ on sys.path
+    # `must_exist=False`, because a failure recorded BEFORE the ingest ever ran
+    # has no manifest and refusing it would lose every pre-ingest error. The
+    # evidence this brings instead is the marker, re-read INSIDE the section:
+    # the purge deletes it with the rest of the drawing, so a vanished marker
+    # means the receipt has already been written and this failure has nowhere to
+    # go. Read outside the section (as it was) the answer goes stale while the
+    # lock is waited for, and `write_marker` then recreates the drawing
+    # directory behind that receipt.
+    with drawing_lock(tenant_id, drawing_id), \
+            store.legacy_drawing_guard(backend, tenant_id, drawing_id,
+                                       must_exist=False):
         current = read_marker(backend, tenant_id, drawing_id)
         if current is None:
             return False
@@ -1342,7 +1353,20 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                     backend, tenant_id, drawing_id, ready_marker,
                     extraction_owner, extraction_fence, cache_key, cache_data)
             else:
-                backend.put(cache_key, cache_data)
+                # Guarded for the same reason the ingest is, and it is a
+                # SEPARATE window: `ingest_drawing` released the shared lock
+                # when it returned, so a second-process purge can delete the
+                # drawing and write its receipt before this line runs. The
+                # intake cache is an ordinary `put`, which recreates missing
+                # parents, so writing it unguarded rebuilds the drawing
+                # directory behind a "deleted" receipt just as a manifest save
+                # would. A purged drawing has no manifest, so the guard raises
+                # and this attempt stops without leaving a trace.
+                try:
+                    with store.legacy_drawing_guard(backend, tenant_id, drawing_id):
+                        backend.put(cache_key, cache_data)
+                except KeyError:
+                    return  # purged between the ingest and the cache write
                 intake_sha256 = hashlib.sha256(cache_data).hexdigest()
         except ValueError as exc:
             _mark_failed(backend, tenant_id, drawing_id, marker, "INTERNAL",
@@ -1388,7 +1412,15 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         marker["extracted_version"] = 1
         marker["intake_ref"] = cache_key
         marker["intake_sha256"] = intake_sha256
-        write_marker(backend, tenant_id, drawing_id, marker)
+        # The LAST window, and the worst one to leave open: this marker is what
+        # makes the upload readable, so recreating a purged drawing's directory
+        # here republishes it as ready with no manifest and no version blob
+        # behind it. Guarded like the cache write above.
+        try:
+            with store.legacy_drawing_guard(backend, tenant_id, drawing_id):
+                write_marker(backend, tenant_id, drawing_id, marker)
+        except KeyError:
+            return  # purged before this attempt could publish; receipt stands
 
 
 class _ExtractError(Exception):

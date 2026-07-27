@@ -2057,6 +2057,32 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
 
 
 @contextlib.contextmanager
+def legacy_drawing_guard(backend: StorageBackend, tid: str, did: str, *,
+                         must_exist: bool = True):
+    """Public entry into one drawing's checkout guard for a NON-manifest writer.
+
+    The manifest writers reach this guard through their own functions. What this
+    is for is the OTHER writes that land in a drawing's directory — an upload's
+    intake cache, its state marker — because `FilesystemBackend.put` recreates
+    missing parents, so any one of them can rebuild a directory the purge has
+    just deleted and reported. Serializing only the manifest would leave the
+    receipt false by a different file.
+
+    `must_exist=True` refuses a drawing that is already gone, with the same
+    `KeyError` the manifest writers raise, which is what a caller finishing work
+    on a purged drawing needs. `must_exist=False` is for a caller whose drawing
+    may legitimately not exist yet (a failure recorded before the ingest ever
+    created one); it must bring its own evidence and re-read it INSIDE the
+    section, because outside it the answer goes stale while it waits.
+
+    NOT REENTRANT, like the guard beneath it: never call this from inside
+    another guarded section for the same drawing.
+    """
+    with _legacy_checkout_guard(backend, tid, did, creating=not must_exist) as held:
+        yield held
+
+
+@contextlib.contextmanager
 def legacy_purge_guard(backend: StorageBackend, tid: str, did: str):
     """The DELETER's entry into a drawing's checkout guard.
 

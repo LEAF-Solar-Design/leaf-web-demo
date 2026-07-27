@@ -284,3 +284,53 @@ def test_the_extraction_hands_the_store_a_marker_check_it_can_run_in_the_lock(
         "the check still says yes after the purge wrote its 'deleted' receipt, "
         "so it would wave an in-flight extraction through and resurrect the "
         "drawing behind that receipt")
+
+
+def test_the_extraction_tail_cannot_republish_a_drawing_purged_after_ingest(
+        client, monkeypatch):
+    """The window AFTER `ingest_drawing` returns, found by review on PR #216.
+
+    The precondition only covers the ingest itself. When it returns it releases
+    the shared checkout lock, and the extraction still has two writes to do: the
+    intake cache and the ready marker. Both go through `FilesystemBackend.put`,
+    which recreates missing parents, so a purge landing in that window used to
+    be followed by the drawing directory reappearing — republished as `ready`,
+    with no manifest and no version blob behind it, behind a receipt that had
+    already called it deleted. That is the same broken promise the ingest guard
+    closes, reached through a different file.
+
+    The purge is fired from inside a patched `ingest_drawing`, immediately after
+    the real one returns, which is exactly the instant the lock is released and
+    exactly where the review said a load-bearing test has to park.
+    """
+    import store
+
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")  # ~72 ms
+    real_ingest = store.ingest_drawing
+    fired = {}
+
+    def ingest_then_purge(backend, tenant_id, local_path, drawing_id=None, **kwargs):
+        out = real_ingest(backend, tenant_id, local_path, drawing_id, **kwargs)
+        # The lock is free again here. Let the stamped expiry pass, then sweep.
+        time.sleep(0.2)
+        fired["purge"] = guest_uploads.purge_expired()
+        return out
+
+    monkeypatch.setattr(store, "ingest_drawing", ingest_then_purge)
+    tenant, did = _upload(client)
+
+    assert fired.get("purge", {}).get("count") == 1, (
+        f"the purge did not delete the drawing mid-extraction: {fired}")
+
+    receipts = [json.loads(line) for line in
+                (Path(write_loop.guest_store_dir()) / "purge.log.jsonl")
+                .read_text(encoding="utf-8").strip().splitlines()]
+    assert [r["status"] for r in receipts] == ["deleted"], receipts
+
+    assert not _drawing_dir(tenant, did).exists(), (
+        f"the extraction tail recreated {_drawing_dir(tenant, did)} after the "
+        f"purge had already written its 'deleted' receipt")
+
+    # And nothing partial was left where the drawing used to be.
+    marker = _drawing_dir(tenant, did) / "upload.state.json"
+    assert not marker.exists(), "a ready marker was republished for a purged upload"
