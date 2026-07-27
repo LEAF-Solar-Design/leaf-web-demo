@@ -17,11 +17,27 @@ socket, not a mock), and asserts:
   (e) an unknown session_id -> TurnRejected(404, session_not_found).
   (f) a stub that streams data but never sends turn_complete -> the
       TURN_MAX_S watchdog appends turn_complete{stop_reason:'timeout'} and
-      releases the CAS — deterministically BEFORE the request-level read
-      timeout could ever fire (proven by construction: the watchdog's
-      deadline is anchored at turn-START, the read-timeout's deadline resets
-      on every chunk received, so as long as at least one chunk arrives after
-      t=0 the read-timeout deadline is strictly later).
+      releases the CAS — and reports that SAME terminal event whether the
+      watchdog or the drain thread got there first.
+
+      The two race for one condition, and the race is not winnable by
+      widening a budget: the drain thread is started first, its socket read
+      timeout is also TURN_MAX_S, and urllib3 restarts that timeout on every
+      chunk, so any fixed margin is only a scheduling allowance. They are
+      therefore made to AGREE on a shared deadline rather than raced —
+      `_drain_terminal`, asserted directly by
+      `test_drain_failure_past_the_deadline_reports_timeout_not_error` and
+      its before-the-deadline control, with no threads or wall clock in the
+      loop. The behavioral cases below then assert the observable outcome:
+      a stalled stream and a harness silent from the first byte both
+      terminalize as turn_complete{stop_reason:'timeout'}, exactly once.
+
+      An earlier revision of this file claimed the ordering was "proven by
+      construction" from chunk arrival times. It was not: the separation was
+      only ever `last_chunk_time - turn_start`, which the HARNESS controls,
+      not this module. On a loaded host the stub's own server thread starves,
+      chunks stop arriving, the margin collapses to zero and the terminal
+      event became a scheduling coin flip.
 
 Run:  cd server && python -m pytest tests/test_turn_runner.py -q
 """
@@ -501,12 +517,16 @@ def test_watchdog_appends_timeout_turn_complete_when_stream_never_ends(monkeypat
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
     monkeypatch.setenv("TURN_MAX_S", "1")  # watchdog deadline = turn-start + 1s
 
-    # 4 chunks ~0.12s apart (last one lands ~t=0.45-0.6s) then the stub hangs
-    # (never sends the terminating 0-chunk). The watchdog's deadline is
-    # anchored at turn-start (t=1s); the request-level read-timeout resets on
-    # every chunk received, so its deadline after the last chunk is
-    # last_chunk_time + 1s > 1s — strictly later than the watchdog. The
-    # watchdog is therefore guaranteed to fire first.
+    # 4 chunks ~0.12s apart, then the stub hangs (never sends the terminating
+    # 0-chunk).
+    #
+    # NOTE: the chunk spacing is scenery, NOT the guarantee. It used to be
+    # load-bearing — the read timeout's deadline is last_chunk + TURN_MAX_S,
+    # so the spacing bought ~0.36s of margin — and that is exactly why this
+    # test flaked: a loaded host starves the stub's own server thread, chunks
+    # stop arriving, and the margin collapses to zero. The terminal event no
+    # longer depends on that margin, or on which thread wins: both paths
+    # resolve against one shared deadline (_drain_terminal).
     stub.SCRIPT = [
         {"type": "text_delta", "data": {"text": "thinking"}},
         {"type": "text_delta", "data": {"text": "..."}},
@@ -520,19 +540,27 @@ def test_watchdog_appends_timeout_turn_complete_when_stream_never_ends(monkeypat
     session_id = sess["session_id"]
     turn_id = turn_runner.start_turn("tenant-watchdog", session_id, text="do something slow")
 
-    # Give the watchdog its full TURN_MAX_S=1s plus slack, but assert well
-    # before the read-timeout's earliest possible deadline (~last_chunk+1s
-    # >= 1.45s here), so a pass here cannot be explained by the read-timeout
-    # instead of the watchdog.
+    # This budget is LIVENESS only, and deliberately generous. It is NOT what
+    # decides the outcome — racing the two deadlines by wall clock is what
+    # made this test flaky in the first place. The assertion below is on the
+    # terminal event's SIGNATURE, and once either path's `_end_once` has won,
+    # waiting longer cannot turn an `error` into a `turn_complete`.
     ok = _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None,
-                     timeout_s=1.35)
+                     timeout_s=8.0)
     assert ok, "CAS was not released by the watchdog within its deadline"
 
     events = session_store.recent_events(session_id, 100)
     assert all(e["turn_id"] == turn_id for e in events)
     terminal = [e for e in events if e["type"] in ("turn_complete", "error")]
     assert len(terminal) == 1, terminal
-    assert terminal[0]["type"] == "turn_complete"
+    # THE control: an `error` here means the request-level read timeout
+    # terminalized this turn instead of the watchdog — the exact regression
+    # this test exists to catch, and the exact way it used to fail on a
+    # loaded host.
+    assert terminal[0]["type"] == "turn_complete", (
+        "the read timeout beat the watchdog and terminalized the turn: "
+        f"{terminal[0]}"
+    )
     assert terminal[0]["data"] == {"stop_reason": "timeout"}
 
     # exactly one terminal event ever landed — no double-fire race with the
@@ -540,6 +568,101 @@ def test_watchdog_appends_timeout_turn_complete_when_stream_never_ends(monkeypat
     types = [e["type"] for e in events]
     assert types.count("turn_complete") == 1
     assert types.count("error") == 0
+
+
+def test_drain_failure_past_the_deadline_reports_timeout_not_error():
+    """The arbitration invariant — asserted with no threads and no wall clock
+    in the loop at all.
+
+    The drain thread and the watchdog race for the same condition, and the
+    race cannot be won by widening either budget: any fixed margin is only a
+    scheduling allowance, and the drain thread is started first. So the two
+    paths are made to AGREE instead. Past the turn's own deadline a stream
+    failure IS turn expiry, and the drain must report exactly what the
+    watchdog would.
+    """
+    already_past = time.monotonic() - 1.0
+    ev_type, data = turn_runner._drain_terminal(
+        already_past, RuntimeError("connection reset by peer"))
+    assert ev_type == "turn_complete"
+    assert data == {"stop_reason": "timeout"}
+
+
+def test_drain_failure_before_the_deadline_still_reports_error():
+    """The control: arbitration must NOT blanket-relabel stream failures as
+    timeouts. A genuine transport fault well inside the turn's budget is still
+    an `error`, with its cause preserved."""
+    not_yet = time.monotonic() + 30.0
+    ev_type, data = turn_runner._drain_terminal(
+        not_yet, RuntimeError("connection reset by peer"))
+    assert ev_type == "error"
+    assert data["error"]["error_code"] == ErrorCode.INTERNAL
+    assert "connection reset by peer" in data["error"]["message"]
+
+
+def test_clean_eof_past_the_deadline_also_reports_timeout():
+    """A stream that simply ENDS past the deadline must read like the
+    watchdog's terminal event too.
+
+    Otherwise the same expired turn yields NO terminal event when the drain
+    thread notices the EOF first, and turn_complete{stop_reason:'timeout'}
+    when the watchdog fires first — the CAS released either way, but the
+    client left showing a turn still in flight in the first case.
+    """
+    already_past = time.monotonic() - 1.0
+    ev_type, data = turn_runner._eof_terminal(already_past)
+    assert ev_type == "turn_complete"
+    assert data == {"stop_reason": "timeout"}
+
+
+def test_clean_eof_before_the_deadline_appends_no_terminal_event():
+    """The control for the EOF path: an unexpectedly SHORT stream is not an
+    expired turn. Historical behavior is preserved — release the CAS, append
+    nothing — so this arbitration cannot manufacture a timeout for a stream
+    that ended early."""
+    not_yet = time.monotonic() + 30.0
+    ev_type, data = turn_runner._eof_terminal(not_yet)
+    assert ev_type is None
+    assert data is None
+
+
+def test_watchdog_wins_even_when_the_harness_is_silent_from_the_first_byte(
+        monkeypatch, turn_stub):
+    """The canonical hang: the harness answers 200 + headers and then sends
+    nothing at all, ever.
+
+    This is the case with NO separation to borrow — not one chunk arrives to
+    push the read timeout's deadline out — so both deadlines land on the same
+    instant and the winner is pure scheduling. Measured against the pre-fix
+    code on an IDLE host, the drain thread won 11 of 12 runs here and the turn
+    terminalized as `error` instead of the documented timeout. The outcome is
+    now the same either way.
+    """
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "1")
+
+    stub.SCRIPT = []              # not one byte of body
+    stub.SEND_TERMINATOR = False  # and never the terminating 0-chunk
+
+    sess = _new_session("tenant-watchdog-silent")
+    session_id = sess["session_id"]
+    turn_id = turn_runner.start_turn(
+        "tenant-watchdog-silent", session_id, text="hello?")
+
+    ok = _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None,
+                     timeout_s=8.0)
+    assert ok, "CAS was never released for a harness that went silent"
+
+    events = session_store.recent_events(session_id, 100)
+    assert all(e["turn_id"] == turn_id for e in events)
+    terminal = [e for e in events if e["type"] in ("turn_complete", "error")]
+    assert len(terminal) == 1, terminal
+    assert terminal[0]["type"] == "turn_complete", (
+        "the read timeout beat the watchdog and terminalized the turn: "
+        f"{terminal[0]}"
+    )
+    assert terminal[0]["data"] == {"stop_reason": "timeout"}
 
 
 # =========================================================================== #
