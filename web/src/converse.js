@@ -9,7 +9,7 @@
 // LIVE only — mock mode never imports a session (the agent tier is disabled
 // entirely in VITE_MOCK; see App.jsx onDispatch).
 
-import { config, authHeaders } from './api.js'
+import { config, authHeaders, noteUnauthorized } from './api.js'
 
 const API_BASE = config.apiBase
 const TENANT = config.tenant
@@ -42,11 +42,11 @@ function tagged(res, body, fallback) {
 }
 
 async function post(path, payload) {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = noteUnauthorized(await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify(payload),
-  })
+  }), path)
   const body = await res.json().catch(() => null)
   return { res, body }
 }
@@ -208,10 +208,17 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
     try {
       for (;;) {
         if (closed) return
-        const res = await fetch(
+        const res = noteUnauthorized(await fetch(
           `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/transcript?limit=${pollLimit}`,
           { headers: { 'X-Tenant-Id': TENANT, ...authHeaders() } },
-        )
+        ), `/api/sessions/${sessionId}/transcript`)
+        if (res.status === 401) {
+          closed = true
+          if (es) { try { es.close() } catch { /* noop */ } es = null }
+          if (reconnectTimer) clearTimeout(reconnectTimer)
+          if (pollTimer) clearInterval(pollTimer)
+          return
+        }
         if (!res.ok) return // transient / 404 — the SSE leg is authoritative
         const body = await res.json().catch(() => null)
         const events = (body && body.events) || [] // ascending seq

@@ -174,7 +174,7 @@
 .tour-dot.on { background: var(--primary); }
 
 @keyframes tour-fade { from { opacity: 0 } to { opacity: 1 } }
-@keyframes tour-rise { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: none } }
+@keyframes tour-rise { from { opacity: 0; transform: scale(.985) } to { opacity: 1; transform: none } }
 
 /* The centered (no-target) case positions itself with a translate(-50%,-50%);
    tour-rise's `transform: none` end state would clobber that and slam the card
@@ -182,7 +182,7 @@
    phone. Give it keyframes that CARRY the centering transform. */
 .tour-card.is-centered { animation-name: tour-rise-centered; }
 @keyframes tour-rise-centered {
-  from { opacity: 0; transform: translate(-50%, calc(-50% + 12px)) }
+  from { opacity: 0; transform: translate(-50%, -50%) scale(.985) }
   to   { opacity: 1; transform: translate(-50%, -50%) }
 }
 

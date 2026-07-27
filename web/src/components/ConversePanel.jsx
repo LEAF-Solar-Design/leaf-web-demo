@@ -60,6 +60,7 @@ export default function ConversePanel({
   onLinkClaude,              // grant_required CTA -> open the Claude account panel
   onAttachJob,               // (jobId, tool) -> App's existing §7 job attach affordance
   onJobLinked,               // a job_linked event arrived -> refresh the job rail
+  writeLocked = false,
 }) {
   const [events, setEvents] = useState([])
   const [input, setInput] = useState('')
@@ -210,8 +211,8 @@ export default function ConversePanel({
   // The confirm payload uses the harness §1 camelCase key (confirmationId):
   // the app forwards req.confirm verbatim, and the harness messages route
   // accepts no other spelling.
-  const decide = async (confirmationId, ok) => {
-    if (deciding) return
+  const decide = async (confirmationId, ok, blocked = false) => {
+    if (deciding || (ok && blocked)) return
     setDeciding(confirmationId); setSendErr(null)
     try {
       try {
@@ -310,10 +311,10 @@ export default function ConversePanel({
               <button
                 type="button"
                 className="chip-act"
-                disabled={deciding === item.id}
-                onClick={() => decide(item.id, true)}
+                disabled={deciding === item.id || (isWrite && writeLocked)}
+                onClick={() => decide(item.id, true, isWrite && writeLocked)}
               >
-                {deciding === item.id ? 'Sending…' : 'Approve'}
+                {deciding === item.id ? 'Sending…' : (isWrite && writeLocked ? 'Editing locked' : 'Approve')}
               </button>
               <button
                 type="button"

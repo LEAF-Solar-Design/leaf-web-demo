@@ -12,6 +12,7 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:5185',
     browserName: 'chromium',
     headless: true,
+    video: 'on',
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
     viewport: { width: 1600, height: 1000 },
@@ -23,6 +24,7 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       VITE_MOCK: '0',
+      VITE_CAT_PROOF: '1',
       VITE_API_BASE: 'http://leaf-proof.invalid',
       VITE_TENANT_ID: 'cat-litmus-tenant',
     },

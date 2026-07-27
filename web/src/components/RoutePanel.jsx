@@ -34,6 +34,7 @@ export default function RoutePanel({
   // last route is held for the 180 ms .exit fade (display-only) before unmount.
   const { shown: route, exiting } = useExit(liveRoute)
   const [activeIdx, setActiveIdx] = useState(0)
+  const resolverRef = useRef(null)
   // Enter arms 350ms AFTER the route mounts: the keypress that dispatched the
   // prompt (or its OS key-repeat) must never also confirm the run — one Enter,
   // one act. A deliberate second Enter lands after the cooldown.
@@ -76,6 +77,11 @@ export default function RoutePanel({
   }, [route, confident, toolObj, tools])
 
   useEffect(() => { setActiveIdx(0); enterArmedAtRef.current = performance.now() + 350 }, [route])
+
+  useEffect(() => {
+    if (!resolverRef.current?.contains(document.activeElement)) return
+    resolverRef.current.querySelector('[role="option"][aria-selected="true"]')?.focus()
+  }, [activeIdx])
 
   // Enter / arrow keys while a decision surface is up (Esc lives in App's
   // global ladder). Enter on a focused button/link is left to that control.
@@ -169,6 +175,7 @@ export default function RoutePanel({
                   : 'you confirm before it runs.'}
           </span>
         </span>
+        {route.stub && <span className="dim">Routing service unavailable. Using local catalog matching.</span>}
         <button
           type="button"
           className="chip-act"
@@ -187,8 +194,9 @@ export default function RoutePanel({
   // ---- RUN lane, low confidence / not in this catalog: resolver rows --------
   const conf = Math.round((route.confidence || 0) * 100)
   return (
-    <div className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
+    <div ref={resolverRef} className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
       <div className="resolver-header">
+        {route.stub && <span>Routing service unavailable. Using local catalog matching. </span>}
         {toolObj
           ? <>Run · best guess {conf}% match</>
           : route.slash
@@ -196,11 +204,13 @@ export default function RoutePanel({
             : <>“{route.tool}” is live-only — not in this catalog. Pick an alternative:</>}
       </div>
       {rows.map((row, i) => (
-        <div
+        <button
+          type="button"
           key={`${row.kind}-${row.tool}`}
           className={`resolver-row ${i === activeIdx ? 'active' : ''}`}
           role="option"
           aria-selected={i === activeIdx}
+          tabIndex={i === activeIdx ? 0 : -1}
           onMouseEnter={() => setActiveIdx(i)}
           onClick={() => {
             if (row.kind === 'run' && toolObj) {
@@ -220,7 +230,7 @@ export default function RoutePanel({
             {typeof row.confidence === 'number' ? `${Math.round(row.confidence * 100)}%` : ''}
           </span>
           {i === activeIdx && <span className="key hot">Enter</span>}
-        </div>
+        </button>
       ))}
       {rows.length === 0 && (
         <div className="resolver-row">

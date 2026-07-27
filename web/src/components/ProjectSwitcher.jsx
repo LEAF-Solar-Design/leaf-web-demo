@@ -21,6 +21,8 @@ export default function ProjectSwitcher({
 }) {
   const [open, setOpen] = useState(false)
   const [hi, setHi] = useState(0) // keyboard-highlighted row (resolver "active")
+  const [orgName, setOrgName] = useState('My workspace')
+  const [projectDraft, setProjectDraft] = useState('')
   const rootRef = useRef(null)
   const menu = useExit(open) // 180 ms M1 exit fade on close
 
@@ -91,9 +93,15 @@ export default function ProjectSwitcher({
           ) : !orgId ? (
             <div className="proj-empty">
               <div className="proj-sub">No workspace org yet. Create one to keep projects and jobs.</div>
-              <button className="btn primary proj-act" onClick={() => { onCreateOrg(); }} disabled={orgBusy}>
-                {orgBusy ? 'Creating…' : 'Create workspace org'}
-              </button>
+              <form className="proj-create" onSubmit={(event) => { event.preventDefault(); onCreateOrg(orgName) }}>
+                <label>
+                  Workspace name
+                  <input value={orgName} onChange={(event) => setOrgName(event.target.value)} disabled={orgBusy} />
+                </label>
+                <button className="btn primary proj-act" type="submit" disabled={orgBusy || !orgName.trim()}>
+                  {orgBusy ? 'Creating…' : 'Create workspace org'}
+                </button>
+              </form>
             </div>
           ) : (
             <>
@@ -134,9 +142,21 @@ export default function ProjectSwitcher({
                   )}
                 </ul>
               )}
-              <button className="chip-act proj-act" onClick={() => { onCreateProject(); }} disabled={projectBusy}>
-                {projectBusy ? 'Creating…' : 'New project'}
-              </button>
+              <form className="proj-create" onSubmit={(event) => {
+                event.preventDefault()
+                const name = projectDraft.trim()
+                if (!name) return
+                onCreateProject(name)
+                setProjectDraft('')
+              }}>
+                <label>
+                  New project
+                  <input value={projectDraft} onChange={(event) => setProjectDraft(event.target.value)} disabled={projectBusy} />
+                </label>
+                <button className="chip-act proj-act" type="submit" disabled={projectBusy || !projectDraft.trim()}>
+                  {projectBusy ? 'Creating…' : 'Create project'}
+                </button>
+              </form>
             </>
           )}
         </div>
