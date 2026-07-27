@@ -903,6 +903,14 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     compared against the ids actually recovered: a POST that dies on the way back
     leaves a job accepted server-side with no id here to drain, and that is
     REPORTED rather than passing quietly as a clean drain.
+
+    What this still does NOT prove is the documented `<200 ms` p-latency itself,
+    for the reason stated at the top: nothing runnable on `ubuntu-latest` can.
+    That half is observed in production instead — `POST /api/run` emits the
+    `SubmitLatency` metric (`emf_metrics.emit_submit_latency`, alarm intent in
+    `server/CONTRACT-ADDENDUM.md` §7 "Observing the `<200 ms` claim"), and its
+    emission is gated by `tests/test_submit_latency_metric.py`. That metric does
+    not weaken anything here: it is a production observation, not a test.
     """
     url = f"{stack['app']}/api/run"
     # Built OUTSIDE every timed window: the catalog GET is not the property here.
