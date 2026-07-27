@@ -649,27 +649,55 @@ def test_1a_flat_submit_cost_does_not_regress(stack):
 INDEPENDENCE_PAIRS = 16
 INDEPENDENCE_SLEEP_S = 4.0
 # Cheap POSTs, discarded, that exist only to get the app process out of its
-# thread-spawn regime before anything is measured. The cause is MEASURED, not
-# assumed: `jobs` hands every submission to a ThreadPoolExecutor, which starts a
-# NEW pool thread on each submit until it holds `max_workers` of them, whether or
-# not an idle thread is already free. So the cost is per-POST and independent of
-# the payload. Driving the fast lane (JOB_WORKERS_FAST, contract default 8, and
-# nothing in CI or the gate runner sets it) at four pool sizes put the drop to
-# the ~7ms warm floor at POST number pool+1 EVERY time:
+# thread-spawn regime before anything is measured.
+#
+# The mechanism, read out of CPython rather than assumed: `jobs` hands every
+# submission to a ThreadPoolExecutor, and `_adjust_thread_count` starts a new
+# pool thread only when NO idle worker is free -- given one, it reuses it and
+# returns. A pool thread therefore is NOT guaranteed per submit. What makes the
+# pool fill here is that a submitted job still holds its worker when the next
+# POST arrives, so no idle worker exists to reuse. That is an observation about
+# this app, not a language invariant, and the measurement is what carries it:
+# driving the fast lane at four pool sizes put the drop to the ~7ms warm floor
+# at POST number pool+1 EVERY time, which is the cliff tracking `max_workers`
+# that reuse would have smeared away.
 #
 #     JOB_WORKERS_FAST     2     4     8    12
 #     first warm POST     #3    #5    #9   #13
 #
-# 12 therefore clears the default with 4 POSTs to spare. This is not a tuning
-# nicety: it is what makes the two groups COMPARABLE. Measured over the first 8
-# POSTs the per-POST cost runs 60-250ms against that 7ms floor, so whichever
-# group happens to own more of those slots carries a bias that has nothing to do
-# with the submit path. An earlier form of this test ran with no such warmup, so
-# the expensive prefix split 3 slots to 4, and 64 runs of it read a systematic
-# -33.7ms (grand mean 40.6ms slow against 74.3ms fast) -- an artefact of which
-# group happened to own the extra slot. After this warmup the two groups are
-# indistinguishable: 1792 measured samples put the grand mean at 9.6ms for BOTH.
-SUBMIT_WARMUP_POSTS = 12
+# Because the cliff moves WITH the pool, the count is derived from the pool
+# actually in force rather than fixed. `start_uvicorn` copies os.environ into
+# the app process and the `stack` fixture does not pin JOB_WORKERS_FAST, so an
+# ambient one is inherited and a hard-coded 12 would quietly stop covering the
+# prefix. At the contract default of 8 this still resolves to 12 POSTs, which is
+# what every measurement quoted here was taken at.
+#
+# What the warmup buys -- and what it costs to lose it -- is bounded, not
+# argued. Over the first 8 POSTs the per-POST cost runs 60-250ms against that
+# 7ms floor, so a group owning more of those slots carries a bias that has
+# nothing to do with the submit path. But the pair order ALTERNATES, so for an
+# expensive prefix of ANY length the two groups differ by at most ONE slot, and
+# the residual is a difference between neighbouring slots divided by
+# INDEPENDENCE_PAIRS rather than a sum. Measured at that worst case: an earlier
+# form of this test ran with no warmup at all, and 64 runs of it read a
+# systematic -33.7ms (grand mean 40.6ms slow against 74.3ms fast). That is 6.7%
+# of the budget below. So a warmup that under-covers erodes margin and nudges
+# the detection floor; it cannot flake this bound, which needs 500ms. After this
+# warmup the two groups are indistinguishable: 1792 measured samples put the
+# grand mean at 9.6ms for BOTH.
+SUBMIT_WARMUP_MARGIN = 4
+
+
+def fast_lane_workers(stack) -> int:
+    """The fast-lane pool size in force in the app process under test.
+
+    Resolved in the same order the app process resolves it: `start_uvicorn`
+    copies os.environ and then applies the fixture's overrides, and `jobs`
+    reads JOB_WORKERS_FAST at executor creation with a default of 8.
+    """
+    raw = stack["app_env"].get(
+        "JOB_WORKERS_FAST", os.environ.get("JOB_WORKERS_FAST", "8"))
+    return max(1, int(raw))
 # Measured 2026-07-27 against this repo, not guessed, and derived from the NOISE
 # rather than from any particular regression size. 56 runs of the exact sequence
 # below against a real booted stack, one full broker+app boot per run, 28 idle
@@ -781,8 +809,9 @@ def test_1b_submit_cost_is_independent_of_execution_time(stack):
     sent = 0
     try:
         # The warmup POSTs carry no `_qa_sleep_s`, so clearing the thread-spawn
-        # regime costs 12 instant jobs rather than 12 more on the drain bill.
-        for _ in range(SUBMIT_WARMUP_POSTS):
+        # regime costs instant jobs rather than that many more on the drain bill.
+        warmup_posts = fast_lane_workers(stack) + SUBMIT_WARMUP_MARGIN
+        for _ in range(warmup_posts):
             sent += 1
             warm = requests.post(url, json=fast_payload, timeout=120)
             assert warm.status_code == 202
