@@ -17,11 +17,25 @@ socket, not a mock), and asserts:
   (e) an unknown session_id -> TurnRejected(404, session_not_found).
   (f) a stub that streams data but never sends turn_complete -> the
       TURN_MAX_S watchdog appends turn_complete{stop_reason:'timeout'} and
-      releases the CAS — deterministically BEFORE the request-level read
-      timeout could ever fire (proven by construction: the watchdog's
-      deadline is anchored at turn-START, the read-timeout's deadline resets
-      on every chunk received, so as long as at least one chunk arrives after
-      t=0 the read-timeout deadline is strictly later).
+      releases the CAS, and it is the WATCHDOG that does so rather than the
+      request-level read timeout.
+
+      That ordering is a property of the code, not of the wall clock.
+      turn_runner gives the read timeout a strictly LATER deadline than the
+      watchdog (READ_TIMEOUT_SLACK_S), which
+      `test_read_timeout_is_strictly_later_than_the_watchdog_deadline`
+      asserts directly, with no timing in the loop at all. The two
+      behavioral cases below — a stream that stalls mid-flight, and a
+      harness that sends headers and then goes silent — then assert WHICH
+      component terminalized the turn by its own signature, never by which
+      one happened to be faster.
+
+      An earlier revision of this file claimed the ordering was "proven by
+      construction" from chunk arrival times. It was not: the separation was
+      only ever `last_chunk_time - turn_start`, which the HARNESS controls,
+      not this module. On a loaded host the stub's own server thread starves,
+      chunks stop arriving, the margin collapses to zero and the terminal
+      event becomes a scheduling coin flip.
 
 Run:  cd server && python -m pytest tests/test_turn_runner.py -q
 """
@@ -39,6 +53,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
+import requests
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
@@ -501,12 +516,16 @@ def test_watchdog_appends_timeout_turn_complete_when_stream_never_ends(monkeypat
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
     monkeypatch.setenv("TURN_MAX_S", "1")  # watchdog deadline = turn-start + 1s
 
-    # 4 chunks ~0.12s apart (last one lands ~t=0.45-0.6s) then the stub hangs
-    # (never sends the terminating 0-chunk). The watchdog's deadline is
-    # anchored at turn-start (t=1s); the request-level read-timeout resets on
-    # every chunk received, so its deadline after the last chunk is
-    # last_chunk_time + 1s > 1s — strictly later than the watchdog. The
-    # watchdog is therefore guaranteed to fire first.
+    # 4 chunks ~0.12s apart, then the stub hangs (never sends the terminating
+    # 0-chunk).
+    #
+    # NOTE: the chunk spacing is scenery, NOT the guarantee. It used to be
+    # load-bearing — the read timeout's deadline is last_chunk + TURN_MAX_S,
+    # so the spacing bought ~0.36s of margin — and that is exactly why this
+    # test flaked: a loaded host starves the stub's own server thread, chunks
+    # stop arriving, and the margin collapses to zero. The watchdog now wins
+    # because turn_runner gives the read timeout a strictly later deadline
+    # (READ_TIMEOUT_SLACK_S), under every arrival pattern.
     stub.SCRIPT = [
         {"type": "text_delta", "data": {"text": "thinking"}},
         {"type": "text_delta", "data": {"text": "..."}},
@@ -520,19 +539,29 @@ def test_watchdog_appends_timeout_turn_complete_when_stream_never_ends(monkeypat
     session_id = sess["session_id"]
     turn_id = turn_runner.start_turn("tenant-watchdog", session_id, text="do something slow")
 
-    # Give the watchdog its full TURN_MAX_S=1s plus slack, but assert well
-    # before the read-timeout's earliest possible deadline (~last_chunk+1s
-    # >= 1.45s here), so a pass here cannot be explained by the read-timeout
-    # instead of the watchdog.
+    # This budget is LIVENESS only, and deliberately generous. It is NOT what
+    # separates the watchdog from the read timeout — racing the two deadlines
+    # by wall clock is what made this test flaky in the first place. The
+    # discriminator is the terminal event's SIGNATURE, asserted below: the
+    # watchdog's is turn_complete{stop_reason:'timeout'}, the read timeout's
+    # is error{INTERNAL, "...Timeout..."}. Waiting longer can therefore never
+    # turn a real failure into a pass.
     ok = _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None,
-                     timeout_s=1.35)
+                     timeout_s=8.0)
     assert ok, "CAS was not released by the watchdog within its deadline"
 
     events = session_store.recent_events(session_id, 100)
     assert all(e["turn_id"] == turn_id for e in events)
     terminal = [e for e in events if e["type"] in ("turn_complete", "error")]
     assert len(terminal) == 1, terminal
-    assert terminal[0]["type"] == "turn_complete"
+    # THE control: an `error` here means the request-level read timeout
+    # terminalized this turn instead of the watchdog — the exact regression
+    # this test exists to catch, and the exact way it used to fail on a
+    # loaded host.
+    assert terminal[0]["type"] == "turn_complete", (
+        "the read timeout beat the watchdog and terminalized the turn: "
+        f"{terminal[0]}"
+    )
     assert terminal[0]["data"] == {"stop_reason": "timeout"}
 
     # exactly one terminal event ever landed — no double-fire race with the
@@ -540,6 +569,79 @@ def test_watchdog_appends_timeout_turn_complete_when_stream_never_ends(monkeypat
     types = [e["type"] for e in events]
     assert types.count("turn_complete") == 1
     assert types.count("error") == 0
+
+
+def test_read_timeout_is_strictly_later_than_the_watchdog_deadline(monkeypatch):
+    """The invariant that makes the WATCHDOG, not the read timeout, own turn
+    expiry — asserted structurally, with no wall clock in the loop.
+
+    urllib3's read timeout restarts on every chunk received. If it shares the
+    TURN_MAX_S budget with the watchdog, then the moment the harness stops
+    sending (a hang — precisely the case the watchdog exists for) the two
+    deadlines coincide and the terminal event is decided by thread scheduling.
+    Strict separation is what makes the ordering true by construction, so it
+    is asserted here directly rather than inferred from a race.
+    """
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("TURN_MAX_S", "7")
+
+    captured: Dict[str, Any] = {}
+
+    def capture_then_refuse(url, **kwargs):
+        captured.update(kwargs)
+        raise requests.exceptions.ConnectionError("captured — no real connection")
+
+    monkeypatch.setattr(turn_runner.requests, "post", capture_then_refuse)
+
+    sess = _new_session("tenant-read-timeout")
+    with pytest.raises(turn_runner.TurnRejected):
+        turn_runner.start_turn("tenant-read-timeout", sess["session_id"], text="hi")
+
+    _connect_s, read_s = captured["timeout"]
+    assert read_s > 7.0, (
+        "the socket read timeout must be STRICTLY later than the watchdog's "
+        "TURN_MAX_S deadline — otherwise a harness that goes silent leaves "
+        "both deadlines at the same instant and the terminal event becomes a "
+        f"scheduling coin flip; got read={read_s} vs watchdog=7.0"
+    )
+
+
+def test_watchdog_wins_even_when_the_harness_is_silent_from_the_first_byte(
+        monkeypatch, turn_stub):
+    """The canonical hang: the harness answers 200 + headers and then sends
+    nothing at all, ever.
+
+    This is the case with NO separation to borrow — not one chunk arrives to
+    push the read timeout's deadline out — so it is the strongest form of the
+    property. Measured against the pre-fix code on an IDLE host, the read
+    timeout won 11 of 12 runs here and the turn terminalized as `error`
+    instead of the documented timeout.
+    """
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "1")
+
+    stub.SCRIPT = []              # not one byte of body
+    stub.SEND_TERMINATOR = False  # and never the terminating 0-chunk
+
+    sess = _new_session("tenant-watchdog-silent")
+    session_id = sess["session_id"]
+    turn_id = turn_runner.start_turn(
+        "tenant-watchdog-silent", session_id, text="hello?")
+
+    ok = _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None,
+                     timeout_s=8.0)
+    assert ok, "CAS was never released for a harness that went silent"
+
+    events = session_store.recent_events(session_id, 100)
+    assert all(e["turn_id"] == turn_id for e in events)
+    terminal = [e for e in events if e["type"] in ("turn_complete", "error")]
+    assert len(terminal) == 1, terminal
+    assert terminal[0]["type"] == "turn_complete", (
+        "the read timeout beat the watchdog and terminalized the turn: "
+        f"{terminal[0]}"
+    )
+    assert terminal[0]["data"] == {"stop_reason": "timeout"}
 
 
 # =========================================================================== #
