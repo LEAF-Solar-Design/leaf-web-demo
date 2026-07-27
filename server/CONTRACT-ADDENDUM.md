@@ -71,18 +71,39 @@ docstring records why no single-sample threshold fits that host's tail.
 
 So the absolute bound is alarmed on in production. `POST /api/run` emits
 **`SubmitLatency`** (`Unit: Milliseconds`, namespace `Leaf/Platform/APS`,
-dimension `{aps_live}`) from `server/emf_metrics.py::emit_submit_latency`,
-measured from handler entry to the 202. `?wait=1` blocks on execution and is
-deliberately NOT sampled: one gauge does not carry two request populations with
-two different contracts.
+dimensions `{environment, aps_live}`) from
+`server/emf_metrics.py::emit_submit_latency`, measured from handler entry to the
+202. `?wait=1` blocks on execution and is deliberately NOT sampled: one gauge
+does not carry two request populations with two different contracts.
 
 | | |
 | --- | --- |
-| metric | `Leaf/Platform/APS` `SubmitLatency`, dimension `aps_live="true"` |
-| statistic | p99 over a 5-minute period |
-| threshold | `> 200` ms for 3 consecutive periods |
+| metric | `Leaf/Platform/APS` `SubmitLatency` |
+| dimensions | `environment="production"` AND `aps_live="true"` |
+| statistic | p99 |
+| threshold | `> 200` ms — UNVALIDATED, see below |
 | missing data | `notBreaching` (no traffic is not a breach) |
-| environment | production (`aps_live="true"` scopes out demo/mock traffic, which would otherwise both mask and trigger it) |
+| period | fit to measured submit volume; there is no correct default |
+
+`environment` is NOT optional and `aps_live` does not substitute for it.
+`Leaf/Platform/APS` is one namespace shared by staging and production in the same
+account and region. Measured 2026-07-27: every `aps_live="true"` `BrokerRun`
+datapoint in the account came from **staging**, because on the `/api/run` path
+`aps_live` derives from the app's own `APS_LIVE` env var, which is `1` in staging
+and `0` in production. An alarm scoped only by `aps_live` therefore cannot tell
+the two deployments apart, and its name is not evidence of what it watches.
+
+Two things this table deliberately does not assert:
+
+- **`> 200` ms is unvalidated.** It is the bound published in
+  `contract/CONTRACT.md` §7, not a fitted value. Fit it against real p50/p99 once
+  datapoints exist.
+- **No period is given.** An earlier version said "3 consecutive periods", which
+  CloudWatch does not do. It evaluates a sliding range wider than
+  `evaluation_periods`, and once at least `evaluation_periods` real datapoints
+  exist anywhere in that range it ignores `treat_missing_data` entirely. At a low
+  submit rate a 5-minute period can leave the alarm structurally unable to fire,
+  because the datapoints never land close enough together.
 
 Alarm creation is an AWS action for the observability plane, not a repo change.
 Emission is gated by `server/tests/test_submit_latency_metric.py`.

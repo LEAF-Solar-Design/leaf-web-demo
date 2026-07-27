@@ -25,12 +25,15 @@ CONTRACT (owned by the unified-observability plane; see CONTRACT.md):
                                           that never ran and could NOT be
                                           returned — the user's single approval
                                           is destroyed. Alarm on ANY value > 0.)
-    SubmitLatency-> {aps_live}           (POST /api/run submit cost; the same
-                                          dimension set EngineSeconds uses, so a
-                                          p-statistic on submit sits beside the
-                                          engine gauge and can be scoped to live
-                                          traffic. ALARM: p99 > 200ms sustained
-                                          — see the emitter's docstring.)
+    SubmitLatency-> {environment, aps_live}
+                                         (POST /api/run submit cost. `environment`
+                                          is here and NOWHERE ELSE in this module
+                                          on purpose: this namespace is shared by
+                                          staging and production, so without it an
+                                          alarm cannot tell which deployment it is
+                                          watching. See _metrics_environment().
+                                          ALARM: p99 > 200ms sustained — see the
+                                          emitter's docstring.)
   Dimensions are LOW-CARDINALITY ONLY. tenant_id, tool, engine_op, aps_endpoint,
   event_key, execution_path, and job_id are LOG FIELDS, never dimensions.
 
@@ -77,6 +80,43 @@ except Exception:  # pragma: no cover - defensive fallback, never expected
     )
 STATUS_ALLOW = frozenset(_ENUM) | {"ok", "unknown", "error"}
 JOB_STATUS_ALLOW = frozenset({"complete", "failed", "unknown"})
+
+# Bounded allowlist for the `environment` dimension, same discipline as
+# STATUS_ALLOW: the value reaches CloudWatch as a dimension, so a typo in a task
+# definition must not be able to mint an unbounded series. Adding a deployment is
+# a one-line change here.
+ENVIRONMENT_ALLOW = frozenset({"production", "staging", "unset"})
+
+
+def _metrics_environment() -> str:
+    """Which deployment this process belongs to, as a metric dimension value.
+
+    WHY THIS EXISTS: `Leaf/Platform/APS` is ONE namespace shared by staging and
+    production in the same account and region, and no directive carried an
+    environment dimension. Measured 2026-07-27: every `aps_live="true"` BrokerRun
+    datapoint in the account came from STAGING, while the production-named alarms
+    scoped to `aps_live="true"` read them as production. An alarm could not tell
+    the two apart, so its name was the only thing asserting what it watched.
+
+    WHY ITS OWN VARIABLE, and not `LEAF_RUNTIME_ENV`: staging's app and broker
+    both run `LEAF_RUNTIME_ENV=production`. That variable selects the fail-closed
+    production posture (broker.py::validate_runtime_safety), it does NOT name the
+    deployment. Reusing it would label staging traffic "production" and rebuild
+    the exact confusion this dimension exists to end.
+
+    Read per emit, not pinned at import, so a process that sets the variable
+    after this module loads cannot publish under a stale value.
+
+    UNSET PUBLISHES "unset", it does not drop the dimension. A missing dimension
+    would make the whole series invisible to an environment-scoped alarm with no
+    symptom anywhere — a metric that silently stops being watched. "unset" stays
+    visible and is itself alarmable. An out-of-allowlist value becomes "other"
+    for the same reason: visible, bounded, not silent.
+    """
+    value = os.environ.get("LEAF_METRICS_ENVIRONMENT", "").strip().lower()
+    if not value:
+        return "unset"
+    return value if value in ENVIRONMENT_ALLOW else "other"
 
 
 def _now_ms() -> int:
@@ -261,20 +301,32 @@ def emit_submit_latency(
     itself. Nothing observable existed for the absolute bound until this metric.
 
     ALARM INTENT (create in the observability plane, not here):
-        metric     Leaf/Platform/APS SubmitLatency, dimension aps_live="true"
-        statistic  p99 over a 5-minute period
-        threshold  > 200 (ms) for 3 consecutive periods
+        metric     Leaf/Platform/APS SubmitLatency
+        dimensions environment="production", aps_live="true"
+        statistic  p99
+        threshold  > 200 (ms)
         treat missing data as `notBreaching` (no traffic is not a breach)
-      Scope it to aps_live="true" so demo/mock traffic cannot mask or trigger
+      BOTH dimensions are load-bearing and neither substitutes for the other.
+      `environment` selects the deployment, because this namespace is shared and
+      an alarm scoped only by aps_live cannot tell staging from production.
+      `aps_live` selects real traffic, so demo/mock runs cannot mask or trigger
       it. p99 (not Average) is the documented statistic: a 202 that is fast on
       average and 2 seconds at the tail has already broken the contract for the
       users who hit the tail.
 
-    Published ONCE under {aps_live} — the same dimension set EngineSeconds
-    uses, so submit cost and engine cost are queryable side by side. tenant_id,
-    tool and job_id are LOW-VALUE-AS-DIMENSIONS and high cardinality: they are
-    log fields, so a breaching p99 can still be attributed by querying the logs
-    behind the metric.
+      PERIOD is deliberately NOT specified here. It has to be fitted to the
+      deployment's real submit volume, and this docstring cannot know it. An
+      earlier version of this block said "3 consecutive periods", which is not
+      a thing CloudWatch does: it evaluates a SLIDING RANGE wider than
+      evaluation_periods, and once at least `evaluation_periods` real datapoints
+      exist in that range it ignores treat_missing_data entirely. At a low submit
+      rate a 5-minute period can leave the alarm unable to fire at all, because
+      the datapoints never land close enough together. Fit period against
+      measured volume; do not copy a number from here.
+
+    Published ONCE under {environment, aps_live}. tenant_id, tool and job_id are
+    LOW-VALUE-AS-DIMENSIONS and high cardinality: they are log fields, so a
+    breaching p99 can still be attributed by querying the logs behind the metric.
 
     A NON-FINITE OR NEGATIVE reading is DROPPED, not floored to 0. A clock that
     produced garbage must not publish a fast sample: that would pull the p99
@@ -290,10 +342,12 @@ def emit_submit_latency(
         if not math.isfinite(value) or value < 0.0:
             return
         directives = [
-            {"Namespace": NAMESPACE, "Dimensions": [["aps_live"]],
+            {"Namespace": NAMESPACE,
+             "Dimensions": [["environment", "aps_live"]],
              "Metrics": [{"Name": "SubmitLatency", "Unit": "Milliseconds"}]}
         ]
         root: Dict[str, Any] = {
+            "environment": _metrics_environment(),
             "aps_live": "true" if aps_live else "false",
             "SubmitLatency": value,
         }
