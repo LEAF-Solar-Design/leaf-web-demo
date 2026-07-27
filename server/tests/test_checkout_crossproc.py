@@ -1528,6 +1528,48 @@ def test_a_failed_ingest_leaves_an_existing_drawings_lock_file_alone(tmp_path):
         "a refused ingest retired the lock file of a drawing that is still there")
 
 
+def test_a_failed_ingest_keeps_a_live_uploads_lock_file(tmp_path):
+    """The case both review rounds were really about, on the path that matters.
+
+    `run_extraction` calls `ingest_drawing` on a drawing that is ALREADY alive as
+    an upload: `upload.state.json` exists, the manifest does not. So the
+    production shape of a failed ingest is not "nothing is there" — it is "a live
+    upload is there, and its `_mark_failed`, its retry and its purge all still
+    want this lock file". Round 2 keyed the reclaim on the manifest alone and
+    retired it anyway.
+
+    The proof therefore has to be about the whole drawing, not the manifest:
+    anything left under the prefix that this call did not write itself means
+    somebody is still to be served.
+    """
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    payload = tmp_path / "payload.dwg"
+    payload.write_bytes(b"dwg-bytes")
+
+    ddir = Path(backend._path(store.drawing_prefix(TENANT, DRAWING)))
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "upload.state.json").write_text(
+        json.dumps({"attempt": "a1", "status": "extracting"}), encoding="utf-8")
+    assert not backend.exists(store.manifest_key(TENANT, DRAWING))
+
+    real_put = backend.put
+
+    def exploding_put(key, data):
+        if key.endswith(".dwg"):
+            raise OSError(28, "No space left on device")
+        return real_put(key, data)
+
+    backend.put = exploding_put
+    with pytest.raises(OSError):
+        store.ingest_drawing(backend, TENANT, str(payload), DRAWING)
+
+    assert (ddir / "upload.state.json").exists(), "the upload is still live"
+    assert _lock_files(root), (
+        "a failed ingest retired the lock file of an upload that is still alive "
+        "on its marker, which its _mark_failed and purge both still need")
+
+
 def test_a_marker_only_uploads_lock_file_survives_a_failed_section(tmp_path):
     """The reason the reclaim lives in `ingest_drawing` and NOT in the guard.
 
@@ -1545,7 +1587,7 @@ def test_a_marker_only_uploads_lock_file_survives_a_failed_section(tmp_path):
     """
     root = str(tmp_path / "store")
     backend = store.FilesystemBackend(root)
-    ddir = Path(backend._path(f"tenants/{TENANT}/drawings/{DRAWING}"))
+    ddir = Path(backend._path(store.drawing_prefix(TENANT, DRAWING)))
     ddir.mkdir(parents=True, exist_ok=True)
     (ddir / "upload.state.json").write_text(
         json.dumps({"attempt": "a1", "status": "extracting"}), encoding="utf-8")

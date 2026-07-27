@@ -192,9 +192,19 @@ def drawing_version_key(tenant_id: str, drawing_id: str, version) -> str:
     return key
 
 
+def drawing_prefix(tenant_id: str, drawing_id: str) -> str:
+    """Object-key prefix holding EVERYTHING that belongs to one drawing.
+
+    Every key above is built from this, and so is the guest upload's marker,
+    which the store does not name but does have to notice. See
+    `StorageBackend.drawing_object_keys`.
+    """
+    return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}"
+
+
 def manifest_key(tenant_id: str, drawing_id: str) -> str:
     """Deterministic object key for the drawing's version index + checkout lock."""
-    return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}/manifest.json"
+    return f"{drawing_prefix(tenant_id, drawing_id)}/manifest.json"
 
 
 def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
@@ -247,13 +257,17 @@ def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     leaving a file behind for a drawing no sweep will ever walk again. The
     `not creating` re-check in `_legacy_checkout_guard` covers a writer that lost
     the race to a purge and re-minted the file behind it. And `ingest_drawing`
-    retires the file it opened when its own write FAILS -- the drawing it was
-    bringing into existence never arrived, so no sweep will ever walk that
-    directory. Note what each of these has in common and the guard does not: the
-    caller knows what "gone" means for its own drawing. A missing manifest is
-    not that proof on its own, since a pre-ingest upload is alive on its marker
-    with no manifest, which is why this stays a per-caller obligation rather
-    than something the guard does for everyone.
+    retires the file it opened when its own write FAILS and left NOTHING behind
+    -- the drawing it was bringing into existence never arrived, so no sweep
+    will ever walk that directory.
+
+    WHAT "GONE" MEANS IS THE CALLER'S TO PROVE, and a missing manifest is not
+    that proof. A guest upload is alive on `upload.state.json` with no manifest
+    at all, so `_mark_failed` requires its marker to be gone AS WELL, and
+    `ingest_drawing` requires the drawing's whole key prefix to be empty apart
+    from the version blob it wrote itself. That is why this is a per-caller
+    obligation and not something the guard does for everyone: the guard knows
+    which flags a section carries, never who is still waiting on the drawing.
 
     The proof they all rely on is the exclusive hold, plus `_HeldCheckoutLock.reclaim`
     refusing if the path no longer names the inode it holds. A caller that was
@@ -517,6 +531,27 @@ class StorageBackend:
     def exists(self, key: str) -> bool:
         raise NotImplementedError
 
+    def drawing_object_keys(self, tenant_id: str, drawing_id: str) -> set | None:
+        """Every object key currently under ONE drawing, or None if this backend
+        cannot enumerate them.
+
+        `None` does NOT mean "empty". It means "I cannot tell", and the one
+        caller of this (`ingest_drawing`'s failure reclaim) must read it as
+        "something is there" — the answer that forbids the removal. Defaulting
+        to None rather than to an empty set is what keeps a backend added later
+        from inheriting a proof it cannot make.
+
+        It exists because "no manifest" is NOT "no drawing". A guest upload is
+        alive on `upload.state.json` with no manifest at all, and the store
+        cannot ask `server/guest_uploads.py` about it — the store never imports
+        that module, which is what keeps the two lock orders from inverting
+        (`test_the_store_never_reaches_back_into_the_upload_module`). So the
+        question is asked in the store's own vocabulary instead: is there any
+        object left under this drawing? A marker answers yes without the store
+        having to know what a marker is.
+        """
+        return None
+
     def put_if_absent_or_verify(self, key: str, data: bytes) -> None:
         """Publish immutable bytes without replacing a matching winner."""
         payload = bytes(data)
@@ -758,6 +793,18 @@ class FilesystemBackend(StorageBackend):
 
     def exists(self, key: str) -> bool:
         return os.path.exists(self._path(key))
+
+    def drawing_object_keys(self, tenant_id: str, drawing_id: str) -> set | None:
+        prefix = drawing_prefix(tenant_id, drawing_id)
+        root = self._path(prefix)
+        if not os.path.isdir(root):
+            return set()
+        found = set()
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                rel = os.path.relpath(os.path.join(dirpath, name), self.root)
+                found.add(rel.replace(os.sep, "/"))
+        return found
 
 
 # --------------------------------------------------------------------------- #
@@ -1361,13 +1408,15 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
     data = _read(local_path)
     # `creating=True`: this is the one writer whose drawing is SUPPOSED to be
     # absent, so it is the one that may bring a lock file into existence.
+    # Derived before the section so the failure handler below can name it even
+    # when the very first check raised. Pure function of the ids, no I/O.
+    vkey = drawing_version_key(tid, did, 1)
     with _legacy_checkout_guard(backend, tid, did, creating=True,
                                 precondition=precondition) as held:
         try:
             if backend.exists(manifest_key(tid, did)):
                 raise ValueError(f"drawing already exists: {tid}/{did} (use put_drawing to add versions)")
 
-            vkey = drawing_version_key(tid, did, 1)
             if backend.exists(vkey):  # immutability guard
                 raise ValueError(f"refuse to overwrite immutable version key {vkey}")
             backend.put(vkey, data)
@@ -1391,18 +1440,29 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
             # exist, so no purge sweep will ever walk its directory and the file
             # would sit there forever.
             #
-            # The condition is the DRAWING, and here `not exists(manifest)`
-            # really does mean an absent drawing, because an absent drawing is
-            # this function's premise and a present one is its refusal. That is
-            # why this lives in `ingest_drawing` and NOT in the guard: the
-            # guard's `creating=True` also covers `legacy_drawing_guard(
-            # must_exist=False)` and `legacy_purge_guard`, whose drawings can be
-            # alive on a marker alone with no manifest -- a pre-ingest upload is
-            # exactly that. Reclaiming there would retire a live drawing's file
-            # and put two callers in one section, which is the defect the whole
-            # design is built to prevent.
+            # THE PROOF IS NOT "NO MANIFEST", and two review rounds were spent
+            # learning it. A guest upload is alive on `upload.state.json` with no
+            # manifest at all: `run_extraction` calls this function on exactly
+            # that drawing, so a failure here routinely leaves a LIVE upload
+            # whose `_mark_failed`, retry and purge all still want this file.
+            # Retiring it there is churn at best and, for a waiter, a lap around
+            # `cross_process_lock`'s identity check it did not need to run.
+            #
+            # So the question is asked in the store's own vocabulary: is there
+            # ANY object left under this drawing? A marker answers yes without
+            # the store having to know what a marker is, which is what keeps it
+            # from importing `guest_uploads` and inverting the lock order. Only
+            # the v1 blob THIS call just wrote is discounted, because nobody else
+            # put it there. Empty, plus no manifest, is "nothing left to serve".
+            #
+            # `None` from `drawing_object_keys` means the backend cannot tell,
+            # and cannot-tell forbids the removal.
             try:
-                orphaned = not backend.exists(manifest_key(tid, did))
+                remaining = backend.drawing_object_keys(tid, did)
+                orphaned = (
+                    remaining is not None
+                    and not (remaining - {vkey})
+                    and not backend.exists(manifest_key(tid, did)))
             except Exception:
                 # Nothing here may raise over the failure that brought us: that
                 # error is the one worth reporting, and a secondary one would
@@ -2040,15 +2100,16 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
 
     IT IS DELIBERATELY NOT DONE HERE, and the reason is what `creating` actually
     means. `creating` says only "do not refuse a missing drawing"; it does not
-    say "a missing manifest means a missing drawing". For `ingest_drawing` those
-    coincide, because an absent drawing is its premise and a present one is its
-    refusal. For the other two `creating=True` entries they do NOT:
-    `legacy_drawing_guard(must_exist=False)` serves `_mark_failed`, whose
-    pre-ingest upload is alive on `upload.state.json` with no manifest at all,
-    and `legacy_purge_guard` serves a half-deleted drawing. Reclaiming here
-    would retire a LIVE drawing's file on any failure in those sections and put
-    two callers in one section. So the rule stays where it has always been: with
-    the caller that can prove its own drawing is gone.
+    say "a missing manifest means a missing drawing", and nothing about a
+    section's flags says whether ANYONE is left to serve. Three entries set it —
+    `ingest_drawing`, `legacy_drawing_guard(must_exist=False)` (which serves
+    `_mark_failed`) and `legacy_purge_guard` — and the last two routinely run
+    over a drawing that is alive on `upload.state.json` with no manifest at all.
+    A blanket reclaim on abnormal exit would retire those live drawings' files.
+    So the rule stays where it has always been: with the caller that can prove
+    its own drawing has nothing left to serve. `ingest_drawing` proves it by
+    finding the drawing's whole key prefix empty apart from the version blob it
+    just wrote itself, not merely by finding no manifest.
 
     The documented answer above that boundary is unchanged and is postgres: it
     reads `FOR UPDATE` and increments in one statement, so it needs none of
