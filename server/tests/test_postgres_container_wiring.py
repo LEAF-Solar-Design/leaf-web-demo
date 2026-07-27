@@ -88,6 +88,31 @@ def test_broker_image_contains_pg_runtime_without_crossing_secret_boundary():
     assert ".secrets/" in dockerignore
 
 
+def test_authored_tool_bodies_never_enter_the_build_context():
+    """_legacy_author in server/routers/author.py writes tenant-authored Python to
+    server/authored/<sha256(tenant_id)[:32]>/<tool>.py on a live request path, and
+    both images COPY the whole server/ tree, so a body authored locally would ride
+    into the image. Git excludes these only through a NESTED
+    server/authored/.gitignore, which docker never reads, so the root
+    .dockerignore has to carry the rule itself.
+    """
+    lines = [line.strip() for line in _read(".dockerignore").splitlines()]
+
+    # Whole line, not a substring: a commented-out mention must not satisfy this.
+    # The `**` is load-bearing -- a dockerignore `*` does not cross `/`, so a
+    # narrowed `server/authored/*.py` would match only direct children and miss
+    # the per-tenant depth the writer actually uses.
+    assert "server/authored/**/*.py" in lines
+
+    # Not a bare directory rule: .gitignore and .gitkeep under server/authored/
+    # are tracked and are meant to keep reaching the build context.
+    assert "server/authored/" not in lines
+
+    # The rule only matters because the images copy the tree that holds it.
+    for path in ("deploy/Dockerfile.app", "deploy/Dockerfile.broker"):
+        assert re.search(r"^COPY server/\s+/app/server/", _read(path), flags=re.MULTILINE), path
+
+
 def test_app_and_harness_images_are_ready_but_keep_legacy_defaults():
     app = _read("deploy/Dockerfile.app")
     harness = _read("deploy/Dockerfile.harness")
