@@ -1466,6 +1466,100 @@ def test_a_refused_writer_does_not_leave_a_fresh_lock_file_behind(tmp_path):
         f"drawing that no longer exists: {_lock_files(root)}")
 
 
+def test_an_ingest_that_fails_to_write_does_not_leave_its_lock_file_behind(tmp_path):
+    """The CREATING writer's own leak, which the pre-lock refusal cannot cover.
+
+    `ingest_drawing` is the one writer allowed to open the lock file for a
+    drawing that does not exist yet, and opening it creates it. If the write then
+    fails — a disk error between the version blob and the manifest — the drawing
+    never comes to exist, so no purge sweep will ever walk its directory and
+    retire the file. One empty file is stranded per occurrence, forever.
+
+    Asserted at BOTH failure points, because they leave different amounts of the
+    drawing on disk (a version blob and no manifest, versus neither) and the
+    reclaim's proof is about the MANIFEST.
+    """
+    for fail_on, label in ((".dwg", "version blob"), ("manifest.json", "manifest")):
+        root = str(tmp_path / f"store-{label.replace(' ', '-')}")
+        backend = store.FilesystemBackend(root)
+        payload = tmp_path / "payload.dwg"
+        payload.write_bytes(b"dwg-bytes")
+
+        real_put = backend.put
+
+        def exploding_put(key, data, _real=real_put, _on=fail_on):
+            if key.endswith(_on):
+                raise OSError(28, "No space left on device")
+            return _real(key, data)
+
+        backend.put = exploding_put
+        with pytest.raises(OSError):
+            store.ingest_drawing(backend, TENANT, str(payload), DRAWING)
+
+        assert not backend.exists(store.manifest_key(TENANT, DRAWING)), (
+            f"the {label} failure still produced a manifest, so this test is "
+            f"not exercising a drawing that never came to exist")
+        assert _lock_files(root) == [], (
+            f"an ingest that failed at the {label} left a lock file behind for "
+            f"a drawing that never came to exist: {_lock_files(root)}")
+
+
+def test_a_failed_ingest_leaves_an_existing_drawings_lock_file_alone(tmp_path):
+    """The counterpart, and the case that keeps the rule about the DRAWING.
+
+    `ingest_drawing` also fails when the drawing ALREADY exists, and that file
+    belongs to a live drawing whose other writers still need it. Retiring it
+    would hand the next two callers two different files — the same
+    two-callers-one-section defect the reclaim is fenced against everywhere else.
+    """
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    payload = tmp_path / "payload.dwg"
+    payload.write_bytes(b"dwg-bytes")
+
+    store.ingest_drawing(backend, TENANT, str(payload), DRAWING)
+    before = _lock_files(root)
+    assert before, "a successful ingest never created a lock file"
+
+    with pytest.raises(ValueError, match="already exists"):
+        store.ingest_drawing(backend, TENANT, str(payload), DRAWING)
+
+    assert _lock_files(root) == before, (
+        "a refused ingest retired the lock file of a drawing that is still there")
+
+
+def test_a_non_creating_section_that_raises_keeps_a_live_drawings_lock_file(tmp_path):
+    """Anti-vacuity for the `creating` half of the rule above.
+
+    A missing manifest does not mean a missing DRAWING for the other sections.
+    `guest_uploads._wipe_failed_attempt_files` deletes a failed attempt's
+    manifest while deliberately keeping `upload.state.json` — the file that
+    routes the next retry — and it does not hold this lock, so a `must_exist`
+    section really can raise with its manifest gone and its drawing still alive.
+    Retiring the file there would hand that drawing's next two writers two
+    different files.
+
+    Without this, `creating` reads as dead code a later reviewer would drop, and
+    the reclaim would widen to every section that fails.
+    """
+    root = _free_drawing(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    store.acquire_checkout_fence(backend, TENANT, DRAWING, "holder", 300.0)
+    before = _lock_files(root)
+    assert before, "the drawing never got a lock file"
+
+    manifest = Path(backend._path(store.manifest_key(TENANT, DRAWING)))
+    with pytest.raises(RuntimeError, match="wipe raced this section"):
+        with store.legacy_drawing_guard(backend, TENANT, DRAWING):
+            # The wipe's shape: the manifest goes, the drawing does not.
+            manifest.unlink()
+            raise RuntimeError("wipe raced this section")
+
+    assert _lock_files(root) == before, (
+        "a non-creating section that failed with its manifest already wiped "
+        "retired the lock file of a drawing that is still alive")
+
+
 def test_the_store_never_reaches_back_into_the_upload_module():
     """The lock ORDER, held at the source level.
 

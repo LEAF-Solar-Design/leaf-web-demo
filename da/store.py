@@ -235,17 +235,23 @@ def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     drawing to every process, without carrying the ids around.
 
     RETIRED ONLY FROM INSIDE THE SECTION, BY A CALLER THAT HAS PROVED THE
-    DRAWING IS GONE. Two callers qualify, and the rule is the same for both:
-    hold this lock, establish that the drawing does not exist, then remove the
-    file as the LAST act before leaving. `server/guest_uploads.py::purge_expired`
-    is the one that deletes the drawing, and now takes THIS lock
-    (`legacy_purge_guard`) rather than only its own `drawing_lock`.
-    `_mark_failed` is the other: it enters with `must_exist=False`, so nothing
+    DRAWING IS GONE. The rule is one rule and every caller obeys the same three
+    steps: hold this lock, establish that the drawing does not exist, then remove
+    the file as the LAST act before leaving. What differs is only how each one
+    came to be holding a file for a drawing that is not there.
+    `server/guest_uploads.py::purge_expired` is the one that DELETES the drawing,
+    and now takes THIS lock (`legacy_purge_guard`) rather than only its own
+    `drawing_lock`. `_mark_failed` enters with `must_exist=False`, so nothing
     refused it for a missing drawing and merely OPENING the file created one --
     if the drawing is already purged, it retires what it just minted rather than
-    leaving a file behind for a drawing no sweep will ever walk again.
+    leaving a file behind for a drawing no sweep will ever walk again. The
+    `not creating` re-check in `_legacy_checkout_guard` covers a writer that lost
+    the race to a purge and re-minted the file behind it. And a `creating`
+    section that leaves ABNORMALLY -- an ingest whose write failed on I/O, so the
+    drawing it was bringing into existence never arrived -- retires the file it
+    opened, for the same reason: no sweep will ever walk that directory.
 
-    The proof both rely on is the exclusive hold, plus `_HeldCheckoutLock.reclaim`
+    The proof they all rely on is the exclusive hold, plus `_HeldCheckoutLock.reclaim`
     refusing if the path no longer names the inode it holds. A caller that was
     parked on the retired inode is caught by the identity check in
     `FilesystemBackend.cross_process_lock` and sent back around to the live file,
@@ -1982,16 +1988,21 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
     holding the lock exclusively is the proof that no live holder is being robbed
     of it. Every path that skips the refusal retires its own file instead: the
     purge after it deletes the drawing, `must_exist=False` when its caller finds
-    the drawing already gone, and the re-check below for a writer that lost the
-    race. Retiring it from anywhere else — under the drawing's own lock, or by
+    the drawing already gone, the re-check below for a writer that lost the
+    race, and the abnormal exit below for a `creating` section whose drawing
+    never came to exist. Retiring it from anywhere else — under the drawing's own lock, or by
     sweeping files whose lock can be taken — puts two callers in here at once,
     which is why the file is not in the drawing's own directory to begin with.
 
-    ONE PATH STILL LEAKS ONE FILE, said rather than papered over: a `creating`
-    ingest that takes the lock and then FAILS to write (a disk error between the
-    version blob and the manifest) leaves a file for a drawing that never came
-    to exist. It is an I/O-failure path, not a race, and it predates the retiring
-    above, which is why it is recorded here rather than fixed alongside it.
+    THE ABNORMAL EXIT IS COVERED BY THE SAME RULE, which is what closes the last
+    of these. A `creating` ingest that takes the lock and then FAILS to write (a
+    disk error between the version blob and the manifest) leaves a drawing that
+    never came to exist, so nothing would ever walk its directory again; the
+    section therefore re-checks the manifest on its way out of ANY abnormal exit
+    and retires the file when the drawing is still absent. It is deliberately
+    keyed on the DRAWING and not on the error: an ingest refused because the
+    drawing ALREADY EXISTS leaves that file alone, since its live writers still
+    need it.
 
     The documented answer above that boundary is unchanged and is postgres: it
     reads `FOR UPDATE` and increments in one statement, so it needs none of
@@ -2065,7 +2076,48 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
                     if not backend.exists(manifest_key(tid, did)):
                         held.reclaim()
                     raise DrawingVanished(f"{tid}/{did} vanished before the write")
-                yield held
+                try:
+                    yield held
+                except BaseException:
+                    # THE SAME RULE, for the section that can leave abnormally
+                    # with its drawing still absent. A `creating` caller is the
+                    # only one allowed to open the lock file for a drawing that
+                    # does not exist, and opening it created it; if its write
+                    # then fails (an I/O error between the version blob and the
+                    # manifest, not a race), the drawing never comes to exist and
+                    # no purge will ever walk its directory to retire the file.
+                    # The condition is the DRAWING, not the failure: an ingest
+                    # refused because the drawing ALREADY EXISTS must leave that
+                    # file alone, because its live writers still need it.
+                    #
+                    # `creating` is load-bearing and not decoration. A missing
+                    # manifest does NOT mean a missing drawing for the other
+                    # sections: `guest_uploads._wipe_failed_attempt_files`
+                    # deletes a failed attempt's manifest while deliberately
+                    # keeping `upload.state.json`, which is what routes the next
+                    # retry, and it does not hold this lock -- so a `must_exist`
+                    # section can raise with its manifest gone and its drawing
+                    # very much alive. Retiring the file there is the
+                    # two-callers-one-section defect, not a cleanup. Only the
+                    # `creating` caller is entitled to read an absent manifest as
+                    # an absent drawing, because an absent drawing is its
+                    # premise.
+                    #
+                    # Still the last act inside the section, still under the
+                    # exclusive hold that is the proof no live holder is being
+                    # robbed, so this adds no new way to remove the file.
+                    try:
+                        orphaned = creating and not backend.exists(
+                            manifest_key(tid, did))
+                    except Exception:
+                        # Nothing here may raise over the failure that brought us:
+                        # that error is the one worth reporting, and a secondary
+                        # one would replace it. Unsure means LEAVE the file, the
+                        # side that only costs an inode.
+                        orphaned = False
+                    if orphaned:
+                        held.reclaim()
+                    raise
         finally:
             thread_lock.release()
 
