@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 import uuid
@@ -6,7 +7,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from leaf_platform import compliance_store, evidence_store, signing, store
+from leaf_platform import compliance_store, db, evidence_store, signing, store
 from leaf_platform.db import cursor
 from leaf_platform.offboard import offboard_org
 from test_compliance_store import INPUTS, PACK, _completed_solve
@@ -112,6 +113,69 @@ def test_later_design_operation_invalidates_the_seal(make_org):
     assert verified["cryptographic_valid"] is True
     assert verified["valid"] is False
     assert "bundle_superseded" in verified["errors"]
+
+
+_NON_UTC_ZONE = "America/Chicago"
+
+
+@contextmanager
+def _non_utc_reader_session():
+    """Force every pooled connection onto a non-UTC session timezone.
+
+    psycopg renders TIMESTAMPTZ in the SESSION timezone, so this is the only
+    thing that makes verify_signature()'s signedAt round-trip observable. CI
+    runs a UTC postgres, where the unfixed re-derivation happens to agree, so
+    the test has to pin the timezone itself rather than trust the ambient one.
+    """
+    original = db._configure
+
+    def configure(conn):
+        original(conn)
+        # SET is transactional; commit so the pool's reset cannot roll it back.
+        conn.execute(f"SET TIME ZONE '{_NON_UTC_ZONE}'")
+        conn.commit()
+
+    db.reset_pool()
+    db._configure = configure
+    try:
+        yield
+    finally:
+        db._configure = original
+        db.reset_pool()
+
+
+def test_signature_verifies_when_the_reader_session_is_not_utc(make_org):
+    """A signature must verify regardless of the reading session's timezone.
+
+    signed_at is TIMESTAMPTZ (migration 0009) and verify_signature() re-derives
+    the signedAt string from it to compare against the signed payload. Nothing
+    pins the session timezone, so before the astimezone(utc) normalization a
+    server whose TimeZone GUC was not UTC failed EVERY signature with
+    payload_mismatch. Signing under the ambient session and verifying under a
+    non-UTC one also covers already-stored (UTC-written) rows.
+    """
+    org, project, bundle, actor, credential, key = _fixture(make_org, "tz-reader")
+    signing.configure_signature_provider(
+        signing.LocalEd25519Provider({"local:tz-reader": key}))
+    signed = signing.countersign(
+        org.org_id, project.project_id, uuid.UUID(bundle["bundle_id"]),
+        uuid.UUID(credential["credential_id"]), actor.binding_id, "tz-reader-sign")
+    with _non_utc_reader_session():
+        # Assert the precondition, or this test silently stops proving anything.
+        with cursor() as cur:
+            cur.execute("SHOW TimeZone")
+            assert cur.fetchone()["TimeZone"] == _NON_UTC_ZONE
+            cur.execute("SELECT signed_at FROM review_signatures "
+                        "WHERE signature_id = %(signature)s",
+                        {"signature": signed["signature_id"]})
+            rendered = cur.fetchone()["signed_at"]
+        # The column really does read back off-UTC: that is the failure input.
+        assert rendered.utcoffset() != timedelta(0)
+        verified = signing.verify_signature(
+            org.org_id, project.project_id, uuid.UUID(signed["signature_id"]))
+    assert verified["errors"] == []
+    assert verified["cryptographic_valid"] is True
+    assert verified["valid"] is True
 
 
 def test_concurrent_replay_creates_one_signature_and_history_operation(make_org):

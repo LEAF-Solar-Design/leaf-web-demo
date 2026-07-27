@@ -447,12 +447,18 @@ def verify_signature(org_id: uuid.UUID, project_id: uuid.UUID,
             row["signed_payload"].get("rootSha256") != row["root_sha256"]:
         crypto_valid = False
         errors.append("root_mismatch")
+    # signed_at is TIMESTAMPTZ, and psycopg renders it in the SESSION timezone,
+    # so the same instant reads back as a different isoformat() string off UTC.
+    # countersign() signs a UTC rendering (_now returns an aware UTC datetime and
+    # no caller supplies `now`), so this side must normalize to UTC before the
+    # string compare below; otherwise a server whose TimeZone GUC is not UTC
+    # fails EVERY signature with payload_mismatch.
     expected_payload_fields = {
         "signatureContract": row["signature_contract"],
         "bundleId": str(row["bundle_id"]),
         "rootSha256": row["root_sha256"],
         "credentialId": str(row["credential_id"]),
-        "signedAt": row["signed_at"].isoformat(),
+        "signedAt": row["signed_at"].astimezone(timezone.utc).isoformat(),
     }
     if row["signature_contract"] != SIGNATURE_CONTRACT or \
             row["signed_payload"] != expected_payload_fields or \
