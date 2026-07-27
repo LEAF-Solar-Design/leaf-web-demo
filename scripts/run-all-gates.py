@@ -239,10 +239,10 @@ def build_suites() -> List[Suite]:
         # Postgres, and the test-gate workflow is hermetic) and
         # `server-customization-adversarial` (Linux and Windows execute
         # different counts, so no single number is honest for both).
-        # `platform` has since moved 199 -> 223, but it is still NOT
-        # re-baselined: the bump is exactly the case count one new file added,
-        # so the pre-existing margin stays put instead of growing. Re-baselining
-        # it still needs a pristine database, for the reason recorded there.
+        # `platform` HAS since been re-baselined: 199 -> 223 (an interim bump of
+        # exactly what one new file added) -> 234, a measured green count on a
+        # pristine database. Only `server-customization-adversarial` is still
+        # deliberately un-baselined. Details at each Suite(...) below.
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
@@ -643,37 +643,38 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # Floor is 199, the EXECUTED count measured 2026-07-25 against a live
-        # PostgreSQL 17 (throwaway Neon branch): 199 passed, 0 skipped, 0
-        # failed. It replaces 145, which commit 80e3762 (2026-07-23) measured
-        # the same way. 54 tests were added after that and the floor never
-        # moved, so the suite could have lost 54 of them and still reported
-        # green: 146..198 passed with only a drift note, and exactly 145 passed
-        # silently, with no note at all.
-        # Collected and executed are both 199 because this suite allowlists NO
+        # Floor 234 is a MEASURED, GREEN, pristine-database baseline: 234
+        # passed, 0 skipped, 0 failed, pytest exit 0, taken 2026-07-27 against
+        # PostgreSQL 16.14 from this suite's registered cwd (the repo parent,
+        # target <repo_name>/platform/tests) and reproduced on a second freshly
+        # created database. It supersedes 199 (2026-07-25, PostgreSQL 17) and
+        # the interim 223, which was only 199 plus the 24 cases one new file
+        # added -- deliberately NOT a clean baseline, so it left an 11-test band
+        # in which tests could vanish under a mere drift note. That band is now
+        # zero: the floor IS the count, so losing any single test trips
+        # "executed-count regression" instead of passing quietly.
+        # Collected and executed are both 234 because this suite allowlists NO
         # skip reason, and every skip path under platform/tests is gated on the
         # DB being unconfigured -- on a reachable DB nothing skips, so a green
         # run executes everything collected.
-        # Re-baselining this needs a PRISTINE database, not just a reachable
-        # one. Several tests bind fixed external subjects (e.g.
-        # "auth0|1b-cross-org") that are unique per tenant, so a second run
-        # against the same branch fails on the first run's rows instead of
-        # measuring anything.
-        # 199 -> 223 when test_schema_status_postgres_authority.py added its 24
-        # cases. This is 199 PLUS EXACTLY WHAT THAT FILE ADDS, not a fresh clean
-        # baseline: it holds the pre-existing margin constant so a new file
-        # cannot widen the band in which tests may silently vanish. It is NOT a
-        # claim that 223 is the pristine count. Measured 2026-07-27 against a
-        # live PostgreSQL 16.14 from this suite's registered cwd: 234 collected
-        # and 234 executed with the new file, 210 without it, 0 skipped -- so
-        # the real count clears 223 by 11, the same slack 199 left over 210.
-        # The 4 failures in that run were pre-existing test_signing.py cases in
-        # a bespoke validation venv, unrelated to this suite's count.
-        # Raising it cannot red-fail CI: this suite is db_gated and the
+        # Re-baselining needs a PRISTINE database, not just a reachable one.
+        # Several tests bind fixed external subjects (e.g. "auth0|1b-cross-org")
+        # that are unique per tenant, so a second run against the same database
+        # fails on the first run's rows instead of measuring anything.
+        # Measure with the DB session timezone at UTC. This is not a count
+        # question -- `got` counts failures too -- but off UTC, 4 test_signing.py
+        # cases fail `payload_mismatch`: verify_signature re-derives signedAt as
+        # row["signed_at"].isoformat() and compares it to the stored JSON
+        # string, and the same instant renders differently under a non-UTC
+        # session. Confirmed by flipping only PGTZ on one database: 4 failed ->
+        # 234 passed. That is a real robustness gap in signing.py, tracked
+        # separately; it is called out here so the next person to measure this
+        # floor does not read those 4 failures as a broken environment.
+        # Raising this cannot red-fail CI: the suite is db_gated and the
         # test-gate workflow is hermetic, so run_suite returns SKIP with
         # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 223, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 234, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
