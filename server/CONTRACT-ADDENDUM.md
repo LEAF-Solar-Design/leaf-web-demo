@@ -98,12 +98,31 @@ Two things this table deliberately does not assert:
 - **`> 200` ms is unvalidated.** It is the bound published in
   `contract/CONTRACT.md` §7, not a fitted value. Fit it against real p50/p99 once
   datapoints exist.
-- **No period is given.** An earlier version said "3 consecutive periods", which
-  CloudWatch does not do. It evaluates a sliding range wider than
-  `evaluation_periods`, and once at least `evaluation_periods` real datapoints
-  exist anywhere in that range it ignores `treat_missing_data` entirely. At a low
-  submit rate a 5-minute period can leave the alarm structurally unable to fire,
-  because the datapoints never land close enough together.
+- **No period is given.** An earlier version said "> 200 ms for 3 consecutive
+  periods". A 3-of-3 alarm does evaluate the three most recent periods when data
+  is present, so that phrasing is not wrong in general; it is wrong as a spec for
+  a SPARSE metric. For a default sliding alarm CloudWatch retrieves a range WIDER
+  than `evaluation_periods`, and once at least `evaluation_periods` real
+  datapoints exist anywhere in that range it stops applying `treat_missing_data`
+  and judges the most recent real ones. At a low submit rate a 5-minute period
+  can therefore leave the alarm unable to fire at all, because the datapoints
+  never land close enough together to fill the window.
+
+### Migration consequence of the dimension change
+
+`SubmitLatency` previously published under `{aps_live}` alone. CloudWatch treats
+each dimension combination as a SEPARATE metric, so an alarm still scoped to the
+one-dimension form does not consume the two-dimension series at all: it does not
+break loudly, it simply stops matching. Under `notBreaching` that reads as a
+green alarm measuring nothing, which is the exact failure mode this section warns
+about above.
+
+At the time of writing, `leaf-production-aps-submit-latency-p99-high` in
+`terraform/environments/production/us-east-1/cloudwatch_aps.tf` is still scoped to
+`aps_live="true"` only. It must gain `environment="production"` in the same change
+that sets `LEAF_METRICS_ENVIRONMENT` on the task definitions. Until both land, that
+alarm is green and blind, as it already was before this change, because
+`SubmitLatency` had never been emitted in the account at all.
 
 Alarm creation is an AWS action for the observability plane, not a repo change.
 Emission is gated by `server/tests/test_submit_latency_metric.py`.

@@ -98,11 +98,23 @@ def _metrics_environment() -> str:
     scoped to `aps_live="true"` read them as production. An alarm could not tell
     the two apart, so its name was the only thing asserting what it watched.
 
-    WHY ITS OWN VARIABLE, and not `LEAF_RUNTIME_ENV`: staging's app and broker
-    both run `LEAF_RUNTIME_ENV=production`. That variable selects the fail-closed
-    production posture (broker.py::validate_runtime_safety), it does NOT name the
-    deployment. Reusing it would label staging traffic "production" and rebuild
-    the exact confusion this dimension exists to end.
+    WHY ITS OWN VARIABLE, and not `LEAF_RUNTIME_ENV`. That variable selects the
+    fail-closed production posture (broker.py::validate_runtime_safety); it does
+    not name the deployment, and it is not even consistent within one. Measured
+    live 2026-07-27:
+
+        staging   leaf-platform-app:81                    LEAF_RUNTIME_ENV=staging
+        staging   leaf-platform-broker:31                 LEAF_RUNTIME_ENV=production
+        production leaf-automation-production-platform:69 app    -> ABSENT
+        production leaf-automation-production-platform:69 broker -> production
+
+    Two independent reasons it cannot serve as the dimension. It disagrees
+    across containers of the SAME deployment (staging's app says staging, its
+    broker says production). And on the production APP -- the one container that
+    emits SubmitLatency, since jobs.py runs there -- it is not set at all, so
+    reading it would yield the empty string in production while yielding a real
+    value in staging. That is the worst shape available: it looks correct in the
+    environment you test and is blank in the one you page on.
 
     Read per emit, not pinned at import, so a process that sets the variable
     after this module loads cannot publish under a stale value.

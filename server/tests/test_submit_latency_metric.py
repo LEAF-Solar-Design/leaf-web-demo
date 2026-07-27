@@ -161,10 +161,15 @@ def test_environment_dimension_distinguishes_the_two_deployments(
 def test_environment_is_not_read_from_leaf_runtime_env(captured, monkeypatch):
     """`LEAF_RUNTIME_ENV` must NOT be the source.
 
-    Staging's app and broker both run LEAF_RUNTIME_ENV=production (it selects the
-    fail-closed posture, not the deployment). If this emitter ever read it, every
-    staging submit would publish as production and the dimension would recreate
-    the confusion it was added to remove.
+    It selects the fail-closed posture, not the deployment, and measured live
+    2026-07-27 it is inconsistent even within one deployment: staging's app says
+    "staging" while staging's broker says "production", and the PRODUCTION app --
+    the container that emits this metric -- does not set it at all. Reading it
+    would therefore publish a real value in staging and an empty one in
+    production: correct where you test, blank where you page.
+
+    This test pins the emitter's indifference to it by setting it to a value
+    that would be visibly wrong if it were ever read.
     """
     monkeypatch.delenv("LEAF_METRICS_ENVIRONMENT", raising=False)
     monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
