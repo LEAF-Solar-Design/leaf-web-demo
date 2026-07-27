@@ -1528,19 +1528,52 @@ def test_a_failed_ingest_leaves_an_existing_drawings_lock_file_alone(tmp_path):
         "a refused ingest retired the lock file of a drawing that is still there")
 
 
-def test_a_non_creating_section_that_raises_keeps_a_live_drawings_lock_file(tmp_path):
-    """Anti-vacuity for the `creating` half of the rule above.
+def test_a_marker_only_uploads_lock_file_survives_a_failed_section(tmp_path):
+    """The reason the reclaim lives in `ingest_drawing` and NOT in the guard.
 
-    A missing manifest does not mean a missing DRAWING for the other sections.
+    Round 2 of review caught this as a RED: the first version of the fix keyed
+    on the guard's `creating` flag, which reads as "ingest" but is not. It is
+    also set by `legacy_drawing_guard(must_exist=False)`, whose caller
+    (`_mark_failed`) serves a PRE-INGEST upload — alive on `upload.state.json`
+    with no manifest at all — and by `legacy_purge_guard`. Retiring the file on
+    any failure in those sections retires a LIVE drawing's lock file, which is
+    the two-callers-one-section defect rather than a cleanup.
+
+    So the proof is not "the manifest is missing". It is "the manifest is
+    missing AND this caller knows that means its drawing is gone", which only
+    the ingest can say, because an absent drawing is its premise.
+    """
+    root = str(tmp_path / "store")
+    backend = store.FilesystemBackend(root)
+    ddir = Path(backend._path(f"tenants/{TENANT}/drawings/{DRAWING}"))
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "upload.state.json").write_text(
+        json.dumps({"attempt": "a1", "status": "extracting"}), encoding="utf-8")
+    assert not backend.exists(store.manifest_key(TENANT, DRAWING)), (
+        "this case is only interesting while the manifest is absent")
+
+    # `_mark_failed`'s shape: it gets past its marker read and its write raises.
+    with pytest.raises(OSError):
+        with store.legacy_drawing_guard(backend, TENANT, DRAWING,
+                                        must_exist=False):
+            raise OSError(28, "No space left on device")
+
+    assert (ddir / "upload.state.json").exists(), "the upload is still live"
+    assert _lock_files(root), (
+        "a failed `must_exist=False` section retired the lock file of an upload "
+        "that is still alive on its marker, so its next two writers would take "
+        "two different files")
+
+
+def test_a_non_creating_section_that_raises_keeps_a_live_drawings_lock_file(tmp_path):
+    """The same rule from the other side, for a drawing that HAD a manifest.
+
     `guest_uploads._wipe_failed_attempt_files` deletes a failed attempt's
     manifest while deliberately keeping `upload.state.json` — the file that
     routes the next retry — and it does not hold this lock, so a `must_exist`
     section really can raise with its manifest gone and its drawing still alive.
     Retiring the file there would hand that drawing's next two writers two
     different files.
-
-    Without this, `creating` reads as dead code a later reviewer would drop, and
-    the reclaim would widen to every section that fails.
     """
     root = _free_drawing(tmp_path / "store")
     backend = store.FilesystemBackend(root)
