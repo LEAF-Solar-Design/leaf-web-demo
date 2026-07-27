@@ -1,0 +1,206 @@
+# Authored CAD production readiness
+
+Status: NOT READY
+
+Updated: 2026-07-26
+
+This plan defines the release contract for tenant-authored CAD tools. The cat
+panel transformation is the first demanding example, not a production-only
+special case.
+
+## Product contract
+
+An authenticated and entitled tenant user can:
+
+1. Open one of that tenant's drawings.
+2. Describe a new deterministic CAD tool in plain language.
+3. Use the user's linked Claude grant to author a tenant-scoped tool package.
+4. Review the staged tool and approve its publication.
+5. Preview a write tool without granting permission for the later write.
+6. Approve the exact write against an exact drawing head and catalog generation.
+7. Create immutable drawing version `vN+1`.
+8. Inspect the result in the browser, including orbit, pan, and zoom for 3D
+   geometry.
+9. Undo, redo, or select a prior version without deleting history.
+
+The same path must work for a new tenant and a new request. A built-in cat tool,
+a preloaded prompt, a fixture-only catalog, or a browser route mock does not
+satisfy this contract.
+
+## Security contract
+
+- Auth0 supplies the user and tenant identity. Request bodies cannot select a
+  different tenant.
+- A tenant can read and mutate only its own repository, catalog, drawing,
+  session, approval, audit, and job records.
+- Claude grants stay tenant-scoped and never enter application logs, model
+  prompts, broker requests, or generated tool sandboxes.
+- The model cannot publish a staged tool. A separate exact approval publishes
+  the exact staged commit and catalog digest.
+- A preview is non-mutating and uses the read approval rung. It cannot mint or
+  reuse a write grant.
+- A write approval binds the tool, parameters, drawing, drawing head, catalog
+  digest, catalog commit, effective catalog digest, and tool manifest digest.
+- Generated code executes only inside the approved tool sandbox. It cannot read
+  platform secrets, the instance metadata service, another tenant's data, or
+  arbitrary network targets.
+- Failed, expired, stale, duplicate, and replayed approvals fail closed.
+
+## Durable authority contract
+
+PostgreSQL is the shared authority for:
+
+- application sessions and approvals
+- agent policy rate state and audit coordination
+- asynchronous jobs and terminal callbacks
+- drawing manifests, versions, and checkout leases
+- upload attempts and purge leases
+- broker tenant state, ledger state, callbacks, and replay nonces
+- harness sessions and tenant repository leases
+- customization staging, publication, and effective catalog pins
+
+Tenant Git and drawing payload storage remain durable, tenant-scoped stores.
+Application containers do not create database schemas during startup.
+Migrations run as a separate reviewed release stage.
+
+## Current verified state
+
+Read-only AWS inspection on 2026-07-26 found:
+
+| Area | Staging | Production |
+|---|---|---|
+| ECS application services | web, app, broker, harness, and canonical worker healthy at 1/1 | combined `leaf-platform` task healthy at 1/1 |
+| Source identity | five services use images from several different source commits | app, broker, and harness use `prod-6cf9b69` |
+| Authored execution | explicitly off in app, broker, and harness | explicitly off in broker and harness |
+| Harness session authority | file | file |
+| Harness authoring mode | disabled | disabled |
+| Tool sandbox credential | no E2B secret exists | no E2B secret exists |
+| Database | Aurora PostgreSQL and TLS-only RDS Proxy are available | Aurora PostgreSQL and TLS-only RDS Proxy are available |
+| Database wiring | app, broker, and canonical worker consume the staging URL | live application task does not consume the production URL |
+| Browser proof | fixture-backed cat proof and a clean real-service flow with a unique per-browser-session workbench exist | no authenticated production smoke |
+
+The integrated application branch is
+`codex/cat-production-integration-20260726`.
+
+## General author boundary status
+
+The application branch now implements the accepted general boundary:
+
+1. The Agent SDK runs on the trusted harness host and can inspect the tenant
+   repository only through read, list, and exists operations.
+2. Claude submits arbitrary tool source and manifest metadata through one
+   structured call. It cannot choose filesystem paths or write files.
+3. The trusted harness validates the proposal and writes exactly `tool.py` and
+   `tool.json`, returning a `leaf.tool-source.v1` receipt with exact hashes and
+   byte counts.
+4. A broker test must pass before the runner can return a candidate.
+5. In E2B mode, the broker returns a `leaf.tool-execution.v1` receipt bound to
+   the submitted source hash and tenant hash.
+6. `AuthorLoop` verifies the source receipt, execution receipt, tenant binding,
+   package bytes, and exact Git diff before registration and commit.
+7. The Claude grant stays in the harness. The E2B credential stays in the
+   broker.
+
+Hermetic tests prove a novel `drawing.write` proposal and reject unsafe,
+oversized, duplicate, forged, mismatched, and model-controlled write attempts.
+Local real-service testing proves the clean request surface and connected
+service flow. It does not prove the production sandbox because this machine has
+no E2B credential.
+
+Status remains NOT READY. Staging still needs the broker E2B credential and
+allowlist, a coherent deployed release, live receipt evidence, the two-tenant
+acceptance run, and the production infrastructure and rollback gates.
+
+## Release gates
+
+### Gate A: application integration
+
+- Merge the recovered cat workflow onto current application `main`.
+- Keep the current drawing-binding and exact-catalog approval fixes.
+- Pass server, harness, web, and browser suites.
+- Run the non-mocked deployed acceptance driver documented in
+  `docs/DEPLOYED-AUTHORED-CAD-ACCEPTANCE.md`.
+
+### Gate B: general sandboxed authoring
+
+- Merge the structured source-submission and broker execution-receipt boundary.
+- Prove that a novel write request can generate a new tool in a live E2B
+  sandbox, not only in the hermetic broker fake.
+- Prove sandbox denial for metadata, loopback, private ranges, public sites,
+  and a second tenant.
+- Prove that Claude, E2B, broker, harness, and platform secrets do not cross
+  their intended boundaries.
+
+### Gate C: staging configuration
+
+- Store a Leaf-owned E2B credential in Secrets Manager.
+- Add an explicit HTTPS broker or health probe URL whose hostname equals the
+  sandbox allowlist hostname.
+- Confirm migration `0017_harness_sessions.sql` and all earlier migrations.
+- Set harness sessions to PostgreSQL.
+- Set harness authoring mode to `singleton`.
+- Keep the author runner on the trusted harness host with
+  `LEAF_AUTHOR_SANDBOX_PROVIDER=off` or unset.
+- Set `LEAF_TOOL_SANDBOX_PROVIDER=e2b` on the broker and the declarative harness
+  gate. Give the E2B credential only to the broker.
+- Enable authored execution together on app, broker, and harness.
+- Select PostgreSQL authorities one at a time and verify each before the next.
+- Deploy app, broker, harness, web, and canonical worker from one exact
+  application commit and record every image digest.
+
+### Gate D: staging acceptance
+
+Run with two real Auth0 users in two tenants:
+
+- link separate Claude grants
+- author separate new tools
+- deny cross-tenant repository, catalog, drawing, approval, job, and audit reads
+- preview a write with no mutation and no write grant
+- approve publication independently
+- approve one exact write
+- create `vN+1`, reload it, orbit the 3D result, undo, and redo
+- reject stale-head, stale-catalog, duplicate, expired, and replayed approvals
+- restart app, broker, harness, and worker and prove the state survives
+- prove one canonical worker owns each delivery lease
+- record logs, metrics, audit rows, task definitions, and image digests
+
+### Gate E: production infrastructure
+
+- Wire the production database URL into app, broker, harness, and worker.
+- Run the reviewed production database bootstrap and schema migration stages.
+- Add the production canonical worker with single-writer and lease guards.
+- Add the same E2B, PostgreSQL, sandbox, and authored-execution posture proven
+  in staging.
+- Keep desired count and deployment percentage compatible with every
+  single-writer authority until all remaining state is shared.
+- Merge a production deploy workflow whose rollback claims match what it can
+  actually attempt.
+
+### Gate F: promotion and cutover
+
+- Promote the exact staging image digests. Do not rebuild for production.
+- Retain the prior production task definition and image digests.
+- Run the production migration receipt before application activation.
+- Use a non-customer tenant and drawing for the first smoke.
+- Verify target health, browser flow, recent logs, alarms, audit, and version
+  persistence.
+- Keep the rollback operator, task definition, image digests, database
+  posture, and effective catalog snapshot in the cutover receipt.
+
+## Ownership
+
+| Lane | Owner | State |
+|---|---|---|
+| Application integration, structured author boundary, cat browser flow, and deployed acceptance driver | `codex/cat-production-integration-20260726` | implemented on PR 210, pending review and staging run |
+| Production rollback workflow | infrastructure PR 183 owner | blocked by RED adversarial review |
+| Docker build-context cleanup | application PRs 207 and 208 owners | merged |
+| Live E2B boundary proof and staging activation workflow | unowned | waits for credential, allowlist, and merged application boundary |
+| Production Postgres and canonical-worker wiring | unowned | blocking |
+| Authenticated two-tenant staging acceptance | `codex/cat-production-integration-20260726` driver, staging operator executes | driver implemented, waits for staging activation |
+
+## Stop conditions
+
+Do not cut over when any release gate is open. Do not use root credentials for
+cloud mutation. Do not enable authored execution by editing a live task
+definition without the reviewed source, migration, secret, sandbox, rollback,
+and acceptance receipts.

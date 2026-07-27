@@ -134,6 +134,11 @@ describe("invariant v2 — dynamic: submitRun is the only side-effecting surface
       "params",
       "dwg",
       "catalogDigest",
+      "drawingVersion",
+      "expectedDrawingHead",
+      "catalogCommit",
+      "effectiveCatalogDigest",
+      "toolManifestSha256",
       "wait",
       "waitTimeoutS",
     ]);

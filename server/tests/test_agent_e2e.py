@@ -260,12 +260,12 @@ def test_full_split_turn_journey(fake_harness):
     assert body["text"] == "add a panel on the roof"
 
     # 3. MID-TURN: the loop's canUseTool consults the gate for run_write_tool
-    #    (confirm-once policy) -> awaiting_approval + durable GATE pending.
+    #    (always-confirm policy) -> awaiting_approval + durable GATE pending.
     g = _gate_call(c, "run_write_tool", write_args, session=sid, turn=turn_id)
     assert g.status_code == 200, g.text
     gb = g.json()
     assert gb["decision"] == "awaiting_approval"
-    assert gb["policy"] == "confirm-once" and gb["rung"] == 3
+    assert gb["policy"] == "always-confirm" and gb["rung"] == 3
     cid = gb["confirmation_id"]
     pending = agent_gate.read_pending(cid)
     assert pending is not None, "awaiting_approval must create a durable pending record"

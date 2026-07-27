@@ -16,6 +16,19 @@ Risks:
 - Web build arguments must remain staging-only and must never move production aliases.
 - Database and worker rollout stays operator-gated and uses named or federated AWS identity.
 
+# Standards surface cat operator flow
+
+- [x] Replace the `/try` command-bar redirect with an in-scene request flow.
+- [x] Show proposal approval, execution, result, version, Undo, and Redo in the same scene.
+- [x] Add browser coverage that proves `/try` stays on `/try` throughout the flow.
+- [x] Run the frontend build and focused browser proof, then inspect the final scene.
+
+Risks:
+
+- Keep `/app` and its backend contracts unchanged.
+- Keep the cat data labeled as a deterministic proof fixture, not a live Claude or APS run.
+- Preserve the committed motion and calm-surface standards.
+
 # Live edge-contract repair
 
 - [x] Bound `drawing_state` summary output while preserving useful counts.
@@ -188,3 +201,51 @@ Risks:
 - Approval arguments are security-sensitive and must remain byte-equivalent across the app and harness.
 - Existing approvals without a stored drawing must fail closed instead of gaining a new target.
 - The client cannot choose or alter the drawing during confirmation replay.
+
+# Orbitable 3D cat proof
+
+- [x] Add a browser assertion for real panel depth and camera orbit.
+- [x] Render the cat version as an extruded panel sculpture without changing its drawing evidence.
+- [x] Enable orbit, pan, and zoom only on the interactive cat surface.
+- [x] Keep proposal, approval, version, Undo, and Redo behavior unchanged.
+- [x] Run the browser proof, production build, focused server tests, and self-review.
+
+Risks:
+
+- The display treatment must not alter panel identity or the oracle input.
+- Default CAD viewers must retain their top-down pan and zoom controls.
+- Camera interaction must remain available without covering the operator controls.
+
+# Authored CAD production readiness
+
+- [x] Reconcile the recovered cat branch with current application main.
+- [x] Verify live staging and production service, image, database, and runtime posture.
+- [x] Freeze the production product, security, durability, staging, and cutover gates.
+- [x] Replace the fixed-template E2B author step with a general sandboxed author boundary.
+  - [x] Remove model-controlled repository writes while retaining read-only inspection.
+  - [x] Accept source and manifest metadata through one structured harness tool.
+  - [x] Reject duplicate, unsafe, oversized, or mismatched proposals before any write.
+  - [x] Write only `tools/<name>/tool.py` and `tool.json`, then verify exact bytes before commit.
+  - [x] Keep the Claude grant outside the broker and generated-code sandbox.
+  - [x] Require the broker test run before a candidate can be returned.
+  - [x] Prove a novel `drawing.write` proposal through hermetic boundary tests.
+- [x] Add a non-mocked deployed-environment acceptance driver.
+  - [x] Require an HTTPS staging target, exact source revision, two distinct tenant JWTs, and acceptance-only drawing IDs.
+  - [x] Prove readiness, coherent build identity, linked grants, tenant isolation, and a blank unique browser workbench without route interception.
+  - [x] Put all mutations behind an explicit staging-only execute flag and emit a secret-free receipt.
+  - [x] Require separate approval authority for the exact staged change and reject generic browser approvals.
+  - [x] Add hermetic negative tests for production targets, missing identity, mixed revisions, degraded dependencies, token leakage, and cross-tenant access.
+  - [x] Register the driver contract tests in the canonical gate.
+- [ ] Enable and verify one coherent release in staging.
+- [ ] Wire the proven posture into production.
+- [ ] Promote exact staging digests and complete the cutover receipt.
+
+Risks:
+
+- A healthy service with authored execution off does not satisfy the product contract.
+- The E2B author runner can propose a novel drawing-write tool, but staging has
+  not yet produced the live broker execution receipt.
+- Enabling authored execution without PostgreSQL sessions, an E2B credential, and an
+  explicit allowlisted probe fails production startup.
+- The live staging services currently use images from several source commits.
+- Cloud mutation must use a named federated identity, never the root identity.

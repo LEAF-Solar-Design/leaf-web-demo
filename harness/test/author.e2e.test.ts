@@ -14,7 +14,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
@@ -22,7 +22,12 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createHarness } from "../src/server.js";
-import type { HarnessPorts } from "../src/ports/index.js";
+import type {
+  AgentRunInput,
+  AgentRunResult,
+  AgentRunner,
+  HarnessPorts,
+} from "../src/ports/index.js";
 import { validateToolPackage } from "../src/registry/toolPackageSchema.js";
 import { HARNESS_IDENTITY } from "../src/registry/registerTool.js";
 import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
@@ -77,6 +82,17 @@ class LeaseAwareFakeTenantRepoProvider extends FakeTenantRepoProvider {
       return commit(message, identity);
     };
     return repo;
+  }
+}
+
+class TamperingAgentRunner implements AgentRunner {
+  constructor(
+    private readonly mutate: (input: AgentRunInput, result: AgentRunResult) => AgentRunResult,
+  ) {}
+
+  async run(input: AgentRunInput): Promise<AgentRunResult> {
+    const result = await new FakeAgentRunner().run(input);
+    return this.mutate(input, result);
   }
 }
 
@@ -218,5 +234,80 @@ describe("POST /author (build route) - hermetic e2e", () => {
     await expect(loop.run("tenant-read", "count-by-layer"))
       .rejects.toThrow("tenant repository read lease is required");
     expect(checkoutCalled).toBe(false);
+  });
+
+  it("rejects an author runner that changes a file outside the submitted package", async () => {
+    const runner = new TamperingAgentRunner((input, result) => {
+      writeFileSync(join(input.repoDir, "unexpected.txt"), "smuggled edit\n", "utf8");
+      return result;
+    });
+    const loop = new AuthorLoop({
+      oauth: new FakeOAuthGrantProvider(),
+      tenantRepo,
+      broker: new FakeBrokerApsClient(),
+      agentRunner: runner,
+    });
+
+    await expect(loop.buildLegacyAuthOff("tenant-tamper", "count entities per layer"))
+      .rejects.toThrow("changed files outside the submitted tool package");
+
+    const repoDir = tenantRepo.lastCheckout!.dir;
+    expect(git(repoDir, ["log", `--author=${HARNESS_IDENTITY.email}`, "--format=%H"]).trim())
+      .toBe("");
+    expect(readFileSync(join(repoDir, "unexpected.txt"), "utf8")).toBe("smuggled edit\n");
+  });
+
+  it("rejects returned source that does not match the trusted submission receipt", async () => {
+    const runner = new TamperingAgentRunner((_input, result) => ({
+      ...result,
+      code: `${result.code}\n# altered after submission\n`,
+    }));
+    const loop = new AuthorLoop({
+      oauth: new FakeOAuthGrantProvider(),
+      tenantRepo,
+      broker: new FakeBrokerApsClient(),
+      agentRunner: runner,
+    });
+
+    await expect(loop.buildLegacyAuthOff("tenant-mismatch", "count entities per layer"))
+      .rejects.toThrow("does not match the exact returned code");
+
+    const repoDir = tenantRepo.lastCheckout!.dir;
+    expect(git(repoDir, ["log", `--author=${HARNESS_IDENTITY.email}`, "--format=%H"]).trim())
+      .toBe("");
+  });
+
+  it("rejects a broker receipt bound to another source or tenant", async () => {
+    const runner = new TamperingAgentRunner((_input, result) => ({
+      ...result,
+      executionReceipt: {
+        contract: "leaf.tool-execution.v1",
+        provider: "e2b",
+        isolation: "microvm",
+        passed: true,
+        tenant_hash: "a".repeat(64),
+        source_sha256: "b".repeat(64),
+        input_sha256: "c".repeat(64),
+        result_sha256: "d".repeat(64),
+        template_version: "leaf-python-test",
+        policy_version: "leaf.sandbox-policy.v1",
+        started_at: "2026-07-26T00:00:00Z",
+        stopped_at: "2026-07-26T00:00:01Z",
+        resource_use: { wallMs: 1 },
+      },
+    }));
+    const loop = new AuthorLoop({
+      oauth: new FakeOAuthGrantProvider(),
+      tenantRepo,
+      broker: new FakeBrokerApsClient(),
+      agentRunner: runner,
+    });
+
+    await expect(loop.buildLegacyAuthOff("tenant-receipt", "count entities per layer"))
+      .rejects.toThrow("does not match the submitted source and tenant");
+
+    const repoDir = tenantRepo.lastCheckout!.dir;
+    expect(git(repoDir, ["log", `--author=${HARNESS_IDENTITY.email}`, "--format=%H"]).trim())
+      .toBe("");
   });
 });

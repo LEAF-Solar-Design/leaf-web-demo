@@ -10,6 +10,7 @@
  * E2B smoke that writes docs/e2b-author-runner-receipt.json — this file stays hermetic.
  */
 
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -31,7 +32,6 @@ import type {
   FsTenantRepoTool,
   ResultEnvelope,
   ToolPackage,
-  ValidationResult,
 } from "../src/ports/index.js";
 
 const BROKER_HOST = "broker.example.test";
@@ -121,9 +121,49 @@ function makeToolset() {
   };
   const toolset: AuthorToolset = {
     fsTenantRepo,
-    validateTool: (tool): ValidationResult => {
+    submitTool: (proposal) => {
+      const now = "2026-07-26T00:00:00.000Z";
+      const pkgDir = `tools/${proposal.name}`;
+      const tool: ToolPackage = {
+        name: proposal.name,
+        version: "1.0.0",
+        description: proposal.description,
+        kind: "script",
+        engine_op: proposal.engine_op,
+        entry: `${pkgDir}/tool.py`,
+        params: proposal.params,
+        returns: proposal.returns,
+        capabilities: proposal.capabilities,
+        timeout_ms: 30_000,
+        idempotent: true,
+        review: { status: "unreviewed" },
+        provenance: {
+          author: "agent",
+          created: now,
+          modified: now,
+          session: proposal.session,
+          static_scan: [],
+        },
+      };
       const diagnostics = validateToolPackage(tool);
-      return { ok: diagnostics.length === 0, diagnostics };
+      if (diagnostics.length > 0) throw new Error(diagnostics.join("; "));
+      const manifest = JSON.stringify({ ...tool, entry: "tool.py" }, null, 2) + "\n";
+      files.set(`${pkgDir}/tool.py`, proposal.source);
+      files.set(`${pkgDir}/tool.json`, manifest);
+      return {
+        tool,
+        code: proposal.source,
+        files: [`${pkgDir}/tool.json`, `${pkgDir}/tool.py`] as [string, string],
+        receipt: {
+          contract: "leaf.tool-source.v1",
+          source_sha256: createHash("sha256").update(proposal.source).digest("hex"),
+          manifest_sha256: createHash("sha256").update(manifest).digest("hex"),
+          source_bytes: Buffer.byteLength(proposal.source),
+          manifest_bytes: Buffer.byteLength(manifest),
+          entry: `${pkgDir}/tool.py`,
+          manifest: `${pkgDir}/tool.json`,
+        },
+      };
     },
     apsTestRun: async (tool, params): Promise<ResultEnvelope> => {
       apsTestCalls.push({ tool, params });
@@ -155,6 +195,25 @@ describe("E2bAgentRunner — egress-locked author session (hermetic, fake sandbo
       '{"a":{"a":"é","β":1.0000000000000000e+0},' +
       '"n":1.0000000000000000e+0,"tiny":1.0000000000000001e-5,"z":"雪"}',
     );
+  });
+
+  it("binds the HTTPS probe URL to the one allowlisted egress host", () => {
+    expect(() => new E2bAgentRunner({
+      brokerHost: "broker.internal",
+      brokerProbeUrl: "https://other.internal/api/health",
+    })).toThrow(/hostname must match/);
+    expect(() => new E2bAgentRunner({
+      brokerHost: "broker.internal",
+      brokerProbeUrl: "http://broker.internal/api/health",
+    })).toThrow(/must use HTTPS/);
+    expect(() => new E2bAgentRunner({
+      brokerHost: "broker.internal",
+      brokerProbeUrl: "https://user:secret@broker.internal/api/health",
+    })).toThrow(/cannot contain credentials/);
+    expect(() => new E2bAgentRunner({
+      brokerHost: "broker.internal",
+      brokerProbeUrl: "https://broker.internal/api/health",
+    })).not.toThrow();
   });
 
   it("boots ONE egress-locked sandbox and returns a valid CONTRACT §2 tool package", async () => {
