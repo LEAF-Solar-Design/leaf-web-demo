@@ -530,9 +530,18 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
         Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics.py"), 13),
+        # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
+        # was registered (bd4606c, 2026-07-24), a day before 5495b81 added
+        # test_required_platform_rejects_missing_shared_mutation_fence. The floor
+        # is a MINIMUM across runners, so it was checked on both before moving:
+        # neither this file nor server/tests/conftest.py gates on OS, DATABASE_URL
+        # or any other environment, and the Linux test-gate runner reports the
+        # same 13 executed / 0 skipped as an operator box (runs 30251486524 and
+        # 30250680397). Left at 12 the suite passed with a standing drift note,
+        # so the next test added here could have vanished behind it unnoticed.
         Suite("server-platform-postgres-startup",
               "server tests/test_platform_postgres_startup.py", "pytest", SERVER,
-              _py_pytest("tests/test_platform_postgres_startup.py"), 12),
+              _py_pytest("tests/test_platform_postgres_startup.py"), 13),
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
               _py_pytest("tests/test_postgres_container_wiring.py"), 7),
