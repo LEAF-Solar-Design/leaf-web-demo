@@ -241,8 +241,10 @@ def build_suites() -> List[Suite]:
         # different counts, so no single number is honest for both).
         # `platform` HAS since been re-baselined: 199 -> 223 (an interim bump of
         # exactly what one new file added) -> 234, a measured green count on a
-        # pristine database. Only `server-customization-adversarial` is still
-        # deliberately un-baselined. Details at each Suite(...) below.
+        # pristine database. `server-customization-adversarial` is now the only
+        # floor still pinned BELOW its CI executed count -- 17 is the Windows
+        # count, Linux CI executes 19 and reports drift -- because no single
+        # number is honest for both. Details at each Suite(...) below.
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
@@ -649,14 +651,18 @@ def build_suites() -> List[Suite]:
         # target <repo_name>/platform/tests) and reproduced on a second freshly
         # created database. It supersedes 199 (2026-07-25, PostgreSQL 17) and
         # the interim 223, which was only 199 plus the 24 cases one new file
-        # added -- deliberately NOT a clean baseline, so it left an 11-test band
-        # in which tests could vanish under a mere drift note. That band is now
-        # zero: the floor IS the count, so losing any single test trips
-        # "executed-count regression" instead of passing quietly.
-        # Collected and executed are both 234 because this suite allowlists NO
-        # skip reason, and every skip path under platform/tests is gated on the
-        # DB being unconfigured -- on a reachable DB nothing skips, so a green
-        # run executes everything collected.
+        # added -- deliberately NOT a clean baseline, so it left an 11-test gap
+        # between the floor and the real count. Losing 1 to 10 tests printed
+        # only an "(executed-count drift)" note; losing exactly 11 printed
+        # NOTHING, because coverage_verdict returns with no note once executed
+        # == expected. That gap is now zero: the floor IS the count, so losing
+        # any single test trips "executed-count regression" instead.
+        # Collected and executed are both 234 because every skip path under
+        # platform/tests is gated on the DB being unconfigured -- on a reachable
+        # DB nothing skips, so a green run executes everything collected. The
+        # empty skip allowlist does not prevent skips; it makes any skip FAIL
+        # the suite, which is what keeps that property honest rather than
+        # letting a future environment-gated skip erode the count quietly.
         # Re-baselining needs a PRISTINE database, not just a reachable one.
         # Several tests bind fixed external subjects (e.g. "auth0|1b-cross-org")
         # that are unique per tenant, so a second run against the same database
