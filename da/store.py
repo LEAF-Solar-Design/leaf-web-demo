@@ -263,9 +263,9 @@ def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     leaving a file behind for a drawing no sweep will ever walk again. The
     `not creating` re-check in `_legacy_checkout_guard` covers a writer that lost
     the race to a purge and re-minted the file behind it. And `ingest_drawing`
-    retires the file it opened when its own write FAILS and left NOTHING behind
-    -- the drawing it was bringing into existence never arrived, so no sweep
-    will ever walk that directory.
+    retires the file it opened when its own write FAILS -- the drawing it was
+    bringing into existence never arrived, so no sweep will ever walk that
+    directory.
 
     WHAT "GONE" MEANS IS THE CALLER'S TO PROVE, and a missing manifest is not
     that proof. A guest upload is alive on `upload.state.json` with no manifest
