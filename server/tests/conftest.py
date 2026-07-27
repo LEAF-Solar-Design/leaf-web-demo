@@ -32,23 +32,28 @@ def _jobs_connection_is_closed(conn: sqlite3.Connection) -> bool:
     return False
 
 
-@pytest.fixture(autouse=True)
-def _drop_closed_jobs_connection():
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):
     """Never hand the next test a CLOSED ``jobs._conn``.
 
-    Many modules isolate their own SQLite file by monkeypatching ``jobs.DB_PATH``
-    plus ``jobs._conn``, then closing the connection they built. On teardown
-    monkeypatch restores the PRIOR ``jobs._conn`` -- and when that prior value is
-    itself an already-closed handle, the dead handle propagates forward instead of
-    being cleared. ``jobs._db()`` returns the module singleton whenever it is not
-    None, so every later test that touches the job store raises
-    ``sqlite3.ProgrammingError: Cannot operate on a closed database``, and the
-    job-reaper daemon spins on the same dead handle every interval.
+    ``jobs._db()`` returns the module singleton whenever it is not None, so a
+    dead handle left in ``jobs._conn`` makes every later test that touches the
+    job store raise ``sqlite3.ProgrammingError: Cannot operate on a closed
+    database``, and the job-reaper daemon spins on the same dead handle every
+    interval. Tests own their isolation, not the module's connection: they must
+    call ``jobs.reset_connection()``, which closes and clears in one step. This
+    is the net for the ones that do not.
 
-    This is autouse, so it is set up before each test's own explicitly requested
-    fixtures and therefore finalized AFTER their teardown -- including after
-    monkeypatch's undo, which is the step that reinstates the dead handle.
-    Clearing it to None makes the next ``_db()`` rebuild the connection.
+    A HOOK, not an autouse fixture. A fixture only finalizes at its own scope,
+    so a function-scoped one is already gone by the time a module-, class- or
+    session-scoped finalizer runs. This wrapper's post-yield body runs after
+    ``teardown_exact`` has popped EVERY finalizer this item triggers, including
+    the higher-scoped ones that fire because ``nextitem`` is in another module,
+    and including monkeypatch's undo -- which is the step that reinstates a dead
+    handle when a test closed ``_conn`` in place before monkeypatching it.
+
+    The clear is reported rather than absorbed: a silent net is how the
+    ownership violation in test_da_callback.py survived a green CI.
     """
     yield
     jobs = sys.modules.get("jobs")
@@ -57,3 +62,7 @@ def _drop_closed_jobs_connection():
     conn = getattr(jobs, "_conn", None)
     if conn is not None and _jobs_connection_is_closed(conn):
         jobs._conn = None
+        item.warn(pytest.PytestWarning(
+            "teardown left a CLOSED handle in jobs._conn; cleared it so later "
+            "tests can rebuild. Use jobs.reset_connection() instead of closing "
+            "jobs._conn in place."))

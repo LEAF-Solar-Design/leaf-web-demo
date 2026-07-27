@@ -574,8 +574,7 @@ def test_dwg_version_survives_local_fallback(monkeypatch, tmp_path):
     assert captured["cloud_event_key"] == f"{job_id}:broker-run"
     assert captured["fallback_event_key"] == f"{job_id}:broker-fallback"
     assert captured["cloud_event_key"] != captured["fallback_event_key"]
-    if jobs._conn is not None:
-        jobs._conn.close()
+    jobs.reset_connection()
 
 
 def test_idempotency_fingerprint_includes_dwg_version(monkeypatch, tmp_path):
@@ -601,8 +600,7 @@ def test_idempotency_fingerprint_includes_dwg_version(monkeypatch, tmp_path):
     # same key, DIFFERENT pin -> rejected
     with pytest.raises(ValueError, match="different run input"):
         jobs.submit_job("t", tool, {}, "rooftop_demo", aps_live=False, dwg_version=2, **kw)
-    if jobs._conn is not None:
-        jobs._conn.close()
+    jobs.reset_connection()
 
 
 def test_restart_recovery_recovers_the_version_pin(monkeypatch, tmp_path):
@@ -628,8 +626,7 @@ def test_restart_recovery_recovers_the_version_pin(monkeypatch, tmp_path):
     # simulate a fresh process picking the durable row back up
     assert jobs._redispatch_record(job_id) is True
     assert captured["dwg_version"] == 7
-    if jobs._conn is not None:
-        jobs._conn.close()
+    jobs.reset_connection()
 
 
 def test_restart_recovery_fails_closed_on_row_predating_pin_persistence(monkeypatch, tmp_path):
@@ -660,5 +657,4 @@ def test_restart_recovery_fails_closed_on_row_predating_pin_persistence(monkeypa
     assert jobs._redispatch_record(job_id) is False
     assert dispatched["called"] is False
     assert jobs.get_job(job_id)["status"] == "failed"
-    if jobs._conn is not None:
-        jobs._conn.close()
+    jobs.reset_connection()

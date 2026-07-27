@@ -348,6 +348,30 @@ def _db() -> sqlite3.Connection:
     return _conn
 
 
+def reset_connection() -> None:
+    """Drop the module's SQLite singleton, closing the handle we are dropping.
+
+    THIS MODULE OWNS ITS CONNECTION. ``_db()`` hands the SAME object to every
+    caller, so a closed handle left in ``_conn`` is not a local problem: every
+    later job read or write raises ``sqlite3.ProgrammingError: Cannot operate on
+    a closed database`` and the reaper daemon spins on the dead handle every
+    interval. Callers that need the connection rebuilt (a test re-pointing
+    ``DB_PATH``, say) must come through here rather than closing ``_conn`` in
+    place, because closing in place leaves exactly that dead handle behind.
+
+    Clearing is done BEFORE the close and under ``_conn_lock``, the same lock
+    ``_db()`` builds under, so there is no window in which ``_conn`` holds a
+    handle that is already closed, and a ``close()`` that raises (SQLite refuses
+    to close over unfinalized statements) still leaves the singleton clean for
+    the next ``_db()`` to rebuild.
+    """
+    global _conn
+    with _conn_lock:
+        conn, _conn = _conn, None
+    if conn is not None:
+        conn.close()
+
+
 def _exec(sql: str, args: tuple = ()) -> None:
     with _lock:
         _db().execute(sql, args)
