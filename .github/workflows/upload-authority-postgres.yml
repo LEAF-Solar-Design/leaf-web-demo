@@ -104,11 +104,14 @@ jobs:
         run: python -m pytest -q tests/test_ops_metrics_pg.py
 
       - name: Run customization authority PostgreSQL integration tests
-        env:
-          PYTHONPATH: server
-        run: >-
-          python -m pytest -q
-          server/tests/test_customization_postgres_integration.py
+        working-directory: server
+        run: |
+          mkdir -p "$RUNNER_TEMP/leaf-customization-pythonpath"
+          ln -s "$GITHUB_WORKSPACE/scripts" \
+            "$RUNNER_TEMP/leaf-customization-pythonpath/scripts"
+          PYTHONPATH="$RUNNER_TEMP/leaf-customization-pythonpath" \
+            python -m pytest -q \
+            "$GITHUB_WORKSPACE/server/tests/test_customization_postgres_integration.py"
 
       - name: Run upload and authored-mutation boundary tests
         working-directory: server

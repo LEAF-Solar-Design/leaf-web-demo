@@ -29,8 +29,9 @@ CUSTOMIZATION_POSTGRES_GATE_FRAGMENTS = (
         "PG_CUSTOMIZATION_TEST_URL: "
         "postgresql://postgres:postgres@127.0.0.1:5432/leaf_test"
     ),
-    "PYTHONPATH: server",
-    "server/tests/test_customization_postgres_integration.py",
+    'ln -s "$GITHUB_WORKSPACE/scripts"',
+    'PYTHONPATH="$RUNNER_TEMP/leaf-customization-pythonpath"',
+    '"$GITHUB_WORKSPACE/server/tests/test_customization_postgres_integration.py"',
 )
 
 
