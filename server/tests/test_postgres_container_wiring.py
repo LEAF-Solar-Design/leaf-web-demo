@@ -8,8 +8,40 @@ from pathlib import Path
 import json
 import re
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CUSTOMIZATION_POSTGRES_GATE_FRAGMENTS = (
+    "- 'contract/customization.v1.schema.json'",
+    "- 'platform/authority-inventory.json'",
+    "- 'platform/db.py'",
+    "- 'platform/migrations/0020_customization_authority.sql'",
+    "- 'platform/tests/test_db_readiness_static.py'",
+    "- 'scripts/reconcile_customization_authority.py'",
+    "- 'server/customization_audit.py'",
+    "- 'server/customization_authority.py'",
+    "- 'server/customization_flags.py'",
+    "- 'server/customization_models.py'",
+    "- 'server/customization_postgres_store.py'",
+    "- 'server/customization_service.py'",
+    "- 'server/customization_store.py'",
+    "- 'server/platform_link.py'",
+    "- 'server/tests/test_customization_postgres_contract.py'",
+    "- 'server/tests/test_customization_postgres_integration.py'",
+    "- 'server/tests/test_customization_runtime.py'",
+    "- 'server/tests/test_postgres_authority_inventory_contract.py'",
+    (
+        "PG_CUSTOMIZATION_TEST_URL: "
+        "postgresql://postgres:postgres@127.0.0.1:5432/leaf_test"
+    ),
+    'test -n "${PG_CUSTOMIZATION_TEST_URL:-}"',
+    'ln -s "$GITHUB_WORKSPACE/scripts"',
+    'PYTHONPATH="$RUNNER_TEMP/leaf-customization-pythonpath"',
+    '"$GITHUB_WORKSPACE/server/tests/test_customization_postgres_contract.py"',
+    '"$GITHUB_WORKSPACE/server/tests/test_customization_postgres_integration.py"',
+    '"$GITHUB_WORKSPACE/server/tests/test_customization_runtime.py"',
+)
 
 
 def _read(path: str) -> str:
@@ -29,6 +61,15 @@ def _service(compose: str, name: str) -> str:
 def _required_environment(path: str) -> set[str]:
     manifest = json.loads(_read(path))
     return set(manifest["required"]["environment"])
+
+
+def _assert_customization_postgres_gate(workflow: str) -> None:
+    missing = [
+        fragment
+        for fragment in CUSTOMIZATION_POSTGRES_GATE_FRAGMENTS
+        if fragment not in workflow
+    ]
+    assert not missing, f"customization PostgreSQL gate omitted: {missing}"
 
 
 def test_required_config_manifests_fail_closed_for_postgres_authority():
@@ -66,6 +107,31 @@ def test_upload_import_boundary_has_a_real_postgres_pr_gate():
     assert "working-directory: server" in workflow
     assert "python -m pytest --import-mode=importlib -q" in workflow
     assert "../platform/tests/test_drawing_import.py" in workflow
+
+
+def test_customization_authority_has_a_real_postgres_pr_gate():
+    _assert_customization_postgres_gate(
+        _read(".github/workflows/upload-authority-postgres.yml")
+    )
+
+
+@pytest.mark.parametrize(
+    "required_fragment",
+    CUSTOMIZATION_POSTGRES_GATE_FRAGMENTS,
+)
+def test_customization_postgres_gate_rejects_each_omission(
+    required_fragment: str,
+):
+    workflow = _read(".github/workflows/upload-authority-postgres.yml")
+    assert required_fragment in workflow
+
+    with pytest.raises(
+        AssertionError,
+        match="customization PostgreSQL gate omitted",
+    ):
+        _assert_customization_postgres_gate(
+            workflow.replace(required_fragment, "", 1)
+        )
 
 
 def test_broker_image_contains_pg_runtime_without_crossing_secret_boundary():
