@@ -752,6 +752,20 @@ class _RelayHarness:
         return t
 
 
+class _FrozenClock:
+    """A stand-in for the `time` module that never advances.
+
+    `monotonic` is the ONLY attribute `turn_runner` reads from `time` — see
+    `_drain_terminal`, `_eof_terminal`, `_spawn_relay`'s deadline, and the
+    watchdog's `finished.wait(...)` — so replacing the whole module is total
+    rather than a partial patch that leaves a second clock running."""
+
+    _NOW = 1_000_000.0
+
+    def monotonic(self) -> float:
+        return self._NOW
+
+
 class _FakeStream:
     """The two attributes `_drain` touches on a `requests.Response`."""
 
@@ -892,9 +906,22 @@ def test_clean_eof_before_the_deadline_is_wired_to_the_turns_own_deadline(monkey
 
     Without this, `finally: _end_once('turn_complete', {'stop_reason':
     'timeout'})` would satisfy the test above while manufacturing a timeout for
-    every stream that merely ended early."""
+    every stream that merely ended early.
+
+    This is the ONE case here with a deadline in the future, so it is the one
+    case real elapsed time could decide: `_eof_terminal` compares
+    `time.monotonic() >= deadline`, so a stall longer than the budget between
+    `_spawn_relay` and the drain's `finally:` leg would return a timeout and
+    fail this test with no code regression at all. The other two pin the
+    deadline in the PAST (`max_s=0`), which no delay can undo. Freezing the
+    clock removes the asymmetry: `deadline` is `_FROZEN_NOW + 30.0` and every
+    reading is `_FROZEN_NOW`, so "inside the budget" holds no matter how long
+    the host stalls. `monotonic` is the only `time` attribute this module
+    uses (`_drain_terminal`, `_eof_terminal`, `_spawn_relay`, watchdog), so the
+    stand-in is total. (sol-critic PR #224 round 1, blocker 1.)"""
     harness = _RelayHarness()
     monkeypatch.setattr(turn_runner, "threading", harness)
+    monkeypatch.setattr(turn_runner, "time", _FrozenClock())
 
     sess = _new_session("tenant-eof-early")
     session_id = sess["session_id"]
