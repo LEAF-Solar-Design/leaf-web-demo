@@ -12,7 +12,8 @@ WHY EMF and not a scrape or PutMetricData:
 CONTRACT (owned by the unified-observability plane; see CONTRACT.md):
   Namespace  : Leaf/Platform/APS
   Metrics    : BrokerRun (Count), EngineSeconds (Seconds), UsdEst (None),
-               JobTerminal (Count), ApprovalGiveBackFailed (Count).
+               JobTerminal (Count), ApprovalGiveBackFailed (Count),
+               SubmitLatency (Milliseconds).
   Each metric is published EXACTLY ONCE per emit, under the single dimension set
   its CloudWatch consumer uses (a metric published under two dimension sets would
   double when summed across them):
@@ -24,8 +25,14 @@ CONTRACT (owned by the unified-observability plane; see CONTRACT.md):
                                           that never ran and could NOT be
                                           returned — the user's single approval
                                           is destroyed. Alarm on ANY value > 0.)
+    SubmitLatency-> {aps_live}           (POST /api/run submit cost; the same
+                                          dimension set EngineSeconds uses, so a
+                                          p-statistic on submit sits beside the
+                                          engine gauge and can be scoped to live
+                                          traffic. ALARM: p99 > 200ms sustained
+                                          — see the emitter's docstring.)
   Dimensions are LOW-CARDINALITY ONLY. tenant_id, tool, engine_op, aps_endpoint,
-  event_key, and execution_path are LOG FIELDS, never dimensions.
+  event_key, execution_path, and job_id are LOG FIELDS, never dimensions.
 
   `status` is CLAMPED to a bounded allowlist before it becomes a dimension: the
   broker copies a tool-returned envelope's error_code into the ledger status
@@ -43,6 +50,7 @@ Only first-party (server/) imports; the broker image declares no boto3 / SDK.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -231,6 +239,78 @@ def emit_approval_give_back_failed(
             pass
 
 
+def emit_submit_latency(
+    ms: Any, aps_live: Any = False, tenant_id: Optional[str] = None,
+    tool: Optional[str] = None, job_id: Optional[str] = None,
+) -> None:
+    """Emit the SUBMIT cost of one POST /api/run, in milliseconds.
+
+    WHAT IT MEASURES: the request's own work — resolve the tool, check the
+    catalog digest, gate the entitlement, exchange the checkout capability,
+    insert the durable job row — up to the 202. It does NOT include job
+    execution: the tool runs on a background worker after the 202 is written,
+    so nothing the engine does can land in this number. Keeping those two apart
+    is a contract, not an accident (server/tests/test_backbone.py
+    ``test_1b_submit_cost_is_independent_of_execution_time``), and this metric
+    is the production-side half of it.
+
+    WHY IT EXISTS: `contract/CONTRACT.md` §7 documents POST /api/run as
+    returning "**HTTP 202** immediately (<200 ms)". That is a p-latency claim on
+    real traffic. A CI test can only bound a MEAN on a shared 2-to-4-core
+    runner, which is why test_1b bounds independence rather than the 200ms
+    itself. Nothing observable existed for the absolute bound until this metric.
+
+    ALARM INTENT (create in the observability plane, not here):
+        metric     Leaf/Platform/APS SubmitLatency, dimension aps_live="true"
+        statistic  p99 over a 5-minute period
+        threshold  > 200 (ms) for 3 consecutive periods
+        treat missing data as `notBreaching` (no traffic is not a breach)
+      Scope it to aps_live="true" so demo/mock traffic cannot mask or trigger
+      it. p99 (not Average) is the documented statistic: a 202 that is fast on
+      average and 2 seconds at the tail has already broken the contract for the
+      users who hit the tail.
+
+    Published ONCE under {aps_live} — the same dimension set EngineSeconds
+    uses, so submit cost and engine cost are queryable side by side. tenant_id,
+    tool and job_id are LOW-VALUE-AS-DIMENSIONS and high cardinality: they are
+    log fields, so a breaching p99 can still be attributed by querying the logs
+    behind the metric.
+
+    A NON-FINITE OR NEGATIVE reading is DROPPED, not floored to 0. A clock that
+    produced garbage must not publish a fast sample: that would pull the p99
+    down exactly when the measurement is broken, which is the one moment the
+    alarm has to be trusted.
+    """
+    if _DISABLED:
+        return
+    try:
+        if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+            return
+        value = float(ms)
+        if not math.isfinite(value) or value < 0.0:
+            return
+        directives = [
+            {"Namespace": NAMESPACE, "Dimensions": [["aps_live"]],
+             "Metrics": [{"Name": "SubmitLatency", "Unit": "Milliseconds"}]}
+        ]
+        root: Dict[str, Any] = {
+            "aps_live": "true" if aps_live else "false",
+            "SubmitLatency": value,
+        }
+        if tenant_id:
+            root["tenant_id"] = str(tenant_id)
+        root["tool"] = str(tool) if tool else "none"
+        if job_id:
+            root["job_id"] = str(job_id)
+        _emit(directives, root)
+    except Exception as exc:  # noqa: BLE001 - metrics must never break the request
+        try:
+            print(f"[emf] emit_submit_latency failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+        except Exception:  # pragma: no cover
+            pass
+
+
 if __name__ == "__main__":
     # Smoke test: emit sample docs; validate they are JSON, single-publish, and
     # that an out-of-allowlist status is clamped.
@@ -252,3 +332,7 @@ if __name__ == "__main__":
     })
     emit_job_terminal("failed", "cloud")
     emit_job_terminal("complete")
+    emit_submit_latency(11.4, aps_live=True, tenant_id="acme",
+                        tool="panelize", job_id="job-abc")
+    # Dropped, not floored: a garbage clock must not publish a fast sample.
+    emit_submit_latency(float("nan"), aps_live=True)

@@ -534,6 +534,12 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_deployment_identity.py"), 5),
         Suite("server-emf-metrics-stream", "server tests/test_emf_metrics_stream.py",
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
+        # Floor 11 = 4 tests + the 7 parametrized cases of the unusable-reading
+        # test. Every case is hermetic and unconditional (no skipif, no DB, no
+        # subprocess), so the count is the same on every runner.
+        Suite("server-submit-latency-metric",
+              "server tests/test_submit_latency_metric.py", "pytest", SERVER,
+              _py_pytest("tests/test_submit_latency_metric.py"), 11),
         Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics.py"), 13),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite

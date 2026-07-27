@@ -32,7 +32,30 @@ import product_capability_availability as capability_catalog
 import customization_service
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_response, with_envelope_fields
 
+try:  # APS domain metrics (CloudWatch EMF); best-effort, optional — mirrors jobs.py
+    import emf_metrics
+except Exception:  # pragma: no cover
+    emf_metrics = None  # type: ignore[assignment]
+
 router = APIRouter()
+
+
+def _emit_submit_latency(ms: float, aps_live: Any, tenant_id: Any,
+                         tool: Any, job_id: Any) -> None:
+    """Best-effort SubmitLatency emission. The emitter already swallows its own
+    failures; this wrapper covers the import being absent, so observability can
+    never turn a successful 202 into a 500.
+
+    It does NOT cover the call site's own argument expressions, which Python
+    evaluates before this function is entered. Keep them incapable of raising
+    (they are today: a module constant, a str(), a dict .get(), and a local)."""
+    if emf_metrics is None:
+        return
+    try:
+        emf_metrics.emit_submit_latency(
+            ms, aps_live=aps_live, tenant_id=tenant_id, tool=tool, job_id=job_id)
+    except Exception:  # noqa: BLE001 - metrics must never break a submitted job
+        pass
 
 
 def _store():
@@ -323,6 +346,16 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     No capability, or a stale one, means the run is unnamed and is refused
     against any active lock.
     """
+    # SUBMIT-LATENCY CLOCK (emf SubmitLatency, emitted just before the 202).
+    # Started at the first statement of the body so it covers every unit of work
+    # this handler does to turn a request into a job_id. It does NOT cover the
+    # ASGI/dependency prologue that ran before the body (deps.require_tenant and
+    # request-body parsing), so the number is a floor on the request's server
+    # time, not the whole of it. That is the honest boundary available without a
+    # middleware, and the work it misses is fixed-cost: a regression in what this
+    # contract is about — resolution, gating, and the durable insert below — is
+    # inside the window.
+    submit_t0 = time.perf_counter()
     # TENANT-SCOPED resolution (wave 4): resolve the tool from the REQUESTING tenant's
     # catalog (globals + that tenant's own repo tools). A tool authored by another
     # tenant is not in this tenant's catalog -> UNKNOWN_TOOL, so it can never be run
@@ -492,12 +525,18 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
         code = env["error"]["error_code"]
         return JSONResponse(status_code=DEFAULT_HTTP_STATUS.get(code, 500), content=env)
 
-    return JSONResponse(
-        status_code=202,
-        content=deps.tenant_echo(
-            with_envelope_fields({"job_id": job_id, "status": "submitted"}), tenant_id
-        ),
+    body = deps.tenant_echo(
+        with_envelope_fields({"job_id": job_id, "status": "submitted"}), tenant_id
     )
+    # Measured HERE, on the 202 path ONLY. `?wait=1` above blocks on execution and
+    # returns 200, so timing it would put engine seconds into a submit metric and
+    # recreate exactly the coupling test_1b exists to forbid. Two request
+    # populations with two different contracts do not share one gauge.
+    _emit_submit_latency(
+        (time.perf_counter() - submit_t0) * 1000.0,
+        deps.APS_LIVE, str(tenant_id), tool.get("name") or req.tool, job_id,
+    )
+    return JSONResponse(status_code=202, content=body)
 
 
 @router.get("/api/jobs/{job_id}")
