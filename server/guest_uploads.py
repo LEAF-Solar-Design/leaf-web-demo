@@ -1108,9 +1108,26 @@ def _mark_failed_committed(
     # directory behind that receipt.
     with drawing_lock(tenant_id, drawing_id), \
             store.legacy_drawing_guard(backend, tenant_id, drawing_id,
-                                       must_exist=False):
+                                       must_exist=False) as checkout_lock:
         current = read_marker(backend, tenant_id, drawing_id)
         if current is None:
+            # Nothing to record, AND a lock file to take back. Entering the
+            # guard opens that file, which creates it, and `must_exist=False`
+            # means nothing above refused this drawing for being absent. On the
+            # ordinary pre-ingest failure that is harmless: the drawing dir and
+            # its marker are still there, so a later sweep retires the file with
+            # the drawing. Here there is no later sweep -- the purge walks
+            # drawing DIRECTORIES and this one is already gone -- so the file
+            # would name a drawing that does not exist and never will, and
+            # nothing would ever look at it again. Retiring it needs the same
+            # proof the purge uses, which this holds: the lock, exclusively.
+            #
+            # Conditional on the manifest, because a marker can be missing while
+            # the DRAWING is alive, and a live drawing's writers still need
+            # their file. Only when neither exists is there provably no one
+            # left to serve.
+            if not backend.exists(store.manifest_key(tenant_id, drawing_id)):
+                checkout_lock.reclaim()
             return False
         if current.get("attempt") != marker.get("attempt"):
             return False

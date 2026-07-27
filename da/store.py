@@ -234,18 +234,24 @@ def checkout_lock_key(tenant_id: str, drawing_id: str) -> str:
     drawing itself was purged. The digest is stable, so it still identifies the
     drawing to every process, without carrying the ids around.
 
-    RETIRED ONLY BY THE DRAWING'S DELETER, WHILE IT HOLDS THE LOCK. The file is
-    created once and outlives every drawing-directory walker, so the only caller
-    that may remove it is the one that has just deleted the drawing itself --
-    `server/guest_uploads.py::purge_expired`, which now takes THIS lock
-    (`legacy_purge_guard`) rather than only its own `drawing_lock`. It removes
-    the file as the last act inside the section, where an exclusive lock proves
-    it is the sole holder, and `_HeldCheckoutLock.reclaim` refuses if the path no
-    longer names the inode it holds. A caller that was parked on the retired
-    inode is caught by the identity check in `FilesystemBackend.cross_process_lock`
-    and sent back around to the live file, so it never runs on a lock that
-    excludes nobody. Anything else that unlinks this file reintroduces exactly
-    the two-callers-one-section defect the paragraph above describes.
+    RETIRED ONLY FROM INSIDE THE SECTION, BY A CALLER THAT HAS PROVED THE
+    DRAWING IS GONE. Two callers qualify, and the rule is the same for both:
+    hold this lock, establish that the drawing does not exist, then remove the
+    file as the LAST act before leaving. `server/guest_uploads.py::purge_expired`
+    is the one that deletes the drawing, and now takes THIS lock
+    (`legacy_purge_guard`) rather than only its own `drawing_lock`.
+    `_mark_failed` is the other: it enters with `must_exist=False`, so nothing
+    refused it for a missing drawing and merely OPENING the file created one --
+    if the drawing is already purged, it retires what it just minted rather than
+    leaving a file behind for a drawing no sweep will ever walk again.
+
+    The proof both rely on is the exclusive hold, plus `_HeldCheckoutLock.reclaim`
+    refusing if the path no longer names the inode it holds. A caller that was
+    parked on the retired inode is caught by the identity check in
+    `FilesystemBackend.cross_process_lock` and sent back around to the live file,
+    so it never runs on a lock that excludes nobody. Unlinking this file from
+    anywhere else -- outside the section, or without that proof -- reintroduces
+    exactly the two-callers-one-section defect the paragraph above describes.
 
     THE NAMING IS PART OF THE CROSS-PROCESS PROTOCOL. Two processes agree on a
     drawing's lock only by deriving the same path, so this function cannot be
@@ -1969,15 +1975,23 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
     RESOURCES IT HOLDS, and exactly how far each is bounded. The in-process lock
     map is reference counted and drops an entry when its last caller leaves, so it
     is bounded by CONCURRENT callers rather than by drawings ever seen. The lock
-    FILES are bounded by the drawings that currently exist: a missing drawing is
-    refused before the file is created, so no caller can mint lock files for ids
-    that were never drawings, and a purged drawing's file is retired by the purge
-    itself (`_HeldCheckoutLock.reclaim`) as the last act inside this section,
-    where holding the lock exclusively is the proof that no live holder is being
-    robbed of it. Retiring it from anywhere else — under the drawing's own lock,
-    or by sweeping files whose lock can be taken — puts two callers in here at
-    once, which is why the file is not in the drawing's own directory to begin
-    with.
+    FILES track the drawings that currently exist: a missing drawing is refused
+    before the file is created, so no caller can mint lock files for ids that
+    were never drawings, and a purged drawing's file is retired
+    (`_HeldCheckoutLock.reclaim`) as the last act inside this section, where
+    holding the lock exclusively is the proof that no live holder is being robbed
+    of it. Every path that skips the refusal retires its own file instead: the
+    purge after it deletes the drawing, `must_exist=False` when its caller finds
+    the drawing already gone, and the re-check below for a writer that lost the
+    race. Retiring it from anywhere else — under the drawing's own lock, or by
+    sweeping files whose lock can be taken — puts two callers in here at once,
+    which is why the file is not in the drawing's own directory to begin with.
+
+    ONE PATH STILL LEAKS ONE FILE, said rather than papered over: a `creating`
+    ingest that takes the lock and then FAILS to write (a disk error between the
+    version blob and the manifest) leaves a file for a drawing that never came
+    to exist. It is an I/O-failure path, not a race, and it predates the retiring
+    above, which is why it is recorded here rather than fixed alongside it.
 
     The documented answer above that boundary is unchanged and is postgres: it
     reads `FOR UPDATE` and increments in one statement, so it needs none of
@@ -2070,10 +2084,17 @@ def legacy_drawing_guard(backend: StorageBackend, tid: str, did: str, *,
 
     `must_exist=True` refuses a drawing that is already gone, with the same
     `KeyError` the manifest writers raise, which is what a caller finishing work
-    on a purged drawing needs. `must_exist=False` is for a caller whose drawing
-    may legitimately not exist yet (a failure recorded before the ingest ever
-    created one); it must bring its own evidence and re-read it INSIDE the
-    section, because outside it the answer goes stale while it waits.
+    on a purged drawing needs. It also retires the lock file on that refusal, so
+    a loser of the race leaves nothing behind.
+
+    `must_exist=False` is for a caller whose drawing may legitimately not exist
+    yet (a failure recorded before the ingest ever created one). It carries two
+    obligations, because skipping the existence check is what makes both
+    possible. It must bring its own evidence and re-read it INSIDE the section,
+    since outside it the answer goes stale while it waits. And when that evidence
+    says the drawing is gone for good, it must `reclaim()` the yielded lock
+    before returning: entering here OPENED the lock file, which created it, and
+    for a drawing that no longer exists nothing else will ever come back for it.
 
     NOT REENTRANT, like the guard beneath it: never call this from inside
     another guarded section for the same drawing.

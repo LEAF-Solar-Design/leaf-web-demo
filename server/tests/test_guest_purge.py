@@ -8,6 +8,7 @@ Run:  cd server && python -m pytest tests/test_guest_purge.py -q
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -334,3 +335,111 @@ def test_the_extraction_tail_cannot_republish_a_drawing_purged_after_ingest(
     # And nothing partial was left where the drawing used to be.
     marker = _drawing_dir(tenant, did) / "upload.state.json"
     assert not marker.exists(), "a ready marker was republished for a purged upload"
+
+
+def test_a_recorded_failure_is_written_inside_the_shared_lock(client, monkeypatch):
+    """`_mark_failed` writes into the drawing directory too, so it needs the
+    same lock the success path takes.
+
+    Asserted STRUCTURALLY, and deliberately so. What the guard adds here is
+    exclusion against a purge running in a SECOND process; in this one, the
+    marker re-check already returns False for a deleted drawing, so a
+    behavioural test would pass with the guard removed and prove nothing about
+    the property it is meant to pin. What is observable, and what actually
+    fails when the guard goes, is whether the write happens with the lock held.
+
+    The guard here is `must_exist=False`: a failure recorded before the ingest
+    ever ran has no manifest, and refusing it would lose every pre-ingest error.
+    """
+    import dxf_intake
+    import store
+
+    depth = {"n": 0}
+    writes = []
+    real_guard = store.legacy_drawing_guard
+    real_write = guest_uploads.write_marker
+
+    @contextlib.contextmanager
+    def spy_guard(backend, tid, did, **kwargs):
+        depth["n"] += 1
+        try:
+            with real_guard(backend, tid, did, **kwargs):
+                yield
+        finally:
+            depth["n"] -= 1
+
+    def spy_write(backend, tenant_id, drawing_id, marker):
+        writes.append((marker.get("status"), depth["n"]))
+        return real_write(backend, tenant_id, drawing_id, marker)
+
+    monkeypatch.setattr(store, "legacy_drawing_guard", spy_guard)
+    monkeypatch.setattr(guest_uploads, "write_marker", spy_write)
+    monkeypatch.setattr(
+        dxf_intake, "parse_dxf_file",
+        lambda *a, **k: (_ for _ in ()).throw(
+            guest_uploads._ExtractError("INTERNAL", "boom", retryable=True)))
+
+    tenant, did = _upload(client)
+
+    failed_writes = [d for status, d in writes if status == "failed"]
+    assert failed_writes, f"the failure was never recorded: {writes}"
+    assert all(d > 0 for d in failed_writes), (
+        f"_mark_failed wrote the marker with NO shared lock held "
+        f"(guard depth {failed_writes}); a purge in another process can delete "
+        f"the drawing and write its receipt in that window, and this write then "
+        f"recreates the directory behind it")
+
+
+def test_a_failure_recorded_for_an_already_purged_drawing_leaves_no_lock_file(
+        client, monkeypatch):
+    """The failure path may arrive AFTER the sweep, and it must not mint a lock
+    file that nothing will ever reclaim.
+
+    `_mark_failed` enters the shared guard with `must_exist=False`, and entering
+    it OPENS the lock file, which creates it. For an ordinary pre-ingest failure
+    that is harmless: the drawing directory and its marker are still there, so a
+    later sweep finds the drawing and retires the file with it. This case is the
+    one that has no later sweep. The purge walks drawing DIRECTORIES, and this
+    drawing's directory is already gone, so a file minted now names a drawing
+    that does not exist and never will, and nothing in the system will ever look
+    at it again.
+
+    That is the same unbounded growth `_HeldCheckoutLock.reclaim` exists to stop,
+    reached from the other side, and it is reachable by exactly the race this
+    whole change is about: a sweep landing while an extraction is still running,
+    whose error handler then reports a drawing that is already gone.
+    """
+    import store
+    backend = store.FilesystemBackend(write_loop.guest_store_dir())
+    lock_root = Path(backend._path("checkout-locks"))
+
+    def lock_files():
+        if not lock_root.exists():
+            return []
+        return sorted(p.name for p in lock_root.rglob("*.lock"))
+
+    monkeypatch.setenv("LEAF_GUEST_RETENTION_HOURS", "0.00002")  # ~72 ms
+    tenant, did = _upload(client)
+    marker = guest_uploads.read_marker(backend, tenant, did)
+    assert marker is not None, "the upload must have written a marker"
+
+    time.sleep(0.2)  # let the stamped expiry pass
+    assert guest_uploads.purge_expired()["count"] == 1
+    assert not _drawing_dir(tenant, did).exists(), "the drawing must be gone"
+
+    # The purge retires the drawing's lock file as its last act, so there is
+    # nothing left here to attribute to the write below.
+    before = lock_files()
+    assert before == [], f"the purge left a lock file behind: {before}"
+
+    # The late failure. It correctly declines to record anything -- the marker
+    # is gone -- but declining is not enough on its own.
+    recorded = guest_uploads._mark_failed(
+        backend, tenant, did, marker, "INTERNAL",
+        "extraction failed after the sweep", retryable=False)
+    assert recorded is False, "a purged drawing must not have a failure recorded"
+
+    assert lock_files() == before, (
+        f"recording a failure for an already-purged drawing minted a lock file "
+        f"that nothing will ever reclaim: {lock_files()}. The purge only walks "
+        f"drawing directories, and this drawing's directory is gone.")

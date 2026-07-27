@@ -326,7 +326,7 @@ def build_suites() -> List[Suite]:
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
               SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 18),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_purge.py"), 11),
+              _py_pytest("tests/test_guest_purge.py"), 13),
         Suite("server-guest-session-auth", "server tests/test_guest_session_auth.py", "pytest",
               SERVER, _py_pytest("tests/test_guest_session_auth.py"), 14),
         Suite("server-broker-upload-resolver", "server tests/test_broker_upload_resolver.py",
