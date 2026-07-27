@@ -328,13 +328,18 @@ def emit_submit_latency(
 
       PERIOD is deliberately NOT specified here. It has to be fitted to the
       deployment's real submit volume, and this docstring cannot know it. An
-      earlier version of this block said "3 consecutive periods", which is not
-      a thing CloudWatch does: it evaluates a SLIDING RANGE wider than
-      evaluation_periods, and once at least `evaluation_periods` real datapoints
-      exist in that range it ignores treat_missing_data entirely. At a low submit
-      rate a 5-minute period can leave the alarm unable to fire at all, because
-      the datapoints never land close enough together. Fit period against
-      measured volume; do not copy a number from here.
+      earlier version of this block said "> 200 ms for 3 consecutive periods".
+      A 3-of-3 alarm DOES evaluate the three most recent periods when data is
+      present, so that phrasing is not wrong in general. It is wrong as a spec
+      for a SPARSE metric: a default sliding alarm retrieves a range WIDER than
+      evaluation_periods to cope with missing data, and once at least
+      `evaluation_periods` real datapoints exist anywhere in that range it stops
+      applying treat_missing_data and judges the most recent real ones. At a low
+      submit rate a 5-minute period can therefore leave the alarm unable to fire
+      at all, because the datapoints never land close enough together to fill
+      the window. Fit period against measured volume; do not copy a number from
+      here. The same statement lives in CONTRACT-ADDENDUM section 7; keep the
+      two in step.
 
     Published ONCE under {environment, aps_live}. tenant_id, tool and job_id are
     LOW-VALUE-AS-DIMENSIONS and high cardinality: they are log fields, so a
