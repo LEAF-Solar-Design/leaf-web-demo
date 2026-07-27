@@ -682,7 +682,17 @@ INDEPENDENCE_SLEEP_S = 4.0
 # form of this test ran with no warmup at all, and 64 runs of it read a
 # systematic -33.7ms (grand mean 40.6ms slow against 74.3ms fast). That is 6.7%
 # of the budget below. So a warmup that under-covers erodes margin and nudges
-# the detection floor; it cannot flake this bound, which needs 500ms. After this
+# the detection floor; it cannot flake this bound, which needs 500ms.
+#
+# Measured directly at the raised pools this derivation exists for, by pinning
+# the count at 12 while the pool was 16 and then 64:
+#
+#     pool 16, 6 runs   count 12: -0.7 .. +2.7ms   derived 20: -1.5 .. +1.2ms
+#     pool 64, 4 runs   count 12: -9.8 .. +6.9ms   derived 68: -4.9 .. +2.2ms
+#
+# Under-covering roughly doubles the spread of the statistic, which is why the
+# count is derived rather than fixed. It does NOT reach a false pass: the worst
+# single reading it produced was 9.8ms, 2% of the budget. After a covering
 # warmup the two groups are indistinguishable: 1792 measured samples put the
 # grand mean at 9.6ms for BOTH.
 SUBMIT_WARMUP_MARGIN = 4
