@@ -64,10 +64,11 @@ export class HttpAppRunClient implements AppRunClient {
     method: "GET" | "POST",
     path: string,
     body?: Record<string, unknown>,
+    extraHeaders?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
-      headers: this.headers(tenantId),
+      headers: { ...this.headers(tenantId), ...extraHeaders },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -111,8 +112,18 @@ export class HttpAppRunClient implements AppRunClient {
     return { drawing_id: drawingId, checkout: versions.checkout ?? null };
   }
 
-  async authorTool(tenantId: string, description: string): Promise<Record<string, unknown>> {
-    return this.request(tenantId, "POST", "/api/author", { description });
+  async authorTool(
+    tenantId: string,
+    description: string,
+    idempotencyKey: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "POST",
+      "/api/author",
+      { description },
+      { "idempotency-key": idempotencyKey },
+    );
   }
 
   /**
@@ -128,6 +139,17 @@ export class HttpAppRunClient implements AppRunClient {
       params: req.params,
       dwg: req.dwg,
       catalog_digest: req.catalogDigest,
+      ...(req.drawingVersion !== undefined ? { dwg_version: req.drawingVersion } : {}),
+      ...(req.expectedDrawingHead !== undefined
+        ? { expected_drawing_head: req.expectedDrawingHead }
+        : {}),
+      ...(req.catalogCommit !== undefined ? { catalog_commit: req.catalogCommit } : {}),
+      ...(req.effectiveCatalogDigest !== undefined
+        ? { effective_catalog_digest: req.effectiveCatalogDigest }
+        : {}),
+      ...(req.toolManifestSha256 !== undefined
+        ? { tool_manifest_sha256: req.toolManifestSha256 }
+        : {}),
     });
     const jobId = String(body.job_id ?? "");
     let status = String(body.status ?? "submitted");
@@ -149,6 +171,15 @@ export class HttpAppRunClient implements AppRunClient {
       await new Promise((r) => setTimeout(r, 250));
     }
     return { job_id: jobId, status };
+  }
+
+  async requestPublication(
+    tenantId: string,
+    changeSetId: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request(tenantId, "POST", "/api/author/publication-requests", {
+      change_set_id: changeSetId,
+    });
   }
 
   async getJob(tenantId: string, jobId: string): Promise<Record<string, unknown>> {

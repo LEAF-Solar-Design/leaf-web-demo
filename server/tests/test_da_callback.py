@@ -274,10 +274,14 @@ def test_callback_completes_the_durable_job_and_poll_duplicate_is_a_noop(monkeyp
         def submit(self, *args, **kwargs):
             return None
 
-    # reset_connection(), never jobs._conn.close(): closing in place leaves the
-    # dead handle IN the singleton, and the monkeypatch below then records that
-    # dead handle as the value to restore on teardown -- reinstating it for
-    # every later test that touches the job store.
+    # This is an isolated-database test, and monkeypatch restores the singleton
+    # after it. reset_connection(), never jobs._conn.close(): closing in place
+    # leaves the dead handle IN the singleton, and the monkeypatch below then
+    # records that dead handle as the value to restore on teardown --
+    # reinstating it for every later module that touches the job store.
+    # reset_connection() clears as well as closes, so what gets restored is
+    # None and the next _db() rebuilds; simply not closing would leave this
+    # test's own connection open for the life of the process.
     jobs.reset_connection()
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
     monkeypatch.setattr(jobs, "_conn", None)

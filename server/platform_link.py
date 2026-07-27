@@ -55,6 +55,23 @@ def _log(msg: str) -> None:
     print(f"[platform-link] {msg}", file=sys.stderr)
 
 
+def _ensure_platform_package() -> None:
+    """Load the platform package alias without importing its API dependencies."""
+    import importlib.util
+
+    if "leaf_platform" in sys.modules:
+        return
+    pkg_dir = Path(__file__).resolve().parent.parent / "platform"
+    spec = importlib.util.spec_from_file_location(
+        "leaf_platform",
+        pkg_dir / "__init__.py",
+        submodule_search_locations=[str(pkg_dir)],
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["leaf_platform"] = mod
+    spec.loader.exec_module(mod)
+
+
 def _load_platform():
     """Load leaf_platform.{store,db} under the non-colliding alias (memoized).
 
@@ -64,16 +81,7 @@ def _load_platform():
     global _pkg
     if _pkg is not None:
         return _pkg
-    import importlib.util
-
-    if "leaf_platform" not in sys.modules:
-        pkg_dir = Path(__file__).resolve().parent.parent / "platform"
-        spec = importlib.util.spec_from_file_location(
-            "leaf_platform", pkg_dir / "__init__.py",
-            submodule_search_locations=[str(pkg_dir)])
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["leaf_platform"] = mod
-        spec.loader.exec_module(mod)
+    _ensure_platform_package()
     import leaf_platform.db as db  # noqa: PLC0415
     import leaf_platform.store as store  # noqa: PLC0415
     import leaf_platform.deps as platform_deps  # noqa: PLC0415
@@ -86,6 +94,14 @@ def platform_store():
     """Return the canonical store through the collision-safe package alias."""
     store, _db, _platform_deps = _load_platform()
     return store
+
+
+def platform_db():
+    """Return the canonical database module through the collision-safe alias."""
+    _ensure_platform_package()
+    import leaf_platform.db as db  # noqa: PLC0415
+
+    return db
 
 
 def _db_configured() -> bool:

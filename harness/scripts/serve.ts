@@ -44,14 +44,13 @@ import { Pool } from "pg";
 
 import { createHarness } from "../src/server.js";
 import { redactTokens } from "../src/redact.js";
-import { authorSandboxProvider, validateProductionHarnessEnv } from "../src/runtimeSafety.js";
+import { authorRunnerMode, validateProductionHarnessEnv } from "../src/runtimeSafety.js";
 import { createShutdownHandler } from "../src/shutdown.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { AgentGrant, HarnessPorts } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
 import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
-import { E2bAgentRunner } from "../src/ports/impl/e2bAgentRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
 import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
@@ -157,12 +156,9 @@ function buildPorts(): HarnessPorts {
   // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
   // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
   const grantStore = createTenantGrantStore();
-  // F2 (2A): the author boundary has its own provider selector. It never follows
-  // the broker tool-execution selector.
-  // egress-locked E2B sandbox instead of in-process. Default (unset/anything else) keeps
-  // AgentSdkRunner so the proven demo + hermetic tests are unchanged. LEAF_SANDBOX_BROKER_HOST
-  // sets the ONE allowlisted egress host (defaults to the proven public stand-in).
-  const useE2b = authorSandboxProvider() === "e2b";
+  // The tenant Claude grant stays on this trusted host. Generated source crosses
+  // the structured submit boundary as data, and only the broker may execute it
+  // inside the E2B tool sandbox.
   // LEAF_AGENT_MOCK=1: fully hermetic mode — scripted fakes for BOTH the design-time
   // author loop and the converse/turn loop. Never loads the Agent SDK, never touches
   // Anthropic, never spends LLM credit. Takes priority over LEAF_SANDBOX.
@@ -170,7 +166,7 @@ function buildPorts(): HarnessPorts {
   if (mockAgent) {
     log("[harness] LEAF_AGENT_MOCK=1 — agentRunner=FakeAgentRunner, converseRunner=FakeTurnRunner (scripted; no SDK, no network).");
   } else {
-    log(`[harness] author runner: ${useE2b ? "E2bAgentRunner (LEAF_AUTHOR_SANDBOX_PROVIDER=e2b)" : "AgentSdkRunner (provider off)"}`);
+    log("[harness] author runner: AgentSdkRunner (structured source submission; generated code executes only through broker)");
     log("[harness] converse runner: spine ConverseLoop via SpineTurnAdapter (gate-before-exec; SDK loads on first /turn).");
   }
   const oauth = new OAuthGrantProviderImpl({ store: grantStore });
@@ -186,11 +182,9 @@ function buildPorts(): HarnessPorts {
     grantAdmin: grantStore,
     tenantRepo,
     broker,
-    agentRunner: mockAgent
+    agentRunner: authorRunnerMode() === "fake"
       ? new FakeAgentRunner()
-      : useE2b
-        ? new E2bAgentRunner({ brokerHost: process.env.LEAF_SANDBOX_BROKER_HOST || undefined })
-        : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
+      : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
     ...(mockAgent
       ? { converseRunner: new FakeTurnRunner() }
       : (() => {

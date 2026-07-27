@@ -328,8 +328,13 @@ def build_suites() -> List[Suite]:
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_uploads.py"), 57),
+        # The cross-process fence probe uses POSIX fcntl and therefore skips on
+        # Windows operator boxes. Linux CI executes it. Keep the Windows run
+        # honest with the exact measured floor for every portable test and an
+        # allowlist for only that named deployment-contract skip.
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
-              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 18),
+              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 34,
+              allowed_skip_reasons=(r"fcntl is a Linux deployment contract",)),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_purge.py"), 9),
         Suite("server-guest-session-auth", "server tests/test_guest_session_auth.py", "pytest",
@@ -512,6 +517,9 @@ def build_suites() -> List[Suite]:
         Suite("server-deployment-source-identity",
               "server tests/test_deployment_source_identity.py", "pytest", SERVER,
               _py_pytest("tests/test_deployment_source_identity.py"), 7),
+        Suite("server-deployment-identity",
+              "server tests/test_deployment_identity.py", "pytest", SERVER,
+              _py_pytest("tests/test_deployment_identity.py"), 5),
         Suite("server-emf-metrics-stream", "server tests/test_emf_metrics_stream.py",
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
         Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
@@ -593,7 +601,10 @@ def build_suites() -> List[Suite]:
         Suite("server-customization-contract", "server customization contract freeze", "pytest",
               SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
         Suite("server-customization-runtime", "server customization runtime", "pytest",
-              SERVER, _py_pytest("tests/test_customization_runtime.py"), 23),
+              SERVER, _py_pytest("tests/test_customization_runtime.py"), 26),
+        Suite("server-customization-postgres-contract",
+              "server customization PostgreSQL contract", "pytest",
+              SERVER, _py_pytest("tests/test_customization_postgres_contract.py"), 9),
         # The two OS-file-lock probes are skipif(fcntl is None): they EXECUTE on
         # the Linux CI runner and skip only on a Windows operator box. Named here
         # so a Windows run stays green without the fail-closed skip rule having to
@@ -696,6 +707,9 @@ def build_suites() -> List[Suite]:
         # reports as the checkout lock rather than as a generic staging-fix chain.
         Suite("web-checkout-identity-check", "web single-writer checkout lock identity", "script", WEB,
               [_npm(), "run", "check:checkout-identity"], None),
+        Suite("web-deployed-acceptance-contract",
+              "web deployed authored CAD acceptance contract", "script", WEB,
+              [_npm(), "run", "check:deployed-acceptance-contract"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #

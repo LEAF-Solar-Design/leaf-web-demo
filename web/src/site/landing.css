@@ -143,6 +143,7 @@
 .tc-solve .dot { background: #22c55e; }
 .tc-back { border: 0; background: none; padding: 0; font-size: 12px; color: #22c55e; cursor: pointer; }
 .tc-back:hover { color: #4ade80; }
+.tc-focus-hidden { display: none !important; }
 
 /* ---------------- landing: statement block (z 20) ---------------- */
 
@@ -264,7 +265,77 @@
   color: #a1a1aa; font: 600 8.5px 'Inter Tight', sans-serif; flex: none;
 }
 
-/* ---------------- tool: command-bar ghost (z 30) ---------------- */
+/* The standards scene now owns the operator flow. The existing conversational
+   component is compacted into the left rail, while its server-bound approval
+   controls and durable transcript behavior remain unchanged. */
+.tc-operator-rail { overflow: hidden; }
+.tc-operator-rail .converse-card {
+  margin: 0 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tc-operator-rail .converse-head,
+.tc-operator-rail .converse-input { display: none; }
+.tc-operator-rail .converse-log {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  padding: 4px 0 12px;
+  overflow: auto;
+}
+.tc-operator-rail .converse-turn { padding: 8px; }
+.tc-operator-rail .converse-msg { font-size: 12px; line-height: 1.45; }
+.tc-operator-rail .strip-decision {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 6px 0;
+  padding: 9px;
+}
+.tc-operator-rail .strip-sentence { flex-basis: calc(100% - 18px); }
+.tc-operator-empty,
+.tc-operator-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 16px;
+  color: #71717a;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.tc-operator-error { color: #fca5a5; }
+.tc-version { font-size: 11.5px; color: #a1a1aa; font-variant-numeric: tabular-nums; }
+.tc-version-actions { display: flex; gap: 8px; padding: 12px 16px; }
+.tc-version-actions button:disabled { cursor: default; opacity: .32; }
+.tc-camera-controls {
+  margin: 0 16px 4px;
+  padding: 9px 10px;
+  border: 1px solid #1f5132;
+  border-radius: 7px;
+  background: rgba(12, 45, 25, .42);
+  color: #86efac;
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.tc-run {
+  border: 0;
+  border-radius: 6px;
+  background: #22c55e;
+  color: #04140a;
+  padding: 5px 12px;
+  font: 600 11.5px 'Inter Tight', sans-serif;
+  cursor: pointer;
+}
+.tc-run:hover { background: #4ade80; }
+.tc-run:disabled { cursor: default; opacity: .42; }
+
+/* ---------------- tool: command bar (z 30) ---------------- */
 
 /* centered via left:50% + negative margin (NOT translateX) so the recast
    scale transform composes cleanly with the positioning */

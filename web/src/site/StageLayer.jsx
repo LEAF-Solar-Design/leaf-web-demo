@@ -28,7 +28,7 @@ function ReadySentinel({ onReady }) {
   return null
 }
 
-export default function StageLayer() {
+export default function StageLayer({ intakeOverride = null, viewMode = 'flat' }) {
   const [intake, setIntake] = useState(null)
   const [routes, setRoutes] = useState([])
   const [fallback, setFallback] = useState(false)
@@ -53,6 +53,7 @@ export default function StageLayer() {
     // the drawing never transitions again for the life of the session.
     settleTimer.current = setTimeout(() => setSettled(true), 2400)
   }
+  const sculpture = viewMode === 'panel-sculpture'
 
   return (
     <div className="stage-layer" aria-hidden="true">
@@ -62,14 +63,16 @@ export default function StageLayer() {
       ) : (
         <div className={`stage-viewer${entered ? ' in' : ''}${settled ? ' settled' : ''}`}>
           <Suspense fallback={null}>
-            {intake && (
+            {(intakeOverride || intake) && (
               <>
                 <Viewer
-                  intake={intake}
+                  intake={intakeOverride || intake}
                   colorForLayer={stageColorForLayer}
                   background="transparent"
-                  controlsEnabled={false}
-                  stringRoutes={routes}
+                  controlsEnabled={sculpture}
+                  rotateEnabled={sculpture}
+                  panelSculpture={sculpture}
+                  stringRoutes={intakeOverride ? [] : routes}
                   onGlError={() => setFallback(true)}
                 />
                 <ReadySentinel onReady={handleReady} />

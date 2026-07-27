@@ -72,7 +72,24 @@ export interface Registry {
   tools: ToolPackage[];
 }
 
-/** Result envelope = CONTRACT.md section 3, plus ADDENDUM section 10 `degraded_mode`. */
+/** Verified receipt for tenant-code execution inside the broker-owned E2B micro-VM. */
+export interface ToolExecutionReceipt {
+  contract: "leaf.tool-execution.v1";
+  provider: "e2b";
+  isolation: "microvm";
+  passed: true;
+  tenant_hash: string;
+  source_sha256: string;
+  input_sha256: string;
+  result_sha256: string;
+  template_version: string;
+  policy_version: string;
+  started_at: string;
+  stopped_at: string;
+  resource_use: Record<string, unknown>;
+}
+
+/** Result envelope = CONTRACT.md section 3, plus additive runtime evidence. */
 export interface ResultEnvelope {
   ok: boolean;
   tool: string | null;
@@ -83,6 +100,7 @@ export interface ResultEnvelope {
   cost: { engine_seconds?: number; usd_est?: number } | null;
   error: { error_code: string; message: string; retryable: boolean } | null;
   degraded_mode?: boolean;
+  execution_provenance?: ToolExecutionReceipt;
 }
 
 export interface ResultOverlay {
@@ -314,26 +332,61 @@ export interface BrokerApsClient {
 // Port 4 - AgentRunner (the Agent SDK loop boundary)
 // --------------------------------------------------------------------------- //
 
+/** Structured source and manifest proposal accepted by the trusted harness. */
+export interface ToolSourceProposal {
+  name: string;
+  description: string;
+  engine_op: string;
+  params: JsonSchema;
+  returns: JsonSchema;
+  capabilities: Capability[];
+  source: string;
+  /** Trusted provenance session label. The model cannot set credential material. */
+  session: string;
+}
+
+/** Exact-byte receipt returned after the harness validates and writes a proposal. */
+export interface ToolSourceReceipt {
+  contract: "leaf.tool-source.v1";
+  source_sha256: string;
+  manifest_sha256: string;
+  source_bytes: number;
+  manifest_bytes: number;
+  entry: string;
+  manifest: string;
+}
+
+export interface ToolSubmissionResult {
+  tool: ToolPackage;
+  code: string;
+  files: [string, string];
+  receipt: ToolSourceReceipt;
+}
+
 /**
- * The exactly-three tools the design-time author session is granted (mirrors
- * hot-script SPEC section 10: no shell, no arbitrary net). Both the fake and the
- * real SDK runner drive THESE and nothing else.
+ * The exactly-three tools the design-time author session is granted: read-only
+ * tenant-repo inspection, structured source submission plus validation, and a
+ * broker test run. There is no model-controlled filesystem write capability.
  */
 export interface AuthorToolset {
-  /** Read/write scoped to the tenant checkout dir; rejects path escapes. */
-  fsTenantRepo: FsTenantRepoTool;
-  /** Runs the CONTRACT section 2 oracle; returns pass/fail + diagnostics. */
-  validateTool: (tool: ToolPackage) => ValidationResult;
+  /** Read-only inspection scoped to the tenant checkout; rejects path escapes. */
+  fsTenantRepo: ReadonlyFsTenantRepoTool;
+  /** Validate and atomically write one new exact tool package. */
+  submitTool: (proposal: ToolSourceProposal) => ToolSubmissionResult;
   /** Test-runs a candidate tool via the broker (broker only, aps_live=false). */
   apsTestRun: (tool: ToolPackage, params?: Record<string, unknown>) => Promise<ResultEnvelope>;
 }
 
-export interface FsTenantRepoTool {
+export interface ReadonlyFsTenantRepoTool {
   readonly root: string;
   readFile(relPath: string): string;
-  writeFile(relPath: string, content: string): void;
   exists(relPath: string): boolean;
   listDir(relPath?: string): string[];
+}
+
+/** Trusted harness-side filesystem implementation. Never mounted as a model write tool. */
+export interface FsTenantRepoTool extends ReadonlyFsTenantRepoTool {
+  writeFile(relPath: string, content: string): void;
 }
 
 export interface ValidationResult {
@@ -350,7 +403,7 @@ export interface AgentRunInput {
 }
 
 export interface AgentRunResult {
-  /** The authored tool package (already written into the repo by the session). */
+  /** The authored tool package, written by the trusted structured-submit handler. */
   tool: ToolPackage;
   /** The generated entry-script source. */
   code: string;
@@ -358,6 +411,10 @@ export interface AgentRunResult {
   preview: string;
   /** Files the session wrote, relative to repoDir (for observability/tests). */
   files: string[];
+  /** Exact source and manifest hashes produced by the trusted submit handler. */
+  sourceReceipt?: ToolSourceReceipt;
+  /** Broker-verified E2B execution receipt for the submitted source, when required. */
+  executionReceipt?: ToolExecutionReceipt;
   /**
    * OPTIONAL authoring telemetry (A1): turns/tokens/cost/models for this build.
    * A runner that meters populates it (AgentSdkRunner); one that does not (the fake,
@@ -397,13 +454,14 @@ export type { StopReason, HarnessTurnEvent, ConverseTurnInput, ConverseRunner, C
 // enforced by test/converseRuntimeSeparation.test.ts).
 // --------------------------------------------------------------------------- //
 
-/** The six spine tool names — the catalog is DATA, not tools, so this set is fixed. */
+/** The seven spine tool names. The catalog is data, not model-owned code. */
 export const SPINE_TOOL_NAMES = [
   "catalog_search",
   "drawing_state",
   "run_capability",
   "job_status",
   "author_tool",
+  "request_publication",
   "request_confirmation",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
@@ -466,11 +524,11 @@ export interface SpineToolResult {
 
 /**
  * The tool-execution surface the ConverseLoop hands the runner. The runner invokes
- * spine tools ONLY through this; the loop implements the six tools (gate check +
+ * spine tools ONLY through this; the loop implements the seven tools (gate check +
  * AppRunClient dispatch) and emits the wire events around each call.
  */
 export interface ToolExecutor {
-  /** The mounted tool names (always the six spine tools). */
+  /** The mounted tool names (always the seven spine tools). */
   list(): readonly string[];
   execute(tool: string, args: Record<string, unknown>): Promise<SpineToolResult>;
 }
@@ -537,6 +595,9 @@ export interface CapabilityEntry {
   capabilities: Capability[];
   params_schema?: JsonSchema;
   catalog_digest?: string;
+  tool_manifest_sha256?: string;
+  catalog_commit?: string;
+  effective_catalog_digest?: string;
   [k: string]: unknown;
 }
 
@@ -547,6 +608,13 @@ export interface SubmitRunRequest {
   params: Record<string, unknown>;
   dwg: string;
   catalogDigest: string;
+  /** Immutable drawing version approved for this run. */
+  drawingVersion?: number;
+  /** Optimistic head precondition checked by the app before job submission. */
+  expectedDrawingHead?: number;
+  catalogCommit?: string;
+  effectiveCatalogDigest?: string;
+  toolManifestSha256?: string;
   /** Fast-tool read path: hold the request open (?wait=1) up to waitTimeoutS. */
   wait?: boolean;
   waitTimeoutS?: number;
@@ -570,7 +638,16 @@ export interface AppRunClient {
     what: "summary" | "versions" | "checkout",
   ): Promise<Record<string, unknown>>;
   /** POST /api/author after the author_tool gate grants an approved request. */
-  authorTool(tenantId: string, description: string): Promise<Record<string, unknown>>;
+  authorTool(
+    tenantId: string,
+    description: string,
+    idempotencyKey: string,
+  ): Promise<Record<string, unknown>>;
+  /** Request or resume publication of one durable staged change set. */
+  requestPublication(
+    tenantId: string,
+    changeSetId: string,
+  ): Promise<Record<string, unknown>>;
   /** POST /api/run for registered deterministic tool execution. */
   submitRun(req: SubmitRunRequest): Promise<SubmitRunResponse>;
   /** GET /api/jobs/{id} — section-7 job row. */

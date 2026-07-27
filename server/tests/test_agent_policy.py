@@ -57,7 +57,7 @@ def test_shipped_catalog_loads_with_v1_shape():
     assert set(pol.actions) == {
         "request_confirmation", "read_platform_state", "run_read_tool",
         "run_write_tool", "submit_live_solve", "undo_drawing_version",
-        "author_tool", "register_tool", "customize_platform",
+        "author_tool", "request_publication", "register_tool", "customize_platform",
     }
     assert pol.rate_limits == {"low": 120, "medium": 60, "high": 10}
     assert pol.approval_ttl_s == 300
@@ -68,11 +68,25 @@ def test_shipped_catalog_loads_with_v1_shape():
     assert reg.rung == 6
     assert reg.required_capability == "deploy"
 
+    publication = pol.actions["request_publication"]
+    assert publication.policy == "auto"
+    assert publication.tenant_tightenable is False
+    assert publication.rung == 6
+    assert publication.required_capability == "deploy"
+    assert publication.args_schema == {
+        "type": "object",
+        "properties": {"change_set_id": {"type": "string"}},
+        "required": ["change_set_id"],
+        "additionalProperties": False,
+    }
+
     cust = pol.actions["customize_platform"]
     assert cust.enabled is False
     assert cust.rung == 7
 
-    assert pol.actions["run_write_tool"].policy == "confirm-once"
+    write = pol.actions["run_write_tool"]
+    assert write.policy == "always-confirm"
+    assert write.tenant_tightenable is False
     assert pol.actions["read_platform_state"].required_capability == "converse"
 
     # undo keeps policy `auto` (the safety valve is never harder than the write)
@@ -265,20 +279,19 @@ def test_bad_rate_limit_is_error(tmp_path):
 # tier_overrides
 # --------------------------------------------------------------------------- #
 def test_tier_override_applies_per_tier(tmp_path):
-    """The agent_write_autopilot mechanism: a tier override may loosen a
-    tenant_tightenable action (run_write_tool -> auto for hosted_pro)."""
+    """Tier overrides may retune an action that remains tenant-tightenable."""
     raw = _shipped_raw()
-    raw["tier_overrides"] = {"hosted_pro": {"run_write_tool": {"policy": "auto"}}}
+    raw["tier_overrides"] = {"hosted_pro": {"submit_live_solve": {"policy": "auto"}}}
     pol = agent_policy.load_policy(_write(tmp_path, raw))
-    assert agent_policy.effective_action(pol, "run_write_tool", tier="hosted_pro").policy == "auto"
+    assert agent_policy.effective_action(pol, "submit_live_solve", tier="hosted_pro").policy == "auto"
     # other tiers keep the base policy
-    assert agent_policy.effective_action(pol, "run_write_tool", tier="hosted_starter").policy == "confirm-once"
-    assert agent_policy.effective_action(pol, "run_write_tool").policy == "confirm-once"
+    assert agent_policy.effective_action(pol, "submit_live_solve", tier="hosted_starter").policy == "confirm-once"
+    assert agent_policy.effective_action(pol, "submit_live_solve").policy == "confirm-once"
 
 
 def test_tier_override_cannot_loosen_tightenable_false_action(tmp_path):
     raw = _shipped_raw()
-    raw["tier_overrides"] = {"hosted_pro": {"register_tool": {"policy": "auto"}}}
+    raw["tier_overrides"] = {"hosted_pro": {"run_write_tool": {"policy": "auto"}}}
     with pytest.raises(PolicyError, match="tenant_tightenable"):
         agent_policy.load_policy(_write(tmp_path, raw))
 
@@ -366,7 +379,8 @@ def test_tenant_overlay_tightens_policy():
         pol, "run_read_tool", tenant_overlay={"run_read_tool": {"policy": "confirm-once"}})
     assert eff.policy == "confirm-once"
     eff2 = agent_policy.effective_action(
-        pol, "run_write_tool", tenant_overlay={"run_write_tool": {"policy": "always-confirm"}})
+        pol, "submit_live_solve",
+        tenant_overlay={"submit_live_solve": {"policy": "always-confirm"}})
     assert eff2.policy == "always-confirm"
 
 

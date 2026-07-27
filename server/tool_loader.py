@@ -212,6 +212,14 @@ _MICROVM_DENIED_TARGETS = [
     "https://example.com/", "https://api.github.com/", "https://1.1.1.1/",
 ]
 _SANDBOX_POLICY_VERSION = "leaf.sandbox-policy.v1"
+
+
+class _MicrovmSuccess:
+    """Trusted return value plus the verified, secret-free execution receipt."""
+
+    def __init__(self, ret: Any, provenance: Dict[str, Any]) -> None:
+        self.ret = ret
+        self.provenance = provenance
 _SANDBOX_TEMPLATE_VERSION = "leaf-python-2026-07-23"
 _SANDBOX_LIMITS = {
     "cpu_seconds": 30,
@@ -691,7 +699,26 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
         return ("tool_error", f"{e.get('type', 'Error')}: {e.get('msg', '')}")
     if not result.get("ok"):
         return ("infra_error", "e2b-microvm runner returned a non-ok result without an error")
-    return ("ok", _decode_ret(result.get("ret") or {}))
+    audit = json.loads(blob.decode("utf-8"))["audit"]
+    provenance = {
+        "contract": "leaf.tool-execution.v1",
+        "provider": "e2b",
+        "isolation": "microvm",
+        "passed": True,
+        "tenant_hash": receipt.get("tenantHash"),
+        "source_sha256": receipt.get("sourceHash"),
+        "input_sha256": audit["input_hash"],
+        "result_sha256": receipt.get("resultHash"),
+        "template_version": receipt.get("templateVersion"),
+        "policy_version": receipt.get("policyVersion"),
+        "started_at": receipt.get("startedAt"),
+        "stopped_at": receipt.get("stoppedAt"),
+        "resource_use": receipt.get("resourceUse"),
+    }
+    return ("ok", _MicrovmSuccess(
+        _decode_ret(result.get("ret") or {}),
+        provenance,
+    ))
 
 
 def _tenant_repo_root(tenant_id: Optional[str] = None) -> Optional[Path]:
@@ -978,6 +1005,7 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
             ErrorCode.INTERNAL,
             "unsupported LEAF_TOOL_SANDBOX_PROVIDER; execution refused",
             retryable=False, tool=name, version=version, timing_ms=_ms())
+    execution_provenance = None
     if tier != "off":
         if tier == "microvm":
             kind, payload = _run_in_sandbox_e2b(
@@ -992,7 +1020,11 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
             return err_envelope(ErrorCode.INTERNAL,
                                 f"sandbox execution failed for tool {name!r}: {payload}",
                                 retryable=False, tool=name, version=version, timing_ms=_ms())
-        ret = payload
+        if isinstance(payload, _MicrovmSuccess):
+            ret = payload.ret
+            execution_provenance = payload.provenance
+        else:
+            ret = payload
     else:
         try:
             mod = _load_module(local)
@@ -1015,10 +1047,14 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     if isinstance(coerced, dict):  # the tool returned a full envelope
         env = coerced
         env.setdefault("degraded_mode", degraded)
+        if execution_provenance is not None:
+            env["execution_provenance"] = execution_provenance
         return env
     result, overlay = coerced
     env = ok_envelope(name, version, result, overlay, timing_ms=_ms(), cost=None,
                       degraded_mode=degraded)
+    if execution_provenance is not None:
+        env["execution_provenance"] = execution_provenance
 
     # 4) POST-VALIDATE the §3 envelope — a broken tool surfaces as INTERNAL
     everrs = validate_envelope(env)

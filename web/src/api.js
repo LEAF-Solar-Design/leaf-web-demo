@@ -71,7 +71,9 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
     if (!res.ok) throw new Error('failed to load sample.intake.json')
     return { intake: await res.json(), tenant: null, tier: null, org: null }
   }
-  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, 5000)
+  // The real rooftop intake contains thousands of panel polylines. A cold
+  // local app can need more than five seconds to read and serialize it.
+  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, 15000)
   // tier/org_id are echoed by deps.tenant_echo only when auth is live; null off-auth.
   return {
     intake: data.intake,

@@ -1,9 +1,11 @@
 # HARNESS-CONTRACT — tenant design-time author loop (Agent SDK)
 
 Net-new service under `C:/tmp/leaf-web-demo/harness/`. It is the **Build lane
-engine** of the Leaf web-CAD platform: **NL prompt → an Agent-SDK session edits
-the tenant's mushy-codebase git repo → authors + validates a deterministic tool
-package → registers it.** Registered tools then run with **ZERO LLM**. Since the
+engine** of the Leaf web-CAD platform: **NL prompt → an Agent-SDK session
+proposes source and metadata through a structured tool → the trusted harness
+writes and validates the exact tool package → the broker executes it in the
+configured tool sandbox → the harness registers it.** Registered tools then run
+with **ZERO LLM**. Since the
 agent-spine wave (`server/CONTRACT-ADDENDUM.md` §18, 2026-07-20) the same process
 also hosts **ConverseLoop**, the conversational runtime surface, as a sibling to
 AuthorLoop — the harness remains the platform's **sole Anthropic egress** (§1
@@ -28,6 +30,20 @@ does not re-freeze — `contract/CONTRACT.md` (§1–§6), `server/CONTRACT-ADDE
 > the `ConverseTurnInput` field set (no packet field), the `HarnessTurnEvent`
 > union, `StopReason`, and the parked ContextPacket schema are pinned by
 > `server/tests/test_contract_freeze.py`.
+
+> **v3 supersession (2026-07-26, structured authored-source boundary).**
+> This note supersedes the old introduction and the section 3 and section 8
+> wording that let the model write repository files and described
+> `validateTool` as a validation-only call. The model now receives exactly
+> three tools: read-only tenant repository inspection, structured source and
+> metadata submission, and broker test execution. Only the trusted harness
+> writes the exact `tool.py` and `tool.json` bytes. It returns a
+> `leaf.tool-source.v1` receipt. In production, the broker must execute those
+> bytes in E2B and return a bound `leaf.tool-execution.v1` receipt before the
+> candidate can be committed. The tenant Claude grant remains on the harness
+> host. The E2B credential remains in the broker. This change strengthens the
+> frozen security boundary and does not change the HTTP routes or the
+> registered-tool zero-LLM invariant.
 
 ---
 
@@ -132,12 +148,26 @@ per-tenant kill-switch denial surfaces as `TENANT_DISABLED`, a down broker as
 one-off and build share the author mechanism (`AgentRunner` + the three tools);
 **only build persists** via `registry/registerTool.ts`.
 
-The design-time author session is granted **exactly three tools** (hot-script SPEC
-§10 — no shell, no arbitrary net):
+The design-time author session is granted **exactly three tools** (hot-script
+SPEC §10, with no shell and no arbitrary network access):
 
-1. `fsTenantRepo` — read/write scoped to the checkout dir; rejects path escapes.
-2. `validateTool` — runs the CONTRACT §2 oracle; returns pass/fail + diagnostics.
-3. `apsTestRun` — delegates to `BrokerApsClient` (broker only, `aps_live:false`).
+1. `fs_tenant_repo` provides read, list, and exists operations scoped to the
+   checkout directory. It has no write operation and rejects path escapes.
+2. `validate_tool` accepts the proposed source and manifest metadata. The
+   trusted harness validates them, writes only `tools/<name>/tool.py` and
+   `tools/<name>/tool.json`, and returns a `leaf.tool-source.v1` receipt with
+   exact paths, byte counts, and SHA-256 digests. A retry can replace only the
+   same uncommitted package when it presents the exact prior receipt.
+3. `aps_test_run` delegates the current validated candidate to
+   `BrokerApsClient` with `aps_live:false`. When
+   `LEAF_TOOL_SANDBOX_PROVIDER=e2b`, success requires a
+   `leaf.tool-execution.v1` receipt bound to the submitted source digest and
+   tenant hash.
+
+The model cannot write arbitrary files, choose a destination path, register a
+tool, or commit a repository. `AuthorLoop` re-reads the package, checks the
+source receipt, execution receipt, tenant binding, exact two-file Git diff, and
+registry state before it can register and commit.
 
 ---
 
@@ -250,12 +280,13 @@ mounted there. The per-package `tool.json` uses the SPEC's package-relative `ent
 ## 8. Validation oracle
 
 `src/registry/toolPackageSchema.ts` is a **faithful TypeScript port of CONTRACT
-§2**, used by the `validateTool` tool and re-run by the harness before register
-(defense in depth). Chosen over shelling out to `engine/selfcheck.py` because the
-gate must be hermetic and Windows-safe, one language / one process — and
-`selfcheck.py` is actually the §3 **envelope** + effective-registry checker, not a
-§2 tool-**package** schema checker. `selfcheck.py` remains the §3 oracle on the
-Python/run side.
+§2**. The trusted `validate_tool` handler applies it before writing a candidate,
+and `AuthorLoop` applies it again before registration. The model does not invoke
+the validator directly against repository paths. Chosen over shelling out to
+`engine/selfcheck.py` because the gate must be hermetic and Windows-safe, with
+one language and one process. `selfcheck.py` is the §3 **envelope** and
+effective-registry checker, not a §2 tool-**package** schema checker. It remains
+the §3 oracle on the Python run side.
 
 ---
 

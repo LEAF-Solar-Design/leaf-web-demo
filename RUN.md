@@ -63,18 +63,23 @@ processes left behind (a Windows job-object guard reaps children even on an
 abrupt exit). The web dev server is launched with `VITE_MOCK=0` so the browser
 talks to the live app.
 
-Add the real Build lane (compiled Agent-SDK harness sidecar on `:8150`):
+Add the Agent SDK conversation sidecar on `:8150`:
 
 ```bash
 python scripts/start-leaf.py --with-harness
 ```
 
-The harness comes up healthy with **no** Claude token, but **authoring a tool
-needs a per-tenant grant** — without one, `POST /api/author` returns a calm
-`GRANT_REQUIRED` (HTTP 401) and **spends no LLM credit** (the SDK is never
-constructed). Link a grant per tenant with `POST /api/tenant/claude-grant
-{token}` (the app forwards it to the harness store and never persists, logs, or
-echoes it). Flags: `--no-web` (backend only), `--with-harness`, `--broker-port`,
+The harness comes up healthy with no Claude token. Authoring a tool needs a
+per-tenant grant. Without one, `POST /api/author` returns `GRANT_REQUIRED`
+(HTTP 401), and the SDK spends no LLM credit. Link a grant per tenant with
+`POST /api/tenant/claude-grant {token}`. The app forwards the token to the
+harness store and never persists, logs, or echoes it.
+
+Repository mutation also needs a PostgreSQL writer lease. Set
+`LEAF_HARNESS_DATABASE_URL` or `DATABASE_URL` before launch. Without a database
+URL, `start-leaf.py` keeps authored execution off and the harness read-only.
+
+Flags: `--no-web` (backend only), `--with-harness`, `--broker-port`,
 `--app-port`, `--harness-port`, `--web-port`.
 
 Prerequisites: Python 3.12+ with `fastapi`/`uvicorn` (verified on 3.13.5), Node
@@ -113,7 +118,10 @@ is in `server/CONTRACT-ADDENDUM.md`.
 | `LEAF_APP_URL` | _(unset)_ | harness → app base URL for the §18 converse back-edge (gate consult + dispatch). Unset ⇒ converse lane dark, fail closed (`POST /turn` 501) |
 | `LEAF_APP_DISPATCH_SECRET` | _(unset)_ | X-Dispatch-Secret shared by app + harness (§18.5). **Must be set on BOTH** or the converse lane stays dark (harness) and the back-edge 401s (app). `start-leaf.py --with-harness` mints an ephemeral one per boot |
 | `LEAF_SESSIONS_DIR` | `harness/sessions-data` | harness converse store (sdk resume ids, confirmation mirrors); durable volume in compose (`/data/sessions`) |
-| `LEAF_TENANTS_DIR` | _(unset)_ | base for per-tenant mushy repos (`<base>/<tenant_id>`); **must match on app + harness** (§16.H) |
+| `LEAF_TENANTS_DIR` | platform temp `leaf-tenants` | shared base for per-tenant mushy repos (`<base>/<tenant_id>`). `start-leaf.py` passes one value to app, broker, and harness (§16.H) |
+| `LEAF_SPINE_TURN_TIMEOUT_S` | `900` from `scripts/start-leaf.py` | cold subscription-backed converse turn budget |
+| `TURN_MAX_S` | `930` from `scripts/start-leaf.py` | app read timeout and busy-session lease; must outlive the spine budget |
+| `LEAF_AUTHOR_TIMEOUT_S` | `600` from `scripts/start-leaf.py` | live authoring wait budget |
 | `LEAF_TENANT_REPO` | _(unset)_ | single-repo override for the **demo** tenant (legacy wave-3 mode) |
 | `LEAF_GRANTS_DIR` | `C:/tmp/leaf-grants` | per-tenant Claude token files (harness-only; `mode 0600`, never logged) |
 | `LEAF_GRANT_FILE` | _(unset)_ | demo-tenant OAuth grant fallback path (token value never printed) |

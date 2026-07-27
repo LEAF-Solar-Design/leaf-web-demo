@@ -360,6 +360,17 @@ def append_event(session_id: str, turn_id: Optional[str], type: str,
             "UPDATE sessions SET last_seq = ?, updated_at = ? WHERE session_id = ?",
             (seq, now, session_id),
         )
+        if type in ("turn_complete", "error") and turn_id is not None:
+            # Publish the terminal event and release its active-turn CAS in the
+            # same transaction. A transcript reader that sees the terminal
+            # event can therefore start the next turn without racing the relay's
+            # later metering work.
+            conn.execute(
+                "UPDATE sessions SET active_turn_id = NULL,"
+                " turn_started_at = NULL, active_turn_tier = NULL"
+                " WHERE session_id = ? AND active_turn_id = ?",
+                (session_id, turn_id),
+            )
         conn.commit()
         return seq
 
@@ -872,6 +883,13 @@ def _pg_append_event(
             (session_id, seq, turn_id, type,
              json.dumps(data if data is not None else {}), now),
         )
+        if type in ("turn_complete", "error") and turn_id is not None:
+            conn.execute(
+                "UPDATE app_sessions SET active_turn_id = NULL,"
+                " turn_started_at = NULL, active_turn_tier = NULL"
+                " WHERE session_id = %s AND active_turn_id = %s",
+                (session_id, turn_id),
+            )
     return seq
 
 
