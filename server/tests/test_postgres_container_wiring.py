@@ -13,10 +13,15 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CUSTOMIZATION_POSTGRES_GATE_FRAGMENTS = (
+    "- 'contract/customization.v1.schema.json'",
     "- 'platform/authority-inventory.json'",
     "- 'platform/db.py'",
     "- 'platform/migrations/0020_customization_authority.sql'",
+    "- 'platform/tests/test_db_readiness_static.py'",
     "- 'scripts/reconcile_customization_authority.py'",
+    "- 'server/customization_audit.py'",
+    "- 'server/customization_authority.py'",
+    "- 'server/customization_flags.py'",
     "- 'server/customization_models.py'",
     "- 'server/customization_postgres_store.py'",
     "- 'server/customization_service.py'",
@@ -25,13 +30,17 @@ CUSTOMIZATION_POSTGRES_GATE_FRAGMENTS = (
     "- 'server/tests/test_customization_postgres_contract.py'",
     "- 'server/tests/test_customization_postgres_integration.py'",
     "- 'server/tests/test_customization_runtime.py'",
+    "- 'server/tests/test_postgres_authority_inventory_contract.py'",
     (
         "PG_CUSTOMIZATION_TEST_URL: "
         "postgresql://postgres:postgres@127.0.0.1:5432/leaf_test"
     ),
+    'test -n "${PG_CUSTOMIZATION_TEST_URL:-}"',
     'ln -s "$GITHUB_WORKSPACE/scripts"',
     'PYTHONPATH="$RUNNER_TEMP/leaf-customization-pythonpath"',
+    '"$GITHUB_WORKSPACE/server/tests/test_customization_postgres_contract.py"',
     '"$GITHUB_WORKSPACE/server/tests/test_customization_postgres_integration.py"',
+    '"$GITHUB_WORKSPACE/server/tests/test_customization_runtime.py"',
 )
 
 
