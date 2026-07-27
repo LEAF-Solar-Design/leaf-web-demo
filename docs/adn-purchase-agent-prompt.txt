@@ -1,0 +1,95 @@
+Help me buy an Autodesk Developer Network (ADN) membership in the browser. I will
+handle sign-in and payment myself. You drive everything in between and tell me
+exactly what you see.
+
+HARD LIMITS, do not violate even if it blocks progress:
+- Never type my password or any credential. At any sign-in prompt, stop and hand
+  back to me.
+- Never enter card or bank details. Never click a final Pay / Submit Order /
+  Confirm Purchase button. Stop one click short.
+- Never accept terms, agreements, or cookie/consent banners for me. Surface them
+  and let me click.
+- Never create a new Autodesk ID. If an account is refused, stop and tell me.
+
+WHO I AM
+- Evan Haug, founder, Leaf Automation, a one-person US LLC.
+- Signing in as ehaug@leafsolardesign.com. That account held a prior ADN
+  membership, which completed the no-charge start-up period and was not renewed.
+  We are buying a PAID seat now. Do not select the start-up category, that window
+  is used.
+- Website leafdesign.ai.
+
+WHAT I ALREADY VERIFIED, so you can skip discovery
+- https://adndata.autodesk.io/sysinit.asp?SessionType=Applicant 301-redirects to
+  https://adn.autodesk.io. The sysinit.asp path is legacy.
+- There is NO pre-login application form. Both "Click here to initiate or
+  continue an ADN Membership Application" links and both Sign In buttons resolve
+  to /user/login?state=/application.
+- Clicking Sign In in-page does nothing, the page is a single-page app. Navigate
+  directly to https://adn.autodesk.io/user/login?state=/application
+- That redirects to https://signin.autodesk.com, which offers an Email field with
+  Next, plus Continue with Google / Apple / Microsoft / Facebook.
+- The word "continue" in the application link suggests part-finished applications
+  resume rather than restart.
+
+TASK
+1. Navigate to https://adn.autodesk.io/user/login?state=/application and stop at
+   the sign-in screen. Tell me it is ready. I will authenticate.
+2. Once I am in, report verbatim what appears: a blank new application, or an
+   existing/expired membership record. If any renew or reinstate path exists,
+   recommend it over a fresh application and quote the screen text that supports
+   that, because keeping the history on one company record avoids a duplicate
+   that is slow to unpick.
+3. Walk the application form field by field. Read each field's label to me and
+   fill the non-sensitive ones from the data below. Where it asks for the exact
+   registered LLC name, or anything financial or personal I have not given you,
+   ask me instead of guessing.
+4. If the form allows additional contacts or developers, add
+   ehaug@leafautomation.ai and tell me where you put it. This matters: our APS
+   production app and all live Design Automation traffic sit on that Autodesk ID,
+   not on the membership address, and support entitlement follows the membership
+   account.
+5. At the order screen, do NOT pay. Quote verbatim: the total, the currency, what
+   period the fee covers, and whether auto-renew is on by default. ADN membership
+   runs January to December and is not prorated, so a purchase in late July may
+   buy five months at full annual price. Published list is 1,750 for 1 user.
+   Hand back to me with those four facts and wait.
+6. After I pay, verify entitlement rather than assuming it. Confirm I can open an
+   API support case, and confirm the case tool can reference an APS app that
+   lives on a different Autodesk ID (ehaug@leafautomation.ai).
+
+APPLICATION DATA
+- Company: Leaf Automation
+- Entity: US limited liability company (ask me for the exact registered name)
+- Country: United States
+- Primary contact: Evan Haug, founder, ehaug@leafautomation.ai
+- Developer seats: 1
+- Membership category: paid, standard
+- Prior ADN history: member under ehaug@leafsolardesign.com, start-up period
+  completed, not renewed
+- Autodesk technologies used: Design Automation for AutoCAD, Object Storage
+  Service, Model Derivative
+- Deployment: commercial SaaS, live production traffic
+- Current Autodesk spend: Design Automation Flex, pay-as-you-go
+- Primary support need: Design Automation API, WorkItem concurrency and quota
+  changes
+- Company description for free-text fields: "Leaf Automation builds a hosted,
+  multi-tenant CAD automation platform on Autodesk Platform Services. Customers
+  upload drawings and run automated AutoCAD workflows through APS Design
+  Automation, with results returned to a web application. We run in production on
+  Design Automation Flex and need higher WorkItem concurrency to serve tenants
+  without head-of-line blocking."
+
+WHY I AM BUYING THIS
+Membership unlocks ADN member API support, the queue that can action a WorkItem
+concurrency raise. Our production app
+czjIu4W9OK9fSoWAJ6lddfj00tv6tPooFdBqMfFbEKP2AbfV (region us-east, engine
+Autodesk.AutoCAD+26_0, Design Automation Flex) is capped at 1 to 2 concurrent
+WorkItems, so every tenant queues behind one in-flight job. We are asking for 25,
+staged 10 then 25 if they prefer to ramp. Measured load: 2.4 to 4.1
+engine-seconds per WorkItem at roughly $0.006 to $0.008 per run.
+
+REPORTING
+Quote screens verbatim, do not paraphrase. Mark each claim confirmed or inferred.
+If a screen does not match what I described above, say so rather than improvising.
+If you get stuck, the ADN rep for US and Canada is Eswar K, eswar.k@autodesk.com.
