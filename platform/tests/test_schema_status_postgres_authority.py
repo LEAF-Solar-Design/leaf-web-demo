@@ -64,6 +64,18 @@ def _describe(label, status):
     return f"{label}: schema_status() ok={status['ok']} defects={_defects(status)}"
 
 
+def _names(contract):
+    """The names in one contract container, whatever shape it is.
+
+    Like the defect keys above, this shape is not stable across revisions of
+    db.py: a catalog contract is a set of names on this tree and a
+    name -> definition mapping on the PR #187 revision. set() reads the names
+    out of either, so the guards below assert instead of raising TypeError on
+    a tree that happens to carry the other shape.
+    """
+    return set(contract)
+
+
 def _select_only(monkeypatch, selectors):
     """Route exactly `selectors` at postgres and clear every other authority."""
     for name in SELECTORS:
@@ -95,19 +107,52 @@ def test_postgres_selection_requires_real_catalog_objects(monkeypatch):
 
     schema_status() reports ok when nothing required is missing. If selecting
     every authority required zero constraints, indexes, or triggers, the ok
-    assertions would hold on a database with none of them. Prove the contract
-    set is populated before trusting the verdict built from it.
+    assertions would hold on a database carrying none of them. Prove the
+    contract set is populated before trusting the verdict built from it.
     """
     _select_only(monkeypatch, SELECTORS)
     catalog = db.required_catalog_for_selected_authorities()
     empty = sorted(kind for kind, names in catalog.items() if not names)
     assert not empty, f"no {empty} required with every authority at postgres"
 
-    required_columns = db.required_columns_for_selected_authorities()
-    for table in ("broker_usage_ledger", "broker_admission_resolution_audit"):
-        assert required_columns.get(table), (
-            f"{table} carries no required columns with every authority at postgres"
-        )
+
+@pytest.mark.parametrize("selector", SELECTORS)
+def test_each_selector_contributes_its_own_authority_contract(selector):
+    """Per selector, not just the union: does routing THIS one at postgres
+    actually require anything the base schema does not?
+
+    The union guard above is satisfied by the selectors that do contribute, so
+    a selector could keep its "postgres" mapping, contribute no columns and no
+    catalog objects, and leave its own parametrized ok-case asserting nothing
+    beyond the base schema and the migration ledger -- green, and hollow.
+    Compare each selector's contract against the empty environment and require
+    it to add at least one column or catalog object.
+
+    Both helpers take an explicit mapping, so this reads the contract without
+    touching os.environ at all.
+    """
+    base_columns = db.required_columns_for_selected_authorities({})
+    base_catalog = db.required_catalog_for_selected_authorities({})
+    selected_columns = db.required_columns_for_selected_authorities(
+        {selector: "postgres"})
+    selected_catalog = db.required_catalog_for_selected_authorities(
+        {selector: "postgres"})
+
+    added_columns = {
+        table: sorted(_names(columns) - _names(base_columns.get(table, ())))
+        for table, columns in selected_columns.items()
+        if _names(columns) - _names(base_columns.get(table, ()))
+    }
+    added_catalog = {
+        kind: sorted(_names(names) - _names(base_catalog.get(kind, ())))
+        for kind, names in selected_catalog.items()
+        if _names(names) - _names(base_catalog.get(kind, ()))
+    }
+    assert added_columns or added_catalog, (
+        f"{selector}=postgres adds no required column and no required "
+        "constraint, index, or trigger over the empty environment, so its "
+        "schema_status() case asserts only the base schema"
+    )
 
 
 def test_schema_status_ok_with_every_authority_on_postgres(monkeypatch):
