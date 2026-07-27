@@ -1502,17 +1502,20 @@ def ingest_drawing(backend: StorageBackend, tenant_id: str, local_path: str,
             # already a non-empty answer and a second check could only ever agree
             # -- a mutation test confirmed it never changes the outcome. One
             # question, asked once, is what keeps the two from drifting apart.
+            # NOTHING IN HERE MAY RAISE over the failure that brought us. That
+            # error is the one worth reporting, and a secondary one would replace
+            # it -- turning "the disk is full" into whatever the cleanup tripped
+            # over. So the removal is inside the guarded block too, not just the
+            # question that decides it: `reclaim` swallows the `OSError` from its
+            # own `os.remove`, but it reaches `_holds_the_live_file` first, and
+            # the `os.fstat` in there is unguarded. Unsure, at either step, means
+            # LEAVE the file -- the side that costs only an inode.
             try:
                 remaining = backend.drawing_object_keys(tid, did)
-                orphaned = remaining is not None and not (remaining - {vkey})
+                if remaining is not None and not (remaining - {vkey}):
+                    held.reclaim()
             except Exception:
-                # Nothing here may raise over the failure that brought us: that
-                # error is the one worth reporting, and a secondary one would
-                # replace it. Unsure means LEAVE the file, the side that costs
-                # only an inode.
-                orphaned = False
-            if orphaned:
-                held.reclaim()
+                pass
             raise
 
 

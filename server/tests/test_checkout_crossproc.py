@@ -1608,6 +1608,54 @@ def test_a_backend_that_cannot_enumerate_never_gets_its_lock_file_reclaimed(tmp_
         "lock file retired, so 'cannot tell' was read as 'nothing is there'")
 
 
+def test_the_cleanup_never_replaces_the_error_that_triggered_it(tmp_path, monkeypatch):
+    """The caller's failure is the one worth reporting.
+
+    Round 6 found this: the reclaim sat OUTSIDE the handler's guarded block. It
+    looks safe because `_HeldCheckoutLock.reclaim` swallows the `OSError` from
+    its own `os.remove` — but it reaches `_holds_the_live_file` first, and the
+    `os.fstat` in there is unguarded. A cleanup fault would then propagate in
+    place of the real one, so "the disk is full" reaches the caller as whatever
+    the cleanup tripped over, and the ingest failure is lost.
+
+    Both steps of the cleanup are exercised, because they can fail
+    independently: deciding whether to reclaim, and reclaiming.
+    """
+    def boom(*_a, **_k):
+        raise OSError(5, "Input/output error")
+
+    for label in ("the scan", "the reclaim"):
+        root = str(tmp_path / f"store-{label.split()[-1]}")
+        backend = store.FilesystemBackend(root)
+        payload = tmp_path / "payload.dwg"
+        payload.write_bytes(b"dwg-bytes")
+
+        real_put = backend.put
+
+        def exploding_put(key, data, _real=real_put):
+            if key.endswith(".dwg"):
+                raise OSError(28, "No space left on device")
+            return _real(key, data)
+
+        backend.put = exploding_put
+        if label == "the scan":
+            backend.drawing_object_keys = boom
+        else:
+            # The reclaim as a whole, rather than the `os.fstat` inside it: the
+            # same call runs during acquisition too, so failing it there would
+            # break the lock before the body ever raised and prove nothing.
+            monkeypatch.setattr(store._HeldCheckoutLock, "reclaim", boom)
+
+        with pytest.raises(OSError) as caught:
+            store.ingest_drawing(backend, TENANT, str(payload), DRAWING)
+        monkeypatch.undo()
+
+        assert caught.value.errno == 28, (
+            f"a fault in {label} replaced the ingest failure: the caller was "
+            f"told {caught.value!r} instead of the real 'No space left on "
+            f"device'")
+
+
 def test_a_failed_scan_is_never_reported_as_an_empty_drawing(tmp_path, monkeypatch):
     """A scan that could not look must not answer "there is nothing here".
 
