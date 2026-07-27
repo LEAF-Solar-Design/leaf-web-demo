@@ -319,7 +319,7 @@ def build_suites() -> List[Suite]:
         # leak this pins was invisible to CI: every file passed alone.
         Suite("server-jobs-connection-ownership",
               "server tests/test_jobs_connection_ownership.py", "pytest", SERVER,
-              _py_pytest("tests/test_jobs_connection_ownership.py"), 6),
+              _py_pytest("tests/test_jobs_connection_ownership.py"), 12),
         Suite("server-agent-e2e", "server tests/test_agent_e2e.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_e2e.py"), 4),
         # --- guest drawing uploads (CONTRACT-ADDENDUM section 19) --- #

@@ -38,6 +38,7 @@ import subprocess
 import sqlite3
 import sys
 import textwrap
+import threading
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,42 @@ def test_reset_connection_is_a_noop_when_there_is_no_singleton(monkeypatch):
     assert jobs._conn is None
 
 
+def test_reset_cannot_land_between_a_writers_execute_and_its_commit(monkeypatch, tmp_path):
+    """PR #215 review finding: a reset that only took `_conn_lock` lost writes.
+
+    `_exec` reads `_db()` separately for the execute and the commit, both under
+    `_lock`. A reset landing between them closes the connection the write sits
+    on (rolling it back), and the commit then lands on a freshly built second
+    connection with no transaction -- silent data loss, reported success.
+    `reset_connection()` must therefore take `_lock` too.
+
+    Asserted as an IMPLICATION, not a stopwatch: while `_lock` is held the
+    singleton must still be INTACT (a reset that ignored `_lock` would have
+    already cleared it by now), and once released the reset must complete.
+    """
+    monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "race.db")
+    monkeypatch.setattr(jobs, "_conn", None)
+    original = jobs._db()
+
+    finished = threading.Event()
+
+    def contender():
+        jobs.reset_connection()
+        finished.set()
+
+    with jobs._lock:                      # stand in for _exec's critical section
+        thread = threading.Thread(target=contender, daemon=True)
+        thread.start()
+        finished.wait(timeout=1.0)
+        # THE ASSERTION. Under the pre-fix `_conn_lock`-only reset this is None.
+        assert jobs._conn is original, "reset_connection() ran while _lock was held"
+
+    thread.join(timeout=10)
+    assert finished.is_set(), "reset_connection() never completed after _lock was released"
+    assert jobs._conn is None
+    assert _is_closed(original)
+
+
 def test_db_rebuilds_a_usable_connection_after_reset(monkeypatch, tmp_path):
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "rebuild.db")
     monkeypatch.setattr(jobs, "_conn", None)
@@ -97,16 +134,32 @@ def test_db_rebuilds_a_usable_connection_after_reset(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 # the source rule: nobody closes the singleton in place again
 # --------------------------------------------------------------------------- #
-def _closes_the_jobs_singleton(node: ast.AST) -> bool:
-    """True for `<anything>.<jobs-ish>._conn.close()` — the banned shape."""
+def _jobs_aliases(tree: ast.AST) -> set[str]:
+    """Every local name bound to the `jobs` module in this file.
+
+    Resolved per-file rather than matched by substring: `import jobs as j`
+    binds a name with no "jobs" in it, and `session_store._conn.close()` is a
+    DIFFERENT module's singleton that this rule has no business policing.
+    """
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "jobs":
+                    names.add(alias.asname or "jobs")
+    return names
+
+
+def _closes_the_jobs_singleton(node: ast.AST, aliases: set[str]) -> bool:
+    """True for `<jobs-alias>._conn.close()` — the banned shape."""
     if not isinstance(node, ast.Call):
         return False
     func = node.func
     if not isinstance(func, ast.Attribute) or func.attr != "close":
         return False
     target = func.value
-    return isinstance(target, ast.Attribute) and target.attr == "_conn" and (
-        isinstance(target.value, ast.Name) and "jobs" in target.value.id)
+    return (isinstance(target, ast.Attribute) and target.attr == "_conn"
+            and isinstance(target.value, ast.Name) and target.value.id in aliases)
 
 
 def test_no_test_module_closes_the_jobs_singleton_in_place():
@@ -118,8 +171,9 @@ def test_no_test_module_closes_the_jobs_singleton_in_place():
     offenders = []
     for path in sorted(TESTS_DIR.glob("test_*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        aliases = _jobs_aliases(tree)
         for node in ast.walk(tree):
-            if _closes_the_jobs_singleton(node):
+            if _closes_the_jobs_singleton(node, aliases):
                 offenders.append(f"{path.name}:{node.lineno}")
     assert offenders == [], (
         "these close jobs._conn in place, leaving a dead handle in the module "
@@ -127,14 +181,20 @@ def test_no_test_module_closes_the_jobs_singleton_in_place():
         f"jobs.reset_connection() instead: {offenders}")
 
 
-def test_the_ban_would_catch_the_shape_it_bans():
+@pytest.mark.parametrize("source, banned", [
+    ("import jobs\njobs._conn.close()", True),
+    ("import jobs as j\nj._conn.close()", True),          # alias, no "jobs" in it
+    ("import jobs as jobs_mod\njobs_mod._conn.close()", True),
+    ("import jobs\njobs.reset_connection()", False),
+    ("import jobs\nconn = jobs._db()\nconn.close()", False),   # a borrowed local
+    ("import session_store\nsession_store._conn.close()", False),  # another module
+])
+def test_the_ban_catches_the_shape_it_bans(source, banned):
     """The detector is load-bearing, not a filter that matches nothing."""
-    banned = ast.parse("jobs._conn.close()").body[0].value
-    allowed = ast.parse("jobs.reset_connection()").body[0].value
-    local = ast.parse("conn.close()").body[0].value
-    assert _closes_the_jobs_singleton(banned)
-    assert not _closes_the_jobs_singleton(allowed)
-    assert not _closes_the_jobs_singleton(local)
+    tree = ast.parse(source)
+    aliases = _jobs_aliases(tree)
+    hits = [n for n in ast.walk(tree) if _closes_the_jobs_singleton(n, aliases)]
+    assert bool(hits) is banned, source
 
 
 # --------------------------------------------------------------------------- #
