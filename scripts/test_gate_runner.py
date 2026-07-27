@@ -418,6 +418,22 @@ def test_duplicate_suite_id_is_named_once_in_registration_order():
     assert g.duplicate_suite_ids(_selection_suites(g)) == []
 
 
+def test_duplicates_are_ordered_by_first_registration_not_by_repeat():
+    """Interleaved `alpha, beta, beta, alpha`: alpha is registered first, so it
+    is reported first, even though beta's repeat is detected first. One
+    duplicated id cannot tell the two orders apart, which is why this case is
+    separate from the test above."""
+    g = _load_runner()
+
+    def stub(sid):
+        return g.Suite(sid, sid, "script", SCRIPTS,
+                       [sys.executable, "-c", "pass"], None)
+
+    interleaved = [stub("alpha"), stub("beta"), stub("beta"), stub("alpha")]
+
+    assert g.duplicate_suite_ids(interleaved) == ["alpha", "beta"]
+
+
 def test_the_real_catalog_registers_every_suite_id_exactly_once():
     """The regression this guard exists for, asserted against the shipped
     catalog rather than a stub: on 2026-07-27 a branch registered

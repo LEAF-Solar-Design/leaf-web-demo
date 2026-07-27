@@ -687,10 +687,10 @@ def build_suites() -> List[Suite]:
               "scripts test_build_platform_images_workflow.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
-        # Floor 26: 22, plus the four duplicate-suite-id tests measured on this
+        # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
         # tree 2026-07-27.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 26),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 27),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
@@ -1128,14 +1128,20 @@ def duplicate_suite_ids(suites: List[Suite]) -> List[str]:
     floor, one clean against the current one -- with nothing saying which floor
     the gate actually stands on. That is not a verdict, so the runner refuses
     to produce one.
+
+    Ordered by where each id was FIRST registered, so the printed list reads
+    down the catalog in the same order as the file the reader has to go fix.
+    Keying on the repeat instead would order by second occurrence: `alpha,
+    beta, beta, alpha` would report beta before alpha.
     """
-    seen: set[str] = set()
-    dupes: List[str] = []
-    for suite in suites:
-        if suite.id in seen and suite.id not in dupes:
-            dupes.append(suite.id)
-        seen.add(suite.id)
-    return dupes
+    first_seen: dict[str, int] = {}
+    dupes: set[str] = set()
+    for index, suite in enumerate(suites):
+        if suite.id in first_seen:
+            dupes.add(suite.id)
+        else:
+            first_seen[suite.id] = index
+    return sorted(dupes, key=lambda sid: first_seen[sid])
 
 
 # --------------------------------------------------------------------------- #
