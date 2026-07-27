@@ -42,6 +42,11 @@ Special handling, all documented on the scoreboard:
     suite exits 2 rather than silently shrinking the run, and the scoreboard
     echoes the exact selection that produced it — so the printed result can be
     checked against the command that was typed.
+  * a suite id registered twice exits 2 before anything runs. The id is the
+    handle `--only` matches and the name of the child's log file, so a
+    duplicate runs one test file twice and can answer to two different
+    expected floors at once — a scoreboard that cannot say which floor the
+    gate stands on.
 
 USAGE
 -----
@@ -56,7 +61,8 @@ USAGE
 EXIT CODE
 ---------
     0  iff every gate passed and every test-level skip was explicitly allowlisted
-    2  nothing ran: an --only substring matched no suite (never a gate verdict)
+    2  nothing ran, so this is never a gate verdict: an --only substring matched
+       no suite, or a suite id was registered more than once
     1  otherwise
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
@@ -233,9 +239,15 @@ def build_suites() -> List[Suite]:
         # Postgres, and the test-gate workflow is hermetic) and
         # `server-customization-adversarial` (Linux and Windows execute
         # different counts, so no single number is honest for both).
+        # `platform` HAS since been re-baselined: 199 -> 223 (an interim bump of
+        # exactly what one new file added) -> 234, a measured green count on a
+        # pristine database. `server-customization-adversarial` is now the only
+        # floor still pinned BELOW its CI executed count -- 17 is the Windows
+        # count, Linux CI executes 19 and reports drift -- because no single
+        # number is honest for both. Details at each Suite(...) below.
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
-              _py_pytest("tests/test_backbone.py"), 14),
+              _py_pytest("tests/test_backbone.py"), 15),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py"), 17),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
@@ -419,7 +431,7 @@ def build_suites() -> List[Suite]:
         # a per-process threading lock cannot see. No skipif: `fcntl` is the
         # Linux path and `msvcrt` the Windows one, and both must execute.
         Suite("server-checkout-crossproc", "server tests/test_checkout_crossproc.py",
-              "pytest", SERVER, _py_pytest("tests/test_checkout_crossproc.py"), 33),
+              "pytest", SERVER, _py_pytest("tests/test_checkout_crossproc.py"), 41),
         Suite("server-hardening-quota", "server tests/test_hardening_quota.py", "pytest",
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
@@ -429,7 +441,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
               SERVER, _py_pytest("tests/test_sessions_routes.py"), 41),
         Suite("server-turn-runner", "server tests/test_turn_runner.py", "pytest", SERVER,
-              _py_pytest("tests/test_turn_runner.py"), 21),
+              _py_pytest("tests/test_turn_runner.py"), 24),
         # g1a canonical e2e self-skips without a reachable Postgres; gate it the
         # same way as the platform suite so the skip is visible, not silent.
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
@@ -524,9 +536,18 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
         Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics.py"), 13),
+        # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
+        # was registered (bd4606c, 2026-07-24), a day before 5495b81 added
+        # test_required_platform_rejects_missing_shared_mutation_fence. The floor
+        # is a MINIMUM across runners, so it was checked on both before moving:
+        # neither this file nor server/tests/conftest.py gates on OS, DATABASE_URL
+        # or any other environment, and the Linux test-gate runner reports the
+        # same 13 executed / 0 skipped as an operator box (runs 30251486524 and
+        # 30250680397). Left at 12 the suite passed with a standing drift note,
+        # so the next test added here could have vanished behind it unnoticed.
         Suite("server-platform-postgres-startup",
               "server tests/test_platform_postgres_startup.py", "pytest", SERVER,
-              _py_pytest("tests/test_platform_postgres_startup.py"), 12),
+              _py_pytest("tests/test_platform_postgres_startup.py"), 13),
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
               _py_pytest("tests/test_postgres_container_wiring.py"), 7),
@@ -624,24 +645,42 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # Floor is 199, the EXECUTED count measured 2026-07-25 against a live
-        # PostgreSQL 17 (throwaway Neon branch): 199 passed, 0 skipped, 0
-        # failed. It replaces 145, which commit 80e3762 (2026-07-23) measured
-        # the same way. 54 tests were added after that and the floor never
-        # moved, so the suite could have lost 54 of them and still reported
-        # green: 146..198 passed with only a drift note, and exactly 145 passed
-        # silently, with no note at all.
-        # Collected and executed are both 199 because this suite allowlists NO
-        # skip reason, and every skip path under platform/tests is gated on the
-        # DB being unconfigured -- on a reachable DB nothing skips, so a green
-        # run executes everything collected.
-        # Re-baselining this needs a PRISTINE database, not just a reachable
-        # one. Several tests bind fixed external subjects (e.g.
-        # "auth0|1b-cross-org") that are unique per tenant, so a second run
-        # against the same branch fails on the first run's rows instead of
-        # measuring anything.
+        # Floor 234 is a MEASURED, GREEN, pristine-database baseline: 234
+        # passed, 0 skipped, 0 failed, pytest exit 0, taken 2026-07-27 against
+        # PostgreSQL 16.14 from this suite's registered cwd (the repo parent,
+        # target <repo_name>/platform/tests) and reproduced on a second freshly
+        # created database. It supersedes 199 (2026-07-25, PostgreSQL 17) and
+        # the interim 223, which was only 199 plus the 24 cases one new file
+        # added -- deliberately NOT a clean baseline, so it left an 11-test gap
+        # between the floor and the real count. Losing 1 to 10 tests printed
+        # only an "(executed-count drift)" note; losing exactly 11 printed
+        # NOTHING, because coverage_verdict returns with no note once executed
+        # == expected. That gap is now zero: the floor IS the count, so losing
+        # any single test trips "executed-count regression" instead.
+        # Collected and executed are both 234 because every skip path under
+        # platform/tests is gated on the DB being unconfigured -- on a reachable
+        # DB nothing skips, so a green run executes everything collected. The
+        # empty skip allowlist does not prevent skips; it makes any skip FAIL
+        # the suite, which is what keeps that property honest rather than
+        # letting a future environment-gated skip erode the count quietly.
+        # Re-baselining needs a PRISTINE database, not just a reachable one.
+        # Several tests bind fixed external subjects (e.g. "auth0|1b-cross-org")
+        # that are unique per tenant, so a second run against the same database
+        # fails on the first run's rows instead of measuring anything.
+        # Measure with the DB session timezone at UTC. This is not a count
+        # question -- `got` counts failures too -- but off UTC, 4 test_signing.py
+        # cases fail `payload_mismatch`: verify_signature re-derives signedAt as
+        # row["signed_at"].isoformat() and compares it to the stored JSON
+        # string, and the same instant renders differently under a non-UTC
+        # session. Confirmed by flipping only PGTZ on one database: 4 failed ->
+        # 234 passed. That is a real robustness gap in signing.py, tracked
+        # separately; it is called out here so the next person to measure this
+        # floor does not read those 4 failures as a broken environment.
+        # Raising this cannot red-fail CI: the suite is db_gated and the
+        # test-gate workflow is hermetic, so run_suite returns SKIP with
+        # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 199, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 234, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
@@ -681,8 +720,10 @@ def build_suites() -> List[Suite]:
               "scripts test_build_platform_images_workflow.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
+        # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
+        # tree 2026-07-27.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 22),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 27),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
@@ -1104,6 +1145,39 @@ def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int) -> Result:
 
 
 # --------------------------------------------------------------------------- #
+# catalog integrity
+# --------------------------------------------------------------------------- #
+def duplicate_suite_ids(suites: List[Suite]) -> List[str]:
+    """Ids registered more than once, in first-registration order.
+
+    The id is the runner's only handle on a suite: `--only` matches against it
+    (select_suites), and each child's output goes to <log-dir>/<id>.log. So a
+    second registration under a live id runs the same tests twice, answers to
+    the same `--only`, and lets the second child's log overwrite the first.
+
+    The two registrations can also carry different labels and different
+    expected floors, and then the scoreboard prints two differently-named rows
+    for one test file -- one flagged for executed-count drift against the stale
+    floor, one clean against the current one -- with nothing saying which floor
+    the gate actually stands on. That is not a verdict, so the runner refuses
+    to produce one.
+
+    Ordered by where each id was FIRST registered, so the printed list reads
+    down the catalog in the same order as the file the reader has to go fix.
+    Keying on the repeat instead would order by second occurrence: `alpha,
+    beta, beta, alpha` would report beta before alpha.
+    """
+    first_seen: dict[str, int] = {}
+    dupes: set[str] = set()
+    for index, suite in enumerate(suites):
+        if suite.id in first_seen:
+            dupes.add(suite.id)
+        else:
+            first_seen[suite.id] = index
+    return sorted(dupes, key=lambda sid: first_seen[sid])
+
+
+# --------------------------------------------------------------------------- #
 # --only selection
 # --------------------------------------------------------------------------- #
 NO_FILTER = "all suites (no --only filter)"
@@ -1229,6 +1303,16 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     suites = build_suites()
+    # Before selection, not after: a duplicate breaks the catalog itself, so it
+    # is still a broken run when `--only` happens to filter the duplicate away.
+    # The `N of M` denominator the scoreboard echoes is already wrong.
+    dupes = duplicate_suite_ids(suites)
+    if dupes:
+        for sid in dupes:
+            print(f"suite id registered more than once: {sid!r}")
+        print("nothing ran: every suite id must be unique. Remove the duplicate "
+              "registration in build_suites().")
+        return 2
     total = len(suites)
     only: List[str] = args.only or []
     selection = describe_selection(only)

@@ -8,13 +8,22 @@ on:
       - 'da/store.py'
       - 'platform/authority-inventory.json'
       - 'platform/db.py'
+      # The two explicit entries are pinned by
+      # server/tests/test_postgres_container_wiring.py so nobody can quietly
+      # drop the upload and customization migrations from this gate; keep them.
+      # The glob is additive: the schema_status authority gate below asserts
+      # catalog objects created by 0014_broker.sql, and a migration this
+      # workflow can break but is not triggered by is the same gap in a new
+      # place. Overlapping entries are harmless -- `paths` is a union.
       - 'platform/migrations/0016_drawing_upload_authority.sql'
       - 'platform/migrations/0020_customization_authority.sql'
+      - 'platform/migrations/**'
       - 'platform/api.py'
       - 'platform/mutation_fence.py'
       - 'platform/tests/conftest.py'
       - 'platform/tests/test_db_readiness_static.py'
       - 'platform/tests/test_drawing_import.py'
+      - 'platform/tests/test_schema_status_postgres_authority.py'
       - 'scripts/reconcile_customization_authority.py'
       - 'deploy/required-config.app.json'
       - 'deploy/required-config.broker.json'
@@ -100,6 +109,22 @@ jobs:
           -r server/requirements.txt
           -r platform/requirements.txt
           -r da/requirements.txt
+
+      # FIRST, because every step below assumes a schema this image can serve.
+      # Until this step existed, no CI job anywhere executed schema_status()
+      # with an authority selector at postgres against a live database: the
+      # test-gate workflow is deliberately hermetic (DATABASE_URL unset on
+      # purpose) so run-all-gates' db_gated `platform` suite skips there, and
+      # this workflow listed platform/db.py in `paths:` while every step ran a
+      # named server/ test that never called schema_status(). Trigger coverage
+      # is not step coverage: PR #187 went green on all three checks with a
+      # committed db.py that returned ok=false on real PostgreSQL, which
+      # assert_schema_current() raises on at startup.
+      - name: Run platform authority schema_status gate
+        working-directory: server
+        run: >-
+          python -m pytest --import-mode=importlib -q
+          ../platform/tests/test_schema_status_postgres_authority.py
 
       - name: Run PostgreSQL authority and race tests
         working-directory: server

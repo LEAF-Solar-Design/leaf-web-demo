@@ -403,6 +403,95 @@ def test_cli_accepts_repeated_only_and_reports_every_dead_substring(tmp_path):
     assert "no-such-suite-beta" in proc.stdout
 
 
+def test_duplicate_suite_id_is_named_once_in_registration_order():
+    """Same id twice is reported once, however many times it repeats, and the
+    unique ids around it are not implicated."""
+    g = _load_runner()
+    suites = _selection_suites(g) + [
+        g.Suite("platform-static", "a second platform-static", "script", SCRIPTS,
+                [sys.executable, "-c", "pass"], None),
+        g.Suite("platform-static", "a third platform-static", "script", SCRIPTS,
+                [sys.executable, "-c", "pass"], None),
+    ]
+
+    assert g.duplicate_suite_ids(suites) == ["platform-static"]
+    assert g.duplicate_suite_ids(_selection_suites(g)) == []
+
+
+def test_duplicates_are_ordered_by_first_registration_not_by_repeat():
+    """Interleaved `alpha, beta, beta, alpha`: alpha is registered first, so it
+    is reported first, even though beta's repeat is detected first. One
+    duplicated id cannot tell the two orders apart, which is why this case is
+    separate from the test above."""
+    g = _load_runner()
+
+    def stub(sid):
+        return g.Suite(sid, sid, "script", SCRIPTS,
+                       [sys.executable, "-c", "pass"], None)
+
+    interleaved = [stub("alpha"), stub("beta"), stub("beta"), stub("alpha")]
+
+    assert g.duplicate_suite_ids(interleaved) == ["alpha", "beta"]
+
+
+def test_the_real_catalog_registers_every_suite_id_exactly_once():
+    """The regression this guard exists for, asserted against the shipped
+    catalog rather than a stub: on 2026-07-27 a branch registered
+    `server-postgres-authority-inventory` twice, with floors 4 and 6, and one
+    test file produced two scoreboard rows -- one drift-flagged, one clean."""
+    g = _load_runner()
+
+    assert g.duplicate_suite_ids(g.build_suites()) == []
+
+
+def test_main_refuses_a_catalog_with_a_duplicate_id_and_runs_nothing(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    stubs = _selection_suites(g) + [
+        g.Suite("platform-static", "a second platform-static", "script", SCRIPTS,
+                [sys.executable, "-c", "pass"], None),
+    ]
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    ran: list[str] = []
+    monkeypatch.setattr(g, "run_suite_guarded",
+                        lambda suite, log_dir, attempt: ran.append(suite.id))
+    monkeypatch.setattr(sys, "argv",
+                        ["run-all-gates.py", "--log-dir", str(tmp_path)])
+
+    rc = g.main()
+    out = capsys.readouterr().out
+
+    assert rc == 2, out
+    assert ran == []
+    assert "platform-static" in out
+    assert "every suite id must be unique" in out
+    # 2 is the "nothing ran" code, so no scoreboard may claim a verdict.
+    assert "GATE SCOREBOARD" not in out
+
+
+def test_duplicate_id_is_rejected_even_when_only_filters_it_away(
+        tmp_path, monkeypatch, capsys):
+    """The check runs before selection on purpose. Filtering the duplicate out
+    of this run does not make the catalog sound -- the `N of M` denominator the
+    scoreboard echoes is already counting one test file twice."""
+    g = _load_runner()
+    stubs = _selection_suites(g) + [
+        g.Suite("platform-static", "a second platform-static", "script", SCRIPTS,
+                [sys.executable, "-c", "pass"], None),
+    ]
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    monkeypatch.setattr(sys, "argv", [
+        "run-all-gates.py",
+        "--only", "server-backbone",          # matches neither duplicate
+        "--log-dir", str(tmp_path),
+    ])
+
+    rc = g.main()
+
+    assert rc == 2
+    assert "platform-static" in capsys.readouterr().out
+
+
 def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch):
     g = _load_runner()
     monkeypatch.setattr(g.os, "name", "nt")
