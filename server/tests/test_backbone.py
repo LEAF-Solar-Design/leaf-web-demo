@@ -642,6 +642,389 @@ def test_1a_flat_submit_cost_does_not_regress(stack):
 
 
 # --------------------------------------------------------------------------- #
+# 1b. a PROPORTIONAL submit-path regression -- one costing a fraction of the
+#     job's own execution time -- is invisible to test 1 AND to test 1a. This is
+#     the bound that sees it.
+# --------------------------------------------------------------------------- #
+INDEPENDENCE_PAIRS = 16
+INDEPENDENCE_SLEEP_S = 4.0
+# Cheap POSTs, discarded, that exist only to get the app process out of its
+# thread-spawn regime before anything is measured.
+#
+# The mechanism, read out of CPython rather than assumed: `jobs` hands every
+# submission to a ThreadPoolExecutor, and `_adjust_thread_count` starts a new
+# pool thread only when NO idle worker is free -- given one, it reuses it and
+# returns. A pool thread therefore is NOT guaranteed per submit. What makes the
+# pool fill here is that a submitted job still holds its worker when the next
+# POST arrives, so no idle worker exists to reuse. That is an observation about
+# this app, not a language invariant, and the measurement is what carries it:
+# driving the fast lane at four pool sizes put the drop to the ~7ms warm floor
+# at POST number pool+1 EVERY time, which is the cliff tracking `max_workers`
+# that reuse would have smeared away.
+#
+#     JOB_WORKERS_FAST     2     4     8    12
+#     first warm POST     #3    #5    #9   #13
+#
+# Because the cliff moves WITH the pool, the count is derived from the pool
+# actually in force rather than fixed. `start_uvicorn` copies os.environ into
+# the app process and the `stack` fixture does not pin JOB_WORKERS_FAST, so an
+# ambient one is inherited and a hard-coded 12 would quietly stop covering the
+# prefix. At the contract default of 8 this still resolves to 12 POSTs, which is
+# what every measurement quoted here was taken at.
+#
+# The warmup is BEST-EFFORT, and the honest statement of what it buys is the
+# measured one, not a structural guarantee. Over the first 8 POSTs the per-POST
+# cost runs 60-250ms against that 7ms floor, so a group owning more of the
+# expensive slots carries a bias that has nothing to do with the submit path.
+# The alternating pair order splits an expensive prefix of ANY length between
+# the two groups to within ONE SLOT -- but that bounds the COUNT of slots, NOT
+# their weighted cost, and the two come apart when the slots differ in price.
+# No ceiling is derived from the alternation here, because every attempt to do
+# so has been wrong: an even 8-slot prefix gives 4*190ms/16 = 47.5ms, but the
+# ODD 7-slot prefix splits 4/3 and gives 51.25ms, and a window the warmup covers
+# none of gives 190ms. The docstring charges the 190ms worst case, which assumes
+# nothing about the cost profile at all.
+#
+# What actually occurs is much smaller, measured by pinning the count at 12
+# while raising the pool, which is the under-covered case in its worst regime
+# (at pool 64 the entire measured window sits inside the spawn prefix):
+#
+#     pool 16, 6 runs   count 12: -0.7 .. +2.7ms   derived 20: -1.5 .. +1.2ms
+#     pool 64, 4 runs   count 12: -9.8 .. +6.9ms   derived 68: -4.9 .. +2.2ms
+#
+# and an earlier form of this test that ran with NO warmup at all read a
+# systematic -33.7ms over 64 runs (grand mean 40.6ms slow against 74.3ms fast).
+# So under-covering roughly doubles the SPREAD of the statistic, which is why
+# the count is derived rather than fixed, and 33.7ms is the worst reading ever
+# produced -- a MEASUREMENT, well under the 190ms the docstring charges and
+# nowhere near flaking a bound that needs 500ms. The charge, not this number, is
+# what the detection floor is stated against. After a covering warmup the two
+# groups are
+# indistinguishable: 1792 measured samples put the grand mean at 9.6ms for BOTH.
+SUBMIT_WARMUP_MARGIN = 4
+# The pool is read from the ENVIRONMENT, so the count it implies is capped. An
+# inherited JOB_WORKERS_FAST is any positive integer -- ThreadPoolExecutor only
+# rejects <= 0 at construction -- and an uncapped warmup would turn an absurd
+# value into a gate that never finishes (a million POSTs, each later polled to
+# terminal) instead of a test that reports something. Past this ceiling the
+# warmup simply under-covers, which costs the bounded, measured bias above. A
+# hang tells you nothing; a slightly wider statistic still tests the property.
+SUBMIT_WARMUP_MAX_POSTS = 64
+
+
+def fast_lane_workers(stack) -> int:
+    """The fast-lane pool size in force in the app process under test.
+
+    Resolved in the same order the app process resolves it: `start_uvicorn`
+    copies os.environ and then applies the fixture's overrides, and `jobs`
+    reads JOB_WORKERS_FAST at executor creation with a default of 8, through the
+    same bare `int` used here. Values the app would reject are not repaired, and
+    the two rejected classes fail in DIFFERENT places. Measured: 0 or negative
+    leaves the app's own rejection to fail the 202 assert on the first POST. A
+    non-integer raises out of this `int` instead, before the `try` and before any
+    POST -- nothing has been submitted, so the `finally` has nothing to drain.
+    """
+    raw = stack["app_env"].get(
+        "JOB_WORKERS_FAST", os.environ.get("JOB_WORKERS_FAST", "8"))
+    return int(raw)
+# Measured 2026-07-27 against this repo, not guessed, and derived from the NOISE
+# rather than from any particular regression size. 56 runs of the exact sequence
+# below against a real booted stack, one full broker+app boot per run, 28 idle
+# and 28 under an 8-way CPU load on a 20-core host. Single samples inside the
+# measured window ran a median of 7.2ms, p95 19.2ms, p99 57.2ms, worst 357ms.
+# The statistic this budget is spent on is the DIFFERENCE of the two means,
+# which carries roughly sqrt(2) times the noise of one mean; measured directly,
+# it ran a median of -0.1ms, p95 +6.3ms, worst +9.4ms across the 56 runs.
+# Bootstrapping it from those same samples (200k draws, both groups resampled
+# from the pooled window -- deliberately conservative, since it draws them from
+# DIFFERENT moments and so throws away the common-mode cancellation a real run
+# gets for free) put p99 at +17.8ms, p99.9 at +26.0ms and the worst of 200k
+# draws at +59.0ms. This budget sits 8.5x above that worst bootstrap draw and
+# 53x above the worst difference any real run produced.
+MEAN_SUBMIT_DIFF_BUDGET_S = 0.5
+# A hang is the only thing this should ever wait out, so it is sized for the
+# fully-serialised worst case (every slow job running one after another) plus
+# slack, not for the ~2-wave drain an 8-worker lane actually performs. It is the
+# budget for the WHOLE drain, spent across every job the test has to poll, not a
+# per-job allowance: see the deadline in the `finally` for why.
+INDEPENDENCE_DRAIN_TIMEOUT_S = INDEPENDENCE_SLEEP_S * INDEPENDENCE_PAIRS + 30.0
+# The same reasoning applied to the SUBMIT phase, which needs its own bound: the
+# per-request timeout is 120s and this test issues up to
+# SUBMIT_WARMUP_MAX_POSTS + 2*INDEPENDENCE_PAIRS of them, so an app that stalls
+# on each one could spend hours here and never reach the `finally` at all. The
+# gate kills the suite at 900s and reports nothing, so an unbounded submit phase
+# would convert every drain report below into an opaque timeout. Sized against
+# reality with enormous slack: the phase costs about 1s when the app is healthy
+# (96 POSTs at the ~10ms warm floor).
+#
+# Be precise about what this is, because it is NOT a wall-clock guarantee. A
+# `requests` timeout is an INACTIVITY timeout -- time waiting for the connection,
+# then time between received bytes -- not a cap on total request duration. A
+# response that delivers a byte before each interval can therefore outlive any
+# value set here. What the deadline does bound is the count and pacing of
+# requests: it stops the failure mode that actually occurs, N stalled requests
+# each paying the full per-request timeout in series. A single trickling
+# response is not covered, and no timeout argument here could cover it; that
+# would need a watchdog, which is not worth carrying for a failure mode this
+# app's small JSON 202 cannot produce.
+#
+# Nor does the sum of the two budgets bound the SUITE. Accounting honestly:
+# ~30s for the two catalog GETs that build the payloads (they are outside this
+# deadline, being built before the phase starts), up to 300s here, up to ~104s
+# draining (94s budget plus a final 10s GET already in flight), so about 434s
+# nominal for this test. Tests 2 through 10 then run on the same module-scoped
+# stack with their own multi-second request paths, and after a failure here they
+# run against jobs that may still be executing. So the 900s suite kill is still
+# reachable in aggregate. The claim made here is narrower and is the one that
+# matters: for the failure mode this can catch -- requests that STALL, each
+# otherwise paying the full per-request timeout in series -- THIS test reaches
+# its own `finally` and reports named job ids rather than dying silently inside
+# its POST loop. A single trickling response defeats that too, and is the same
+# uncovered case named above; it is not claimed to be handled.
+SUBMIT_PHASE_BUDGET_S = 300.0
+
+
+def test_1b_submit_cost_is_independent_of_execution_time(stack):
+    """Submit cost must not scale with the execution time of the job submitted.
+
+    Test 1 proves the 202 does not WAIT for execution and test 1a proves
+    submitting is CHEAP. A regression that costs a fraction `k` of the job's own
+    execution time on the submit path defeats both:
+
+      * test 1's `elapsed < sleep_s` is a 10s budget, and k*10s clears it for
+        every k below 1;
+      * test 1's `delta < sleep_s / 2` is a 5 SECOND budget, so it only sees
+        k > 0.5. Measured, not argued: k = 0.3 makes `delta` about 3s and the
+        test passes. (A prior lane's mutation harness asserted this bound
+        "exists to catch" exactly that regression. It does not.)
+      * test 1a is blind BY CONSTRUCTION, not by margin: its samples carry no
+        `_qa_sleep_s`, so a purely proportional cost is k*0 == 0 on every one
+        of them and its mean does not move at all.
+
+    Tightening test 1's delta to 2s was considered and rejected on measured
+    grounds. Pooled `delta` across 91 real samples maxes at +755ms, but a single
+    1.72s stall (this file's own worst recorded, see test 1) landing on the
+    subject POST alone puts `delta` near +1.72s, which is 16% under a 2s bound.
+    And the gate runs on `ubuntu-latest`, a shared 2-to-4-core VM whose tail is
+    worse than anything measurable here. There is no defensible single-sample
+    threshold in that window -- the same squeeze test 1a documents.
+
+    So this bound tests INDEPENDENCE rather than absolute cheapness, and spends
+    its budget on a DIFFERENCE OF MEANS:
+
+        mean(submit | job sleeps INDEPENDENCE_SLEEP_S) - mean(submit | 0s job)
+
+    A proportional regression contributes k*INDEPENDENCE_SLEEP_S to every sample
+    in the slow group and exactly 0 to every sample in the fast group, so it
+    survives the subtraction at full size. Host slowness, being common to both
+    groups, cancels. What is left is diluted the way test 1a's mean is: a ONE-OFF
+    stall of S seconds inside the window moves the difference by only
+    S/INDEPENDENCE_PAIRS. That 1/N dilution of a single large stall is the
+    mechanism here, NOT the 1/sqrt(N) shrinkage of independent random noise,
+    which is the weaker and less relevant effect.
+
+    Stated as the stall budget it takes to flake: breaching 0.5s over 16 pairs
+    needs 8.0 SECONDS of stall landing inside the slow group alone. The worst
+    single stall ever recorded on this file is 1.72s, so it would take four and a
+    half of the worst events back to back, and the worst single sample seen
+    anywhere in this test's own measured window was 357ms. A stall that lands on
+    the FAST group pushes the difference DOWN, so only half the window is even
+    exposed.
+
+    That the control is subtracted one-sidedly cuts both ways, and the same
+    averaging answers it: for an inflated fast group to hide a real regression,
+    noise would have to add 8.0s to the FAST half of the window, which is the
+    same event as the flake above and just as unlikely.
+
+    The budget is derived from the measured noise, NOT reverse-engineered from a
+    regression size. Stated as a detection floor, the budget alone would buy
+    k > 0.125 -- an eighth of execution time. But the warmup above is
+    best-effort, and thread-spawn slots it fails to cover can seat a bias on the
+    FAST side that subtracts from a real regression before this bound sees it.
+    That bias is charged at its WORST CASE, which assumes nothing about the
+    shape of the cost profile: if the warmup covers nothing, all 2*16 measured
+    slots sit in the spawn regime, and the documented 60-250ms per-POST range
+    put entirely in anti-phase with the pair order gives
+    16*(250-60)ms / 16 pairs = 190ms. So the floor this test claims is
+
+        k > (MEAN_SUBMIT_DIFF_BUDGET_S + 0.190) / INDEPENDENCE_SLEEP_S
+          = 0.18
+
+    -- any submit path whose cost grows faster than about a fifth of execution
+    time. Do NOT tighten that number by arguing the profile is really monotone,
+    or that alternation balances the slots. Alternation bounds the COUNT of
+    slots each group owns, to within one; it does NOT bound their weighted cost,
+    and every attempt to derive a tighter ceiling from it has been wrong. The
+    measured bias is far smaller -- worst ever recorded 33.7ms, from the form of
+    this test with no warmup at all -- but 190ms is what is CLAIMED, because it
+    is the only figure that holds without assuming a cost profile.
+
+    Both numbers are consequences rather than targets, which matters because the
+    mutant used to check this test uses k = 0.3: that constant is an arbitrary
+    parameter of the mutation, not a contract, and sizing a bound to catch
+    exactly it would be fitting to the mutant. It is reported here only as a
+    margin -- k = 0.3 costs 1.2s, which overshoots the budget 2.4x and still
+    clears the charged floor by 1.7x.
+
+    The pair order ALTERNATES, (slow, fast) then (fast, slow). Within a pair the
+    second POST is issued after the first has already been submitted, so any
+    per-position effect would land on the same group every time if the order
+    were fixed, and the test would measure the ordering rather than the
+    property. It is deliberately NOT claimed that the second POST runs with one
+    more job in flight: a 0s job can reach terminal between its own response and
+    the next POST, and this test never observes job state between calls, so it
+    could not support that.
+
+    Jobs are drained in a `finally`, for the reason test 1 documents at length,
+    but under a BOUNDED budget rather than unconditionally, and the difference
+    is deliberate. Both phases carry a deadline -- SUBMIT_PHASE_BUDGET_S over
+    the POSTs, INDEPENDENCE_DRAIN_TIMEOUT_S over the whole drain -- because this
+    test issues up to SUBMIT_WARMUP_MAX_POSTS + 2*INDEPENDENCE_PAIRS requests
+    and a per-request allowance multiplies: the gate kills a suite at 900s
+    (scripts/run-all-gates.py Suite.timeout_s) and a killed suite reports
+    NOTHING, so an unbounded phase converts a named failure into an opaque
+    timeout. What those deadlines do and do not bound -- in particular that a
+    `requests` timeout is an inactivity timeout and not a wall-clock cap, and
+    that the two budgets do not add up to a bound on the SUITE -- is spelled out
+    at SUBMIT_PHASE_BUDGET_S and is deliberately not restated as a guarantee
+    here.
+
+    What that costs, stated plainly: if the drain budget is spent, the jobs it
+    did not reach are named in the failure and MAY STILL BE RUNNING. The `stack`
+    fixture is module-scoped, so those jobs share an app process with tests 2
+    through 10. This is a real trade and it is taken on purpose -- the budget is
+    only ever spent when jobs are not finishing, which fails this test either
+    way, and a named failure plus possible contamination beats a suite-wide
+    timeout that reports neither. It is not a silent path: EVERY unpolled id is
+    printed, not a sample of them.
+
+    As in test 1a, a job id is only readable AFTER its POST returns and parses,
+    so the count of POSTs that reached the server is taken BEFORE each call and
+    compared against the ids actually recovered: a POST that dies on the way back
+    leaves a job accepted server-side with no id here to drain, and that is
+    REPORTED rather than passing quietly as a clean drain.
+    """
+    url = f"{stack['app']}/api/run"
+    # Built OUTSIDE every timed window: the catalog GET is not the property here.
+    slow_payload = confirmed_requests_payload(
+        stack["app"], "count-by-layer",
+        {"_qa_sleep_s": INDEPENDENCE_SLEEP_S}, "rooftop_demo")
+    fast_payload = confirmed_requests_payload(
+        stack["app"], "count-by-layer", {}, "rooftop_demo")
+
+    job_ids = []
+    slow_samples, fast_samples = [], []
+    # Incremented BEFORE each call, so a POST that raises still counts as work
+    # the server may have accepted. Comparing this against len(job_ids) in the
+    # `finally` is what keeps an unrecoverable job from reading as a clean drain.
+    sent = 0
+    # The warmup POSTs carry no `_qa_sleep_s`, so clearing the thread-spawn
+    # regime costs instant jobs rather than that many more on the drain bill.
+    warmup_posts = min(
+        fast_lane_workers(stack) + SUBMIT_WARMUP_MARGIN,
+        SUBMIT_WARMUP_MAX_POSTS)
+    total_posts = warmup_posts + 2 * INDEPENDENCE_PAIRS
+    # ONE deadline over every POST this test makes, warmup and measured alike.
+    submit_deadline = time.monotonic() + SUBMIT_PHASE_BUDGET_S
+
+    def post_timeout_s() -> float:
+        """Per-request timeout, trimmed to the time left in the submit phase.
+
+        This bounds what the REMAINING requests may spend, not what any single
+        one can: a `requests` timeout measures inactivity, so one trickling
+        response still outlives it. See SUBMIT_PHASE_BUDGET_S. For the failure
+        mode it does cover -- requests that stall -- the assert below raises
+        inside the `try`, so the `finally` still runs and still reports the jobs
+        it could not drain.
+        """
+        remaining = submit_deadline - time.monotonic()
+        assert remaining > 0, (
+            f"the submit phase spent its {SUBMIT_PHASE_BUDGET_S:g}s budget after "
+            f"{sent} of {total_posts} POSTs, so the app is not accepting "
+            f"submissions at anything near the ~10ms this test measures")
+        return min(120.0, remaining)
+
+    try:
+        for _ in range(warmup_posts):
+            sent += 1
+            warm = requests.post(url, json=fast_payload, timeout=post_timeout_s())
+            assert warm.status_code == 202
+            job_ids.append(warm.json()["job_id"])
+
+        for i in range(INDEPENDENCE_PAIRS):
+            pair = ((slow_samples, slow_payload), (fast_samples, fast_payload))
+            if i % 2:
+                pair = pair[::-1]
+            for bucket, payload in pair:
+                sent += 1
+                # Resolved BEFORE the clock starts: the deadline arithmetic is
+                # not part of what this test is timing.
+                timeout_s = post_timeout_s()
+                start = time.perf_counter()
+                r = requests.post(url, json=payload, timeout=timeout_s)
+                bucket.append(time.perf_counter() - start)
+                assert r.status_code == 202
+                job_ids.append(r.json()["job_id"])
+
+        mean_slow = sum(slow_samples) / len(slow_samples)
+        mean_fast = sum(fast_samples) / len(fast_samples)
+        excess = mean_slow - mean_fast
+        assert excess < MEAN_SUBMIT_DIFF_BUDGET_S, (
+            f"submitting a {INDEPENDENCE_SLEEP_S:g}s job cost a mean of "
+            f"{mean_slow*1000:.0f}ms against {mean_fast*1000:.0f}ms for a 0s job, "
+            f"an excess of {excess*1000:.0f}ms over the "
+            f"{MEAN_SUBMIT_DIFF_BUDGET_S:g}s budget, so submit cost is scaling "
+            f"with execution time at roughly "
+            f"{excess/INDEPENDENCE_SLEEP_S:.2f}x it. "
+            f"Slow samples (ms): {', '.join(f'{v*1000:.0f}' for v in slow_samples)}. "
+            f"Fast samples (ms): {', '.join(f'{v*1000:.0f}' for v in fast_samples)}. "
+            f"An excess this large is not scheduling noise: noise would have to "
+            f"stall ~{MEAN_SUBMIT_DIFF_BUDGET_S*INDEPENDENCE_PAIRS:.0f}s inside "
+            f"the slow half of this window alone")
+    finally:
+        drain_errors = []
+        unrecovered = sent - len(job_ids)
+        if unrecovered > 0:
+            drain_errors.append(
+                f"{unrecovered} of {sent} POSTs did not yield a readable job_id, "
+                f"so a job may have been accepted with an id this test never saw "
+                f"and cannot drain")
+        # ONE deadline for the whole drain, not one per job. Per-job timeouts
+        # multiply: this test can hold up to SUBMIT_WARMUP_MAX_POSTS warmup jobs
+        # plus 2*INDEPENDENCE_PAIRS measured ones, and a per-job budget would let
+        # cleanup run to hours. The gate kills a suite at 900s
+        # (scripts/run-all-gates.py Suite.timeout_s), and a killed suite reports
+        # NOTHING -- the accumulated drain_errors below would never be seen, so
+        # the failure would surface as an opaque timeout instead of the named
+        # jobs that would not finish. A total deadline keeps the report reachable.
+        drain_deadline = time.monotonic() + INDEPENDENCE_DRAIN_TIMEOUT_S
+        undrained = []
+        for job_id in job_ids:
+            remaining = drain_deadline - time.monotonic()
+            if remaining <= 0:
+                undrained.append(job_id)
+                continue
+            try:
+                poll_until_terminal(stack, job_id, timeout_s=remaining)
+            except Exception as exc:  # noqa: BLE001 - drain every job, then report
+                drain_errors.append(f"{job_id}: {type(exc).__name__}: {exc}")
+        if undrained:
+            drain_errors.append(
+                # EVERY id, not a sample: these jobs may still be running against
+                # the module-scoped stack that tests 2-10 share, so a truncated
+                # list would hide exactly the ones needed to explain a later
+                # failure. The count is bounded by SUBMIT_WARMUP_MAX_POSTS +
+                # 2*INDEPENDENCE_PAIRS, so this cannot run away.
+                f"{len(undrained)} of {len(job_ids)} jobs were never polled: the "
+                f"{INDEPENDENCE_DRAIN_TIMEOUT_S:g}s drain budget for the whole "
+                f"test was already spent on earlier ones "
+                f"({', '.join(undrained)})")
+        assert not drain_errors, (
+            "this test could not confirm every job it started had finished: "
+            + "; ".join(drain_errors))
+
+
+# --------------------------------------------------------------------------- #
 # 2. submitted->running->complete; result is a section-3 envelope; SQLite
 #    record survives a FULL app-process kill + restart
 # --------------------------------------------------------------------------- #
