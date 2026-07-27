@@ -11,11 +11,11 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const REVISION = /^(?:sha256:)?[a-f0-9]{7,64}$/
+const SOURCE_SHA = /^[a-f0-9]{40}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const SAFE_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/
 const RUN_ID = /^[a-z0-9][a-z0-9-]{5,49}$/
@@ -71,10 +71,15 @@ function exactUrl(value, name) {
   return parsed
 }
 
+function canonicalHostname(value) {
+  const host = String(value || '').trim().toLowerCase()
+  return host.endsWith('.') ? host.slice(0, -1) : host
+}
+
 function parseAllowedHosts(env) {
   const hosts = required(env, 'LEAF_ACCEPTANCE_ALLOWED_HOSTS')
     .split(',')
-    .map((value) => value.trim().toLowerCase())
+    .map(canonicalHostname)
     .filter(Boolean)
   if (hosts.length === 0 || new Set(hosts).size !== hosts.length) {
     throw new AcceptanceError(
@@ -136,24 +141,24 @@ export function validateConfig(env = process.env, execute = false) {
   const apiUrl = exactUrl(required(env, 'LEAF_ACCEPTANCE_API_URL'), 'LEAF_ACCEPTANCE_API_URL')
   const allowedHosts = parseAllowedHosts(env)
   for (const [name, url] of [['web', webUrl], ['api', apiUrl]]) {
-    if (!allowedHosts.has(url.hostname.toLowerCase())) {
+    const hostname = canonicalHostname(url.hostname)
+    if (!allowedHosts.has(hostname)) {
       throw new AcceptanceError(
         'configuration',
         `${name} hostname is not in LEAF_ACCEPTANCE_ALLOWED_HOSTS`,
       )
     }
-    if (PRODUCTION_HOSTS.has(url.hostname.toLowerCase())) {
+    if (PRODUCTION_HOSTS.has(hostname)) {
       throw new AcceptanceError('production_target', `${name} points at production`)
     }
   }
   const expectedRevision = required(env, 'LEAF_ACCEPTANCE_EXPECTED_REVISION').toLowerCase()
-  if (!REVISION.test(expectedRevision)) {
+  if (!SOURCE_SHA.test(expectedRevision)) {
     throw new AcceptanceError(
       'configuration',
       'LEAF_ACCEPTANCE_EXPECTED_REVISION is not a source revision',
     )
   }
-  const manifestPath = resolve(required(env, 'LEAF_ACCEPTANCE_IMAGE_MANIFEST'))
   const tenants = [
     tenantConfig(env, 'A', runId),
     tenantConfig(env, 'B', runId),
@@ -186,45 +191,47 @@ export function validateConfig(env = process.env, execute = false) {
     webUrl: webUrl.toString().replace(/\/$/, ''),
     apiUrl: apiUrl.toString().replace(/\/$/, ''),
     expectedRevision,
-    manifestPath,
     publicationApprovalSecret,
     tenants,
   }
 }
 
-export function validateDeploymentManifest(manifest, config) {
-  if (!manifest || manifest.schema !== 'leaf.deployment-image-manifest.v1') {
-    throw new AcceptanceError('image_manifest', 'unsupported deployment image manifest')
+export function evaluateDeploymentIdentity(identity, expectedRevision) {
+  if (!identity || identity.schema !== 'leaf.deployment-identity.v1') {
+    throw new AcceptanceError('deployment_identity', 'unsupported live deployment identity')
   }
-  if (manifest.environment !== 'staging') {
-    throw new AcceptanceError('image_manifest', 'image manifest is not for staging')
+  if (identity.environment !== 'staging') {
+    throw new AcceptanceError('deployment_identity', 'live deployment identity is not for staging')
   }
-  if (manifest.source_revision !== config.expectedRevision) {
+  if (!SOURCE_SHA.test(String(identity.source_revision || ''))) {
+    throw new AcceptanceError('deployment_identity', 'live deployment identity lacks a full source SHA')
+  }
+  if (identity.source_revision !== expectedRevision) {
     throw new AcceptanceError(
       'mixed_revision',
-      'image manifest source revision does not match the expected revision',
+      'live deployment identity source revision does not match the expected revision',
     )
   }
-  const names = Object.keys(manifest.services || {}).sort()
+  const names = Object.keys(identity.services || {}).sort()
   if (JSON.stringify(names) !== JSON.stringify(REQUIRED_SERVICES)) {
     throw new AcceptanceError(
-      'image_manifest',
-      `image manifest services must be exactly ${REQUIRED_SERVICES.join(', ')}`,
+      'deployment_identity',
+      `live deployment identity services must be exactly ${REQUIRED_SERVICES.join(', ')}`,
     )
   }
   for (const name of REQUIRED_SERVICES) {
-    const service = manifest.services[name]
+    const service = identity.services[name]
     if (!service || !DIGEST.test(String(service.image_digest || ''))) {
-      throw new AcceptanceError('image_manifest', `${name} is missing an immutable image digest`)
+      throw new AcceptanceError('deployment_identity', `${name} is missing an immutable image digest`)
     }
-    if (service.source_revision !== config.expectedRevision) {
+    if (service.source_revision !== expectedRevision) {
       throw new AcceptanceError(
         'mixed_revision',
-        `${name} was not built from the expected source revision`,
+        `${name} live identity was not built from the expected source revision`,
       )
     }
   }
-  return manifest
+  return identity
 }
 
 function sha256(value) {
@@ -324,6 +331,9 @@ function expectStatus(result, allowed, check) {
 
 export async function runApiPreflight(config, fetchImpl = fetch) {
   const [a, b] = config.tenants
+  const deploymentIdentity = await requestJson(config, a, '/api/deployment-identity', { fetchImpl })
+  expectStatus(deploymentIdentity, [200], 'deployment_identity')
+  const identity = evaluateDeploymentIdentity(deploymentIdentity.body, config.expectedRevision)
   const readiness = await requestJson(config, a, '/api/ready', { fetchImpl })
   expectStatus(readiness, [200], 'readiness')
   evaluateReadiness(readiness.body, config.expectedRevision)
@@ -361,6 +371,12 @@ export async function runApiPreflight(config, fetchImpl = fetch) {
     }
   }
   return {
+    deployment_identity: {
+      source_revision: identity.source_revision,
+      services: Object.fromEntries(
+        REQUIRED_SERVICES.map((name) => [name, identity.services[name].image_digest]),
+      ),
+    },
     readiness: {
       source_revision: readiness.body.source_revision,
       dependencies: Object.fromEntries(
@@ -426,7 +442,7 @@ export async function approveStagedPublication(
   }
 }
 
-function validateStagedAuthorResponse(body, tenant) {
+export function validateStagedAuthorResponse(body, tenant) {
   const changeSetId = body?.receipt?.change_set_id
   const toolName = body?.tool?.name
   const capabilities = body?.tool?.capabilities
@@ -436,7 +452,8 @@ function validateStagedAuthorResponse(body, tenant) {
     typeof toolName !== 'string' ||
     !toolName ||
     !Array.isArray(capabilities) ||
-    !capabilities.includes('drawing.write')
+    capabilities.length !== 1 ||
+    capabilities[0] !== 'drawing.write'
   ) {
     throw new AcceptanceError(
       'author_stage',
@@ -444,6 +461,26 @@ function validateStagedAuthorResponse(body, tenant) {
     )
   }
   return { changeSetId, toolName }
+}
+
+export function requireCameraMotion(before, after) {
+  if (!before || !after || before === after) {
+    throw new AcceptanceError('camera_motion', 'the browser gesture did not move the camera')
+  }
+}
+
+export function requireDistinctStagedResults(results, tenants) {
+  if (
+    results.length !== 2 ||
+    results[0]._staged_tool_name === results[1]._staged_tool_name ||
+    results[0]._staged_change_set_id === results[1]._staged_change_set_id ||
+    results.some((result, index) => result.staged_request_hash !== sha256(tenants[index].request))
+  ) {
+    throw new AcceptanceError(
+      'author_stage',
+      'the tenants did not receive distinct staged tools and change sets bound to their requests',
+    )
+  }
 }
 
 async function runBrowserTenant(config, tenant, browser, execute) {
@@ -535,6 +572,13 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     const stagedBody = await stageResponse.json()
     const staged = validateStagedAuthorResponse(stagedBody, tenant)
+    const stageRequest = stageResponse.request().postDataJSON()
+    if (stageRequest?.description !== tenant.request) {
+      throw new AcceptanceError(
+        'author_stage',
+        `tenant ${tenant.label} staged a change set for a different request`,
+      )
+    }
     await page.getByText('Staged and awaiting approval.', { exact: false })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
 
@@ -589,12 +633,29 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     const camera = page.getByTestId('camera-controls')
     await camera.waitFor({ state: 'visible', timeout: 120_000 })
     const canvas = page.locator('canvas').first()
+    const cameraMount = page.locator('[data-camera-position][data-camera-target]')
+    await cameraMount.waitFor({ state: 'visible', timeout: 30_000 })
+    const beforeCameraPose = await cameraMount.evaluate((mount) =>
+      `${mount.dataset.cameraPosition}|${mount.dataset.cameraTarget}`,
+    )
     const box = await canvas.boundingBox()
     if (!box) throw new AcceptanceError('browser_execute', '3D canvas has no visible bounds')
     await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.5)
     await page.mouse.down()
     await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.4, { steps: 8 })
     await page.mouse.up()
+    await page.waitForFunction(
+      ({ previous }) => {
+        const mount = document.querySelector('[data-camera-position][data-camera-target]')
+        return mount && `${mount.dataset.cameraPosition}|${mount.dataset.cameraTarget}` !== previous
+      },
+      { previous: beforeCameraPose },
+      { timeout: 30_000 },
+    )
+    const afterCameraPose = await cameraMount.evaluate((mount) =>
+      `${mount.dataset.cameraPosition}|${mount.dataset.cameraTarget}`,
+    )
+    requireCameraMotion(beforeCameraPose, afterCameraPose)
     const undo = page.getByRole('button', { name: 'Undo', exact: true })
     await undo.click()
     const redo = page.getByRole('button', { name: 'Redo', exact: true })
@@ -615,6 +676,9 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       ...result,
       authored_tool_hash: sha256(staged.toolName),
       staged_change_hash: sha256(staged.changeSetId),
+      staged_request_hash: sha256(stageRequest.description),
+      _staged_tool_name: staged.toolName,
+      _staged_change_set_id: staged.changeSetId,
       independent_publication_approval: independentApproval.status,
       publication_confirmation_hash: independentApproval.confirmation_hash,
       exact_write_approval: true,
@@ -643,6 +707,7 @@ export async function runBrowserAcceptance(config, execute = false, chromiumImpl
         'the two tenant browser sessions received the same workbench',
       )
     }
+    if (execute) requireDistinctStagedResults(results, config.tenants)
     return results
   } finally {
     await browser.close()
@@ -677,9 +742,9 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
       'the two distinct acceptance requests produced indistinguishable drawings',
     )
   }
-  for (const [tenant, other, forbiddenHash] of [
-    [a, b, own[1]],
-    [b, a, own[0]],
+  for (const [tenant, other] of [
+    [a, b],
+    [b, a],
   ]) {
     const cross = await requestJson(
       config,
@@ -693,19 +758,11 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
         },
       },
     )
-    if ([403, 404].includes(cross.status)) continue
-    expectStatus(cross, [200], `cross_tenant_drawing_${tenant.label}`)
-    if (!cross.body?.intake || typeof cross.body.intake !== 'object') {
+    if (![403, 404].includes(cross.status)) {
       throw new AcceptanceError(
         `cross_tenant_drawing_${tenant.label}`,
-        'the cross-tenant response is missing intake data',
-      )
-    }
-    const observed = sha256(JSON.stringify(cross.body?.intake))
-    if (observed === forbiddenHash) {
-      throw new AcceptanceError(
-        'tenant_isolation',
-        `tenant ${tenant.label} read the other tenant's drawing bytes`,
+        `cross-tenant drawing read returned HTTP ${cross.status}`,
+        { status: cross.status },
       )
     }
   }
@@ -714,12 +771,11 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
 
 export function buildReceipt(
   config,
-  manifest,
+  deploymentIdentity,
   api,
   browser,
   startedAt,
   stoppedAt,
-  manifestBytes = JSON.stringify(manifest),
 ) {
   return {
     schema: 'leaf.deployed-authored-cad-acceptance.v1',
@@ -730,9 +786,9 @@ export function buildReceipt(
     source_revision: config.expectedRevision,
     web_origin: new URL(config.webUrl).origin,
     api_origin: new URL(config.apiUrl).origin,
-    image_manifest_sha256: sha256(manifestBytes),
+    deployment_identity_sha256: sha256(JSON.stringify(deploymentIdentity)),
     images: Object.fromEntries(
-      REQUIRED_SERVICES.map((name) => [name, manifest.services[name].image_digest]),
+      REQUIRED_SERVICES.map((name) => [name, deploymentIdentity.services[name].image_digest]),
     ),
     tenants: config.tenants.map((tenant) => ({
       label: tenant.label,
@@ -740,7 +796,7 @@ export function buildReceipt(
       drawing_hash: sha256(tenant.drawingId),
     })),
     api,
-    browser: browser.map(({ _workbench_id, ...safe }) => safe),
+    browser: browser.map(({ _workbench_id, _staged_tool_name, _staged_change_set_id, ...safe }) => safe),
     started_at: startedAt,
     stopped_at: stoppedAt,
     secrets_recorded: false,
@@ -784,8 +840,6 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       throw new AcceptanceError('configuration', '--receipt is required')
     }
     const config = validateConfig(env, args.execute)
-    const manifestBytes = readFileSync(config.manifestPath, 'utf8')
-    const manifest = validateDeploymentManifest(JSON.parse(manifestBytes), config)
     const startedAt = new Date().toISOString()
     const api = await runApiPreflight(config)
     const browser = await runBrowserAcceptance(config, args.execute)
@@ -793,12 +847,21 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     const stoppedAt = new Date().toISOString()
     const receipt = buildReceipt(
       config,
-      manifest,
+      {
+        schema: 'leaf.deployment-identity.v1',
+        environment: 'staging',
+        source_revision: api.deployment_identity.source_revision,
+        services: Object.fromEntries(
+          Object.entries(api.deployment_identity.services).map(([name, image_digest]) => [
+            name,
+            { image_digest, source_revision: api.deployment_identity.source_revision },
+          ]),
+        ),
+      },
       api,
       browser,
       startedAt,
       stoppedAt,
-      manifestBytes,
     )
     writeReceipt(args.receipt, receipt)
     console.log(JSON.stringify({

@@ -6,13 +6,16 @@ browser routes or load proof fixtures.
 Run it only with two non-customer Auth0 tenants. Each tenant must have a linked
 Claude grant. Use a new run ID and two acceptance drawing IDs for every run.
 
-## Required deployment manifest
+## Required live deployment identity
 
-Export the exact staging task images before the run. Save them in this format:
+The staging deployment controller must set `LEAF_DEPLOYMENT_IDENTITY` in the
+running API task. This deployment-owned runtime evidence is not an input to the
+acceptance driver. The authenticated `/api/deployment-identity` endpoint returns
+only the validated identity below. A missing or invalid identity returns 503.
 
 ```json
 {
-  "schema": "leaf.deployment-image-manifest.v1",
+  "schema": "leaf.deployment-identity.v1",
   "environment": "staging",
   "source_revision": "<application commit>",
   "services": {
@@ -40,8 +43,10 @@ Export the exact staging task images before the run. Save them in this format:
 }
 ```
 
-The driver rejects a missing service, a mutable image tag, or a mixed source
-revision.
+`source_revision` must be the full 40-character lowercase application SHA. The
+deployment controller must record the five resolved task image digests after it
+selects the live task definitions. The driver rejects a missing service, mutable
+image tag, mixed revision, or caller-authored manifest assertion.
 
 ## Required environment
 
@@ -55,7 +60,6 @@ LEAF_ACCEPTANCE_WEB_URL=https://<staging web host>
 LEAF_ACCEPTANCE_API_URL=https://<staging API host>
 LEAF_ACCEPTANCE_ALLOWED_HOSTS=<exact web host>,<exact API host>
 LEAF_ACCEPTANCE_EXPECTED_REVISION=<application commit>
-LEAF_ACCEPTANCE_IMAGE_MANIFEST=<absolute manifest path>
 LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET=<protected independent approver secret>
 
 LEAF_ACCEPTANCE_TENANT_A_ID=<resolved Auth0 tenant id>
@@ -71,7 +75,8 @@ LEAF_ACCEPTANCE_TENANT_B_REQUEST=<different novel request that contains the run 
 
 The exact web and API hosts must appear in
 `LEAF_ACCEPTANCE_ALLOWED_HOSTS`. The driver always rejects known production
-hosts. The publication approval secret is required only with `--execute`. It
+hosts, including a terminal DNS dot and explicit or default ports. The
+publication approval secret is required only with `--execute`. It
 must equal the staging app's `LEAF_CUSTOMIZATION_APPROVAL_SECRET`. Store it as a
 masked CI secret. The driver sends it only to the internal approval endpoint.
 It never places it in the browser, application JWT headers, logs, or receipt.
@@ -87,7 +92,8 @@ node scripts/deployed_authored_cad_acceptance.mjs `
 
 Preflight checks:
 
-1. The live source revision equals the deployment manifest.
+1. The authenticated live deployment identity has the expected full source SHA
+   and all five immutable service digests.
 2. Broker, harness, database, worker, durable stores, and build identity are
    ready.
 3. Both JWTs resolve to different tenant IDs.
@@ -119,16 +125,20 @@ outside the browser, to approve that exact staged change through
 `/internal/customization/confirm`.
 
 The browser publishes the approved tool, selects **Run it now**, and displays
-the exact tool confirmation. The driver accepts only a run request for that
-tool, the exact acceptance drawing, and drawing version 1. It does not click
-generic approval buttons. After the server creates version 2, the driver orbits
-the 3D view, runs Undo, and runs Redo. It then proves that forged tenant headers
-cannot return the other tenant's executed drawing bytes.
+the exact tool confirmation. The driver requires distinct new tool names,
+change-set IDs, and exact `drawing.write` capability sets. Each staged browser
+request must carry that tenant's exact request. It accepts only a run request
+for that tool, the exact acceptance drawing, and drawing version 1. It does not
+click generic approval buttons. After the server creates version 2, it records a
+stable camera pose, performs the real drag, and rejects an unchanged pose. It
+then runs Undo and Redo. Forged tenant-header reads of the other drawing must
+return only 403 or 404. Every 2xx response fails.
 
 The driver creates the receipt with exclusive file creation. It never
 overwrites an earlier receipt. The receipt contains tenant and drawing hashes,
-image digests, source revision, checks, and timestamps. It does not contain
-JWTs, Claude grants, tenant IDs, drawing IDs, prompts, or browser traces.
+authenticated live image digests, source revision, checks, and timestamps. It
+does not contain JWTs, Claude grants, tenant IDs, drawing IDs, prompts, or
+browser traces.
 
 ## Stop conditions
 

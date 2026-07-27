@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -8,11 +9,14 @@ import {
   approveStagedPublication,
   buildReceipt,
   evaluateReadiness,
+  evaluateDeploymentIdentity,
   main,
   proveExecutedDrawingIsolation,
+  requireCameraMotion,
+  requireDistinctStagedResults,
   runApiPreflight,
   validateConfig,
-  validateDeploymentManifest,
+  validateStagedAuthorResponse,
 } from './deployed_authored_cad_acceptance.mjs'
 
 const REVISION = 'f'.repeat(40)
@@ -20,6 +24,7 @@ const DIGEST = `sha256:${'a'.repeat(64)}`
 const TOKEN_A = 'aaa.bbb.ccc'
 const TOKEN_B = 'ddd.eee.fff'
 const ORIGINAL_ERROR = console.error
+const sha256 = (value) => createHash('sha256').update(value).digest('hex')
 
 function environment(overrides = {}) {
   const runId = 'run-20260726'
@@ -30,7 +35,6 @@ function environment(overrides = {}) {
     LEAF_ACCEPTANCE_API_URL: 'https://staging-api.leaf.test',
     LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'staging.leaf.test,staging-api.leaf.test',
     LEAF_ACCEPTANCE_EXPECTED_REVISION: REVISION,
-    LEAF_ACCEPTANCE_IMAGE_MANIFEST: 'manifest.json',
     LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET: 'independent-secret-value',
     LEAF_ACCEPTANCE_TENANT_A_ID: 'acceptance-a',
     LEAF_ACCEPTANCE_TENANT_A_JWT: TOKEN_A,
@@ -44,9 +48,9 @@ function environment(overrides = {}) {
   }
 }
 
-function manifest(overrides = {}) {
+function deploymentIdentity(overrides = {}) {
   return {
-    schema: 'leaf.deployment-image-manifest.v1',
+    schema: 'leaf.deployment-identity.v1',
     environment: 'staging',
     source_revision: REVISION,
     services: Object.fromEntries(
@@ -84,7 +88,7 @@ afterEach(() => {
 })
 
 describe('deployed authored CAD acceptance configuration', () => {
-  it('accepts only an explicit non-production HTTPS staging allowlist', () => {
+  it('rejects every production hostname spelling before any local or network action', () => {
     const config = validateConfig(environment())
     assert.equal(config.environment, 'staging')
     assert.equal(config.tenants.length, 2)
@@ -95,6 +99,18 @@ describe('deployed authored CAD acceptance configuration', () => {
       { LEAF_ACCEPTANCE_API_URL: 'https://staging-api.leaf.test/api' },
       {
         LEAF_ACCEPTANCE_WEB_URL: 'https://platform.leafdesign.ai',
+        LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'platform.leafdesign.ai,staging-api.leaf.test',
+      },
+      {
+        LEAF_ACCEPTANCE_WEB_URL: 'https://platform.leafdesign.ai.',
+        LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'platform.leafdesign.ai.,staging-api.leaf.test',
+      },
+      {
+        LEAF_ACCEPTANCE_WEB_URL: 'https://platform.leafdesign.ai:443',
+        LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'platform.leafdesign.ai,staging-api.leaf.test',
+      },
+      {
+        LEAF_ACCEPTANCE_WEB_URL: 'https://platform.leafdesign.ai:8443',
         LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'platform.leafdesign.ai,staging-api.leaf.test',
       },
       { LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'other.test,staging-api.leaf.test' },
@@ -136,21 +152,24 @@ describe('deployed authored CAD acceptance configuration', () => {
     )
   })
 
-  it('requires five immutable images from the exact source revision', () => {
-    const config = validateConfig(environment())
-    assert.equal(validateDeploymentManifest(manifest(), config).environment, 'staging')
+  it('requires live deployment identity with five immutable digests and a full source SHA', () => {
+    assert.equal(evaluateDeploymentIdentity(deploymentIdentity(), REVISION).environment, 'staging')
 
-    const mixed = manifest()
+    const mixed = deploymentIdentity()
     mixed.services.broker = { image_digest: DIGEST, source_revision: 'e'.repeat(40) }
-    assert.throws(() => validateDeploymentManifest(mixed, config), /broker was not built/)
+    assert.throws(() => evaluateDeploymentIdentity(mixed, REVISION), /broker live identity was not built/)
 
-    const missing = manifest()
+    const missing = deploymentIdentity()
     delete missing.services.harness
-    assert.throws(() => validateDeploymentManifest(missing, config), /services must be exactly/)
+    assert.throws(() => evaluateDeploymentIdentity(missing, REVISION), /services must be exactly/)
 
-    const mutable = manifest()
+    const mutable = deploymentIdentity()
     mutable.services.web.image_digest = 'latest'
-    assert.throws(() => validateDeploymentManifest(mutable, config), /immutable image digest/)
+    assert.throws(() => evaluateDeploymentIdentity(mutable, REVISION), /immutable image digest/)
+    assert.throws(
+      () => validateConfig(environment({ LEAF_ACCEPTANCE_EXPECTED_REVISION: 'f'.repeat(39) })),
+      /not a source revision/,
+    )
   })
 })
 
@@ -208,6 +227,7 @@ describe('deployed authored CAD acceptance checks', () => {
         redirect: options.redirect,
       })
       const path = new URL(url).pathname
+      if (path === '/api/deployment-identity') return response(200, deploymentIdentity())
       if (path === '/api/ready') return response(200, ready())
       if (path === '/api/tenant/claude-grant') {
         return response(200, { linked: true, kind: 'oauth' })
@@ -222,7 +242,7 @@ describe('deployed authored CAD acceptance checks', () => {
     }
     const result = await runApiPreflight(config, fetchImpl)
     assert.equal(result.tenant_header_override, 'denied')
-    assert.equal(calls.length, 5)
+    assert.equal(calls.length, 6)
     assert.ok(calls.every((call) => call.credentials === 'omit'))
     assert.ok(calls.every((call) => call.redirect === 'error'))
     assert.ok(calls.every((call) => [
@@ -232,6 +252,7 @@ describe('deployed authored CAD acceptance checks', () => {
 
     const permissive = async (url, options) => {
       const path = new URL(url).pathname
+      if (path === '/api/deployment-identity') return response(200, deploymentIdentity())
       if (path === '/api/ready') return response(200, ready())
       if (path === '/api/tenant/claude-grant') {
         return response(200, { linked: true, kind: 'oauth' })
@@ -247,17 +268,15 @@ describe('deployed authored CAD acceptance checks', () => {
     )
   })
 
-  it('rejects executed cross-tenant drawing bytes even behind a forged header', async () => {
+  it('accepts only 403 or 404 for forged cross-tenant drawing reads', async () => {
     const config = validateConfig(environment(), true)
     const ownA = { tenant: 'a', shape: 'cat' }
     const ownB = { tenant: 'b', shape: 'fox' }
     const fetchImpl = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      if (drawing.endsWith('-a')) {
-        return response(200, { intake: tokenA ? ownA : { tenant: 'b', shape: 'base' } })
-      }
-      return response(200, { intake: tokenA ? { tenant: 'a', shape: 'base' } : ownB })
+      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
+      return ownDrawing ? response(200, { intake: tokenA ? ownA : ownB }) : response(404, {})
     }
     const browser = [
       { label: 'A', executed: true },
@@ -268,18 +287,66 @@ describe('deployed authored CAD acceptance checks', () => {
       { status: 'denied', distinct_result_hashes: true },
     )
 
-    const leaking = async (url, options) => {
+    const sanitizedButPermissive = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
-      if (drawing.endsWith('-b')) return response(200, { intake: ownB })
-      return response(200, {
-        intake: options.headers.Authorization === `Bearer ${TOKEN_A}`
-          ? ownA
-          : ownA,
-      })
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
+      return response(200, { intake: ownDrawing ? (tokenA ? ownA : ownB) : { redacted: true } })
     }
     await assert.rejects(
-      () => proveExecutedDrawingIsolation(config, browser, leaking),
-      /read the other tenant's drawing bytes/,
+      () => proveExecutedDrawingIsolation(config, browser, sanitizedButPermissive),
+      /cross-tenant drawing read returned HTTP 200/,
+    )
+  })
+
+  it('rejects a no-op camera gesture', () => {
+    assert.throws(() => requireCameraMotion('1,2,3|4,5,6', '1,2,3|4,5,6'), /did not move/)
+    assert.doesNotThrow(() => requireCameraMotion('1,2,3|4,5,6', '2,2,3|4,5,6'))
+  })
+
+  it('requires distinct staged tool identities, exact capability, and request-bound change sets', () => {
+    const config = validateConfig(environment(), true)
+    const staged = (toolName, changeSetId) => ({
+      receipt: { state: 'staged', change_set_id: changeSetId },
+      tool: { name: toolName, capabilities: ['drawing.write'] },
+    })
+    assert.deepEqual(
+      validateStagedAuthorResponse(staged('cat_tool', '11111111-1111-4111-8111-111111111111'), config.tenants[0]),
+      { toolName: 'cat_tool', changeSetId: '11111111-1111-4111-8111-111111111111' },
+    )
+    assert.throws(
+      () => validateStagedAuthorResponse({
+        ...staged('cat_tool', '11111111-1111-4111-8111-111111111111'),
+        tool: { name: 'cat_tool', capabilities: ['drawing.write', 'network.read'] },
+      }, config.tenants[0]),
+      /did not stage one novel drawing.write tool/,
+    )
+    const results = [
+      {
+        _staged_tool_name: 'cat_tool',
+        _staged_change_set_id: '11111111-1111-4111-8111-111111111111',
+        staged_request_hash: sha256(config.tenants[0].request),
+      },
+      {
+        _staged_tool_name: 'fox_tool',
+        _staged_change_set_id: '22222222-2222-4222-8222-222222222222',
+        staged_request_hash: sha256(config.tenants[1].request),
+      },
+    ]
+    assert.doesNotThrow(() => requireDistinctStagedResults(results, config.tenants))
+    assert.throws(
+      () => requireDistinctStagedResults([
+        results[0],
+        { ...results[1], _staged_tool_name: results[0]._staged_tool_name },
+      ], config.tenants),
+      /bound to their requests/,
+    )
+    assert.throws(
+      () => requireDistinctStagedResults([
+        results[0],
+        { ...results[1], staged_request_hash: sha256('wrong request') },
+      ], config.tenants),
+      /bound to their requests/,
     )
   })
 
@@ -287,7 +354,7 @@ describe('deployed authored CAD acceptance checks', () => {
     const config = validateConfig(environment(), true)
     const receipt = buildReceipt(
       config,
-      manifest(),
+      deploymentIdentity(),
       { tenant_header_override: 'denied' },
       [
         { label: 'A', executed: true, _workbench_id: 'secret-workbench-a' },
@@ -317,7 +384,7 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(!source.includes("getByRole('button', { name: 'Approve'"))
   })
 
-  it('refuses production before reading a manifest or launching a browser', async () => {
+  it('refuses production before requesting live identity or launching a browser', async () => {
     const errors = []
     console.error = (value) => errors.push(value)
     const result = await main(
