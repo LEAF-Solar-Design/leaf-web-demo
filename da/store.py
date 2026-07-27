@@ -1954,13 +1954,17 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
     a save already in flight put the drawing back AFTER the purge had appended a
     "deleted" line to `purge.log.jsonl`, making the receipt a lie. The purge now
     enters this same guard through `legacy_purge_guard` and holds it across the
-    deletion and the receipt, and the two checks below run INSIDE the lock rather
-    than only before it, so a writer that was parked while the purge ran finds
-    the drawing gone and refuses instead of recreating it.
+    deletion and the receipt.
 
-    Both checks have to be inside. The pre-lock check is still worth keeping —
-    it stops a made-up drawing id from minting a lock file — but on its own it is
-    a read followed by a wait, and the purge fits in the gap.
+    THE LOCK IS WHAT CLOSES IT, for the five writers that load the manifest. Each
+    one's read and save are both inside this section, so a purge holding the same
+    lock can no longer land between them; and a writer that arrives after the
+    deletion fails its `load_manifest`. The re-checks below are not what makes
+    that true — a mutation test was what settled it — and the comments there say
+    so. `ingest_drawing` is the exception: it CREATES, so it has no manifest to
+    load and nothing about a missing drawing looks wrong to it. That one carries
+    a `precondition`, evaluated inside the lock, and it is genuinely the only
+    thing standing between a purged upload and an extraction that finishes late.
 
     RESOURCES IT HOLDS, and exactly how far each is bounded. The in-process lock
     map is reference counted and drops an entry when its last caller leaves, so it
@@ -2016,18 +2020,26 @@ def _legacy_checkout_guard(backend: StorageBackend, tid: str, did: str, *,
             with backend.cross_process_lock(checkout_lock_key(tid, did)) as held:
                 # RE-CHECK, now that nothing else can be mid-delete. The check
                 # above ran before the wait, so a purge that started after it and
-                # finished before the lock was granted is invisible to it, and
-                # every writer here rewrites the WHOLE manifest through a `put`
-                # that recreates missing parents. Without this a writer parked
-                # behind the purge recreates the drawing directory it had just
-                # been told was gone, and the "deleted" receipt already written
-                # for it becomes false.
+                # finished before the lock was granted is invisible to it.
                 if not creating and not backend.exists(manifest_key(tid, did)):
-                    # Opening the lock RE-CREATED the file a moment ago, for a
-                    # drawing the purge has already finished with and will never
-                    # look at again. Retire it here, where holding it exclusively
-                    # is the same proof the purge itself relies on; otherwise
-                    # every writer that lost this race leaves permanent residue.
+                    # What stops this caller RESURRECTING the drawing is not this
+                    # line. It is the shared lock -- which keeps the purge out
+                    # from a writer's manifest read until its save -- plus the
+                    # `load_manifest` every one of these writers does as its
+                    # first act inside the guard, which raises this same
+                    # `KeyError` a moment later. Stated plainly because the
+                    # earlier wording here claimed otherwise and a mutation test
+                    # showed the claim was false: deleting this check leaves the
+                    # drawing just as un-resurrectable.
+                    #
+                    # What is only possible HERE is retiring the lock FILE.
+                    # Opening the lock re-created it a moment ago, for a drawing
+                    # the purge has already finished with and will never look at
+                    # again, so letting the refusal come from `load_manifest`
+                    # instead would leave one empty file behind every writer that
+                    # lost this race -- the same unbounded growth the purge's own
+                    # reclaim exists to stop. Holding the lock exclusively is the
+                    # same proof the purge relies on.
                     held.reclaim()
                     raise KeyError(manifest_key(tid, did))
                 # The CREATING writer cannot use the check above — an absent
