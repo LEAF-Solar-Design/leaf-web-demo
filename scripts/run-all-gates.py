@@ -240,8 +240,9 @@ def build_suites() -> List[Suite]:
         # `server-customization-adversarial` (Linux and Windows execute
         # different counts, so no single number is honest for both).
         # `platform` HAS since been re-baselined: 199 -> 223 (an interim bump of
-        # exactly what one new file added) -> 234, a measured green count on a
-        # pristine database. `server-customization-adversarial` is now the only
+        # exactly what one new file added) -> 234 -> 235, the last two each a
+        # measured green count on a pristine database.
+        # `server-customization-adversarial` is now the only
         # floor still pinned BELOW its CI executed count -- 17 is the Windows
         # count, Linux CI executes 19 and reports drift -- because no single
         # number is honest for both. Details at each Suite(...) below.
@@ -534,6 +535,12 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_deployment_identity.py"), 5),
         Suite("server-emf-metrics-stream", "server tests/test_emf_metrics_stream.py",
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
+        # Floor 11 = 4 tests + the 7 parametrized cases of the unusable-reading
+        # test. Every case is hermetic and unconditional (no skipif, no DB, no
+        # subprocess), so the count is the same on every runner.
+        Suite("server-submit-latency-metric",
+              "server tests/test_submit_latency_metric.py", "pytest", SERVER,
+              _py_pytest("tests/test_submit_latency_metric.py"), 11),
         Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics.py"), 13),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
@@ -645,11 +652,12 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
-        # Floor 234 is a MEASURED, GREEN, pristine-database baseline: 234
+        # Floor 236 is a MEASURED, GREEN, pristine-database baseline: 236
         # passed, 0 skipped, 0 failed, pytest exit 0, taken 2026-07-27 against
         # PostgreSQL 16.14 from this suite's registered cwd (the repo parent,
         # target <repo_name>/platform/tests) and reproduced on a second freshly
-        # created database. It supersedes 199 (2026-07-25, PostgreSQL 17) and
+        # created database. It supersedes the 234 measured earlier the same day
+        # (this branch adds exactly two tests), 199 (2026-07-25, PostgreSQL 17) and
         # the interim 223, which was only 199 plus the 24 cases one new file
         # added -- deliberately NOT a clean baseline, so it left an 11-test gap
         # between the floor and the real count. Losing 1 to 10 tests printed
@@ -657,7 +665,7 @@ def build_suites() -> List[Suite]:
         # NOTHING, because coverage_verdict returns with no note once executed
         # == expected. That gap is now zero: the floor IS the count, so losing
         # any single test trips "executed-count regression" instead.
-        # Collected and executed are both 234 because every skip path under
+        # Collected and executed are both 236 because every skip path under
         # platform/tests is gated on the DB being unconfigured -- on a reachable
         # DB nothing skips, so a green run executes everything collected. The
         # empty skip allowlist does not prevent skips; it makes any skip FAIL
@@ -667,20 +675,24 @@ def build_suites() -> List[Suite]:
         # Several tests bind fixed external subjects (e.g. "auth0|1b-cross-org")
         # that are unique per tenant, so a second run against the same database
         # fails on the first run's rows instead of measuring anything.
-        # Measure with the DB session timezone at UTC. This is not a count
-        # question -- `got` counts failures too -- but off UTC, 4 test_signing.py
-        # cases fail `payload_mismatch`: verify_signature re-derives signedAt as
-        # row["signed_at"].isoformat() and compares it to the stored JSON
-        # string, and the same instant renders differently under a non-UTC
-        # session. Confirmed by flipping only PGTZ on one database: 4 failed ->
-        # 234 passed. That is a real robustness gap in signing.py, tracked
-        # separately; it is called out here so the next person to measure this
-        # floor does not read those 4 failures as a broken environment.
+        # The session timezone no longer changes this measurement. It used to:
+        # off UTC, 4 test_signing.py cases failed `payload_mismatch` because
+        # verify_signature re-derived signedAt as row["signed_at"].isoformat()
+        # from a TIMESTAMPTZ, and the same instant renders differently under a
+        # non-UTC session. That is fixed in signing.py (the re-derivation
+        # normalizes to UTC first) and pinned by
+        # test_signature_verifies_when_the_reader_session_is_not_utc, which
+        # forces a non-UTC session itself rather than trusting the ambient one.
+        # The WRITE side is canonicalized too: _now() converts a caller-supplied
+        # `now=` to UTC, so the signed rendering cannot disagree with the one
+        # verification re-derives; pinned by
+        # test_signature_verifies_when_countersigned_with_a_non_utc_now.
+        # 236 was measured both ways -- TimeZone=America/Chicago and UTC.
         # Raising this cannot red-fail CI: the suite is db_gated and the
         # test-gate workflow is hermetic, so run_suite returns SKIP with
         # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 234, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 236, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.

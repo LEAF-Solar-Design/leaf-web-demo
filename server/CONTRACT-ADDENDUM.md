@@ -57,6 +57,36 @@ Job record fields: `job_id, tenant_id, tool, params, dwg, status, progress,
 created_at, started_at, updated_at, finished_at, elapsed_ms, result, error,
 degraded_mode`.
 
+### Observing the `<200 ms` claim
+
+> Added 2026-07-27, AFTER the promotion above. Non-normative: it changes no
+> behaviour §7 specifies, it records how the latency claim §7 already makes is
+> observed. `contract/CONTRACT.md` stays authoritative for §7 itself.
+
+`<200 ms` is a p-latency claim on real traffic, and no test that runs on
+`ubuntu-latest` can prove it — `server/tests/test_backbone.py`
+`test_1b_submit_cost_is_independent_of_execution_time` bounds the difference of
+means between a slow job and a 0s job for exactly that reason, and its own
+docstring records why no single-sample threshold fits that host's tail.
+
+So the absolute bound is alarmed on in production. `POST /api/run` emits
+**`SubmitLatency`** (`Unit: Milliseconds`, namespace `Leaf/Platform/APS`,
+dimension `{aps_live}`) from `server/emf_metrics.py::emit_submit_latency`,
+measured from handler entry to the 202. `?wait=1` blocks on execution and is
+deliberately NOT sampled: one gauge does not carry two request populations with
+two different contracts.
+
+| | |
+| --- | --- |
+| metric | `Leaf/Platform/APS` `SubmitLatency`, dimension `aps_live="true"` |
+| statistic | p99 over a 5-minute period |
+| threshold | `> 200` ms for 3 consecutive periods |
+| missing data | `notBreaching` (no traffic is not a breach) |
+| environment | production (`aps_live="true"` scopes out demo/mock traffic, which would otherwise both mask and trigger it) |
+
+Alarm creation is an AWS action for the observability plane, not a repo change.
+Emission is gated by `server/tests/test_submit_latency_metric.py`.
+
 ## §8 APS broker boundary
 
 > Section 8 is FROZEN (2026-07-22, census #4 credential-broker keystone).
