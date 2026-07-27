@@ -42,6 +42,11 @@ Special handling, all documented on the scoreboard:
     suite exits 2 rather than silently shrinking the run, and the scoreboard
     echoes the exact selection that produced it — so the printed result can be
     checked against the command that was typed.
+  * a suite id registered twice exits 2 before anything runs. The id is the
+    handle `--only` matches and the name of the child's log file, so a
+    duplicate runs one test file twice and can answer to two different
+    expected floors at once — a scoreboard that cannot say which floor the
+    gate stands on.
 
 USAGE
 -----
@@ -56,7 +61,8 @@ USAGE
 EXIT CODE
 ---------
     0  iff every gate passed and every test-level skip was explicitly allowlisted
-    2  nothing ran: an --only substring matched no suite (never a gate verdict)
+    2  nothing ran, so this is never a gate verdict: an --only substring matched
+       no suite, or a suite id was registered more than once
     1  otherwise
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
@@ -681,8 +687,10 @@ def build_suites() -> List[Suite]:
               "scripts test_build_platform_images_workflow.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
+        # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
+        # tree 2026-07-27.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 22),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 27),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
@@ -1104,6 +1112,39 @@ def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int) -> Result:
 
 
 # --------------------------------------------------------------------------- #
+# catalog integrity
+# --------------------------------------------------------------------------- #
+def duplicate_suite_ids(suites: List[Suite]) -> List[str]:
+    """Ids registered more than once, in first-registration order.
+
+    The id is the runner's only handle on a suite: `--only` matches against it
+    (select_suites), and each child's output goes to <log-dir>/<id>.log. So a
+    second registration under a live id runs the same tests twice, answers to
+    the same `--only`, and lets the second child's log overwrite the first.
+
+    The two registrations can also carry different labels and different
+    expected floors, and then the scoreboard prints two differently-named rows
+    for one test file -- one flagged for executed-count drift against the stale
+    floor, one clean against the current one -- with nothing saying which floor
+    the gate actually stands on. That is not a verdict, so the runner refuses
+    to produce one.
+
+    Ordered by where each id was FIRST registered, so the printed list reads
+    down the catalog in the same order as the file the reader has to go fix.
+    Keying on the repeat instead would order by second occurrence: `alpha,
+    beta, beta, alpha` would report beta before alpha.
+    """
+    first_seen: dict[str, int] = {}
+    dupes: set[str] = set()
+    for index, suite in enumerate(suites):
+        if suite.id in first_seen:
+            dupes.add(suite.id)
+        else:
+            first_seen[suite.id] = index
+    return sorted(dupes, key=lambda sid: first_seen[sid])
+
+
+# --------------------------------------------------------------------------- #
 # --only selection
 # --------------------------------------------------------------------------- #
 NO_FILTER = "all suites (no --only filter)"
@@ -1229,6 +1270,16 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     suites = build_suites()
+    # Before selection, not after: a duplicate breaks the catalog itself, so it
+    # is still a broken run when `--only` happens to filter the duplicate away.
+    # The `N of M` denominator the scoreboard echoes is already wrong.
+    dupes = duplicate_suite_ids(suites)
+    if dupes:
+        for sid in dupes:
+            print(f"suite id registered more than once: {sid!r}")
+        print("nothing ran: every suite id must be unique. Remove the duplicate "
+              "registration in build_suites().")
+        return 2
     total = len(suites)
     only: List[str] = args.only or []
     selection = describe_selection(only)
