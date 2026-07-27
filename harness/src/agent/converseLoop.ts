@@ -519,7 +519,7 @@ export class ConverseLoop {
           const target = String(args.tool ?? "");
           const entry = (await catalogFor()).find((c) => c.name === target);
           const catalogDigest = entry?.catalog_digest;
-          const params = asRecord(args.params);
+          let params = asRecord(args.params);
           if (typeof catalogDigest !== "string" || !catalogDigest) {
             throw new Error("run_capability requires a current server-issued catalog digest");
           }
@@ -536,6 +536,13 @@ export class ConverseLoop {
                 ? "run_write_tool"
                 : "run_read_tool";
           const dwg = String(args.dwg ?? session.drawing_id);
+          if (
+            action !== "run_read_tool" &&
+            entry?.capabilities.includes("drawing.write") &&
+            params.drawing_id == null
+          ) {
+            params = { ...params, drawing_id: dwg };
+          }
           let drawingPins: Record<string, unknown> = {};
           if (action !== "run_read_tool") {
             if (
@@ -674,10 +681,10 @@ export class ConverseLoop {
           state.proposalMade = true;
           if (tool === "run_capability") {
             const target = String(args.tool ?? "");
-            const params = asRecord(args.params);
+            const params = asRecord(consult.args.params);
             // dwg resolves exactly as dispatchAllowed will resolve it — the chip
             // must render the TARGET drawing, not just the one on screen.
-            const dwg = String(args.dwg ?? session.drawing_id);
+            const dwg = String(consult.args.dwg ?? session.drawing_id);
             await emit("proposed_run", {
               confirmation_id: confirmationId,
               tool: target,

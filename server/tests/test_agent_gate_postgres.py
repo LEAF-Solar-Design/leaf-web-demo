@@ -402,7 +402,7 @@ def test_atomic_redemption_does_not_run_a_second_stranding_audit(
             "atomic redemption evidence must replace the later general audit"),
     )
     result = agent_gate.gate(
-        "atomic-tenant", "atomic-session", "atomic-turn", "run_write_tool",
+        "atomic-tenant", "atomic-session", "atomic-turn", "submit_live_solve",
         {"tool": "add-panel", "confirmation_id": "atomic-approval"},
         {"run_write": True},
     )

@@ -221,7 +221,7 @@ def test_request_confirmation_mints_a_confirmation_id_at_rung_zero():
 
 def test_confirm_once_flow_and_session_grant_persists():
     args = {"tool": "add-panel", "params": {"n": 2}, "dwg": "rooftop_demo"}
-    first = _gate("run_write_tool", args, session="s-A")
+    first = _gate("submit_live_solve", args, session="s-A")
     assert first["decision"] == "awaiting_approval"
     cid = first["confirmation_id"]
     assert cid
@@ -230,16 +230,16 @@ def test_confirm_once_flow_and_session_grant_persists():
     assert ok and record["granted"] and reason == "granted"
 
     # re-invoke carries confirmation_id inside args (wire contract §7)
-    resumed = _gate("run_write_tool", dict(args, confirmation_id=cid), session="s-A")
+    resumed = _gate("submit_live_solve", dict(args, confirmation_id=cid), session="s-A")
     assert resumed["decision"] == "allow"
     assert resumed["reason"] == "allow_via_approval"
 
     # confirm-once persisted per session: same session skips the chip...
-    again = _gate("run_write_tool", args, session="s-A")
+    again = _gate("submit_live_solve", args, session="s-A")
     assert again["decision"] == "allow"
     assert again["reason"] == "allow_via_session_grant"
     # ...a DIFFERENT session files a fresh approval
-    other = _gate("run_write_tool", args, session="s-B")
+    other = _gate("submit_live_solve", args, session="s-B")
     assert other["decision"] == "awaiting_approval"
     assert other["confirmation_id"] != cid
 
@@ -265,6 +265,33 @@ def test_granted_approval_redeems_exactly_once_always_confirm():
     assert replay["decision"] == "deny"
     assert replay["reason"] == "approval_consumed"
     assert agent_gate.read_pending(cid)["consumed_at"]
+
+
+def test_drawing_write_requires_fresh_approval_for_every_execution():
+    """One approved drawing mutation must not authorize a later mutation."""
+    args = {
+        "tool": "add-panel",
+        "params": {"n": 2},
+        "dwg": "rooftop_demo",
+    }
+    first = _gate("run_write_tool", args, session="s-write")
+    assert first["decision"] == "awaiting_approval"
+    assert first["policy"] == "always-confirm"
+    agent_gate.grant_approval(first["confirmation_id"])
+    resumed = _gate(
+        "run_write_tool",
+        dict(args, confirmation_id=first["confirmation_id"]),
+        session="s-write",
+    )
+    assert resumed["reason"] == "allow_via_approval"
+
+    again = _gate("run_write_tool", args, session="s-write")
+    assert again["decision"] == "awaiting_approval"
+    assert again["policy"] == "always-confirm"
+    assert again["confirmation_id"] != first["confirmation_id"]
+    assert agent_gate.has_session_grant(
+        "t-gate", "s-write", "run_write_tool", agent_gate.grant_target(args)
+    ) is False
 
 
 def test_falsy_consumed_stamp_still_denies_the_replay():
@@ -350,16 +377,16 @@ def test_confirm_once_replay_denies_but_grant_covers_repeats():
     """Confirm-once consumes the record too; repeats in the session ride the
     session grant, never a re-redeemed approval."""
     args = {"tool": "add-panel"}
-    first = _gate("run_write_tool", args, session="s-consume")
+    first = _gate("submit_live_solve", args, session="s-consume")
     cid = first["confirmation_id"]
     agent_gate.grant_approval(cid)
-    assert _gate("run_write_tool", dict(args, confirmation_id=cid),
+    assert _gate("submit_live_solve", dict(args, confirmation_id=cid),
                  session="s-consume")["reason"] == "allow_via_approval"
-    replay = _gate("run_write_tool", dict(args, confirmation_id=cid), session="s-consume")
+    replay = _gate("submit_live_solve", dict(args, confirmation_id=cid), session="s-consume")
     assert replay["decision"] == "deny"
     assert replay["reason"] == "approval_consumed"
     # the plain (no-id) repeat still allows — via the grant, not the record
-    again = _gate("run_write_tool", args, session="s-consume")
+    again = _gate("submit_live_solve", args, session="s-consume")
     assert again["reason"] == "allow_via_session_grant"
 
 
@@ -367,14 +394,14 @@ def test_session_grant_does_not_cross_to_another_tool():
     """One chip names ONE tool. Approving a benign write must not silently
     authorize a different, destructive write in the same session."""
     benign = {"tool": "add-panel"}
-    first = _gate("run_write_tool", benign, session="s-tools")
+    first = _gate("submit_live_solve", benign, session="s-tools")
     agent_gate.grant_approval(first["confirmation_id"])
-    assert _gate("run_write_tool", dict(benign, confirmation_id=first["confirmation_id"]),
+    assert _gate("submit_live_solve", dict(benign, confirmation_id=first["confirmation_id"]),
                  session="s-tools")["reason"] == "allow_via_approval"
     # the SAME tool rides the grant...
-    assert _gate("run_write_tool", benign, session="s-tools")["reason"] == "allow_via_session_grant"
+    assert _gate("submit_live_solve", benign, session="s-tools")["reason"] == "allow_via_session_grant"
     # ...a DIFFERENT tool under the same action still needs its own chip
-    other = _gate("run_write_tool", {"tool": "delete-everything"}, session="s-tools")
+    other = _gate("submit_live_solve", {"tool": "delete-everything"}, session="s-tools")
     assert other["decision"] == "awaiting_approval"
 
 
@@ -382,13 +409,13 @@ def test_session_grant_does_not_cross_to_another_tenant():
     """has_session_grant is tenant-scoped: a tenant presenting someone else's
     session id inherits nothing."""
     args = {"tool": "add-panel"}
-    first = _gate("run_write_tool", args, tenant="t-A", session="s-shared")
+    first = _gate("submit_live_solve", args, tenant="t-A", session="s-shared")
     agent_gate.grant_approval(first["confirmation_id"])
-    assert _gate("run_write_tool", dict(args, confirmation_id=first["confirmation_id"]),
+    assert _gate("submit_live_solve", dict(args, confirmation_id=first["confirmation_id"]),
                  tenant="t-A", session="s-shared")["reason"] == "allow_via_approval"
-    assert _gate("run_write_tool", args, tenant="t-A",
+    assert _gate("submit_live_solve", args, tenant="t-A",
                  session="s-shared")["reason"] == "allow_via_session_grant"
-    other = _gate("run_write_tool", args, tenant="t-other", session="s-shared")
+    other = _gate("submit_live_solve", args, tenant="t-other", session="s-shared")
     assert other["decision"] == "awaiting_approval"
 
 
@@ -397,9 +424,9 @@ def test_legacy_grant_file_grants_nothing():
     cannot be re-keyed — it must be ignored, not trusted."""
     agent_gate.grants_file().parent.mkdir(parents=True, exist_ok=True)
     agent_gate.grants_file().write_text(
-        json.dumps({"s-legacy": {"run_write_tool": "2026-01-01T00:00:00Z"}}),
+        json.dumps({"s-legacy": {"submit_live_solve": "2026-01-01T00:00:00Z"}}),
         encoding="utf-8")
-    res = _gate("run_write_tool", {"tool": "add-panel"}, session="s-legacy")
+    res = _gate("submit_live_solve", {"tool": "add-panel"}, session="s-legacy")
     assert res["decision"] == "awaiting_approval"
 
 
@@ -408,16 +435,16 @@ def test_planted_grant_key_with_no_timestamp_authorizes_nothing():
     snapshot carrying the exact key with a null / empty / non-timestamp value is
     a key someone planted — honouring it would dispatch a write with no chip."""
     args = {"tool": "add-panel"}
-    key = agent_gate._grant_key("t-gate", "s-planted", "run_write_tool",
+    key = agent_gate._grant_key("t-gate", "s-planted", "submit_live_solve",
                                 agent_gate.grant_target(args))
     for bogus in (None, "", 0, True, [], {}, "not-a-timestamp"):
         agent_gate.grants_file().parent.mkdir(parents=True, exist_ok=True)
         agent_gate.grants_file().write_text(
             json.dumps({"v": 2, "grants": {key: bogus}}), encoding="utf-8")
         assert agent_gate.has_session_grant(
-            "t-gate", "s-planted", "run_write_tool",
+            "t-gate", "s-planted", "submit_live_solve",
             agent_gate.grant_target(args)) is False, f"value {bogus!r} granted"
-        res = _gate("run_write_tool", args, session="s-planted")
+        res = _gate("submit_live_solve", args, session="s-planted")
         assert res["decision"] == "awaiting_approval", f"value {bogus!r} skipped the chip"
 
 
@@ -425,16 +452,16 @@ def test_one_malformed_entry_rejects_the_whole_grants_snapshot():
     """A snapshot this module cannot read is not a set of grants to salvage —
     the cost of rejecting is one extra confirmation chip."""
     args = {"tool": "add-panel"}
-    first = _gate("run_write_tool", args, session="s-mixed")
+    first = _gate("submit_live_solve", args, session="s-mixed")
     agent_gate.grant_approval(first["confirmation_id"])
-    assert _gate("run_write_tool", dict(args, confirmation_id=first["confirmation_id"]),
+    assert _gate("submit_live_solve", dict(args, confirmation_id=first["confirmation_id"]),
                  session="s-mixed")["reason"] == "allow_via_approval"
-    assert _gate("run_write_tool", args, session="s-mixed")["reason"] == "allow_via_session_grant"
+    assert _gate("submit_live_solve", args, session="s-mixed")["reason"] == "allow_via_session_grant"
     # now corrupt a SIBLING entry: the real grant must stop being honoured too
     raw = json.loads(agent_gate.grants_file().read_text(encoding="utf-8"))
-    raw["grants"]["[\"t-x\",\"s-x\",\"run_write_tool\",[\"none\"]]"] = None
+    raw["grants"]["[\"t-x\",\"s-x\",\"submit_live_solve\",[\"none\"]]"] = None
     agent_gate.grants_file().write_text(json.dumps(raw), encoding="utf-8")
-    assert _gate("run_write_tool", args, session="s-mixed")["decision"] == "awaiting_approval"
+    assert _gate("submit_live_solve", args, session="s-mixed")["decision"] == "awaiting_approval"
 
 
 def test_approval_record_copied_under_another_id_denies():
@@ -609,10 +636,10 @@ def test_corrupt_policy_file_fails_closed(tmp_path, monkeypatch):
 
 def test_tier_override_reaches_gate(tmp_path, monkeypatch):
     _custom_policy(tmp_path, monkeypatch, lambda raw: raw.update(
-        {"tier_overrides": {"hosted_pro": {"run_write_tool": {"policy": "auto"}}}}))
-    res = _gate("run_write_tool", {"tool": "add-panel"}, tier="hosted_pro")
+        {"tier_overrides": {"hosted_pro": {"submit_live_solve": {"policy": "auto"}}}}))
+    res = _gate("submit_live_solve", {"tool": "add-panel"}, tier="hosted_pro")
     assert res["decision"] == "allow"
-    res2 = _gate("run_write_tool", {"tool": "add-panel"}, tier="hosted_starter")
+    res2 = _gate("submit_live_solve", {"tool": "add-panel"}, tier="hosted_starter")
     assert res2["decision"] == "awaiting_approval"
 
 

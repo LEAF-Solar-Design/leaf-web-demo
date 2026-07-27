@@ -24,12 +24,12 @@ function readPbm(path) {
   return points.sort((a, b) => a[1] - b[1] || a[0] - b[0])
 }
 
-function panel(handle, x, y) {
+function panel(handle, x, y, size = 1) {
   return {
     handle,
     layer: 'PANELS',
     closed: true,
-    pts: [[x, y, 7], [x + 1, y, 7], [x + 1, y + 1, 7], [x, y + 1, 7]],
+    pts: [[x, y, 7], [x + size, y, 7], [x + size, y + size, 7], [x, y + size, 7]],
     xdata: { panel: handle },
     metadata: { kind: 'roof-panel' },
   }
@@ -48,7 +48,8 @@ export function makeCatProofState() {
   }
   const cat = {
     ...base,
-    polylines: handles.map((handle, index) => panel(handle, points[index][0], points[index][1])),
+    polylines: handles.map((handle, index) =>
+      panel(handle, points[index][0] * 100, points[index][1] * 100, 100)),
   }
   return { base, cat, count: handles.length, head: 1, events: [] }
 }
