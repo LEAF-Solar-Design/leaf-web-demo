@@ -102,9 +102,21 @@ async function http(path, opts, timeoutMs = null) {
   if (!res.ok) {
     const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
     e.status = res.status // callers gate on 401/403 without string-matching
+    try {
+      e.body = await res.clone().json()
+    } catch { /* non-JSON errors keep the stable status-only contract */ }
     throw e
   }
   return res.json()
+}
+
+const WORKSPACE_BOOTSTRAP_DETAILS = new Set([
+  'verified subject has no active platform identity binding',
+  'verified subject has no active platform tenant authority',
+])
+
+export function isWorkspaceBootstrapRequired(error) {
+  return error?.status === 403 && WORKSPACE_BOOTSTRAP_DETAILS.has(error?.body?.detail)
 }
 
 // --- Session / intake ---------------------------------------------------
