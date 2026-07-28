@@ -216,6 +216,14 @@ export default function ToolCast({
   const transportMock = PUBLIC_DEMO || !sessionReady
   const sessionReadyRef = useRef(sessionReady)
   sessionReadyRef.current = sessionReady
+  // The first-run coach is only for visitors who were never signed in during
+  // this page view. An active session that later expires flips status back
+  // to 'required' (any subscribed 401 does it), and a first-run hint
+  // surfacing mid-session for a returning user is noise, not coaching.
+  const sessionWasActiveRef = useRef(false)
+  useEffect(() => {
+    if (platformSession.status === 'active') sessionWasActiveRef.current = true
+  }, [platformSession.status])
   const requireAuth = platformSession.actions.requireAuth
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
@@ -1383,7 +1391,9 @@ export default function ToolCast({
           bannerSubtitle="One scene for request, approval, job, drawing, version, and trust."
         />
       )}
-      {!tourOn && sessionAuthRequired && <FirstRunCoach signedIn={platformSession.status === 'active'} active={!focusView} />}
+      {!tourOn && sessionAuthRequired && !sessionWasActiveRef.current && (
+        <FirstRunCoach signedIn={platformSession.status === 'active'} active={!focusView} />
+      )}
     </>
   )
 }

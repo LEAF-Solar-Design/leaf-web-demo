@@ -66,8 +66,15 @@
   .coach-card { width: 246px; }
 }
 
+/* <=980px: landing.css hands the whole bottom half of the viewport to the
+   rails (.tc-rail { top: 54%; bottom: 0; width: 50% }, .tc-rail-r at
+   left: 50%), so there is NO free bottom-right corner in this layout class:
+   any fixed card there sits across live operations tabs, and a pointer
+   inside the overlap targets .coach-root, eating the tab's click. The coach
+   is a pointer/keyboard discovery aid; where it cannot avoid covering
+   controls it must not render at all. */
 @media (max-width: 980px) {
-  .coach-card { width: 300px; }
+  .coach-root { display: none; }
 }
 
 @keyframes coach-rise {
