@@ -414,7 +414,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
 
     // Terminal state.
     let stopReason: ConverseStopReason;
-    let error: { error_code: string; message: string; retryable: boolean } | undefined;
+    let error: { error_code: string; message: string; retryable: boolean; retry_after_s?: number } | undefined;
     if (timedOut) {
       stopReason = "timeout";
       error = {
@@ -437,6 +437,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           `Anthropic rate limited` +
           (retryAfterS !== null ? ` (retry after ~${Math.round(retryAfterS)}s)` : " (horizon unknown)"),
         retryable: true,
+        ...(retryAfterS !== null ? { retry_after_s: retryAfterS } : {}),
       };
     } else if (terminalError) {
       stopReason = "error";

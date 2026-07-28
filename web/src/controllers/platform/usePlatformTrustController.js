@@ -5,6 +5,7 @@ import {
   getEntitlements,
   getHealth,
   getUsage,
+  activateClaudeGrant,
   linkClaudeGrant,
   unlinkClaudeGrant,
 } from '../../api.js'
@@ -17,6 +18,7 @@ const defaultServices = {
   getEntitlements,
   getHealth,
   getUsage,
+  activateClaudeGrant,
   linkClaudeGrant,
   unlinkClaudeGrant,
 }
@@ -86,6 +88,7 @@ export default function usePlatformTrustController({
       loadHealth: controller.loadHealth,
       loadGrant: controller.loadGrant,
       linkClaude: controller.linkClaude,
+      activateClaude: controller.activateClaude,
       unlinkClaude: controller.unlinkClaude,
       reportAuthRequired: controller.reportAuthRequired,
     },

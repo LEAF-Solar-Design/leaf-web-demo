@@ -164,10 +164,27 @@ export type AgentGrant =
 
 /** The credential kind of a linked grant (web-lane OAuth vs enterprise BYO API key). */
 export type GrantKind = AgentGrant["kind"];
+export type GrantPlan = "team" | "enterprise";
+
+export interface GrantLease {
+  grant: AgentGrant;
+  account_id: string;
+  lease_id: string;
+}
+
+export interface GrantSettlement {
+  usage: Pick<ConverseTurnUsage, "cost_tokens">;
+  stop_reason: ConverseStopReason;
+  retry_after_s?: number;
+}
 
 export interface OAuthGrantProvider {
   /** Resolve the per-tenant Agent SDK grant. Concern 2 only. */
   getGrant(tenantId: string): Promise<AgentGrant>;
+  /** Reserve one eligible Team/Enterprise mount for a live turn. */
+  acquireGrant?(tenantId: string): Promise<GrantLease>;
+  /** Feed the turn's token-free usage and terminal state back into routing. */
+  settleGrant?(tenantId: string, leaseId: string, outcome: GrantSettlement): Promise<void>;
 }
 
 /** The default tenant id when a request carries none (the proven demo loop). */
@@ -196,6 +213,10 @@ export interface GrantAccountStatus {
   kind: GrantKind;
   linked_at: string | null;
   active: boolean;
+  plan?: GrantPlan | null;
+  eligible?: boolean;
+  usage_tokens?: number;
+  cooldown_until?: string | null;
 }
 
 /** Token-free operational facts about one tenant grant record. */
@@ -206,7 +227,7 @@ export interface GrantDiagnostic {
   linked_at: string | null;
   backend: "file";
   path_class: "efs_access_point" | "local_file" | "environment";
-  record_format: "v1" | "v2" | "legacy" | "environment" | "missing" | "invalid";
+  record_format: "v1" | "v2" | "v3" | "legacy" | "environment" | "missing" | "invalid";
   legacy_fallback_present: boolean;
   owner: { uid: number | null; gid: number | null; mode: string | null };
   persistence: {
@@ -230,7 +251,7 @@ export interface TenantGrantAdminStore {
    * oauth; otherwise oauth). The kind is persisted alongside the token (never logged).
    * Returns the resulting link status (carrying `kind`, never the token).
    */
-  put(tenantId: string, token: string, kind?: GrantKind, label?: string): Promise<GrantStatus>;
+  put(tenantId: string, token: string, kind?: GrantKind, label?: string, plan?: GrantPlan): Promise<GrantStatus>;
   /** Select one of this tenant's linked accounts for subsequent authoring runs. */
   activate(tenantId: string, accountId: string): Promise<GrantStatus>;
   /** Report link status + kind only — never the token. */
@@ -556,7 +577,7 @@ export type ConverseRunnerEvent =
       /** True when a missing resume target forced a fresh SDK conversation. */
       sdkSessionReset?: boolean;
       /** Present when stopReason is error/llm_* — relayed on the wire error event. */
-      error?: { error_code: string; message: string; retryable: boolean };
+      error?: { error_code: string; message: string; retryable: boolean; retry_after_s?: number };
     };
 
 export interface ConverseRunInput {

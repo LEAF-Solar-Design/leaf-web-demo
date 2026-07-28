@@ -72,6 +72,28 @@ test('Explore the demo keeps the CAD operator on try and runs without private AP
   expect(calls.filter((call) => call.path.startsWith('/api/') && !call.path.startsWith('/api/site/'))).toEqual([])
 })
 
+test('signed-in demo URL keeps the CAD surface and uses the live conversation session', async ({ page }) => {
+  const state = makeCatProofState()
+  const calls = []
+  await page.addInitScript(() => localStorage.setItem('leaf.jwt', 'fixture-token'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    calls.push({ method: request.method(), path: url.pathname })
+    const result = catProofResponse({ method: request.method(), path: url.pathname, body: request.postDataJSON?.() }, state)
+    await route.fulfill({ status: result.status, contentType: 'application/json', body: JSON.stringify(result.body || {}) })
+  })
+
+  await page.goto('/try?demo=1')
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await expect(page.getByTestId('demo-conversation')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeEnabled()
+  await page.getByRole('textbox', { name: 'Command bar' }).fill('hello from the mounted account')
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await expect.poll(() => calls.some((call) => call.method === 'POST' && call.path === '/api/sessions')).toBe(true)
+  await expect.poll(() => calls.some((call) => call.method === 'POST' && call.path === '/api/sessions/cat-session/messages')).toBe(true)
+})
+
 test('an Auth0 callback aimed at try does not boot the legacy app', async ({ page }) => {
   const state = makeCatProofState()
   await page.route('http://leaf-proof.invalid/api/**', async (route) => {

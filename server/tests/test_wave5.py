@@ -153,6 +153,7 @@ class _HarnessStub(http.server.BaseHTTPRequestHandler):
     STORE: dict = {}                 # tenant_id -> {"token","kind"}
     LAST_PUT_TOKEN: str | None = None
     LAST_PUT_KIND: str | None = None  # what the APP forwarded (None => app omitted it)
+    LAST_PUT_PLAN: str | None = None
 
     def _send(self, status: int, body: dict) -> None:
         raw = json.dumps(body).encode("utf-8")
@@ -175,6 +176,7 @@ class _HarnessStub(http.server.BaseHTTPRequestHandler):
         cls.STORE[self._tenant()] = {"token": token, "kind": kind}
         cls.LAST_PUT_TOKEN = token
         cls.LAST_PUT_KIND = forwarded_kind
+        cls.LAST_PUT_PLAN = payload.get("plan")
         self._send(200, {"linked": True,
                          "linked_at": datetime.now(timezone.utc).isoformat(),
                          "kind": kind})
@@ -201,6 +203,7 @@ def harness_stub():
     _HarnessStub.STORE = {}
     _HarnessStub.LAST_PUT_TOKEN = None
     _HarnessStub.LAST_PUT_KIND = None
+    _HarnessStub.LAST_PUT_PLAN = None
     srv = http.server.HTTPServer(("127.0.0.1", 0), _HarnessStub)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -233,6 +236,22 @@ def test_grant_explicit_api_key_kind_forwarded(monkeypatch, harness_stub):
     # token NEVER echoed; the explicit kind WAS forwarded to the harness.
     assert FAKE_API not in r.text and "token" not in b
     assert stub.LAST_PUT_TOKEN == FAKE_API and stub.LAST_PUT_KIND == "api_key"
+
+
+def test_grant_commercial_plan_attestation_forwarded_without_echo(monkeypatch, harness_stub):
+    url, stub = harness_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    c = _client()
+
+    r = c.post(
+        "/api/tenant/claude-grant",
+        json={"token": FAKE_OAUTH, "kind": "oauth", "plan": "team"},
+        headers=_h("commercial"),
+    )
+
+    assert r.status_code == 200, r.text
+    assert stub.LAST_PUT_PLAN == "team"
+    assert FAKE_OAUTH not in r.text and "token" not in r.json()
 
 
 def test_grant_autodetect_api_key_when_kind_omitted(monkeypatch, harness_stub):

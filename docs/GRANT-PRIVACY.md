@@ -1,117 +1,104 @@
-# How the platform handles your Claude credential
+# How Leaf handles Claude credentials
 
-Status: DRAFT for enterprise review (census #13, NL-build lane, 2026-07-22).
-Audience: enterprise security reviewers. Every claim below names the code or
-test that enforces it. Contract references: `server/CONTRACT-ADDENDUM.md`
-sections 15 to 17 (FROZEN) and `harness/contract/HARNESS-CONTRACT.md` (FROZEN).
+Status: Staging commercial lane review, 2026-07-27.
 
-## What we store
+Audience: enterprise security reviewers. The controls below are implemented in
+`server/routers/tenant.py`, `harness/src/ports/impl/oauthGrantProvider.ts`,
+`harness/src/agent/spineTurnAdapter.ts`, and their focused tests.
 
-One credential per tenant, and nothing else:
+## Terms boundary
 
-- either a "sign in with Claude" OAuth token (web lane), or an API key your
-  company brings (enterprise lane, the recommended path);
-- a one-word record of which kind it is (`oauth` or `api_key`);
-- the file's own modification time, which we report as `linked_at`.
+This lane accepts Claude Team or Enterprise setup tokens under Anthropic's
+Commercial Terms and Claude for Work terms. It also accepts customer-owned
+Anthropic API keys. It does not accept consumer Free, Pro, or Max credentials
+for automatic routing.
 
-We store no other Anthropic account data. We never derive, cache, or copy the
-credential anywhere else.
+The tenant owner must attest the Team or Enterprise plan when mounting an OAuth
+credential. This is a product control, not proof of the customer's contract.
+Leaf must keep the current terms and its own Anthropic agreement under review.
 
-## Where it lives
+Primary terms reviewed on 2026-07-27:
 
-The credential lives in one file per tenant (`<tenant>.token`, mode 0600) plus
-a kind sidecar (`<tenant>.kind`) under `LEAF_GRANTS_DIR`, inside the harness
-container only (`harness/src/ports/impl/oauthGrantProvider.ts`,
-`FileTenantGrantStore`). In the container stack this directory is the
-`leaf-grants` volume. Only the harness mounts it. The app, web, and broker
-containers cannot read it. The harness runs as a dedicated non-root user
-(uid 10002, `deploy/Dockerfile.harness`).
+- https://www.anthropic.com/legal/commercial-terms
+- https://www.anthropic.com/legal/service-specific-terms
+- https://code.claude.com/docs/en/legal-and-compliance
 
-The file store is the default backend. Production deployments can select a
-sealed secret store (vault or DPAPI) through the `LEAF_GRANT_STORE` seam. If an
-operator requests `vault` before it is wired, the harness refuses to start; it
-never falls back to disk silently (`createTenantGrantStore`, pinned by
-`harness/test/grantStore.test.ts`).
+## What Leaf stores
 
-## How it moves
+Leaf stores one private atomic v3 JSON record per tenant. It contains:
 
-You submit the credential once, to the app (`POST /api/tenant/claude-grant`).
-The app forwards it in that one request to the harness over an authenticated
-internal hop (`X-Harness-Secret`, shared secret `LEAF_HARNESS_SECRET`,
-fail-closed) and then forgets it. The app never persists, logs, or echoes the
-credential (`server/routers/tenant.py`, asserted by `server/tests/test_wave4.py`).
+- one or more Team or Enterprise OAuth setup tokens, or customer API keys;
+- an opaque account id, owner-supplied label, credential kind, plan attestation,
+  and link time;
+- token-free routing state: settled token usage, selection count, last use,
+  short leases, and quota cooldown.
 
-Every status or link response carries only `{linked, linked_at, kind}` and
-never the credential (`grantStore.test.ts`, `grantAdmin.e2e.test.ts`, and the
-containerized smoke `scripts/harness-container-smoke.py`).
+The app and browser never store the credential. Status responses contain only
+the token-free account inventory.
 
-## When we use it
+## Who can manage mounts
 
-The credential is used only for your own tenant's work: authoring a tool at
-design time, or driving your conversational session. For each such request the
-harness builds a scrubbed child environment: the known ambient Anthropic
-identities are removed, every environment key whose NAME looks
-credential-bearing (secret / token / key / password / credential patterns) is
-removed wholesale, and exactly one credential variable is then set
-(`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`). The sweep is by key-name
-pattern, not a fixed list, so a newly added platform secret is stripped by
-default. Non-secret process environment (paths, locale) passes through so the
-SDK can run (`envScrub.ts` + `buildScrubbedEnv`, pinned by `runnerEnv.test.ts`).
-The only network egress on that path is Anthropic, through the official Agent
-SDK (`agentSdkRunner.ts`). Registered tools run with zero LLM involvement, so
-normal tool execution never touches the credential at all (HARNESS-CONTRACT
-section 4, enforced by `converseRuntimeSeparation.test.ts`).
+Only the active platform tenant owner can list, add, select, diagnose, or remove
+mounts. The app resolves the current server-owned identity binding and reads the
+role again before it contacts the harness. Revoked, moved, stale, and non-owner
+bindings fail closed.
 
-Credential scope is the tenant workspace: the store keys one credential per
-validated tenant id (`tenant_id_validator.py` mirrored in the TS store; a
-crafted id cannot escape the directory), and one tenant's credential is never
-used for another tenant's work. Anthropic's rule for subscription OAuth tokens
-is one token per end user, never pooled — so an OAuth-linked workspace must
-correspond to exactly one end user. The platform does not itself enforce a
-per-user key inside a multi-user workspace; a workspace with many seats must
-use the enterprise lane (your organization's own API key under your own
-Anthropic agreement), not a member's personal OAuth token.
+Auth-off local and hermetic test paths keep the legacy behavior. Staging and
+production use live authorization.
 
-## What we log
+## Where credentials live
 
-Nothing that contains the credential. No designed code path places a
-credential in a log or error message, and every harness logging site that
-renders arbitrary text — the serve status log, the request-error line, and the
-git-worker diagnostics — routes through one shared token redactor
-(`src/redact.ts`) before writing, as defense in depth. Git itself cannot see a
-credential either: both the boot-time git worker and the in-process git
-fallback run on the same scrubbed environment as the SDK child, and the author
-session's filesystem tool refuses any path under `.git/` — including paths
-that reach it through a symlink or junction committed in the checkout, which
-are rejected outright — so model-authored repository content cannot install a
-git hook or filter that would run with access to secrets during the register
-commit (`fsTenantRepo.test.ts`). The
-internal hop secret is env-only and never logged. The containerized smoke
-asserts the end result: after a full link, author, restart, and unlink cycle,
-neither the credential nor the hop secret appears anywhere in the container
-logs.
+The record lives under `LEAF_GRANTS_DIR` inside the harness container. New
+writes use a mode-0600 temporary file, file fsync, atomic rename, and directory
+fsync where the operating system supports it. Only the harness mounts this
+directory. The app, web, and broker containers cannot read it.
 
-We do keep usage telemetry (token counts and estimated cost from each SDK
-response). Telemetry never includes credentials.
+The file store is the staging backend. `LEAF_GRANT_STORE=vault` is a fail-closed
+production seam. The harness refuses to start if that backend is requested
+before it is implemented.
 
-## How you remove it
+## How a credential moves
 
-`DELETE /api/tenant/claude-grant` deletes the token file and its kind sidecar
-immediately, and the response reports the store's actual post-delete state.
-For real tenants there are no other copies, so deletion is complete. The demo
-tenant is the one documented exception: local development can mount an
-operator fallback grant (`LEAF_GRANT_FILE` / `CLAUDE_CODE_OAUTH_TOKEN`, §16
-back-compat), which a delete does not remove — and the delete response then
-says `linked: true` honestly rather than pretending otherwise. Enterprise
-tenants never use that fallback. Destroying the `leaf-grants` volume
-(`docker compose down -v`) removes every stored credential at once. We make no
-backups of the grant volume; if your operators add volume backups, those
-backups inherit this document's obligations.
+The browser sends a credential once to
+`POST /api/tenant/claude-grant`. The app forwards it once to the harness over
+the authenticated internal hop and then forgets it. The app never logs,
+persists, or echoes the credential.
 
-## Open policy question (not a code gap)
+The harness injects exactly one selected credential into a scrubbed Agent SDK
+child environment. Known ambient Anthropic identities and credential-like
+environment keys are removed first. Registered CAD tools run without LLM
+involvement, so normal tool execution never receives the credential.
 
-Whether Anthropic's consumer terms permit a hosted, stranger-facing service to
-author tools on end users' own subscription OAuth tokens is a POLICY question
-that remains open. It gates a stranger-facing launch only. The enterprise
-lane does not depend on it: bring your own API key, which your agreement with
-Anthropic already covers.
+## Automatic routing
+
+For each live conversational turn, the harness considers only eligible mounts
+from that tenant's record. It selects the lowest settled token usage, then uses
+selection count and stable account fields as deterministic tie breakers.
+
+The harness creates a short lease before the turn. That lease reserves estimated
+capacity so simultaneous turns in one staging harness do not choose the same
+mount. When the turn ends, Leaf removes the lease and settles the actual
+cost-relevant token count.
+
+A long-horizon quota response places only the selected mount in cooldown. Leaf
+does not retry a completed or partly visible turn. It does not pool credentials
+across tenants and does not use rotation to bypass provider limits. Ephemeral
+per-turn credentials never enter the tenant pool or its usage records.
+
+## Logs and telemetry
+
+No designed log path contains a credential. Harness error and status logs use
+the shared redactor in `harness/src/redact.ts`. Errors that cross the durable
+transcript boundary are scrubbed by value before they leave the runner.
+
+Leaf records token counts, estimated cost, selected account id, and cooldown
+state. It never records the credential value in telemetry.
+
+## Removal
+
+`DELETE /api/tenant/claude-grant?account_id=...` removes one mount. Deleting
+the last mount removes the tenant record. The response reports the actual
+token-free post-delete state.
+
+The local demo tenant can have a documented environment fallback for backwards
+compatibility. Commercial staging tenants do not use that fallback.

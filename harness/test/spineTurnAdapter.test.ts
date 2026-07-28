@@ -246,6 +246,66 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
     await expect(iterator.next()).rejects.toBeInstanceOf(GrantRequiredError);
   });
 
+  it("settles linked-grant usage against the exact routing lease", async () => {
+    const settlements: Array<{ tenantId: string; leaseId: string; outcome: unknown }> = [];
+    const routed: OAuthGrantProvider = {
+      async getGrant(): Promise<AgentGrant> {
+        throw new Error("manual grant path must not run");
+      },
+      async acquireGrant() {
+        return {
+          grant: { kind: "oauth", oauthToken: "FAKE-routed-token" },
+          account_id: "acct-1",
+          lease_id: "lease-1",
+        };
+      },
+      async settleGrant(tenantId, leaseId, outcome) {
+        settlements.push({ tenantId, leaseId, outcome });
+      },
+    };
+    const { adapter } = makeAdapter({ oauth: routed });
+
+    await drain(adapter.runTurn(turnInput({ text: "hello" })));
+
+    expect(settlements).toHaveLength(1);
+    expect(settlements[0]).toMatchObject({
+      tenantId: "demo-tenant",
+      leaseId: "lease-1",
+      outcome: {
+        usage: { cost_tokens: expect.any(Number) },
+        stop_reason: "end_turn",
+      },
+    });
+    expect((settlements[0]!.outcome as { usage: { cost_tokens: number } }).usage.cost_tokens).toBeGreaterThan(0);
+  });
+
+  it("never acquires or settles a tenant mount for an ephemeral wire credential", async () => {
+    let acquired = 0;
+    let settled = 0;
+    const routed: OAuthGrantProvider = {
+      async getGrant(): Promise<AgentGrant> {
+        throw new Error("linked grant path must not run");
+      },
+      async acquireGrant() {
+        acquired += 1;
+        throw new Error("must not acquire");
+      },
+      async settleGrant() {
+        settled += 1;
+      },
+    };
+    const { adapter, grants } = makeAdapter({ oauth: routed });
+
+    await drain(adapter.runTurn(turnInput({
+      text: "hello",
+      credential_grant: { kind: "oauth", oauth_token: "FAKE-ephemeral-token" },
+    })));
+
+    expect(acquired).toBe(0);
+    expect(settled).toBe(0);
+    expect(grants).toEqual([{ kind: "oauth", oauthToken: "FAKE-ephemeral-token" }]);
+  });
+
   it("aborted signal: the stream ends without yielding further events", async () => {
     const { adapter } = makeAdapter();
     const ctrl = new AbortController();

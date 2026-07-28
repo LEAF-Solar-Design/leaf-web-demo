@@ -403,8 +403,11 @@ export async function getClaudeGrant() {
 // from the user's choice. It is OPTIONAL in the contract (the server auto-detects
 // from the token shape when omitted); we send it so the linked kind is honest
 // even if detection is ambiguous. The token itself is never stored/echoed/logged.
-export async function linkClaudeGrant(token, kind) {
-  const body = kind ? { token, kind } : { token }
+export async function linkClaudeGrant(token, kind, label, plan) {
+  const body = { token }
+  if (kind) body.kind = kind
+  if (label) body.label = label
+  if (plan) body.plan = plan
   return http('/api/tenant/claude-grant', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
@@ -412,8 +415,17 @@ export async function linkClaudeGrant(token, kind) {
   })
 }
 
-export async function unlinkClaudeGrant() {
+export async function activateClaudeGrant(accountId) {
   return http('/api/tenant/claude-grant', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ account_id: accountId }),
+  })
+}
+
+export async function unlinkClaudeGrant(accountId) {
+  const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''
+  return http(`/api/tenant/claude-grant${query}`, {
     method: 'DELETE',
     headers: { 'X-Tenant-Id': TENANT },
   })
