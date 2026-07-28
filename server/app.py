@@ -227,7 +227,10 @@ def health() -> Dict[str, Any]:
         "data_file_present": deps.DATA_FILE.exists(),
         "engine_registry_present": deps.ENGINE_REGISTRY.exists(),
         "da_client_present": (deps.DA_DIR / "client.py").exists(),
-        "n_tools": len(deps.all_tools()),
+        # Liveness is process-scoped. Do not select the default tenant here:
+        # authored mode can correctly have no effective catalog for that tenant
+        # yet, and that request-scoped state must not make the process unhealthy.
+        "n_tools": len(deps.shared_tools()),
         "n_authored": len(deps._AUTHORED),
         "source_sha": os.environ.get("LEAF_SOURCE_SHA", "unknown"),
         "drawing_mutation_fence_state": _drawing_mutation_fence_state(),

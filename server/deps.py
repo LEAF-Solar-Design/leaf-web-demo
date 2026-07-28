@@ -234,6 +234,31 @@ def _check_global_seed_collisions(tiers: List[Tuple[str, List[Dict[str, Any]]]])
             owner.setdefault(name, tier_name)
 
 
+def _global_tool_tiers() -> List[Tuple[str, List[Dict[str, Any]]]]:
+    """Load and validate the process-global catalog tiers.
+
+    Keep this separate from tenant resolution so process health can inspect the
+    shipped catalog without selecting a tenant or requiring an effective tenant
+    catalog to have been published.
+    """
+    tiers = [
+        ("engine_registry", load_engine_registry_tools()),
+        ("catalog_seed", load_seed_catalog_tools()),
+        ("write_seed", load_seed_write_tools()),
+    ]
+    _check_global_seed_collisions(tiers)
+    return tiers
+
+
+def shared_tools() -> List[Dict[str, Any]]:
+    """Return only the process-global catalog used by every tenant."""
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for _tier_name, tools in _global_tool_tiers():
+        for tool in tools:
+            by_name[tool["name"]] = tool
+    return list(by_name.values())
+
+
 def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
     """Registry tools + general-catalog seed + THIS TENANT's repo tools + write seed +
     authored tools, de-duped by name. PRECEDENCE (last wins): engine registry <
@@ -254,14 +279,10 @@ def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
     catalog seed / write seed) — see ``_check_global_seed_collisions``. Tenant-repo and
     authored_tools.json are excluded from that check: they are the DOCUMENTED override
     tiers and a same-name collision there is the intended shadowing behaviour, not a bug."""
-    engine_tools = load_engine_registry_tools()
-    catalog_tools = load_seed_catalog_tools()
-    write_tools = load_seed_write_tools()
-    _check_global_seed_collisions([
-        ("engine_registry", engine_tools),
-        ("catalog_seed", catalog_tools),
-        ("write_seed", write_tools),
-    ])
+    global_tiers = _global_tool_tiers()
+    engine_tools = global_tiers[0][1]
+    catalog_tools = global_tiers[1][1]
+    write_tools = global_tiers[2][1]
 
     by_name: Dict[str, Dict[str, Any]] = {}
     for t in engine_tools:
