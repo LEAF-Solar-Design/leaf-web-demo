@@ -531,7 +531,8 @@ def test_ready_route_is_separate_from_unchanged_liveness(monkeypatch):
     assert set(original_health) == {
         "ok", "aps_live", "data_file_present", "engine_registry_present",
         "da_client_present", "n_tools", "n_authored", "error", "degraded_mode",
-        "source_sha", "drawing_mutation_fence_state",
+        "source_sha", "drawing_mutation_fence_state", "drawing_store_authority",
+        "upload_store_authority",
     }
     paths = set(app.app.openapi()["paths"])
     assert "/api/ready" in paths
@@ -554,6 +555,18 @@ def test_liveness_reports_exact_mutation_fence_state(tmp_path, monkeypatch):
     assert app.health()["drawing_mutation_fence_state"] == "unreadable"
     monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE")
     assert app.health()["drawing_mutation_fence_state"] == "unconfigured"
+
+
+def test_liveness_reports_running_authority_selectors(monkeypatch):
+    import app
+
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "POSTGRES")
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "postgres")
+
+    health = app.health()
+
+    assert health["drawing_store_authority"] == "postgres"
+    assert health["upload_store_authority"] == "postgres"
 
 
 def test_liveness_ignores_unsupported_shared_customization_while_disabled(

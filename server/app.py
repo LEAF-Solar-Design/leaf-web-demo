@@ -200,6 +200,12 @@ def health() -> Dict[str, Any]:
         "n_authored": len(deps._AUTHORED),
         "source_sha": os.environ.get("LEAF_SOURCE_SHA", "unknown"),
         "drawing_mutation_fence_state": _drawing_mutation_fence_state(),
+        "drawing_store_authority": os.environ.get(
+            "LEAF_DRAWING_STORE", "legacy"
+        ).strip().lower(),
+        "upload_store_authority": os.environ.get(
+            "LEAF_UPLOAD_STORE", "legacy"
+        ).strip().lower(),
     })
 
 
