@@ -57,6 +57,7 @@ function useSmallViewport() {
 export default function FirstRunCoach({ signedIn = false, active = true, sceneActive = true }) {
   const [dismissed, setDismissed] = useState(readDismissed)
   const [sessionHidden, setSessionHidden] = useState(false)
+  const [entering, setEntering] = useState(true)
   const smallViewport = useSmallViewport()
 
   const visible = active && !smallViewport && !sessionHidden && shouldOfferCoach({
@@ -69,6 +70,23 @@ export default function FirstRunCoach({ signedIn = false, active = true, sceneAc
     writeDismissed()
     setDismissed(true)
   }, [])
+
+  // Choreographed ENTRANCE for a late-mounting pane: the coach appears only
+  // after /api/session answers 401, long after the scene rule went active, so
+  // it would otherwise pop in at full opacity during the landing cast's exit.
+  // It mounts with [data-entering] (opacity 0 at scene-rule specificity, see
+  // coach.css) and releases it after the browser commits that state; the
+  // scene rule's own delayed opacity transition then runs the rank-4 fade-in.
+  // Double rAF: one frame can coalesce with the mount and skip the transition.
+  useEffect(() => {
+    if (!visible) return undefined
+    setEntering(true)
+    let second = 0
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => setEntering(false))
+    })
+    return () => { cancelAnimationFrame(first); if (second) cancelAnimationFrame(second) }
+  }, [visible])
 
   useEffect(() => {
     if (!visible || !sceneActive) return undefined
@@ -93,6 +111,11 @@ export default function FirstRunCoach({ signedIn = false, active = true, sceneAc
 
   if (!visible) return null
 
+  // inert/aria-hidden are SELF-managed (not left to SiteRoot's sweep): the
+  // sweep only runs on scene CHANGES, so a coach that mounts while the scene
+  // is already elsewhere (small-viewport /try -> Back -> resize wide) would
+  // otherwise stay focusable at opacity 0. React 18 attribute idiom: '' sets
+  // the inert attribute, undefined removes it.
   return (
     <div
       className="coach-root"
@@ -100,6 +123,9 @@ export default function FirstRunCoach({ signedIn = false, active = true, sceneAc
       aria-label="Try the command bar"
       data-testid="first-run-coach"
       data-cast="tool"
+      data-entering={entering ? '' : undefined}
+      inert={sceneActive ? undefined : ''}
+      aria-hidden={sceneActive ? undefined : 'true'}
       style={{ '--rank': 4 }}
     >
       <div className="coach-card">

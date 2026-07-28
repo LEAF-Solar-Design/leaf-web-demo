@@ -112,6 +112,16 @@
   .coach-root { display: none; }
 }
 
+/* Pre-entrance state, released one committed frame after mount (see
+   FirstRunCoach.jsx). Must OUTRANK the active-scene rule
+   `.stage-root[data-scene="tool"] [data-cast="tool"] { opacity: 1 }`
+   ((0,3,0)) so a late-mounting card starts transparent; removing the
+   attribute then lets that rule's own delayed transition run the rank-4
+   fade-in. */
+.stage-root[data-scene="tool"] .coach-root[data-entering] {
+  opacity: 0;
+}
+
 @keyframes coach-rise {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }

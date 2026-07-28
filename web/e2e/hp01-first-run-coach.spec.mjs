@@ -135,7 +135,16 @@ test('leaving the tool scene via Back never strands the coach over the landing p
 
   await page.goto('/')
   await page.getByRole('button', { name: 'Try Branch — no install' }).click()
-  await expect(page.getByTestId('first-run-coach')).toBeVisible()
+  const enteringCoach = page.getByTestId('first-run-coach')
+  await expect(enteringCoach).toBeAttached()
+  // Round-5 pin: a late-mounting coach must START transparent (the
+  // choreographed rank-4 entrance), never pop in over the landing exit.
+  const initialOpacity = await enteringCoach.evaluate((el) => getComputedStyle(el).opacity)
+  expect(Number(initialOpacity)).toBeLessThan(1)
+  await expect.poll(
+    () => enteringCoach.evaluate((el) => getComputedStyle(el).opacity),
+    { timeout: 10_000 },
+  ).toBe('1')
 
   await page.goBack()
   const coach = page.getByTestId('first-run-coach')
@@ -224,6 +233,30 @@ test('a mid-session 401 flip back to signed-out never resurfaces the coach', asy
   await page.getByRole('tab', { name: /Versions/ }).click()
   await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible({ timeout: 15_000 })
   await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+})
+
+test('a coach that mounts while the scene is elsewhere is inert from birth', async ({ page }) => {
+  // Round-5 pin: SiteRoot's inert sweep runs only on scene CHANGES. Enter
+  // /try small (coach not mounted), go Back to the landing, then resize
+  // wide: the coach mounts with scene=site and must self-apply inert +
+  // aria-hidden, so its invisible card can never take clicks or focus and
+  // its dismiss button can never record a dismissal from the landing page.
+  const state = makeCatProofState()
+  await routeSession401(page, state)
+  await page.setViewportSize({ width: 844, height: 390 })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Try Branch — no install' }).click()
+  await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible()
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+
+  await page.goBack()
+  await page.setViewportSize({ width: 1280, height: 800 })
+  const coach = page.getByTestId('first-run-coach')
+  await expect(coach).toBeAttached()
+  await expect(coach).toHaveAttribute('aria-hidden', 'true')
+  await expect(coach).toHaveAttribute('inert', '')
+  expect(await page.evaluate(() => localStorage.getItem('leaf.coach.dismissed.v1'))).toBeNull()
 })
 
 test('an active session never shows the coach', async ({ page }) => {
