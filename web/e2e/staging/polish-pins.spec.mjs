@@ -53,6 +53,23 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   await expect(stageRoot).toBeVisible()
   const canvas = stageRoot.locator('canvas').first()
   await expect(canvas).toBeVisible({ timeout: 15_000 })
+
+  // The stage entrance (.stage-viewer's one-time 1730ms condense-in) starts
+  // when the viewer reports ready, which is before this test flips the media
+  // emulation, and a CSS transition that has already started keeps its
+  // original duration when transition-duration later changes (CSS Transitions
+  // level 1, "running transitions are not affected"). A real reduced-motion
+  // user carries the preference from first paint, so the entrance never
+  // animates for them. Let that legitimate pre-flip tail finish before
+  // opening the settle window; anything still moving after this converges is
+  // a genuine reduced-motion violation and fails the poll timeout.
+  await expect.poll(async () => {
+    const first = await canvas.boundingBox()
+    await page.waitForTimeout(150)
+    const second = await canvas.boundingBox()
+    return JSON.stringify(first) === JSON.stringify(second) ? 'stable' : 'moving'
+  }, { timeout: 15_000 }).toBe('stable')
+
   const canvasBoxBefore = await canvas.boundingBox()
   expect(canvasBoxBefore).not.toBeNull()
   expect(canvasBoxBefore.width).toBeGreaterThan(0)
