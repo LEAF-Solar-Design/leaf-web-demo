@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 import app
 import customization_service
@@ -512,6 +514,69 @@ def test_independent_confirmation_rejects_the_harness_dispatch_secret(
     assert denied.status_code == 403
     assert approved == {"confirmation_id": "ok"}
     assert calls == [{"tenant_id": "tenant-a", "change_set_id": "change"}]
+
+
+def test_internal_confirmation_hides_cross_tenant_change_without_mutation(
+    tmp_path, monkeypatch,
+):
+    store = SQLiteCustomizationStore(tmp_path / "customization.db")
+    service = CustomizationService(store)
+    staged = staged_change(store, tenant_id="tenant-a", suffix="route")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_APPROVAL_SECRET", "approval-secret")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_CONFIRMATION_SECRET", "signing-secret")
+    monkeypatch.setenv(
+        "LEAF_CUSTOMIZATION_INTERNAL_APPROVER_SUBJECT", "auth0|approver"
+    )
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(lambda cls: service),
+    )
+    route_app = FastAPI()
+    route_app.include_router(author_router.router)
+    client = TestClient(route_app, raise_server_exceptions=False)
+    body = {"change_set_id": staged.change_set_id}
+    headers = {"X-Approval-Secret": "approval-secret"}
+
+    with store._connection() as conn:
+        confirmations_before = conn.execute(
+            "SELECT COUNT(*) AS n FROM customization_confirmations"
+        ).fetchone()["n"]
+    denied = client.post(
+        "/internal/customization/confirm",
+        json=body,
+        headers={**headers, "X-Tenant-Id": "tenant-b"},
+    )
+
+    assert denied.status_code == 404
+    assert denied.json()["reason_code"] == "confirmation_not_available"
+    assert store.get_change_set(
+        tenant_id="tenant-a", change_set_id=staged.change_set_id
+    ).state is ChangeState.STAGED
+    with store._connection() as conn:
+        confirmations_after_denial = conn.execute(
+            "SELECT COUNT(*) AS n FROM customization_confirmations"
+        ).fetchone()["n"]
+    assert confirmations_after_denial == confirmations_before
+
+    approved = client.post(
+        "/internal/customization/confirm",
+        json=body,
+        headers={**headers, "X-Tenant-Id": "tenant-a"},
+    )
+    assert approved.status_code == 200
+    assert isinstance(approved.json().get("confirmation_id"), str)
+    assert store.get_change_set(
+        tenant_id="tenant-a", change_set_id=staged.change_set_id
+    ).state is ChangeState.STAGED
+    with store._connection() as conn:
+        confirmations_after_owner = conn.execute(
+            "SELECT COUNT(*) AS n FROM customization_confirmations"
+        ).fetchone()["n"]
+    assert confirmations_after_owner == confirmations_before + 1
 
 
 def test_independent_confirmation_rejects_non_ascii_secret(monkeypatch):

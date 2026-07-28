@@ -540,6 +540,13 @@ export function requireDistinctStagedResults(results, tenants) {
   }
 }
 
+export function isMutatingApiRequest(requestUrl, method, allowedOrigins) {
+  const url = new URL(requestUrl)
+  return allowedOrigins.has(url.origin)
+    && url.pathname.startsWith('/api/')
+    && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+}
+
 async function runBrowserTenant(config, tenant, browser, execute) {
   const context = await browser.newContext({
     baseURL: config.webUrl,
@@ -547,6 +554,10 @@ async function runBrowserTenant(config, tenant, browser, execute) {
   })
   const unexpected = []
   const mutatingApiRequests = []
+  const allowedOrigins = new Set([
+    new URL(config.webUrl).origin,
+    new URL(config.apiUrl).origin,
+  ])
   try {
     await context.addInitScript(({ token, drawingId }) => {
       window.localStorage.setItem('leaf.jwt', token)
@@ -555,17 +566,10 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     const page = await context.newPage()
     page.on('request', (request) => {
       const url = new URL(request.url())
-      const allowedOrigins = new Set([
-        new URL(config.webUrl).origin,
-        new URL(config.apiUrl).origin,
-      ])
       if (!allowedOrigins.has(url.origin)) {
         unexpected.push(`${request.method()} ${url.origin}${url.pathname}`)
       }
-      if (
-        url.origin === new URL(config.apiUrl).origin &&
-        ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method())
-      ) {
+      if (isMutatingApiRequest(url, request.method(), allowedOrigins)) {
         mutatingApiRequests.push(`${request.method()} ${url.pathname}`)
       }
     })
@@ -1009,7 +1013,6 @@ export async function provePinnedWriteRejections(config, browserResults, fetchIm
     status: 'denied_without_mutation',
     stale_head: true,
     stale_catalog: true,
-    duplicate_exact_request: true,
     replayed_exact_request: true,
     expired_approval: 'requires_external_evidence',
   }

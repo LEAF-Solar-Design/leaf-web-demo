@@ -11,6 +11,7 @@ import {
   evaluateReadiness,
   evaluateDeploymentIdentity,
   main,
+  isMutatingApiRequest,
   proveExecutedAuthorityIsolation,
   proveExecutedDrawingIsolation,
   provePinnedWriteRejections,
@@ -400,7 +401,6 @@ describe('deployed authored CAD acceptance checks', () => {
         status: 'denied_without_mutation',
         stale_head: true,
         stale_catalog: true,
-        duplicate_exact_request: true,
         replayed_exact_request: true,
         expired_approval: 'requires_external_evidence',
       },
@@ -520,6 +520,33 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(!source.includes("getByRole('button', { name: 'Approve'"))
     assert.ok(source.includes("getByText(/Viewing v1.*read-only preview/)"))
     assert.ok(source.includes("expired_approval: 'requires_external_evidence'"))
+  })
+
+  it('counts mutating API requests on both allowed browser origins', () => {
+    const allowed = new Set([
+      'https://staging.leaf.test',
+      'https://staging-api.leaf.test',
+    ])
+    assert.equal(
+      isMutatingApiRequest('https://staging.leaf.test/api/author/register', 'POST', allowed),
+      true,
+    )
+    assert.equal(
+      isMutatingApiRequest('https://staging-api.leaf.test/api/run', 'POST', allowed),
+      true,
+    )
+    assert.equal(
+      isMutatingApiRequest('https://staging.leaf.test/try', 'POST', allowed),
+      false,
+    )
+    assert.equal(
+      isMutatingApiRequest('https://staging-api.leaf.test/api/run', 'GET', allowed),
+      false,
+    )
+    assert.equal(
+      isMutatingApiRequest('https://other.leaf.test/api/run', 'POST', allowed),
+      false,
+    )
   })
 
   it('refuses production before requesting live identity or launching a browser', async () => {

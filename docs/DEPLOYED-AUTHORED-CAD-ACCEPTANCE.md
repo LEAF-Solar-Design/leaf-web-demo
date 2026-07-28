@@ -161,7 +161,7 @@ response for a cross-tenant authority probe fails.
 Finally, the driver resubmits the exact version-1 write after the head advanced
 to version 2 and submits the same request with a stale catalog digest. Both
 must return 409, and the drawing head must remain at version 2. This proves
-stale-head, stale-catalog, duplicate-request, and exact-request replay denial.
+stale-head, stale-catalog, and exact-request replay denial.
 It does not claim that a time-expired approval was exercised.
 
 The driver creates the receipt with exclusive file creation. It never

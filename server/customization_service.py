@@ -492,7 +492,12 @@ class CustomizationService:
             raise CustomizationServiceError("customization_auth_required", 503)
         if not enabled(6, tenant_id):
             raise CustomizationServiceError("customization_publish_disabled", 404)
-        change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change_set_id)
+        try:
+            change = self.store.get_change_set(
+                tenant_id=tenant_id, change_set_id=change_set_id
+            )
+        except ChangeSetNotFoundError as exc:
+            raise CustomizationServiceError("confirmation_not_available", 404) from exc
         if change.state is not ChangeState.STAGED or not change.staged_commit or not change.catalog_digest:
             raise CustomizationServiceError("confirmation_not_available")
         staff = os.environ.get("LEAF_CUSTOMIZATION_INTERNAL_APPROVER_SUBJECT", "").strip()
