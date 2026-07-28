@@ -42,10 +42,12 @@ CREATE TABLE IF NOT EXISTS drawing_authority_cutover (
         CHECK (fence_path = '/data/state/drawing-mutations'),
     CONSTRAINT drawing_authority_cutover_source_counts_shape CHECK (
         jsonb_typeof(source_counts) = 'object'
-        AND jsonb_object_length(source_counts) = 4
         AND source_counts ?& ARRAY[
             'manifests', 'versions', 'attempts', 'purge_receipts'
         ]
+        AND source_counts - ARRAY[
+            'manifests', 'versions', 'attempts', 'purge_receipts'
+        ] = '{}'::jsonb
         AND jsonb_typeof(source_counts->'manifests') = 'number'
         AND jsonb_typeof(source_counts->'versions') = 'number'
         AND jsonb_typeof(source_counts->'attempts') = 'number'

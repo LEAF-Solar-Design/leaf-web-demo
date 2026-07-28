@@ -51,7 +51,10 @@ def test_marker_binds_exact_run_source_task_storage_and_deadline() -> None:
     assert "fence_path = '/data/state/drawing-mutations'" in sql
     assert "deadline > entered_at" in sql
     assert "last_error ~ '^[a-z0-9_]+$'" in sql
-    assert "jsonb_object_length(source_counts) = 4" in sql
+    assert (
+        "source_counts - array[ 'manifests', 'versions', 'attempts', "
+        "'purge_receipts' ] = '{}'::jsonb" in sql
+    )
     for category in ("manifests", "versions", "attempts", "purge_receipts"):
         assert f"jsonb_typeof(source_counts->'{category}') = 'number'" in sql
         assert (
