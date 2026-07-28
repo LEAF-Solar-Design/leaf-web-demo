@@ -6,6 +6,7 @@ import {
   getDrawingIntake,
   getJob,
   getSession,
+  isWorkspaceBootstrapRequired,
   getTools,
   listProjects,
   nlPrompt,
@@ -36,6 +37,7 @@ import Toast from '../components/Toast.jsx'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
+import WorkspaceBootstrapGate from '../components/WorkspaceBootstrapGate.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import useJobController from '../controllers/useJobController.js'
@@ -231,6 +233,8 @@ export default function ToolCast({
   const [authorSeed, setAuthorSeed] = useState('')
   const [authorSeedSignal, setAuthorSeedSignal] = useState(0)
   const [claudeOpen, setClaudeOpen] = useState(false)
+  const [workspaceBootstrapRequired, setWorkspaceBootstrapRequired] = useState(false)
+  const [sessionRetry, setSessionRetry] = useState(0)
   const [toast, setToast] = useState(null)
   const [drawer, setDrawer] = useState(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
@@ -343,6 +347,7 @@ export default function ToolCast({
     }
     let live = true
     platformSession.actions.checking()
+    setWorkspaceBootstrapRequired(false)
     setPhase('loading')
     getSession(PUBLIC_DEMO, DRAWING_SOURCE)
       .then((data) => {
@@ -369,11 +374,17 @@ export default function ToolCast({
           setPhase('failed')
           return
         }
+        if (isWorkspaceBootstrapRequired(cause)) {
+          setWorkspaceBootstrapRequired(true)
+          setError(null)
+          setPhase('failed')
+          return
+        }
         setError('The drawing backend is unavailable. Start the proof API and reload this surface.')
         setPhase('failed')
       })
     return () => { live = false }
-  }, [active, platformSession.actions, requireAuth, seatIntake])
+  }, [active, platformSession.actions, requireAuth, seatIntake, sessionRetry])
 
   const showToast = useCallback((next) => {
     toastSeqRef.current += 1
@@ -662,9 +673,14 @@ export default function ToolCast({
   }, [sessionReady, workspace])
 
   const createWorkspaceOrg = useCallback(async (name) => {
-    if (!sessionReady) return
-    if (name != null) await workspace.createOrg(name)
-  }, [sessionReady, workspace])
+    if ((!sessionReady && !workspaceBootstrapRequired) || name == null) return
+    const org = await workspace.createOrg(name)
+    if (org && workspaceBootstrapRequired) {
+      setWorkspaceBootstrapRequired(false)
+      setSessionRetry((current) => current + 1)
+    }
+    return org
+  }, [sessionReady, workspace, workspaceBootstrapRequired])
 
   const createWorkspaceProject = useCallback(async (name) => {
     if (!sessionReady) return
@@ -962,6 +978,12 @@ export default function ToolCast({
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (PUBLIC_DEMO ? (
             <DemoConversationPanel turns={demoTurns} onSuggestion={dispatchRequest} canSignIn={authConfigured} onSignIn={() => login()} />
+          ) : workspaceBootstrapRequired ? (
+            <WorkspaceBootstrapGate
+              busy={workspace.orgBusy}
+              error={workspace.projectsError}
+              onCreate={createWorkspaceOrg}
+            />
           ) : sessionAuthRequired ? (
             <>
               {guestDrawing && (
