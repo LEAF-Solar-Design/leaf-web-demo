@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { describe, it } from 'node:test'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { after, describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
   createLocalJWKSet,
@@ -25,6 +27,11 @@ const RUN_ID = 'production-20260728'
 const ISSUER = 'https://leafautomation.us.auth0.com/'
 const AUDIENCE = 'https://api.leafdesign.ai'
 const CLAIM_NS = 'https://leafdesign.ai/'
+const SECRET_DIR = mkdtempSync(join(tmpdir(), 'leaf-production-acceptance-'))
+const SECRET_FILE = join(SECRET_DIR, 'publication-secret')
+const SECRET_VALUE = 'independent-secret-value\n'
+writeFileSync(SECRET_FILE, SECRET_VALUE, { mode: 0o600 })
+after(() => rmSync(SECRET_DIR, { recursive: true, force: true }))
 
 function environment(overrides = {}) {
   return {
@@ -36,7 +43,7 @@ function environment(overrides = {}) {
     LEAF_ACCEPTANCE_EXPECTED_REVISION: REVISION,
     LEAF_ACCEPTANCE_PRODUCTION_CONFIRMATION:
       `production-authored-acceptance:${REVISION}:${RUN_ID}`,
-    LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET: 'independent-secret-value',
+    LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET_FILE: SECRET_FILE,
     LEAF_ACCEPTANCE_TENANT_A_ID: 'production_acceptance_a',
     LEAF_ACCEPTANCE_TENANT_A_JWT: 'aaa.bbb.ccc',
     LEAF_ACCEPTANCE_TENANT_A_DRAWING_ID: `production-acceptance-${RUN_ID}-a`,
@@ -97,6 +104,7 @@ describe('production authored CAD acceptance target policy', () => {
     assert.equal(config.environment, 'production')
     assert.equal(config.webUrl, 'https://leaf-platform-web.vercel.app')
     assert.equal(config.apiUrl, 'https://platform.leafdesign.ai')
+    assert.equal(config.publicationApprovalSecret, SECRET_VALUE)
 
     for (const overrides of [
       { LEAF_ACCEPTANCE_ENVIRONMENT: 'staging' },
@@ -122,11 +130,17 @@ describe('production authored CAD acceptance target policy', () => {
       () => validateProductionConfig(environment(), ''),
       /explicit preflight or execute/,
     )
+    assert.throws(
+      () => validateProductionConfig(environment({
+        LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET_FILE: join(SECRET_DIR, 'missing'),
+      }), 'execute'),
+      /must be readable/,
+    )
   })
 
   it('supports explicit read-only preflight without the publication credential', () => {
     const config = validateProductionConfig(environment({
-      LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET: '',
+      LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET_FILE: '',
     }), 'preflight')
     assert.equal(config.mode, 'preflight')
     assert.equal(config.execute, false)

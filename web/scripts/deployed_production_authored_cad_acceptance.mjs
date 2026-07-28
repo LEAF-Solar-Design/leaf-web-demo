@@ -163,13 +163,25 @@ export function validateProductionConfig(env = process.env, mode = '') {
       'the two production acceptance tenants and JWTs must be distinct',
     )
   }
-  const publicationApprovalSecret = mode === 'execute'
-    ? required(env, 'LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET')
-    : ''
+  let publicationApprovalSecret = ''
+  if (mode === 'execute') {
+    const secretFile = required(
+      env,
+      'LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET_FILE',
+    )
+    try {
+      publicationApprovalSecret = readFileSync(resolve(secretFile), 'utf8')
+    } catch {
+      throw new AcceptanceError(
+        'configuration',
+        'LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET_FILE must be readable',
+      )
+    }
+  }
   if (mode === 'execute' && publicationApprovalSecret.length < 16) {
     throw new AcceptanceError(
       'configuration',
-      'LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET must be at least 16 characters',
+      'production publication approval secret file must contain at least 16 characters',
     )
   }
   return {
