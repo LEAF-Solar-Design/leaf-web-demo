@@ -522,6 +522,17 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(source.includes("expired_approval: 'requires_external_evidence'"))
   })
 
+  it('loads the workbench shell without contacting a third-party origin', () => {
+    const index = readFileSync(fileURLToPath(
+      new URL('../index.html', import.meta.url),
+    ), 'utf8')
+    const externalResources = Array.from(
+      index.matchAll(/\b(?:href|src)="(https?:\/\/[^"]+)"/g),
+      (match) => match[1],
+    )
+    assert.deepEqual(externalResources, [])
+  })
+
   it('counts mutating API requests on both allowed browser origins', () => {
     const allowed = new Set([
       'https://staging.leaf.test',
