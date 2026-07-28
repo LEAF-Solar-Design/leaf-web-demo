@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 from executor.bootstrap import BootstrapError, CONTROL_FILES, EXECUTOR_FILES, materialize
 
@@ -56,6 +57,24 @@ class BootstrapTests(unittest.TestCase):
             environment["LEAF_INSTANT_CONTROL_JWKS_JSON"] = "[]"
             with self.assertRaisesRegex(BootstrapError, "JSON object"):
                 materialize("executor", environ=environment, output_directory=temporary)
+
+    @unittest.skipIf(os.name == "nt", "Windows chmod semantics do not match Fargate mounts")
+    def test_directory_chmod_permission_denial_is_tolerated_when_writable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_chmod = os.chmod
+
+            def chmod_side_effect(path: str | os.PathLike[str], mode: int) -> None:
+                if Path(path) == root:
+                    raise PermissionError(1, "Operation not permitted", str(path))
+                real_chmod(path, mode)
+
+            with mock.patch("executor.bootstrap.os.chmod", side_effect=chmod_side_effect):
+                written = materialize("executor", environ=self.environment("executor"), output_directory=root)
+
+            self.assertEqual(set(EXECUTOR_FILES), set(written))
+            for target in written.values():
+                self.assertEqual(0o600, stat.S_IMODE(target.stat().st_mode))
 
     @unittest.skipIf(os.name == "nt", "Windows symlink creation can require elevated developer mode")
     def test_symlink_output_directory_is_rejected(self) -> None:

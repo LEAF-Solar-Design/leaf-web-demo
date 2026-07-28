@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 import json
 import os
 from pathlib import Path
@@ -67,7 +68,7 @@ def materialize(
     if root.exists() and root.is_symlink():
         raise BootstrapError("instant execution secret directory must not be a symlink")
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
+    _harden_directory(root)
     if not stat.S_ISDIR(root.stat().st_mode):
         raise BootstrapError("instant execution secret path is not a directory")
 
@@ -104,6 +105,14 @@ def materialize(
         for variable in PROFILES[profile]:
             source.pop(variable, None)
     return written
+
+
+def _harden_directory(root: Path) -> None:
+    try:
+        os.chmod(root, 0o700)
+    except PermissionError as exc:
+        if exc.errno != errno.EPERM or not os.access(root, os.W_OK | os.X_OK):
+            raise
 
 
 def _decode(variable: str, raw: str, kind: str) -> bytes:
