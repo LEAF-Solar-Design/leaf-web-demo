@@ -295,13 +295,28 @@ export default function useDrawingVersionController({
       return result
     }
 
-    setUnreadableHead(null)
-    if (typeof loadHead !== 'function') return result
+    if (typeof loadHead !== 'function') {
+      setUnreadableHead(null)
+      return result
+    }
     try {
       const view = await loadHead(drawingId)
+      // seatVersion clears unreadableHead itself — the lock lifts only once
+      // the NEW head's intake is actually seated in the viewer.
       seatVersion(view, { drawingId, source: 'restore' })
       return view
     } catch (error) {
+      // The server head moved but we could not read it: the stale viewer
+      // must NOT become eligible to mutate the newer head (clearing the lock
+      // before this read was the hole — a failed GET left old geometry
+      // editable against the new server head).
+      setUnreadableHead({
+        drawing_id: drawingId,
+        head: Number(result.head),
+        latest: Number(result.latest ?? result.head),
+        restored_from: result.restored_from,
+        message: `Restored as v${result.head}, but the new head could not be loaded. Editing stays locked until it loads.`,
+      })
       reportError(error, 'restore-refresh')
       return null
     }

@@ -395,6 +395,45 @@ def test_non_dict_intake_json_is_refused(client, tmp_path):
     assert r.status_code == 422, r.text
 
 
+def test_pre_proof_era_live_version_still_reads_and_self_heals(client, tmp_path):
+    """Post-merge BLOCKING pin: live DWG versions created BEFORE the proof
+    sidecar existed (cache present, no .proof.json — every pre-#243 live
+    version, no backfill) must keep reading. Trust-on-first-read: the read
+    accepts the cache exactly as pre-proof readers did AND mints the missing
+    proof, so the version is bound from then on."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG",
+        parent_version=3, meta={"tool": "test-seed", "note": "pre-proof live"})
+    legacy_intake = _intake([_poly("A")])
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(legacy_intake, separators=(",", ":")).encode("utf-8"))
+    pkey = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+    assert not backend.exists(pkey)
+
+    v, intake = write_loop.read_intake(backend, TENANT, DRAWING, v4)
+    assert v == v4 and intake == legacy_intake
+    assert backend.exists(pkey)  # self-healed binding minted by the read
+    # The minted proof verifies: a second read takes the strict path.
+    _, intake_again = write_loop.read_intake(backend, TENANT, DRAWING, v4)
+    assert intake_again == legacy_intake
+
+
+def test_present_but_wrong_proof_still_fails_closed(client, tmp_path):
+    """The legacy fallback is ONLY for a MISSING proof: a present-but-wrong
+    proof (swapped cache, corrupt sidecar) still refuses, unchanged."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG2",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    backend.put(write_loop.intake_cache_proof_key(TENANT, DRAWING, v4),
+                b'{"schema": 1, "version": 999}')
+    with pytest.raises(ValueError, match="source binding"):
+        write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
 def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypatch):
     """Round-4 MAJOR pin: when the source is live-representation (DWG blob +
     valid cache) and the cache mirror fails post-commit, the response still
@@ -438,8 +477,14 @@ def test_restore_of_missing_version_404s(client, tmp_path):
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DATABASE_URL"),
-    reason="PostgreSQL restore proof requires explicit DATABASE_URL",
+    not os.environ.get("LEAF_RESTORE_PG_PROOF_DB"),
+    reason="PostgreSQL restore proof requires the EXPLICIT opt-in "
+           "LEAF_RESTORE_PG_PROOF_DB (a disposable database URL). A generic "
+           "ambient DATABASE_URL must never trigger this test: it applies "
+           "every repository migration and leaves randomized manifest, "
+           "version, and checkout rows behind, which would mutate a staging "
+           "or production database whose URL happens to be in the "
+           "environment.",
 )
 def test_postgres_live_dwg_restore_preserves_blob_and_readable_cache(
     client, tmp_path, monkeypatch,
@@ -455,6 +500,9 @@ def test_postgres_live_dwg_restore_preserves_blob_and_readable_cache(
     import store  # noqa: PLC0415
     from routers import drawings as drawings_router  # noqa: PLC0415
 
+    # The dedicated opt-in URL IS the database for this test; never the
+    # ambient DATABASE_URL (see skipif).
+    monkeypatch.setenv("DATABASE_URL", os.environ["LEAF_RESTORE_PG_PROOF_DB"])
     db = store._db()
     db.apply_migration()
     monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")

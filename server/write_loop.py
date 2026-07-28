@@ -383,10 +383,6 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
 
     if not marker_bound:
         pkey = intake_cache_proof_key(tenant_id, drawing_id, v)
-        try:
-            proof = json.loads(backend.get(pkey).decode("utf-8"))
-        except (KeyError, UnicodeDecodeError, ValueError) as exc:
-            raise ValueError("raw DWG intake cache has no source binding") from exc
         expected = {
             "schema": 1,
             "version": int(v),
@@ -394,11 +390,34 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
             "intake_ref": ckey,
             "intake_sha256": intake_digest,
         }
-        if not isinstance(proof, dict) or any(
-            not hmac.compare_digest(str(proof.get(key)), str(value))
-            for key, value in expected.items()
-        ):
-            raise ValueError("raw DWG intake cache does not match its source binding")
+        if not backend.exists(pkey):
+            # PRE-PROOF-ERA version: the sidecar proof was introduced with the
+            # restore lane (PR #243) and no backfill exists, so every live DWG
+            # version created before it has a cache and NO proof. Refusing
+            # here bricked all of them (head reads, write preflights,
+            # undo/redo, restore). Trust-on-first-read: accept the cache
+            # exactly as every reader did before the proof era — strictly
+            # stronger than that status quo, never weaker for new versions —
+            # and MINT the missing proof from what we just read, so this
+            # version is bound from now on (self-healing backfill). The
+            # backfill write is best-effort: a read must not fail because a
+            # repair write could not land; the next read retries it.
+            try:
+                backend.put(pkey, json.dumps(expected, separators=(",", ":")).encode("utf-8"))
+            except Exception:  # noqa: BLE001 — see above
+                pass
+        else:
+            # A PRESENT proof is authoritative: corrupt or mismatched fails
+            # closed exactly as before (a swapped cache must never be served).
+            try:
+                proof = json.loads(backend.get(pkey).decode("utf-8"))
+            except (KeyError, UnicodeDecodeError, ValueError) as exc:
+                raise ValueError("raw DWG intake cache has no source binding") from exc
+            if not isinstance(proof, dict) or any(
+                not hmac.compare_digest(str(proof.get(key)), str(value))
+                for key, value in expected.items()
+            ):
+                raise ValueError("raw DWG intake cache does not match its source binding")
 
     intake = json.loads(candidate.decode("utf-8"))
     if not isinstance(intake, dict):
