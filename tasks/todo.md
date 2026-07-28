@@ -238,6 +238,11 @@ Risks:
   - [x] Register the driver contract tests in the canonical gate.
 - [ ] Enable and verify one coherent release in staging.
 - [ ] Wire the proven posture into production.
+  - [ ] Add a protected main-only Vercel production workflow.
+  - [ ] Consume one exact handoff receipt and its exact release web artifact.
+  - [ ] Deploy the existing web bytes without rebuilding them.
+  - [ ] Verify the immutable deployment URL and stable production routes.
+  - [ ] Publish a sanitized run-attempt-bound deployment receipt.
 - [ ] Promote exact staging digests and complete the cutover receipt.
 
 Risks:
@@ -249,6 +254,8 @@ Risks:
   explicit allowlisted probe fails production startup.
 - The live staging services currently use images from several source commits.
 - Cloud mutation must use a named federated identity, never the root identity.
+- Vercel production publication must require the protected environment token and
+  must never accept a branch, preview, or unverified build artifact.
 
 # Staging Team and Enterprise subscription mounts
 

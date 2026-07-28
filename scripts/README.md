@@ -6,6 +6,7 @@ CI-ready entry points for the Leaf web demo:
 |------|------------|
 | `run-all-gates.py` | Runs every test suite in the repo, each in its **own** subprocess, and prints one PASS/FAIL scoreboard. Exit 0 only when every selected gate passes. Test-level skips require an exact allowlist and never satisfy the executed-test floor. Pytest pins reasons; Vitest pins files and counts. Run in CI by `.github/workflows/test-gate.yml` on every pull request and every push to `main`, and again by `build-platform-images.yml` before any image is pushed to ECR. |
 | `deploy-web.py` | Builds `web/` and deploys `web/dist` **itself** to the `leaf-platform-web` Vercel project, then verifies the live domain. Exit 0 iff every route returns 200 and the domain serves the asset filenames this build produced. |
+| `production_web_release.py` | Validates attempt-bound release and handoff evidence, safely extracts artifacts, prepares a no-rebuild Vercel Build Output API package, and emits the sanitized protected-workflow receipt. It does not call Vercel itself. |
 | `../server/tests/test_e2e_golden.py` | One self-contained golden-path e2e that boots the broker + app and drives the whole product over HTTP. Run by the gate runner, also runnable alone. |
 
 ---

@@ -1,0 +1,371 @@
+name: Deploy platform web production
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact accepted application main commit to publish."
+        required: true
+        type: string
+      release_workflow_run_id:
+        description: "Successful push build run that published the web-dist artifact."
+        required: true
+        type: string
+      release_run_attempt:
+        description: "Exact successful attempt of the push build run."
+        required: true
+        type: string
+      handoff_workflow_run_id:
+        description: "Successful manual handoff run that accepted staging evidence."
+        required: true
+        type: string
+      handoff_run_attempt:
+        description: "Exact successful attempt of the manual handoff run."
+        required: true
+        type: string
+      expected_web_artifact_sha256:
+        description: "Reviewed SHA-256 from the accepted staging supply set."
+        required: true
+        type: string
+      confirmation:
+        description: "Exact project, source, evidence, artifact, and workflow confirmation."
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: deploy-platform-web-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment: vercel-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERCEL_ORG_ID: team_LWjg4ghzDbsZrkNPaOnRwAx5
+      VERCEL_PROJECT_ID: prj_tBxvYtXa47THZ8aF59gvRx8W0bBc
+      VERCEL_PROJECT_NAME: leaf-platform-web
+      VERCEL_STABLE_URL: https://leaf-platform-web.vercel.app
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}
+      RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
+      HANDOFF_RUN_ID: ${{ inputs.handoff_workflow_run_id }}
+      HANDOFF_RUN_ATTEMPT: ${{ inputs.handoff_run_attempt }}
+      EXPECTED_WEB_SHA256: ${{ inputs.expected_web_artifact_sha256 }}
+      RUN_DIR: ${{ runner.temp }}/leaf-production-web-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+
+    steps:
+      - name: Validate protected production request and operator
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = "refs/heads/main" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ]]
+          [[ "$RELEASE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ]]
+          [[ "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_WEB_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          EXPECTED_CONFIRMATION="deploy-platform-web-production:$VERCEL_PROJECT_ID:$SOURCE_SHA:$RELEASE_RUN_ID:$RELEASE_RUN_ATTEMPT:$HANDOFF_RUN_ID:$HANDOFF_RUN_ATTEMPT:$EXPECTED_WEB_SHA256:$GITHUB_SHA"
+          [ "$CONFIRMATION" = "$EXPECTED_CONFIRMATION" ] || {
+            echo "::error::Production web deployment requires confirmation=$EXPECTED_CONFIRMATION"
+            exit 1
+          }
+          umask 077
+          mkdir -m 700 -- "$RUN_DIR"
+          for OPERATOR in "$ACTOR" "$TRIGGERING_ACTOR"; do
+            [[ "$OPERATOR" =~ ^[A-Za-z0-9-]{1,39}$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/collaborators/$OPERATOR/permission" \
+              > "$RUN_DIR/operator-$OPERATOR.json"
+            jq -e '.permission == "admin" or .permission == "maintain" or .permission == "write"' \
+              "$RUN_DIR/operator-$OPERATOR.json" >/dev/null
+          done
+
+      - name: Check out the protected workflow commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove source ancestry and exact workflow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$SOURCE_SHA" HEAD
+          WORKFLOW_PATH=.github/workflows/build-platform-images.yml
+          HANDOFF_ARTIFACT="production-handoff-candidate-$SOURCE_SHA-attempt-$HANDOFF_RUN_ATTEMPT"
+          WEB_ARTIFACT="web-dist-$SOURCE_SHA-attempt-$RELEASE_RUN_ATTEMPT"
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/build-platform-images.yml" \
+            > "$RUN_DIR/build-workflow.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$HANDOFF_RUN_ID" \
+            > "$RUN_DIR/handoff-run.json"
+          HANDOFF_HEAD_SHA=$(jq -er '.head_sha' "$RUN_DIR/handoff-run.json")
+          git merge-base --is-ancestor "$HANDOFF_HEAD_SHA" HEAD
+          python scripts/platform_release_manifest.py verify-workflow-run \
+            --run "$RUN_DIR/handoff-run.json" --workflow "$RUN_DIR/build-workflow.json" \
+            --run-id "$HANDOFF_RUN_ID" --run-attempt "$HANDOFF_RUN_ATTEMPT" \
+            --workflow-path "$WORKFLOW_PATH" --event workflow_dispatch --branch main \
+            --head-sha "$HANDOFF_HEAD_SHA" --output "$RUN_DIR/handoff-run-proof.json"
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID" \
+            > "$RUN_DIR/release-run.json"
+          python scripts/platform_release_manifest.py verify-workflow-run \
+            --run "$RUN_DIR/release-run.json" --workflow "$RUN_DIR/build-workflow.json" \
+            --run-id "$RELEASE_RUN_ID" --run-attempt "$RELEASE_RUN_ATTEMPT" \
+            --workflow-path "$WORKFLOW_PATH" --event push --branch main \
+            --head-sha "$SOURCE_SHA" --output "$RUN_DIR/release-run-proof.json"
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$HANDOFF_RUN_ID/artifacts?per_page=100" \
+            > "$RUN_DIR/handoff-artifacts.json"
+          python scripts/platform_release_manifest.py verify-artifact \
+            --listing "$RUN_DIR/handoff-artifacts.json" --artifact-name "$HANDOFF_ARTIFACT" \
+            --run-id "$HANDOFF_RUN_ID" --head-sha "$HANDOFF_HEAD_SHA" \
+            --output "$RUN_DIR/handoff-artifact.json"
+          HANDOFF_ARTIFACT_ID=$(jq -er '.id' "$RUN_DIR/handoff-artifact.json")
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/artifacts?per_page=100" \
+            > "$RUN_DIR/release-artifacts.json"
+          python scripts/platform_release_manifest.py verify-artifact \
+            --listing "$RUN_DIR/release-artifacts.json" --artifact-name "$WEB_ARTIFACT" \
+            --run-id "$RELEASE_RUN_ID" --head-sha "$SOURCE_SHA" \
+            --output "$RUN_DIR/web-artifact.json"
+          WEB_ARTIFACT_ID=$(jq -er '.id' "$RUN_DIR/web-artifact.json")
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$HANDOFF_ARTIFACT_ID/zip" \
+            > "$RUN_DIR/handoff.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$WEB_ARTIFACT_ID/zip" \
+            > "$RUN_DIR/web-dist.zip"
+          python scripts/production_web_release.py extract \
+            --archive "$RUN_DIR/handoff.zip" --destination "$RUN_DIR/handoff"
+          python scripts/production_web_release.py extract \
+            --archive "$RUN_DIR/web-dist.zip" --destination "$RUN_DIR/web-dist"
+          [ "$(find "$RUN_DIR/handoff" -type f | wc -l | tr -d ' ')" = "1" ]
+          [ -f "$RUN_DIR/handoff/production-handoff-candidate.json" ]
+
+      - name: Prepare the accepted bytes without rebuilding
+        run: |
+          set -euo pipefail
+          python scripts/production_web_release.py prepare \
+            --handoff "$RUN_DIR/handoff/production-handoff-candidate.json" \
+            --web-dist "$RUN_DIR/web-dist" \
+            --output-root "$RUN_DIR/deploy-root/.vercel/output" \
+            --source "$SOURCE_SHA" \
+            --release-run-id "$RELEASE_RUN_ID" \
+            --release-attempt "$RELEASE_RUN_ATTEMPT" \
+            --expected-web-sha256 "$EXPECTED_WEB_SHA256" \
+            --proof-output "$RUN_DIR/prepared.json"
+          [ "$(jq -r '.build_performed' "$RUN_DIR/prepared.json")" = false ]
+
+      - name: Install the pinned Vercel client
+        run: |
+          set -euo pipefail
+          npm install --global vercel@53.2.0
+          [ "$(vercel --version | tail -n 1)" = "53.2.0" ]
+
+      - name: Capture the exact production baseline
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$VERCEL_TOKEN" ]
+          vercel inspect "$VERCEL_STABLE_URL" --format=json \
+            --token="$VERCEL_TOKEN" --scope="$VERCEL_ORG_ID" \
+            > "$RUN_DIR/baseline.json"
+          BASELINE_ID=$(jq -er '
+            select(.name == env.VERCEL_PROJECT_NAME and .target == "production"
+            and .readyState == "READY") | .id
+            | select(test("^dpl_[A-Za-z0-9]{20,64}$"))
+          ' "$RUN_DIR/baseline.json")
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v13/deployments/$BASELINE_ID?teamId=$VERCEL_ORG_ID" \
+            > "$RUN_DIR/baseline-api.json"
+          jq -e --arg id "$BASELINE_ID" --arg project "$VERCEL_PROJECT_ID" --arg name "$VERCEL_PROJECT_NAME" '
+            .id == $id and .projectId == $project and .name == $name
+            and .target == "production" and .readyState == "READY"
+          ' "$RUN_DIR/baseline-api.json" >/dev/null
+          jq -s '.[0] + {projectId:.[1].projectId}' \
+            "$RUN_DIR/baseline.json" "$RUN_DIR/baseline-api.json" \
+            > "$RUN_DIR/baseline-evidence.json"
+
+      - name: Deploy one unaliased production candidate
+        id: deploy_candidate
+        working-directory: ${{ env.RUN_DIR }}/deploy-root
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENT_URL=$(vercel deploy --prebuilt --prod --skip-domain --yes \
+            --token="$VERCEL_TOKEN" --scope="$VERCEL_ORG_ID" \
+            --meta "leafSourceSha=$SOURCE_SHA" \
+            --meta "leafWebArtifactSha256=$EXPECTED_WEB_SHA256" \
+            --meta "githubRunId=$GITHUB_RUN_ID" \
+            --meta "githubRunAttempt=$GITHUB_RUN_ATTEMPT")
+          [[ "$DEPLOYMENT_URL" =~ ^https://[a-z0-9][a-z0-9-]*\.vercel\.app$ ]]
+          printf '%s\n' "$DEPLOYMENT_URL" > "$RUN_DIR/deployment-url.txt"
+          vercel inspect "$DEPLOYMENT_URL" --wait --timeout=5m --format=json \
+            --token="$VERCEL_TOKEN" --scope="$VERCEL_ORG_ID" \
+            > "$RUN_DIR/deployment.json"
+          DEPLOYMENT_ID=$(jq -er '
+            select(.name == env.VERCEL_PROJECT_NAME and .target == "production"
+            and .readyState == "READY") | .id
+            | select(test("^dpl_[A-Za-z0-9]{20,64}$"))
+          ' "$RUN_DIR/deployment.json")
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v13/deployments/$DEPLOYMENT_ID?teamId=$VERCEL_ORG_ID" \
+            > "$RUN_DIR/deployment-api.json"
+          jq -e --arg id "$DEPLOYMENT_ID" --arg project "$VERCEL_PROJECT_ID" --arg name "$VERCEL_PROJECT_NAME" '
+            .id == $id and .projectId == $project and .name == $name
+            and .target == "production" and .readyState == "READY"
+          ' "$RUN_DIR/deployment-api.json" >/dev/null
+          jq -s '.[0] + {projectId:.[1].projectId}' \
+            "$RUN_DIR/deployment.json" "$RUN_DIR/deployment-api.json" \
+            > "$RUN_DIR/deployment-evidence.json"
+
+      - name: Verify the immutable candidate before promotion
+        id: verify_candidate
+        run: |
+          set -euo pipefail
+          BASE=$(cat "$RUN_DIR/deployment-url.txt")
+          ENTRY=$(jq -er '.entry_asset' "$RUN_DIR/prepared.json")
+          curl --fail --silent --show-error --retry 3 --retry-all-errors "$BASE/" \
+            > "$RUN_DIR/candidate-index.html"
+          grep -Fq -- "$ENTRY" "$RUN_DIR/candidate-index.html"
+          for route in / /app /try /sheets /sheets/01; do
+            [ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$BASE$route")" = 200 ]
+          done
+          curl --fail --silent --show-error "$BASE/health.json" > "$RUN_DIR/candidate-health.json"
+          jq -e --arg source "$SOURCE_SHA" '
+            . == {ok:true,service:"leaf-platform-web",component:"frontend",source_sha:$source}
+          ' "$RUN_DIR/candidate-health.json" >/dev/null
+          API_STATUS=$(curl --silent --show-error --output "$RUN_DIR/candidate-api.txt" \
+            --write-out '%{http_code}' "$BASE/api/health")
+          [ "$API_STATUS" = 404 ]
+          ! grep -Eiq '<!doctype html|<html' "$RUN_DIR/candidate-api.txt"
+
+      - name: Promote the verified immutable deployment
+        id: promote
+        working-directory: ${{ env.RUN_DIR }}/deploy-root
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          : > "$RUN_DIR/promotion-started"
+          DEPLOYMENT_ID=$(jq -er '.id' "$RUN_DIR/deployment.json")
+          vercel promote "$DEPLOYMENT_ID" --yes --timeout=5m \
+            --token="$VERCEL_TOKEN" --scope="$VERCEL_ORG_ID"
+          : > "$RUN_DIR/promotion-completed"
+
+      - name: Verify the stable production alias
+        id: verify_stable
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          EXPECTED_ID=$(jq -er '.id' "$RUN_DIR/deployment.json")
+          MATCHED=false
+          for attempt in $(seq 1 12); do
+            vercel inspect "$VERCEL_STABLE_URL" --format=json \
+              --token="$VERCEL_TOKEN" --scope="$VERCEL_ORG_ID" \
+              > "$RUN_DIR/stable.json"
+            if [ "$(jq -r '.id' "$RUN_DIR/stable.json")" = "$EXPECTED_ID" ]; then
+              MATCHED=true
+              break
+            fi
+            [ "$attempt" -lt 12 ] && sleep 5
+          done
+          [ "$MATCHED" = true ]
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v13/deployments/$EXPECTED_ID?teamId=$VERCEL_ORG_ID" \
+            > "$RUN_DIR/stable-api.json"
+          jq -e --arg id "$EXPECTED_ID" --arg project "$VERCEL_PROJECT_ID" --arg name "$VERCEL_PROJECT_NAME" '
+            .id == $id and .projectId == $project and .name == $name
+            and .target == "production" and .readyState == "READY"
+          ' "$RUN_DIR/stable-api.json" >/dev/null
+          jq -s '.[0] + {projectId:.[1].projectId}' \
+            "$RUN_DIR/stable.json" "$RUN_DIR/stable-api.json" \
+            > "$RUN_DIR/stable-evidence.json"
+          ENTRY=$(jq -er '.entry_asset' "$RUN_DIR/prepared.json")
+          curl --fail --silent --show-error --retry 3 --retry-all-errors "$VERCEL_STABLE_URL/" \
+            > "$RUN_DIR/stable-index.html"
+          grep -Fq -- "$ENTRY" "$RUN_DIR/stable-index.html"
+          for route in / /app /try /sheets /sheets/01; do
+            [ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$VERCEL_STABLE_URL$route")" = 200 ]
+          done
+          curl --fail --silent --show-error "$VERCEL_STABLE_URL/health.json" \
+            > "$RUN_DIR/stable-health.json"
+          jq -e --arg source "$SOURCE_SHA" '
+            . == {ok:true,service:"leaf-platform-web",component:"frontend",source_sha:$source}
+          ' "$RUN_DIR/stable-health.json" >/dev/null
+          API_STATUS=$(curl --silent --show-error --output "$RUN_DIR/stable-api.txt" \
+            --write-out '%{http_code}' "$VERCEL_STABLE_URL/api/health")
+          [ "$API_STATUS" = 404 ]
+          ! grep -Eiq '<!doctype html|<html' "$RUN_DIR/stable-api.txt"
+
+      - name: Emit sanitized production web deployment receipt
+        id: receipt
+        run: |
+          set -euo pipefail
+          python scripts/production_web_release.py receipt \
+            --prepared "$RUN_DIR/prepared.json" \
+            --baseline "$RUN_DIR/baseline-evidence.json" \
+            --deployment "$RUN_DIR/deployment-evidence.json" \
+            --stable "$RUN_DIR/stable-evidence.json" \
+            --handoff-run-id "$HANDOFF_RUN_ID" \
+            --handoff-attempt "$HANDOFF_RUN_ATTEMPT" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-attempt "$GITHUB_RUN_ATTEMPT" \
+            --workflow-head-sha "$GITHUB_SHA" \
+            --output "$RUN_DIR/production-web-deployment-receipt.json"
+
+      - name: Upload immutable production web deployment receipt
+        id: upload_receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-web-deployment-${{ inputs.source_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ env.RUN_DIR }}/production-web-deployment-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+
+      - name: Restore the exact baseline after a failed post-promotion gate
+        if: >-
+          always() &&
+          steps.promote.outcome != 'skipped' &&
+          (steps.promote.outcome != 'success' ||
+           steps.verify_stable.outcome != 'success' ||
+           steps.receipt.outcome != 'success' ||
+           steps.upload_receipt.outcome != 'success')
+        working-directory: ${{ env.RUN_DIR }}/deploy-root
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -f "$RUN_DIR/promotion-started" ] || exit 0
+          BASELINE_ID=$(jq -er '.id' "$RUN_DIR/baseline.json")
+          vercel rollback "$BASELINE_ID" --yes --timeout=5m \
+            --token="$VERCEL_TOKEN" --scope="$VERCEL_ORG_ID"
+          RESTORED=false
+          for attempt in $(seq 1 12); do
+            vercel inspect "$VERCEL_STABLE_URL" --format=json \
+              --token="$VERCEL_TOKEN" --scope="$VERCEL_ORG_ID" \
+              > "$RUN_DIR/restored.json"
+            if [ "$(jq -r '.id' "$RUN_DIR/restored.json")" = "$BASELINE_ID" ]; then
+              RESTORED=true
+              break
+            fi
+            [ "$attempt" -lt 12 ] && sleep 5
+          done
+          [ "$RESTORED" = true ]

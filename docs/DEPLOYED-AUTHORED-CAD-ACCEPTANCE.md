@@ -159,3 +159,26 @@ run ID.
 This driver does not provision secrets, run migrations, deploy images, enable
 authored execution, or promote production. Those actions need their own
 reviewed workflows and receipts.
+
+## Protected production web publication
+
+After an executed staging receipt produces a production handoff candidate, use
+`deploy-platform-web-production.yml` from `main`. The `vercel-production`
+environment must hold `VERCEL_TOKEN` and must require its production reviewers.
+The dispatcher supplies the exact source SHA, release and handoff run IDs and
+attempts, reviewed web artifact SHA-256, and the confirmation string printed by
+the workflow contract.
+
+The workflow downloads only the attempt-bound handoff and `web-dist` artifacts.
+It checks their GitHub workflow identity, successful conclusion, protected
+branch, source, five-service staging evidence, and exact web bytes. It creates a
+Vercel Build Output API package from those bytes, so it does not run a build. A
+terminal 404 route keeps `/api/*` from falling through to the SPA.
+
+The candidate is first deployed without assigning production domains. The
+workflow verifies the immutable URL, source health document, entry asset, SPA
+routes, and terminal API boundary before promotion. It then verifies the stable
+project URL and uploads an attempt-bound `leaf.production-web-deployment.v1`
+receipt. If promotion or any later required gate fails, it restores the exact
+baseline deployment ID. This receipt proves the Vercel half of the production
+identity. The backend identity remains four OCI digests.
