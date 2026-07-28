@@ -253,6 +253,16 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => (
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`
+    )).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
 async function parseJsonResponse(response, check) {
   const length = Number(response.headers.get('content-length') || 0)
   if (length > MAX_RESPONSE_BYTES) {
@@ -359,7 +369,13 @@ export async function runApiPreflight(config, fetchImpl = fetch) {
 
   const grants = []
   for (const [tenant, other] of [[a, b], [b, a]]) {
-    const grant = await requestJson(config, tenant, '/api/tenant/claude-grant', { fetchImpl })
+    const grant = await requestJson(config, tenant, '/api/tenant/claude-grant', {
+      fetchImpl,
+      extraHeaders: {
+        'X-Tenant-Id': other.id,
+        'X-Org-Id': other.id,
+      },
+    })
     expectStatus(grant, [200], `grant_${tenant.label}`)
     if (grant.body?.linked !== true || !['oauth', 'api_key'].includes(grant.body?.kind)) {
       throw new AcceptanceError(
@@ -367,27 +383,13 @@ export async function runApiPreflight(config, fetchImpl = fetch) {
         `tenant ${tenant.label} does not have a linked Claude grant`,
       )
     }
-    grants.push({ label: tenant.label, kind: grant.body.kind })
-
-    const identity = await requestJson(
-      config,
-      tenant,
-      '/api/session?dwg=rooftop_demo',
-      {
-        fetchImpl,
-        extraHeaders: {
-          'X-Tenant-Id': other.id,
-          'X-Org-Id': other.id,
-        },
-      },
-    )
-    expectStatus(identity, [200], `identity_${tenant.label}`)
-    if (identity.body?.tenant_id !== tenant.id || identity.body?.tenant_id === other.id) {
+    if (grant.body?.tenant_id !== tenant.id || grant.body?.tenant_id === other.id) {
       throw new AcceptanceError(
         `identity_${tenant.label}`,
         'request headers overrode the JWT tenant identity',
       )
     }
+    grants.push({ label: tenant.label, kind: grant.body.kind })
   }
   return {
     deployment_identity: {
@@ -512,10 +514,12 @@ export async function approveIsolatedStagedPublication(
 
 export function validateStagedAuthorResponse(body, tenant) {
   const changeSetId = body?.receipt?.change_set_id
+  const publicationCatalogDigest = body?.receipt?.catalog_digest
   const toolName = body?.tool?.name
   const capabilities = body?.tool?.capabilities
   if (
     !UUID.test(String(changeSetId || '')) ||
+    !/^[a-f0-9]{64}$/.test(String(publicationCatalogDigest || '')) ||
     body?.receipt?.state !== 'staged' ||
     typeof toolName !== 'string' ||
     !toolName ||
@@ -528,7 +532,7 @@ export function validateStagedAuthorResponse(body, tenant) {
       `tenant ${tenant.label} did not stage one novel drawing.write tool`,
     )
   }
-  return { changeSetId, toolName }
+  return { changeSetId, toolName, publicationCatalogDigest }
 }
 
 export function requireCameraMotion(before, after) {
@@ -794,6 +798,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       _run_headers: runReplayHeaders,
       _job_id: jobId,
       _publication_confirmation_id: independentApproval._confirmation_id,
+      _publication_catalog_digest: staged.publicationCatalogDigest,
       cross_tenant_publication_approval: 'denied',
       independent_publication_approval: independentApproval.status,
       publication_confirmation_hash: independentApproval.confirmation_hash,
@@ -851,7 +856,9 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
         'the executed drawing response is missing intake data',
       )
     }
-    own.push(sha256(JSON.stringify(result.body?.intake)))
+    const contentHash = sha256(canonicalJson(result.body.intake))
+    browserResults[own.length]._drawing_content_hash = contentHash
+    own.push(contentHash)
   }
   if (own[0] === own[1]) {
     throw new AcceptanceError(
@@ -913,6 +920,14 @@ export async function proveExecutedAuthorityIsolation(config, browserResults, fe
     if (ownNames.includes(otherResult._staged_tool_name)) {
       throw new AcceptanceError(`cross_tenant_catalog_${tenant.label}`, 'another tenant tool leaked')
     }
+    const exactTools = (ownCatalog.body?.tools || []).filter(
+      (tool) => tool?.name === ownResult._staged_tool_name,
+    )
+    if (exactTools.length !== 1) {
+      throw new AcceptanceError(`own_catalog_${tenant.label}`, 'the published tool is not unique')
+    }
+    ownResult._tool_content_hash = sha256(canonicalJson(exactTools[0]))
+    ownResult._tool_catalog_digest = exactTools[0].catalog_digest
 
     const staged = await requestJson(
       config,
@@ -951,6 +966,199 @@ export async function proveExecutedAuthorityIsolation(config, browserResults, fe
     status: 'denied',
     authorities: ['repository', 'catalog', 'job', 'audit'],
     tenants: checks,
+  }
+}
+
+export async function provePersistedAcceptanceState(config, state, fetchImpl = fetch) {
+  const stateKeys = ['run_id', 'schema', 'source_revision', 'tenants']
+  const tenantKeys = [
+    'change_set_id', 'drawing_content_sha256', 'drawing_id', 'job_id', 'label',
+    'publication_catalog_digest', 'publication_confirmation_id', 'tool_catalog_digest',
+    'tool_content_sha256', 'tool_name',
+  ]
+  if (
+    state?.schema !== 'leaf.production-authored-cad-private-state.v1'
+    || state?.run_id !== config.runId
+    || state?.source_revision !== config.expectedRevision
+    || !Array.isArray(state?.tenants)
+    || state.tenants.length !== 2
+    || JSON.stringify(Object.keys(state).sort()) !== JSON.stringify(stateKeys)
+    || state.tenants.some((record) => (
+      JSON.stringify(Object.keys(record || {}).sort()) !== JSON.stringify(tenantKeys)
+    ))
+  ) {
+    throw new AcceptanceError('persisted_state', 'private acceptance state is not bound to this run')
+  }
+  const results = []
+  for (const tenant of config.tenants) {
+    const record = state.tenants.find((candidate) => candidate?.label === tenant.label)
+    if (
+      !record
+      || record.drawing_id !== tenant.drawingId
+      || typeof record.tool_name !== 'string'
+      || !record.tool_name
+      || !UUID.test(String(record.change_set_id || ''))
+      || typeof record.job_id !== 'string'
+      || !record.job_id
+      || typeof record.publication_confirmation_id !== 'string'
+      || !record.publication_confirmation_id
+      || !/^[a-f0-9]{64}$/.test(String(record.tool_content_sha256 || ''))
+      || !/^[a-f0-9]{64}$/.test(String(record.drawing_content_sha256 || ''))
+      || !DIGEST.test(String(record.tool_catalog_digest || ''))
+      || !/^[a-f0-9]{64}$/.test(String(record.publication_catalog_digest || ''))
+    ) {
+      throw new AcceptanceError(
+        `persisted_state_${tenant.label}`,
+        'private acceptance state contains an invalid or mismatched durable handle',
+      )
+    }
+
+    const evidence = await requestJson(
+      config,
+      tenant,
+      `/api/author/change-sets/${encodeURIComponent(record.change_set_id)}/publication-evidence` +
+        `?confirmation_id=${encodeURIComponent(record.publication_confirmation_id)}`,
+      { fetchImpl },
+    )
+    expectStatus(evidence, [200], `persisted_publication_${tenant.label}`)
+    if (
+      evidence.body?.change_set_id !== record.change_set_id
+      || evidence.body?.confirmation_id !== record.publication_confirmation_id
+      || evidence.body?.status !== 'published'
+      || evidence.body?.effective !== true
+      || evidence.body?.confirmation_consumed !== true
+      || evidence.body?.published_audit_event !== true
+      || evidence.body?.catalog_digest !== record.publication_catalog_digest
+    ) {
+      throw new AcceptanceError(
+        `persisted_publication_${tenant.label}`,
+        'the exact change set, confirmation, publication, and audit evidence did not persist',
+      )
+    }
+
+    const catalog = await requestJson(config, tenant, '/api/tools', { fetchImpl })
+    expectStatus(catalog, [200], `persisted_catalog_${tenant.label}`)
+    const exactTools = (catalog.body?.tools || []).filter((tool) => tool?.name === record.tool_name)
+    if (
+      exactTools.length !== 1
+      || sha256(canonicalJson(exactTools[0])) !== record.tool_content_sha256
+      || exactTools[0]?.catalog_digest !== record.tool_catalog_digest
+    ) {
+      throw new AcceptanceError(
+        `persisted_catalog_${tenant.label}`,
+        'the exact published tool did not persist once in the tenant catalog',
+      )
+    }
+
+    const job = await requestJson(
+      config,
+      tenant,
+      `/api/jobs/${encodeURIComponent(record.job_id)}`,
+      { fetchImpl },
+    )
+    expectStatus(job, [200], `persisted_job_${tenant.label}`)
+    if (
+      job.body?.job_id !== record.job_id
+      || job.body?.tool !== record.tool_name
+      || job.body?.dwg !== record.drawing_id
+      || job.body?.status !== 'complete'
+    ) {
+      throw new AcceptanceError(
+        `persisted_job_${tenant.label}`,
+        'the exact completed job record did not persist',
+      )
+    }
+
+    const versions = await requestJson(
+      config,
+      tenant,
+      `/api/drawings/${encodeURIComponent(record.drawing_id)}/versions`,
+      { fetchImpl },
+    )
+    expectStatus(versions, [200], `persisted_drawing_${tenant.label}`)
+    if (versions.body?.head !== 2) {
+      throw new AcceptanceError(
+        `persisted_drawing_${tenant.label}`,
+        'the exact acceptance drawing head did not persist',
+      )
+    }
+
+    const drawing = await requestJson(
+      config,
+      tenant,
+      `/api/drawings/${encodeURIComponent(record.drawing_id)}/intake`,
+      { fetchImpl },
+    )
+    expectStatus(drawing, [200], `persisted_drawing_content_${tenant.label}`)
+    if (
+      !drawing.body?.intake
+      || sha256(canonicalJson(drawing.body.intake)) !== record.drawing_content_sha256
+    ) {
+      throw new AcceptanceError(
+        `persisted_drawing_content_${tenant.label}`,
+        'the exact acceptance drawing content did not persist',
+      )
+    }
+
+    results.push({ label: tenant.label, durable_records: true })
+  }
+  for (const [tenant, otherTenant] of [
+    [config.tenants[0], config.tenants[1]],
+    [config.tenants[1], config.tenants[0]],
+  ]) {
+    const other = state.tenants.find((record) => record?.label === otherTenant.label)
+    const crossPublication = await requestJson(
+      config,
+      tenant,
+      `/api/author/change-sets/${encodeURIComponent(other.change_set_id)}/publication-evidence` +
+        `?confirmation_id=${encodeURIComponent(other.publication_confirmation_id)}`,
+      { fetchImpl },
+    )
+    requireDenied(crossPublication, `persisted_cross_publication_${tenant.label}`)
+    for (const path of [
+      `/api/jobs/${encodeURIComponent(other.job_id)}`,
+      `/api/drawings/${encodeURIComponent(other.drawing_id)}/intake`,
+      `/api/drawings/${encodeURIComponent(other.drawing_id)}/versions`,
+    ]) {
+      const cross = await requestJson(config, tenant, path, { fetchImpl })
+      requireDenied(cross, `persisted_cross_record_${tenant.label}`)
+    }
+    const ownCatalog = await requestJson(config, tenant, '/api/tools', { fetchImpl })
+    expectStatus(ownCatalog, [200], `persisted_cross_catalog_${tenant.label}`)
+    if ((ownCatalog.body?.tools || []).some((tool) => tool?.name === other.tool_name)) {
+      throw new AcceptanceError(
+        `persisted_cross_catalog_${tenant.label}`,
+        'the other tenant tool leaked after restart',
+      )
+    }
+    const ownAudit = await requestJson(config, tenant, '/api/agent/audit?limit=1000', { fetchImpl })
+    expectStatus(ownAudit, [200], `persisted_cross_audit_${tenant.label}`)
+    const forgedAudit = await requestJson(
+      config,
+      tenant,
+      '/api/agent/audit?limit=1000',
+      { fetchImpl, extraHeaders: { 'X-Tenant-Id': otherTenant.id, 'X-Org-Id': otherTenant.id } },
+    )
+    expectStatus(forgedAudit, [200], `persisted_cross_audit_${tenant.label}`)
+    if (JSON.stringify(forgedAudit.body) !== JSON.stringify(ownAudit.body)) {
+      throw new AcceptanceError(
+        `persisted_cross_audit_${tenant.label}`,
+        'forged tenant headers changed the post-restart audit projection',
+      )
+    }
+    if ((ownAudit.body?.records || []).some((event) => (
+      event?.args?.tool === other.tool_name || event?.args?.dwg === other.drawing_id
+    ))) {
+      throw new AcceptanceError(
+        `persisted_cross_audit_${tenant.label}`,
+        'the other tenant audit record leaked after restart',
+      )
+    }
+  }
+  return {
+    status: 'persisted',
+    authorities: ['change_set', 'publication', 'catalog', 'job', 'drawing', 'audit'],
+    tenants: results,
   }
 }
 
@@ -1064,6 +1272,10 @@ export function buildReceipt(
       _run_headers,
       _job_id,
       _publication_confirmation_id,
+      _publication_catalog_digest,
+      _tool_content_hash,
+      _tool_catalog_digest,
+      _drawing_content_hash,
       ...safe
     }) => safe),
     external_evidence: {

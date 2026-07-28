@@ -1,9 +1,12 @@
 # Production authored acceptance
 
 - [x] Keep the existing staging driver production-denied while exposing only target-neutral execution helpers.
-- [x] Add a production-only driver with exact-host, execute-only, confirmation, and signed non-customer tenant gates.
+- [x] Add a production-only driver with exact-host, explicit-mode, confirmation, and signed non-customer tenant gates.
+- [x] Add an explicit read-only production preflight mode that never launches the browser write proof.
 - [x] Add the Auth0 machine-token classification claim required by the production driver.
 - [x] Add negative contract tests for target aliases, missing confirmation, token signature and claim failures, and receipt leaks.
+- [x] Keep preflight read-only and prove the exact change set, publication confirmation, job, drawing, catalog, and audit records after service restart.
+- [x] Keep restart handles in an execute-only private state file and expose only its hash in the final receipt.
 - [x] Run the focused Node tests, Auth0 action tests, web build, full applicable gates, and independent review.
 
 Risks:

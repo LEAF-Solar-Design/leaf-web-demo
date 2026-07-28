@@ -15,6 +15,7 @@ import {
   proveExecutedAuthorityIsolation,
   proveExecutedDrawingIsolation,
   provePinnedWriteRejections,
+  provePersistedAcceptanceState,
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
@@ -247,19 +248,22 @@ describe('deployed authored CAD acceptance checks', () => {
       if (path === '/api/deployment-identity') return response(200, deploymentIdentity())
       if (path === '/api/ready') return response(200, ready())
       if (path === '/api/tenant/claude-grant') {
-        return response(200, { linked: true, kind: 'oauth' })
-      }
-      if (path === '/api/session') {
         const tenantId = options.headers.Authorization === `Bearer ${TOKEN_A}`
           ? 'acceptance-a'
           : 'acceptance-b'
-        return response(200, { intake: {}, tenant_id: tenantId })
+        return response(200, { linked: true, kind: 'oauth', tenant_id: tenantId })
       }
       return response(500, {})
     }
     const result = await runApiPreflight(config, fetchImpl)
     assert.equal(result.tenant_header_override, 'denied')
-    assert.equal(calls.length, 6)
+    assert.equal(calls.length, 4)
+    assert.deepEqual(calls.map((call) => new URL(call.url).pathname), [
+      '/api/deployment-identity',
+      '/api/ready',
+      '/api/tenant/claude-grant',
+      '/api/tenant/claude-grant',
+    ])
     assert.ok(calls.every((call) => call.credentials === 'omit'))
     assert.ok(calls.every((call) => call.redirect === 'error'))
     assert.ok(calls.every((call) => [
@@ -272,12 +276,13 @@ describe('deployed authored CAD acceptance checks', () => {
       if (path === '/api/deployment-identity') return response(200, deploymentIdentity())
       if (path === '/api/ready') return response(200, ready())
       if (path === '/api/tenant/claude-grant') {
-        return response(200, { linked: true, kind: 'oauth' })
+        return response(200, {
+          linked: true,
+          kind: 'oauth',
+          tenant_id: options.headers['X-Tenant-Id'],
+        })
       }
-      return response(200, {
-        intake: {},
-        tenant_id: options.headers['X-Tenant-Id'],
-      })
+      return response(500, {})
     }
     await assert.rejects(
       () => runApiPreflight(config, permissive),
@@ -368,6 +373,97 @@ describe('deployed authored CAD acceptance checks', () => {
 
   })
 
+  it('proves exact durable authoring records from private restart state', async () => {
+    const config = validateConfig(environment(), true)
+    const changes = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    ]
+    const state = {
+      schema: 'leaf.production-authored-cad-private-state.v1',
+      run_id: config.runId,
+      source_revision: config.expectedRevision,
+      tenants: config.tenants.map((tenant, index) => {
+        const toolName = `acceptance-tool-${tenant.label.toLowerCase()}`
+        const toolCatalogDigest = `sha256:${String(index + 1).repeat(64)}`
+        const drawing = { shape: tenant.label }
+        return {
+          label: tenant.label,
+          drawing_id: tenant.drawingId,
+          tool_name: toolName,
+          change_set_id: changes[index],
+          job_id: `job-${tenant.label.toLowerCase()}`,
+          publication_confirmation_id: `confirmation-${tenant.label.toLowerCase()}`,
+          publication_catalog_digest: String(index + 3).repeat(64),
+          tool_catalog_digest: toolCatalogDigest,
+          tool_content_sha256: sha256(JSON.stringify({
+            catalog_digest: toolCatalogDigest, name: toolName,
+          })),
+          drawing_content_sha256: sha256(JSON.stringify(drawing)),
+        }
+      }),
+    }
+    const fetchImpl = async (url, options = {}) => {
+      const parsed = new URL(url)
+      const auth = String(options.headers?.Authorization || options.headers?.authorization || '')
+      const index = auth.includes(TOKEN_B) ? 1 : 0
+      const record = state.tenants[index]
+      const other = state.tenants[index === 0 ? 1 : 0]
+      if (
+        parsed.pathname.includes(other.change_set_id)
+        || parsed.pathname.includes(other.job_id)
+        || parsed.pathname.includes(other.drawing_id)
+      ) return response(404, {})
+      if (parsed.pathname.includes('/publication-evidence')) return response(200, {
+        change_set_id: record.change_set_id,
+        confirmation_id: record.publication_confirmation_id,
+        status: 'published',
+        effective: true,
+        confirmation_consumed: true,
+        published_audit_event: true,
+        catalog_digest: record.publication_catalog_digest,
+      })
+      if (parsed.pathname === '/api/tools') return response(200, { tools: [{
+        catalog_digest: record.tool_catalog_digest, name: record.tool_name,
+      }] })
+      if (parsed.pathname.startsWith('/api/jobs/')) return response(200, {
+        job_id: record.job_id, tool: record.tool_name, dwg: record.drawing_id, status: 'complete',
+      })
+      if (parsed.pathname.endsWith('/versions')) return response(200, { head: 2 })
+      if (parsed.pathname.endsWith('/intake')) return response(200, { intake: { shape: record.label } })
+      if (parsed.pathname === '/api/agent/audit') return response(200, {
+        records: [{ args: { tool: record.tool_name, dwg: record.drawing_id } }],
+      })
+      return response(404, {})
+    }
+    const proof = await provePersistedAcceptanceState(config, state, fetchImpl)
+    assert.equal(proof.status, 'persisted')
+    assert.deepEqual(proof.authorities, [
+      'change_set', 'publication', 'catalog', 'job', 'drawing', 'audit',
+    ])
+    const leakingFetch = async (url, options = {}) => {
+      const parsed = new URL(url)
+      const auth = String(options.headers?.Authorization || options.headers?.authorization || '')
+      const index = auth.includes(TOKEN_B) ? 1 : 0
+      const other = state.tenants[index === 0 ? 1 : 0]
+      if (parsed.pathname.includes(other.job_id)) return response(200, {
+        job_id: other.job_id, tool: other.tool_name, dwg: other.drawing_id, status: 'complete',
+      })
+      return fetchImpl(url, options)
+    }
+    await assert.rejects(
+      () => provePersistedAcceptanceState(config, state, leakingFetch),
+      /cross-tenant authority read returned HTTP 200/,
+    )
+    await assert.rejects(
+      () => provePersistedAcceptanceState(config, {
+        ...state,
+        tenants: [{ ...state.tenants[0], change_set_id: changes[1] }, state.tenants[1]],
+      }, fetchImpl),
+      AcceptanceError,
+    )
+  })
+
   it('rejects stale catalog and exact write replay without changing head', async () => {
     const config = validateConfig(environment(), true)
     const browser = config.tenants.map((tenant) => ({
@@ -426,12 +522,16 @@ describe('deployed authored CAD acceptance checks', () => {
   it('requires distinct staged tool identities, exact capability, and request-bound change sets', () => {
     const config = validateConfig(environment(), true)
     const staged = (toolName, changeSetId) => ({
-      receipt: { state: 'staged', change_set_id: changeSetId },
+      receipt: { state: 'staged', change_set_id: changeSetId, catalog_digest: 'c'.repeat(64) },
       tool: { name: toolName, capabilities: ['drawing.write'] },
     })
     assert.deepEqual(
       validateStagedAuthorResponse(staged('cat_tool', '11111111-1111-4111-8111-111111111111'), config.tenants[0]),
-      { toolName: 'cat_tool', changeSetId: '11111111-1111-4111-8111-111111111111' },
+      {
+        toolName: 'cat_tool',
+        changeSetId: '11111111-1111-4111-8111-111111111111',
+        publicationCatalogDigest: 'c'.repeat(64),
+      },
     )
     assert.throws(
       () => validateStagedAuthorResponse({
