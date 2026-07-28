@@ -12,6 +12,8 @@ FROM node:22-bookworm AS trust-store
 
 FROM node:22-slim AS harness
 
+ARG LEAF_SOURCE_SHA=unknown
+
 # The self-hosted build runner cannot reach Debian mirrors over port 80. Seed
 # TLS trust from the full Node image, then rewrite the slim image's Debian
 # sources before the first apt metadata request.
@@ -58,6 +60,7 @@ ENV HARNESS_PORT=8150 \
     LEAF_TENANT_FIXTURE=/app/test/fixtures/tenant-repo \
     LEAF_TENANTS_DIR=/data/tenants \
     LEAF_GRANTS_DIR=/data/grants \
+    LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA} \
     BROKER_URL=http://broker:8140 \
     NODE_ENV=production
 

@@ -732,6 +732,9 @@ def build_suites() -> List[Suite]:
         Suite("build-platform-images-workflow",
               "scripts test_build_platform_images_workflow.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
+        Suite("platform-release-manifest",
+              "scripts test_platform_release_manifest.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 10),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
         # tree 2026-07-27.
