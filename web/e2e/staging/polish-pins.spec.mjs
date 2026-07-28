@@ -4,6 +4,9 @@ import { assertPageOnAllowedOrigin, stagingProofPath } from './stagingConfig.mjs
 import { writeProofReceipt } from '../proofReceipt.mjs'
 
 test('the command-bar shortcut and the center-stage reduced-motion pin hold on the deployed surface', async ({ page, request, baseURL }) => {
+  // Navigation + the bounded entrance-settle allowance + the dense stability
+  // window can legitimately exceed Playwright's 30s default.
+  test.setTimeout(90_000)
   const identity = await captureStagingIdentity(request)
   const stagingOrigin = new URL(baseURL).origin
   const observedEndpoints = [identity.endpoint]
@@ -54,21 +57,29 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   const canvas = stageRoot.locator('canvas').first()
   await expect(canvas).toBeVisible({ timeout: 15_000 })
 
-  // The stage entrance (.stage-viewer's one-time 1730ms condense-in) starts
-  // when the viewer reports ready, which is before this test flips the media
-  // emulation, and a CSS transition that has already started keeps its
-  // original duration when transition-duration later changes (CSS Transitions
-  // level 1, "running transitions are not affected"). A real reduced-motion
-  // user carries the preference from first paint, so the entrance never
-  // animates for them. Let that legitimate pre-flip tail finish before
-  // opening the settle window; anything still moving after this converges is
-  // a genuine reduced-motion violation and fails the poll timeout.
-  await expect.poll(async () => {
-    const first = await canvas.boundingBox()
+  // The stage entrance (.stage-viewer's one-time condense-in, --recast-enter
+  // = 1730ms in landing.css) starts when the viewer reports ready, which is
+  // before this test flips the media emulation, and a CSS transition that has
+  // already started keeps its original duration when transition-* later
+  // changes (CSS Transitions L1). A real reduced-motion user carries the
+  // preference from first paint, so the entrance never animates for them.
+  // Allow that legitimate tail a BOUNDED window: 4s generously covers the
+  // 1730ms transform leg plus a late `.in` and scheduling latency, while any
+  // motion still running past it is a genuine reduced-motion violation.
+  // Limitation (also mirrored in the receipt): a one-shot motion that both
+  // starts and completes inside this allowance is geometrically
+  // indistinguishable from the entrance tail and is not detected; continuous
+  // or looping motion still fails here or in the dense window below.
+  const settleDeadline = Date.now() + 4_000
+  let settled = false
+  let lastSeen = await canvas.boundingBox()
+  while (Date.now() < settleDeadline) {
     await page.waitForTimeout(150)
-    const second = await canvas.boundingBox()
-    return JSON.stringify(first) === JSON.stringify(second) ? 'stable' : 'moving'
-  }, { timeout: 15_000 }).toBe('stable')
+    const next = await canvas.boundingBox()
+    if (JSON.stringify(next) === JSON.stringify(lastSeen)) { settled = true; break }
+    lastSeen = next
+  }
+  expect(settled, 'stage geometry was still moving 4s after the reduced-motion flip').toBe(true)
 
   const canvasBoxBefore = await canvas.boundingBox()
   expect(canvasBoxBefore).not.toBeNull()
@@ -82,7 +93,13 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
     expect(boxesBefore[selector]).not.toBeNull()
   }
 
-  await page.waitForTimeout(600)
+  // Dense sampling: a canvas read every 100ms across the 600ms window, so
+  // periodic motion with any period above ~200ms cannot alias past the pin
+  // (the endpoint-only comparison this replaces could miss it).
+  for (let sample = 1; sample <= 6; sample += 1) {
+    await page.waitForTimeout(100)
+    expect(await canvas.boundingBox(), `canvas moved ${sample * 100}ms into the settle window`).toEqual(canvasBoxBefore)
+  }
 
   const canvasBoxAfter = await canvas.boundingBox()
   expect(canvasBoxAfter).toEqual(canvasBoxBefore)
@@ -135,6 +152,7 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
     limitations: [
       'Canvas non-blankness is not proven because this read-only WebGL proof does not use pixel readback.',
       'This does not exercise a completed run under reduced motion (MO-02), because reaching a completed result requires an active session on the deployed surface.',
+      'The pin grants a bounded 4s allowance for the tail of the pre-flip stage entrance (a running CSS transition keeps its original duration when the media preference changes mid-flight); a one-shot motion that starts and completes inside that allowance is indistinguishable from the entrance tail and is not detected.',
     ],
   })
 })
