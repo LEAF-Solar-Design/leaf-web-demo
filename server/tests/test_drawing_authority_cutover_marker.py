@@ -51,6 +51,12 @@ def test_marker_binds_exact_run_source_task_storage_and_deadline() -> None:
     assert "fence_path = '/data/state/drawing-mutations'" in sql
     assert "deadline > entered_at" in sql
     assert "last_error ~ '^[a-z0-9_]+$'" in sql
+    assert "jsonb_object_length(source_counts) = 4" in sql
+    for category in ("manifests", "versions", "attempts", "purge_receipts"):
+        assert f"jsonb_typeof(source_counts->'{category}') = 'number'" in sql
+        assert (
+            f"source_counts->>'{category}' ~ '^(0|[1-9][0-9]*)$'" in sql
+        )
 
 
 def test_marker_contains_no_customer_identity_column() -> None:

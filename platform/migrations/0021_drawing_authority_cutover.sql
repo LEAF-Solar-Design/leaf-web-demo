@@ -42,9 +42,18 @@ CREATE TABLE IF NOT EXISTS drawing_authority_cutover (
         CHECK (fence_path = '/data/state/drawing-mutations'),
     CONSTRAINT drawing_authority_cutover_source_counts_shape CHECK (
         jsonb_typeof(source_counts) = 'object'
+        AND jsonb_object_length(source_counts) = 4
         AND source_counts ?& ARRAY[
             'manifests', 'versions', 'attempts', 'purge_receipts'
         ]
+        AND jsonb_typeof(source_counts->'manifests') = 'number'
+        AND jsonb_typeof(source_counts->'versions') = 'number'
+        AND jsonb_typeof(source_counts->'attempts') = 'number'
+        AND jsonb_typeof(source_counts->'purge_receipts') = 'number'
+        AND source_counts->>'manifests' ~ '^(0|[1-9][0-9]*)$'
+        AND source_counts->>'versions' ~ '^(0|[1-9][0-9]*)$'
+        AND source_counts->>'attempts' ~ '^(0|[1-9][0-9]*)$'
+        AND source_counts->>'purge_receipts' ~ '^(0|[1-9][0-9]*)$'
     ),
     CONSTRAINT drawing_authority_cutover_parity_digest_shape CHECK (
         parity_digest IS NULL OR parity_digest ~ '^[0-9a-f]{64}$'
