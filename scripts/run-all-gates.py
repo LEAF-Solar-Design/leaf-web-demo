@@ -713,9 +713,10 @@ def build_suites() -> List[Suite]:
         # also explicit here so this PR cannot ship its dependency-free
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
-        # invariant to DB presence: 82 collected either way. The floor below is
-        # the EXECUTED count on a host with no DATABASE_URL, 82 collected minus
-        # the 2 DB-gated skips named in allowed_skip_reasons = 80.
+        # invariant to DB presence: 82 collected either way, measured on this
+        # tree 2026-07-25. The floor below is the EXECUTED count on a host with
+        # no DATABASE_URL -- 82 collected minus the 2 DB-gated skips named in
+        # allowed_skip_reasons = 80.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
@@ -743,8 +744,8 @@ def build_suites() -> List[Suite]:
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 21),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
-        # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
-        # tree 2026-07-27.
+        # Floor 29: 27 baseline tests, plus the PostgreSQL proof registration
+        # and Chromium workflow tests measured on this tree 2026-07-28.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 29),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
