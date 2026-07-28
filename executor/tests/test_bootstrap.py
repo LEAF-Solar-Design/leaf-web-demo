@@ -76,6 +76,24 @@ class BootstrapTests(unittest.TestCase):
             for target in written.values():
                 self.assertEqual(0o600, stat.S_IMODE(target.stat().st_mode))
 
+    def test_file_chmod_permission_denial_is_tolerated_after_private_create(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_chmod = os.chmod
+
+            def chmod_side_effect(path: str | os.PathLike[str], mode: int) -> None:
+                candidate = Path(path)
+                if candidate.parent == root and candidate.name.startswith("."):
+                    raise PermissionError(1, "Operation not permitted", str(path))
+                real_chmod(path, mode)
+
+            with mock.patch("executor.bootstrap.os.chmod", side_effect=chmod_side_effect):
+                written = materialize("executor", environ=self.environment("executor"), output_directory=root)
+
+            self.assertEqual(set(EXECUTOR_FILES), set(written))
+            for target in written.values():
+                self.assertTrue(target.exists())
+
     @unittest.skipIf(os.name == "nt", "Windows symlink creation can require elevated developer mode")
     def test_symlink_output_directory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
