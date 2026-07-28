@@ -20,6 +20,9 @@ _SHA = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SOURCE_HASH = re.compile(r"^[0-9a-f]{64}$")
 _TAG = re.compile(r"^(?:prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$")
+_RUN_ID = re.compile(r"^[1-9][0-9]{5,19}$")
+_RUN_ATTEMPT = re.compile(r"^[1-9][0-9]*$")
+_RECEIPT_RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{5,49}$")
 
 
 class ContractError(ValueError):
@@ -99,7 +102,9 @@ def build_manifest(
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    _exact_keys(manifest, {"schema", "source_revision", "build_tag", "services"}, "manifest")
+    _exact_keys(
+        manifest, {"schema", "source_revision", "build_tag", "services"}, "manifest"
+    )
     if manifest["schema"] != SCHEMA:
         raise ContractError("unsupported release manifest schema")
     source = manifest["source_revision"]
@@ -152,10 +157,111 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         provenance["solver_source_revision"]
     ):
         raise ContractError("canonical-worker solver revision is invalid")
-    if not isinstance(provenance["solver_source_sha256"], str) or not _SOURCE_HASH.fullmatch(
-        provenance["solver_source_sha256"]
-    ):
+    if not isinstance(
+        provenance["solver_source_sha256"], str
+    ) or not _SOURCE_HASH.fullmatch(provenance["solver_source_sha256"]):
         raise ContractError("canonical-worker solver source hash is invalid")
+
+
+def verify_workflow_run(
+    run: dict[str, Any],
+    workflow: dict[str, Any],
+    *,
+    run_id: str,
+    run_attempt: str,
+    workflow_path: str,
+    event: str,
+    branch: str,
+    head_sha: str | None = None,
+) -> dict[str, Any]:
+    if not _RUN_ID.fullmatch(run_id) or not _RUN_ATTEMPT.fullmatch(run_attempt):
+        raise ContractError("workflow run ID or attempt is invalid")
+    if not workflow_path.startswith(".github/workflows/") or not workflow_path.endswith(
+        (".yml", ".yaml")
+    ):
+        raise ContractError("canonical workflow path is invalid")
+    workflow_id = workflow.get("id")
+    if not isinstance(workflow_id, int) or workflow_id < 1:
+        raise ContractError("canonical workflow ID is invalid")
+    if workflow.get("path") != workflow_path:
+        raise ContractError("canonical workflow metadata has the wrong path")
+    if run.get("id") != int(run_id) or run.get("run_attempt") != int(run_attempt):
+        raise ContractError("workflow run identity or attempt differs")
+    if run.get("workflow_id") != workflow_id or run.get("path") != workflow_path:
+        raise ContractError("workflow run did not execute the canonical workflow")
+    if run.get("event") != event or run.get("head_branch") != branch:
+        raise ContractError("workflow run event or protected branch differs")
+    actual_head = run.get("head_sha")
+    if not isinstance(actual_head, str) or not _SHA.fullmatch(actual_head):
+        raise ContractError("workflow run head SHA is invalid")
+    if head_sha is not None and actual_head != head_sha:
+        raise ContractError("workflow run head SHA differs from the trusted source")
+    if run.get("status") != "completed" or run.get("conclusion") != "success":
+        raise ContractError("workflow run did not complete successfully")
+    return {
+        "workflow_id": workflow_id,
+        "workflow_path": workflow_path,
+        "run_id": int(run_id),
+        "run_attempt": int(run_attempt),
+        "event": event,
+        "head_branch": branch,
+        "head_sha": actual_head,
+    }
+
+
+def verify_artifact(
+    listing: dict[str, Any],
+    *,
+    artifact_name: str,
+    run_id: str,
+    head_sha: str,
+) -> dict[str, Any]:
+    artifacts = listing.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise ContractError("workflow artifact listing is invalid")
+    matches = [item for item in artifacts if item.get("name") == artifact_name]
+    if len(matches) != 1:
+        raise ContractError("expected exactly one attempt-specific workflow artifact")
+    artifact = matches[0]
+    workflow_run = artifact.get("workflow_run")
+    if (
+        artifact.get("expired") is not False
+        or not isinstance(artifact.get("id"), int)
+        or not isinstance(workflow_run, dict)
+        or workflow_run.get("id") != int(run_id)
+        or workflow_run.get("head_sha") != head_sha
+    ):
+        raise ContractError("workflow artifact is not bound to the accepted run")
+    return artifact
+
+
+def _validate_run_proof(proof: dict[str, Any], label: str) -> None:
+    required = {
+        "workflow_id",
+        "workflow_path",
+        "run_id",
+        "run_attempt",
+        "event",
+        "head_branch",
+        "head_sha",
+    }
+    if set(proof) != required:
+        raise ContractError(f"{label} workflow run proof is incomplete")
+    if (
+        not isinstance(proof["workflow_id"], int)
+        or proof["workflow_id"] < 1
+        or not isinstance(proof["run_id"], int)
+        or proof["run_id"] < 1
+        or not isinstance(proof["run_attempt"], int)
+        or proof["run_attempt"] < 1
+        or not isinstance(proof["workflow_path"], str)
+        or not proof["workflow_path"].startswith(".github/workflows/")
+        or proof["event"] not in {"push", "workflow_dispatch"}
+        or proof["head_branch"] != "main"
+        or not isinstance(proof["head_sha"], str)
+        or not _SHA.fullmatch(proof["head_sha"])
+    ):
+        raise ContractError(f"{label} workflow run proof is invalid")
 
 
 def verify_staging_receipt(
@@ -163,6 +269,9 @@ def verify_staging_receipt(
     receipt: dict[str, Any],
     repo_root: Path,
     main_ref: str,
+    release_run: dict[str, Any],
+    acceptance_run: dict[str, Any],
+    expected_receipt_run_id: str,
 ) -> dict[str, Any]:
     validate_manifest(manifest)
     if receipt.get("schema") != "leaf.deployed-authored-cad-acceptance.v1":
@@ -177,14 +286,24 @@ def verify_staging_receipt(
     images = receipt.get("images")
     if not isinstance(images, dict) or set(images) != set(SERVICES):
         raise ContractError("staging receipt does not contain exactly five images")
-    expected = {
-        name: manifest["services"][name]["image_digest"] for name in SERVICES
-    }
+    expected = {name: manifest["services"][name]["image_digest"] for name in SERVICES}
     if images != expected:
         raise ContractError("staging and release image digests differ")
     run_id = receipt.get("run_id")
-    if not isinstance(run_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{5,49}", run_id):
+    if (
+        not isinstance(run_id, str)
+        or not _RECEIPT_RUN_ID.fullmatch(run_id)
+        or run_id != expected_receipt_run_id
+    ):
         raise ContractError("staging receipt run ID is invalid")
+    _validate_run_proof(release_run, "release")
+    _validate_run_proof(acceptance_run, "staging")
+    if release_run["head_sha"] != source or release_run["event"] != "push":
+        raise ContractError(
+            "release workflow run proof differs from the release source"
+        )
+    if acceptance_run["event"] != "workflow_dispatch":
+        raise ContractError("staging workflow run proof has the wrong event")
 
     commit = subprocess.run(
         ["git", "-C", str(repo_root), "cat-file", "-e", f"{source}^{{commit}}"],
@@ -195,15 +314,33 @@ def verify_staging_receipt(
         capture_output=True,
     )
     if commit.returncode != 0 or ancestry.returncode != 0:
-        raise ContractError("release source is not an ancestor of the protected main ref")
+        raise ContractError(
+            "release source is not an ancestor of the protected main ref"
+        )
 
     canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     return {
         "schema": HANDOFF_SCHEMA,
         "source_revision": source,
         "staging_supply_set_manifest_sha256": hashlib.sha256(canonical).hexdigest(),
+        "release": {
+            "workflow_run_id": release_run["run_id"],
+            "workflow_run_attempt": release_run["run_attempt"],
+            "workflow_id": release_run["workflow_id"],
+            "workflow_path": release_run["workflow_path"],
+            "event": release_run["event"],
+            "head_branch": release_run["head_branch"],
+            "head_sha": release_run["head_sha"],
+        },
         "staging_acceptance": {
             "run_id": run_id,
+            "workflow_run_id": acceptance_run["run_id"],
+            "workflow_run_attempt": acceptance_run["run_attempt"],
+            "workflow_id": acceptance_run["workflow_id"],
+            "workflow_path": acceptance_run["workflow_path"],
+            "event": acceptance_run["event"],
+            "head_branch": acceptance_run["head_branch"],
+            "head_sha": acceptance_run["head_sha"],
             "source_revision": source,
             "images": images,
         },
@@ -267,7 +404,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     verify.add_argument("--receipt", type=Path, required=True)
     verify.add_argument("--repo-root", type=Path, required=True)
     verify.add_argument("--main-ref", required=True)
+    verify.add_argument("--release-run-proof", type=Path, required=True)
+    verify.add_argument("--acceptance-run-proof", type=Path, required=True)
+    verify.add_argument("--expected-receipt-run-id", required=True)
     verify.add_argument("--output", type=Path, required=True)
+    verify_run = commands.add_parser("verify-workflow-run")
+    verify_run.add_argument("--run", type=Path, required=True)
+    verify_run.add_argument("--workflow", type=Path, required=True)
+    verify_run.add_argument("--run-id", required=True)
+    verify_run.add_argument("--run-attempt", required=True)
+    verify_run.add_argument("--workflow-path", required=True)
+    verify_run.add_argument("--event", required=True)
+    verify_run.add_argument("--branch", required=True)
+    verify_run.add_argument("--head-sha")
+    verify_run.add_argument("--output", type=Path, required=True)
+    verify_artifact_command = commands.add_parser("verify-artifact")
+    verify_artifact_command.add_argument("--listing", type=Path, required=True)
+    verify_artifact_command.add_argument("--artifact-name", required=True)
+    verify_artifact_command.add_argument("--run-id", required=True)
+    verify_artifact_command.add_argument("--head-sha", required=True)
+    verify_artifact_command.add_argument("--output", type=Path, required=True)
     web_digest = commands.add_parser("digest-web-dist")
     web_digest.add_argument("--root", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -275,7 +431,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "digest-web-dist":
             print(web_dist_digest(args.root))
             return 0
-        if args.command == "generate":
+        if args.command == "verify-workflow-run":
+            value = verify_workflow_run(
+                load_json(args.run),
+                load_json(args.workflow),
+                run_id=args.run_id,
+                run_attempt=args.run_attempt,
+                workflow_path=args.workflow_path,
+                event=args.event,
+                branch=args.branch,
+                head_sha=args.head_sha,
+            )
+        elif args.command == "verify-artifact":
+            value = verify_artifact(
+                load_json(args.listing),
+                artifact_name=args.artifact_name,
+                run_id=args.run_id,
+                head_sha=args.head_sha,
+            )
+        elif args.command == "generate":
             value = build_manifest(
                 args.source_revision,
                 args.build_tag,
@@ -291,6 +465,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 load_json(args.receipt),
                 args.repo_root,
                 args.main_ref,
+                load_json(args.release_run_proof),
+                load_json(args.acceptance_run_proof),
+                args.expected_receipt_run_id,
             )
         _write_new(args.output, value)
     except ContractError as exc:

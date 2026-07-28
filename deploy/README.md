@@ -330,13 +330,19 @@ The release path is a staged, receipt-bound chain:
 2. **Accept staging (terraform repo)**: run the protected staging authored-CAD
    acceptance in `execute` mode. Its successful artifact must name the same
    full source SHA and the same five digests as the staging supply-set manifest.
+   The producer must include its GitHub run ID and attempt in the artifact name.
 3. **Create the production handoff (this repo)**: manually run the build
    workflow with `promote=true`, the full release `source_sha`, the successful
-   build workflow run ID, the successful acceptance workflow run ID, and its
-   exact `staging-authored-execute-*` artifact name. The build and push jobs are
-   disabled on this handoff run. It downloads the earlier immutable manifest,
-   verifies that the source is an ancestor of `main`, and proves that all five
-   accepted staging digests equal the release manifest. It uploads a
+   build workflow run ID and attempt, the successful acceptance workflow run ID
+   and attempt, and its exact attempt-specific
+   `staging-authored-execute-*-run-<run-id>-attempt-<attempt>` artifact name.
+   The build and push jobs are disabled on this handoff run. It accepts only the
+   canonical workflow file and workflow ID, expected event, `main` branch,
+   trusted head SHA, and supplied attempt for both upstream runs. It downloads
+   artifacts by their verified artifact IDs, verifies that the source is an
+   ancestor of `main`, binds the receipt's internal run ID to its artifact name,
+   and proves that all five accepted staging digests equal the release manifest.
+   It uploads a
    `leaf.production-handoff-candidate.v1` receipt. It does not rebuild, retag,
    or deploy an image.
 4. **Deploy (terraform repo, not yet receipt-enabled)**: production must consume
@@ -349,6 +355,13 @@ The release path is a staged, receipt-bound chain:
    old three-image tag-only dispatch was removed from this repository. Until
    protected infrastructure and Vercel workflows consume and revalidate the
    candidate, promotion stops at the artifact and fails closed.
+
+The ECR permission change is a required companion infrastructure PR. The
+`leaf-github-web-demo-ecr-push-role` must grant only the image upload and read
+actions needed for the five named `leaf-platform-*` release repositories. This
+application change does not grant, emulate, or bypass that IAM authority. The
+release build must remain blocked until the reviewed infrastructure PR supplies
+the role and immutable-tag repository policy.
 
 The historical one-shot CLI provisioning script (`apply.sh` + `taskdef.json`,
 outside this repo) is RETIRED from deploy duty; it remains provisioning

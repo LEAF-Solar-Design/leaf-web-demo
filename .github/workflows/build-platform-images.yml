@@ -47,8 +47,16 @@ on:
         description: "Required with promote: successful build workflow run that published the five-service manifest."
         type: string
         required: false
+      release_run_attempt:
+        description: "Required with promote: exact successful attempt of the release workflow run."
+        type: string
+        required: false
+      staging_acceptance_run_attempt:
+        description: "Required with promote: exact successful attempt of the staging acceptance workflow run."
+        type: string
+        required: false
       staging_acceptance_artifact:
-        description: "Required with promote: exact staging-authored-execute-* artifact name from that run."
+        description: "Required with promote: exact staging-authored-execute-*-run-<id>-attempt-<attempt> artifact name."
         type: string
         required: false
 
@@ -93,6 +101,8 @@ jobs:
           STAGING_ACCEPTANCE_RUN_ID: ${{ inputs.staging_acceptance_workflow_run_id }}
           STAGING_ACCEPTANCE_ARTIFACT: ${{ inputs.staging_acceptance_artifact }}
           RELEASE_WORKFLOW_RUN_ID: ${{ inputs.release_workflow_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
+          STAGING_ACCEPTANCE_RUN_ATTEMPT: ${{ inputs.staging_acceptance_run_attempt }}
         run: |
           set -euo pipefail
           api_get() {
@@ -156,8 +166,16 @@ jobs:
               echo "::error::Production handoff requires an exact staging acceptance workflow run ID."
               exit 1
             }
-            [[ "$STAGING_ACCEPTANCE_ARTIFACT" =~ ^staging-authored-execute-[a-z0-9][a-z0-9-]{5,49}$ ]] || {
-              echo "::error::Production handoff requires the exact staging execute artifact name."
+            [[ "$RELEASE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::Production handoff requires the exact release run attempt."
+              exit 1
+            }
+            [[ "$STAGING_ACCEPTANCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::Production handoff requires the exact staging acceptance run attempt."
+              exit 1
+            }
+            [[ "$STAGING_ACCEPTANCE_ARTIFACT" =~ ^staging-authored-execute-([a-z0-9][a-z0-9-]{5,49})-run-${STAGING_ACCEPTANCE_RUN_ID}-attempt-${STAGING_ACCEPTANCE_RUN_ATTEMPT}$ ]] || {
+              echo "::error::Production handoff requires the exact attempt-specific staging execute artifact name."
               exit 1
             }
           fi
@@ -432,7 +450,7 @@ jobs:
       - name: Upload immutable staging supply-set manifest
         uses: actions/upload-artifact@v4
         with:
-          name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}
+          name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/staging-supply-set.json
           if-no-files-found: error
           retention-days: 30
@@ -440,7 +458,7 @@ jobs:
       - name: Upload deterministic web deployment artifact
         uses: actions/upload-artifact@v4
         with:
-          name: web-dist-${{ needs.prepare.outputs.source_sha }}
+          name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: web/dist
           if-no-files-found: error
           retention-days: 30
@@ -457,7 +475,9 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
       RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}
+      RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
       ACCEPTANCE_RUN_ID: ${{ inputs.staging_acceptance_workflow_run_id }}
+      ACCEPTANCE_RUN_ATTEMPT: ${{ inputs.staging_acceptance_run_attempt }}
       ACCEPTANCE_ARTIFACT: ${{ inputs.staging_acceptance_artifact }}
       SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
 
@@ -471,38 +491,68 @@ jobs:
       - name: Consume the release manifest and accepted staging execution receipt
         run: |
           set -euo pipefail
+          RELEASE_WORKFLOW_PATH=.github/workflows/build-platform-images.yml
+          ACCEPTANCE_REPOSITORY=LEAF-Solar-Design/leaf-automation-aws-terraform
+          ACCEPTANCE_WORKFLOW_PATH=.github/workflows/accept-leaf-platform-staging-authored-cad.yml
+          RELEASE_ARTIFACT="staging-supply-set-$SOURCE_SHA-attempt-$RELEASE_RUN_ATTEMPT"
+          [[ "$ACCEPTANCE_ARTIFACT" =~ ^staging-authored-execute-([a-z0-9][a-z0-9-]{5,49})-run-${ACCEPTANCE_RUN_ID}-attempt-${ACCEPTANCE_RUN_ATTEMPT}$ ]]
+          ACCEPTANCE_RECEIPT_RUN_ID=${BASH_REMATCH[1]}
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID" \
             > "$RUNNER_TEMP/release-workflow-run.json"
-          jq -e '
-            .name == "Build platform images"
-            and .status == "completed"
-            and .conclusion == "success"
-          ' "$RUNNER_TEMP/release-workflow-run.json" >/dev/null || {
-            echo "::error::The release workflow run did not publish accepted build evidence."
-            exit 1
-          }
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/build-platform-images.yml" \
+            > "$RUNNER_TEMP/release-workflow.json"
+          python scripts/platform_release_manifest.py verify-workflow-run \
+            --run "$RUNNER_TEMP/release-workflow-run.json" \
+            --workflow "$RUNNER_TEMP/release-workflow.json" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT" \
+            --workflow-path "$RELEASE_WORKFLOW_PATH" \
+            --event push --branch main --head-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/release-run-proof.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/release-artifacts.json"
+          python scripts/platform_release_manifest.py verify-artifact \
+            --listing "$RUNNER_TEMP/release-artifacts.json" \
+            --artifact-name "$RELEASE_ARTIFACT" \
+            --run-id "$RELEASE_RUN_ID" --head-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/release-artifact.json"
+          RELEASE_ARTIFACT_ID=$(jq -er '.id' "$RUNNER_TEMP/release-artifact.json")
           mkdir -p "$RUNNER_TEMP/release"
-          gh run download "$RELEASE_RUN_ID" \
-            -R "$GITHUB_REPOSITORY" \
-            -n "staging-supply-set-$SOURCE_SHA" \
-            -D "$RUNNER_TEMP/release"
-          gh api \
-            "repos/LEAF-Solar-Design/leaf-automation-aws-terraform/actions/runs/$ACCEPTANCE_RUN_ID" \
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RELEASE_ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/release.zip"
+          unzip -q "$RUNNER_TEMP/release.zip" -d "$RUNNER_TEMP/release"
+          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID" \
             > "$RUNNER_TEMP/staging-acceptance-run.json"
-          jq -e '
-            .name == "Accept Leaf Platform staging authored CAD"
-            and .event == "workflow_dispatch"
-            and .status == "completed"
-            and .conclusion == "success"
-          ' "$RUNNER_TEMP/staging-acceptance-run.json" >/dev/null || {
-            echo "::error::The staging acceptance workflow run is not an accepted execution."
-            exit 1
-          }
+          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/workflows/accept-leaf-platform-staging-authored-cad.yml" \
+            > "$RUNNER_TEMP/staging-acceptance-workflow.json"
+          ACCEPTANCE_HEAD_SHA=$(jq -er '.head_sha' "$RUNNER_TEMP/staging-acceptance-run.json")
+          python scripts/platform_release_manifest.py verify-workflow-run \
+            --run "$RUNNER_TEMP/staging-acceptance-run.json" \
+            --workflow "$RUNNER_TEMP/staging-acceptance-workflow.json" \
+            --run-id "$ACCEPTANCE_RUN_ID" \
+            --run-attempt "$ACCEPTANCE_RUN_ATTEMPT" \
+            --workflow-path "$ACCEPTANCE_WORKFLOW_PATH" \
+            --event workflow_dispatch --branch main --head-sha "$ACCEPTANCE_HEAD_SHA" \
+            --output "$RUNNER_TEMP/staging-acceptance-run-proof.json"
+          gh api "repos/$ACCEPTANCE_REPOSITORY/compare/$ACCEPTANCE_HEAD_SHA...main" \
+            > "$RUNNER_TEMP/staging-acceptance-main-ancestry.json"
+          jq -e --arg head "$ACCEPTANCE_HEAD_SHA" '
+            (.merge_base_commit.sha | ascii_downcase) == $head
+            and (.status == "ahead" or .status == "identical")
+          ' "$RUNNER_TEMP/staging-acceptance-main-ancestry.json" >/dev/null
+          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/staging-acceptance-artifacts.json"
+          python scripts/platform_release_manifest.py verify-artifact \
+            --listing "$RUNNER_TEMP/staging-acceptance-artifacts.json" \
+            --artifact-name "$ACCEPTANCE_ARTIFACT" \
+            --run-id "$ACCEPTANCE_RUN_ID" --head-sha "$ACCEPTANCE_HEAD_SHA" \
+            --output "$RUNNER_TEMP/staging-acceptance-artifact.json"
+          ACCEPTANCE_ARTIFACT_ID=$(jq -er '.id' "$RUNNER_TEMP/staging-acceptance-artifact.json")
           mkdir -p "$RUNNER_TEMP/staging-acceptance"
-          gh run download "$ACCEPTANCE_RUN_ID" \
-            -R LEAF-Solar-Design/leaf-automation-aws-terraform \
-            -n "$ACCEPTANCE_ARTIFACT" \
-            -D "$RUNNER_TEMP/staging-acceptance"
+          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/artifacts/$ACCEPTANCE_ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/staging-acceptance.zip"
+          unzip -q "$RUNNER_TEMP/staging-acceptance.zip" \
+            -d "$RUNNER_TEMP/staging-acceptance"
           mapfile -t receipts < <(find "$RUNNER_TEMP/staging-acceptance" \
             -type f -name '*.json' -print)
           [ "${#receipts[@]}" -eq 1 ] || {
@@ -515,6 +565,9 @@ jobs:
             --receipt "${receipts[0]}" \
             --repo-root . \
             --main-ref origin/main \
+            --release-run-proof "$RUNNER_TEMP/release-run-proof.json" \
+            --acceptance-run-proof "$RUNNER_TEMP/staging-acceptance-run-proof.json" \
+            --expected-receipt-run-id "$ACCEPTANCE_RECEIPT_RUN_ID" \
             --output "$RUNNER_TEMP/production-handoff-candidate.json"
           echo "Verified receipt-bound production handoff candidate. No image was rebuilt or retagged, and no deployment was dispatched." \
             >> "$GITHUB_STEP_SUMMARY"
@@ -522,7 +575,7 @@ jobs:
       - name: Upload verified production handoff
         uses: actions/upload-artifact@v4
         with:
-          name: production-handoff-candidate-${{ needs.prepare.outputs.source_sha }}
+          name: production-handoff-candidate-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/production-handoff-candidate.json
           if-no-files-found: error
           retention-days: 30

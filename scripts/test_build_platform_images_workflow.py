@@ -25,8 +25,7 @@ def main() -> None:
     assert "IMAGE_TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert "TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert (
-        "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:"
-        "${{ env.IMAGE_TAG }}"
+        "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
     ) in text
 
     # A trusted main workflow may build an exact reviewed source without
@@ -60,9 +59,7 @@ def main() -> None:
 
     # The matrix isolates all five images and does not cancel siblings after
     # one failure. A failed matrix entry still blocks the verification job.
-    assert re.search(
-        r"image:\s*\[app, broker, canonical-worker, harness, web\]", text
-    )
+    assert re.search(r"image:\s*\[app, broker, canonical-worker, harness, web\]", text)
     assert "fail-fast: false" in text
     assert "needs: [prepare, build]" in text
 
@@ -105,26 +102,52 @@ def main() -> None:
     assert "platform_release_manifest.py generate" in verify_body
     assert "digest-web-dist --root dist" in verify_body
     assert "--web-artifact-sha256" in verify_body
-    assert "staging-supply-set-${{ needs.prepare.outputs.source_sha }}" in verify_body
-    assert "web-dist-${{ needs.prepare.outputs.source_sha }}" in verify_body
+    assert (
+        "staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}"
+        in verify_body
+    )
+    assert (
+        "web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}"
+        in verify_body
+    )
 
     handoff_body = text[text.index("  handoff:") :]
-    assert 'inputs.promote' in handoff_body
+    assert "inputs.promote" in handoff_body
     assert "RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}" in handoff_body
-    assert 'gh run download "$RELEASE_RUN_ID"' in handoff_body
-    assert 'staging-supply-set-$SOURCE_SHA' in handoff_body
-    assert "Accept Leaf Platform staging authored CAD" in handoff_body
+    assert "RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}" in handoff_body
+    assert (
+        "ACCEPTANCE_RUN_ATTEMPT: ${{ inputs.staging_acceptance_run_attempt }}"
+        in handoff_body
+    )
+    assert "verify-workflow-run" in handoff_body
+    assert "verify-artifact" in handoff_body
+    assert '--workflow-path "$RELEASE_WORKFLOW_PATH"' in handoff_body
+    assert '--workflow-path "$ACCEPTANCE_WORKFLOW_PATH"' in handoff_body
+    assert '--event push --branch main --head-sha "$SOURCE_SHA"' in handoff_body
+    assert "--event workflow_dispatch --branch main" in handoff_body
+    assert "staging-supply-set-$SOURCE_SHA-attempt-$RELEASE_RUN_ATTEMPT" in handoff_body
+    assert "actions/artifacts/$RELEASE_ARTIFACT_ID/zip" in handoff_body
+    assert "actions/artifacts/$ACCEPTANCE_ARTIFACT_ID/zip" in handoff_body
+    assert "ACCEPTANCE_RECEIPT_RUN_ID=${BASH_REMATCH[1]}" in handoff_body
+    assert '--release-run-proof "$RUNNER_TEMP/release-run-proof.json"' in handoff_body
+    assert '--expected-receipt-run-id "$ACCEPTANCE_RECEIPT_RUN_ID"' in handoff_body
+    assert "/compare/$ACCEPTANCE_HEAD_SHA...main" in handoff_body
     assert "staging-authored-execute-" in text
     assert "platform_release_manifest.py verify-staging" in handoff_body
     assert "git fetch --no-tags origin main" in handoff_body
     assert "--main-ref origin/main" in handoff_body
     assert "production-handoff-candidate-" in handoff_body
+    assert "-attempt-${{ github.run_attempt }}" in handoff_body
     assert "gh workflow run deploy-service-production.yml" not in text
     assert "aws ecr put-image" not in handoff_body
     assert "docker/build-push-action" not in handoff_body
     assert text.count("if: ${{ !inputs.promote }}") == 3
     assert "Production handoff requires the exact release source_sha input" in text
     assert "Production handoff requires the successful release workflow run ID" in text
+    assert "Production handoff requires the exact release run attempt" in text
+    assert (
+        "Production handoff requires the exact staging acceptance run attempt" in text
+    )
     assert "leaf.staging-supply-set.v1" in DEPLOY_DOC
     assert "leaf.production-handoff-candidate.v1" in DEPLOY_DOC
     assert "four OCI" in DEPLOY_DOC
