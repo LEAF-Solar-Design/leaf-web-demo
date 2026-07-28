@@ -70,6 +70,15 @@ PROBE_LAYER = "LEAF_WRITE_PROBE"
 USD_PER_HR = float(os.environ.get("APS_USD_PER_HR", "10"))
 
 
+class ProofStateUnreadable(RuntimeError):
+    """A version's cache-proof state could not be READ (transport), so the
+    reader can neither trust nor refute the cache. Deliberately NOT a
+    ValueError: the route family maps (KeyError, ValueError) to non-retryable
+    404/400 ("that version does not exist"), and this is a different answer —
+    the version exists, the store is just unreachable right now. Callers
+    surface it as a retryable 503."""
+
+
 # --------------------------------------------------------------------------- #
 # tool classification + backend selection
 # --------------------------------------------------------------------------- #
@@ -403,9 +412,12 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
             # backfill write is best-effort: a read must not fail because a
             # repair write could not land; the next read retries it.
             # Mint ladder, fail-closed on every DETECTED conflict:
-            #  * put_if_absent_or_verify raising ValueError means a DIFFERENT
-            #    proof already won this key — that is a detected conflict,
-            #    never a transport blip, and must refuse the read.
+            #  * put_if_absent_or_verify raising store.ImmutableConflict means
+            #    a DIFFERENT proof already won this key — that is a detected
+            #    conflict, never a transport blip, and must refuse the read.
+            #    (A bare ValueError is NOT a conflict signal: OSS credential
+            #    parsing or response decoding can raise it for transport
+            #    reasons; those fall to the re-read.)
             #  * a transport failure during the mint proves nothing; the key
             #    state is then confirmed by a re-read, where ABSENT means the
             #    pure legacy case (serve, pre-proof status quo), a readable
@@ -427,7 +439,7 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
                     json.dumps(expected, separators=(",", ":")).encode("utf-8"),
                 )
                 minted = True
-            except ValueError as exc:
+            except store.ImmutableConflict as exc:
                 raise ValueError(
                     "raw DWG intake cache does not match its source binding"
                 ) from exc
@@ -435,13 +447,22 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
                 pass
             if not minted:
                 try:
-                    healed_proof = json.loads(backend.get(pkey).decode("utf-8"))
+                    raw_proof = backend.get(pkey)
                 except KeyError:
                     healed_proof = None  # pure legacy: nothing won the key
-                except Exception as exc:  # noqa: BLE001
-                    raise ValueError(
+                except Exception as exc:  # noqa: BLE001 — transport, retryable
+                    raise ProofStateUnreadable(
                         "raw DWG intake cache proof state is unreadable"
                     ) from exc
+                else:
+                    try:
+                        healed_proof = json.loads(raw_proof.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        # A READABLE but unparseable proof is corruption, not
+                        # transport: fail closed non-retryably as before.
+                        raise ValueError(
+                            "raw DWG intake cache has no source binding"
+                        ) from exc
                 if healed_proof is not None and (
                     not isinstance(healed_proof, dict) or any(
                         not hmac.compare_digest(

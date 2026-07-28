@@ -83,6 +83,10 @@ def get_intake(drawing_id: str, version: str = "head",
         ver = int(version)
     try:
         view = write_loop.intake_view(str(tenant_id), drawing_id, ver, backend=_backend(str(tenant_id)))
+    except write_loop.ProofStateUnreadable as exc:
+        # The version exists; its cache-proof state is unreachable right now.
+        return error_response(ErrorCode.INTERNAL, str(exc), retryable=True,
+                              status_code=503)
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
                               retryable=False, status_code=404)
@@ -123,6 +127,9 @@ def get_summary(drawing_id: str, version: str = "head",
             view = write_loop.intake_view(
                 str(tenant_id), drawing_id, ver, backend=_backend(str(tenant_id))
             )
+        except write_loop.ProofStateUnreadable as exc:
+            return error_response(ErrorCode.INTERNAL, str(exc), retryable=True,
+                                  status_code=503)
         except (KeyError, ValueError) as exc:
             return error_response(
                 ErrorCode.BAD_PARAMS,
@@ -377,7 +384,10 @@ def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
             try:
                 _, intake = write_loop.read_intake(backend, tenant_id, drawing_id, v)
                 intake = intake if isinstance(intake, dict) else None
-            except (KeyError, ValueError, TypeError):
+            except (KeyError, ValueError, TypeError,
+                    write_loop.ProofStateUnreadable):
+                # Unreadable proof state degrades this ROW's delta to null;
+                # a transient blip must not 500 the whole chain listing.
                 intake = None
             cache[v] = intake
         return cache[v]
@@ -525,6 +535,9 @@ def restore_version(drawing_id: str, version: int,
             backend, str(tenant_id), drawing_id, source_v)
         if not isinstance(source_intake, dict):
             raise ValueError("intake payload is not an object")
+    except write_loop.ProofStateUnreadable as exc:
+        return error_response(ErrorCode.INTERNAL, str(exc), retryable=True,
+                              status_code=503)
     except (KeyError, ValueError) as exc:
         return error_response(
             ErrorCode.BAD_PARAMS,

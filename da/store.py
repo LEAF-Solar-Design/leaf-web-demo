@@ -142,6 +142,16 @@ class CheckoutParamError(ValueError):
     """
 
 
+class ImmutableConflict(ValueError):
+    """put_if_absent_or_verify found a DIFFERENT winner already at the key.
+
+    A distinct subclass because a bare ValueError is ambiguous on the live
+    backend: OSS credential parsing or response decoding can raise ValueError
+    for reasons that are transport problems, not conflicts, and a caller that
+    must fail closed on REAL conflicts (write_loop's proof mint) needs to
+    tell the two apart without string matching."""
+
+
 class CheckoutDenied(Exception):
     """A write was attempted by someone who is not the single-writer lock holder.
 
@@ -565,7 +575,7 @@ class StorageBackend:
             self.put(key, payload)
         existing = self.get(key)
         if existing != payload:
-            raise ValueError("immutable object already exists with different content")
+            raise ImmutableConflict("immutable object already exists with different content")
 
 
 class InMemoryBackend(StorageBackend):
@@ -599,7 +609,7 @@ class InMemoryBackend(StorageBackend):
         payload = bytes(data)
         winner = self._blobs.setdefault(key, payload)
         if winner != payload:
-            raise ValueError("immutable object already exists with different content")
+            raise ImmutableConflict("immutable object already exists with different content")
 
     # test convenience
     def keys(self) -> list[str]:
@@ -783,7 +793,7 @@ class FilesystemBackend(StorageBackend):
             with open(p, "rb") as winner:
                 existing = winner.read()
             if existing != payload:
-                raise ValueError(
+                raise ImmutableConflict(
                     "immutable object already exists with different content")
             if created and hasattr(os, "O_DIRECTORY"):
                 directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)

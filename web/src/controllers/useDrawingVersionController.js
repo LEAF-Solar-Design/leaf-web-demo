@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 
 const identity = (value) => value
 
@@ -132,6 +132,7 @@ export default function useDrawingVersionController({
     setRefreshFailure(null)
     setRefreshing(false)
     setUnreadableHead(null)
+    restoreGenerationRef.current += 1 // abandon any in-flight restore completion
     onResetSelection?.({ source: 'reset' })
   }, [onResetSelection])
 
@@ -143,6 +144,7 @@ export default function useDrawingVersionController({
     setOverlayStale(false)
     setRefreshFailure(null)
     setUnreadableHead(null)
+    restoreGenerationRef.current += 1 // drawing switch: abandon in-flight restore completions
     resetPreview()
     onResetSelection?.({ source: 'intake' })
 
@@ -306,9 +308,18 @@ export default function useDrawingVersionController({
     }
   }, [drawingState, loadHead, reportError, seatVersion])
 
+  // Generation token for the ASYNC restore completion (round-4 finding): the
+  // awaited head read can resolve after another actor already settled the
+  // lock (a parallel valid read cleared it, a drawing switch replaced the
+  // context, a newer restore superseded this one). A stale completion must
+  // neither seat over the newer context nor re-arm an obsolete lock.
+  const restoreGenerationRef = useRef(0)
+
   const recordRestore = useCallback(async (result) => {
     const drawingId = result?.drawing_id ?? drawingState?.drawing_id
     if (drawingId == null || result?.head == null) return null
+    const generation = restoreGenerationRef.current + 1
+    restoreGenerationRef.current = generation
     const nextState = drawingStateFrom({
       drawing_id: drawingId,
       version: result.head,
@@ -354,6 +365,11 @@ export default function useDrawingVersionController({
     }
     try {
       const view = await loadHead(drawingId)
+      if (restoreGenerationRef.current !== generation) {
+        // Superseded while awaiting (newer restore, drawing switch, reset):
+        // this completion must not seat old context over the new one.
+        return null
+      }
       const seatedDrawing = view?.drawing_id ?? drawingId
       // Same coherence + watermark proof as releaseLockIfSeated: the SEATED
       // version must BE the response's own head (a split read can report
@@ -379,16 +395,21 @@ export default function useDrawingVersionController({
       seatVersion(view, { drawingId, source: 'restore' })
       return view
     } catch (error) {
+      if (restoreGenerationRef.current !== generation) return null
       // The server head moved but we could not read it: the stale viewer
-      // must NOT become eligible to mutate the newer head (clearing the lock
-      // before this read was the hole — a failed GET left old geometry
-      // editable against the new server head).
-      setUnreadableHead({
-        drawing_id: drawingId,
-        head: Number(result.head),
-        latest: Number(result.latest ?? result.head),
-        restored_from: result.restored_from,
-        message: `Restored as v${result.head}, but the new head could not be loaded. Editing stays locked until it loads.`,
+      // must NOT become eligible to mutate the newer head. Re-arm ONLY if
+      // the current lock is still THIS restore's (a parallel valid read may
+      // already have released it; an obsolete failure must not resurrect an
+      // obsolete lock).
+      setUnreadableHead((lock) => {
+        if (!lock || lock.drawing_id !== drawingId || Number(lock.head) !== Number(result.head)) return lock
+        return {
+          drawing_id: drawingId,
+          head: Number(result.head),
+          latest: Number(result.latest ?? result.head),
+          restored_from: result.restored_from,
+          message: `Restored as v${result.head}, but the new head could not be loaded. Editing stays locked until it loads.`,
+        }
       })
       reportError(error, 'restore-refresh')
       return null

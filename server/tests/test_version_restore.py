@@ -469,8 +469,10 @@ def test_mint_conflict_with_unreadable_reread_still_fails_closed(client, tmp_pat
     proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
 
     def conflicting_mint(key, data):
+        import store  # noqa: PLC0415
         if key == proof_key:
-            raise ValueError("immutable object already exists with different content")
+            raise store.ImmutableConflict(
+                "immutable object already exists with different content")
         raise AssertionError("unexpected key")
 
     original_get = backend.get
@@ -510,8 +512,30 @@ def test_transport_only_mint_failure_with_unreadable_proof_refuses(client, tmp_p
 
     backend.put_if_absent_or_verify = transport_failing_mint
     backend.get = failing_proof_get
-    with pytest.raises(ValueError, match="proof state is unreadable"):
+    # ProofStateUnreadable is deliberately NOT a ValueError: routes surface
+    # it as a retryable 503, never the version-does-not-exist 404/422.
+    with pytest.raises(write_loop.ProofStateUnreadable):
         write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
+def test_non_conflict_valueerror_from_mint_is_transport_not_conflict(client, tmp_path):
+    """Round-4 pin: a bare ValueError from the mint (OSS credential parsing,
+    response decoding) is NOT a conflict signal. With the proof state absent
+    on re-read, the legacy trust-on-first-read still serves."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG6",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    legacy_intake = _intake([_poly("A")])
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(legacy_intake, separators=(",", ":")).encode("utf-8"))
+
+    def oss_style_valueerror_mint(key, data):
+        raise ValueError("substring not found while parsing OSS response")
+
+    backend.put_if_absent_or_verify = oss_style_valueerror_mint
+    v, intake = write_loop.read_intake(backend, TENANT, DRAWING, v4)
+    assert v == v4 and intake == legacy_intake
 
 
 def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypatch):
