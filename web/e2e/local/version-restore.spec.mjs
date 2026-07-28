@@ -37,7 +37,11 @@ test('a 3-version chain renders delta chips, and restoring v1 appends a new head
   // server/tests/test_version_restore.py -- under the LEGACY JSON-backed
   // APS_LIVE=0 storage only; the PostgreSQL authority and live-DWG
   // representations are NOT exercised by those tests, which is part of what
-  // this spec still owes when it un-skips.
+  // this spec still owes when it un-skips. Also owed here (no component
+  // harness exists in this repo -- node --test covers headless modules
+  // only): the committed-but-unreadable-head lifecycle, where a failed
+  // cache mirror must surface the drawer-level [data-testid=vh-head-warning]
+  // banner and that banner must SURVIVE the post-restore history refresh.
   test.skip(true, 'delta/restore UI mounts on /app (VersionHistory.jsx), not /try; see finding above')
   await requireLocalReady(request, test, API_BASE)
 

@@ -87,6 +87,12 @@ export default function VersionHistory({
   const [confirmingVersion, setConfirmingVersion] = useState(null)
   const [restoringVersion, setRestoringVersion] = useState(null)
   const [restoreErr, setRestoreErr] = useState(null) // {version, message} | null
+  // Unlike restoreErr, this SURVIVES data refreshes: doRestore's own onRetry
+  // fetches a new history object, and the [data] effect below clears
+  // transient per-row state — which silently erased the committed-but-
+  // unreadable-head warning the instant it appeared (round-5 finding).
+  // Cleared only by a later readable restore or the drawer unmounting.
+  const [headWarning, setHeadWarning] = useState(null) // {version, head, message} | null
 
   // A fresh `data` prop (a real reload) always wins over our own best-effort
   // local refresh, and closes out any stale confirm/error state.
@@ -119,12 +125,16 @@ export default function VersionHistory({
       setConfirmingVersion(null)
       if (result && result.restored_head_readable === false) {
         // The head committed (immutable), but its intake cache could not be
-        // written: silent success here would leave the viewer stale with no
-        // explanation. Surface it as the row's error line.
-        setRestoreErr({
+        // written: silent success would leave the viewer stale with no
+        // explanation. headWarning, not restoreErr: the refresh two lines
+        // down replaces `data`, and restoreErr is cleared by that refresh.
+        setHeadWarning({
           version: v,
+          head: result.head,
           message: `Restored as v${result.head}, but the new head is not readable yet (its intake cache could not be written). Retry loading, or contact ops if it persists.`,
         })
+      } else {
+        setHeadWarning(null)
       }
       if (onRetry) {
         // The real integration path: the parent's own history state refreshes,
@@ -154,6 +164,14 @@ export default function VersionHistory({
       </div>
 
       <div className="drawer-body">
+        {headWarning && (
+          // Drawer-level, not row-level: the refreshed history re-renders the
+          // rows, and this warning must outlive that refresh (see headWarning
+          // above). role=alert so the state change is announced.
+          <div className="field-err vh-restore-err" role="alert" data-testid="vh-head-warning">
+            {headWarning.message}
+          </div>
+        )}
         {previewingVersion != null && (
           <div className="vh-previewing">
             <span>Viewing v{previewingVersion}{latest != null ? ` of ${latest}` : ''} — read-only preview</span>
