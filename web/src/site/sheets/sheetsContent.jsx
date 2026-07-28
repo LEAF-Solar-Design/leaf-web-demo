@@ -3,6 +3,7 @@
 // recast the ui-kit homepage copy (ui_kits/website/index.html) into the same
 // frame, sentence case, mono only for refs/revs/codes.
 import SheetFrame, { Dot, TrialCta, Chip, go } from './SheetFrame.jsx';
+import { DemandCaptureCard } from '../../components/SessionGate.jsx';
 
 export const SHEET_CODES = ['l-000', 'g-000', 'a-101', 'a-102', 'e-401', 'c-201', 's-501'];
 
@@ -525,7 +526,7 @@ export function C201Sheet() {
           </div>
           <div className="sheet-cta-row">
             <TrialCta />
-            <Chip target="mailto:contact@leafautomation.ai">Talk to an engineer</Chip>
+            <DemandCaptureCard compact />
           </div>
           <DeployedRow />
         </>

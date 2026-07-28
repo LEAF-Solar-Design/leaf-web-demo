@@ -934,3 +934,22 @@ export async function publishStagedAuthor(mock, staged) {
   if (!res.ok) throw customizationError('POST', path, res.status, body)
   return { ...staged, ...body, published: true }
 }
+
+// --- Demand capture ------------------------------------------------------
+// Public waitlist endpoint. This intentionally bypasses mock mode because it
+// records a real request even when the operator surface is otherwise mocked.
+export async function submitDemandCapture({ email, interest, org = null }) {
+  const path = '/api/demand'
+  const res = await apiFetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, interest, org }),
+  }, path)
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error?.message || 'We could not save your request. Please try again.')
+    error.status = res.status
+    throw error
+  }
+  return body
+}
