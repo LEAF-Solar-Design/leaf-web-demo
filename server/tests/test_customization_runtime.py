@@ -641,8 +641,70 @@ def test_live_author_fails_closed_when_r5_is_disabled(monkeypatch):
     )
 
     assert response.status_code == 404
-    assert json.loads(response.body)["reason_code"] == "customization_stage_disabled"
+    body = json.loads(response.body)
+    assert body["reason_code"] == "customization_stage_disabled"
+    assert body["error"]["message"] == (
+        "Tool authoring is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    )
+    assert "refused" not in body["error"]["message"].lower()
     assert legacy_calls == []
+
+
+def test_live_author_preserves_requested_mode(monkeypatch):
+    calls = []
+    service = SimpleNamespace(
+        stage=lambda **kwargs: calls.append(kwargs) or {"status": "staged"}
+    )
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(lambda cls: service),
+    )
+
+    response = author_router.author(
+        author_router.AuthorRequest(description="make a tool", mode="one_off"),
+        tenant="tenant-a",
+        idempotency_key="request-a",
+    )
+
+    assert response == {"status": "staged"}
+    assert calls == [{
+        "tenant": "tenant-a",
+        "description": "make a tool",
+        "mode": "one_off",
+        "idempotency_key": "request-a",
+    }]
+
+
+def test_live_author_reports_unsupported_one_off_mode(tmp_path, monkeypatch):
+    service = CustomizationService(
+        SQLiteCustomizationStore(tmp_path / "customization.db")
+    )
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(lambda cls: service),
+    )
+
+    response = author_router.author(
+        author_router.AuthorRequest(description="make a tool", mode="one_off"),
+        tenant="tenant-a",
+        idempotency_key="request-a",
+    )
+
+    assert response.status_code == 422
+    body = json.loads(response.body)
+    assert body["reason_code"] == "invalid_stage_request"
+    assert body["error"]["message"] == (
+        "The requested authoring mode is not supported by the protected authoring path. "
+        "Use build mode."
+    )
 
 
 def test_live_author_requires_stable_idempotency_key_when_r5_is_enabled(monkeypatch):

@@ -156,6 +156,13 @@ In live-auth mode, `POST /api/author` MUST NOT publish or persist bytes. It may
 delegate to the R5 stage operation or fail closed while the staged path is
 disabled. A harness failure MUST NOT fall back to local persisted authoring.
 
+The compatibility route MUST preserve the approved `mode` through dispatch and
+request identity. The protected R5 stage supports `build`; a `one_off` request
+that is not supported by that path MUST fail explicitly and MUST NOT be silently
+converted to `build`. A disabled or unavailable customization path MUST return
+its stable `reason_code` with a safe, actionable message. It MUST NOT describe
+an environment or rollout refusal as a rejection of the user's tool request.
+
 Auth-off demo mode may retain the legacy direct authoring path for compatibility,
 but its response MUST identify the legacy mode and it is never production
 evidence.

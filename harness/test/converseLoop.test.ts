@@ -736,11 +736,54 @@ describe("ConverseLoop — remaining spine tools", () => {
       }))
       .digest("hex")}`;
     expect(appRun.authorCalls).toEqual([
-      { tenantId: "demo-tenant", description: "panel-gap-checker", idempotencyKey },
+      {
+        tenantId: "demo-tenant",
+        description: "panel-gap-checker",
+        mode: "build",
+        idempotencyKey,
+      },
     ]);
     expect(gate.checks).toContainEqual(expect.objectContaining({
       action: "author_tool",
       args: expect.objectContaining({ confirmation_id: cid }),
+      decision: "allow",
+    }));
+  });
+
+  it("author_tool binds one-off mode into approval replay and request identity", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, "AUTHOR_ONCE:sphere-drape");
+    const pending = await store.eventsAfter(s.session_id, 0);
+    const cid = String(ofType(pending, "confirmation_required")[0]!.data.confirmation_id);
+
+    gate.grant(cid);
+    const { done } = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    });
+    await done;
+
+    const idempotencyKey = `author:${createHash("sha256")
+      .update(JSON.stringify({
+        action: "author_tool",
+        tenant_id: "demo-tenant",
+        session_id: s.session_id,
+        description: "sphere-drape",
+        mode: "one_off",
+      }))
+      .digest("hex")}`;
+    expect(appRun.authorCalls).toEqual([{
+      tenantId: "demo-tenant",
+      description: "sphere-drape",
+      mode: "one_off",
+      idempotencyKey,
+    }]);
+    expect(gate.checks).toContainEqual(expect.objectContaining({
+      action: "author_tool",
+      args: expect.objectContaining({ mode: "one_off", confirmation_id: cid }),
       decision: "allow",
     }));
   });

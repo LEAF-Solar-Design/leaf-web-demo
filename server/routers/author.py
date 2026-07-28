@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
@@ -49,6 +49,7 @@ DEFAULT_AUTHOR_TIMEOUT_S = 120.0
 
 class AuthorRequest(BaseModel):
     description: str = Field(..., max_length=MAX_AUTHOR_DESCRIPTION)
+    mode: Literal["build", "one_off"] = "build"
 
 
 class StageRequest(AuthorRequest):
@@ -311,9 +312,39 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     )
 
 
+_CUSTOMIZATION_ERROR_MESSAGES = {
+    "customization_stage_disabled": (
+        "Tool authoring is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    ),
+    "customization_publish_disabled": (
+        "Tool publication is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    ),
+    "invalid_stage_request": (
+        "The requested authoring mode is not supported by the protected authoring path. "
+        "Use build mode."
+    ),
+    "builder_entitlement_missing": (
+        "This workspace does not have the builder entitlement required for tool authoring."
+    ),
+    "customization_harness_unavailable": (
+        "Protected tool authoring is temporarily unavailable. "
+        "The approved request was not executed."
+    ),
+    "idempotency_key_required": (
+        "Tool authoring requires a request identity. The approved request was not executed."
+    ),
+}
+
+
 def _customization_error(exc: CustomizationServiceError) -> JSONResponse:
+    message = _CUSTOMIZATION_ERROR_MESSAGES.get(
+        exc.code,
+        "Protected tool authoring could not complete. The approved request was not executed.",
+    )
     return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
-        "error": error_obj("BAD_PARAMS", "customization request was refused", retryable=False),
+        "error": error_obj("BAD_PARAMS", message, retryable=False),
         "reason_code": exc.code,
     }))
 
@@ -354,7 +385,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         )
     try:
         return CustomizationService.configured().stage(
-            tenant=tenant, description=req.description, mode="build",
+            tenant=tenant, description=req.description, mode=req.mode,
             idempotency_key=idempotency_key.strip(),
         )
     except (CustomizationServiceError, AuthorityError) as exc:

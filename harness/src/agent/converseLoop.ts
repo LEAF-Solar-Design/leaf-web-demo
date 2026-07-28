@@ -838,17 +838,20 @@ export class ConverseLoop {
         const description = String(args.description ?? "").trim();
         if (!description) return err("author_tool requires args.description");
         const normalizedDescription = description.replace(/\s+/g, " ");
+        const mode = args.mode === "one_off" ? "one_off" : "build";
         const idempotencyKey = `author:${createHash("sha256")
           .update(JSON.stringify({
             action: "author_tool",
             tenant_id: tenantId,
             session_id: ctx.session.session_id,
             description: normalizedDescription,
+            ...(mode === "one_off" ? { mode } : {}),
           }))
           .digest("hex")}`;
         const authored = await appRun.authorTool(
           tenantId,
           normalizedDescription,
+          mode,
           idempotencyKey,
         );
         return ok(JSON.stringify(authored));
