@@ -9,7 +9,7 @@ const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof'
 test('reduced motion completes the operator flow without hiding filled panes', async ({ page }) => {
   test.setTimeout(60_000)
   mkdirSync(PROOF_DIR, { recursive: true })
-  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
   const proofState = makeCatProofState()
   await page.route('http://leaf-proof.invalid/api/**', async (route) => {
     const request = route.request()
@@ -25,6 +25,23 @@ test('reduced motion completes the operator flow without hiding filled panes', a
   })
 
   await page.goto('/try')
+  const caption = page.locator('.tc-caption')
+  await expect(caption).toBeVisible()
+  const readCaptionMotion = () => caption.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    return {
+      transitionDuration: computed.transitionDuration,
+      transitionDelay: computed.transitionDelay,
+    }
+  })
+  const unrestrictedCaptionMotion = await readCaptionMotion()
+  expect(unrestrictedCaptionMotion.transitionDuration).toBe('0.5s')
+
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const reducedCaptionMotion = await readCaptionMotion()
+  expect(reducedCaptionMotion.transitionDuration).toBe('0s')
+  expect(reducedCaptionMotion.transitionDelay).toBe('0s')
+
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready')
   await page.getByRole('textbox', { name: 'Command bar' }).fill(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
@@ -49,10 +66,17 @@ test('reduced motion completes the operator flow without hiding filled panes', a
     assertions: [
       'the completed operator surface remains visible at opacity 1',
       'filled animations complete at zero duration',
+      'the caption keeps its normal transition until reduced motion is requested',
+      'the reduced-motion cascade zeroes the caption transition duration and delay',
       'the request, approval, job, and version flow completes under reduced motion',
     ],
     artifacts: ['completed.png'],
-    result: { verdict: 'pass', computed_style: style },
+    result: {
+      verdict: 'pass',
+      computed_style: style,
+      unrestricted_caption_motion: unrestrictedCaptionMotion,
+      reduced_caption_motion: reducedCaptionMotion,
+    },
     limitations: ['This is a deterministic browser contract, not a real local backend run.'],
   })
 })
