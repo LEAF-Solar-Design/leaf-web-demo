@@ -307,6 +307,8 @@ export default function App() {
     historyLoading,
     previewing,
     refreshFailure: refreshFail,
+    unreadableHead,
+    mutationsBlocked: drawingMutationsBlocked,
     actions: drawingActions,
   } = drawing
   const {
@@ -324,6 +326,8 @@ export default function App() {
     backToHead: onBackToHead,
     markRefreshFailure,
     retryRefresh: onRetryViewerRefresh,
+    recordRestore: onRestoreCommitted,
+    retryUnreadableHead,
   } = drawingActions
   const platform = usePlatformTrustController({ mock })
   const {
@@ -491,7 +495,7 @@ export default function App() {
     canTake: baseLock.canTake || !!unprovenOwnLock,
   }
   const otherHeldCheckout = lock.otherHeld || unprovenOwnLock
-  const writeLocked = lock.writeLocked
+  const writeLocked = lock.writeLocked || drawingMutationsBlocked
   const heldByUs = lock.heldByUs
   const staleHeldCheckout = lock.stale ? lock.otherHeld : null
   const legacyHeldCheckout = lock.legacy ? lock.otherHeld : null
@@ -1916,6 +1920,21 @@ export default function App() {
         )}
 
         <div className="workspace-card enter" style={{ '--rank': 1 }} ref={workspaceCardRef}>
+          {unreadableHead && (
+            <div
+              className="strip-failed"
+              role="alert"
+              data-testid="unreadable-head-lock"
+              data-head={unreadableHead.head}
+              data-latest={unreadableHead.latest}
+            >
+              <span className="dot red" aria-hidden="true" />
+              <span className="strip-sentence">{unreadableHead.message}</span>
+              <button type="button" className="chip-act" onClick={retryUnreadableHead} disabled={drawing.refreshing}>
+                Retry loading
+              </button>
+            </div>
+          )}
           <div className="viewer-toolbar">
             <div className="viewer-title">
               {/* One loading voice per pane — the pulse-dot line in the viewer
@@ -1956,14 +1975,14 @@ export default function App() {
                   <button
                     className="btn ghost"
                     onClick={onUndo}
-                    disabled={versionBusy || running || !!previewing || !canUndo}
+                    disabled={versionBusy || running || !!previewing || drawingMutationsBlocked || !canUndo}
                   >
                     Undo
                   </button>
                   <button
                     className="btn ghost"
                     onClick={onRedo}
-                    disabled={versionBusy || running || !!previewing || !canRedo}
+                    disabled={versionBusy || running || !!previewing || drawingMutationsBlocked || !canRedo}
                   >
                     Redo
                   </button>
@@ -1990,7 +2009,9 @@ export default function App() {
                         exiting={historyExit.exiting}
                         mock={mock}
                         capability={capabilityRef.current}
-                        onRestored={() => drawingActions.refreshHead()}
+                        onRestored={onRestoreCommitted}
+                        headWarning={unreadableHead}
+                        mutationBlocked={drawingMutationsBlocked}
                       />
                     )}
                   </div>

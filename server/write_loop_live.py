@@ -126,8 +126,8 @@ def main() -> int:
         receipt["extract_v1_workitem"] = _record("extract-v1", st_v1)
         H1 = {p["handle"] for p in v1_intake["polylines"] if p.get("handle")}
         L1 = set(v1_intake["layers"])
-        be.put(write_loop.intake_cache_key(TENANT, drawing_id, 1),
-               json.dumps(v1_intake, separators=(",", ":")).encode("utf-8"))
+        write_loop.publish_intake_cache(
+            be, TENANT, drawing_id, 1, Path(DWG).read_bytes(), v1_intake)
         print(f"[v1] polylines={len(v1_intake['polylines'])} handles={len(H1)} "
               f"probe_in_v1={write_loop.PROBE_LAYER in L1}")
 

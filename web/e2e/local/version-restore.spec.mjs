@@ -134,4 +134,56 @@ test('an unreadable restored head keeps its warning through history refresh and 
   await expect(history.getByTestId('vh-head-warning')).toContainText('not readable yet')
   expect(observed.restoreCount()).toBe(1)
   expect(observed.intakeReadsAfterRestore()).toBe(0)
+
+  await history.getByRole('button', { name: 'Close version history' }).click()
+  const persistentLock = page.getByTestId('unreadable-head-lock')
+  await expect(persistentLock).toContainText('Restored as v4')
+  await expect(persistentLock).toHaveAttribute('data-head', '4')
+  await expect(persistentLock).toHaveAttribute('data-latest', '4')
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Redo' })).toBeDisabled()
+  await page.getByRole('button', { name: /Drawing tools/ }).click()
+  const writeTool = page.locator('.tool-card').filter({ hasText: 'arrange-panels-as-cat' })
+  await writeTool.getByRole('button').first().click()
+  await expect(writeTool.getByRole('button', { name: 'Review & run' })).toBeDisabled()
+
+  // Closing and reopening the drawer cannot erase the controller-owned lock.
+  await page.getByRole('button', { name: 'History' }).click()
+  const reopened = page.getByRole('dialog', { name: 'Version history' })
+  await expect(reopened.getByTestId('vh-head-warning')).toBeVisible()
+  await expect(reopened.getByTestId('vh-row-v1').getByRole('button', { name: 'Restore', exact: true })).toBeDisabled()
+  await reopened.getByRole('button', { name: 'Close version history' }).click()
+
+  // A successful head intake read repairs the state and only then unlocks edits.
+  await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
+  await expect(persistentLock).toBeHidden()
+  expect(observed.intakeReadsAfterRestore()).toBe(1)
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
+})
+
+test('/try neither requests deltas nor exposes restore controls', async ({ page }) => {
+  const state = makeCatProofState()
+  const versionQueries = []
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (url.pathname.includes('/versions')) versionQueries.push(url.search)
+    const body = request.postData() ? request.postDataJSON() : {}
+    const result = catProofResponse({
+      method: request.method(), path: url.pathname, body,
+      query: Object.fromEntries(url.searchParams),
+    }, state)
+    await route.fulfill({
+      status: result.status,
+      contentType: result.body == null ? undefined : 'application/json',
+      body: result.body == null ? '' : JSON.stringify(result.body),
+      headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
+    })
+  })
+
+  await page.goto('/try')
+  await expect(page.getByTestId('operator-phase')).toContainText(/ready/i, { timeout: 15_000 })
+  await expect(page.getByRole('button', { name: /^Restore/ })).toHaveCount(0)
+  expect(versionQueries.length).toBeGreaterThan(0)
+  expect(versionQueries.some((query) => query.includes('include_deltas'))).toBe(false)
 })

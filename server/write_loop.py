@@ -295,6 +295,38 @@ def intake_cache_key(tenant_id: str, drawing_id: str, version: int) -> str:
             f"{store.sanitize_id(drawing_id)}/v/{v:08d}.intake.json")
 
 
+def intake_cache_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
+    """Binding proof for a derived intake cache beside a raw DWG version."""
+    return intake_cache_key(tenant_id, drawing_id, version) + ".proof.json"
+
+
+def publish_intake_cache(backend, tenant_id: str, drawing_id: str, version: int,
+                         source_bytes: bytes, intake: Dict[str, Any]) -> str:
+    """Publish derived intake plus a binding to its immutable DWG source.
+
+    A cache that is merely valid JSON can belong to another DWG. The proof
+    binds its digest, source digest, key, and version. Readers fail closed if a
+    crash leaves the cache without the proof or either artifact is replaced.
+    """
+    if not isinstance(intake, dict):
+        raise ValueError("intake payload is not an object")
+    cache_key = intake_cache_key(tenant_id, drawing_id, version)
+    cache_bytes = json.dumps(intake, separators=(",", ":")).encode("utf-8")
+    proof = {
+        "schema": 1,
+        "version": int(version),
+        "source_sha256": hashlib.sha256(bytes(source_bytes)).hexdigest(),
+        "intake_ref": cache_key,
+        "intake_sha256": hashlib.sha256(cache_bytes).hexdigest(),
+    }
+    backend.put(cache_key, cache_bytes)
+    backend.put(
+        intake_cache_proof_key(tenant_id, drawing_id, version),
+        json.dumps(proof, separators=(",", ":")).encode("utf-8"),
+    )
+    return cache_key
+
+
 def upload_marker_key(tenant_id: str, drawing_id: str) -> str:
     """Sibling key holding an uploaded drawing's upload/extraction state
     (server/guest_uploads.py writes it; ensure_demo_drawing consults it as a
@@ -309,38 +341,69 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
                 version="head") -> Tuple[int, Dict[str, Any]]:
     """Resolve `version` and return (version_int, intake_dict).
 
-    Prefers the explicit intake cache key (live representation); falls back to
-    reading the version blob itself as JSON (mock representation: the blob IS the
-    intake). Raises KeyError/ValueError on a missing drawing/version."""
+    A JSON-object version blob is its own intake (mock representation). A raw
+    DWG version may use a sibling cache only when an upload marker or cache proof
+    binds that cache to the exact immutable source bytes. Raises KeyError or
+    ValueError on a missing, corrupt, or unbound representation."""
     import store
     v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
     ckey = intake_cache_key(tenant_id, drawing_id, v)
-    raw = None
-    if store.authority_mode() == "postgres":
-        import guest_uploads
-        if guest_uploads.upload_store_mode() == "postgres":
-            marker = guest_uploads.read_marker(
-                backend, tenant_id, drawing_id)
-            if marker is not None and marker.get("extracted_version") == v:
-                ref = marker.get("intake_ref")
-                digest = marker.get("intake_sha256")
-                if (
-                    marker.get("status") != "ready"
-                    or ref != ckey
-                    or not isinstance(digest, str)
-                    or len(digest) != 64
-                ):
-                    raise ValueError(
-                        "ready upload has no source-bound intake proof")
-                candidate = backend.get(ref)
-                if not hmac.compare_digest(
-                    hashlib.sha256(candidate).hexdigest(), digest):
-                    raise ValueError(
-                        "ready upload intake does not match its source proof")
-                raw = candidate
-    if raw is None:
-        raw = backend.get(ckey) if backend.exists(ckey) else backend.get(vkey)
-    return v, json.loads(raw.decode("utf-8"))
+    source = backend.get(vkey)
+    try:
+        direct = json.loads(source.decode("utf-8"))
+        if isinstance(direct, dict):
+            return v, direct
+    except (UnicodeDecodeError, ValueError):
+        pass
+
+    if not backend.exists(ckey):
+        raise ValueError("raw DWG version has no intake cache")
+    candidate = backend.get(ckey)
+    source_digest = hashlib.sha256(source).hexdigest()
+    intake_digest = hashlib.sha256(candidate).hexdigest()
+
+    # Uploaded v1 already has a durable source/cache proof in its marker.
+    import guest_uploads
+    marker = guest_uploads.read_marker(backend, tenant_id, drawing_id)
+    marker_applies = marker is not None and marker.get("extracted_version") == v
+    marker_bound = False
+    if marker_applies:
+        if (
+            marker.get("status") != "ready"
+            or marker.get("intake_ref") != ckey
+            or not hmac.compare_digest(
+                str(marker.get("content_sha256") or ""), source_digest)
+        ):
+            raise ValueError("ready upload has no source-bound intake proof")
+        if not hmac.compare_digest(
+            str(marker.get("intake_sha256") or ""), intake_digest
+        ):
+            raise ValueError("ready upload intake does not match its source proof")
+        marker_bound = True
+
+    if not marker_bound:
+        pkey = intake_cache_proof_key(tenant_id, drawing_id, v)
+        try:
+            proof = json.loads(backend.get(pkey).decode("utf-8"))
+        except (KeyError, UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("raw DWG intake cache has no source binding") from exc
+        expected = {
+            "schema": 1,
+            "version": int(v),
+            "source_sha256": source_digest,
+            "intake_ref": ckey,
+            "intake_sha256": intake_digest,
+        }
+        if not isinstance(proof, dict) or any(
+            not hmac.compare_digest(str(proof.get(key)), str(value))
+            for key, value in expected.items()
+        ):
+            raise ValueError("raw DWG intake cache does not match its source binding")
+
+    intake = json.loads(candidate.decode("utf-8"))
+    if not isinstance(intake, dict):
+        raise ValueError("intake payload is not an object")
+    return v, intake
 
 
 def _transform_number(value: Any, field: str, handle: str) -> float:
@@ -947,10 +1010,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 meta={"tool": name, "workitem_id": wi_id,
                       "note": "live write (output.dwg)"},
                 holder=holder, fence=fence)
-            backend.put(
-                intake_cache_key(tenant_id, drawing_id, new_v),
-                json.dumps(intake, separators=(",", ":")).encode("utf-8"),
-            )
+            publish_intake_cache(
+                backend, tenant_id, drawing_id, new_v, out_bytes, intake)
 
         eng_s = da._engine_seconds(status)
         cost = None if eng_s is None else {

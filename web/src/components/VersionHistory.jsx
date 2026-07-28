@@ -80,19 +80,14 @@ function DeltaChip({ delta }) {
 // holds the mount through the 180 ms M1 exit fade (useExit).
 export default function VersionHistory({
   data, error, loading, previewingVersion, onPreview, onBackToHead, onClose, onRetry,
-  retryKey, exiting, mock, capability, onRestored,
+  retryKey, exiting, mock, capability, onRestored, headWarning, mutationBlocked = false,
 }) {
   // Self-contained restore state (see the integration note above for why).
   const [overrideData, setOverrideData] = useState(null)
   const [confirmingVersion, setConfirmingVersion] = useState(null)
   const [restoringVersion, setRestoringVersion] = useState(null)
   const [restoreErr, setRestoreErr] = useState(null) // {version, message} | null
-  // Unlike restoreErr, this SURVIVES data refreshes: doRestore's own onRetry
-  // fetches a new history object, and the [data] effect below clears
-  // transient per-row state — which silently erased the committed-but-
-  // unreadable-head warning the instant it appeared (round-5 finding).
-  // Cleared only by a later readable restore or the drawer unmounting.
-  const [headWarning, setHeadWarning] = useState(null) // {version, head, message} | null
+  // The controller owns committed-head warnings because this drawer can close.
 
   // A fresh `data` prop (a real reload) always wins over our own best-effort
   // local refresh, and closes out any stale confirm/error state.
@@ -123,19 +118,6 @@ export default function VersionHistory({
     try {
       const result = await restoreDrawingVersion(useMock, drawingId, v, capability)
       setConfirmingVersion(null)
-      if (result && result.restored_head_readable === false) {
-        // The head committed (immutable), but its intake cache could not be
-        // written: silent success would leave the viewer stale with no
-        // explanation. headWarning, not restoreErr: the refresh two lines
-        // down replaces `data`, and restoreErr is cleared by that refresh.
-        setHeadWarning({
-          version: v,
-          head: result.head,
-          message: `Restored as v${result.head}, but the new head is not readable yet (its intake cache could not be written). Retry loading, or contact ops if it persists.`,
-        })
-      } else {
-        setHeadWarning(null)
-      }
       if (onRetry) {
         // The real integration path: the parent's own history state refreshes,
         // and `data` (a fresh prop) will clear `overrideData` above.
@@ -145,12 +127,9 @@ export default function VersionHistory({
         try { setOverrideData(await getDrawingVersions(useMock, drawingId, { includeDeltas: true })) }
         catch { /* the restore itself already succeeded; the list just won't advance */ }
       }
-      // History must refresh after every committed restore so the immutable
-      // version appears. The CAD viewer refresh is a normal-success action and
-      // must wait until the server says the new head is readable.
-      if (result?.restored_head_readable !== false) {
-        await onRestored?.(result)
-      }
+      // The controller records the committed head before deciding whether a
+      // viewer refresh is safe.
+      await onRestored?.(result)
     } catch (e) {
       setRestoreErr({ version: v, message: e?.message || 'Restore failed.' })
     } finally {
@@ -253,7 +232,7 @@ export default function VersionHistory({
                             <span className="confirm-q">Restore v{r.v} as the new head?</span>
                             <button
                               className="chip-act"
-                              disabled={isRestoring}
+                              disabled={isRestoring || mutationBlocked}
                               onClick={() => doRestore(r.v)}
                             >
                               {isRestoring ? 'Restoring…' : `Restore v${r.v}`}
@@ -269,7 +248,7 @@ export default function VersionHistory({
                         ) : (
                           <button
                             className="chip-act"
-                            disabled={restoringVersion != null}
+                            disabled={restoringVersion != null || mutationBlocked}
                             onClick={() => { setRestoreErr(null); setConfirmingVersion(r.v) }}
                           >
                             Restore

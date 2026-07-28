@@ -316,13 +316,23 @@ def test_checkout_acquired_after_preflight_is_refused_at_the_store(client, tmp_p
     assert versions["head"] == 3  # the refused write never landed
 
 
-def test_corrupt_intake_cache_is_refused(client, tmp_path):
-    """Round-3 MAJOR pin: an existing-but-corrupt cache must be refused, not
-    mirrored unexamined onto the new head."""
+def test_valid_but_mismatched_live_cache_is_refused(client, tmp_path):
+    """A valid intake cache from another source must not authorize restore."""
     backend = _seed_chain(tmp_path)
-    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, 2), b"{not intake json")
+    live_bytes = b"AC1032\x00SOURCE-A"
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, live_bytes,
+        parent_version=3, meta={"tool": "test-seed", "note": "live source"})
+    write_loop.publish_intake_cache(
+        backend, TENANT, DRAWING, v4, live_bytes,
+        _intake([_poly("SOURCE-A")]))
+    # The replacement is well-formed intake JSON, but its digest no longer
+    # matches the source binding published with the raw DWG.
+    backend.put(
+        write_loop.intake_cache_key(TENANT, DRAWING, v4),
+        json.dumps(_intake([_poly("OTHER-SOURCE")])).encode("utf-8"))
 
-    r = client.post(f"/api/drawings/{DRAWING}/versions/2/restore", headers=_h(TENANT))
+    r = client.post(f"/api/drawings/{DRAWING}/versions/{v4}/restore", headers=_h(TENANT))
     assert r.status_code == 422, r.text
     assert r.json()["error"]["retryable"] is False
 
@@ -395,8 +405,9 @@ def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypat
     v4 = write_loop._put_bytes_version(
         backend, TENANT, DRAWING, b"\x00\x01DWGBYTES",
         parent_version=3, meta={"tool": "test-seed", "note": "live-rep"})
-    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
-                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    write_loop.publish_intake_cache(
+        backend, TENANT, DRAWING, v4, b"\x00\x01DWGBYTES",
+        _intake([_poly("A")]))
 
     new_head_ckey = write_loop.intake_cache_key(TENANT, DRAWING, 5)
     original_put = store.FilesystemBackend.put
@@ -468,10 +479,8 @@ def test_postgres_live_dwg_restore_preserves_blob_and_readable_cache(
     )
     assert live_version == 2
     live_intake = _intake([_poly("A"), _poly("B")])
-    backend.put(
-        write_loop.intake_cache_key(tenant, drawing, live_version),
-        json.dumps(live_intake, separators=(",", ":")).encode("utf-8"),
-    )
+    write_loop.publish_intake_cache(
+        backend, tenant, drawing, live_version, live_bytes, live_intake)
 
     monkeypatch.setattr(
         drawings_router, "_lock_authorization",
@@ -511,3 +520,43 @@ def test_restore_denied_without_the_current_checkout_capability(client, tmp_path
 
     versions = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
     assert versions["head"] == 3  # refused write never landed
+
+
+def test_restore_accepts_the_current_checkout_capability(client, tmp_path, monkeypatch):
+    """The real acquire response authorizes restore without a gate monkeypatch."""
+    monkeypatch.setenv(
+        "LEAF_CHECKOUT_CAP_SECRET", "s5-positive-capability-secret-32-bytes")
+    _seed_chain(tmp_path)
+    acquired = client.post(
+        f"/api/drawings/{DRAWING}/checkout",
+        json={"holder": "s5-owner"}, headers=_h(TENANT))
+    assert acquired.status_code == 200, acquired.text
+    capability = acquired.json()["checkout_capability"]
+
+    restored = client.post(
+        f"/api/drawings/{DRAWING}/versions/1/restore",
+        headers={**_h(TENANT), "X-Checkout-Capability": capability})
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["new_version"] == {
+        "drawing_id": DRAWING, "version": 4, "parent": 3}
+
+
+def test_restore_route_is_tenant_isolated(client, tmp_path):
+    """A restore in tenant A cannot read or advance tenant B's same drawing id."""
+    import store  # noqa: PLC0415
+
+    backend = _seed_chain(tmp_path)
+    other = "s5-version-restore-other"
+    source = tmp_path / "other.json"
+    other_intake = _intake([_poly("OTHER")])
+    source.write_bytes(json.dumps(other_intake).encode("utf-8"))
+    store.ingest_drawing(backend, other, str(source), drawing_id=DRAWING)
+    before = store.load_manifest(backend, other, DRAWING)
+    other_blob = backend.get(store.drawing_version_key(other, DRAWING, 1))
+
+    restored = client.post(
+        f"/api/drawings/{DRAWING}/versions/1/restore", headers=_h(TENANT))
+    assert restored.status_code == 200, restored.text
+    after = store.load_manifest(backend, other, DRAWING)
+    assert after == before
+    assert backend.get(store.drawing_version_key(other, DRAWING, 1)) == other_blob

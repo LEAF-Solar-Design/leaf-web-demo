@@ -615,10 +615,9 @@ def restore_version(drawing_id: str, version: int,
                 # restored_head_readable instead of a post-commit 500.
                 restored_head_readable = True
                 try:
-                    backend.put(
-                        write_loop.intake_cache_key(str(tenant_id), drawing_id, new_v),
-                        json.dumps(source_intake, separators=(",", ":")).encode("utf-8"),
-                    )
+                    write_loop.publish_intake_cache(
+                        backend, str(tenant_id), drawing_id, new_v,
+                        source_bytes, source_intake)
                 except Exception:  # noqa: BLE001 — committed head; see above
                     # Without a cache, the head is readable only when the
                     # BLOB is itself intake (mock representation) — a live
