@@ -24,7 +24,8 @@
     "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs && node scripts/check_checkout_identity.mjs && node scripts/check_web_container_config.mjs",
     "check:checkout-identity": "node scripts/check_checkout_identity.mjs",
     "check:deployed-acceptance-contract": "node --test scripts/test_deployed_authored_cad_acceptance.mjs",
-    "check:proof-receipt": "node --test e2e/proofReceipt.test.mjs"
+    "check:proof-receipt": "node --test e2e/proofReceipt.test.mjs",
+    "check:workbench-id": "node --test src/site/workbenchId.test.mjs"
   },
   "dependencies": {
     "@auth0/auth0-spa-js": "^2.23.0",
