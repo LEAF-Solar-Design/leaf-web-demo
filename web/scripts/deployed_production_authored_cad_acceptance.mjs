@@ -104,9 +104,12 @@ function tenantConfig(env, label, runId) {
   return { label, id, jwt, drawingId, request }
 }
 
-export function validateProductionConfig(env = process.env, execute = false) {
-  if (!execute) {
-    throw new AcceptanceError('production_target', 'production acceptance is execute-only')
+export function validateProductionConfig(env = process.env, mode = '') {
+  if (mode !== 'preflight' && mode !== 'execute') {
+    throw new AcceptanceError(
+      'production_target',
+      'production acceptance requires explicit preflight or execute mode',
+    )
   }
   if (required(env, 'LEAF_ACCEPTANCE_ENVIRONMENT') !== 'production') {
     throw new AcceptanceError(
@@ -159,11 +162,10 @@ export function validateProductionConfig(env = process.env, execute = false) {
       'the two production acceptance tenants and JWTs must be distinct',
     )
   }
-  const publicationApprovalSecret = required(
-    env,
-    'LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET',
-  )
-  if (publicationApprovalSecret.length < 16) {
+  const publicationApprovalSecret = mode === 'execute'
+    ? required(env, 'LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET')
+    : ''
+  if (mode === 'execute' && publicationApprovalSecret.length < 16) {
     throw new AcceptanceError(
       'configuration',
       'LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET must be at least 16 characters',
@@ -171,7 +173,8 @@ export function validateProductionConfig(env = process.env, execute = false) {
   }
   return {
     environment: 'production',
-    execute: true,
+    execute: mode === 'execute',
+    mode,
     runId,
     webUrl: webUrl.origin,
     apiUrl: apiUrl.origin,
@@ -249,10 +252,16 @@ export async function verifyProductionTenantTokens(
   return { classification: TENANT_CLASS, tenants: ['A', 'B'] }
 }
 
-function parseArgs(argv) {
-  const args = { execute: false, receipt: null }
+export function parseProductionArgs(argv) {
+  const args = { mode: null, receipt: null }
   for (let index = 0; index < argv.length; index += 1) {
-    if (argv[index] === '--execute') args.execute = true
+    if (argv[index] === '--execute') {
+      if (args.mode) throw new AcceptanceError('configuration', 'choose one production mode')
+      args.mode = 'execute'
+    } else if (argv[index] === '--preflight') {
+      if (args.mode) throw new AcceptanceError('configuration', 'choose one production mode')
+      args.mode = 'preflight'
+    }
     else if (argv[index] === '--receipt' && argv[index + 1]) args.receipt = argv[++index]
     else if (argv[index] === '--help') args.help = true
     else throw new AcceptanceError('configuration', `unknown argument: ${argv[index]}`)
@@ -272,25 +281,30 @@ function writeReceipt(path, receipt) {
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
   try {
-    const args = parseArgs(argv)
+    const args = parseProductionArgs(argv)
     if (args.help) {
       console.log(
         'Usage: node web/scripts/deployed_production_authored_cad_acceptance.mjs ' +
-        '--execute --receipt <new-json-path>',
+        '(--preflight | --execute) --receipt <new-json-path>',
       )
       return 0
     }
     if (!args.receipt) {
       throw new AcceptanceError('configuration', '--receipt is required')
     }
-    const config = validateProductionConfig(env, args.execute)
+    if (!args.mode) {
+      throw new AcceptanceError('configuration', 'explicit --preflight or --execute is required')
+    }
+    const config = validateProductionConfig(env, args.mode)
     const classification = await verifyProductionTenantTokens(config)
     const startedAt = new Date().toISOString()
     const api = await runApiPreflight(config)
-    const browser = await runBrowserAcceptance(config, true)
-    api.executed_drawing_isolation = await proveExecutedDrawingIsolation(config, browser)
-    api.executed_authority_isolation = await proveExecutedAuthorityIsolation(config, browser)
-    api.pinned_write_rejections = await provePinnedWriteRejections(config, browser)
+    const browser = config.execute ? await runBrowserAcceptance(config, true) : []
+    if (config.execute) {
+      api.executed_drawing_isolation = await proveExecutedDrawingIsolation(config, browser)
+      api.executed_authority_isolation = await proveExecutedAuthorityIsolation(config, browser)
+      api.pinned_write_rejections = await provePinnedWriteRejections(config, browser)
+    }
     const stoppedAt = new Date().toISOString()
     const common = buildReceipt(
       config,
@@ -312,9 +326,13 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     )
     const receipt = {
       ...common,
-      schema: 'leaf.deployed-production-authored-cad-acceptance.v1',
+      schema: config.execute
+        ? 'leaf.deployed-production-authored-cad-acceptance.v1'
+        : 'leaf.deployed-production-authored-cad-preflight.v1',
       tenant_classification: classification.classification,
-      tenants: common.tenants.map(({ label, drawing_hash }) => ({ label, drawing_hash })),
+      tenants: common.tenants.map(({ label, drawing_hash }) => (
+        config.execute ? { label, drawing_hash } : { label }
+      )),
       customer_data_accessed: false,
     }
     writeReceipt(args.receipt, receipt)
