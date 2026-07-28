@@ -607,7 +607,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
-              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 4),
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 6),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),
@@ -687,12 +687,12 @@ def build_suites() -> List[Suite]:
         # `now=` to UTC, so the signed rendering cannot disagree with the one
         # verification re-derives; pinned by
         # test_signature_verifies_when_countersigned_with_a_non_utc_now.
-        # 236 was measured both ways -- TimeZone=America/Chicago and UTC.
+        # 247 was measured both ways -- TimeZone=America/Chicago and UTC.
         # Raising this cannot red-fail CI: the suite is db_gated and the
         # test-gate workflow is hermetic, so run_suite returns SKIP with
         # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 236, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
@@ -704,10 +704,9 @@ def build_suites() -> List[Suite]:
         # also explicit here so this PR cannot ship its dependency-free
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
-        # invariant to DB presence: 71 collected either way, measured on this
-        # tree 2026-07-25. The floor below is the EXECUTED count on a host with
-        # no DATABASE_URL -- 71 collected minus the 2 DB-gated skips named in
-        # allowed_skip_reasons = 69.
+        # invariant to DB presence: 82 collected either way. The floor below is
+        # the EXECUTED count on a host with no DATABASE_URL, 82 collected minus
+        # the 2 DB-gated skips named in allowed_skip_reasons = 80.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
@@ -715,7 +714,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
-                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 69,
+                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 80,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or

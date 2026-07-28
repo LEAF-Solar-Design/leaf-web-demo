@@ -175,6 +175,12 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "guest_upload_counters": {"namespace", "counter_key", "value", "updated_at"},
     },
     "drawing": {
+        "drawing_authority_cutover": {
+            "id", "state", "schema_version", "source_commit", "run_id",
+            "run_attempt", "task_definition_arn", "source_task_definition_arn",
+            "efs_id", "fence_path", "source_counts", "parity_digest",
+            "entered_at", "updated_at", "deadline", "last_error",
+        },
         "drawing_store_manifests": {
             "tenant_id", "drawing_id", "head", "latest", "checkout_holder",
             "checkout_fence", "checkout_acquired_at", "checkout_expires_at",
@@ -188,6 +194,12 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         },
     },
     "upload": {
+        "drawing_authority_cutover": {
+            "id", "state", "schema_version", "source_commit", "run_id",
+            "run_attempt", "task_definition_arn", "source_task_definition_arn",
+            "efs_id", "fence_path", "source_counts", "parity_digest",
+            "entered_at", "updated_at", "deadline", "last_error",
+        },
         "drawing_store_manifests": {
             "tenant_id", "drawing_id", "head", "latest", "checkout_holder",
             "checkout_fence", "checkout_acquired_at", "checkout_expires_at",
@@ -227,6 +239,40 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "harness_usage": {"usage_id", "session_id", "turn_id", "usage", "ts"},
         "harness_tenant_repo_leases": {
             "tenant_id", "owner_token", "generation", "acquired_at", "heartbeat_at", "expires_at",
+        },
+    },
+    "customization": {
+        "customization_change_sets": {
+            "change_set_id", "tenant_id", "idempotency_key", "state", "version",
+            "base_commit", "staged_commit", "catalog_digest",
+            "desired_platform_release", "workspace_contract_digest",
+            "author_subject", "approver_subject", "created_at", "updated_at",
+        },
+        "effective_catalogs": {
+            "tenant_id", "change_set_id", "catalog_commit", "catalog_digest",
+            "effective_platform_release", "workspace_contract_digest", "updated_at",
+        },
+        "customization_audit_events": {
+            "event_id", "tenant_id", "change_set_id", "prior_state", "next_state",
+            "author_subject", "approver_subject", "base_commit", "staged_commit",
+            "catalog_digest", "platform_release", "workspace_contract_digest",
+            "idempotency_key", "result", "reason_code", "payload_json", "created_at",
+        },
+        "customization_confirmations": {
+            "confirmation_id", "tenant_id", "change_set_id", "payload_json",
+            "signature", "consumed", "created_at",
+        },
+        "customization_publication_requests": {
+            "tenant_id", "change_set_id", "confirmation_id", "status",
+            "reason_code", "created_at", "updated_at",
+        },
+        "customization_deployment_snapshots": {
+            "snapshot_id", "payload_json", "effective_catalog_digest",
+            "platform_release", "idempotency_key", "created_at",
+        },
+        "customization_deployment_audit": {
+            "audit_id", "snapshot_id", "action", "result", "idempotency_key",
+            "created_at",
         },
     },
 }
@@ -329,6 +375,18 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "guest_upload_counters", "PRIMARY KEY (namespace, counter_key)"),
     },
     "drawing": {
+        "drawing_authority_cutover_pkey": _catalog_contract(
+            "drawing_authority_cutover", "PRIMARY KEY (id)"),
+        "drawing_authority_cutover_singleton": _catalog_contract(
+            "drawing_authority_cutover", "CHECK (id = 1)"),
+        "drawing_authority_cutover_state_allowed": _catalog_contract(
+            "drawing_authority_cutover", "CHECK", "state", "fence_closed",
+            "migrating", "migrated", "promoted", "rolled_back"),
+        "drawing_authority_cutover_deadline_after_entry": _catalog_contract(
+            "drawing_authority_cutover", "CHECK (deadline > entered_at)"),
+        "drawing_authority_cutover_migrated_has_digest": _catalog_contract(
+            "drawing_authority_cutover", "CHECK", "state", "migrated",
+            "promoted", "parity_digest IS NOT NULL"),
         "drawing_store_manifests_pkey": _catalog_contract(
             "drawing_store_manifests", "PRIMARY KEY (tenant_id, drawing_id)"),
         "drawing_store_versions_pkey": _catalog_contract(
@@ -343,6 +401,18 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "drawing_store_versions", "CHECK", "state", "reserved", "ready", "orphaned"),
     },
     "upload": {
+        "drawing_authority_cutover_pkey": _catalog_contract(
+            "drawing_authority_cutover", "PRIMARY KEY (id)"),
+        "drawing_authority_cutover_singleton": _catalog_contract(
+            "drawing_authority_cutover", "CHECK (id = 1)"),
+        "drawing_authority_cutover_state_allowed": _catalog_contract(
+            "drawing_authority_cutover", "CHECK", "state", "fence_closed",
+            "migrating", "migrated", "promoted", "rolled_back"),
+        "drawing_authority_cutover_deadline_after_entry": _catalog_contract(
+            "drawing_authority_cutover", "CHECK (deadline > entered_at)"),
+        "drawing_authority_cutover_migrated_has_digest": _catalog_contract(
+            "drawing_authority_cutover", "CHECK", "state", "migrated",
+            "promoted", "parity_digest IS NOT NULL"),
         "drawing_store_manifests_pkey": _catalog_contract(
             "drawing_store_manifests", "PRIMARY KEY (tenant_id, drawing_id)"),
         "drawing_store_versions_pkey": _catalog_contract(
@@ -512,6 +582,13 @@ _AUTHORITY_REQUIRED_INDEXES = {
         "idx_harness_tenant_repo_leases_expiry": _catalog_contract(
             "harness_tenant_repo_leases", "(expires_at)"),
     },
+    "customization": {
+        "customization_recovery_idx": _catalog_contract(
+            "customization_change_sets", "(state, tenant_id)"),
+        "customization_confirmation_lookup_idx": _catalog_contract(
+            "customization_confirmations",
+            "(tenant_id, change_set_id, consumed, created_at DESC)"),
+    },
 }
 
 # 0014_broker.sql writes ``BEFORE UPDATE OR DELETE``, but pg_get_triggerdef
@@ -545,6 +622,7 @@ _AUTHORITY_SELECTORS = {
     "LEAF_DRAWING_STORE": {"postgres": "drawing"},
     "LEAF_UPLOAD_STORE": {"postgres": "upload"},
     "LEAF_HARNESS_SESSION_STORE": {"postgres": "harness_sessions"},
+    "LEAF_CUSTOMIZATION_STORE": {"postgres": "customization"},
 }
 _RECONCILIATION_TABLES = (
     "orgs", "projects", "drawing_artifacts", "drawing_versions", "jobs",
