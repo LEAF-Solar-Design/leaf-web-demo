@@ -18,6 +18,9 @@ def main() -> None:
     assert "LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}" in text
     assert "source_sha must be a full 40-character lowercase hexadecimal commit" in text
     assert "Checkout did not resolve to source_sha" in text
+    assert "GH_TOKEN: ${{ github.token }}" in text
+    assert 'http.https://github.com/.extraheader="AUTHORIZATION: bearer $GH_TOKEN"' in text
+    assert "fetch --no-tags origin main" in text
 
     assert 'image_tag="sha-$current_sha"' in text
     assert "IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}" in text

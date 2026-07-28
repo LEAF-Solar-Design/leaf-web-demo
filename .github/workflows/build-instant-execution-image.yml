@@ -40,6 +40,7 @@ jobs:
       - name: Require an exact source commit
         id: source
         env:
+          GH_TOKEN: ${{ github.token }}
           SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
@@ -58,7 +59,8 @@ jobs:
               exit 1
             fi
           fi
-          git fetch --no-tags origin main
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: bearer $GH_TOKEN" \
+            fetch --no-tags origin main
           if ! git merge-base --is-ancestor "$current_sha" origin/main; then
             echo "::error::source_sha must be an ancestor of current main."
             exit 1
