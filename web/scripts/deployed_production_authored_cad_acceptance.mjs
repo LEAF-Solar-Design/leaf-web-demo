@@ -8,7 +8,7 @@
  * non-customer acceptance classification.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
@@ -19,6 +19,7 @@ import {
   proveExecutedAuthorityIsolation,
   proveExecutedDrawingIsolation,
   provePinnedWriteRejections,
+  provePersistedAcceptanceState,
   runApiPreflight,
   runBrowserAcceptance,
 } from './deployed_authored_cad_acceptance.mjs'
@@ -253,7 +254,7 @@ export async function verifyProductionTenantTokens(
 }
 
 export function parseProductionArgs(argv) {
-  const args = { mode: null, receipt: null }
+  const args = { mode: null, receipt: null, state: null, verifyState: null }
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === '--execute') {
       if (args.mode) throw new AcceptanceError('configuration', 'choose one production mode')
@@ -263,10 +264,32 @@ export function parseProductionArgs(argv) {
       args.mode = 'preflight'
     }
     else if (argv[index] === '--receipt' && argv[index + 1]) args.receipt = argv[++index]
+    else if (argv[index] === '--state' && argv[index + 1]) args.state = argv[++index]
+    else if (argv[index] === '--verify-state' && argv[index + 1]) args.verifyState = argv[++index]
     else if (argv[index] === '--help') args.help = true
     else throw new AcceptanceError('configuration', `unknown argument: ${argv[index]}`)
   }
   return args
+}
+
+function buildPrivateState(config, browser) {
+  return {
+    schema: 'leaf.production-authored-cad-private-state.v1',
+    run_id: config.runId,
+    source_revision: config.expectedRevision,
+    tenants: browser.map((result) => ({
+      label: result.label,
+      drawing_id: result._workbench_id,
+      tool_name: result._staged_tool_name,
+      change_set_id: result._staged_change_set_id,
+      job_id: result._job_id,
+      publication_confirmation_id: result._publication_confirmation_id,
+      publication_catalog_digest: result._publication_catalog_digest,
+      tool_content_sha256: result._tool_content_hash,
+      tool_catalog_digest: result._tool_catalog_digest,
+      drawing_content_sha256: result._drawing_content_hash,
+    })),
+  }
 }
 
 function writeReceipt(path, receipt) {
@@ -285,7 +308,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (args.help) {
       console.log(
         'Usage: node web/scripts/deployed_production_authored_cad_acceptance.mjs ' +
-        '(--preflight | --execute) --receipt <new-json-path>',
+        '(--preflight | --execute) --receipt <new-json-path> ' +
+        '[--state <new-private-json-path> | --verify-state <private-json-path>]',
       )
       return 0
     }
@@ -295,10 +319,28 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (!args.mode) {
       throw new AcceptanceError('configuration', 'explicit --preflight or --execute is required')
     }
+    if (args.state && args.mode !== 'execute') {
+      throw new AcceptanceError('configuration', '--state is execute-only')
+    }
+    if (args.mode === 'execute' && !args.state) {
+      throw new AcceptanceError('configuration', 'production execute requires --state')
+    }
+    if (args.verifyState && args.mode !== 'preflight') {
+      throw new AcceptanceError('configuration', '--verify-state requires --preflight')
+    }
+    if (args.state && args.verifyState) {
+      throw new AcceptanceError('configuration', 'choose --state or --verify-state')
+    }
     const config = validateProductionConfig(env, args.mode)
     const classification = await verifyProductionTenantTokens(config)
     const startedAt = new Date().toISOString()
     const api = await runApiPreflight(config)
+    if (args.verifyState) {
+      api.persisted_acceptance_state = await provePersistedAcceptanceState(
+        config,
+        JSON.parse(readFileSync(resolve(args.verifyState), 'utf8')),
+      )
+    }
     const browser = config.execute ? await runBrowserAcceptance(config, true) : []
     if (config.execute) {
       api.executed_drawing_isolation = await proveExecutedDrawingIsolation(config, browser)
@@ -335,6 +377,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       )),
       customer_data_accessed: false,
     }
+    if (args.state) writeReceipt(args.state, buildPrivateState(config, browser))
     writeReceipt(args.receipt, receipt)
     console.log(JSON.stringify({
       ok: true,

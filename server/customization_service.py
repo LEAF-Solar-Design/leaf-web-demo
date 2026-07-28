@@ -643,6 +643,41 @@ class CustomizationService:
             raise CustomizationServiceError("customization_publish_incomplete", 503)
         return self._publication_status(durable, "published")
 
+    def publication_evidence(
+        self, *, tenant: Any, change_set_id: str, confirmation_id: str
+    ) -> dict[str, Any]:
+        """Read bounded, tenant-scoped durable publication evidence."""
+        tenant_id = _tenant_id(tenant)
+        if not deps.auth_live():
+            raise CustomizationServiceError("customization_auth_required", 503)
+        try:
+            change = self.store.get_change_set(
+                tenant_id=tenant_id, change_set_id=change_set_id
+            )
+            effective = self.store.get_effective_catalog(tenant_id=tenant_id)
+        except ChangeSetNotFoundError as exc:
+            raise CustomizationServiceError("publication_evidence_not_available", 404) from exc
+        confirmation = self.store.get_confirmation(confirmation_id=confirmation_id)
+        payload = confirmation.get("payload") if isinstance(confirmation, dict) else None
+        if not isinstance(payload, dict) or (
+            payload.get("tenant_id"), payload.get("change_set_id")
+        ) != (tenant_id, change.change_set_id):
+            raise CustomizationServiceError("publication_evidence_not_available", 404)
+        audit = self.store.audit_events(
+            tenant_id=tenant_id, change_set_id=change.change_set_id
+        )
+        published_audit = any(event.next_state is ChangeState.PUBLISHED for event in audit)
+        return {
+            "contract": CONTRACT,
+            "change_set_id": change.change_set_id,
+            "confirmation_id": confirmation_id,
+            "status": change.state.value,
+            "effective": effective.change_set_id == change.change_set_id,
+            "confirmation_consumed": confirmation.get("consumed") is True,
+            "published_audit_event": published_audit,
+            "catalog_digest": change.catalog_digest,
+        }
+
     def deny_publication(
         self, *, tenant_id: str, change_set_id: str
     ) -> dict[str, Any]:

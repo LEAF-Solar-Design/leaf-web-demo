@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Literal
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -459,6 +459,31 @@ def request_publication(
     except Exception:
         return _customization_error(
             CustomizationServiceError("customization_publish_failed", 503)
+        )
+
+
+@router.get("/api/author/change-sets/{change_set_id}/publication-evidence")
+def publication_evidence(
+    change_set_id: str,
+    confirmation_id: str = Query(..., min_length=1, max_length=200),
+    tenant=Depends(deps.require_tenant),
+) -> Dict[str, Any]:
+    """Return only the caller tenant's bounded durable publication evidence."""
+    try:
+        return CustomizationService.configured().publication_evidence(
+            tenant=tenant,
+            change_set_id=change_set_id,
+            confirmation_id=confirmation_id,
+        )
+    except (CustomizationServiceError, AuthorityError, ValueError) as exc:
+        if isinstance(exc, CustomizationServiceError):
+            return _customization_error(exc)
+        if isinstance(exc, AuthorityError):
+            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+        return _customization_error(CustomizationServiceError("invalid_publication_request", 422))
+    except Exception:
+        return _customization_error(
+            CustomizationServiceError("publication_evidence_unavailable", 503)
         )
 
 

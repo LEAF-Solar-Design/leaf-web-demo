@@ -134,11 +134,48 @@ describe('production authored CAD acceptance target policy', () => {
     assert.deepEqual(parseProductionArgs(['--preflight', '--receipt', 'proof.json']), {
       mode: 'preflight',
       receipt: 'proof.json',
+      state: null,
+      verifyState: null,
     })
+    assert.deepEqual(
+      parseProductionArgs(['--execute', '--receipt', 'proof.json', '--state', 'private.json']),
+      { mode: 'execute', receipt: 'proof.json', state: 'private.json', verifyState: null },
+    )
+    assert.deepEqual(
+      parseProductionArgs(['--preflight', '--receipt', 'proof.json', '--verify-state', 'private.json']),
+      { mode: 'preflight', receipt: 'proof.json', state: null, verifyState: 'private.json' },
+    )
     assert.throws(
       () => parseProductionArgs(['--preflight', '--execute', '--receipt', 'proof.json']),
       /choose one production mode/,
     )
+    const source = readFileSync(fileURLToPath(
+      new URL('./deployed_authored_cad_acceptance.mjs', import.meta.url),
+    ), 'utf8')
+    const preflight = source.slice(
+      source.indexOf('export async function runApiPreflight'),
+      source.indexOf('async function requestStagedPublicationApproval'),
+    )
+    assert.ok(preflight.includes("'/api/deployment-identity'"))
+    assert.ok(preflight.includes("'/api/ready'"))
+    assert.ok(preflight.includes("'/api/tenant/claude-grant'"))
+    for (const forbidden of [
+      '/api/session', '/api/author', '/api/run', '/api/drawings/',
+      '/internal/customization/confirm', 'runBrowserAcceptance',
+    ]) {
+      assert.ok(!preflight.includes(forbidden), `preflight contains ${forbidden}`)
+    }
+    const productionSource = readFileSync(fileURLToPath(
+      new URL('./deployed_production_authored_cad_acceptance.mjs', import.meta.url),
+    ), 'utf8')
+    assert.ok(productionSource.includes('production execute requires --state'))
+    const privateState = productionSource.slice(
+      productionSource.indexOf('function buildPrivateState'),
+      productionSource.indexOf('function writeReceipt'),
+    )
+    for (const forbidden of ['jwt', 'tenant.id', 'publicationApprovalSecret', '_run_request', '_run_headers']) {
+      assert.ok(!privateState.includes(forbidden), `private state contains ${forbidden}`)
+    }
   })
 
   it('requires exact run-scoped drawings and source-fixed distinct requests', () => {

@@ -117,6 +117,48 @@ def test_independent_approval_then_publication_is_replay_safe(publication_servic
     ).state is ChangeState.PUBLISHED
 
 
+def test_publication_evidence_binds_exact_tenant_change_confirmation_and_audit(
+    publication_service,
+):
+    service, _store, staged, tenant = publication_service
+    service.request_publication(tenant=tenant, change_set_id=staged.change_set_id)
+    issued = service.confirm(
+        tenant_id="tenant-a", change_set_id=staged.change_set_id
+    )
+    service.request_publication(tenant=tenant, change_set_id=staged.change_set_id)
+
+    evidence = service.publication_evidence(
+        tenant=tenant,
+        change_set_id=staged.change_set_id,
+        confirmation_id=issued["confirmation_id"],
+    )
+
+    assert evidence == {
+        "contract": "leaf.customization.v1",
+        "change_set_id": staged.change_set_id,
+        "confirmation_id": issued["confirmation_id"],
+        "status": "published",
+        "effective": True,
+        "confirmation_consumed": True,
+        "published_audit_event": True,
+        "catalog_digest": DIGEST,
+    }
+    with pytest.raises(CustomizationServiceError) as wrong_confirmation:
+        service.publication_evidence(
+            tenant=tenant,
+            change_set_id=staged.change_set_id,
+            confirmation_id="not-the-confirmation",
+        )
+    assert wrong_confirmation.value.status_code == 404
+    with pytest.raises(CustomizationServiceError) as wrong_tenant:
+        service.publication_evidence(
+            tenant=deps.TenantContext("tenant-b", tier="hosted_pro"),
+            change_set_id=staged.change_set_id,
+            confirmation_id=issued["confirmation_id"],
+        )
+    assert wrong_tenant.value.status_code == 404
+
+
 def test_retry_recovers_after_publish_was_prepared(publication_service, monkeypatch):
     service, store, staged, tenant = publication_service
     service.request_publication(tenant=tenant, change_set_id=staged.change_set_id)
