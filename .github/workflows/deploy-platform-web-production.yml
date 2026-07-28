@@ -105,6 +105,7 @@ jobs:
               "$RUN_DIR/operator-$OPERATOR.json" >/dev/null
           done
           EXPECTED_APPROVAL="approve-vercel-production:$VERCEL_PROJECT_ID:$SOURCE_SHA:$RELEASE_RUN_ID:$RELEASE_RUN_ATTEMPT:$HANDOFF_RUN_ID:$HANDOFF_RUN_ATTEMPT:$EXPECTED_WEB_SHA256:$GITHUB_SHA:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          echo "::notice title=Independent production approval required::$EXPECTED_APPROVAL"
           gh api "repos/$GITHUB_REPOSITORY/issues/$APPROVAL_ISSUE_NUMBER" \
             > "$RUN_DIR/approval-issue.json"
           jq -e '.state == "open" and .pull_request == null' \

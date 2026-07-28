@@ -284,8 +284,12 @@ def test_receipt_rejects_stable_alias_or_project_mismatch(tmp_path: Path):
 def test_receipt_rejects_replayed_or_unbound_approval(tmp_path: Path):
     dist, digest = _dist(tmp_path)
     prepared = prepare(
-        _handoff(digest), dist, tmp_path / "output", source=SOURCE,
-        release_run_id=RELEASE_RUN_ID, release_attempt=RELEASE_ATTEMPT,
+        _handoff(digest),
+        dist,
+        tmp_path / "output",
+        source=SOURCE,
+        release_run_id=RELEASE_RUN_ID,
+        release_attempt=RELEASE_ATTEMPT,
         expected_web_sha256=digest,
     )
     baseline = _inspect("dpl_" + "A" * 24, "leaf-old.vercel.app")
@@ -299,9 +303,15 @@ def test_receipt_rejects_replayed_or_unbound_approval(tmp_path: Path):
         approval[field] = value
         with pytest.raises(ReleaseError):
             deployment_receipt(
-                prepared, baseline, deployed, deployed, approval,
-                handoff_run_id="654322", handoff_attempt="4",
-                workflow_run_id="765432", workflow_attempt="5",
+                prepared,
+                baseline,
+                deployed,
+                deployed,
+                approval,
+                handoff_run_id="654322",
+                handoff_attempt="4",
+                workflow_run_id="765432",
+                workflow_attempt="5",
                 workflow_head_sha="f" * 40,
             )
 
@@ -317,6 +327,7 @@ def test_workflow_is_protected_prebuilt_two_phase_and_receipted():
         "collaborators/$OPERATOR/permission",
         "collaborators/$APPROVER/permission",
         "approve-vercel-production:",
+        "Independent production approval required",
         '[ "$APPROVER" != "$ACTOR" ]',
         '[ "$APPROVER" != "$TRIGGERING_ACTOR" ]',
         "age > 86400",

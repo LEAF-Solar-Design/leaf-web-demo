@@ -340,13 +340,28 @@ def deployment_receipt(
     current_id = _positive(workflow_run_id, _RUN_ID, "deployment workflow run ID")
     current_try = _positive(workflow_attempt, _ATTEMPT, "deployment run attempt")
     approval_keys = {
-        "schema", "project_id", "source_revision", "release_workflow_run_id",
-        "release_workflow_run_attempt", "handoff_workflow_run_id",
-        "handoff_workflow_run_attempt", "web_artifact_sha256", "workflow_head_sha",
-        "deployment_workflow_run_id", "deployment_workflow_run_attempt",
-        "issue_number", "comment_id", "approver_login", "approver_id", "permission",
-        "created_at", "validated_at", "approval_payload_sha256",
-        "exact_body_verified", "author_separated", "timely_at_promotion",
+        "schema",
+        "project_id",
+        "source_revision",
+        "release_workflow_run_id",
+        "release_workflow_run_attempt",
+        "handoff_workflow_run_id",
+        "handoff_workflow_run_attempt",
+        "web_artifact_sha256",
+        "workflow_head_sha",
+        "deployment_workflow_run_id",
+        "deployment_workflow_run_attempt",
+        "issue_number",
+        "comment_id",
+        "approver_login",
+        "approver_id",
+        "permission",
+        "created_at",
+        "validated_at",
+        "approval_payload_sha256",
+        "exact_body_verified",
+        "author_separated",
+        "timely_at_promotion",
     }
     _exact(approval, approval_keys, "production approval proof")
     if (
@@ -354,7 +369,8 @@ def deployment_receipt(
         or approval["project_id"] != PROJECT_ID
         or approval["source_revision"] != prepared["source_revision"]
         or approval["release_workflow_run_id"] != prepared["release_workflow_run_id"]
-        or approval["release_workflow_run_attempt"] != prepared["release_workflow_run_attempt"]
+        or approval["release_workflow_run_attempt"]
+        != prepared["release_workflow_run_attempt"]
         or approval["handoff_workflow_run_id"] != handoff_id
         or approval["handoff_workflow_run_attempt"] != handoff_try
         or approval["web_artifact_sha256"] != prepared["web_artifact_sha256"]
