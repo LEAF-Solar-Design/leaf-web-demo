@@ -20,7 +20,9 @@ import { listMockCatalogTools, registerMockCatalogTool } from './mock/mockCatalo
 import { fetchWithBudget } from './fetchBudget.js'
 import * as mockVersions from './mock/mockVersions.js'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8130'
+// A deployed static bundle talks to the app through the same public origin.
+// Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
+const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 const STARTUP_FETCH_TIMEOUT_MS = Number(import.meta.env.VITE_STARTUP_FETCH_TIMEOUT_MS || 5000)
 // Default to mock unless explicitly disabled (VITE_MOCK=0).
 const MOCK_DEFAULT = import.meta.env.VITE_MOCK !== '0'

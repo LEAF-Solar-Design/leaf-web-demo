@@ -40,10 +40,12 @@ Only `web` (8080) and `app` (8130) publish to the host. `broker` and `harness`
 are reachable only on the internal compose network (`http://broker:8140`,
 `http://harness:8150`) — the browser never talks to them directly.
 
-**Why the browser hits `localhost:8130`:** the web bundle bakes `VITE_API_BASE`
+**Local browser API:** docker-compose bakes `http://localhost:8130` into `VITE_API_BASE`
 at build time (default `http://localhost:8130`) and the browser — running on the
 host — calls the app's *published* port. To serve the stack from another host,
-rebuild `web` with `--build-arg VITE_API_BASE=https://your-host:8130`.
+For deployed images the default is the current public origin. Override it with
+`--build-arg VITE_API_BASE=https://your-host:8130` only when the API uses a
+different origin.
 
 ---
 
