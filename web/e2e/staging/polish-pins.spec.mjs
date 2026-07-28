@@ -4,6 +4,9 @@ import { assertPageOnAllowedOrigin, stagingProofPath } from './stagingConfig.mjs
 import { writeProofReceipt } from '../proofReceipt.mjs'
 
 test('the command-bar shortcut and the center-stage reduced-motion pin hold on the deployed surface', async ({ page, request, baseURL }) => {
+  // Navigation + the bounded entrance-settle allowance + the dense stability
+  // window can legitimately exceed Playwright's 30s default.
+  test.setTimeout(90_000)
   const identity = await captureStagingIdentity(request)
   const stagingOrigin = new URL(baseURL).origin
   const observedEndpoints = [identity.endpoint]
@@ -41,6 +44,10 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   })
   const unrestrictedMotion = await readMotionStyle()
   expect(unrestrictedMotion.transitionDuration).not.toBe('0s')
+  // Stamp BEFORE the awaited call: the RPC completes after the browser
+  // applies the emulation, so anchoring here can only shorten the allowance,
+  // never extend it past 4s from the actual flip.
+  const reducedMotionFlipAt = Date.now()
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const reducedMotion = await readMotionStyle()
   expect(reducedMotion.animationDuration).toBe('0s')
@@ -53,10 +60,52 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   await expect(stageRoot).toBeVisible()
   const canvas = stageRoot.locator('canvas').first()
   await expect(canvas).toBeVisible({ timeout: 15_000 })
-  const canvasBoxBefore = await canvas.boundingBox()
+
+  // The stage entrance (.stage-viewer's one-time condense-in, --recast-enter
+  // = 1730ms in landing.css) starts when the viewer reports ready, which is
+  // before this test flips the media emulation, and a CSS transition that has
+  // already started keeps its original duration when transition-* later
+  // changes (CSS Transitions L1). A real reduced-motion user carries the
+  // preference from first paint, so the entrance never animates for them.
+  // That legitimate tail gets a BOUNDED allowance of 4s measured FROM THE
+  // FLIP (1730ms transform leg + a late `.in` + scheduling latency). The
+  // canvas is sampled continuously from here THROUGH the boundary until at
+  // least 600ms past it, with no early exit, and every sample taken at or
+  // after the boundary must be bit-for-bit identical: motion that starts
+  // late, pauses, or resumes past the boundary is observed and fails.
+  // Limitation (also mirrored in the receipt): motion confined entirely to
+  // the pre-boundary allowance is geometrically indistinguishable from the
+  // entrance tail and is not detected.
+  const boundaryMs = 4_000
+  const samples = []
+  const windowEnd = Math.max(reducedMotionFlipAt + boundaryMs + 600, Date.now() + 600)
+  // Each sample costs ~150-200ms (boundingBox round trip + the 100ms pause),
+  // so keep sampling until the window has passed AND at least six samples
+  // landed on or past the boundary; the hard stop only trips if sampling
+  // itself degrades, and then the count assertion below fails loud.
+  // Samples are stamped AFTER the bounding-box read completes, so a read
+  // that starts before the boundary but observes geometry after it is
+  // included rather than escaping between stamps; the trade is strictness
+  // (a straddling read may carry the entrance tail's final sub-pixel),
+  // which the 4s allowance vs the 1730ms entrance absorbs.
+  const hardStop = reducedMotionFlipAt + 10_000
+  let settledCount = 0
+  while ((Date.now() < windowEnd || settledCount < 6) && Date.now() < hardStop) {
+    const box = await canvas.boundingBox()
+    const at = Date.now() - reducedMotionFlipAt
+    samples.push({ at, box })
+    if (at >= boundaryMs) settledCount += 1
+    await page.waitForTimeout(100)
+  }
+  const settledSamples = samples.filter((sample) => sample.at >= boundaryMs)
+  expect(settledSamples.length).toBeGreaterThanOrEqual(6)
+  const canvasBoxBefore = settledSamples[settledSamples.length - 1].box
   expect(canvasBoxBefore).not.toBeNull()
   expect(canvasBoxBefore.width).toBeGreaterThan(0)
   expect(canvasBoxBefore.height).toBeGreaterThan(0)
+  for (const sample of settledSamples) {
+    expect(sample.box, `canvas moved ${sample.at}ms after the reduced-motion flip (allowance is ${boundaryMs}ms)`).toEqual(canvasBoxBefore)
+  }
 
   const columnSelectors = ['.tc-rail-l', '.tc-bar-wrap', '.tc-rail-r']
   const boxesBefore = {}
@@ -65,7 +114,13 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
     expect(boxesBefore[selector]).not.toBeNull()
   }
 
-  await page.waitForTimeout(600)
+  // Dense sampling: a canvas read every 100ms across the 600ms window, so
+  // periodic motion with any period above ~200ms cannot alias past the pin
+  // (the endpoint-only comparison this replaces could miss it).
+  for (let sample = 1; sample <= 6; sample += 1) {
+    await page.waitForTimeout(100)
+    expect(await canvas.boundingBox(), `canvas moved ${sample * 100}ms into the settle window`).toEqual(canvasBoxBefore)
+  }
 
   const canvasBoxAfter = await canvas.boundingBox()
   expect(canvasBoxAfter).toEqual(canvasBoxBefore)
@@ -118,6 +173,7 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
     limitations: [
       'Canvas non-blankness is not proven because this read-only WebGL proof does not use pixel readback.',
       'This does not exercise a completed run under reduced motion (MO-02), because reaching a completed result requires an active session on the deployed surface.',
+      'The pin grants a bounded 4s post-flip allowance for the tail of the pre-flip stage entrance (a running CSS transition keeps its original duration when the media preference changes mid-flight); the canvas is sampled continuously through that boundary and must hold bit-for-bit from the boundary onward, but motion confined entirely to the pre-boundary allowance is indistinguishable from the entrance tail and is not detected.',
     ],
   })
 })
