@@ -127,6 +127,16 @@ function normalized(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function normalizedIndexDefinition(value: string): string {
+  return value
+    .replace(
+      /\bON (?:"(?:[^"]|"")*"|[A-Z_][A-Z0-9_$]*)\./i,
+      "ON ",
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function assertHarnessCatalog(catalog: HarnessCatalog): void {
   const problems: string[] = [];
   const columns = new Map(
@@ -160,10 +170,13 @@ export function assertHarnessCatalog(catalog: HarnessCatalog): void {
   }
 
   const indexes = new Map(
-    catalog.indexes.map((index) => [index.indexname, normalized(index.indexdef)]),
+    catalog.indexes.map((index) => [
+      index.indexname,
+      normalizedIndexDefinition(index.indexdef),
+    ]),
   );
   for (const [name, expected] of Object.entries(REQUIRED_INDEX_DEFINITIONS)) {
-    if ((indexes.get(name) ?? "") !== normalized(expected)) {
+    if ((indexes.get(name) ?? "") !== normalizedIndexDefinition(expected)) {
       problems.push(`${name}:definition`);
     }
   }
