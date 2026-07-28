@@ -741,6 +741,9 @@ def build_suites() -> List[Suite]:
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 21),
+        Suite("production-web-release",
+              "scripts test_production_web_release.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 9),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         # Floor 29: 27 baseline tests, plus the PostgreSQL proof registration
         # and Chromium workflow tests measured on this tree 2026-07-28.
