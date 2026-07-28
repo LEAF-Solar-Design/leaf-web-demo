@@ -10,6 +10,7 @@ import {
 } from 'jose'
 
 import {
+  parseProductionArgs,
   validateProductionConfig,
   verifyProductionTenantTokens,
 } from './deployed_production_authored_cad_acceptance.mjs'
@@ -92,7 +93,7 @@ async function token(
 
 describe('production authored CAD acceptance target policy', () => {
   it('accepts only explicit execute against the exact production origin', () => {
-    const config = validateProductionConfig(environment(), true)
+    const config = validateProductionConfig(environment(), 'execute')
     assert.equal(config.environment, 'production')
     assert.equal(config.webUrl, 'https://leaf-platform-web.vercel.app')
     assert.equal(config.apiUrl, 'https://platform.leafdesign.ai')
@@ -113,13 +114,30 @@ describe('production authored CAD acceptance target policy', () => {
       { LEAF_ACCEPTANCE_PRODUCTION_CONFIRMATION: 'accept-production' },
     ]) {
       assert.throws(
-        () => validateProductionConfig(environment(overrides), true),
+        () => validateProductionConfig(environment(overrides), 'execute'),
         AcceptanceError,
       )
     }
     assert.throws(
-      () => validateProductionConfig(environment(), false),
-      /execute-only/,
+      () => validateProductionConfig(environment(), ''),
+      /explicit preflight or execute/,
+    )
+  })
+
+  it('supports explicit read-only preflight without the publication credential', () => {
+    const config = validateProductionConfig(environment({
+      LEAF_ACCEPTANCE_PUBLICATION_APPROVAL_SECRET: '',
+    }), 'preflight')
+    assert.equal(config.mode, 'preflight')
+    assert.equal(config.execute, false)
+    assert.equal(config.publicationApprovalSecret, '')
+    assert.deepEqual(parseProductionArgs(['--preflight', '--receipt', 'proof.json']), {
+      mode: 'preflight',
+      receipt: 'proof.json',
+    })
+    assert.throws(
+      () => parseProductionArgs(['--preflight', '--execute', '--receipt', 'proof.json']),
+      /choose one production mode/,
     )
   })
 
@@ -127,19 +145,19 @@ describe('production authored CAD acceptance target policy', () => {
     assert.throws(
       () => validateProductionConfig(environment({
         LEAF_ACCEPTANCE_TENANT_A_DRAWING_ID: 'customer-drawing',
-      }), true),
+      }), 'execute'),
       /exact production acceptance drawing/,
     )
     assert.throws(
       () => validateProductionConfig(environment({
         LEAF_ACCEPTANCE_TENANT_A_REQUEST: `Production acceptance run ${RUN_ID} customer prompt`,
-      }), true),
+      }), 'execute'),
       /source-fixed/,
     )
     assert.throws(
       () => validateProductionConfig(environment({
         LEAF_ACCEPTANCE_TENANT_B_ID: 'production_acceptance_a',
-      }), true),
+      }), 'execute'),
       /must be distinct/,
     )
   })
@@ -190,7 +208,7 @@ describe('production authored CAD acceptance tenant classification', () => {
     const config = validateProductionConfig(environment({
       LEAF_ACCEPTANCE_TENANT_A_JWT: jwtA,
       LEAF_ACCEPTANCE_TENANT_B_JWT: jwtB,
-    }), true)
+    }), 'execute')
     assert.deepEqual(
       await verifyProductionTenantTokens(config, { keyResolver, now }),
       { classification: 'non_customer_acceptance', tenants: ['A', 'B'] },
@@ -219,7 +237,7 @@ describe('production authored CAD acceptance tenant classification', () => {
       const config = validateProductionConfig(environment({
         LEAF_ACCEPTANCE_TENANT_A_JWT: await candidate,
         LEAF_ACCEPTANCE_TENANT_B_JWT: validB,
-      }), true)
+      }), 'execute')
       await assert.rejects(
         () => verifyProductionTenantTokens(config, { keyResolver, now }),
         AcceptanceError,
@@ -239,7 +257,7 @@ describe('production authored CAD acceptance tenant classification', () => {
       const config = validateProductionConfig(environment({
         LEAF_ACCEPTANCE_TENANT_A_JWT: jwtA,
         LEAF_ACCEPTANCE_TENANT_B_JWT: jwtB,
-      }), true)
+      }), 'execute')
       await assert.rejects(
         () => verifyProductionTenantTokens(config, { keyResolver, now }),
         /distinct subject and jti/,
