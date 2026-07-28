@@ -7,7 +7,7 @@ import {
   liveDrawingId,
 } from './workbenchId.js'
 
-function scopeWith(initial, { throwOnGet = false } = {}) {
+function scopeWith(initial, { throwOnGet = false, throwOnSet = false } = {}) {
   const store = new Map(Object.entries(initial ?? {}))
   return {
     crypto: { randomUUID: () => '00000000-1111-2222-3333-444444444444' },
@@ -16,7 +16,12 @@ function scopeWith(initial, { throwOnGet = false } = {}) {
         if (throwOnGet) throw new Error('storage disabled')
         return store.has(key) ? store.get(key) : null
       },
-      setItem(key, value) { store.set(key, value) },
+      setItem(key, value) {
+        // Real browsers throw QuotaExceededError here, and Safari private
+        // mode historically threw on every write.
+        if (throwOnSet) throw new Error('quota exceeded')
+        store.set(key, value)
+      },
     },
     _store: store,
   }
@@ -31,7 +36,7 @@ describe('live workbench drawing id', () => {
     assert.equal(scope._store.get(WORKBENCH_ID_KEY), seeded)
   })
 
-  it('accepts any id the shared server rule accepts', () => {
+  it('accepts the canonical ids the shared server rule accepts', () => {
     for (const id of ['demo', 'cat-workbench-abc', 'org_leaf_demo', 'a', '0'.repeat(63)]) {
       assert.equal(liveDrawingId(scopeWith({ [WORKBENCH_ID_KEY]: id })), id, id)
       assert.ok(CANONICAL_DRAWING_ID.test(id), id)
@@ -68,9 +73,27 @@ describe('live workbench drawing id', () => {
     assert.ok(CANONICAL_DRAWING_ID.test(resolved))
   })
 
-  it('falls back to a fresh id when storage throws', () => {
+  it('falls back to a fresh id when reading storage throws', () => {
     const resolved = liveDrawingId(scopeWith({}, { throwOnGet: true }))
     assert.match(resolved, /^cat-workbench-[0-9a-z-]+$/)
+  })
+
+  it('still returns a usable id when persisting throws', () => {
+    // A write failure must not leave the surface without a drawing id. The id
+    // is then per-load rather than per-session, which is the honest outcome
+    // when the browser refuses to remember anything.
+    const resolved = liveDrawingId(scopeWith({}, { throwOnSet: true }))
+    assert.match(resolved, /^cat-workbench-[0-9a-z-]+$/)
+    assert.ok(CANONICAL_DRAWING_ID.test(resolved))
+  })
+
+  it('rejects a trailing newline, unlike a bare python re.match', () => {
+    // Documented divergence: python's re.match("$") tolerates one trailing
+    // newline, so `demo\n` would pass a naive server-side match. This rule is
+    // strictly tighter, which is the safe direction for a value that becomes a
+    // storage key.
+    assert.ok(!CANONICAL_DRAWING_ID.test('demo\n'))
+    assert.notEqual(liveDrawingId(scopeWith({ [WORKBENCH_ID_KEY]: 'demo\n' })), 'demo\n')
   })
 
   it('mints ids that are themselves canonical without crypto.randomUUID', () => {
