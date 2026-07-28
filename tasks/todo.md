@@ -268,3 +268,19 @@ Risks:
 - Credential material must stay server-side and must never enter logs, responses, browser storage, or usage records.
 - Concurrent turns must not lose usage updates or select disabled accounts.
 - Anonymous demo traffic must never reach a mounted private account.
+
+# First-login subscription mount access
+
+- [x] Distinguish a valid but unprovisioned Auth0 identity from an expired session.
+- [x] Let that signed-in user create the first Leaf workspace owner binding on the CAD surface.
+- [x] Retry the live session after workspace creation and expose the Claude mount panel.
+- [x] Prove the 403, bootstrap, retry, owner-only mount path in browser and backend tests.
+- [ ] Merge and deploy the exact app and web commits through the protected staging workflow.
+- [ ] Verify live Auth0 entry, ECS source identity, health, and rollback baselines.
+
+Risks:
+
+- A missing post-login tenant claim must not be mistaken for a provisionable workspace.
+- An unauthenticated or expired session must never create a tenant.
+- Workspace creation must remain an explicit user action and must not silently recreate an offboarded tenant.
+- No Claude credential may enter browser storage, logs, or a response.
