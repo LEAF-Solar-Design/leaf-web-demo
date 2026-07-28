@@ -1665,7 +1665,8 @@ def authorize_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
 
 def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_path: str,
                 parent_version, meta: dict | None = None, *,
-                holder: str | None = None, fence: int | None = None) -> int:
+                holder: str | None = None, fence: int | None = None,
+                require_parent_is_head: bool = False) -> int:
     """Append a NEW immutable version (v = latest+1, parent = parent_version) and
     advance head + latest. This is the primitive the DWG write path calls.
 
@@ -1726,6 +1727,18 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     with _legacy_checkout_guard(backend, tid, did):
         m = load_manifest(backend, tid, did)
         _authorize_checkout_view(m.get("checkout"), holder, fence)
+
+        # Opt-in compare-and-set for callers whose CONTRACT is "parent = the
+        # current head" (restore): inside this guard the manifest is fresh, so
+        # a head that moved since the caller read it is refused here instead
+        # of silently branching the DAG. Default off — the write/undo/redo
+        # family branches deliberately, and the PostgreSQL authority enforces
+        # its own parent discipline under its row lock.
+        if require_parent_is_head:
+            declared_parent = int(parent_version) if parent_version is not None else None
+            if declared_parent != int(m["head"]):
+                raise ValueError(
+                    f"stale parent {declared_parent}: head is now {int(m['head'])}")
 
         new_v = int(m["latest"]) + 1
         vkey = drawing_version_key(tid, did, new_v)

@@ -326,6 +326,93 @@ def test_corrupt_intake_cache_is_refused(client, tmp_path):
     assert r.json()["error"]["retryable"] is False
 
 
+def test_store_compare_and_set_refuses_a_stale_parent(client, tmp_path):
+    """Round-4 BLOCKING pin, store level: put_drawing(require_parent_is_head=
+    True) refuses inside its own critical section when head has moved."""
+    import store  # noqa: PLC0415
+
+    backend = _seed_chain(tmp_path)
+    with pytest.raises(ValueError, match="stale parent"):
+        write_loop._put_bytes_version(
+            backend, TENANT, DRAWING, b'{"stale": true}',
+            parent_version=1, meta={"tool": "test", "note": "stale"},
+            require_parent_is_head=True)
+    m = store.load_manifest(backend, TENANT, DRAWING)
+    assert int(m["head"]) == 3  # nothing landed
+
+
+def test_restore_racing_a_broker_write_returns_409_not_a_fork(client, tmp_path, monkeypatch):
+    """Round-4 BLOCKING pin, route level: a write that lands between restore's
+    fresh head read and its put makes the store's compare-and-set refuse the
+    stale parent; the route answers retryable 409 and the DAG never forks."""
+    _seed_chain(tmp_path)
+    original = write_loop._put_bytes_version
+    state = {"raced": False}
+
+    def _race(backend_, tenant, drawing, data, parent_version, meta, **kwargs):
+        if meta.get("tool") == "restore" and not state["raced"]:
+            state["raced"] = True
+            # Deterministic interleave: a broker-style write commits AFTER the
+            # route read head but BEFORE its put reaches the store.
+            original(backend_, tenant, drawing, b'{"racer": true}',
+                     parent_version=parent_version,
+                     meta={"tool": "test-racer", "note": "interleaved write"})
+        return original(backend_, tenant, drawing, data,
+                        parent_version=parent_version, meta=meta, **kwargs)
+
+    monkeypatch.setattr(write_loop, "_put_bytes_version", _race)
+    r = client.post(f"/api/drawings/{DRAWING}/versions/1/restore", headers=_h(TENANT))
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["retryable"] is True
+
+    versions = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
+    rows = {row["v"]: row for row in versions["versions"]}
+    assert versions["head"] == 4 and rows[4]["parent"] == 3  # racer landed, linear
+    assert 5 not in rows  # the stale restore never forked the DAG
+
+
+def test_non_dict_intake_json_is_refused(client, tmp_path):
+    """Round-4 MAJOR pin: a payload that is valid JSON but not an intake
+    OBJECT (a list) must be refused 422, not restored."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"[1, 2, 3]",
+        parent_version=3, meta={"tool": "test-seed", "note": "list payload"})
+    assert v4 == 4
+
+    r = client.post(f"/api/drawings/{DRAWING}/versions/4/restore", headers=_h(TENANT))
+    assert r.status_code == 422, r.text
+
+
+def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypatch):
+    """Round-4 MAJOR pin: when the source is live-representation (DWG blob +
+    valid cache) and the cache mirror fails post-commit, the response still
+    succeeds (the head is immutable) but restored_head_readable is false."""
+    import store  # noqa: PLC0415
+
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01DWGBYTES",
+        parent_version=3, meta={"tool": "test-seed", "note": "live-rep"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+
+    new_head_ckey = write_loop.intake_cache_key(TENANT, DRAWING, 5)
+    original_put = store.FilesystemBackend.put
+
+    def _failing_put(self, key, data):
+        if key == new_head_ckey:
+            raise OSError("simulated cache-write failure")
+        return original_put(self, key, data)
+
+    monkeypatch.setattr(store.FilesystemBackend, "put", _failing_put)
+    r = client.post(f"/api/drawings/{DRAWING}/versions/4/restore", headers=_h(TENANT))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["head"] == 5
+    assert body["restored_head_readable"] is False
+
+
 def test_restore_of_missing_version_404s(client, tmp_path):
     _seed_chain(tmp_path)
 

@@ -511,28 +511,32 @@ def restore_version(drawing_id: str, version: int,
                               f"version {version} unavailable: {exc}",
                               retryable=False, status_code=404)
 
-    # Readability pre-check: the restored head must be consumable. Whichever
-    # source will serve reads — the intake cache when one exists (live
-    # representation; the cache KEY is per-version, so it is structurally
-    # bound to source_v), else the blob itself (mock representation) — must
-    # parse to an intake-shaped DICT. `json.loads` alone is not enough:
-    # `null`, a list, or a bare string parse fine and still leave read_intake
-    # consumers broken, and a CORRUPT cache would otherwise be mirrored
-    # unexamined onto the new head.
-    source_ckey = write_loop.intake_cache_key(str(tenant_id), drawing_id, source_v)
-    source_cache_bytes = backend.get(source_ckey) if backend.exists(source_ckey) else None
-    readable_source = source_cache_bytes if source_cache_bytes is not None else source_bytes
+    # Readability + source-binding pre-check through the ONE reader every
+    # consumer uses: write_loop.read_intake enforces the cache/marker digest
+    # proof for PostgreSQL-backed uploads (a cache swapped for other content
+    # is rejected there, where a raw backend.get would accept it), and its
+    # result must be an intake-shaped DICT — `null`, a list, or a bare
+    # string parse as JSON but leave every consumer broken. The validated
+    # intake is also what the mirror below writes: the cache is DERIVED data
+    # (canonical re-serialization is its normal form); byte-fidelity applies
+    # to the immutable version BLOB, which is copied verbatim above.
     try:
-        parsed_intake = json.loads(readable_source.decode("utf-8"))
-        if not isinstance(parsed_intake, dict):
+        _, source_intake = write_loop.read_intake(
+            backend, str(tenant_id), drawing_id, source_v)
+        if not isinstance(source_intake, dict):
             raise ValueError("intake payload is not an object")
-    except (UnicodeDecodeError, ValueError):
-        which = "intake cache" if source_cache_bytes is not None else "payload"
+    except (KeyError, ValueError) as exc:
         return error_response(
             ErrorCode.BAD_PARAMS,
-            f"version {version}'s {which} is not readable intake JSON; "
+            f"version {version} is not readable as intake ({exc}); "
             "restoring it would produce an unusable head",
             retryable=False, status_code=422)
+    # Whether the BLOB alone is readable (mock representation: the blob IS
+    # the intake). Decides restored_head_readable if the cache mirror fails.
+    try:
+        blob_is_intake = isinstance(json.loads(source_bytes.decode("utf-8")), dict)
+    except (UnicodeDecodeError, ValueError):
+        blob_is_intake = False
 
     with _RESTORE_LOCK:
         # Serializes concurrent restores IN THIS PROCESS so both re-read a
@@ -584,6 +588,15 @@ def restore_version(drawing_id: str, version: int,
                         parent_version=head_v,
                         meta={"tool": "restore", "note": f"restore of version {version}"},
                         holder=put_holder, fence=fence,
+                        # Restore's CONTRACT is parent = current head. The
+                        # store re-checks that inside ITS OWN critical
+                        # section (compare-and-set), so a broker write that
+                        # lands between our fresh head read and this put is
+                        # refused as a stale parent (409 below) instead of
+                        # silently branching the DAG. The PostgreSQL
+                        # authority enforces the same discipline intrinsically
+                        # under its row lock.
+                        require_parent_is_head=True,
                     )
                 except ValueError as exc:
                     # The store refused THIS put under its own lock (stale
@@ -595,25 +608,22 @@ def restore_version(drawing_id: str, version: int,
                                           retryable=True, status_code=409)
                 # The head is COMMITTED past this point: nothing below may
                 # convert into a retryable error (a retry would append a
-                # duplicate head). Mirror the pre-read, pre-VALIDATED cache
-                # bytes to the new head; any failure here (filesystem, OSS
+                # duplicate head). Mirror the VALIDATED intake (canonical
+                # serialization of read_intake's source-bound result) to the
+                # new head's cache; any failure here (filesystem, OSS
                 # transport) is swallowed and reported via
-                # restored_head_readable below instead of a post-commit 500.
+                # restored_head_readable instead of a post-commit 500.
                 restored_head_readable = True
-                if source_cache_bytes is not None:
-                    try:
-                        backend.put(
-                            write_loop.intake_cache_key(str(tenant_id), drawing_id, new_v),
-                            source_cache_bytes,
-                        )
-                    except Exception:  # noqa: BLE001 — committed head; see above
-                        # Without the cache, a live-representation head is not
-                        # readable (the blob is DWG bytes); a mock head still
-                        # is (its blob IS the intake JSON we validated).
-                        try:
-                            json.loads(source_bytes.decode("utf-8"))
-                        except (UnicodeDecodeError, ValueError):
-                            restored_head_readable = False
+                try:
+                    backend.put(
+                        write_loop.intake_cache_key(str(tenant_id), drawing_id, new_v),
+                        json.dumps(source_intake, separators=(",", ":")).encode("utf-8"),
+                    )
+                except Exception:  # noqa: BLE001 — committed head; see above
+                    # Without a cache, the head is readable only when the
+                    # BLOB is itself intake (mock representation) — a live
+                    # DWG head is not, and the response says so.
+                    restored_head_readable = blob_is_intake
         except store.CheckoutDenied as exc:
             return _denied(checkout_capability.CapabilityRejected(str(exc)))
 

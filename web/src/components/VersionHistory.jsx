@@ -117,6 +117,15 @@ export default function VersionHistory({
     try {
       const result = await restoreDrawingVersion(useMock, drawingId, v, capability)
       setConfirmingVersion(null)
+      if (result && result.restored_head_readable === false) {
+        // The head committed (immutable), but its intake cache could not be
+        // written: silent success here would leave the viewer stale with no
+        // explanation. Surface it as the row's error line.
+        setRestoreErr({
+          version: v,
+          message: `Restored as v${result.head}, but the new head is not readable yet (its intake cache could not be written). Retry loading, or contact ops if it persists.`,
+        })
+      }
       if (onRetry) {
         // The real integration path: the parent's own history state refreshes,
         // and `data` (a fresh prop) will clear `overrideData` above.

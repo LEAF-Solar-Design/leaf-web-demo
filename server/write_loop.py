@@ -476,13 +476,15 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
 def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                        parent_version: int, meta: Dict[str, Any], *,
                        holder: Optional[str] = None,
-                       fence: Optional[int] = None) -> int:
+                       fence: Optional[int] = None,
+                       require_parent_is_head: bool = False) -> int:
     """put_drawing takes a local path (immutability + sha are computed there), so
     stage `data` to a temp file and append the new version.
 
     `holder`/`fence` are the caller's single-writer identity, forwarded verbatim
     so the store can refuse a write published under another session's checkout
-    (da/store.py put_drawing)."""
+    (da/store.py put_drawing). `require_parent_is_head` forwards the store's
+    compare-and-set for callers whose contract is parent = current head."""
     import store
     fd, tmp = tempfile.mkstemp(suffix=".blob")
     try:
@@ -490,7 +492,8 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
             fh.write(bytes(data))
         return store.put_drawing(backend, tenant_id, drawing_id, tmp,
                                  parent_version=parent_version, meta=meta,
-                                 holder=holder, fence=fence)
+                                 holder=holder, fence=fence,
+                                 require_parent_is_head=require_parent_is_head)
     finally:
         try:
             os.remove(tmp)
