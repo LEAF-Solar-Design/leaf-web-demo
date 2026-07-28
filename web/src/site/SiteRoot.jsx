@@ -13,7 +13,7 @@ import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
-import { handleRedirectCallback } from '../auth.js'
+import { handleRedirectCallback, isSignedIn } from '../auth.js'
 import {
   getDrawingIntake,
   getDrawingVersions,
@@ -50,7 +50,8 @@ const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
 
 const OPERATOR_DRAWING_ID = 'cat-panels'
-const PUBLIC_DEMO = new URLSearchParams(window.location.search).get('demo') === '1'
+const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') === '1'
+const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
 const loadHead = (drawingId) => getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
 const loadVersion = (drawingId, version) => getDrawingIntake(PUBLIC_DEMO, drawingId, version)
 const loadVersions = (drawingId) => getDrawingVersions(PUBLIC_DEMO, drawingId)
@@ -92,7 +93,11 @@ export default function SiteRoot() {
   useEffect(() => {
     if (!authCallbackPending) return
     let live = true
-    handleRedirectCallback().finally(() => { if (live) setAuthCallbackPending(false) })
+    handleRedirectCallback().then((signedIn) => {
+      if (!live) return
+      if (signedIn) window.location.reload()
+      else setAuthCallbackPending(false)
+    })
     return () => { live = false }
   }, [authCallbackPending])
 

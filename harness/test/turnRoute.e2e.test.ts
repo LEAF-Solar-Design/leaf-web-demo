@@ -37,7 +37,7 @@ import type {
   HarnessPorts,
   HarnessTurnEvent,
 } from "../src/ports/index.js";
-import { GrantRequiredError } from "../src/ports/impl/oauthGrantProvider.js";
+import { GrantPoolUnavailableError, GrantRequiredError } from "../src/ports/impl/oauthGrantProvider.js";
 import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
@@ -343,6 +343,23 @@ describe("POST /turn - mid-stream throw", () => {
 // --------------------------------------------------------------------------- //
 
 describe("POST /turn - grant error resolved before streaming", () => {
+  it("an exhausted mounted pool returns a clean immediate quota response", async () => {
+    const runner: ConverseRunner = {
+      async *runTurn(): AsyncGenerator<HarnessTurnEvent> {
+        throw new GrantPoolUnavailableError(420);
+      },
+    };
+    const { server: s, baseUrl } = listen(basePorts(runner));
+    server = s;
+
+    const res = await postTurn(baseUrl, validBody());
+    expect(res.status).toBe(429);
+    expect(await res.json()).toMatchObject({
+      errorCode: "llm_quota_exhausted",
+      retry_after_s: 420,
+    });
+  });
+
   it("runner throws GrantRequiredError synchronously -> 401 {grant_required:true}, no stream opened", async () => {
     const grantless: ConverseRunner = {
       runTurn(): AsyncIterable<HarnessTurnEvent> {

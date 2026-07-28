@@ -26,7 +26,7 @@ export function demoReplyFor(text, decision) {
   return 'I received your message. This public preview can route its local CAD tools without sending your text to a cloud assistant. Try one of the suggested CAD requests.'
 }
 
-export default function DemoConversationPanel({ turns = [], onSuggestion }) {
+export default function DemoConversationPanel({ turns = [], onSuggestion, canSignIn = false, onSignIn }) {
   return (
     <div className="converse-card demo-conversation" data-testid="demo-conversation">
       <div className="converse-log" role="log" aria-live="polite" aria-label="Demo conversation">
@@ -42,6 +42,11 @@ export default function DemoConversationPanel({ turns = [], onSuggestion }) {
                 </button>
               ))}
             </div>
+            {canSignIn && (
+              <button type="button" className="chip-act" onClick={onSignIn}>
+                Sign in to use mounted Team or Enterprise Claude accounts
+              </button>
+            )}
           </div>
         )}
         {turns.map((turn) => (

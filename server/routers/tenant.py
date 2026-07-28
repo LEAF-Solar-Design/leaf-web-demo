@@ -9,9 +9,10 @@ carry only ``{linked, linked_at}`` (never the token).
     GET    /api/tenant/claude-grant                 -> §10 {linked:bool, linked_at, kind}
     DELETE /api/tenant/claude-grant                 -> §10 {linked:false, linked_at:null}
 
-Grant KIND (§17): "oauth" (per-user "sign in with Claude") or "api_key" (enterprise BYO
-key). POST may carry an optional ``kind`` (else the harness auto-detects from the token
-prefix); status echoes the linked ``kind`` (never the token).
+Grant KIND (§17): "oauth" for an owner-attested Claude Team or Enterprise workspace,
+or "api_key" for a tenant-owned Anthropic API key. POST may carry an optional ``kind``
+(else the harness auto-detects from the token prefix); status echoes the linked ``kind``
+(never the token).
 
 Tenant identity is the usual ``require_tenant`` (X-Tenant-Id stub, or the live JWT
 claim). Harness unreachable / not configured -> BROKER_UNREACHABLE envelope (HTTP 502).
@@ -21,9 +22,9 @@ from __future__ import annotations
 import logging
 import os
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -36,11 +37,14 @@ logger = logging.getLogger(__name__)
 
 class GrantLinkRequest(BaseModel):
     token: str
-    # Optional credential kind (§17): "oauth" (per-user "sign in with Claude") or
-    # "api_key" (enterprise BYO key). When omitted the harness AUTO-DETECTS from the token
+    # Optional credential kind (§17): "oauth" (Team or Enterprise workspace) or
+    # "api_key" (tenant-owned API key). When omitted the harness AUTO-DETECTS from the token
     # prefix. Passed through to the harness; the token itself is never persisted app-side.
     kind: Optional[str] = None
     label: Optional[str] = None
+    # OAuth mounts may join automatic routing only after the owner explicitly
+    # attests that the credential belongs to a Commercial Terms workspace.
+    plan: Optional[Literal["team", "enterprise"]] = None
 
 
 class GrantActivateRequest(BaseModel):
@@ -68,6 +72,37 @@ def _grant_admin_url(tenant: str) -> Optional[str]:
     if not base:
         return None
     return f"{base}/grants/{urllib.parse.quote(str(tenant), safe='')}"
+
+
+def _require_grant_owner(tenant=Depends(deps.require_active_tenant)):
+    """Require the current platform tenant owner for grant administration.
+
+    Auth-off keeps the hermetic demo contract unchanged. In live mode, resolve
+    the binding and role again at the point of mutation so a recent revoke or
+    tenant move fails closed before the harness receives any request.
+    """
+    if not deps.auth_live():
+        return tenant
+    if not isinstance(tenant, deps.TenantContext) or not tenant.subject:
+        raise HTTPException(status_code=403, detail="tenant owner authority required")
+    try:
+        import platform_link
+
+        store = platform_link.platform_store()
+        binding = store.resolve_active_identity_binding("auth0", tenant.subject)
+        if binding is None or str(binding.platform_tenant_id) != str(tenant):
+            raise HTTPException(status_code=403, detail="tenant owner authority required")
+        role = store.active_identity_role(binding.platform_tenant_id, binding.binding_id)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - authority outages fail closed
+        raise HTTPException(
+            status_code=503,
+            detail="platform identity binding authority is unavailable",
+        ) from exc
+    if role != "owner":
+        raise HTTPException(status_code=403, detail="tenant owner authority required")
+    return tenant
 
 
 def _rejected(status_code: int) -> JSONResponse:
@@ -103,6 +138,14 @@ def _status_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
                 "linked_at": account.get("linked_at")
                 if isinstance(account.get("linked_at"), str) else None,
                 "active": bool(account.get("active", False)),
+                "plan": account.get("plan")
+                if account.get("plan") in {"team", "enterprise"} else None,
+                "eligible": bool(account.get("eligible", False)),
+                "usage_tokens": account.get("usage_tokens")
+                if isinstance(account.get("usage_tokens"), int)
+                and account.get("usage_tokens") >= 0 else 0,
+                "cooldown_until": account.get("cooldown_until")
+                if isinstance(account.get("cooldown_until"), str) else None,
             })
     return with_envelope_fields({
         "linked": bool(harness_json.get("linked", False)),
@@ -137,7 +180,7 @@ def _diagnostic_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
         else "local_file",
         "record_format": harness_json.get("record_format")
         if harness_json.get("record_format") in {
-            "v1", "v2", "legacy", "environment", "missing", "invalid"
+            "v1", "v2", "v3", "legacy", "environment", "missing", "invalid"
         } else "invalid",
         "legacy_fallback_present": bool(harness_json.get("legacy_fallback_present", False)),
         "owner": {
@@ -155,7 +198,7 @@ def _diagnostic_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.get("/api/tenant/claude-grant/diagnostic")
-def grant_diagnostic(tenant=Depends(deps.require_tenant)):
+def grant_diagnostic(tenant=Depends(_require_grant_owner)):
     """Return authenticated, token-free grant storage diagnostics."""
     url = _grant_admin_url(str(tenant))
     if url is None:
@@ -180,8 +223,8 @@ def grant_diagnostic(tenant=Depends(deps.require_tenant)):
 
 
 @router.post("/api/tenant/claude-grant")
-def link_grant(req: GrantLinkRequest, tenant=Depends(deps.require_tenant)):
-    """Link (or replace) THIS tenant's 'sign in with Claude' grant. The token is
+def link_grant(req: GrantLinkRequest, tenant=Depends(_require_grant_owner)):
+    """Mount a Team/Enterprise workspace or API grant for THIS tenant. The token is
     forwarded to the harness store in this one request and is NEVER persisted, logged,
     or echoed by the app."""
     url = _grant_admin_url(str(tenant))
@@ -195,6 +238,8 @@ def link_grant(req: GrantLinkRequest, tenant=Depends(deps.require_tenant)):
         payload["kind"] = req.kind
     if req.label is not None:
         payload["label"] = req.label
+    if req.plan is not None:
+        payload["plan"] = req.plan
     try:
         import requests
         import broker_client
@@ -213,7 +258,7 @@ def link_grant(req: GrantLinkRequest, tenant=Depends(deps.require_tenant)):
 
 
 @router.patch("/api/tenant/claude-grant")
-def activate_grant(req: GrantActivateRequest, tenant=Depends(deps.require_tenant)):
+def activate_grant(req: GrantActivateRequest, tenant=Depends(_require_grant_owner)):
     """Select one of THIS tenant's linked accounts as the authoring credential."""
     url = _grant_admin_url(str(tenant))
     if url is None:
@@ -241,7 +286,7 @@ def activate_grant(req: GrantActivateRequest, tenant=Depends(deps.require_tenant
 
 
 @router.get("/api/tenant/claude-grant")
-def grant_status(tenant=Depends(deps.require_tenant)):
+def grant_status(tenant=Depends(_require_grant_owner)):
     """Whether THIS tenant has a linked grant. Never returns the token."""
     url = _grant_admin_url(str(tenant))
     if url is None:
@@ -262,7 +307,7 @@ def grant_status(tenant=Depends(deps.require_tenant)):
 
 
 @router.delete("/api/tenant/claude-grant")
-def unlink_grant(account_id: Optional[str] = None, tenant=Depends(deps.require_tenant)):
+def unlink_grant(account_id: Optional[str] = None, tenant=Depends(_require_grant_owner)):
     """Unlink THIS tenant's grant."""
     url = _grant_admin_url(str(tenant))
     if url is None:

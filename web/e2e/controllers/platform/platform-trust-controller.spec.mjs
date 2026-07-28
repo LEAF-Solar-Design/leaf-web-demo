@@ -125,6 +125,40 @@ test('loading and grant failures remain explicit without retaining the token', a
   expect(controller.getSnapshot().grantErr).toBe('Could not unlink this Claude account.')
 })
 
+test('grant mutations preserve the token-free mounted account pool', async () => {
+  const calls = []
+  const accountOne = { id: 'acct-1', label: 'Team east', kind: 'oauth', plan: 'team', eligible: true, active: true }
+  const accountTwo = { id: 'acct-2', label: 'Enterprise west', kind: 'oauth', plan: 'enterprise', eligible: true, active: false }
+  const pool = (active, accounts = [accountOne, accountTwo]) => ({
+    linked: accounts.length > 0,
+    linked_at: accounts[0]?.linked_at || '2026-07-27T12:00:00Z',
+    kind: accounts.find((account) => account.id === active)?.kind || null,
+    active_account_id: active,
+    accounts: accounts.map((account) => ({ ...account, active: account.id === active })),
+  })
+  const controller = createPlatformTrustController({
+    services: {
+      linkClaudeGrant: async (...args) => { calls.push(['link', ...args]); return pool('acct-2') },
+      activateClaudeGrant: async (id) => { calls.push(['activate', id]); return pool(id) },
+      unlinkClaudeGrant: async (id) => { calls.push(['unlink', id]); return pool('acct-2', [accountTwo]) },
+    },
+  })
+  const token = 'sensitive-team-setup-token'
+
+  await controller.linkClaude(token, 'oauth', 'Enterprise west', 'enterprise')
+  expect(controller.getSnapshot().grant.accounts).toHaveLength(2)
+  await controller.activateClaude('acct-1')
+  expect(controller.getSnapshot().grant.active_account_id).toBe('acct-1')
+  await controller.unlinkClaude('acct-1')
+  expect(controller.getSnapshot().grant.accounts.map((account) => account.id)).toEqual(['acct-2'])
+  expect(calls).toEqual([
+    ['link', token, 'oauth', 'Enterprise west', 'enterprise'],
+    ['activate', 'acct-1'],
+    ['unlink', 'acct-1'],
+  ])
+  expect(JSON.stringify(controller.getSnapshot())).not.toContain(token)
+})
+
 test('auth sources coordinate and a successful retry clears only its source', async () => {
   let failUsage = true
   const authEvents = []

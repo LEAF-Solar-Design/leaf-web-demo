@@ -1,10 +1,9 @@
 /**
  * REAL OAuthGrantProvider - resolves ONE tenant's Agent SDK grant (Concern 2).
  *
- *   - Web lane: the tenant's OWN "sign in with Claude" OAuth token (individual-use;
- *     one per end user, NEVER pooled - research/agentsdk-usage-visibility.md). The
- *     token draws on that user's subscription rate windows; there is no balance API.
- *   - Enterprise lane: a BYO API key.
+ *   - Commercial workspace lane: tenant-owner mounted Team or Enterprise Claude
+ *     credentials, routed only inside that tenant.
+ *   - API lane: a tenant-owned Anthropic API key.
  *
  * INVARIANT (contract/AUTH.md section 0): this NEVER touches the Auth0 platform JWT.
  * The tenant JWT answers "which workspace"; this answers "whose Anthropic credit" -
@@ -38,6 +37,9 @@ import type {
   AgentGrant,
   GrantDiagnostic,
   GrantKind,
+  GrantLease,
+  GrantPlan,
+  GrantSettlement,
   GrantStatus,
   OAuthGrantProvider,
   TenantGrantAdminStore,
@@ -67,10 +69,12 @@ function grantFor(kind: GrantKind, token: string): AgentGrant {
 export interface TenantGrantStore {
   /** Return the tenant's stored grant, or null if the tenant has not linked one. */
   get(tenantId: string): Promise<AgentGrant | null>;
+  acquire?(tenantId: string): Promise<GrantLease>;
+  settle?(tenantId: string, leaseId: string, outcome: GrantSettlement): Promise<void>;
 }
 
 /**
- * Thrown when a tenant has no linked grant. Distinct type so the HTTP shell can map it
+ * Thrown when a tenant has no eligible linked grant. Distinct type so the HTTP shell can map it
  * to a clean 401 with a `grant_required` marker (instead of an opaque 500), which the
  * app proxy surfaces to the frontend as GRANT_REQUIRED. Carries NO token.
  */
@@ -79,18 +83,18 @@ export class GrantRequiredError extends Error {
   constructor(readonly tenantId: string, message?: string) {
     super(
       message ??
-        `tenant ${tenantId} has no linked Claude grant - the user must "sign in with Claude" ` +
-          `(per-user OAuth) or provide a BYO API key before the author loop can run.`,
+        `tenant ${tenantId} has no eligible Claude grant. The tenant owner must mount ` +
+          `a Claude Team or Enterprise workspace credential, or a tenant-owned Anthropic API key.`,
     );
     this.name = "GrantRequiredError";
   }
 }
 
 /**
- * Concrete grant store for the demo/single-operator lane: resolves ONE OAuth grant
+ * Concrete grant store for the legacy demo/single-operator lane: resolves ONE OAuth grant
  * from the env var `CLAUDE_CODE_OAUTH_TOKEN`, else from the file named by env
  * `LEAF_GRANT_FILE` (default the proven hosted-oauth-spike grant path). This is the
- * operator's OWN 1-year subscription token (individual-use). The token VALUE is only
+ * legacy operator token. The token VALUE is only
  * ever returned inside the AgentGrant; it is NEVER printed or logged here.
  *
  * In wave 4 this survives as the BACK-COMPAT fallback the per-tenant store consults for
@@ -174,13 +178,46 @@ interface PersistedGrantAccount {
   linked_at: string;
 }
 
+export class GrantPoolUnavailableError extends Error {
+  readonly retryAfterS: number;
+  constructor(retryAfterS: number) {
+    super("all authorized Claude mounts are temporarily unavailable");
+    this.name = "GrantPoolUnavailableError";
+    this.retryAfterS = retryAfterS;
+  }
+}
+
 interface PersistedGrantRecordV2 {
   version: 2;
   active_account_id: string;
   accounts: PersistedGrantAccount[];
 }
 
-type PersistedGrantRecord = PersistedGrantRecordV1 | PersistedGrantRecordV2;
+interface PersistedGrantLease {
+  id: string;
+  expires_at: string;
+}
+
+interface PersistedGrantAccountV3 extends PersistedGrantAccount {
+  plan: GrantPlan | null;
+  usage_tokens: number;
+  selection_count: number;
+  last_used_at: string | null;
+  cooldown_until: string | null;
+  leases: PersistedGrantLease[];
+}
+
+interface PersistedGrantRecordV3 {
+  version: 3;
+  active_account_id: string;
+  accounts: PersistedGrantAccountV3[];
+}
+
+type PersistedGrantRecord = PersistedGrantRecordV1 | PersistedGrantRecordV2 | PersistedGrantRecordV3;
+
+const LEASE_TTL_MS = 5 * 60 * 1000;
+const LEASE_RESERVATION_TOKENS = 100_000;
+const DEFAULT_QUOTA_COOLDOWN_S = 15 * 60;
 
 function cleanLabel(label: string | undefined, kind: GrantKind): string {
   const value = (label ?? "").trim();
@@ -315,26 +352,88 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
         })),
       };
     }
+    if (candidate.version === 3 && Array.isArray(candidate.accounts)) {
+      const accounts = candidate.accounts as Array<Record<string, unknown>>;
+      const valid = accounts.length > 0 && accounts.every((account) => {
+        const leases = account.leases;
+        return typeof account.id === "string" && !!account.id &&
+          typeof account.label === "string" && account.label.length <= 120 &&
+          (account.kind === "oauth" || account.kind === "api_key") &&
+          typeof account.token === "string" && !!account.token.trim() &&
+          typeof account.linked_at === "string" && !Number.isNaN(Date.parse(account.linked_at)) &&
+          (account.plan === null || account.plan === "team" || account.plan === "enterprise") &&
+          Number.isSafeInteger(account.usage_tokens) && (account.usage_tokens as number) >= 0 &&
+          Number.isSafeInteger(account.selection_count) && (account.selection_count as number) >= 0 &&
+          (account.last_used_at === null ||
+            (typeof account.last_used_at === "string" && !Number.isNaN(Date.parse(account.last_used_at)))) &&
+          (account.cooldown_until === null ||
+            (typeof account.cooldown_until === "string" && !Number.isNaN(Date.parse(account.cooldown_until)))) &&
+          Array.isArray(leases) && leases.every((lease) => {
+            const item = lease as Record<string, unknown>;
+            return typeof item.id === "string" && !!item.id &&
+              typeof item.expires_at === "string" && !Number.isNaN(Date.parse(item.expires_at));
+          });
+      });
+      const ids = accounts.map((account) => account.id as string);
+      if (!valid || new Set(ids).size !== ids.length ||
+          typeof candidate.active_account_id !== "string" ||
+          !ids.includes(candidate.active_account_id)) {
+        throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
+      }
+      return {
+        version: 3,
+        active_account_id: candidate.active_account_id,
+        accounts: accounts.map((account) => ({
+          id: account.id as string,
+          label: account.label as string,
+          kind: account.kind as GrantKind,
+          token: (account.token as string).trim(),
+          linked_at: account.linked_at as string,
+          plan: account.plan as GrantPlan | null,
+          usage_tokens: account.usage_tokens as number,
+          selection_count: account.selection_count as number,
+          last_used_at: account.last_used_at as string | null,
+          cooldown_until: account.cooldown_until as string | null,
+          leases: (account.leases as Array<Record<string, unknown>>).map((lease) => ({
+            id: lease.id as string,
+            expires_at: lease.expires_at as string,
+          })),
+        })),
+      };
+    }
     throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
   }
 
-  private asV2(tenantId: string, record: PersistedGrantRecord): PersistedGrantRecordV2 {
-    if (record.version === 2) return record;
-    const linkedAt = statSync(this.recordFile(tenantId)).mtime.toISOString();
+  private asV3(tenantId: string, record: PersistedGrantRecord): PersistedGrantRecordV3 {
+    if (record.version === 3) return record;
+    const linkedAt = record.version === 1
+      ? statSync(this.recordFile(tenantId)).mtime.toISOString()
+      : null;
+    const accounts = record.version === 1
+      ? [{
+          id: "legacy",
+          label: cleanLabel(undefined, record.kind),
+          kind: record.kind,
+          token: record.token,
+          linked_at: linkedAt!,
+        }]
+      : record.accounts;
     return {
-      version: 2,
-      active_account_id: "legacy",
-      accounts: [{
-        id: "legacy",
-        label: cleanLabel(undefined, record.kind),
-        kind: record.kind,
-        token: record.token,
-        linked_at: linkedAt,
-      }],
+      version: 3,
+      active_account_id: record.version === 1 ? "legacy" : record.active_account_id,
+      accounts: accounts.map((account) => ({
+        ...account,
+        plan: null,
+        usage_tokens: 0,
+        selection_count: 0,
+        last_used_at: null,
+        cooldown_until: null,
+        leases: [],
+      })),
     };
   }
 
-  private writeRecord(tenantId: string, record: PersistedGrantRecordV2): void {
+  private writeRecord(tenantId: string, record: PersistedGrantRecordV3): void {
     writePrivateFileAtomic(this.recordFile(tenantId), JSON.stringify(record) + "\n");
   }
 
@@ -371,19 +470,31 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     return null;
   }
 
-  async put(tenantId: string, token: string, kind?: GrantKind, label?: string): Promise<GrantStatus> {
+  async put(tenantId: string, token: string, kind?: GrantKind, label?: string, plan?: GrantPlan): Promise<GrantStatus> {
     const t = (token ?? "").trim();
     if (!t) throw new Error("grant token must not be empty");
     const k: GrantKind = kind ?? detectGrantKind(t);
     mkdirSync(this.dir, { recursive: true });
     const existing = this.readRecord(tenantId);
-    const record = existing ? this.asV2(tenantId, existing) : {
-      version: 2 as const,
+    const record = existing ? this.asV3(tenantId, existing) : {
+      version: 3 as const,
       active_account_id: "",
       accounts: [],
     };
     const id = randomUUID();
-    record.accounts.push({ id, label: cleanLabel(label, k), kind: k, token: t, linked_at: new Date().toISOString() });
+    record.accounts.push({
+      id,
+      label: cleanLabel(label, k),
+      kind: k,
+      token: t,
+      linked_at: new Date().toISOString(),
+      plan: k === "oauth" ? plan ?? null : null,
+      usage_tokens: 0,
+      selection_count: 0,
+      last_used_at: null,
+      cooldown_until: null,
+      leases: [],
+    });
     record.active_account_id = id;
     this.writeRecord(tenantId, record);
     return this.status(tenantId);
@@ -392,13 +503,85 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
   async activate(tenantId: string, accountId: string): Promise<GrantStatus> {
     const existing = this.readRecord(tenantId);
     if (!existing) throw new Error("grant account not found");
-    const record = this.asV2(tenantId, existing);
+    const record = this.asV3(tenantId, existing);
     if (!record.accounts.some((account) => account.id === accountId)) {
       throw new Error("grant account not found");
     }
     record.active_account_id = accountId;
     this.writeRecord(tenantId, record);
     return this.status(tenantId);
+  }
+
+  async acquire(tenantId: string): Promise<GrantLease> {
+    const existing = this.readRecord(tenantId);
+    if (!existing) throw new GrantRequiredError(tenantId);
+    const record = this.asV3(tenantId, existing);
+    const now = Date.now();
+    let changed = existing.version !== 3;
+    for (const account of record.accounts) {
+      const leases = account.leases.filter((lease) => Date.parse(lease.expires_at) > now);
+      if (leases.length !== account.leases.length) changed = true;
+      account.leases = leases;
+    }
+    const attested = record.accounts.filter(
+      (account) => account.kind === "api_key" || account.plan === "team" || account.plan === "enterprise",
+    );
+    if (!attested.length) {
+      if (changed) this.writeRecord(tenantId, record);
+      throw new GrantRequiredError(
+        tenantId,
+        `tenant ${tenantId} must mount a Claude Team or Enterprise account before live conversation`,
+      );
+    }
+    const eligible = attested.filter(
+      (account) => account.cooldown_until === null || Date.parse(account.cooldown_until) <= now,
+    );
+    if (!eligible.length) {
+      if (changed) this.writeRecord(tenantId, record);
+      const next = Math.min(...attested
+        .map((account) => account.cooldown_until ? Date.parse(account.cooldown_until) : now)
+        .filter(Number.isFinite));
+      throw new GrantPoolUnavailableError(Math.max(1, Math.ceil((next - now) / 1000)));
+    }
+    eligible.sort((a, b) => {
+      const aScore = a.usage_tokens + a.leases.length * LEASE_RESERVATION_TOKENS;
+      const bScore = b.usage_tokens + b.leases.length * LEASE_RESERVATION_TOKENS;
+      return aScore - bScore || a.selection_count - b.selection_count ||
+        a.linked_at.localeCompare(b.linked_at) || a.id.localeCompare(b.id);
+    });
+    const selected = eligible[0]!;
+    const leaseId = randomUUID();
+    selected.leases.push({ id: leaseId, expires_at: new Date(now + LEASE_TTL_MS).toISOString() });
+    selected.selection_count += 1;
+    selected.last_used_at = new Date(now).toISOString();
+    record.active_account_id = selected.id;
+    this.writeRecord(tenantId, record);
+    return {
+      grant: grantFor(selected.kind, selected.token),
+      account_id: selected.id,
+      lease_id: leaseId,
+    };
+  }
+
+  async settle(tenantId: string, leaseId: string, outcome: GrantSettlement): Promise<void> {
+    const existing = this.readRecord(tenantId);
+    if (!existing) return;
+    const record = this.asV3(tenantId, existing);
+    const account = record.accounts.find((candidate) =>
+      candidate.leases.some((lease) => lease.id === leaseId));
+    if (!account) return; // idempotent settlement or an expired crash lease
+    account.leases = account.leases.filter((lease) => lease.id !== leaseId);
+    const costTokens = Number.isSafeInteger(outcome.usage.cost_tokens) && outcome.usage.cost_tokens > 0
+      ? outcome.usage.cost_tokens
+      : 0;
+    account.usage_tokens += costTokens;
+    if (outcome.stop_reason === "llm_quota_exhausted") {
+      const retryAfterS = Number.isFinite(outcome.retry_after_s) && (outcome.retry_after_s ?? 0) > 0
+        ? outcome.retry_after_s!
+        : DEFAULT_QUOTA_COOLDOWN_S;
+      account.cooldown_until = new Date(Date.now() + retryAfterS * 1000).toISOString();
+    }
+    this.writeRecord(tenantId, record);
   }
 
   async status(tenantId: string): Promise<GrantStatus> {
@@ -412,18 +595,26 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
           accounts: [{ id: "legacy", label: cleanLabel(undefined, record.kind), kind: record.kind, linked_at: linkedAt, active: true }],
         };
       }
-      const active = record.accounts.find((account) => account.id === record.active_account_id)!;
+      const normalized = this.asV3(tenantId, record);
+      const active = normalized.accounts.find((account) => account.id === normalized.active_account_id)!;
+      const now = Date.now();
       return {
         linked: true,
         linked_at: active.linked_at,
         kind: active.kind,
         active_account_id: active.id,
-        accounts: record.accounts.map((account) => ({
+        accounts: normalized.accounts.map((account) => ({
           id: account.id,
           label: account.label,
           kind: account.kind,
           linked_at: account.linked_at,
           active: account.id === active.id,
+          plan: account.plan,
+          eligible: account.kind === "api_key" || account.plan !== null,
+          usage_tokens: account.usage_tokens,
+          cooldown_until: account.cooldown_until && Date.parse(account.cooldown_until) > now
+            ? account.cooldown_until
+            : null,
         })),
       };
     }
@@ -474,7 +665,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
           path_class: (process.env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase() === "production"
             ? "efs_access_point"
             : "local_file",
-          record_format: record.version === 2 ? "v2" : "v1",
+          record_format: record.version === 3 ? "v3" : record.version === 2 ? "v2" : "v1",
           owner: owner(recordPath),
           persistence: {
             atomic_publish: true,
@@ -555,7 +746,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     if (accountId) {
       const existing = this.readRecord(tenantId);
       if (!existing) throw new Error("grant account not found");
-      const record = this.asV2(tenantId, existing);
+      const record = this.asV3(tenantId, existing);
       const accounts = record.accounts.filter((account) => account.id !== accountId);
       if (accounts.length === record.accounts.length) throw new Error("grant account not found");
       if (accounts.length) {
@@ -642,5 +833,16 @@ export class OAuthGrantProviderImpl implements OAuthGrantProvider {
     }
 
     throw new GrantRequiredError(tenantId);
+  }
+
+  async acquireGrant(tenantId: string): Promise<GrantLease> {
+    if (!this.opts.store.acquire) {
+      throw new Error("grant routing is not configured");
+    }
+    return this.opts.store.acquire(tenantId);
+  }
+
+  async settleGrant(tenantId: string, leaseId: string, outcome: GrantSettlement): Promise<void> {
+    await this.opts.store.settle?.(tenantId, leaseId, outcome);
   }
 }

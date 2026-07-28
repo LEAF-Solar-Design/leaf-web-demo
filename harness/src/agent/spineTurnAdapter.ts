@@ -110,9 +110,12 @@ export class SpineTurnAdapter implements ConverseRunner {
     //    the runner's scrubbed env, never logged, never persisted. Otherwise the
     //    tenant's linked grant is resolved; a missing one must surface as the
     //    non-stream 401 {grant_required:true}, never a half-open 200 stream.
+    const lease = !input.credential_grant && this.ports.oauth.acquireGrant
+      ? await this.ports.oauth.acquireGrant(input.tenant_id)
+      : null;
     const grant: AgentGrant = input.credential_grant
       ? wireGrantToAgentGrant(input.credential_grant)
-      : await this.ports.oauth.getGrant(input.tenant_id);
+      : lease?.grant ?? await this.ports.oauth.getGrant(input.tenant_id);
 
     // Scrub the credential out of the INBOUND CONTENT, exactly once, here.
     //
@@ -204,6 +207,9 @@ export class SpineTurnAdapter implements ConverseRunner {
     const queue: HarnessTurnEvent[] = [];
     let wake: (() => void) | null = null;
     let finished = false;
+    let routingUsage = { cost_tokens: 0 };
+    let routingStopReason: import("../ports/index.js").ConverseStopReason = "error";
+    let routingRetryAfterS: number | undefined;
     const push = (): void => {
       wake?.();
       wake = null;
@@ -215,6 +221,19 @@ export class SpineTurnAdapter implements ConverseRunner {
     const onEvent = (ev: ConverseEvent): void => {
       const type = ev.type as HarnessTurnEvent["type"];
       if (!WIRE_EVENT_TYPES.has(type)) return;
+      if (ev.type === "turn_usage" && typeof ev.data.cost_tokens === "number") {
+        routingUsage = { cost_tokens: Math.max(0, Math.trunc(ev.data.cost_tokens)) };
+      } else if (ev.type === "turn_complete" && typeof ev.data.stop_reason === "string") {
+        routingStopReason = ev.data.stop_reason as import("../ports/index.js").ConverseStopReason;
+      } else if (ev.type === "error") {
+        const detail = ev.data.error;
+        if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+          const retryAfter = (detail as Record<string, unknown>).retry_after_s;
+          if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0) {
+            routingRetryAfterS = retryAfter;
+          }
+        }
+      }
       queue.push({ type, data: ev.data });
       push();
     };
@@ -237,9 +256,22 @@ export class SpineTurnAdapter implements ConverseRunner {
       priorMessages: input.messages,
       onEvent,
     });
-    void done.finally(() => {
-      finished = true;
-      push();
+    void (async () => {
+      try {
+        await done;
+        if (lease && this.ports.oauth.settleGrant) {
+          await this.ports.oauth.settleGrant(input.tenant_id, lease.lease_id, {
+            usage: routingUsage,
+            stop_reason: routingStopReason,
+            ...(routingRetryAfterS !== undefined ? { retry_after_s: routingRetryAfterS } : {}),
+          });
+        }
+      } finally {
+        finished = true;
+        push();
+      }
+    })().catch(() => {
+      // Routing telemetry must never turn a completed model turn into a broken stream.
     });
 
     while (true) {

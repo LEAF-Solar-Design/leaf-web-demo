@@ -68,7 +68,10 @@ const PROOF_MODE =
   import.meta.env.VITE_CAT_PROOF === '1' ||
   new URLSearchParams(window.location.search).get('proof') === '1'
 const DRAWING_SOURCE = PROOF_MODE ? 'cat' : 'rooftop_demo'
-const PUBLIC_DEMO = new URLSearchParams(window.location.search).get('demo') === '1'
+const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') === '1'
+// A signed-in user gets the live session and mounted-account path on the same
+// CAD surface. Only an anonymous demo remains fully local.
+const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
 const LIVE_TOUR_REQUESTED = new URLSearchParams(window.location.search).get('demo') === 'tour'
 const freshDrawingId = () => {
   const randomId = globalThis.crypto?.randomUUID?.()
@@ -958,7 +961,7 @@ export default function ToolCast({
         </div>
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (PUBLIC_DEMO ? (
-            <DemoConversationPanel turns={demoTurns} onSuggestion={dispatchRequest} />
+            <DemoConversationPanel turns={demoTurns} onSuggestion={dispatchRequest} canSignIn={authConfigured} onSignIn={() => login()} />
           ) : sessionAuthRequired ? (
             <>
               {guestDrawing && (
@@ -977,7 +980,7 @@ export default function ToolCast({
               sessionId={sessionId}
               userTurns={turns}
               onDismiss={() => {}}
-              onLinkClaude={() => {}}
+              onLinkClaude={() => { setRightView('trust'); setClaudeOpen(true) }}
               onAttachJob={attachJob}
               onJobLinked={attachJob}
               writeLocked={checkout.writeLocked}
@@ -1299,7 +1302,7 @@ export default function ToolCast({
             <div className="strip-decision enter" role="status">
               <span className="dot square" aria-hidden="true" />
               <span className="strip-sentence">{agentBanner.message}</span>
-              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => setRightView('trust')}>Link account</button>}
+              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => { setRightView('trust'); setClaudeOpen(true) }}>Link account</button>}
               <button type="button" className="chip-neutral" onClick={catalog.actions.clearAgentBanner}>Dismiss</button>
             </div>
           )}

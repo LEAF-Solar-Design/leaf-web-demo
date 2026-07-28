@@ -49,7 +49,7 @@ describe("FileTenantGrantStore", () => {
     const file = join(dir, "acme.grant.json");
     expect(existsSync(file)).toBe(true);
     const persisted = JSON.parse(readFileSync(file, "utf8"));
-    expect(persisted.version).toBe(2);
+    expect(persisted.version).toBe(3);
     expect(persisted.accounts).toHaveLength(1);
     expect(persisted.accounts[0]).toMatchObject({ kind: "oauth", token: FAKE });
     expect(persisted.active_account_id).toBe(persisted.accounts[0].id);
@@ -91,6 +91,78 @@ describe("FileTenantGrantStore", () => {
     expect(await store.get("acme")).toBeNull();
     expect((await store.status("acme")).linked).toBe(false);
     await expect(store.remove("acme")).resolves.toBeUndefined(); // idempotent
+  });
+
+  it("routes Team and Enterprise mounts by settled token usage without crossing tenants", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("acme", FAKE, "oauth", "team-primary", "team");
+    await store.put("acme", FAKE2, "oauth", "enterprise-secondary", "enterprise");
+    await store.put("other", "FAKE-OAUTH-other-777888999", "oauth", "other-team", "team");
+
+    const first = await store.acquire("acme");
+    expect(first.grant).toMatchObject({ kind: "oauth" });
+    await store.settle("acme", first.lease_id, {
+      usage: { cost_tokens: 12_000 },
+      stop_reason: "end_turn",
+    });
+
+    const second = await store.acquire("acme");
+    expect(second.account_id).not.toBe(first.account_id);
+    expect(second.grant).not.toEqual(first.grant);
+    const other = await store.acquire("other");
+    expect(other.grant).toEqual({ kind: "oauth", oauthToken: "FAKE-OAUTH-other-777888999" });
+
+    const status = await store.status("acme");
+    expect(JSON.stringify(status)).not.toContain(FAKE);
+    expect(JSON.stringify(status)).not.toContain(FAKE2);
+    expect(status.accounts?.every((account) => account.eligible)).toBe(true);
+    expect(status.accounts?.find((account) => account.id === first.account_id)?.usage_tokens).toBe(12_000);
+  });
+
+  it("keeps unattested OAuth mounts out of automatic routing", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("acme", FAKE, "oauth", "legacy subscription");
+
+    await expect(store.acquire("acme")).rejects.toThrow(/Team or Enterprise/i);
+    expect((await store.status("acme")).accounts?.[0]).toMatchObject({
+      plan: null,
+      eligible: false,
+    });
+    expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
+  });
+
+  it("skips a quota-cooled mount and fails closed when every eligible mount is cooling", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("acme", FAKE, "oauth", "team-one", "team");
+    await store.put("acme", FAKE2, "oauth", "team-two", "team");
+
+    const first = await store.acquire("acme");
+    await store.settle("acme", first.lease_id, {
+      usage: { cost_tokens: 0 },
+      stop_reason: "llm_quota_exhausted",
+      retry_after_s: 600,
+    });
+    const second = await store.acquire("acme");
+    expect(second.account_id).not.toBe(first.account_id);
+    await store.settle("acme", second.lease_id, {
+      usage: { cost_tokens: 0 },
+      stop_reason: "llm_quota_exhausted",
+      retry_after_s: 600,
+    });
+
+    await expect(store.acquire("acme")).rejects.toThrow(/temporarily unavailable/i);
+    const status = await store.status("acme");
+    expect(status.accounts?.every((account) => typeof account.cooldown_until === "string")).toBe(true);
+  });
+
+  it("reserves concurrent acquisitions so simultaneous turns do not choose one mount", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("acme", FAKE, "oauth", "team-one", "team");
+    await store.put("acme", FAKE2, "oauth", "team-two", "team");
+
+    const [one, two] = await Promise.all([store.acquire("acme"), store.acquire("acme")]);
+    expect(one.account_id).not.toBe(two.account_id);
+    expect(one.lease_id).not.toBe(two.lease_id);
   });
 
   it("keeps v1 records readable and migrates them when a second account is added", async () => {
