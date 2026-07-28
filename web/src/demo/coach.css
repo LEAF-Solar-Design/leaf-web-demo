@@ -24,7 +24,13 @@
   width: 720px;
   bottom: 188px;
   z-index: 80;
-  pointer-events: none;
+  /* !important: the scene rule `.stage-root[data-scene="tool"]
+     [data-cast="tool"]` sets pointer-events: auto at higher specificity,
+     which would make the EMPTY part of this 720px strip eat stage clicks
+     (and read as "inside the coach" to the outside-pointerdown hide). The
+     root stays transparent always; only the card is interactive, and
+     off-scene the inert sweep kills even that. */
+  pointer-events: none !important;
   display: flex;
   justify-content: flex-end;
 }

@@ -1420,8 +1420,17 @@ export default function ToolCast({
           bannerSubtitle="One scene for request, approval, job, drawing, version, and trust."
         />
       )}
-      {!tourOn && active && sessionAuthRequired && !sessionWasActiveThisPageLoad && (
-        <FirstRunCoach signedIn={platformSession.status === 'active'} active={!focusView} />
+      {!tourOn && sessionAuthRequired && !sessionWasActiveThisPageLoad && (
+        // Mounted independent of the scene so the data-cast choreography can
+        // fade it with the other tool panes (a mount gated on `active` pops
+        // in over the fading landing scene and unmounts without the exit
+        // fade). The scene CSS + SiteRoot's inert sweep hide it off-scene;
+        // sceneActive only gates its document listeners.
+        <FirstRunCoach
+          signedIn={platformSession.status === 'active'}
+          active={!focusView}
+          sceneActive={active}
+        />
       )}
     </>
   )

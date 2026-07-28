@@ -124,9 +124,12 @@ for (const viewport of [
 }
 
 test('leaving the tool scene via Back never strands the coach over the landing page', async ({ page }) => {
-  // Round-3 pin: enter /try from / via SPA navigation, then browser Back.
-  // ToolCast stays mounted with sessionAuthRequired true; the coach must
-  // disappear with the scene (the `active` prop gate + data-cast="tool").
+  // Round-3/4 pin: enter /try from / via SPA navigation, then browser Back.
+  // ToolCast stays mounted with sessionAuthRequired true; the coach STAYS
+  // MOUNTED (so the data-cast choreography can fade it with the other tool
+  // panes) but must end inert, aria-hidden, faded to opacity 0, and
+  // pointer-transparent -- and its listeners must be off: Escape on the
+  // landing page must not write the permanent dismissal.
   const state = makeCatProofState()
   await routeSession401(page, state)
 
@@ -135,7 +138,15 @@ test('leaving the tool scene via Back never strands the coach over the landing p
   await expect(page.getByTestId('first-run-coach')).toBeVisible()
 
   await page.goBack()
-  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+  const coach = page.getByTestId('first-run-coach')
+  await expect(coach).toHaveAttribute('aria-hidden', 'true')
+  await expect.poll(async () => coach.evaluate((el) => {
+    const style = getComputedStyle(el)
+    return `${style.opacity}|${style.pointerEvents}`
+  }), { timeout: 5_000 }).toBe('0|none')
+
+  await page.keyboard.press('Escape')
+  expect(await page.evaluate(() => localStorage.getItem('leaf.coach.dismissed.v1'))).toBeNull()
 })
 
 for (const viewport of [{ width: 844, height: 390 }, { width: 980, height: 600 }]) {

@@ -48,7 +48,13 @@ function useSmallViewport() {
   return small
 }
 
-export default function FirstRunCoach({ signedIn = false, active = true }) {
+// `sceneActive`: whether the tool scene is the active cast. The card STAYS
+// MOUNTED while the scene is away -- landing.css's [data-cast="tool"] rules
+// fade it with the other tool panes and SiteRoot's sweep makes it inert --
+// but its document listeners must not run there: an Escape on the landing
+// page must never permanently dismiss, and a pointerdown there must never
+// session-hide, a coach the user is not looking at.
+export default function FirstRunCoach({ signedIn = false, active = true, sceneActive = true }) {
   const [dismissed, setDismissed] = useState(readDismissed)
   const [sessionHidden, setSessionHidden] = useState(false)
   const smallViewport = useSmallViewport()
@@ -65,7 +71,7 @@ export default function FirstRunCoach({ signedIn = false, active = true }) {
   }, [])
 
   useEffect(() => {
-    if (!visible) return undefined
+    if (!visible || !sceneActive) return undefined
     const onKey = (event) => {
       if (event.key === 'Escape') dismiss()
     }
@@ -83,7 +89,7 @@ export default function FirstRunCoach({ signedIn = false, active = true }) {
       window.removeEventListener('keydown', onKey)
       document.removeEventListener('pointerdown', onPointerDown, true)
     }
-  }, [visible, dismiss])
+  }, [visible, sceneActive, dismiss])
 
   if (!visible) return null
 
