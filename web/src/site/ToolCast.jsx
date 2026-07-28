@@ -200,6 +200,11 @@ function moveTab(event) {
   tabs[next].click()
 }
 
+// Whether this SPA page load ever saw an ACTIVE platform session. Lives at
+// module scope so it survives ToolCast unmounts (route to /sheets or /app and
+// back); see the first-run coach gate below.
+let sessionWasActiveThisPageLoad = false
+
 export default function ToolCast({
   active,
   onFitDrawing,
@@ -222,9 +227,11 @@ export default function ToolCast({
   // this page view. An active session that later expires flips status back
   // to 'required' (any subscribed 401 does it), and a first-run hint
   // surfacing mid-session for a returning user is noise, not coaching.
-  const sessionWasActiveRef = useRef(false)
+  // Module-scoped (not a ref): navigating through /sheets or /app unmounts
+  // ToolCast, and a remount within the same SPA page load must not forget
+  // that the visitor was signed in.
   useEffect(() => {
-    if (platformSession.status === 'active') sessionWasActiveRef.current = true
+    if (platformSession.status === 'active') sessionWasActiveThisPageLoad = true
   }, [platformSession.status])
   const requireAuth = platformSession.actions.requireAuth
   const [phase, setPhase] = useState('loading')
@@ -1413,7 +1420,7 @@ export default function ToolCast({
           bannerSubtitle="One scene for request, approval, job, drawing, version, and trust."
         />
       )}
-      {!tourOn && sessionAuthRequired && !sessionWasActiveRef.current && (
+      {!tourOn && active && sessionAuthRequired && !sessionWasActiveThisPageLoad && (
         <FirstRunCoach signedIn={platformSession.status === 'active'} active={!focusView} />
       )}
     </>

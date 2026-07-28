@@ -28,11 +28,32 @@ function writeDismissed() {
   }
 }
 
+// At <=980px landing.css hands the whole bottom half to the rails, so there
+// is no placement for the card (coach.css hides it as a belt). This media
+// gate is the suspenders: while it matches, the component renders null and
+// installs NO document listeners -- otherwise an Escape or stray pointerdown
+// would silently dismiss/hide a coach the user never saw, and resizing wider
+// would reveal nothing.
+const SMALL_VIEWPORT_QUERY = '(max-width: 980px)'
+
+function useSmallViewport() {
+  const [small, setSmall] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia(SMALL_VIEWPORT_QUERY).matches)
+  useEffect(() => {
+    const mql = window.matchMedia(SMALL_VIEWPORT_QUERY)
+    const onChange = (event) => setSmall(event.matches)
+    mql.addEventListener('change', onChange)
+    return () => mql.removeEventListener('change', onChange)
+  }, [])
+  return small
+}
+
 export default function FirstRunCoach({ signedIn = false, active = true }) {
   const [dismissed, setDismissed] = useState(readDismissed)
   const [sessionHidden, setSessionHidden] = useState(false)
+  const smallViewport = useSmallViewport()
 
-  const visible = active && !sessionHidden && shouldOfferCoach({
+  const visible = active && !smallViewport && !sessionHidden && shouldOfferCoach({
     search: typeof window !== 'undefined' ? window.location.search : '',
     dismissed,
     signedIn,
@@ -67,7 +88,14 @@ export default function FirstRunCoach({ signedIn = false, active = true }) {
   if (!visible) return null
 
   return (
-    <div className="coach-root" role="dialog" aria-label="Try the command bar" data-testid="first-run-coach">
+    <div
+      className="coach-root"
+      role="dialog"
+      aria-label="Try the command bar"
+      data-testid="first-run-coach"
+      data-cast="tool"
+      style={{ '--rank': 4 }}
+    >
       <div className="coach-card">
         <div className="coach-title">Type a request, or use a keycap</div>
         <p className="coach-body">

@@ -83,8 +83,23 @@ test('shouldOfferCoach predicate: signed-in, dismissed, and demo-param inputs al
   expect(shouldOfferCoach({ search: '?other=1', dismissed: false, signedIn: false })).toBe(true)
 })
 
-for (const viewport of [{ width: 1024, height: 768 }, { width: 1440, height: 900 }]) {
-  test(`the coach never overlaps the command bar at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+function boxesIntersect(a, b) {
+  const horizontalOverlap = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
+  const verticalOverlap = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
+  return horizontalOverlap > 0 && verticalOverlap > 0
+}
+
+// Round-3 pin: the card must be clear of the command bar AND BOTH RAILS and
+// the caption at every desktop layout class, not just clear of the bar at two
+// viewports (round 1's mistake: bottom-right is inside .tc-rail-r at every
+// width, and only the bar was asserted).
+for (const viewport of [
+  { width: 1024, height: 768 },
+  { width: 1280, height: 800 },
+  { width: 1440, height: 900 },
+  { width: 1920, height: 1080 },
+]) {
+  test(`the coach clears the bar, both rails, and the caption at ${viewport.width}x${viewport.height}`, async ({ page }) => {
     const state = makeCatProofState()
     await routeSession401(page, state)
     await page.setViewportSize(viewport)
@@ -92,35 +107,85 @@ for (const viewport of [{ width: 1024, height: 768 }, { width: 1440, height: 900
     await page.goto('/try')
     const coach = page.getByTestId('first-run-coach').locator('.coach-card')
     await expect(coach).toBeVisible()
-    const bar = page.locator('.tc-bar-wrap')
-    await expect(bar).toBeVisible()
-
     const coachBox = await coach.boundingBox()
-    const barBox = await bar.boundingBox()
     expect(coachBox).not.toBeNull()
-    expect(barBox).not.toBeNull()
-    const horizontalOverlap = Math.min(coachBox.x + coachBox.width, barBox.x + barBox.width) - Math.max(coachBox.x, barBox.x)
-    const verticalOverlap = Math.min(coachBox.y + coachBox.height, barBox.y + barBox.height) - Math.max(coachBox.y, barBox.y)
-    const intersects = horizontalOverlap > 0 && verticalOverlap > 0
-    expect(intersects, `coach ${JSON.stringify(coachBox)} must not intersect bar ${JSON.stringify(barBox)}`).toBe(false)
+
+    for (const selector of ['.tc-bar-wrap', '.tc-rail-l', '.tc-rail-r', '.tc-caption']) {
+      const element = page.locator(selector).first()
+      if (!(await element.isVisible())) continue
+      const box = await element.boundingBox()
+      expect(box, `${selector} should have a box when visible`).not.toBeNull()
+      expect(
+        boxesIntersect(coachBox, box),
+        `coach ${JSON.stringify(coachBox)} must not intersect ${selector} ${JSON.stringify(box)}`,
+      ).toBe(false)
+    }
   })
 }
 
+test('leaving the tool scene via Back never strands the coach over the landing page', async ({ page }) => {
+  // Round-3 pin: enter /try from / via SPA navigation, then browser Back.
+  // ToolCast stays mounted with sessionAuthRequired true; the coach must
+  // disappear with the scene (the `active` prop gate + data-cast="tool").
+  const state = makeCatProofState()
+  await routeSession401(page, state)
+
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Try Branch — no install' }).click()
+  await expect(page.getByTestId('first-run-coach')).toBeVisible()
+
+  await page.goBack()
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+})
+
 for (const viewport of [{ width: 844, height: 390 }, { width: 980, height: 600 }]) {
-  test(`the coach does not render in the responsive rail layout at ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    // Round-2 pin: at <=980px landing.css hands the whole bottom half to the
-    // rails (.tc-rail top:54% width:50%, .tc-rail-r left:50%), so there is no
-    // free bottom-right corner; the coach must not render at all rather than
-    // sit across live operations tabs and eat their clicks.
+  test(`the coach does not MOUNT in the responsive rail layout at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    // Round-2/3 pin: at <=980px there is no placement for the card, and the
+    // matchMedia gate must render null (count 0, not merely CSS-hidden), so
+    // no document listeners exist to swallow Escape or pointerdown.
     const state = makeCatProofState()
     await routeSession401(page, state)
     await page.setViewportSize(viewport)
 
     await page.goto('/try')
     await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible()
-    await expect(page.getByTestId('first-run-coach')).toBeHidden()
+    await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
   })
 }
+
+test('keys pressed while the viewport is small never dismiss the coach the user has not seen', async ({ page }) => {
+  // Round-3 pin for the hidden-listener hazard: at a small viewport the
+  // component must install NO listeners, so an outside pointerdown (which
+  // would hide for the page view) and Escape (which would write the
+  // PERMANENT dismissal) must not touch coach state. Escape at /try is also
+  // the app's own back-out-of-the-scene key, so the flow follows real
+  // behavior: Escape leaves the tool scene; re-entering it at a desktop
+  // width must still OFFER the coach, and no dismissal may have been
+  // recorded.
+  const state = makeCatProofState()
+  await routeSession401(page, state)
+  await page.setViewportSize({ width: 844, height: 390 })
+
+  await page.goto('/try')
+  await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible()
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+
+  // Pointerdown on a neutral element: no listener may swallow or act on it.
+  await page.getByRole('heading', { name: 'You are not signed in' }).click()
+  await expect(page).toHaveURL(/\/try/)
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+
+  // Escape backs out to the landing scene (app behavior) -- but it must NOT
+  // have written the permanent dismissal, because the user never saw a coach.
+  await page.keyboard.press('Escape')
+  expect(await page.evaluate(() => localStorage.getItem('leaf.coach.dismissed.v1'))).toBeNull()
+
+  // Re-enter the tool scene at a desktop width: the coach is still offered.
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.getByRole('button', { name: 'Try Branch — no install' }).click()
+  await expect(page.getByTestId('first-run-coach')).toBeVisible()
+  expect(await page.evaluate(() => localStorage.getItem('leaf.coach.dismissed.v1'))).toBeNull()
+})
 
 test('a mid-session 401 flip back to signed-out never resurfaces the coach', async ({ page }) => {
   // Round-2 pin: sessionAuthRequired also becomes true when an ACTIVE

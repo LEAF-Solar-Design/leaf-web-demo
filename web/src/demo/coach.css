@@ -3,22 +3,35 @@
    --primary, --muted, …), same convention as demo.css's tour overlay. No new
    color system, no new fonts. */
 
+/* Placement: the card lives INSIDE the command bar's own column and sits
+   ABOVE it, right-aligned. The bar column is the one horizontal band that is
+   clear of both rails at every width, by the app's own layout contract --
+   .coach-root mirrors .tc-bar-wrap's horizontal rules verbatim (landing.css:
+   default = centered 720px; <=1279px = left/right 270, max 720, anchored
+   left). bottom: 188px clears the bar (top edge ~ 18px + ~105px signed-out
+   height) and the caption (.tc-caption bottom: 122px + ~50px of text). The
+   bar only grows taller (.strip-decision/.resolver rows) after an
+   interaction, and the coach's first outside pointerdown hides it, so the
+   two can't coexist. Above 188px the card covers only the stage canvas,
+   which holds no interactive controls for a signed-out visitor.
+   data-cast="tool" (set in FirstRunCoach.jsx) opts the card into the same
+   scene choreography as every other tool pane: hidden, pointer-inert, and
+   inert on the landing scene. */
 .coach-root {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
+  position: absolute;
+  left: 50%;
+  margin-left: -360px;
+  width: 720px;
+  bottom: 188px;
   z-index: 80;
   pointer-events: none;
+  display: flex;
+  justify-content: flex-end;
 }
 
-/* Width is constrained so the card NEVER overlaps .tc-bar-wrap (landing.css).
-   Wide screens: the bar is centered at 720px, so its right edge sits at
-   calc(50vw + 360px); the free zone right of it is calc(50vw - 392px) after
-   margins. <=1180px: the bar pins to right: 270px, leaving 246px. <=980px:
-   the bar moves up to bottom: calc(46% + 12px), so the corner is free again. */
 .coach-card {
   pointer-events: auto;
-  width: min(300px, calc(50vw - 392px));
+  width: 300px;
   max-width: calc(100vw - 32px);
   background: var(--card);
   border: 1px solid var(--border);
@@ -62,17 +75,33 @@
   justify-content: flex-end;
 }
 
-@media (max-width: 1180px) {
-  .coach-card { width: 246px; }
+/* 1280-1336px: the default rails are 300px wide, so the centered 720px bar
+   column itself slides up to 20px under the right rail's edge (720 + 2*300 >
+   vw). Pull the card left of the rail with an 8px gap: rail left edge =
+   100vw - 300px, column right edge = 50vw + 360px, overhang + gap =
+   668px - 50vw, clamped to 0 from 1336px up. Scoped >=1280 so the <=1279
+   column rules stay exact. */
+@media (min-width: 1280px) {
+  .coach-card { margin-right: max(0px, calc(668px - 50vw)); }
+}
+
+/* Mirror of landing.css's <=1279px .tc-bar-wrap rule. */
+@media (max-width: 1279px) {
+  .coach-root {
+    left: 270px;
+    right: 270px;
+    margin-left: 0;
+    width: auto;
+    max-width: 720px;
+    margin-right: auto;
+  }
 }
 
 /* <=980px: landing.css hands the whole bottom half of the viewport to the
    rails (.tc-rail { top: 54%; bottom: 0; width: 50% }, .tc-rail-r at
-   left: 50%), so there is NO free bottom-right corner in this layout class:
-   any fixed card there sits across live operations tabs, and a pointer
-   inside the overlap targets .coach-root, eating the tab's click. The coach
-   is a pointer/keyboard discovery aid; where it cannot avoid covering
-   controls it must not render at all. */
+   left: 50%), so there is NO placement for the card in this layout class.
+   Belt only -- FirstRunCoach.jsx's matchMedia gate renders null (and installs
+   no listeners) at these widths. */
 @media (max-width: 980px) {
   .coach-root { display: none; }
 }
