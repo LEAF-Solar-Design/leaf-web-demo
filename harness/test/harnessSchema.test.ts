@@ -90,6 +90,68 @@ describe("assertHarnessCatalog", () => {
     expect(() => assertHarnessCatalog(validCatalog())).not.toThrow();
   });
 
+  it("accepts the schema contract in a non-public PostgreSQL schema", () => {
+    const catalog = validCatalog();
+    for (const index of catalog.indexes) {
+      index.indexdef = index.indexdef.replace("ON public.", "ON leaf_platform.");
+    }
+    expect(() => assertHarnessCatalog(catalog)).not.toThrow();
+  });
+
+  it("still rejects an index on the wrong table in a non-public schema", () => {
+    const catalog = validCatalog();
+    const index = catalog.indexes.find(
+      (entry) => entry.indexname === "idx_harness_usage_session",
+    )!;
+    index.indexdef = index.indexdef.replace(
+      "ON public.harness_usage",
+      "ON leaf_platform.harness_events",
+    );
+    expect(() => assertHarnessCatalog(catalog)).toThrow(/idx_harness_usage_session/);
+  });
+
+  it("rejects a predicate literal with different case", () => {
+    const catalog = validCatalog();
+    const index = catalog.indexes.find(
+      (entry) => entry.indexname === "harness_one_active_turn",
+    )!;
+    index.indexdef = index.indexdef.replace("'active'", "'ACTIVE'");
+    expect(() => assertHarnessCatalog(catalog)).toThrow(/harness_one_active_turn/);
+  });
+
+  it("rejects removal of index uniqueness", () => {
+    const catalog = validCatalog();
+    const index = catalog.indexes.find(
+      (entry) => entry.indexname === "harness_one_active_turn",
+    )!;
+    index.indexdef = index.indexdef.replace("CREATE UNIQUE INDEX", "CREATE INDEX");
+    expect(() => assertHarnessCatalog(catalog)).toThrow(/harness_one_active_turn/);
+  });
+
+  it("rejects a mismatched index name inside the definition", () => {
+    const catalog = validCatalog();
+    const index = catalog.indexes.find(
+      (entry) => entry.indexname === "idx_harness_events_turn",
+    )!;
+    index.indexdef = index.indexdef.replace(
+      "idx_harness_events_turn ON",
+      "idx_harness_events_wrong ON",
+    );
+    expect(() => assertHarnessCatalog(catalog)).toThrow(/idx_harness_events_turn/);
+  });
+
+  it("rejects reordered index columns", () => {
+    const catalog = validCatalog();
+    const index = catalog.indexes.find(
+      (entry) => entry.indexname === "idx_harness_events_turn",
+    )!;
+    index.indexdef = index.indexdef.replace(
+      "(session_id, turn_id, seq)",
+      "(turn_id, session_id, seq)",
+    );
+    expect(() => assertHarnessCatalog(catalog)).toThrow(/idx_harness_events_turn/);
+  });
+
   it("rejects a stale single-active-turn index predicate", () => {
     const catalog = validCatalog();
     const index = catalog.indexes.find((entry) => entry.indexname === "harness_one_active_turn")!;
