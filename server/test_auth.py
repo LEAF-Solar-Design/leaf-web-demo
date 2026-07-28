@@ -91,7 +91,13 @@ _ENV = {
 }
 
 import auth  # noqa: E402
+import deps  # noqa: E402
 import tenancy  # noqa: E402
+
+
+def _active_test_tenant(subject):
+    assert subject == "auth0|tester"
+    return "org_acme_solar", "hosted_pro"
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -103,6 +109,7 @@ def _auth_env():
     mp = pytest.MonkeyPatch()
     for k, v in _ENV.items():
         mp.setenv(k, v)
+    mp.setattr(deps, "resolve_active_platform_tenant_authority", _active_test_tenant)
     tenancy.reset_store()
     yield
     mp.undo()
@@ -224,15 +231,20 @@ def _run_all() -> int:
     # the interpreter exits right after the run so nothing can leak).
     os.environ.update(_ENV)
     tenancy.reset_store()
+    original_resolver = deps.resolve_active_platform_tenant_authority
+    deps.resolve_active_platform_tenant_authority = _active_test_tenant
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
-    for t in tests:
-        try:
-            t()
-            print(f"PASS {t.__name__}")
-        except Exception as exc:  # noqa: BLE001
-            failures += 1
-            print(f"FAIL {t.__name__}: {type(exc).__name__}: {exc}")
+    try:
+        for t in tests:
+            try:
+                t()
+                print(f"PASS {t.__name__}")
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                print(f"FAIL {t.__name__}: {type(exc).__name__}: {exc}")
+    finally:
+        deps.resolve_active_platform_tenant_authority = original_resolver
     print(f"\n{len(tests) - failures}/{len(tests)} passed")
     return 1 if failures else 0
 
