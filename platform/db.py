@@ -460,7 +460,9 @@ def get_pool() -> ConnectionPool:
                 validate_database_url(database_url)
                 _pool = ConnectionPool(
                     conninfo=database_url,
-                    min_size=1,
+                    # Keep no floor connection. Staging can then release every
+                    # direct Aurora connection before its auto-pause window.
+                    min_size=0,
                     max_size=5,
                     max_idle=600,
                     configure=_configure,

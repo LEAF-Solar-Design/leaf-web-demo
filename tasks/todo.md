@@ -160,6 +160,24 @@ Risks:
 - GitHub schedules can be delayed, so backend request-time renewal remains the
   source of truth and the canary runs away from the start-of-hour peak.
 
+# Staging database idle-pool prerequisite
+
+- [x] Record the focused database-pool baseline: 44 passed, 3 skipped.
+- [x] Let the shared PostgreSQL pool release every idle connection without
+  changing its concurrency limit or transaction behavior.
+- [x] Add regression coverage for lazy zero-idle pool construction and reset.
+- [x] Run focused platform and broker tests plus the repository gate. The
+  focused run passed 45 tests with 3 environment skips. The full gate passed
+  119 suites, then all 6 dependency-blocked suites passed after `npm ci`.
+- [x] Document the RDS Proxy removal and Aurora auto-pause dependency.
+
+Risks:
+
+- A direct Aurora resume can add connection latency, so connection attempts
+  must remain bounded and staging must prove cold resume before proxy removal.
+- The app and broker share this pool implementation. The change must preserve
+  both callers and must not expose database connection strings.
+
 # Multiple Claude accounts per workspace
 
 - [x] Freeze an additive, token-free account-list contract with stable account IDs and one active account.
