@@ -40,6 +40,52 @@ function withPolylines(intake, polylines) {
   return { ...intake, polylines }
 }
 
+// --------------------------------------------------------------------------- #
+// ruling-4 (lane S5): delta chips + restore-to-version, mock-side parity with
+// server/routers/drawings.py. `list()` computes each row's delta the SAME way
+// the live route does (diffed against the parent, at read time) so the two
+// surfaces agree on shape; `restore()` mirrors POST .../versions/{v}/restore.
+// --------------------------------------------------------------------------- #
+
+// A stable identity for one polyline across two versions: its handle when
+// present, else a content hash (a handle-less entity still matches when
+// unchanged; an edited one reads as one delete + one add — the same honest
+// limit the server's `_entity_identity` documents).
+function entityIdentity(entity) {
+  const handle = entity && typeof entity.handle === 'string' && entity.handle
+  return handle ? `h:${handle}` : `c:${digest(JSON.stringify(entity))}`
+}
+
+function entityMap(intake) {
+  const map = new Map()
+  for (const entity of intake?.polylines || []) {
+    if (entity && typeof entity === 'object') map.set(entityIdentity(entity), entity)
+  }
+  return map
+}
+
+/** `{added, modified, deleted}` between two stored intake payloads, or `null`
+ * when either side is unavailable (mirrors the server's null-on-root /
+ * null-on-unparseable rule; the mock never fails to parse its own objects, so
+ * only the "no parent" case applies in practice). */
+function versionDelta(parentIntake, childIntake) {
+  if (!parentIntake || !childIntake) return null
+  const parentMap = entityMap(parentIntake)
+  const childMap = entityMap(childIntake)
+  let added = 0
+  let modified = 0
+  let deleted = 0
+  for (const [ident, entity] of childMap) {
+    const prior = parentMap.get(ident)
+    if (prior === undefined) added += 1
+    else if (JSON.stringify(prior) !== JSON.stringify(entity)) modified += 1
+  }
+  for (const ident of parentMap.keys()) {
+    if (!childMap.has(ident)) deleted += 1
+  }
+  return { added, modified, deleted }
+}
+
 const chain = {
   intakes: [],    // index 0 = v1, index n-1 = vn
   removed: null,  // handle removed by the most recent write
@@ -156,25 +202,85 @@ export function view(version) {
   }
 }
 
-/** Step head back one version. Returns the LIVE undo shape. */
+/** Step head back along the PARENT LINK (not numeric adjacency: after a
+ * restore, v4's parent is wherever head stood when it was restored, so undo
+ * from v4 must land there — live parity). Returns the LIVE undo shape. */
 export function undo() {
-  if (chain.head > 1) chain.head -= 1
+  const current = chain.versions[chain.head - 1]
+  if (current && current.parent != null) chain.head = current.parent
   return view('head')
 }
 
-/** Step head forward one version. Returns the LIVE redo shape. */
+/** Step head forward one hop along LATEST's lineage: walk from `latest` back
+ * along parent pointers until the version whose parent IS the current head
+ * (the exact live rule, da/store.py `redo`; numeric +1 diverges after a
+ * restore). No such child means head is not on latest's lineage — no-op. */
 export function redo() {
-  if (chain.head < chain.latest) chain.head += 1
+  let cursor = chain.versions[chain.latest - 1]
+  while (cursor && cursor.parent != null && cursor.parent !== chain.head) {
+    cursor = chain.versions[cursor.parent - 1]
+  }
+  if (cursor && cursor.parent === chain.head) chain.head = cursor.v
   return view('head')
 }
 
-/** LIVE /versions shape consumed by VersionHistory.jsx. */
-export function list() {
+/**
+ * Restore-as-new-head: append a new version whose intake equals `intakeAt`'s
+ * resolution of `version`, with parent = the CURRENT head. Mirrors the live
+ * POST .../versions/{v}/restore route — history is APPENDED to, never
+ * rewritten, and the redo tail is PRESERVED (only a write-after-undo via
+ * `applyDelete` forks and truncates). Throws if
+ * `version` does not exist (`intakeAt`), matching the live route's 404.
+ * Returns the LIVE restore shape: {drawing_id, restored_from, new_version:
+ * {drawing_id, version, parent}, head, latest}.
+ */
+export function restore(version) {
+  const source = intakeAt(version) // throws for an unknown version
+  const resolved = version === 'head' || version == null ? chain.head : Number(version)
+  const parent = chain.head
+
+  // Live parity: restore APPENDS, numbered past EVERY existing version, with
+  // parent = the current head — and, unlike a write after an undo, it never
+  // truncates the redo tail (the live store keeps all versions; only the
+  // write-after-undo fork discards). After v1..v3 with head undone to v2,
+  // restoring v1 yields v4 (parent 2) and v3 survives.
+  const newV = chain.versions.length + 1
+  chain.intakes.push({ ...source })
+  chain.versions.push({
+    v: newV,
+    parent,
+    tool: 'restore',
+    note: `Restored version ${resolved}`,
+    created: nowIso(),
+    sha256: fingerprint(source),
+  })
+  chain.head = chain.latest = newV
+
+  return {
+    drawing_id: DRAWING_ID,
+    restored_from: resolved,
+    new_version: { drawing_id: DRAWING_ID, version: newV, parent },
+    head: chain.head,
+    latest: chain.latest,
+  }
+}
+
+/** LIVE /versions shape consumed by VersionHistory.jsx. `delta` is computed
+ * HERE, at read time, from the intake chain (never stamped at write time) —
+ * the same rule the live route follows. */
+export function list({ includeDeltas = false } = {}) {
+  // Wire parity with GET /versions: `delta` appears ONLY when requested
+  // (?include_deltas=1) — the default shape matches the pre-feature contract.
   return {
     drawing_id: DRAWING_ID,
     head: chain.head,
     latest: chain.latest,
     checkout: null,
-    versions: chain.versions.map((r) => ({ ...r })),
+    versions: chain.versions.map((r) => (includeDeltas
+      ? {
+        ...r,
+        delta: r.parent == null ? null : versionDelta(chain.intakes[r.parent - 1], chain.intakes[r.v - 1]),
+      }
+      : { ...r })),
   }
 }

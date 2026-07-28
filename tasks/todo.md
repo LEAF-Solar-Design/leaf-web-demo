@@ -292,3 +292,11 @@ Risks:
 - [x] Keep a downstream `grant_required` response from deleting the separate Leaf login token.
 - [x] Prove stale JWT tenant claims cannot split mount storage from live turn routing.
 - [ ] Merge, deploy the app-only fix, and complete a real mounted turn on staging.
+
+# Version delta and restore repair
+
+- [x] Keep `/try` on the default versions response without delta computation.
+- [x] Prove delta chips and restore-as-new-head on the mounted `/app` drawer.
+- [x] Preserve an unreadable-head warning through history refresh and skip the viewer refresh.
+- [x] Add a PostgreSQL-authoritative raw-DWG restore proof with cache validation.
+- [ ] Run that proof with an explicit test `DATABASE_URL`; this workstation has none.
