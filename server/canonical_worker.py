@@ -91,6 +91,7 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> boo
             raise ValueError(f"no canonical solver adapter for {job.get('tool_name')}")
         result = adapter(dict(job.get("params") or {}))
         provenance = {**base_provenance,
+                      "worker_id": owner,
                       "solver_revision": result["solver_revision"],
                       "source_sha256": result["source_sha256"],
                       "runtime": result["runtime"]}

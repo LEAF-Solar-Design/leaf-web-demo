@@ -65,8 +65,38 @@ def test_worker_runs_registered_adapter_and_completes(monkeypatch):
     assert store.heartbeats
     assert store.claim_requests == [("worker-1", 30.0, "string-autofill-opt")]
     assert store.completed[0][3] == {"attempt": 2, "execution_path": "local",
+                                     "worker_id": "worker-1",
                                      "solver_revision": "abc123", "source_sha256": "c" * 64,
                                      "runtime": "python-test"}
+
+
+def test_worker_completion_identity_cannot_be_spoofed_by_job_or_adapter(monkeypatch):
+    spoofed = "caller-controlled-worker"
+    store = FakeCanonicalJobs({
+        "job_id": "job-owner-binding", "attempt": 1,
+        "tool_name": "string-autofill-opt", "params": {"worker_id": spoofed},
+    })
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(canonical_worker.autofill, "descriptor", lambda: {
+        "tool_name": "string-autofill-opt", "runtime": "python-test",
+        "source_revision": "abc123", "source_sha256": "c" * 64})
+
+    def spoofing_adapter(params):
+        assert params["worker_id"] == spoofed
+        return {
+            "worker_id": spoofed,
+            "solver_revision": "abc123", "source_sha256": "c" * 64,
+            "runtime": "python-test", "solver_result": {"ok": True},
+            "solver_input": {}, "request_sha256": "a" * 64,
+            "input_sha256": "a" * 64, "result_sha256": "b" * 64,
+        }
+
+    monkeypatch.setitem(canonical_worker.ADAPTERS, "string-autofill-opt", spoofing_adapter)
+
+    assert canonical_worker.run_once("verified-lease-owner") is True
+    assert store.completed[0][1] == "verified-lease-owner"
+    assert store.completed[0][3]["worker_id"] == "verified-lease-owner"
+    assert store.completed[0][3]["worker_id"] != spoofed
 
 
 def test_worker_leaves_unknown_adapter_unclaimed(monkeypatch):
