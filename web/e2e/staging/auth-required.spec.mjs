@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { captureStagingIdentity } from './stagingIdentity.mjs'
 import {
-  allowedStagingHostnames,
+  allowedStagingOrigins,
   assertPageOnAllowedOrigin,
   assertResponseOnAllowedOrigin,
   collectBearerLeaks,
@@ -34,11 +34,13 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 const STAGING_JWT = process.env.LEAF_E2E_STAGING_JWT || ''
 
 async function primeAuthenticatedPage(page) {
-  await page.addInitScript(({ token, allowedHostnames }) => {
-    if (allowedHostnames.includes(location.hostname.toLowerCase())) {
+  // Full ORIGIN, not hostname: a page served from an allowed hostname on a
+  // nonstandard port is a different origin and must never receive the JWT.
+  await page.addInitScript(({ token, allowedOrigins }) => {
+    if (allowedOrigins.includes(location.origin.toLowerCase())) {
       window.localStorage.setItem('leaf.jwt', token)
     }
-  }, { token: STAGING_JWT, allowedHostnames: [...allowedStagingHostnames()] })
+  }, { token: STAGING_JWT, allowedOrigins: [...allowedStagingOrigins()] })
 }
 
 test('ID-01 + CA-01: an authenticated staging session reaches the operator surface and a real tool catalog', async ({ page, request, baseURL }) => {

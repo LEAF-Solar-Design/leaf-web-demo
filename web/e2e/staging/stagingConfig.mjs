@@ -42,6 +42,13 @@ export function allowedStagingHostnames(env = process.env) {
   return allowed
 }
 
+/** Full-origin allowlist: ports are part of an origin, and URL.origin
+ * omits the default 443 for https, so `https://host:4443` never equals
+ * `https://host`. Every guard below compares EXACT origins. */
+export function allowedStagingOrigins(env = process.env) {
+  return new Set([...allowedStagingHostnames(env)].map((hostname) => `https://${hostname}`))
+}
+
 /** The same https+allowlist rule for API responses: a redirect that resolves
  * an authenticated call off-origin must fail the test, not become evidence. */
 export function assertResponseOnAllowedOrigin(response, env = process.env) {
@@ -51,7 +58,7 @@ export function assertResponseOnAllowedOrigin(response, env = process.env) {
   } catch {
     throw new StagingHostError(`staging API call resolved to an invalid URL: ${response.url()}`)
   }
-  if (parsed.protocol !== 'https:' || !allowedStagingHostnames(env).has(parsed.hostname.toLowerCase())) {
+  if (!allowedStagingOrigins(env).has(parsed.origin.toLowerCase())) {
     throw new StagingHostError(`staging API call resolved off the allowed HTTPS origin: ${response.url()}`)
   }
   return parsed
@@ -63,7 +70,7 @@ export function assertResponseOnAllowedOrigin(response, env = process.env) {
  * a foreign base would otherwise exfiltrate silently). Returns the mutable
  * violations array; assert it is empty at the end of the test. */
 export function collectBearerLeaks(page, env = process.env) {
-  const allowed = allowedStagingHostnames(env)
+  const allowed = allowedStagingOrigins(env)
   const leaks = []
   page.on('request', (request) => {
     const headers = request.headers()
@@ -75,7 +82,7 @@ export function collectBearerLeaks(page, env = process.env) {
       leaks.push(request.url())
       return
     }
-    if (parsed.protocol !== 'https:' || !allowed.has(parsed.hostname.toLowerCase())) {
+    if (!allowed.has(parsed.origin.toLowerCase())) {
       leaks.push(request.url())
     }
   })
@@ -89,7 +96,7 @@ export function assertPageOnAllowedOrigin(page, env = process.env) {
   } catch {
     throw new StagingHostError(`staging browser navigated to an invalid URL: ${page.url()}`)
   }
-  if (parsed.protocol !== 'https:' || !allowedStagingHostnames(env).has(parsed.hostname.toLowerCase())) {
+  if (!allowedStagingOrigins(env).has(parsed.origin.toLowerCase())) {
     throw new StagingHostError(`staging browser navigated off the allowed HTTPS origin: ${page.url()}`)
   }
   return parsed
@@ -108,14 +115,15 @@ export function assertAllowedStagingHost(baseURL, env = process.env) {
     throw new StagingHostError(`LEAF_E2E_STAGING_BASE_URL is not a valid absolute URL: ${baseURL}`)
   }
   const defaultHost = new URL(DEFAULT_STAGING_BASE_URL).hostname
-  const allowed = allowedStagingHostnames(env)
   if (baseURL !== DEFAULT_STAGING_BASE_URL && parsed.protocol !== 'https:') {
     throw new StagingHostError(`LEAF_E2E_STAGING_BASE_URL must use https: ${baseURL}`)
   }
-  if (!allowed.has(parsed.hostname.toLowerCase())) {
+  // Full ORIGIN, not hostname: a nonstandard port on an allowed hostname is a
+  // different origin and must be refused too.
+  if (!allowedStagingOrigins(env).has(parsed.origin.toLowerCase())) {
     throw new StagingHostError(
-      `refusing to run the staging proof suite against host "${parsed.hostname}". ` +
-      `It must equal "${defaultHost}", or exactly match ${STAGING_ALLOW_HOST_ENV} if that is set. ` +
+      `refusing to run the staging proof suite against origin "${parsed.origin}". ` +
+      `It must equal "https://${defaultHost}", or exactly match ${STAGING_ALLOW_HOST_ENV} if that is set. ` +
       'This guard exists so a stray production base URL can never masquerade as staging evidence.',
     )
   }

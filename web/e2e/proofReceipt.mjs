@@ -22,7 +22,18 @@ function ledgerSubCases(capabilityId) {
     // Fail-closed row resolution: collect EVERY table row whose first cell is
     // this id, across BOTH ledger tables. Exactly one match is required — a
     // duplicated or wrapped row must throw, never silently win by position.
+    // Only genuine table lines count: the line must start with a pipe and be
+    // OUTSIDE fenced code blocks, so a ``` example quoting a row can never
+    // become a second match.
+    let inFence = false
     const matches = ledgerText.split(/\r?\n/)
+      .filter((line) => {
+        if (/^\s*(```|~~~)/.test(line)) {
+          inFence = !inFence
+          return false
+        }
+        return !inFence && line.trimStart().startsWith('|')
+      })
       .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()))
       .filter((cells) => cells[0] === capabilityId)
     if (matches.length !== 1) {

@@ -174,6 +174,21 @@ test('an id with no single unambiguous ledger row fails closed', () => {
   )
 })
 
+test('a nonstandard port on an allowed hostname is a different origin', async () => {
+  // Round-5 BLOCKING: ports are part of an origin. The guards must refuse
+  // https://platform-staging.leafdesign.ai:4443 everywhere.
+  const { assertAllowedStagingHost, assertResponseOnAllowedOrigin, StagingHostError } =
+    await import('./staging/stagingConfig.mjs')
+  assert.throws(
+    () => assertAllowedStagingHost('https://platform-staging.leafdesign.ai:4443', {}),
+    StagingHostError,
+  )
+  assert.throws(
+    () => assertResponseOnAllowedOrigin({ url: () => 'https://platform-staging.leafdesign.ai:4443/steal' }, {}),
+    StagingHostError,
+  )
+})
+
 test('requires every staging artifact to exist before writing the receipt', () => {
   const receiptDir = mkdtempSync(join(tmpdir(), 'proof-receipt-'))
   try {
