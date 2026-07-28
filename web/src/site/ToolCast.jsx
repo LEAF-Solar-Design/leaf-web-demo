@@ -48,6 +48,7 @@ import useCheckoutController from '../controllers/checkout/useCheckoutController
 import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import useSessionController from '../controllers/session/useSessionController.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
+import { liveDrawingId } from './workbenchId.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
   confirmRunIntent,
@@ -77,23 +78,6 @@ const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') =
 // CAD surface. Only an anonymous demo remains fully local.
 const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
 const LIVE_TOUR_REQUESTED = new URLSearchParams(window.location.search).get('demo') === 'tour'
-const freshDrawingId = () => {
-  const randomId = globalThis.crypto?.randomUUID?.()
-  if (randomId) return `cat-workbench-${randomId}`
-  return `cat-workbench-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-}
-const liveDrawingId = () => {
-  const key = 'leaf.cat.workbench.id.v1'
-  try {
-    const existing = globalThis.sessionStorage?.getItem(key)
-    if (/^cat-workbench-[0-9a-z-]+$/.test(existing || '')) return existing
-    const created = freshDrawingId()
-    globalThis.sessionStorage?.setItem(key, created)
-    return created
-  } catch {
-    return freshDrawingId()
-  }
-}
 const DRAWING_ID = PROOF_MODE ? 'cat-panels' : liveDrawingId()
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
 const workspaceServices = { createOrg, listProjects, createProject, openProject }

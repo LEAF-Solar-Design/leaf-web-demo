@@ -785,6 +785,12 @@ def build_suites() -> List[Suite]:
         Suite("web-proof-receipt-contract",
               "web proof receipt contract", "script", WEB,
               [_npm(), "run", "check:proof-receipt"], None),
+        # The seeded workbench id is the deployed acceptance driver's contract
+        # with the surface: it seeds a server-canonical id and requires that
+        # exact drawing to open.
+        Suite("web-workbench-id-contract",
+              "web live workbench drawing id rule", "script", WEB,
+              [_npm(), "run", "check:workbench-id"], None),
         Suite("web-version-restore-proof",
               "web /app version restore browser proof", "script", WEB,
               [_npm(), "run", "proof:version-restore"], None),
