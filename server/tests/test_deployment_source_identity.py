@@ -20,6 +20,22 @@ def test_health_reports_image_source_sha(monkeypatch):
     assert response.json()["source_sha"] == source_sha
 
 
+def test_health_does_not_resolve_a_tenant_catalog(monkeypatch):
+    def reject_tenant_resolution(*_args, **_kwargs):
+        raise AssertionError("process health must not resolve a tenant catalog")
+
+    monkeypatch.setattr(app_module.deps, "all_tools", reject_tenant_resolution)
+    monkeypatch.setattr(
+        app_module.deps, "load_tenant_repo_tools", reject_tenant_resolution
+    )
+
+    response = TestClient(app_module.app).get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["n_tools"] == len(app_module.deps.shared_tools())
+
+
 def test_required_deployment_manifests_have_frozen_shape():
     for service in ("app", "broker", "harness", "web"):
         manifest = json.loads(
