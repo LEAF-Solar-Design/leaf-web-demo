@@ -30,8 +30,9 @@ function writeDismissed() {
 
 export default function FirstRunCoach({ signedIn = false, active = true }) {
   const [dismissed, setDismissed] = useState(readDismissed)
+  const [sessionHidden, setSessionHidden] = useState(false)
 
-  const visible = active && shouldOfferCoach({
+  const visible = active && !sessionHidden && shouldOfferCoach({
     search: typeof window !== 'undefined' ? window.location.search : '',
     dismissed,
     signedIn,
@@ -47,8 +48,20 @@ export default function FirstRunCoach({ signedIn = false, active = true }) {
     const onKey = (event) => {
       if (event.key === 'Escape') dismiss()
     }
+    // The coach must never cost a click: the first pointerdown anywhere
+    // outside the card hides it for this page view (without recording a
+    // dismissal, so a genuinely fresh visitor still gets offered next load).
+    const onPointerDown = (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest('.coach-root')) {
+        setSessionHidden(true)
+      }
+    }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onPointerDown, true)
+    }
   }, [visible, dismiss])
 
   if (!visible) return null
@@ -58,7 +71,7 @@ export default function FirstRunCoach({ signedIn = false, active = true }) {
       <div className="coach-card">
         <div className="coach-title">Type a request, or use a keycap</div>
         <p className="coach-body">
-          The command bar above turns plain English into a reviewed drawing change. A few keys get you there faster.
+          The command bar turns plain English into a reviewed drawing change. A few keys get you there faster.
         </p>
         <div className="coach-keys">
           <span className="key hot" title="Focus the command bar">⌘K</span>

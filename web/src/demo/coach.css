@@ -11,9 +11,14 @@
   pointer-events: none;
 }
 
+/* Width is constrained so the card NEVER overlaps .tc-bar-wrap (landing.css).
+   Wide screens: the bar is centered at 720px, so its right edge sits at
+   calc(50vw + 360px); the free zone right of it is calc(50vw - 392px) after
+   margins. <=1180px: the bar pins to right: 270px, leaving 246px. <=980px:
+   the bar moves up to bottom: calc(46% + 12px), so the corner is free again. */
 .coach-card {
   pointer-events: auto;
-  width: 300px;
+  width: min(300px, calc(50vw - 392px));
   max-width: calc(100vw - 32px);
   background: var(--card);
   border: 1px solid var(--border);
@@ -55,6 +60,14 @@
 .coach-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+@media (max-width: 1180px) {
+  .coach-card { width: 246px; }
+}
+
+@media (max-width: 980px) {
+  .coach-card { width: 300px; }
 }
 
 @keyframes coach-rise {

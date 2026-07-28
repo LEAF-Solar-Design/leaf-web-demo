@@ -1383,7 +1383,7 @@ export default function ToolCast({
           bannerSubtitle="One scene for request, approval, job, drawing, version, and trust."
         />
       )}
-      {!tourOn && <FirstRunCoach signedIn={isSignedIn()} active={!focusView} />}
+      {!tourOn && sessionAuthRequired && <FirstRunCoach signedIn={platformSession.status === 'active'} active={!focusView} />}
     </>
   )
 }

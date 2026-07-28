@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
+import { shouldOfferCoach } from '../src/demo/tourEntry.js'
 
 // HP-01 — first-run coach mark.
 //
@@ -49,6 +50,76 @@ test('an explicit demo param keeps absolute priority and suppresses the coach', 
 
   await page.goto('/try?demo=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+})
+
+test('non-tour demo params also suppress the coach (bare and unknown values)', async ({ page }) => {
+  const state = makeCatProofState()
+  await routeSession401(page, state)
+
+  // Neither of these starts the tour, so a regression that only suppresses
+  // the coach for demo=1/demo=tour would fail here.
+  await page.goto('/try?demo=')
+  await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible()
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+
+  await page.goto('/try?demo=off')
+  await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible()
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+})
+
+test('shouldOfferCoach predicate: signed-in, dismissed, and demo-param inputs all veto', () => {
+  // Pure-module contract, covering inputs the browser tests cannot cheaply
+  // reach (a real signed-in session). Mirrors check_tourscript.mjs's headless
+  // import guarantee.
+  expect(shouldOfferCoach({ search: '', dismissed: false, signedIn: false })).toBe(true)
+  expect(shouldOfferCoach({ search: '', dismissed: false, signedIn: true })).toBe(false)
+  expect(shouldOfferCoach({ search: '', dismissed: true, signedIn: false })).toBe(false)
+  expect(shouldOfferCoach({ search: '?demo=1', dismissed: false, signedIn: false })).toBe(false)
+  expect(shouldOfferCoach({ search: '?demo=tour', dismissed: false, signedIn: false })).toBe(false)
+  expect(shouldOfferCoach({ search: '?demo=', dismissed: false, signedIn: false })).toBe(false)
+  expect(shouldOfferCoach({ search: '?demo=off', dismissed: false, signedIn: false })).toBe(false)
+  expect(shouldOfferCoach({ search: '?other=1&demo=x', dismissed: false, signedIn: false })).toBe(false)
+  expect(shouldOfferCoach({ search: '?other=1', dismissed: false, signedIn: false })).toBe(true)
+})
+
+for (const viewport of [{ width: 1024, height: 768 }, { width: 1440, height: 900 }]) {
+  test(`the coach never overlaps the command bar at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    const state = makeCatProofState()
+    await routeSession401(page, state)
+    await page.setViewportSize(viewport)
+
+    await page.goto('/try')
+    const coach = page.getByTestId('first-run-coach').locator('.coach-card')
+    await expect(coach).toBeVisible()
+    const bar = page.locator('.tc-bar-wrap')
+    await expect(bar).toBeVisible()
+
+    const coachBox = await coach.boundingBox()
+    const barBox = await bar.boundingBox()
+    expect(coachBox).not.toBeNull()
+    expect(barBox).not.toBeNull()
+    const horizontalOverlap = Math.min(coachBox.x + coachBox.width, barBox.x + barBox.width) - Math.max(coachBox.x, barBox.x)
+    const verticalOverlap = Math.min(coachBox.y + coachBox.height, barBox.y + barBox.height) - Math.max(coachBox.y, barBox.y)
+    const intersects = horizontalOverlap > 0 && verticalOverlap > 0
+    expect(intersects, `coach ${JSON.stringify(coachBox)} must not intersect bar ${JSON.stringify(barBox)}`).toBe(false)
+  })
+}
+
+test('an active session never shows the coach', async ({ page }) => {
+  // Regression pin for the cat-standards collision: with the fixture session
+  // ACTIVE (no 401 override), the coach must not mount at all, so it can
+  // never cover the operations rail's interactive controls.
+  const state = makeCatProofState()
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const result = catProofResponse({ method: request.method(), path: url.pathname }, state)
+    await route.fulfill({ status: result.status, contentType: 'application/json', body: JSON.stringify(result.body || {}) })
+  })
+
+  await page.goto('/try')
+  await expect(page.getByRole('tab', { name: /Trust/ })).toBeVisible()
   await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
 })
 
