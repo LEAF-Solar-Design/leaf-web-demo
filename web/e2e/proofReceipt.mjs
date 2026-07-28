@@ -32,12 +32,20 @@ function ledgerSubCases(capabilityId) {
     let openFence = null
     const matches = ledgerText.split(/\r?\n/)
       .filter((line) => {
-        const fence = line.match(/^\s*(`{3,}|~{3,})/)
+        const fence = line.match(/^\s*(`{3,}|~{3,})(.*)$/)
         if (fence) {
           const marker = fence[1]
+          const rest = fence[2]
           if (!openFence) {
             openFence = marker
-          } else if (marker[0] === openFence[0] && marker.length >= openFence.length) {
+          } else if (
+            marker[0] === openFence[0]
+            && marker.length >= openFence.length
+            // CommonMark: a CLOSING fence carries no info string — only
+            // whitespace may follow. ````javascript inside a four-backtick
+            // block is content, not a closer (round-7 finding).
+            && rest.trim() === ''
+          ) {
             openFence = null
           }
           return false
