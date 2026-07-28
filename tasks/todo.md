@@ -300,3 +300,17 @@ Risks:
 - [x] Preserve an unreadable-head warning through history refresh and skip the viewer refresh.
 - [x] Add a PostgreSQL-authoritative raw-DWG restore proof with cache validation.
 - [ ] Run that proof with an explicit test `DATABASE_URL`; this workstation has none.
+
+# PostgreSQL authority contract repair
+
+- [x] Port PR #187 relation, column, constraint, index, and trigger authority checks onto current main.
+- [x] Preserve the upload-to-drawing selector dependency in the authority inventory.
+- [x] Register the static and live PostgreSQL contract tests with measured current counts.
+- [x] Run focused tests, replay, and the full hermetic gate; record the unavailable local PostgreSQL gate.
+- [x] Confirm the diff preserves release, cutover, and PR #236 functionality.
+
+Risks:
+
+- A weak catalog check can report ready for a same-name object on the wrong relation.
+- A stale test floor can hide an unregistered authority proof or fail a valid current tree.
+- Stricter startup checks must not change selector state or claim that a PostgreSQL cutover occurred.

@@ -347,7 +347,8 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "broker_run_admissions_event_tenant_uq": _catalog_contract(
             "broker_run_admissions", "UNIQUE (event_key, tenant_id)"),
         "broker_run_admissions_state_allowed": _catalog_contract(
-            "broker_run_admissions", "CHECK", "state", "leased", "executing", "terminal"),
+            "broker_run_admissions",
+            "CHECK (state = ANY (ARRAY['leased', 'executing', 'terminal']))"),
         "broker_run_admissions_state_shape": _catalog_contract(
             "broker_run_admissions", "CHECK", "state = 'leased'",
             "state = 'executing'", "state = 'terminal'"),
@@ -363,12 +364,14 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "broker_aps_slots", "FOREIGN KEY (event_key, tenant_id)",
             "REFERENCES broker_run_admissions(event_key, tenant_id)"),
         "broker_aps_slots_state_allowed": _catalog_contract(
-            "broker_aps_slots", "CHECK", "state", "held", "released"),
+            "broker_aps_slots",
+            "CHECK (state = ANY (ARRAY['held', 'released']))"),
         "broker_aps_slots_state_shape": _catalog_contract(
             "broker_aps_slots", "CHECK", "state = 'held'", "state = 'released'"),
         "broker_admission_resolution_allowed": _catalog_contract(
-            "broker_admission_resolution_audit", "CHECK", "resolution",
-            "confirmed_failed_no_charge", "verified_terminal"),
+            "broker_admission_resolution_audit",
+            "CHECK (resolution = ANY (ARRAY['confirmed_failed_no_charge', "
+            "'verified_terminal']))"),
         "broker_admission_resolution_prior_state": _catalog_contract(
             "broker_admission_resolution_audit", "CHECK", "prior_state = 'executing'"),
         "broker_admission_resolution_admission_fk": _catalog_contract(
@@ -386,8 +389,9 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "drawing_authority_cutover_singleton": _catalog_contract(
             "drawing_authority_cutover", "CHECK (id = 1)"),
         "drawing_authority_cutover_state_allowed": _catalog_contract(
-            "drawing_authority_cutover", "CHECK", "state", "fence_closed",
-            "migrating", "migrated", "promoted", "rolled_back"),
+            "drawing_authority_cutover",
+            "CHECK (state = ANY (ARRAY['fence_closed', 'migrating', "
+            "'migrated', 'promoted', 'rolled_back']))"),
         "drawing_authority_cutover_deadline_after_entry": _catalog_contract(
             "drawing_authority_cutover", "CHECK (deadline > entered_at)"),
         "drawing_authority_cutover_migrated_has_digest": _catalog_contract(
@@ -404,7 +408,8 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "REFERENCES drawing_store_manifests(tenant_id, drawing_id)",
             "ON DELETE CASCADE"),
         "drawing_store_versions_state_check": _catalog_contract(
-            "drawing_store_versions", "CHECK", "state", "reserved", "ready", "orphaned"),
+            "drawing_store_versions",
+            "CHECK (state = ANY (ARRAY['reserved', 'ready', 'orphaned']))"),
     },
     "upload": {
         "drawing_authority_cutover_pkey": _catalog_contract(
@@ -412,8 +417,9 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "drawing_authority_cutover_singleton": _catalog_contract(
             "drawing_authority_cutover", "CHECK (id = 1)"),
         "drawing_authority_cutover_state_allowed": _catalog_contract(
-            "drawing_authority_cutover", "CHECK", "state", "fence_closed",
-            "migrating", "migrated", "promoted", "rolled_back"),
+            "drawing_authority_cutover",
+            "CHECK (state = ANY (ARRAY['fence_closed', 'migrating', "
+            "'migrated', 'promoted', 'rolled_back']))"),
         "drawing_authority_cutover_deadline_after_entry": _catalog_contract(
             "drawing_authority_cutover", "CHECK (deadline > entered_at)"),
         "drawing_authority_cutover_migrated_has_digest": _catalog_contract(
@@ -430,17 +436,20 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "REFERENCES drawing_store_manifests(tenant_id, drawing_id)",
             "ON DELETE CASCADE"),
         "drawing_store_versions_state_check": _catalog_contract(
-            "drawing_store_versions", "CHECK", "state", "reserved", "ready", "orphaned"),
+            "drawing_store_versions",
+            "CHECK (state = ANY (ARRAY['reserved', 'ready', 'orphaned']))"),
         "drawing_upload_attempts_pkey": _catalog_contract(
             "drawing_upload_attempts", "PRIMARY KEY (tenant_id, drawing_id)"),
         "drawing_upload_attempts_status_check": _catalog_contract(
-            "drawing_upload_attempts", "CHECK", "status", "extracting", "ready",
-            "failed", "purging", "purged"),
+            "drawing_upload_attempts",
+            "CHECK (status = ANY (ARRAY['extracting', 'ready', 'failed', "
+            "'purging', 'purged']))"),
         "drawing_purge_receipts_pkey": _catalog_contract(
             "drawing_purge_receipts",
             "PRIMARY KEY (tenant_id, drawing_id, attempt, purge_fence)"),
         "drawing_purge_receipts_status_check": _catalog_contract(
-            "drawing_purge_receipts", "CHECK", "status", "deleted", "failed"),
+            "drawing_purge_receipts",
+            "CHECK (status = ANY (ARRAY['deleted', 'failed']))"),
     },
     "harness_sessions": {
         "harness_sessions_pkey": _catalog_contract(
@@ -612,6 +621,8 @@ _AUTHORITY_REQUIRED_TRIGGERS = {
             "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
     },
 }
+
+_TRIGGER_ENABLED_MODES = frozenset({"O", "A"})
 
 _AUTHORITY_SELECTORS = {
     "LEAF_JOBS_STORE": {"postgres": "jobs"},
@@ -979,6 +990,27 @@ def _migration_proof(applied_rows: List[Mapping[str, str]]) -> Dict[str, Any]:
     }
 
 
+_SIMPLE_INDEX_TERM = (
+    r"[a-z_][a-z0-9_]*"
+    r"(?:\s+(?:asc|desc))?"
+    r"(?:\s+nulls\s+(?:first|last))?"
+)
+
+
+def _catalog_column_list(value: Any) -> Optional[tuple[str, ...]]:
+    """Return a simple catalog column list without discarding its arity."""
+    text = str(value or "").replace('"', "").strip().lower()
+    if not (text.startswith("(") and text.endswith(")")):
+        return None
+    inner = text[1:-1].strip()
+    if not re.fullmatch(
+        rf"{_SIMPLE_INDEX_TERM}(?:\s*,\s*{_SIMPLE_INDEX_TERM})*",
+        inner,
+    ):
+        return None
+    return tuple(re.sub(r"\s+", " ", item.strip()) for item in inner.split(","))
+
+
 def _normalize_catalog_definition(value: Any) -> str:
     """Normalize pg_get_*def output without weakening semantic comparison."""
     normalized = str(value or "").replace('"', "").lower()
@@ -987,9 +1019,37 @@ def _normalize_catalog_definition(value: Any) -> str:
     # so remove only whitespace and grouping punctuation from both sides.
     # Keep schema qualifiers. Stripping them would let a foreign key that
     # references another schema satisfy an unqualified authority contract.
+    normalized = re.sub(
+        r"::\s*[a-z_][a-z0-9_.]*(?:\[\])?"
+        r"(?:\s+(?:precision|varying|with(?:out)?\s+time\s+zone))?",
+        "",
+        normalized,
+    )
+    normalized = re.sub(
+        rf"\(\s*({_SIMPLE_INDEX_TERM}(?:\s*,\s*{_SIMPLE_INDEX_TERM})*)\s*\)",
+        lambda match: "{columns:" + ",".join(
+            _catalog_column_list(match.group(0)) or (),
+        ) + "}",
+        normalized,
+    )
     normalized = re.sub(r"\s+", "", normalized)
     normalized = normalized.replace("(", "").replace(")", "")
     return normalized
+
+
+def _catalog_fragment_matches(fragment: Any, definition: Any) -> bool:
+    """Match semantic fragments while keeping simple column lists exact."""
+    required_columns = _catalog_column_list(fragment)
+    if required_columns is not None:
+        found_columns = {
+            columns
+            for inner in re.findall(r"\(([^()]*)\)", str(definition or ""))
+            if (columns := _catalog_column_list(f"({inner})")) is not None
+        }
+        return required_columns in found_columns
+    return _normalize_catalog_definition(fragment) in _normalize_catalog_definition(
+        definition,
+    )
 
 
 def _catalog_contract_errors(
@@ -1028,16 +1088,17 @@ def _catalog_contract_errors(
             ):
                 invalid.append(f"{name}:not-valid-ready")
                 continue
-            if kind == "triggers" and str(row.get("enabled")) not in {"O", "A"}:
+            if (
+                kind == "triggers"
+                and str(row.get("enabled")) not in _TRIGGER_ENABLED_MODES
+            ):
                 invalid.append(f"{name}:disabled")
                 continue
 
-            definition = _normalize_catalog_definition(row.get("definition"))
-            fragments = [
-                _normalize_catalog_definition(fragment)
+            if any(
+                not _catalog_fragment_matches(fragment, row.get("definition"))
                 for fragment in contract["definition_fragments"]
-            ]
-            if any(fragment not in definition for fragment in fragments):
+            ):
                 invalid.append(f"{name}:definition-mismatch")
         errors[f"invalid_{kind}"] = sorted(invalid)
     return errors
