@@ -1,5 +1,45 @@
 # Leaf platform — local container stack (WAVE 5 deploy pack)
 
+## Warm instant execution staging image
+
+`Dockerfile.instant-execution` is a separate staging-only image. It does not
+join the five-service production supply set and no workflow in this lane deploys
+it. Build it with an exact source revision:
+
+```bash
+docker build --build-arg LEAF_SOURCE_SHA="$(git rev-parse HEAD)" \
+  -f deploy/Dockerfile.instant-execution -t leaf-platform-instant-execution:local .
+```
+
+The image defaults to the control-plane WSGI process. Use an explicit command
+to run another warm instant execution process. Mount secrets at runtime. Do not
+bake credentials into the image.
+
+On ECS, first run one of these commands in a short-lived init container with a
+task-local ephemeral volume mounted at `/run/leaf/secrets`:
+
+```bash
+python -m executor.bootstrap control
+python -m executor.bootstrap executor
+```
+
+Only that init container receives raw Secrets Manager values. It writes the
+allowlisted files with mode `0600` and exits. The control, reaper, and executor
+containers receive file paths, not the raw certificate, key, seed, or trust
+bundle values.
+
+```bash
+docker run --read-only --tmpfs /tmp --rm leaf-platform-instant-execution:local
+docker run --read-only --tmpfs /tmp --rm leaf-platform-instant-execution:local \
+  python -m executor.control_plane.reaper_main
+docker run --read-only --tmpfs /tmp --rm leaf-platform-instant-execution:local \
+  python -m executor.runtime.service --host 0.0.0.0 --port 8088
+```
+
+The WSGI and reconciler commands require their documented PostgreSQL, Redis,
+TLS, and mounted-secret configuration. The non-loopback executor command also
+requires its mTLS, control-secret, and trust-bundle configuration.
+
 The first deploy-readiness artifact: the Leaf CAD-tool platform (app + broker +
 harness + web) containerized and proven to run under `docker compose`. Everything
 here is **new** — no existing repo file was modified. Runs at `APS_LIVE=0` with

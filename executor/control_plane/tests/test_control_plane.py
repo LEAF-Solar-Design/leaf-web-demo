@@ -56,6 +56,15 @@ class ControlPlaneTests(unittest.TestCase):
                 "drawing_context": {"reference": reference, "data": {"layers": ["Panels"]}},
                 "artifact": {"source": "trusted-registry://instant/tool", "code_digest": digest(code), "artifact_digest": digest("b"), "runtime": "python-3.12", "entrypoint": "leaf_tools.tool:run", "limits": {"max_wall_ms": 5000, "max_cpu_ms": 3000, "max_memory_mb": 64, "max_output_bytes": 65536, "max_tool_calls": 0}, "tool_id": "instant-list-layers", "tool_version": "1.0.0", "capability_id": "drawing.read", "params_schema_digest": digest("p"), "catalog_commit": "a" * 40}}
 
+    @staticmethod
+    def call_api(app, path, body, secret=None):
+        captured = []
+        environ = {"REQUEST_METHOD": "POST", "PATH_INFO": path, "CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
+        if secret is not None:
+            environ["HTTP_X_INSTANT_CONTROL_SECRET"] = secret
+        response = app(environ, lambda status, _: captured.append(status))
+        return captured[0], json.loads(b"".join(response))
+
     def test_assignment_validates_and_lease_verifies(self):
         assignment = self.plane.assign(self.request())
         with open("executor/contracts/schemas/session-assignment.v1.schema.json", encoding="utf-8") as handle:
@@ -182,6 +191,22 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(kinds, ["assign", "release", "assign"])
         self.assertEqual(new["binding_epoch"], old["binding_epoch"] + 1)
 
+    def test_concurrent_rebinds_receive_unique_binding_epochs(self):
+        request = self.request()
+        old = self.plane.assign(request)
+        request["artifact"]["code_digest"] = digest("e")
+        barrier = threading.Barrier(2)
+
+        def rebind():
+            barrier.wait()
+            return self.plane.rebind(request)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: rebind(), range(2)))
+
+        self.assertEqual(sorted(result["binding_epoch"] for result in results), [old["binding_epoch"] + 1, old["binding_epoch"] + 2])
+        self.assertEqual(self.store.get_session(request["session_id"]).binding_epoch, old["binding_epoch"] + 2)
+
     def test_redis_and_store_loss_fail_closed(self):
         self.coord.available = False
         with self.assertRaisesRegex(ControlPlaneError, "Redis"):
@@ -221,6 +246,50 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual("UNAUTHORIZED", json.loads(b"".join(response))["code"])
         with self.assertRaisesRegex(ControlPlaneError, "HTTPS"):
             self.plane.register_host("executor-evil-001", "http://169.254.169.254/latest", ["slot-1"])
+
+    def test_production_host_registration_is_limited_to_the_pool_cidr_and_port(self):
+        plane = ControlPlane(
+            InMemoryStore(), Runtime(), LeaseSigner(b"a" * 32, "test-key"), Coordination(), self.clock,
+            executor_cidrs=("10.20.0.0/16",), executor_port=8088,
+        )
+        registered = plane.register_host("executor-private-001", "https://10.20.14.9:8088", ["slot-1"])
+        self.assertEqual("executor-private-001", registered[0]["executor_id"])
+        with self.assertRaisesRegex(ControlPlaneError, "outside"):
+            plane.register_host("executor-wrong-port", "https://10.20.14.9:8443", ["slot-1"])
+        with self.assertRaisesRegex(ControlPlaneError, "outside"):
+            plane.register_host("executor-wrong-cidr", "https://10.30.14.9:8088", ["slot-1"])
+        with self.assertRaisesRegex(ControlPlaneError, "private task IP"):
+            plane.register_host("executor-dns", "https://executor.internal:8088", ["slot-1"])
+
+    def test_host_lifecycle_requires_its_own_secret(self):
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            application(self.plane, app_control_secret="shared", host_lifecycle_secret="shared")
+        app = application(self.plane, app_control_secret="app-control", host_lifecycle_secret="host-lifecycle")
+        register = json.dumps({"executor_id": "executor-test-002", "endpoint": "https://executor-2.internal:8443", "slot_ids": ["slot-1"]}).encode()
+
+        status, payload = self.call_api(app, "/v1/sessions", json.dumps(self.request()).encode(), "wrong-secret")
+        self.assertEqual(status, "401 Unauthorized")
+        self.assertEqual(payload["code"], "UNAUTHORIZED")
+
+        status, payload = self.call_api(app, "/v1/hosts/register", register, "app-control")
+        self.assertEqual(status, "401 Unauthorized")
+        self.assertEqual(payload["code"], "UNAUTHORIZED")
+
+        status, payload = self.call_api(app, "/v1/hosts/register", register, "wrong-secret")
+        self.assertEqual(status, "401 Unauthorized")
+        self.assertEqual(payload["code"], "UNAUTHORIZED")
+
+        status, _ = self.call_api(app, "/v1/hosts/register", register, "host-lifecycle")
+        self.assertEqual(status, "201 Created")
+
+    def test_api_rejects_malformed_non_object_and_unknown_fields(self):
+        app = application(self.plane, app_control_secret="app-control", host_lifecycle_secret="host-lifecycle")
+        bodies = [b"{", b"[]", b"{}", json.dumps({**self.request(), "unexpected": True}).encode()]
+        for body in bodies:
+            with self.subTest(body=body):
+                status, payload = self.call_api(app, "/v1/sessions", body, "app-control")
+                self.assertEqual(status, "400 Error")
+                self.assertEqual(payload, {"code": "INVALID_REQUEST", "message": "invalid request body"})
 
 
 if __name__ == "__main__":

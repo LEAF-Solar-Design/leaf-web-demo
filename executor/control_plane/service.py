@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import ipaddress
 import threading
 import uuid
 import weakref
@@ -26,9 +27,18 @@ class _SessionAssignmentLock:
 
 
 class ControlPlane:
-    def __init__(self, store: ControlStore, runtime, signer: LeaseSigner | None = None, coordination=None, clock=None, lease_lifetime: timedelta = timedelta(seconds=60)):
+    def __init__(self, store: ControlStore, runtime, signer: LeaseSigner | None = None,
+                 coordination=None, clock=None, lease_lifetime: timedelta = timedelta(seconds=60),
+                 executor_cidrs: tuple[str, ...] = (), executor_port: int = 8088):
         self.store, self.runtime, self.signer, self.coordination = store, runtime, signer or LeaseSigner(), coordination
         self.clock, self.lease_lifetime = clock or (lambda: datetime.now(timezone.utc)), lease_lifetime
+        try:
+            self.executor_networks = tuple(ipaddress.ip_network(value, strict=True) for value in executor_cidrs)
+        except ValueError as exc:
+            raise ValueError("executor CIDRs must be canonical IP networks") from exc
+        if not 1 <= executor_port <= 65535:
+            raise ValueError("executor port is out of range")
+        self.executor_port = executor_port
         self._assignment_locks = weakref.WeakValueDictionary()
         self._assignment_locks_guard = threading.Lock()
 
@@ -64,13 +74,16 @@ class ControlPlane:
         create for two simultaneous app requests in one control-plane worker.
         """
         session_id = str(request.get("session_id", ""))
+        with self._assignment_lock(session_id):
+            return self._assign(request, binding_epoch)
+
+    def _assignment_lock(self, session_id: str):
         with self._assignment_locks_guard:
             holder = self._assignment_locks.get(session_id)
             if holder is None:
                 holder = _SessionAssignmentLock()
                 self._assignment_locks[session_id] = holder
-        with holder.lock:
-            return self._assign(request, binding_epoch)
+        return holder.lock
 
     def _assign(self, request: dict, binding_epoch: int = 1) -> dict:
         self._require(request)
@@ -85,29 +98,18 @@ class ControlPlane:
             if existing.expires_at is None or existing.expires_at > now:
                 raise ControlPlaneError("SESSION_ALREADY_BOUND", "session already has a live instant binding", 409)
             self.release(existing.session_id, "lease_expired")
-        lock = None
-        candidate = None
         try:
-            # Redis only narrows contention. This durable versioned CAS decides ownership.
+            # Redis is a control-plane availability gate. PostgreSQL row locks,
+            # freshness checks, and bounded retries decide slot ownership.
             self.coordination.check_available()
-            candidate = self.store.candidate()
-            lock = self.coordination.acquire_claim_lock(candidate.executor_id, candidate.slot_id)
-            slot, claim = self.store.claim_slot(candidate.executor_id, candidate.slot_id, candidate.version, now, self.lease_lifetime)
+            slot, claim = self.store.claim_ready_slot(now, self.lease_lifetime, max_attempts=5)
         except CoordinationUnavailable as exc:
-            if lock is not None:
-                self.coordination.release_claim_lock(candidate.executor_id, candidate.slot_id, lock)
             raise ControlPlaneError("REDIS_UNAVAILABLE", "new assignment is fail closed while Redis is unavailable") from exc
         except StoreUnavailable as exc:
-            if lock is not None:
-                self.coordination.release_claim_lock(candidate.executor_id, candidate.slot_id, lock)
             raise ControlPlaneError("POSTGRES_UNAVAILABLE", "new assignment is fail closed while PostgreSQL is unavailable") from exc
         except NoCapacity as exc:
-            if lock is not None:
-                self.coordination.release_claim_lock(candidate.executor_id, candidate.slot_id, lock)
             raise ControlPlaneError("NO_CAPACITY", str(exc), 429) from exc
         except StaleFence as exc:
-            if lock is not None:
-                self.coordination.release_claim_lock(candidate.executor_id, candidate.slot_id, lock)
             raise ControlPlaneError("NO_CAPACITY", "capacity claim lost a concurrent race", 429) from exc
         session_created = False
         try:
@@ -155,11 +157,6 @@ class ControlPlane:
                 self.store.abort_claim(claim.claim_id)
                 self.runtime.release(slot.endpoint, {"assignment_id": str(uuid.uuid4()), "reason": "assignment_failed"})
             raise ControlPlaneError("ASSIGNMENT_FAILED", "executor assignment failed") from exc
-        finally:
-            try:
-                self.coordination.release_claim_lock(slot.executor_id, slot.slot_id, lock)
-            except CoordinationUnavailable:
-                pass  # lock TTL and durable claim fencing prevent double ownership
 
     def renew(self, session_id: str, binding_epoch: int) -> dict:
         try:
@@ -203,17 +200,26 @@ class ControlPlane:
         return [session.session_id for session in self.store.drain(executor_id, deadline)]
 
     def rebind(self, request: dict) -> dict:
-        old = self.store.get_session(request["session_id"])
-        next_epoch = (old.binding_epoch + 1) if old else 1
-        if old:
-            self.invalidate(old.session_id, "code_change", old.binding_epoch)
-        return self.assign(request, next_epoch)
+        session_id = str(request.get("session_id", ""))
+        with self._assignment_lock(session_id):
+            old = self.store.get_session(request["session_id"])
+            next_epoch = (old.binding_epoch + 1) if old else 1
+            if old:
+                self.invalidate(old.session_id, "code_change", old.binding_epoch)
+            return self._assign(request, next_epoch)
 
     def register_host(self, executor_id: str, endpoint: str, slot_ids: list[str]) -> list[dict]:
         parsed = urlparse(endpoint)
         loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
         if parsed.scheme not in ({"http", "https"} if loopback else {"https"}) or not parsed.hostname or parsed.username or parsed.password:
             raise ControlPlaneError("INVALID_EXECUTOR_ENDPOINT", "executor endpoint must be HTTPS, or loopback HTTP for local development", 400)
+        if self.executor_networks and not loopback:
+            try:
+                address = ipaddress.ip_address(parsed.hostname)
+            except ValueError as exc:
+                raise ControlPlaneError("INVALID_EXECUTOR_ENDPOINT", "executor endpoint must use a private task IP", 400) from exc
+            if parsed.port != self.executor_port or not any(address in network for network in self.executor_networks):
+                raise ControlPlaneError("INVALID_EXECUTOR_ENDPOINT", "executor endpoint is outside the allowed private pool", 400)
         return [slot.__dict__ for slot in self.store.register_host(executor_id, endpoint, slot_ids)]
 
     def readiness(self, executor_id: str, slot_id: str, ready: bool, code_digest: str, runtime_digest: str) -> dict:

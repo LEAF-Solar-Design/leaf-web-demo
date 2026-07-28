@@ -196,19 +196,19 @@ the durable result.
 | --- | --- | --- | --- |
 | `ix:host:{host_id}:live` | `{"host_epoch":42,"seen_at":"..."}` | 30 s | Fast liveness hint, refreshed every 10 s. |
 | `ix:host:{host_id}:ready` | `{"host_epoch":42,"ready_slots":8,"catalog_version":12}` | 30 s | Fast readiness hint. |
-| `ix:claim-lock:{host_id}:{slot_id}` | opaque `claim_id:random_128_bit_nonce` | 10 s | Short contention lock before the PostgreSQL claim transaction. |
+| `ix:claim-lock:{host_id}:{slot_id}` | opaque `claim_id:random_128_bit_nonce` | 10 s | Optional contention hint for implementations that do not use PostgreSQL row skipping. It is not ownership evidence. |
 | `ix:claim:{claim_id}` | `{"host_id":"...","slot_id":"...","claim_epoch":17,"expires_at":"..."}` | 90 s | Claim discovery and cleanup hint. |
 | `ix:session:{session_id}:hint` | `{"host_id":"...","slot_id":"...","binding_epoch":4,"lease_id":"..."}` | 70 s | Invalidation fan-out hint. Never used to route a call. |
 | `ix:revoke:{host_id}` | `{"host_epoch":42,"reason":"...","at":"..."}` | 24 h | Best-effort wake-up for a revocation listener. |
 | `ix:events:control` | stream entry with `event_id`, `kind`, entity ID, and version | trim at 100,000 entries or 24 h | Best-effort notifications. Consumers reconcile with PostgreSQL. |
 
-The holder may renew `ix:claim-lock` only when its value exactly matches the
-original opaque value. It must use an atomic compare-and-expire script. It must
-not use the lock as evidence that it owns the slot. The PostgreSQL transaction
-must verify that the slot is `READY`, its `version` is the value read, and no
-active claim exists. It then updates the slot, inserts the claim, and inserts a
-transactional outbox event. A failed CAS loses the race even if the Redis lock
-is still held.
+An implementation that uses `ix:claim-lock` may renew it only when its value
+exactly matches the original opaque value. It must use an atomic
+compare-and-expire script and must not treat the lock as ownership evidence.
+The current implementation does not need this hint. PostgreSQL selects a fresh
+ready slot with `FOR UPDATE SKIP LOCKED`, updates it, and inserts the capacity
+claim in one transaction with bounded retry. Either implementation must keep
+PostgreSQL as authority and must reject stale host heartbeats.
 
 The outbox publisher writes hints after commit. It may retry any publish. A
 consumer treats every Redis event as a prompt to read the matching PostgreSQL

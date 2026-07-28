@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from multiprocessing.connection import Connection
@@ -20,6 +21,8 @@ from .ed25519 import verify
 
 SECRET_WORDS = re.compile(r"(?:secret|password|credential|authorization|api[_-]?key|access[_-]?key)", re.I)
 MAX_INPUT_BYTES = 1_048_576
+DEFAULT_IDEMPOTENCY_TTL_SECONDS = 300.0
+DEFAULT_IDEMPOTENCY_MAX_ENTRIES = 10_000
 
 
 class ExecutorError(ValueError):
@@ -69,14 +72,22 @@ class Slot:
 class WarmExecutorSupervisor:
     """Starts processes once and routes already-authorized calls to a bound slot."""
 
-    def __init__(self, executor_id: str, public_keys: dict[str, bytes], pool_size: int = 2) -> None:
+    def __init__(self, executor_id: str, public_keys: dict[str, bytes], pool_size: int = 2,
+                 *, idempotency_ttl_seconds: float = DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+                 idempotency_max_entries: int = DEFAULT_IDEMPOTENCY_MAX_ENTRIES) -> None:
         if pool_size < 1:
             raise ValueError("pool_size must be positive")
+        if idempotency_ttl_seconds <= 0:
+            raise ValueError("idempotency_ttl_seconds must be positive")
+        if idempotency_max_entries < 1:
+            raise ValueError("idempotency_max_entries must be positive")
         self.executor_id = executor_id
         self.public_keys = dict(public_keys)
         self._ctx = multiprocessing.get_context("spawn")
         self._slots: list[Slot] = []
-        self._idempotency: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
+        self._idempotency: OrderedDict[tuple[str, str, str], tuple[float, str, dict[str, Any]]] = OrderedDict()
+        self._idempotency_ttl_seconds = idempotency_ttl_seconds
+        self._idempotency_max_entries = idempotency_max_entries
         self._state_lock = threading.RLock()
         for index in range(pool_size):
             self._slots.append(self._start_slot(f"slot-{index + 1}"))
@@ -163,13 +174,12 @@ class WarmExecutorSupervisor:
         try:
             with slot.lock:
                 slot.conn.send({"action": "load", "assignment_id": assignment["assignment_id"],
-                                "source": source, "drawing_context": drawing_context})
+                                "source": source, "drawing_context": drawing_context,
+                                "limits": catalog["limits"]})
                 reply = self._receive(slot, 2.0)
         except Exception:
             with self._state_lock:
-                slot.assignment = slot.catalog = slot.load = None
-                slot.source = slot.drawing_context = None
-                slot.loading = False
+                self._replace(slot, restore=False)
             raise
         if not reply.get("ok"):
             with self._state_lock:
@@ -189,14 +199,12 @@ class WarmExecutorSupervisor:
             with slot.lock:
                 tenant_id = slot.assignment["tenant_id"]
                 session_id = slot.assignment["session_id"]
-                slot.conn.send({"action": "clear", "assignment_id": assignment_id})
-                self._receive(slot, 1.0)
-                slot.assignment = slot.catalog = slot.load = None
-                slot.source = slot.drawing_context = None
-                slot.loading = False
-                slot.highest_lease_sequence = 0
                 for key in [item for item in self._idempotency if item[:2] == (tenant_id, session_id)]:
                     self._idempotency.pop(key, None)
+                # Address-space and CPU limits can only be lowered safely.  A
+                # released slot must therefore get a fresh child before it can
+                # accept an assignment with different limits.
+                self._replace(slot, restore=False)
             return {"released": True, "assignment_id": assignment_id}
 
     def invoke(self, body: dict[str, Any], authorization: str | None) -> dict[str, Any]:
@@ -214,16 +222,19 @@ class WarmExecutorSupervisor:
             return self._error(body, "FORBIDDEN_PAYLOAD_FIELD", "credential-shaped input is forbidden")
         request_hash = _canonical(body)
         key = (body["tenant_id"], body["session_id"], body["invocation_id"])
-        with self._state_lock:
-            prior = self._idempotency.get(key)
-            if prior:
-                if prior[0] != request_hash:
-                    return self._error(body, "INVOCATION_CONFLICT", "invocation ID has another request hash")
-                return prior[1]
         try:
-            slot, claims = self._verify_lease(body, authorization)
+            slot, _claims = self._verify_lease(body, authorization)
         except ExecutorError as exc:
             return self._error(body, exc.code, str(exc), exc.retryable, exc.disposition)
+        with self._state_lock:
+            self._purge_idempotency()
+            prior = self._idempotency.get(key)
+            if prior:
+                _expires_at, prior_hash, prior_response = prior
+                if prior_hash != request_hash:
+                    return self._error(body, "INVOCATION_CONFLICT", "invocation ID has another request hash")
+                self._idempotency.move_to_end(key)
+                return prior_response
         deadline = datetime.fromisoformat(body["deadline_at"].replace("Z", "+00:00")).timestamp()
         timeout = min(max(0.001, deadline - time.time()), slot.catalog["limits"]["max_wall_ms"] / 1000)
         with slot.lock:
@@ -233,6 +244,9 @@ class WarmExecutorSupervisor:
             except TimeoutError:
                 self._replace(slot)
                 response = self._error(body, "DEADLINE_EXCEEDED", "tool exceeded its wall time", disposition="unknown")
+            except (BrokenPipeError, EOFError, OSError):
+                self._replace(slot)
+                response = self._error(body, "TOOL_FAILED", "child exited during invocation", disposition="unknown")
             else:
                 if not reply.get("ok"):
                     response = self._error(body, "TOOL_FAILED", reply.get("error", "tool failed"), disposition="completed")
@@ -243,7 +257,11 @@ class WarmExecutorSupervisor:
                                 "tenant_id": body["tenant_id"], "session_id": body["session_id"], "status": "succeeded",
                                 "code_digest": body["code_digest"], "completed_at": _now(), **reply["payload"]}
         with self._state_lock:
-            self._idempotency[key] = (request_hash, response)
+            self._purge_idempotency()
+            self._idempotency[key] = (time.monotonic() + self._idempotency_ttl_seconds, request_hash, response)
+            self._idempotency.move_to_end(key)
+            while len(self._idempotency) > self._idempotency_max_entries:
+                self._idempotency.popitem(last=False)
         return response
 
     def _verify_lease(self, body: dict[str, Any], authorization: str | None) -> tuple[Slot, dict[str, Any]]:
@@ -295,7 +313,7 @@ class WarmExecutorSupervisor:
             raise TimeoutError("child did not answer")
         return slot.conn.recv()
 
-    def _replace(self, slot: Slot) -> None:
+    def _replace(self, slot: Slot, *, restore: bool = True) -> None:
         assignment, catalog, load = slot.assignment, slot.catalog, slot.load
         source, drawing_context = slot.source, slot.drawing_context
         old = slot.process
@@ -307,13 +325,22 @@ class WarmExecutorSupervisor:
         slot.assignment = slot.catalog = slot.load = None
         slot.source = slot.drawing_context = None
         slot.highest_lease_sequence = 0
-        if assignment and catalog and load and source is not None and drawing_context is not None:
-            slot.conn.send({"action": "load", "assignment_id": assignment["assignment_id"],
-                            "source": source, "drawing_context": drawing_context})
-            reply = self._receive(slot, 2.0)
+        if restore and assignment and catalog and load and source is not None and drawing_context is not None:
+            try:
+                slot.conn.send({"action": "load", "assignment_id": assignment["assignment_id"],
+                                "source": source, "drawing_context": drawing_context, "limits": catalog["limits"]})
+                reply = self._receive(slot, 2.0)
+            except (BrokenPipeError, EOFError, OSError, TimeoutError):
+                return
             if reply.get("ok"):
                 slot.assignment, slot.catalog, slot.load = assignment, catalog, load
                 slot.source, slot.drawing_context = source, drawing_context
+
+    def _purge_idempotency(self) -> None:
+        now = time.monotonic()
+        for key, (expires_at, _request_hash, _response) in list(self._idempotency.items()):
+            if expires_at <= now:
+                self._idempotency.pop(key)
 
     def _find_assignment(self, assignment_id: str) -> Slot | None:
         return next((slot for slot in self._slots if slot.assignment and slot.assignment["assignment_id"] == assignment_id), None)

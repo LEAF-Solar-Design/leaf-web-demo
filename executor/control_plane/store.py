@@ -1,13 +1,18 @@
 """Durable authority interface and memory/PostgreSQL implementations."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import threading
 import uuid
 from typing import Protocol
 
 from .models import Claim, Lease, Session, Slot
+
+
+# Executors send heartbeats every 30 seconds. A host without a recent durable
+# heartbeat must not receive new work.
+DEFAULT_HEARTBEAT_TIMEOUT = timedelta(seconds=30)
 
 
 class StoreUnavailable(RuntimeError):
@@ -28,6 +33,7 @@ class ControlStore(Protocol):
     def heartbeat(self, executor_id: str) -> None: ...
     def candidate(self) -> Slot: ...
     def claim_slot(self, executor_id: str, slot_id: str, expected_version: int, now: datetime, lifetime: timedelta) -> tuple[Slot, Claim]: ...
+    def claim_ready_slot(self, now: datetime, lifetime: timedelta, max_attempts: int = 3) -> tuple[Slot, Claim]: ...
     def get_claim(self, claim_id: str) -> Claim | None: ...
     def abort_claim(self, claim_id: str) -> None: ...
     def create_session(self, session: Session) -> None: ...
@@ -42,13 +48,19 @@ class ControlStore(Protocol):
 
 class InMemoryStore:
     """Deterministic store. The lock makes capacity claims single-winner."""
-    def __init__(self) -> None:
+    def __init__(self, *, heartbeat_timeout: timedelta = DEFAULT_HEARTBEAT_TIMEOUT, clock=None) -> None:
+        if heartbeat_timeout <= timedelta(0):
+            raise ValueError("heartbeat_timeout must be positive")
         self.available = True
         self._lock = threading.RLock()
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._heartbeat_timeout = heartbeat_timeout
         self.slots: dict[tuple[str, str], Slot] = {}
         self.sessions: dict[str, Session] = {}
         self.claims: dict[str, Claim] = {}
         self._host_epochs: dict[str, int] = {}
+        self._last_heartbeat: dict[str, datetime] = {}
+        self._candidate_cursor = 0
 
     def _require(self) -> None:
         if not self.available:
@@ -59,6 +71,7 @@ class InMemoryStore:
             self._require()
             epoch = self._host_epochs.get(executor_id, 0) + 1
             self._host_epochs[executor_id] = epoch
+            self._last_heartbeat[executor_id] = self._clock()
             result = []
             for slot_id in slot_ids:
                 slot = Slot(executor_id, slot_id, endpoint, host_epoch=epoch)
@@ -80,27 +93,54 @@ class InMemoryStore:
             self._require()
             if executor_id not in self._host_epochs:
                 raise KeyError(executor_id)
+            self._last_heartbeat[executor_id] = self._clock()
+
+    def _host_is_fresh(self, executor_id: str, now: datetime) -> bool:
+        heartbeat = self._last_heartbeat.get(executor_id)
+        if not isinstance(heartbeat, datetime) or heartbeat.tzinfo is None or now.tzinfo is None:
+            return False
+        try:
+            age = now - heartbeat
+            return timedelta(0) <= age <= self._heartbeat_timeout
+        except TypeError:
+            return False
+
+    def _candidate_locked(self, now: datetime) -> Slot:
+        ready = [slot for key, slot in sorted(self.slots.items())
+                 if slot.state == "READY" and self._host_is_fresh(key[0], now)]
+        if not ready:
+            raise NoCapacity("no ready executor slot with a fresh heartbeat")
+        slot = ready[self._candidate_cursor % len(ready)]
+        self._candidate_cursor += 1
+        return Slot(**slot.__dict__)
 
     def candidate(self) -> Slot:
         with self._lock:
             self._require()
-            for key in sorted(self.slots):
-                slot = self.slots[key]
-                if slot.state == "READY":
-                    return Slot(**slot.__dict__)
-            raise NoCapacity("no ready executor slot")
+            return self._candidate_locked(self._clock())
 
     def claim_slot(self, executor_id: str, slot_id: str, expected_version: int, now: datetime, lifetime: timedelta) -> tuple[Slot, Claim]:
         with self._lock:
             self._require()
             slot = self.slots[(executor_id, slot_id)]
-            if slot.state != "READY" or slot.version != expected_version:
+            if (slot.state != "READY" or slot.version != expected_version
+                    or not self._host_is_fresh(executor_id, self._clock())):
                 raise StaleFence("capacity claim lost its compare-and-set race")
             slot.state = "CLAIMED"
             slot.version += 1
             claim = Claim(str(uuid.uuid4()), slot.executor_id, slot.slot_id, slot.version, now + lifetime)
             self.claims[claim.claim_id] = claim
             return slot, claim
+
+    def claim_ready_slot(self, now: datetime, lifetime: timedelta, max_attempts: int = 3) -> tuple[Slot, Claim]:
+        """Atomically claim a fresh ready slot, avoiding candidate/CAS races."""
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        with self._lock:
+            self._require()
+            # The memory store has one lock, so a single attempt cannot race.
+            candidate = self._candidate_locked(self._clock())
+            return self.claim_slot(candidate.executor_id, candidate.slot_id, candidate.version, now, lifetime)
 
     def get_claim(self, claim_id: str) -> Claim | None:
         with self._lock:
@@ -200,8 +240,11 @@ class PostgresStore:
     mutation runs in one database transaction. Capacity ownership is decided
     by a single compare-and-set statement in PostgreSQL.
     """
-    def __init__(self, connection_factory):
+    def __init__(self, connection_factory, *, heartbeat_timeout: timedelta = DEFAULT_HEARTBEAT_TIMEOUT):
+        if heartbeat_timeout <= timedelta(0):
+            raise ValueError("heartbeat_timeout must be positive")
         self._connect = connection_factory
+        self._heartbeat_timeout = heartbeat_timeout
 
     @staticmethod
     def _unavailable(exc: Exception) -> bool:
@@ -232,6 +275,92 @@ class PostgresStore:
                 close = getattr(conn, "close", None)
                 if close is not None:
                     close()
+
+    def record_invocation(self, record: dict) -> dict:
+        """Persist one accounting transition and its terminal outbox atomically.
+
+        ``AccountingService`` validates all input before this method runs.  The
+        database remains the idempotency and charge authority.  Redis is not
+        consulted by this path.
+        """
+        identity = (record["invocation_id"], record["tenant_id"], record["session_id"],
+                    record["lease_id"], record["code_digest"])
+
+        def same_identity(row) -> bool:
+            return tuple(str(value) for value in row[:5]) == tuple(str(value) for value in identity)
+
+        def operation(cur):
+            cur.execute(
+                """INSERT INTO instant_invocations
+                     (invocation_id, tenant_id, session_id, lease_id, code_digest, state, accepted_at)
+                   VALUES (%s, %s, %s, %s, %s, 'accepted', %s)
+                   ON CONFLICT (invocation_id) DO NOTHING
+                   RETURNING invocation_id""",
+                (*identity, record["occurred_at"]),
+            )
+            cur.fetchone()
+            cur.execute(
+                """SELECT invocation_id, tenant_id, session_id, lease_id, code_digest, state
+                   FROM instant_invocations WHERE invocation_id=%s FOR UPDATE""",
+                (record["invocation_id"],),
+            )
+            invocation = cur.fetchone()
+            if invocation is None or not same_identity(invocation):
+                raise StaleFence("conflicting immutable invocation identity")
+            current_state = invocation[5]
+            if record["state"] == "accepted":
+                return {"invocation_id": record["invocation_id"], "state": current_state, "charged": False}
+            if record["state"] == "started":
+                if current_state == "accepted":
+                    cur.execute(
+                        """UPDATE instant_invocations SET state='started', started_at=%s,
+                               updated_at=now(), version=version+1 WHERE invocation_id=%s""",
+                        (record["occurred_at"], record["invocation_id"]),
+                    )
+                    current_state = "started"
+                return {"invocation_id": record["invocation_id"], "state": current_state, "charged": False}
+            if current_state == "accepted":
+                raise StaleFence("terminal accounting requires a started invocation")
+            cur.execute(
+                """INSERT INTO instant_accounting
+                     (accounting_id, invocation_id, tenant_id, session_id, lease_id, code_digest, outcome, recorded_at,
+                      cpu_ms, wall_ms, memory_peak_bytes, input_bytes, output_bytes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (invocation_id) DO NOTHING
+                   RETURNING invocation_id""",
+                (str(uuid.uuid4()), *identity, record["outcome"], record["occurred_at"], record["cpu_ms"], record["wall_ms"],
+                 record["memory_peak_bytes"], record["input_bytes"], record["output_bytes"]),
+            )
+            charged = cur.fetchone() is not None
+            if not charged:
+                cur.execute(
+                    """SELECT tenant_id, session_id, lease_id, code_digest, outcome, recorded_at, cpu_ms,
+                              wall_ms, memory_peak_bytes, input_bytes, output_bytes
+                       FROM instant_accounting WHERE invocation_id=%s""",
+                    (record["invocation_id"],),
+                )
+                existing = cur.fetchone()
+                expected = (record["tenant_id"], record["session_id"], record["lease_id"], record["code_digest"],
+                            record["outcome"], record["occurred_at"], record["cpu_ms"], record["wall_ms"],
+                            record["memory_peak_bytes"], record["input_bytes"], record["output_bytes"])
+                existing_values = tuple(str(value) for value in existing or ())
+                expected_values = tuple(str(value) for value in expected)
+                if existing_values != expected_values:
+                    raise StaleFence("conflicting terminal accounting retry")
+            if charged:
+                cur.execute(
+                    """UPDATE instant_invocations SET state=%s, terminal_at=%s,
+                           updated_at=now(), version=version+1 WHERE invocation_id=%s""",
+                    (record["outcome"], record["occurred_at"], record["invocation_id"]),
+                )
+                cur.execute(
+                    """INSERT INTO control_outbox (event_id, kind, entity_id, entity_version)
+                       VALUES (%s, 'instant.accounting.recorded', %s, 1)""",
+                    (str(uuid.uuid4()), record["invocation_id"]),
+                )
+            return {"invocation_id": record["invocation_id"], "state": record["outcome"], "charged": charged}
+
+        return self._transaction(operation)
 
     @staticmethod
     def _slot(row) -> Slot:
@@ -268,13 +397,13 @@ class PostgresStore:
             cur.execute(
                 """INSERT INTO executor_hosts
                        (host_id, state, host_epoch, public_key_fingerprint, capacity_total,
-                        capacity_ready, endpoint, version)
-                   VALUES (%s, 'ACTIVE', 1, '', %s, 0, %s, 1)
+                        capacity_ready, endpoint, last_heartbeat_at, version)
+                   VALUES (%s, 'ACTIVE', 1, '', %s, 0, %s, now(), 1)
                    ON CONFLICT (host_id) DO UPDATE SET
                      state='ACTIVE', host_epoch=executor_hosts.host_epoch + 1,
                      capacity_total=EXCLUDED.capacity_total, capacity_ready=0,
                      endpoint=EXCLUDED.endpoint, drain_deadline_at=NULL,
-                     revoked_at=NULL, version=executor_hosts.version + 1
+                     revoked_at=NULL, last_heartbeat_at=now(), version=executor_hosts.version + 1
                    RETURNING host_epoch""",
                 (executor_id, len(slot_ids), endpoint),
             )
@@ -354,7 +483,10 @@ class PostgresStore:
                           s.state, s.code_digest, s.runtime_digest, s.version
                    FROM executor_slots s JOIN executor_hosts h ON h.host_id=s.host_id
                    WHERE s.state='READY' AND h.state='ACTIVE'
-                   ORDER BY s.host_id, s.slot_id LIMIT 1"""
+                     AND h.last_heartbeat_at IS NOT NULL
+                     AND h.last_heartbeat_at >= now() - %s
+                   ORDER BY random() LIMIT 1""",
+                (self._heartbeat_timeout,),
             )
             row = cur.fetchone()
             if row is None:
@@ -370,25 +502,77 @@ class PostgresStore:
                 """WITH claimed AS (
                      UPDATE executor_slots s SET state='CLAIMED', current_claim_id=%s, version=s.version+1
                      WHERE s.host_id=%s AND s.slot_id=%s AND s.state='READY' AND s.version=%s
-                       AND EXISTS (SELECT 1 FROM executor_hosts h WHERE h.host_id=s.host_id AND h.state='ACTIVE')
+                       AND EXISTS (SELECT 1 FROM executor_hosts h WHERE h.host_id=s.host_id
+                                   AND h.state='ACTIVE' AND h.last_heartbeat_at IS NOT NULL
+                                   AND h.last_heartbeat_at >= now() - %s)
                      RETURNING s.host_id, s.slot_id, s.slot_epoch, s.code_digest, s.runtime_digest, s.version
                    ), created AS (
                      INSERT INTO capacity_claims
                        (claim_id, host_id, slot_id, owner_id, claim_epoch, state, expires_at, version)
-                     SELECT %s, host_id, slot_id, %s, version, 'ACTIVE', %s, 1 FROM claimed
+                     SELECT %s, host_id, slot_id, host_id, version, 'ACTIVE', %s, 1 FROM claimed
                      RETURNING claim_id, host_id, slot_id, claim_epoch, expires_at, state
                    )
                    SELECT c.host_id, c.slot_id, h.endpoint, h.host_epoch, c.slot_epoch, 'CLAIMED',
                           c.code_digest, c.runtime_digest, c.version,
                           x.claim_id, x.host_id, x.slot_id, x.claim_epoch, x.expires_at, x.state
                    FROM claimed c JOIN executor_hosts h ON h.host_id=c.host_id CROSS JOIN created x""",
-                (claim_id, executor_id, slot_id, expected_version, claim_id, executor_id, expires_at),
+                (claim_id, executor_id, slot_id, expected_version, self._heartbeat_timeout,
+                 claim_id, expires_at),
             )
             row = cur.fetchone()
             if row is None:
                 raise StaleFence("capacity claim lost its compare-and-set race")
             return self._slot(row[:9]), self._claim(row[9:])
         return self._transaction(operation)
+
+    def claim_ready_slot(self, now, lifetime, max_attempts=3):
+        """Claim an eligible slot atomically, retrying locked candidates a bounded number of times.
+
+        This is the integration hook for assignment code that needs to avoid a
+        read-then-CAS collision. PostgreSQL selects, locks, and claims the slot
+        in one statement. Redis is not consulted and cannot decide ownership.
+        """
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        claim_id = str(uuid.uuid4())
+        expires_at = now + lifetime
+
+        def operation(cur):
+            cur.execute(
+                """WITH picked AS (
+                     SELECT s.host_id, s.slot_id, s.version
+                     FROM executor_slots s JOIN executor_hosts h ON h.host_id=s.host_id
+                     WHERE s.state='READY' AND h.state='ACTIVE'
+                       AND h.last_heartbeat_at IS NOT NULL
+                       AND h.last_heartbeat_at >= now() - %s
+                     ORDER BY random()
+                     FOR UPDATE OF s SKIP LOCKED
+                     LIMIT 1
+                   ), claimed AS (
+                     UPDATE executor_slots s SET state='CLAIMED', current_claim_id=%s, version=s.version+1
+                     FROM picked p
+                     WHERE s.host_id=p.host_id AND s.slot_id=p.slot_id AND s.version=p.version
+                     RETURNING s.host_id, s.slot_id, s.slot_epoch, s.code_digest, s.runtime_digest, s.version
+                   ), created AS (
+                     INSERT INTO capacity_claims
+                       (claim_id, host_id, slot_id, owner_id, claim_epoch, state, expires_at, version)
+                     SELECT %s, host_id, slot_id, host_id, version, 'ACTIVE', %s, 1 FROM claimed
+                     RETURNING claim_id, host_id, slot_id, claim_epoch, expires_at, state
+                   )
+                   SELECT c.host_id, c.slot_id, h.endpoint, h.host_epoch, c.slot_epoch, 'CLAIMED',
+                          c.code_digest, c.runtime_digest, c.version,
+                          x.claim_id, x.host_id, x.slot_id, x.claim_epoch, x.expires_at, x.state
+                   FROM claimed c JOIN executor_hosts h ON h.host_id=c.host_id CROSS JOIN created x""",
+                (self._heartbeat_timeout, claim_id, claim_id, expires_at),
+            )
+            row = cur.fetchone()
+            return (self._slot(row[:9]), self._claim(row[9:])) if row else None
+
+        for _ in range(max_attempts):
+            result = self._transaction(operation)
+            if result is not None:
+                return result
+        raise NoCapacity("no ready executor slot with a fresh heartbeat")
 
     def get_claim(self, claim_id):
         def operation(cur):

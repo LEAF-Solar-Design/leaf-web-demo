@@ -1,0 +1,204 @@
+name: Build instant execution staging image
+
+# This is an isolated staging supply lane. It builds one image and never
+# writes the five-service production manifest or dispatches a deployment.
+# Cache retention: expire buildcache-* tags after 14 days or retain no more
+# than the latest 20 cache tags in leaf-platform-instant-execution.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Optional exact source commit. Defaults to the workflow commit."
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-instant-execution-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      image_tag: ${{ steps.tag.outputs.value }}
+      cache_tag: ${{ steps.tag.outputs.cache_value }}
+      previous_cache_tag: ${{ steps.tag.outputs.previous_cache_value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require an exact source commit
+        id: source
+        env:
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          current_sha="$(git rev-parse HEAD)"
+          if [[ ! "$current_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Checked-out source is not an exact commit."
+            exit 1
+          fi
+          if [[ -n "$SOURCE_SHA_INPUT" ]]; then
+            if [[ ! "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::source_sha must be a full 40-character lowercase hexadecimal commit."
+              exit 1
+            fi
+            if [[ "$current_sha" != "$SOURCE_SHA_INPUT" ]]; then
+              echo "::error::Checkout did not resolve to source_sha."
+              exit 1
+            fi
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$current_sha" origin/main; then
+            echo "::error::source_sha must be an ancestor of current main."
+            exit 1
+          fi
+          echo "sha=$current_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Derive immutable image and cache tags
+        id: tag
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          current_sha="$(git rev-parse HEAD)"
+          current_short="$(git rev-parse --short HEAD)"
+          image_tag="sha-$current_sha"
+          current_cache_tag="buildcache-$current_short"
+          previous_cache_tag=""
+          if [[ "$GITHUB_EVENT_NAME" == "push" \
+            && "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ \
+            && ! "$BEFORE_SHA" =~ ^0+$ \
+            && "$(git cat-file -t "$BEFORE_SHA" 2>/dev/null || true)" == "commit" ]]; then
+            previous_short="$(git rev-parse --short "$BEFORE_SHA")"
+            previous_cache_tag="buildcache-$previous_short"
+          fi
+          if [[ "$previous_cache_tag" == "$current_cache_tag" ]]; then
+            echo "::error::Current and previous cache tags must differ."
+            exit 1
+          fi
+          echo "value=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "cache_value=$current_cache_tag" >> "$GITHUB_OUTPUT"
+          echo "previous_cache_value=$previous_cache_tag" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+      - name: Run staging image contract tests
+        run: |
+          set -euo pipefail
+          python scripts/test_build_instant_execution_image_workflow.py
+          python scripts/test_instant_execution_container_contract.py
+
+  build-scan-push:
+    needs: [prepare, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+      IMAGE_NAME: leaf-platform-instant-execution
+      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+      CURRENT_CACHE_TAG: ${{ needs.prepare.outputs.cache_tag }}
+      PREVIOUS_CACHE_TAG: ${{ needs.prepare.outputs.previous_cache_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_INSTANT_EXECUTION_ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-BuildInstantExecution-${{ github.run_id }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Select immutable cache references
+        id: cache
+        run: |
+          set -euo pipefail
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME"
+          cache_from=""
+          cache_to=""
+          if [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' --output text 2>/dev/null || true)"
+            if [[ "$found" == "1" ]]; then
+              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+            else
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+          if current_exists="$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+            --query 'length(images)' --output text 2>/dev/null)"; then
+            if [[ "$current_exists" == "1" ]]; then
+              echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
+            else
+              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true"
+            fi
+          else
+            echo "::warning::Unable to verify $CURRENT_CACHE_TAG; skipping cache publication"
+          fi
+          echo "from=$cache_from" >> "$GITHUB_OUTPUT"
+          echo "to=$cache_to" >> "$GITHUB_OUTPUT"
+
+      - name: Build unpushed instant execution image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.instant-execution
+          build-args: |
+            LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
+          load: true
+          push: false
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
+
+      - name: Scan image before push
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+      - name: Push scanned immutable image
+        env:
+          IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE_URI"

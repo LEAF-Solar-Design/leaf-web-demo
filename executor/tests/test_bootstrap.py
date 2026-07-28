@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
+import unittest
+
+from executor.bootstrap import BootstrapError, CONTROL_FILES, EXECUTOR_FILES, materialize
+
+
+def _pem(label: str) -> str:
+    return f"-----BEGIN {label}-----\ntest\n-----END {label}-----\n"
+
+
+class BootstrapTests(unittest.TestCase):
+    def environment(self, profile: str) -> dict[str, str]:
+        files = CONTROL_FILES if profile == "control" else EXECUTOR_FILES
+        values = {}
+        for variable, (_filename, kind) in files.items():
+            if kind == "seed":
+                values[variable] = base64.b64encode(b"s" * 32).decode("ascii")
+            elif kind == "json":
+                values[variable] = json.dumps({"keys": []})
+            elif kind == "text":
+                values[variable] = "s" * 40
+            else:
+                values[variable] = _pem("TEST")
+        return values
+
+    def test_profiles_write_only_allowlisted_private_files_and_scrub_raw_values(self) -> None:
+        for profile, expected in (("control", CONTROL_FILES), ("executor", EXECUTOR_FILES)):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as temporary:
+                environment = self.environment(profile)
+                written = materialize(profile, environ=environment, output_directory=temporary)
+                self.assertEqual(set(expected), set(written))
+                self.assertFalse(set(expected) & set(environment))
+                if os.name != "nt":
+                    self.assertEqual(0o700, stat.S_IMODE(Path(temporary).stat().st_mode))
+                for target in written.values():
+                    if os.name != "nt":
+                        self.assertEqual(0o600, stat.S_IMODE(target.stat().st_mode))
+
+    def test_incomplete_or_invalid_profiles_fail_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = self.environment("control")
+            environment.pop("LEAF_INSTANT_CONTROL_TLS_KEY_PEM")
+            with self.assertRaisesRegex(BootstrapError, "required"):
+                materialize("control", environ=environment, output_directory=temporary)
+            self.assertEqual([], list(Path(temporary).iterdir()))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = self.environment("executor")
+            environment["LEAF_INSTANT_CONTROL_JWKS_JSON"] = "[]"
+            with self.assertRaisesRegex(BootstrapError, "JSON object"):
+                materialize("executor", environ=environment, output_directory=temporary)
+
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation can require elevated developer mode")
+    def test_symlink_output_directory_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "target"
+            target.mkdir()
+            link = Path(temporary) / "link"
+            link.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(BootstrapError, "symlink"):
+                materialize("executor", environ=self.environment("executor"), output_directory=link)
+
+
+if __name__ == "__main__":
+    unittest.main()

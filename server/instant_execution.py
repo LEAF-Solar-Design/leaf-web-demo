@@ -12,6 +12,7 @@ executor directly. The existing POST /api/run path remains the batch path.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import threading
@@ -21,16 +22,25 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
 import deps
 import customization_service
+from instant_artifact_registry import (
+    ArtifactResolutionError,
+    FilesystemTrustedPlatformArtifactRegistry,
+    InstantArtifact,
+)
 
 
 CONTRACT = "leaf.instant-execution/v1"
 SERVER_DIR = Path(__file__).resolve().parent
 _DIGEST = "sha256:"
+ARTIFACT_REGISTRY = FilesystemTrustedPlatformArtifactRegistry(
+    SERVER_DIR / "instant_tools",
+)
 _lock = threading.Lock()
 _assignments: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
 _session_locks: "OrderedDict[Tuple[str, str], threading.RLock]" = OrderedDict()
@@ -58,21 +68,48 @@ def _control_timeout_s() -> float:
 def _control_headers() -> Dict[str, str]:
     headers = {"content-type": "application/json"}
     secret = os.environ.get("LEAF_INSTANT_CONTROL_SECRET", "").strip()
+    filename = os.environ.get("LEAF_INSTANT_CONTROL_SECRET_FILE", "").strip()
+    if secret and filename:
+        return headers
+    if filename:
+        try:
+            path = Path(filename)
+            secret = path.read_text(encoding="utf-8").strip() if path.is_absolute() else ""
+        except OSError:
+            secret = ""
     if secret:
         headers["x-instant-control-secret"] = secret
     return headers
 
 
+def _control_transport(url: str) -> Dict[str, Any]:
+    """Return fail-closed requests mTLS options for the private control API."""
+    parsed = urlparse(url)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.hostname:
+        raise ValueError("instant control URL is invalid")
+    if parsed.scheme == "http":
+        try:
+            loopback = parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise ValueError("plain HTTP instant control URL must be loopback")
+        return {}
+    if parsed.scheme != "https":
+        raise ValueError("instant control URL must use HTTPS")
+    names = (
+        "LEAF_INSTANT_CONTROL_CA_FILE",
+        "LEAF_INSTANT_CONTROL_CLIENT_CERT_FILE",
+        "LEAF_INSTANT_CONTROL_CLIENT_KEY_FILE",
+    )
+    files = [os.environ.get(name, "").strip() for name in names]
+    if not all(files) or not all(Path(filename).is_file() for filename in files):
+        raise ValueError("instant control HTTPS requires CA, client certificate, and client key files")
+    return {"verify": files[0], "cert": (files[1], files[2])}
+
+
 def _sha256(value: bytes) -> str:
     return _DIGEST + hashlib.sha256(value).hexdigest()
-
-
-def _canonical_digest(value: Any) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    return _sha256(encoded)
 
 
 def _sanitized_drawing_context(drawing_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -102,42 +139,21 @@ def _sanitized_drawing_context(drawing_id: str) -> Tuple[Dict[str, Any], Dict[st
     return sanitized, reference
 
 
-def _inside(candidate: Path, root: Path) -> bool:
-    try:
-        candidate.relative_to(root)
-        return True
-    except ValueError:
-        return False
+def _eligible_tool() -> Optional[Dict[str, Any]]:
+    """Return only a checked-in trusted-platform catalog entry.
 
-
-def _artifact_path(tool: Dict[str, Any], tenant_id: str) -> Optional[Path]:
-    entry = tool.get("entry") or tool.get("script")
-    if not isinstance(entry, str) or not entry.strip():
-        return None
-    relative = Path(entry.replace("\\", "/"))
-    if relative.is_absolute() or ".." in relative.parts:
-        return None
-
-    # The current restricted Python worker is suitable only for trusted
-    # platform code. Tenant-authored Python remains batch-only until the
-    # instant tier has a reviewed hostile-code boundary such as WASM.
-    resolved_root = (SERVER_DIR / "instant_tools").resolve()
-    candidate = (resolved_root / relative).resolve()
-    if _inside(candidate, resolved_root) and candidate.is_file():
-        return candidate
-    return None
-
-
-def _eligible_tool(tenant_id: str) -> Optional[Dict[str, Any]]:
-    for tool in deps.all_tools(tenant_id):
+    Tenant repositories and authored tools can appear in ``deps.all_tools``.
+    The instant tier does not consult that merge because it has no hostile-code
+    isolation boundary. Those tools remain available only through batch.
+    """
+    for tool in deps.load_seed_catalog_tools():
         if tool.get("execution_class") != "instant":
             continue
         if tool.get("capabilities") != ["drawing.read"]:
             continue
         if tool.get("runtime") != "python-3.12":
             continue
-        if _artifact_path(tool, tenant_id) is not None:
-            return tool
+        return tool
     return None
 
 
@@ -220,30 +236,9 @@ def _session_lock(key: Tuple[str, str]) -> threading.RLock:
 
 
 def _request_body(
-    tenant_id: str, session_id: str, drawing_id: str, tool: Dict[str, Any], source: bytes,
+    tenant_id: str, session_id: str, drawing_id: str, artifact: InstantArtifact,
+    effective_catalog_digest: str,
 ) -> Dict[str, Any]:
-    source_text = source.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-    source = source_text.encode("utf-8")
-    code_digest = _sha256(source)
-    declared_code = tool.get("code_digest")
-    if declared_code is not None and declared_code != code_digest:
-        raise ValueError("instant tool code_digest does not match its immutable source")
-    artifact_digest = tool.get("artifact_digest") or code_digest
-    if not isinstance(artifact_digest, str) or not artifact_digest.startswith(_DIGEST):
-        raise ValueError("instant tool requires a sha256 artifact_digest")
-    limits = tool.get("limits")
-    if not isinstance(limits, dict):
-        raise ValueError("instant tool requires catalog limits")
-
-    pin = (
-        customization_service.effective_catalog_pin(tenant_id)
-        or deps.base_catalog_pin(deps.all_tools(tenant_id))
-    )
-    effective_catalog_digest = _DIGEST + pin["effective_catalog_digest"]
-    params_schema = tool.get("params", {"type": "object", "properties": {}})
-    catalog_commit = tool.get("catalog_commit")
-    if not isinstance(catalog_commit, str) or len(catalog_commit) != 40:
-        catalog_commit = pin["catalog_commit"]
     drawing_data, drawing_reference = _sanitized_drawing_context(drawing_id)
     return {
         "contract": CONTRACT,
@@ -251,17 +246,19 @@ def _request_body(
         "session_id": session_id,
         "effective_catalog_digest": effective_catalog_digest,
         "artifact": {
-            "tool_id": tool["name"],
-            "tool_version": tool.get("version", "1.0.0"),
-            "capability_id": "drawing.read",
-            "runtime": tool["runtime"],
-            "entrypoint": tool.get("entrypoint", "tool:run"),
-            "limits": limits,
-            "params_schema_digest": _canonical_digest(params_schema),
-            "catalog_commit": catalog_commit,
-            "code_digest": code_digest,
-            "artifact_digest": artifact_digest,
-            "source": source_text,
+            "tool_id": artifact.tool_id,
+            "tool_version": artifact.tool_version,
+            "capability_id": artifact.capability_id,
+            "runtime": artifact.runtime,
+            "entrypoint": artifact.entrypoint,
+            "limits": artifact.limits_for_transport(),
+            "params_schema_digest": artifact.params_schema_digest,
+            "catalog_commit": artifact.catalog_commit,
+            "code_digest": artifact.code_digest,
+            "artifact_digest": artifact.artifact_digest,
+            # Trusted registry bytes are sent to the separate control plane in
+            # this staging tier. This is transport, never caller input.
+            "source": artifact.source.decode("utf-8"),
         },
         "drawing_context": {
             "reference": drawing_reference,
@@ -294,22 +291,29 @@ def _prepare_session_uncached(tenant_id: str, session_id: str, drawing_id: str) 
         return {"ready": False, "reason": "instant_pool_disabled"}
     if "x-instant-control-secret" not in _control_headers():
         return {"ready": False, "reason": "instant_control_auth_missing"}
-    tool = _eligible_tool(str(tenant_id))
+    tool = _eligible_tool()
     if tool is None:
         return {"ready": False, "reason": "no_eligible_instant_tool"}
-    path = _artifact_path(tool, str(tenant_id))
-    if path is None:
-        return {"ready": False, "reason": "instant_artifact_unavailable"}
 
     try:
-        body = _request_body(str(tenant_id), str(session_id), drawing_id, tool, path.read_bytes())
+        pin = (
+            customization_service.effective_catalog_pin(tenant_id)
+            or deps.base_catalog_pin(deps.all_tools(tenant_id))
+        )
+        catalog_commit = pin["catalog_commit"]
+        artifact = ARTIFACT_REGISTRY.resolve(tool, catalog_commit=catalog_commit)
+        body = _request_body(
+            str(tenant_id), str(session_id), drawing_id, artifact,
+            _DIGEST + pin["effective_catalog_digest"],
+        )
         response = requests.post(
             f"{url}/v1/sessions", json=body, headers=_control_headers(),
             timeout=(2.0, _control_timeout_s()),
+            **_control_transport(url),
         )
         response.raise_for_status()
         assignment = response.json()
-    except (OSError, UnicodeError, ValueError, requests.RequestException):
+    except (ArtifactResolutionError, OSError, UnicodeError, ValueError, requests.RequestException):
         return {"ready": False, "reason": "instant_control_unavailable"}
 
     if not _assignment_valid(assignment, str(tenant_id), str(session_id), body):
@@ -379,6 +383,7 @@ def _renew(assignment: Dict[str, Any]) -> Optional[Dict[str, str]]:
             f"{url}/v1/sessions/{assignment['session_id']}/renew",
             json={"binding_epoch": assignment["binding_epoch"]},
             headers=_control_headers(), timeout=(2.0, _control_timeout_s()),
+            **_control_transport(url),
         )
         response.raise_for_status()
         value = response.json()

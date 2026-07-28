@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import copy
+import os
+import signal
+import time
 import unittest
 
+from executor.runtime import child
 from executor.runtime.supervisor import WarmExecutorSupervisor
 from executor.runtime.tests.helpers import EXECUTOR_ID, documents, keys, lease
 
@@ -75,7 +79,9 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual("TOOL_FAILED", failed["error"]["code"])
 
     def test_timeout_replaces_slot_and_batch_is_rejected(self) -> None:
-        docs = self.assigned("def run(intake, params):\n while True:\n  pass\n")
+        docs = documents("def run(intake, params):\n while True:\n  pass\n")
+        docs["catalog"]["limits"]["max_cpu_ms"] = 30_000
+        self.supervisor.assign({key: docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
         before = self.supervisor.process_ids()
         timed_out = self.invoke(docs)
         self.assertEqual("DEADLINE_EXCEEDED", timed_out["error"]["code"])
@@ -85,3 +91,117 @@ class RuntimeTests(unittest.TestCase):
         batch["batch"] = True
         rejected = self.supervisor.invoke(batch, "Bearer " + lease(batch))
         self.assertEqual("EXECUTION_CLASS_DENIED", rejected["error"]["code"])
+
+    def test_child_enforces_output_and_tool_call_limits(self) -> None:
+        output_docs = documents("def run(intake, params):\n return {'data': 'x' * 128}\n")
+        output_docs["catalog"]["limits"]["max_output_bytes"] = 32
+        self.supervisor.assign({key: output_docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        output = self.invoke(output_docs)
+        self.assertEqual("TOOL_FAILED", output["error"]["code"])
+        self.assertIn("output exceeds", output["error"]["message"])
+
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1)
+        calls_docs = documents("def run(intake, params):\n intake['tool_call']()\n intake['tool_call']()\n return {}\n")
+        calls_docs["catalog"]["limits"]["max_tool_calls"] = 1
+        self.supervisor.assign({key: calls_docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        calls = self.invoke(calls_docs)
+        self.assertEqual("TOOL_FAILED", calls["error"]["code"])
+        self.assertIn("tool call count exceeds", calls["error"]["message"])
+
+    def test_child_failure_replaces_only_the_failed_slot(self) -> None:
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2)
+        failing = documents("def run(intake, params):\n raise MemoryError()\n")
+        healthy = documents("def run(intake, params):\n return {'healthy': True}\n")
+        self.supervisor.assign({key: failing[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        self.supervisor.assign({key: healthy[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        before = self.supervisor.process_ids()
+        failed = self.invoke(failing)
+        after = self.supervisor.process_ids()
+        healthy_response = self.invoke(healthy)
+        self.assertEqual("TOOL_FAILED", failed["error"]["code"])
+        self.assertNotEqual(before["slot-1"], after["slot-1"])
+        self.assertEqual(before["slot-2"], after["slot-2"])
+        self.assertEqual("succeeded", healthy_response["status"])
+
+    def test_idempotency_cache_has_a_ttl_and_entry_cap(self) -> None:
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=1, idempotency_ttl_seconds=0.02, idempotency_max_entries=2,
+        )
+        docs = self.assigned()
+        first = self.invoke(docs)
+        time.sleep(0.03)
+        after_ttl = self.invoke(docs)
+        self.assertEqual(1, first["result"]["count"])
+        self.assertEqual(2, after_ttl["result"]["count"])
+        for invocation_id in ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"):
+            current = copy.deepcopy(docs["invocation"])
+            current["invocation_id"] = invocation_id
+            self.supervisor.invoke(current, "Bearer " + lease(current))
+        self.assertLessEqual(len(self.supervisor._idempotency), 2)
+        stale = self.supervisor.invoke(docs["invocation"], "Bearer " + lease(docs["invocation"], expires_in=-1))
+        self.assertEqual("SESSION_EXPIRED", stale["error"]["code"])
+
+    def test_resource_limit_fallback_is_platform_safe(self) -> None:
+        class FakeResource:
+            RLIM_INFINITY = -1
+            RLIMIT_AS = "as"
+            RLIMIT_NPROC = "nproc"
+            RLIMIT_FSIZE = "fsize"
+            RLIMIT_CPU = "cpu"
+
+            def __init__(self) -> None:
+                self.applied: list[tuple[str, tuple[int, int]]] = []
+
+            @staticmethod
+            def getrlimit(_limit: str) -> tuple[int, int]:
+                return (-1, -1)
+
+            def setrlimit(self, limit: str, values: tuple[int, int]) -> None:
+                self.applied.append((limit, values))
+
+        original = child.resource
+        fake = FakeResource()
+        try:
+            child.resource = fake
+            child._apply_resource_limits({"max_memory_mb": 32, "max_output_bytes": 64, "max_cpu_ms": 1, "max_tool_calls": 0})
+        finally:
+            child.resource = original
+        self.assertEqual({"as", "nproc", "fsize", "cpu"}, {name for name, _values in fake.applied})
+
+    @unittest.skipUnless(os.name == "posix", "POSIX resource limits are unavailable on Windows")
+    def test_linux_memory_limit_replaces_only_the_allocation_slot(self) -> None:
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2)
+        allocation = documents("def run(intake, params):\n return {'data': 'x' * (64 * 1024 * 1024)}\n")
+        allocation["catalog"]["limits"]["max_memory_mb"] = 32
+        healthy = documents("def run(intake, params):\n return {'healthy': True}\n")
+        self.supervisor.assign({key: allocation[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        self.supervisor.assign({key: healthy[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        before = self.supervisor.process_ids()
+        failed = self.invoke(allocation)
+        after = self.supervisor.process_ids()
+        self.assertEqual("TOOL_FAILED", failed["error"]["code"])
+        self.assertNotEqual(before["slot-1"], after["slot-1"])
+        self.assertEqual(before["slot-2"], after["slot-2"])
+        self.assertEqual("succeeded", self.invoke(healthy)["status"])
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(signal, "ITIMER_PROF"), "POSIX CPU timers are unavailable")
+    def test_linux_cpu_limit_replaces_only_the_busy_slot(self) -> None:
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2)
+        busy = documents("def run(intake, params):\n while True:\n  pass\n")
+        busy["catalog"]["limits"]["max_wall_ms"] = 30_000
+        busy["catalog"]["limits"]["max_cpu_ms"] = 50
+        healthy = documents("def run(intake, params):\n return {'healthy': True}\n")
+        self.supervisor.assign({key: busy[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        self.supervisor.assign({key: healthy[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        before = self.supervisor.process_ids()
+        failed = self.invoke(busy)
+        after = self.supervisor.process_ids()
+        self.assertEqual("TOOL_FAILED", failed["error"]["code"])
+        self.assertNotEqual(before["slot-1"], after["slot-1"])
+        self.assertEqual(before["slot-2"], after["slot-2"])
+        self.assertEqual("succeeded", self.invoke(healthy)["status"])

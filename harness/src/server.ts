@@ -628,7 +628,13 @@ export async function startReal(port = 8130): Promise<Server> {
         gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
         store: sessionStore.store,
         runnerFor: (grant) => new ConverseSdkRunner({ grant }),
-        instantExecutor: new HttpInstantExecutorClient(),
+        instantExecutor: new HttpInstantExecutorClient({
+          requireTls: true,
+          caFile: process.env.LEAF_INSTANT_EXECUTOR_CA_FILE,
+          clientCertificateFile: process.env.LEAF_INSTANT_EXECUTOR_CERT_FILE,
+          clientPrivateKeyFile: process.env.LEAF_INSTANT_EXECUTOR_KEY_FILE,
+          tlsServerName: process.env.LEAF_INSTANT_EXECUTOR_TLS_SERVER_NAME,
+        }),
       })
     : undefined;
 

@@ -8,7 +8,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 import instant_execution
+from instant_artifact_registry import FilesystemTrustedPlatformArtifactRegistry
 import turn_runner
 from routers import sessions as sessions_router
 
@@ -82,10 +85,13 @@ def test_prepare_assigns_and_loads_before_reporting_ready(monkeypatch, tmp_path)
     assignment["code_digest"] = code_digest
     assignment["artifact_digest"] = code_digest
 
-    monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://control.internal")
+    monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://127.0.0.1:8080")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_SECRET", "test-control-secret")
-    monkeypatch.setattr(instant_execution, "_eligible_tool", lambda _tenant: tool)
-    monkeypatch.setattr(instant_execution, "_artifact_path", lambda *_args: path)
+    monkeypatch.setattr(instant_execution, "_eligible_tool", lambda: tool)
+    monkeypatch.setattr(
+        instant_execution, "ARTIFACT_REGISTRY",
+        FilesystemTrustedPlatformArtifactRegistry(path.parent),
+    )
     monkeypatch.setattr(
         instant_execution, "_sanitized_drawing_context",
         lambda _drawing: ({"layers": ["Panels"]}, assignment["drawing_context"]),
@@ -100,7 +106,7 @@ def test_prepare_assigns_and_loads_before_reporting_ready(monkeypatch, tmp_path)
     )
 
     assert status == {"ready": True, "reason": None}
-    assert posted[0][0] == "http://control.internal/v1/sessions"
+    assert posted[0][0] == "http://127.0.0.1:8080/v1/sessions"
     assert posted[0][1]["json"]["artifact"]["source"].startswith("def run")
     assert instant_execution.assignment_for_session(
         "tenant-demo", assignment["session_id"],
@@ -110,6 +116,22 @@ def test_prepare_assigns_and_loads_before_reporting_ready(monkeypatch, tmp_path)
         "tenant-demo", assignment["session_id"], "rooftop-demo",
     )["ready"] is True
     assert len(posted) == 1
+
+
+def test_tenant_authored_path_never_enters_the_instant_loader(monkeypatch):
+    tenant_tool = {
+        "name": "tenant-python",
+        "entry": "../../tenant-repo/tool.py",
+        "execution_class": "instant",
+        "runtime": "python-3.12",
+        "capabilities": ["drawing.read"],
+    }
+    calls = []
+    monkeypatch.setattr(instant_execution.deps, "all_tools", lambda tenant: calls.append(tenant) or [tenant_tool])
+    monkeypatch.setattr(instant_execution.deps, "load_seed_catalog_tools", lambda: [])
+
+    assert instant_execution._eligible_tool() is None
+    assert calls == []
 
 
 def test_create_session_returns_readiness_but_never_assignment_secret(monkeypatch):
@@ -134,6 +156,27 @@ def test_create_session_returns_readiness_but_never_assignment_secret(monkeypatc
     assert body["instant_ready"] is True
     assert "lease" not in encoded
     assert "executor_endpoint" not in encoded
+
+
+def test_control_transport_requires_mtls_and_rejects_nonloopback_http(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="loopback"):
+        instant_execution._control_transport("http://control.internal:8080")
+    with pytest.raises(ValueError, match="requires CA"):
+        instant_execution._control_transport("https://control.internal:8080")
+
+    ca_file = tmp_path / "ca.pem"
+    cert_file = tmp_path / "client.pem"
+    key_file = tmp_path / "client.key"
+    for filename in (ca_file, cert_file, key_file):
+        filename.write_text("test", encoding="utf-8")
+    monkeypatch.setenv("LEAF_INSTANT_CONTROL_CA_FILE", str(ca_file))
+    monkeypatch.setenv("LEAF_INSTANT_CONTROL_CLIENT_CERT_FILE", str(cert_file))
+    monkeypatch.setenv("LEAF_INSTANT_CONTROL_CLIENT_KEY_FILE", str(key_file))
+
+    assert instant_execution._control_transport("https://control.internal:8080") == {
+        "verify": str(ca_file),
+        "cert": (str(cert_file), str(key_file)),
+    }
 
 
 def test_assignment_validation_rejects_digest_substitution_and_expiry():
@@ -181,7 +224,7 @@ def test_assignment_renews_before_half_life(monkeypatch):
     with instant_execution._lock:
         instant_execution._assignments[key] = dict(assignment)
     renewed_expiry = (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
-    monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://control.internal")
+    monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://127.0.0.1:8080")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_SECRET", "test-control-secret")
     monkeypatch.setattr(
         instant_execution.requests, "post",
@@ -208,7 +251,7 @@ def test_ninety_second_fake_clock_soak_renews_one_session_without_redis(monkeypa
     key = (assignment["tenant_id"], assignment["session_id"])
     instant_execution._remember_assignment(key, assignment)
     monkeypatch.setattr(instant_execution, "_now", lambda: clock[0])
-    monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://control.internal")
+    monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://127.0.0.1:8080")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_SECRET", "test-control-secret")
     renewals = []
 
@@ -240,7 +283,7 @@ def test_failed_renewal_never_returns_an_expired_assignment(monkeypatch):
     key = (assignment["tenant_id"], assignment["session_id"])
     instant_execution._remember_assignment(key, assignment)
     monkeypatch.setattr(instant_execution, "_now", lambda: clock[0])
-    monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://control.internal")
+    monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://127.0.0.1:8080")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_SECRET", "test-control-secret")
 
     def _fail(_url, **_kwargs):

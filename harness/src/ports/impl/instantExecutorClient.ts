@@ -1,7 +1,10 @@
 /** Direct, keep-alive HTTP(S) client for the instant executor RPC. */
 
+import { readFileSync, statSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import { isIP } from "node:net";
+import { createSecureContext } from "node:tls";
 import type {
   InstantExecutorClient,
   InstantInvocation,
@@ -10,19 +13,96 @@ import type {
 } from "../index.js";
 
 export class InstantExecutorClientError extends Error {
-  constructor(message: string, readonly code: "timeout" | "cancelled" | "transport" | "response") {
+  constructor(message: string, readonly code: "timeout" | "cancelled" | "transport" | "response" | "configuration") {
     super(message);
     this.name = "InstantExecutorClientError";
   }
 }
 
+export interface HttpInstantExecutorClientOptions {
+  timeoutMs?: number;
+  /** Require TLS material at construction, for production composition. */
+  requireTls?: boolean;
+  /** PEM trust anchor for executor server certificates. Required with the client cert and key. */
+  caFile?: string;
+  /** PEM client certificate for executor mTLS. Required with the CA and key. */
+  clientCertificateFile?: string;
+  /** PEM private key for executor mTLS. Required with the CA and client certificate. */
+  clientPrivateKeyFile?: string;
+  /** Verified TLS identity when the assigned endpoint is a private task IP. */
+  tlsServerName?: string;
+}
+
+type TlsMaterial = { ca: Buffer; cert: Buffer; key: Buffer };
+
+function configuredText(value: string | undefined): string | undefined {
+  const text = value?.trim();
+  return text || undefined;
+}
+
+function loadTlsMaterial(opts: HttpInstantExecutorClientOptions): TlsMaterial | undefined {
+  const caFile = configuredText(opts.caFile);
+  const clientCertificateFile = configuredText(opts.clientCertificateFile);
+  const clientPrivateKeyFile = configuredText(opts.clientPrivateKeyFile);
+  if (!caFile && !clientCertificateFile && !clientPrivateKeyFile) return undefined;
+  if (!caFile || !clientCertificateFile || !clientPrivateKeyFile) {
+    throw new InstantExecutorClientError(
+      "instant executor TLS configuration requires CA, client certificate, and private key files",
+      "configuration",
+    );
+  }
+
+  try {
+    for (const file of [caFile, clientCertificateFile, clientPrivateKeyFile]) {
+      if (!statSync(file).isFile()) throw new Error("not a regular file");
+    }
+    const material = {
+      ca: readFileSync(caFile),
+      cert: readFileSync(clientCertificateFile),
+      key: readFileSync(clientPrivateKeyFile),
+    };
+    // Parse the PEM material now. This rejects malformed or unusable key material before
+    // an invocation can start, while keeping the bytes confined to the HTTPS agent.
+    createSecureContext(material);
+    return material;
+  } catch {
+    throw new InstantExecutorClientError("invalid instant executor TLS credential configuration", "configuration");
+  }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost") return true;
+  if (isIP(host) === 4) return host.split(".")[0] === "127";
+  return host === "::1";
+}
+
 export class HttpInstantExecutorClient implements InstantExecutorClient {
   private readonly httpAgent = new http.Agent({ keepAlive: true });
-  private readonly httpsAgent = new https.Agent({ keepAlive: true });
+  private readonly httpsAgent: https.Agent;
   private readonly timeoutMs: number;
+  private readonly tlsConfigured: boolean;
+  private readonly tlsServerName?: string;
 
-  constructor(opts: { timeoutMs?: number } = {}) {
+  constructor(opts: HttpInstantExecutorClientOptions = {}) {
     this.timeoutMs = opts.timeoutMs ?? 15_000;
+    this.tlsServerName = configuredText(opts.tlsServerName);
+    if (this.tlsServerName && !/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/i.test(this.tlsServerName)) {
+      throw new InstantExecutorClientError("invalid instant executor TLS server name", "configuration");
+    }
+    const tls = loadTlsMaterial(opts);
+    if (opts.requireTls && !tls) {
+      throw new InstantExecutorClientError(
+        "instant executor TLS configuration requires CA, client certificate, and private key files",
+        "configuration",
+      );
+    }
+    this.tlsConfigured = tls !== undefined;
+    this.httpsAgent = new https.Agent({
+      keepAlive: true,
+      rejectUnauthorized: true,
+      ...(tls ?? {}),
+    });
   }
 
   close(): void {
@@ -62,12 +142,20 @@ export class HttpInstantExecutorClient implements InstantExecutorClient {
     const payload = JSON.stringify(body);
     const requestFn = url.protocol === "https:" ? https.request : url.protocol === "http:" ? http.request : null;
     if (!requestFn) return Promise.reject(new InstantExecutorClientError("unsupported executor protocol", "transport"));
+    if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+      return Promise.reject(new InstantExecutorClientError("plain HTTP executor endpoint must be loopback", "configuration"));
+    }
+    if (url.protocol === "https:" && !this.tlsConfigured) {
+      return Promise.reject(new InstantExecutorClientError("instant executor TLS credentials are required for HTTPS", "configuration"));
+    }
     return new Promise<T>((resolve, reject) => {
       let timedOut = false;
       let cancelled = false;
       const req = requestFn(url, {
         method: "POST",
         agent: url.protocol === "https:" ? this.httpsAgent : this.httpAgent,
+        rejectUnauthorized: true,
+        ...(url.protocol === "https:" && this.tlsServerName ? { servername: this.tlsServerName } : {}),
         headers: {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(payload),
