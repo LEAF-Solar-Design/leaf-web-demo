@@ -23,7 +23,9 @@ a documented follow-up (CONTRACT-ADDENDUM §11).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+import hashlib
+import json
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
@@ -300,15 +302,104 @@ def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _entity_identity(kind: str, entity: Dict[str, Any]) -> Any:
+    """A stable-enough key for one intake entity across two version payloads.
+
+    Every entity in the cached demo schema (polylines/inserts/faces3d) carries
+    a `handle`, and that is the real identity — the same handle survives a
+    panel-transform/v1 move or an added-layer edit. An entity with no handle
+    (schema drift, or a future entity kind) falls back to a content hash, which
+    still recognizes an UNCHANGED entity across versions but cannot tell a
+    modified handle-less entity from a delete+add — there is no id to hang
+    "modified" on, so it reads as one of each. That is the honest limit of a
+    read-time diff over opaque JSON, not a bug."""
+    handle = entity.get("handle") if isinstance(entity, dict) else None
+    if isinstance(handle, str) and handle:
+        return (kind, "handle", handle)
+    canon = json.dumps(entity, sort_keys=True, default=str)
+    return (kind, "hash", hashlib.sha256(canon.encode("utf-8")).hexdigest())
+
+
+def _entity_map(intake: Dict[str, Any]) -> Dict[Any, Dict[str, Any]]:
+    out: Dict[Any, Dict[str, Any]] = {}
+    for kind in ("polylines", "inserts", "faces3d"):
+        for entity in (intake.get(kind) or []):
+            if isinstance(entity, dict):
+                out[_entity_identity(kind, entity)] = entity
+    return out
+
+
+def _version_delta(parent_intake: Dict[str, Any], child_intake: Dict[str, Any]) -> Dict[str, int]:
+    """`{added, modified, deleted}` entity counts between two STORED intake
+    payloads (parent vs child), computed fresh on every read — never stamped at
+    write time (CONTRACT-ADDENDUM: the write path is owned elsewhere and is not
+    touched by this route)."""
+    parent_map = _entity_map(parent_intake or {})
+    child_map = _entity_map(child_intake or {})
+    added = modified = deleted = 0
+    for ident, entity in child_map.items():
+        prior = parent_map.get(ident)
+        if prior is None:
+            added += 1
+        elif prior != entity:
+            modified += 1
+    for ident in parent_map:
+        if ident not in child_map:
+            deleted += 1
+    return {"added": added, "modified": modified, "deleted": deleted}
+
+
+def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
+                    entries: List[Dict[str, Any]]) -> Dict[int, Optional[Dict[str, int]]]:
+    """Per-version delta, keyed by `v`. `None` where a delta cannot be derived:
+    the root version (no parent to diff against) or a payload that fails to
+    parse (`write_loop.read_intake` raises `KeyError`/`ValueError` — a missing
+    blob or a non-JSON one). Ships only what IS derivable from the stored
+    payloads rather than guessing at either end."""
+    cache: Dict[int, Optional[Dict[str, Any]]] = {}
+
+    def _load(v: int) -> Optional[Dict[str, Any]]:
+        if v not in cache:
+            try:
+                _, intake = write_loop.read_intake(backend, tenant_id, drawing_id, v)
+                intake = intake if isinstance(intake, dict) else None
+            except (KeyError, ValueError, TypeError):
+                intake = None
+            cache[v] = intake
+        return cache[v]
+
+    out: Dict[int, Optional[Dict[str, int]]] = {}
+    for e in entries:
+        v = int(e["v"])
+        parent = e.get("parent")
+        if parent is None:
+            out[v] = None
+            continue
+        parent_intake = _load(int(parent))
+        child_intake = _load(v)
+        if parent_intake is None or child_intake is None:
+            out[v] = None
+            continue
+        try:
+            out[v] = _version_delta(parent_intake, child_intake)
+        except Exception:  # noqa: BLE001 — a malformed payload must not 500 the whole chain
+            out[v] = None
+    return out
+
+
 @router.get("/api/drawings/{drawing_id}/versions")
 def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     """Full version-history chain straight from the store manifest — the read the
     UI's version-chain popover needs (undo/redo only stepped head one hop).
 
     §10-enveloped `{drawing_id, head, latest, versions:[{v, parent, created, bytes,
-    sha256, tool, workitem_id, note}], checkout: {holder, acquired, expires}|null}`
-    (§14: `checkout` is the single-writer lock from the manifest, read-only — no
-    acquire/release this wave). Same 404 pattern as the intake route for
+    sha256, tool, workitem_id, note, delta}], checkout: {holder, acquired,
+    expires}|null}` (§14: `checkout` is the single-writer lock from the
+    manifest, read-only — no acquire/release this wave). `delta` is
+    `{added, modified, deleted}` computed HERE, at read time, by diffing this
+    version's stored payload against its parent's (see `_version_deltas`); it
+    is `null` where that is not derivable (the root version, or an unparseable
+    payload on either side). Same 404 pattern as the intake route for
     an unknown drawing (the well-known `demo` bootstraps on first read at
     APS_LIVE=0; any other unknown drawing → BAD_PARAMS 404)."""
     import store  # da/store.py; importable via write_loop's sys.path setup (imported above)
@@ -327,14 +418,99 @@ def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_active_t
         # mislabeled as an unavailable drawing.
         return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                               retryable=False, status_code=404)
+    entries = m.get("versions", [])
+    deltas = _version_deltas(backend, str(tenant_id), drawing_id, entries)
+    rows = []
+    for e in entries:
+        row = _version_row(e)
+        row["delta"] = deltas.get(row["v"])
+        rows.append(row)
     view = {
         "drawing_id": drawing_id,
         "head": int(m["head"]),
         "latest": int(m["latest"]),
-        "versions": [_version_row(e) for e in m.get("versions", [])],
+        "versions": rows,
         "checkout": _checkout_view(m.get("checkout")),  # single-writer lock (read-only)
     }
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
+
+
+@router.post("/api/drawings/{drawing_id}/versions/{version}/restore")
+def restore_version(drawing_id: str, version: int,
+                    tenant_id: str = Depends(deps.require_active_tenant),
+                    x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
+    """Restore-as-new-head: append a NEW version whose stored payload equals
+    `version`'s, with `parent` = the CURRENT head. History is never rewritten —
+    restoring is an ordinary write (new v, chain intact), not a rollback of the
+    manifest. Composes existing primitives only (`write_loop.read_intake`,
+    `write_loop._put_bytes_version` → `store.put_drawing`); neither is modified
+    here.
+
+    Same single-writer gate as undo/redo/publish (`_lock_authorization`): an
+    ACTIVE checkout needs a valid `X-Checkout-Capability` for the current
+    lease, else 403; a server that cannot verify at all answers 503. A
+    malformed/unresolvable DRAWING id answers 400, matching undo/redo (see the
+    note on those routes). Restoring a version absent from THIS drawing's
+    chain answers 404 — the same shape GET .../intake already gives for an
+    unknown version, since the drawing itself is fine and only the version
+    argument is bad."""
+    blocked = _mutation_gate()
+    if blocked is not None:
+        return blocked
+    import store  # da/store.py; importable via write_loop's sys.path setup
+
+    backend = _backend(str(tenant_id))
+    try:
+        write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+        holder, fence = _lock_authorization(drawing_id, tenant_id, backend,
+                                            x_checkout_capability)
+    except (checkout_capability.CapabilityRejected,
+            checkout_capability.CapabilityUnavailable) as exc:
+        return _denied(exc)
+    except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400)
+
+    try:
+        m = store.load_manifest(backend, str(tenant_id), drawing_id)
+    except KeyError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
+                              retryable=False, status_code=404)
+    head_v = int(m["head"])
+
+    try:
+        _, source_intake = write_loop.read_intake(backend, str(tenant_id), drawing_id, int(version))
+    except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS,
+                              f"version {version} unavailable: {exc}",
+                              retryable=False, status_code=404)
+
+    try:
+        with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+            if not commit_enabled:
+                return error_response(
+                    ErrorCode.INTERNAL,
+                    "drawing mutations are temporarily disabled for a storage cutover",
+                    retryable=True, status_code=503,
+                )
+            new_v = write_loop._put_bytes_version(
+                backend, str(tenant_id), drawing_id,
+                json.dumps(source_intake, separators=(",", ":")).encode("utf-8"),
+                parent_version=head_v,
+                meta={"tool": "restore", "note": f"restore of version {version}"},
+                holder=holder, fence=fence,
+            )
+    except store.CheckoutDenied as exc:
+        return _denied(checkout_capability.CapabilityRejected(str(exc)))
+
+    view = deps.tenant_echo({
+        "drawing_id": drawing_id,
+        "restored_from": int(version),
+        "new_version": {"drawing_id": drawing_id, "version": new_v, "parent": head_v},
+        "head": new_v,
+        "latest": new_v,
+    }, tenant_id)
+    return with_envelope_fields(view)
 
 
 # --------------------------------------------------------------------------- #

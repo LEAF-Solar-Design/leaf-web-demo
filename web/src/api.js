@@ -797,6 +797,22 @@ export async function releaseCheckout(drawingId, capability) {
   return data || { released: true, checkout: null }
 }
 
+// POST /api/drawings/{id}/versions/{v}/restore -> restore-as-new-head: appends
+// a NEW version whose content equals `version`'s, with parent = the CURRENT
+// head (history is never rewritten). Same single-writer gate as undo/redo/
+// publish — pass the held checkout capability when one is active (omitted ->
+// the ordinary no-lock demo path, unauthenticated by that gate). Enveloped
+// body verbatim: {drawing_id, restored_from, new_version:{drawing_id,version,
+// parent}, head, latest}. MOCK: mockVersions.restore(version) (same
+// append-only in-memory chain, zero network).
+export async function restoreDrawingVersion(mock, drawingId, version, capability) {
+  if (mock) { await nap(180); return mockVersions.restore(version) }
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions/${encodeURIComponent(version)}/restore`, {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': TENANT, ...checkoutHeaders(capability) },
+  })
+}
+
 export async function undoDrawing(mock, drawingId, capability) {
   if (mock) { await nap(180); return mockVersions.undo() }
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/undo`, {
