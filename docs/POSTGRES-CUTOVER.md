@@ -54,8 +54,16 @@ command.
 
 Customization is also an exception. The app can select
 `LEAF_CUSTOMIZATION_STORE=postgres` after migration `0020`. The reconciliation
-command reads SQLite without write access, refuses a non-empty mismatched
-PostgreSQL target, and reports only table counts plus an aggregate digest:
+command first runs the SQLite store's own idempotent schema initialization and
+guarded legacy migrations on the source (`SQLiteCustomizationStore.initialize`:
+`CREATE TABLE IF NOT EXISTS` plus the confirmation-binding and
+publication-request migrations, so a never-touched or pre-migration store
+reads correctly instead of failing as incomplete). It therefore requires
+write access to the SQLite file for schema and migration only; it never
+inserts, rewrites, or deletes source rows outside those guarded migrations.
+The subsequent snapshot itself opens the file read-only. It refuses a
+non-empty mismatched PostgreSQL target and reports only table counts plus an
+aggregate digest:
 
 ```shell
 python scripts/reconcile_customization_authority.py --mode backfill \

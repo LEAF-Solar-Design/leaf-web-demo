@@ -61,6 +61,53 @@ def test_store_missing_one_table_is_repaired_not_refused(tmp_path):
     assert snapshot["customization_publication_requests"] == []
 
 
+def test_reconcile_ensures_schema_before_snapshotting(tmp_path, monkeypatch):
+    """Deleting the ensure call from reconcile() must fail THIS test.
+
+    reconcile() is exercised for real up to the PostgreSQL boundary: the
+    platform-db loader is replaced with a sentinel so the test proves the
+    ordering (ensure, then snapshot, then database) without a live Postgres.
+    """
+    script = _script()
+    path = tmp_path / "state" / "customization.db"
+    assert not path.exists()
+
+    class _Sentinel(RuntimeError):
+        pass
+
+    calls: list[str] = []
+    real_ensure = script._ensure_source_schema
+    real_snapshot = script._sqlite_snapshot
+
+    def recording_ensure(target):
+        calls.append("ensure")
+        return real_ensure(target)
+
+    def recording_snapshot(target):
+        calls.append("snapshot")
+        return real_snapshot(target)
+
+    def no_database():
+        calls.append("database")
+        raise _Sentinel("stop before PostgreSQL")
+
+    monkeypatch.setattr(script, "_ensure_source_schema", recording_ensure)
+    monkeypatch.setattr(script, "_sqlite_snapshot", recording_snapshot)
+    monkeypatch.setattr(script, "_platform_db", no_database)
+
+    try:
+        script.reconcile(sqlite_path=path, mode="backfill")
+    except _Sentinel:
+        pass
+    else:  # pragma: no cover - reconcile must reach the database boundary
+        raise AssertionError("reconcile() never reached the database boundary")
+    # The never-touched source was initialized BEFORE the snapshot read it;
+    # without the ensure, the snapshot raises "incomplete" (or FileNotFound)
+    # and this ordering is never recorded.
+    assert calls == ["ensure", "snapshot", "database"]
+    assert path.exists()
+
+
 def test_ensure_is_idempotent_and_preserves_rows(tmp_path):
     script = _script()
     path = tmp_path / "customization.db"
