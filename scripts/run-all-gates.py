@@ -765,6 +765,9 @@ def build_suites() -> List[Suite]:
         Suite("web-deployed-acceptance-contract",
               "web deployed authored CAD acceptance contract", "script", WEB,
               [_npm(), "run", "check:deployed-acceptance-contract"], None),
+        Suite("web-proof-receipt-contract",
+              "web proof receipt contract", "script", WEB,
+              [_npm(), "run", "check:proof-receipt"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
