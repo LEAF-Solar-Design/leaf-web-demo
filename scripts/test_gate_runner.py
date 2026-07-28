@@ -47,7 +47,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
 
     static = suites["platform-static"]
-    assert static.expected == 80
+    assert static.expected == 96
     assert any(
         str(arg).endswith("platform/tests/test_db_schema_proof_static.py")
         for arg in static.argv

@@ -75,11 +75,9 @@ emit per-test skip reasons.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -713,10 +711,10 @@ def build_suites() -> List[Suite]:
         # also explicit here so this PR cannot ship its dependency-free
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
-        # invariant to DB presence: 82 collected either way, measured on this
-        # tree 2026-07-25. The floor below is the EXECUTED count on a host with
-        # no DATABASE_URL -- 82 collected minus the 2 DB-gated skips named in
-        # allowed_skip_reasons = 80.
+        # invariant to DB presence: 98 collected either way, measured on this
+        # tree 2026-07-28. The floor below is the EXECUTED count on a host with
+        # no DATABASE_URL -- 98 collected minus the 2 DB-gated skips named in
+        # allowed_skip_reasons = 96.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
@@ -724,7 +722,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
-                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 80,
+                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 96,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or

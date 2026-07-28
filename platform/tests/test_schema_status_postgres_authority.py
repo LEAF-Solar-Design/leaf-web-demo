@@ -44,15 +44,7 @@ SELECTORS = sorted(db._AUTHORITY_SELECTORS)
 
 
 def _defects(status):
-    """Every non-metadata field carrying a value, whatever it happens to be named.
-
-    schema_status()'s defect keys are NOT stable across revisions of db.py: this
-    tree reports missing_constraints / missing_indexes / missing_triggers, while
-    the PR #187 revision reports invalid_constraints / invalid_indexes /
-    invalid_triggers for the same class of failure. Naming the keys explicitly
-    would make this gate silently vacuous the day the key set moves again, so
-    report whatever non-metadata field is populated.
-    """
+    """Return every populated schema-defect list without pinning object names."""
     return {
         key: value
         for key, value in sorted(status.items())
@@ -65,14 +57,7 @@ def _describe(label, status):
 
 
 def _names(contract):
-    """The names in one contract container, whatever shape it is.
-
-    Like the defect keys above, this shape is not stable across revisions of
-    db.py: a catalog contract is a set of names on this tree and a
-    name -> definition mapping on the PR #187 revision. set() reads the names
-    out of either, so the guards below assert instead of raising TypeError on
-    a tree that happens to carry the other shape.
-    """
+    """Return the names in one name-to-definition contract mapping."""
     return set(contract)
 
 
@@ -166,8 +151,8 @@ def test_schema_status_ok_with_every_authority_on_postgres(monkeypatch):
 def test_schema_status_ok_for_each_authority_on_postgres(monkeypatch, selector):
     """One selector at a time, so a failure names the authority that broke.
 
-    The union case above fails on the first defect from any authority; these
-    localize it. PR #187's tree fails exactly LEAF_BROKER_STORE here.
+    The union case above fails on the first defect from any authority, while
+    these cases localize the failing authority.
     """
     _select_only(monkeypatch, [selector])
     status = db.schema_status()

@@ -430,6 +430,123 @@ def test_catalog_contract_rejects_cross_schema_foreign_key_target():
 
 
 @pytest.mark.parametrize(
+    ("kind", "selector", "name", "required_columns", "widened_columns"),
+    [
+        (
+            "indexes",
+            "LEAF_HARNESS_SESSION_STORE",
+            "harness_one_active_turn",
+            "(session_id)",
+            "(session_id, turn_id)",
+        ),
+        (
+            "indexes",
+            "LEAF_HARNESS_SESSION_STORE",
+            "harness_one_active_session",
+            "(tenant_id, drawing_id)",
+            "(tenant_id, drawing_id, session_id)",
+        ),
+        (
+            "constraints",
+            "LEAF_SESSIONS_STORE",
+            "app_sessions_tenant_id_drawing_id_key",
+            "(tenant_id, drawing_id)",
+            "(tenant_id, drawing_id, session_id)",
+        ),
+    ],
+)
+def test_catalog_contract_rejects_widened_catalog_column_lists(
+    kind, selector, name, required_columns, widened_columns,
+):
+    environ = {selector: "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    name_field = {"constraints": "conname", "indexes": "indexname"}[kind]
+    row = next(item for item in rows[kind] if item[name_field] == name)
+    row["definition"] = row["definition"].replace(
+        required_columns, widened_columns,
+    )
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert f"{name}:definition-mismatch" in errors[f"invalid_{kind}"]
+
+
+@pytest.mark.parametrize(
+    ("selector", "name", "extra_value"),
+    [
+        (
+            "LEAF_DRAWING_STORE",
+            "drawing_authority_cutover_state_allowed",
+            "retired",
+        ),
+        (
+            "LEAF_UPLOAD_STORE",
+            "drawing_authority_cutover_state_allowed",
+            "retired",
+        ),
+        ("LEAF_BROKER_STORE", "broker_run_admissions_state_allowed", "queued"),
+        ("LEAF_BROKER_STORE", "broker_aps_slots_state_allowed", "expired"),
+        ("LEAF_BROKER_STORE", "broker_admission_resolution_allowed", "ignored"),
+        ("LEAF_DRAWING_STORE", "drawing_store_versions_state_check", "deleted"),
+        ("LEAF_UPLOAD_STORE", "drawing_upload_attempts_status_check", "paused"),
+        ("LEAF_UPLOAD_STORE", "drawing_purge_receipts_status_check", "pending"),
+    ],
+)
+def test_catalog_contract_rejects_widened_state_allowlists(
+    selector, name, extra_value,
+):
+    environ = {selector: "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    row = next(
+        item for item in rows["constraints"] if item["conname"] == name
+    )
+    row["definition"] = row["definition"].replace(
+        "])", f", '{extra_value}'])", 1,
+    )
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert f"{name}:definition-mismatch" in errors["invalid_constraints"]
+
+
+def test_catalog_contract_accepts_postgres_text_array_casts():
+    environ = {"LEAF_BROKER_STORE": "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    name = "broker_run_admissions_state_allowed"
+    row = next(
+        item for item in rows["constraints"] if item["conname"] == name
+    )
+    row["definition"] = (
+        "CHECK ((state = ANY (ARRAY['leased'::text, 'executing'::text, "
+        "'terminal'::text])))"
+    )
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert f"{name}:definition-mismatch" not in errors["invalid_constraints"]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "rejected"),
+    [("O", False), ("A", False), ("D", True), ("R", True)],
+)
+def test_catalog_contract_pins_trigger_enable_modes(enabled, rejected):
+    environ = {"LEAF_BROKER_STORE": "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    name = "broker_usage_ledger_immutable"
+    row = next(item for item in rows["triggers"] if item["tgname"] == name)
+    row["enabled"] = enabled
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert (f"{name}:disabled" in errors["invalid_triggers"]) is rejected
+
+
+@pytest.mark.parametrize(
     ("field", "value", "message"),
     [
         ("missing_migrations", ["0007_missing.sql"], "missing migrations"),
