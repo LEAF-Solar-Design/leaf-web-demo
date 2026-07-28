@@ -74,7 +74,17 @@ def test_reconciliation_digest_is_order_stable_and_data_sensitive() -> None:
     assert RECONCILE.authority_digest(first) != RECONCILE.authority_digest(second)
 
 
-def test_reconciliation_source_is_read_only_and_target_is_non_destructive() -> None:
+def test_reconciliation_source_writes_are_schema_init_only() -> None:
+    """The source contract, updated with the live 2026-07-28 activation fix.
+
+    The script now runs the app's own idempotent schema initialization and
+    guarded legacy migrations on the SQLite source before snapshotting
+    (docs/POSTGRES-CUTOVER.md discloses this), because a never-touched or
+    pre-migration store otherwise fails as "incomplete" and an unmigrated
+    legacy store could be under-read. The SNAPSHOT itself must stay
+    read-only, and the script must contain no destructive SQL of its own;
+    the only sanctioned write path is SQLiteCustomizationStore.initialize().
+    """
     source = RECONCILE_PATH.read_text(encoding="utf-8")
     assert "?mode=ro" in source
     assert "DELETE FROM" not in source
@@ -82,6 +92,11 @@ def test_reconciliation_source_is_read_only_and_target_is_non_destructive() -> N
     assert "DROP TABLE" not in source
     assert "nonempty and differs" in source
     assert "pg_advisory_xact_lock" in source
+    assert "SQLiteCustomizationStore" in source
+    assert ".initialize()" in source
+    # The ensure step must run before the snapshot inside reconcile().
+    body = source[source.index("def reconcile(") :]
+    assert body.index("_ensure_source_schema(") < body.index("_sqlite_snapshot(")
 
 
 def test_inventory_declares_postgres_selector_backfill_and_parity() -> None:

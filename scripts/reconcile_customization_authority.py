@@ -94,6 +94,29 @@ def authority_counts(
     return {table: len(snapshot.get(table, ())) for table in TABLE_COLUMNS}
 
 
+def _ensure_source_schema(path: Path) -> None:
+    """Run the app's own idempotent schema init and migrations on the source.
+
+    ``SQLiteCustomizationStore`` creates its tables lazily and carries guarded
+    legacy migrations (``initialize()`` is CREATE TABLE IF NOT EXISTS plus the
+    publication-request and confirmation-binding migrations), so a store that
+    was never touched, or that predates a migration, legitimately lacks
+    tables. Snapshotting such a store without the app's migration would
+    misread legacy rows, and refusing outright (the prior behavior) blocked
+    authored-execution activation on every environment whose store had simply
+    never been used ("SQLite customization source is incomplete", observed
+    live on staging 2026-07-28). Initializing first is therefore the only
+    correct read, in every mode; it also creates the file for a brand-new
+    environment, which then snapshots as complete-and-empty.
+    """
+    server_dir = str(ROOT / "server")
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+    from customization_store import SQLiteCustomizationStore
+
+    SQLiteCustomizationStore(path).initialize()
+
+
 def _sqlite_snapshot(path: Path) -> dict[str, list[dict[str, Any]]]:
     resolved = path.resolve(strict=True)
     if resolved.is_symlink() or not resolved.is_file():
@@ -154,6 +177,7 @@ def _insert_snapshot(
 
 
 def reconcile(*, sqlite_path: Path, mode: str) -> dict[str, Any]:
+    _ensure_source_schema(sqlite_path)
     source = _sqlite_snapshot(sqlite_path)
     source_digest = authority_digest(source)
     database = _platform_db()
