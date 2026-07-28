@@ -16,6 +16,7 @@
     "proof:guest": "playwright test --config playwright.guest.config.mjs",
     "proof:guest:managed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_unified_local_proof.ps1 -Mode guest",
     "proof:prod": "playwright test --config playwright.prod.config.mjs",
+    "proof:staging": "playwright test --config playwright.staging.config.mjs",
     "check:unified-pins": "node scripts/check_unified_behavior_pins.mjs",
     "proof:cat:api": "node e2e/catProofApi.mjs",
     "check:customization": "node scripts/check_customization.mjs",

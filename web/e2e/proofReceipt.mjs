@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 const EVIDENCE_TIERS = new Set(['contract', 'local-e2e', 'staging'])
-const CAPABILITY_ID = /^[A-Z]{2}-\d{2}$/
+const CAPABILITY_ID = /^[A-Z]{2}-\d{2}[A-Z]?$/
 
 export function makeProofReceipt(input) {
   if (!Array.isArray(input.capability_ids) || input.capability_ids.length === 0) {
