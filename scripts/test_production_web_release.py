@@ -256,10 +256,17 @@ def test_workflow_is_protected_prebuilt_two_phase_and_receipted():
         ROOT / ".github" / "workflows" / "deploy-platform-web-production.yml"
     ).read_text(encoding="utf-8")
     for expected in (
-        "environment: vercel-production",
         "refs/heads/main",
         "actions: read",
+        "issues: read",
         "collaborators/$OPERATOR/permission",
+        "collaborators/$APPROVER/permission",
+        "approve-vercel-production:",
+        '[ "$APPROVER" != "$ACTOR" ]',
+        '[ "$APPROVER" != "$TRIGGERING_ACTOR" ]',
+        "age > 86400",
+        "VERCEL_AUTOMATION_BYPASS_SECRET",
+        "x-vercel-protection-bypass:",
         "production-handoff-candidate-$SOURCE_SHA-attempt-$HANDOFF_RUN_ATTEMPT",
         "web-dist-$SOURCE_SHA-attempt-$RELEASE_RUN_ATTEMPT",
         "vercel deploy --prebuilt --prod --skip-domain",
@@ -273,6 +280,9 @@ def test_workflow_is_protected_prebuilt_two_phase_and_receipted():
         "production-web-deployment-${{ inputs.source_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}",
     ):
         assert expected in workflow
+    assert "environment: vercel-production" not in workflow
+    job_env = workflow.split("    steps:", 1)[0]
+    assert "runner.temp" not in job_env
     for forbidden in ("npm run build", "aws ", "ecs ", "ecr ", "secretsmanager"):
         assert forbidden not in workflow.lower()
     assert workflow.count("actions/upload-artifact@v4") == 1

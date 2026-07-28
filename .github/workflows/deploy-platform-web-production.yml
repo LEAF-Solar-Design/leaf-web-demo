@@ -27,6 +27,14 @@ on:
         description: "Reviewed SHA-256 from the accepted staging supply set."
         required: true
         type: string
+      approval_issue_number:
+        description: "Open issue containing the independent exact approval comment."
+        required: true
+        type: string
+      approval_comment_id:
+        description: "Exact independent approval comment ID, valid for 24 hours."
+        required: true
+        type: string
       confirmation:
         description: "Exact project, source, evidence, artifact, and workflow confirmation."
         required: true
@@ -35,6 +43,7 @@ on:
 permissions:
   actions: read
   contents: read
+  issues: read
 
 concurrency:
   group: deploy-platform-web-production
@@ -42,7 +51,6 @@ concurrency:
 
 jobs:
   deploy:
-    environment: vercel-production
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -56,13 +64,27 @@ jobs:
       HANDOFF_RUN_ID: ${{ inputs.handoff_workflow_run_id }}
       HANDOFF_RUN_ATTEMPT: ${{ inputs.handoff_run_attempt }}
       EXPECTED_WEB_SHA256: ${{ inputs.expected_web_artifact_sha256 }}
-      RUN_DIR: ${{ runner.temp }}/leaf-production-web-${{ github.run_id }}-attempt-${{ github.run_attempt }}
 
     steps:
+      - name: Initialize exact run-owned directory
+        env:
+          RUN_DIR: ${{ runner.temp }}/leaf-production-web-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [ -n "${RUNNER_TEMP:-}" ] && [ "$RUNNER_TEMP" != "/" ] && [ -d "$RUNNER_TEMP" ]
+          TEMP_ROOT=$(cd -- "$RUNNER_TEMP" && pwd -P)
+          EXPECTED="$TEMP_ROOT/leaf-production-web-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
+          [ "$RUN_DIR" = "$EXPECTED" ]
+          mkdir -m 700 -- "$RUN_DIR"
+          echo "RUN_DIR=$RUN_DIR" >> "$GITHUB_ENV"
+
       - name: Validate protected production request and operator
         env:
           GH_TOKEN: ${{ github.token }}
           CONFIRMATION: ${{ inputs.confirmation }}
+          APPROVAL_ISSUE_NUMBER: ${{ inputs.approval_issue_number }}
+          APPROVAL_COMMENT_ID: ${{ inputs.approval_comment_id }}
           ACTOR: ${{ github.actor }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
@@ -74,13 +96,13 @@ jobs:
           [[ "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ]]
           [[ "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           [[ "$EXPECTED_WEB_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$APPROVAL_ISSUE_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "$APPROVAL_COMMENT_ID" =~ ^[1-9][0-9]{5,19}$ ]]
           EXPECTED_CONFIRMATION="deploy-platform-web-production:$VERCEL_PROJECT_ID:$SOURCE_SHA:$RELEASE_RUN_ID:$RELEASE_RUN_ATTEMPT:$HANDOFF_RUN_ID:$HANDOFF_RUN_ATTEMPT:$EXPECTED_WEB_SHA256:$GITHUB_SHA"
           [ "$CONFIRMATION" = "$EXPECTED_CONFIRMATION" ] || {
             echo "::error::Production web deployment requires confirmation=$EXPECTED_CONFIRMATION"
             exit 1
           }
-          umask 077
-          mkdir -m 700 -- "$RUN_DIR"
           for OPERATOR in "$ACTOR" "$TRIGGERING_ACTOR"; do
             [[ "$OPERATOR" =~ ^[A-Za-z0-9-]{1,39}$ ]]
             gh api "repos/$GITHUB_REPOSITORY/collaborators/$OPERATOR/permission" \
@@ -88,6 +110,36 @@ jobs:
             jq -e '.permission == "admin" or .permission == "maintain" or .permission == "write"' \
               "$RUN_DIR/operator-$OPERATOR.json" >/dev/null
           done
+          EXPECTED_APPROVAL="approve-vercel-production:$VERCEL_PROJECT_ID:$SOURCE_SHA:$RELEASE_RUN_ID:$RELEASE_RUN_ATTEMPT:$HANDOFF_RUN_ID:$HANDOFF_RUN_ATTEMPT:$EXPECTED_WEB_SHA256:$GITHUB_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/issues/$APPROVAL_ISSUE_NUMBER" \
+            > "$RUN_DIR/approval-issue.json"
+          jq -e '.state == "open" and .pull_request == null' \
+            "$RUN_DIR/approval-issue.json" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/issues/comments/$APPROVAL_COMMENT_ID" \
+            > "$RUN_DIR/approval-comment.json"
+          jq -e --arg body "$EXPECTED_APPROVAL" --arg issue "/issues/$APPROVAL_ISSUE_NUMBER" '
+            .body == $body and (.issue_url | endswith($issue))
+            and (.user.login | type == "string" and test("^[A-Za-z0-9-]{1,39}$"))
+          ' "$RUN_DIR/approval-comment.json" >/dev/null
+          APPROVER=$(jq -er '.user.login' "$RUN_DIR/approval-comment.json")
+          [ "$APPROVER" != "$ACTOR" ]
+          [ "$APPROVER" != "$TRIGGERING_ACTOR" ]
+          gh api "repos/$GITHUB_REPOSITORY/collaborators/$APPROVER/permission" \
+            > "$RUN_DIR/approver-permission.json"
+          jq -e '.permission == "admin" or .permission == "maintain" or .permission == "write"' \
+            "$RUN_DIR/approver-permission.json" >/dev/null
+          python - "$RUN_DIR/approval-comment.json" <<'PY'
+          import datetime as dt
+          import json
+          import sys
+
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          created = dt.datetime.fromisoformat(value["created_at"].replace("Z", "+00:00"))
+          now = dt.datetime.now(dt.timezone.utc)
+          age = (now - created).total_seconds()
+          if age < -300 or age > 86400:
+              raise SystemExit("independent approval is outside the 24-hour window")
+          PY
 
       - name: Check out the protected workflow commit
         uses: actions/checkout@v4
@@ -200,7 +252,7 @@ jobs:
 
       - name: Deploy one unaliased production candidate
         id: deploy_candidate
-        working-directory: ${{ env.RUN_DIR }}/deploy-root
+        working-directory: ${{ runner.temp }}/leaf-production-web-${{ github.run_id }}-attempt-${{ github.run_attempt }}/deploy-root
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
@@ -235,28 +287,37 @@ jobs:
 
       - name: Verify the immutable candidate before promotion
         id: verify_candidate
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: |
           set -euo pipefail
+          [ -n "$VERCEL_AUTOMATION_BYPASS_SECRET" ]
           BASE=$(cat "$RUN_DIR/deployment-url.txt")
           ENTRY=$(jq -er '.entry_asset' "$RUN_DIR/prepared.json")
-          curl --fail --silent --show-error --retry 3 --retry-all-errors "$BASE/" \
+          curl --fail --silent --show-error --retry 3 --retry-all-errors \
+            -H "x-vercel-protection-bypass: $VERCEL_AUTOMATION_BYPASS_SECRET" "$BASE/" \
             > "$RUN_DIR/candidate-index.html"
           grep -Fq -- "$ENTRY" "$RUN_DIR/candidate-index.html"
           for route in / /app /try /sheets /sheets/01; do
-            [ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$BASE$route")" = 200 ]
+            [ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              -H "x-vercel-protection-bypass: $VERCEL_AUTOMATION_BYPASS_SECRET" "$BASE$route")" = 200 ]
           done
-          curl --fail --silent --show-error "$BASE/health.json" > "$RUN_DIR/candidate-health.json"
+          curl --fail --silent --show-error \
+            -H "x-vercel-protection-bypass: $VERCEL_AUTOMATION_BYPASS_SECRET" \
+            "$BASE/health.json" > "$RUN_DIR/candidate-health.json"
           jq -e --arg source "$SOURCE_SHA" '
             . == {ok:true,service:"leaf-platform-web",component:"frontend",source_sha:$source}
           ' "$RUN_DIR/candidate-health.json" >/dev/null
           API_STATUS=$(curl --silent --show-error --output "$RUN_DIR/candidate-api.txt" \
-            --write-out '%{http_code}' "$BASE/api/health")
+            --write-out '%{http_code}' \
+            -H "x-vercel-protection-bypass: $VERCEL_AUTOMATION_BYPASS_SECRET" \
+            "$BASE/api/health")
           [ "$API_STATUS" = 404 ]
           ! grep -Eiq '<!doctype html|<html' "$RUN_DIR/candidate-api.txt"
 
       - name: Promote the verified immutable deployment
         id: promote
-        working-directory: ${{ env.RUN_DIR }}/deploy-root
+        working-directory: ${{ runner.temp }}/leaf-production-web-${{ github.run_id }}-attempt-${{ github.run_attempt }}/deploy-root
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
@@ -335,7 +396,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: production-web-deployment-${{ inputs.source_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: ${{ env.RUN_DIR }}/production-web-deployment-receipt.json
+          path: ${{ runner.temp }}/leaf-production-web-${{ github.run_id }}-attempt-${{ github.run_attempt }}/production-web-deployment-receipt.json
           if-no-files-found: error
           retention-days: 90
           overwrite: false
@@ -348,7 +409,7 @@ jobs:
            steps.verify_stable.outcome != 'success' ||
            steps.receipt.outcome != 'success' ||
            steps.upload_receipt.outcome != 'success')
-        working-directory: ${{ env.RUN_DIR }}/deploy-root
+        working-directory: ${{ runner.temp }}/leaf-production-web-${{ github.run_id }}-attempt-${{ github.run_attempt }}/deploy-root
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |

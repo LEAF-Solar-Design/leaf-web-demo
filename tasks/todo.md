@@ -254,8 +254,9 @@ Risks:
   explicit allowlisted probe fails production startup.
 - The live staging services currently use images from several source commits.
 - Cloud mutation must use a named federated identity, never the root identity.
-- Vercel production publication must require the protected environment token and
-  must never accept a branch, preview, or unverified build artifact.
+- Vercel production publication must require an exact independent issue approval,
+  repository-scoped Vercel secrets, and must never accept a branch, preview, or
+  unverified build artifact.
 
 # Staging Team and Enterprise subscription mounts
 

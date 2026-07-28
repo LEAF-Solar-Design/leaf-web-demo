@@ -163,11 +163,17 @@ reviewed workflows and receipts.
 ## Protected production web publication
 
 After an executed staging receipt produces a production handoff candidate, use
-`deploy-platform-web-production.yml` from `main`. The `vercel-production`
-environment must hold `VERCEL_TOKEN` and must require its production reviewers.
-The dispatcher supplies the exact source SHA, release and handoff run IDs and
-attempts, reviewed web artifact SHA-256, and the confirmation string printed by
-the workflow contract.
+`deploy-platform-web-production.yml` from `main`. Store `VERCEL_TOKEN` and
+`VERCEL_AUTOMATION_BYPASS_SECRET` as repository Actions secrets. The dispatcher
+supplies the exact source SHA, release and handoff run IDs and attempts,
+reviewed web artifact SHA-256, and the confirmation string printed by the
+workflow contract.
+
+Before dispatch, a different collaborator with write access must add the exact
+approval string to an open repository issue. Supply that issue number and exact
+comment ID. The comment author cannot be the actor or triggering actor, and the
+comment expires after 24 hours. This issue gate provides independent approval
+on private repositories whose GitHub plan cannot enforce environment reviewers.
 
 The workflow downloads only the attempt-bound handoff and `web-dist` artifacts.
 It checks their GitHub workflow identity, successful conclusion, protected
@@ -177,8 +183,10 @@ terminal 404 route keeps `/api/*` from falling through to the SPA.
 
 The candidate is first deployed without assigning production domains. The
 workflow verifies the immutable URL, source health document, entry asset, SPA
-routes, and terminal API boundary before promotion. It then verifies the stable
-project URL and uploads an attempt-bound `leaf.production-web-deployment.v1`
+routes, and terminal API boundary before promotion. Candidate probes use the
+Vercel automation bypass secret so Deployment Protection stays enabled. It then
+verifies the stable project URL and uploads an attempt-bound
+`leaf.production-web-deployment.v1`
 receipt. If promotion or any later required gate fails, it restores the exact
 baseline deployment ID. This receipt proves the Vercel half of the production
 identity. The backend identity remains four OCI digests.
