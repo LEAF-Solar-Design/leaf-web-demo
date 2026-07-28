@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/instant-execution/error.v1.schema.json",
+  "title": "Leaf instant execution error v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "message", "retryable", "execution_disposition"],
+  "properties": {
+    "code": {"enum": ["INVALID_CONTRACT", "FORBIDDEN_PAYLOAD_FIELD", "SESSION_EXPIRED", "SESSION_BINDING_MISMATCH", "CATALOG_DIGEST_MISMATCH", "EXECUTION_CLASS_DENIED", "CAPABILITY_DENIED", "CODE_DIGEST_MISMATCH", "ARTIFACT_DIGEST_MISMATCH", "ARTIFACT_UNAVAILABLE", "INVALID_DRAWING_CONTEXT", "DEADLINE_EXCEEDED", "EXECUTOR_NOT_READY", "REDIS_UNAVAILABLE", "CONTROL_PLANE_UNAVAILABLE", "INVOCATION_CONFLICT", "CANCELLED", "TOOL_FAILED", "INTERNAL"]},
+    "message": {"type": "string", "minLength": 1, "maxLength": 512},
+    "retryable": {"type": "boolean"},
+    "execution_disposition": {"enum": ["not_started", "unknown", "completed"]},
+    "details": {"type": "object", "additionalProperties": {"type": ["string", "number", "integer", "boolean", "null"]}, "maxProperties": 16}
+  },
+  "allOf": [
+    {"if": {"properties": {"code": {"enum": ["REDIS_UNAVAILABLE", "CONTROL_PLANE_UNAVAILABLE"]}}}, "then": {"properties": {"execution_disposition": {"const": "not_started"}}}}
+  ]
+}

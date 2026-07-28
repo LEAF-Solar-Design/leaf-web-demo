@@ -462,7 +462,10 @@ import type { ConverseRunner } from "./converse.js";
  * dependency-free port; re-exported here so callers can import everything
  * from `ports/index.js` like the other four ports.
  */
-export type { StopReason, HarnessTurnEvent, ConverseTurnInput, ConverseRunner, ConverseRunOptions, WireAgentGrant } from "./converse.js";
+export type {
+  StopReason, HarnessTurnEvent, ConverseTurnInput, ConverseRunner, ConverseRunOptions,
+  WireAgentGrant, InstantDrawingContext, InstantSessionAssignment,
+} from "./converse.js";
 
 // --------------------------------------------------------------------------- //
 // Conversational spine ports (section 18 / converse lane — PR #5). PARKED at
@@ -619,7 +622,54 @@ export interface CapabilityEntry {
   tool_manifest_sha256?: string;
   catalog_commit?: string;
   effective_catalog_digest?: string;
+  execution_class?: "instant" | "batch";
+  runtime?: string;
+  limits?: Record<string, unknown>;
+  artifact_digest?: string;
+  batch_fallback?: boolean;
   [k: string]: unknown;
+}
+
+export interface InstantInvocation {
+  contract: "leaf.instant-execution/v1";
+  invocation_id: string;
+  tenant_id: string;
+  session_id: string;
+  assignment_id: string;
+  binding_epoch: number;
+  lease_id: string;
+  effective_catalog_digest: string;
+  code_digest: string;
+  artifact_digest: string;
+  deadline_at: string;
+  capability: { capability_id: string; tool_id: string; tool_version: string };
+  params: Record<string, unknown>;
+  drawing_context: import("./converse.js").InstantDrawingContext;
+}
+
+export interface InstantInvocationResponse {
+  contract: "leaf.instant-execution/v1";
+  invocation_id: string;
+  tenant_id: string;
+  session_id: string;
+  status: "succeeded" | "failed" | "cancelled";
+  code_digest: string;
+  completed_at: string;
+  result?: Record<string, unknown>;
+  error?: Record<string, unknown>;
+}
+
+/** Direct harness-to-executor RPC. It has no control-plane or app back-edge methods. */
+export interface InstantExecutorClient {
+  invoke(
+    assignment: import("./converse.js").InstantSessionAssignment,
+    invocation: InstantInvocation,
+    opts?: { signal?: AbortSignal },
+  ): Promise<InstantInvocationResponse>;
+  cancel?(
+    assignment: import("./converse.js").InstantSessionAssignment,
+    invocation: Pick<InstantInvocation, "invocation_id" | "tenant_id" | "session_id">,
+  ): Promise<Record<string, unknown>>;
 }
 
 export interface SubmitRunRequest {

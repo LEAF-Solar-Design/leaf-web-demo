@@ -1,0 +1,79 @@
+{
+  "contract_version": "executor-bench.v1",
+  "purpose": "Measurable latency and capacity gate for a warm executor pool.",
+  "result_schema": "result-schema.json",
+  "percentile_rule": {
+    "method": "nearest_rank",
+    "unit": "milliseconds",
+    "successful_samples_only": true,
+    "formula": "sorted_samples[max(ceil(percentile / 100 * N), 1) - 1]"
+  },
+  "shared_requirements": {
+    "required_result_context": [
+      "environment",
+      "source_sha",
+      "host_shape",
+      "concurrency",
+      "payload_bytes",
+      "code_digest",
+      "warm_cold_classification",
+      "sample_count",
+      "failures"
+    ],
+    "instant_path": {
+      "docker_start_delta_must_equal": 0,
+      "forbidden_per_call_dependencies": ["redis", "s3", "docker_ecs", "broker", "database"],
+      "proof_requirements": ["instrumentation", "fail_fast_sentinel", "request_trace"]
+    }
+  },
+  "scenarios": [
+    {
+      "id": "prepare_before_first_call",
+      "classification": "cold_prepare",
+      "description": "Assign an executor and validate and load a code digest before its first invocation.",
+      "required_events_in_order": ["assignment_completed", "code_validation_completed", "code_loaded", "first_call_started"],
+      "acceptance": {"preparation_before_first_call": true, "max_failures": 0}
+    },
+    {
+      "id": "warm_invocation_startup",
+      "classification": "warm",
+      "description": "Measure executor dispatch to user-code entry with a resident compatible executor.",
+      "metric": "warm_invocation_startup_ms",
+      "acceptance": {"p95_lt_ms": 10, "max_failures": 0}
+    },
+    {
+      "id": "trivial_cloud_rpc",
+      "classification": "warm",
+      "description": "Measure caller request through cloud network to response for a trivial tool.",
+      "metric": "trivial_cloud_rpc_ms",
+      "report_percentiles": [50, 95, 99],
+      "expected_planning_range_ms": {"min": 20, "max": 100},
+      "acceptance": {"p99_lt_ms": 100, "max_failures": 0}
+    },
+    {
+      "id": "concurrent_sessions_per_host",
+      "classification": "warm",
+      "description": "Step isolated sessions on one host through planned concurrency levels.",
+      "required_concurrency_levels": [1, 2, 4, 6, 8],
+      "acceptance": {"no_isolation_breach": true, "max_failures": 0}
+    },
+    {
+      "id": "code_reload",
+      "classification": "mixed",
+      "description": "Load a replacement code digest while existing sessions complete safely.",
+      "acceptance": {"no_stale_digest_execution": true, "recovery_reported": true, "max_failures": 0}
+    },
+    {
+      "id": "host_drain",
+      "classification": "mixed",
+      "description": "Drain a host without new assignments and report each active session terminal disposition.",
+      "acceptance": {"no_assignment_after_drain": true, "all_sessions_terminal": true, "max_failures": 0}
+    },
+    {
+      "id": "batch_handoff",
+      "classification": "batch",
+      "description": "Hand heavy work to a durable batch lane outside the instant path.",
+      "acceptance": {"http_status": 202, "returns_job_id": true, "inline_terminal_result": false, "max_failures": 0}
+    }
+  ]
+}

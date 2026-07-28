@@ -1,0 +1,4 @@
+cryptography>=42,<46
+gunicorn>=22,<24
+psycopg[binary]>=3.2,<4
+redis>=5,<7

@@ -1,0 +1,27 @@
+{
+  "contract_version": "executor-bench.v1",
+  "evidence_kind": "synthetic_fixture",
+  "synthetic": true,
+  "notice": "Deterministic schema fixture only. These values are not live performance evidence and cannot pass an SLO.",
+  "run": {
+    "environment": "synthetic-local",
+    "source_sha": "0000000",
+    "host_shape": {"provider": "synthetic", "instance_type": "fixture", "cpu": 4, "memory_mib": 8192},
+    "concurrency": 1,
+    "payload_bytes": 32,
+    "code_digest": "sha256:synthetic-fixture",
+    "warm_cold_classification": "mixed",
+    "sample_count": 3,
+    "failures": []
+  },
+  "scenario_results": [
+    {"scenario_id": "prepare_before_first_call", "sample_count": 3, "failures": [], "latency_samples_ms": [1, 2, 3], "percentiles_ms": {"p50": 2, "p95": 3, "p99": 3}, "acceptance": {"verdict": "NOT_EVALUATED"}, "preparation_before_first_call": true, "event_timeline": [{"event": "assignment_completed", "monotonic_ms": 1}, {"event": "code_validation_completed", "monotonic_ms": 2}, {"event": "code_loaded", "monotonic_ms": 3}, {"event": "first_call_started", "monotonic_ms": 4}], "instant_path_proof": {"applicable": false, "docker_start_delta": 0, "dependency_operations": {}, "sentinel_test_passed": false, "trace_request_id": "synthetic-prepare"}},
+    {"scenario_id": "warm_invocation_startup", "sample_count": 3, "failures": [], "latency_samples_ms": [4, 5, 6], "percentiles_ms": {"p50": 5, "p95": 6, "p99": 6}, "acceptance": {"verdict": "NOT_EVALUATED"}, "instant_path_proof": {"applicable": true, "docker_start_delta": 0, "dependency_operations": {"redis": 0, "s3": 0, "docker_ecs": 0, "broker": 0, "database": 0}, "sentinel_test_passed": true, "trace_request_id": "synthetic-warm"}},
+    {"scenario_id": "trivial_cloud_rpc", "sample_count": 3, "failures": [], "latency_samples_ms": [25, 40, 60], "percentiles_ms": {"p50": 40, "p95": 60, "p99": 60}, "acceptance": {"verdict": "NOT_EVALUATED"}, "instant_path_proof": {"applicable": true, "docker_start_delta": 0, "dependency_operations": {"redis": 0, "s3": 0, "docker_ecs": 0, "broker": 0, "database": 0}, "sentinel_test_passed": true, "trace_request_id": "synthetic-rpc"}},
+    {"scenario_id": "concurrent_sessions_per_host", "sample_count": 3, "failures": [], "latency_samples_ms": [7, 8, 9], "percentiles_ms": {"p50": 8, "p95": 9, "p99": 9}, "acceptance": {"verdict": "NOT_EVALUATED"}, "isolation_breach": false, "tested_concurrency_levels": [1, 2, 4, 6, 8], "instant_path_proof": {"applicable": true, "docker_start_delta": 0, "dependency_operations": {"redis": 0, "s3": 0, "docker_ecs": 0, "broker": 0, "database": 0}, "sentinel_test_passed": true, "trace_request_id": "synthetic-concurrency"}},
+    {"scenario_id": "code_reload", "sample_count": 3, "failures": [], "latency_samples_ms": [10, 11, 12], "percentiles_ms": {"p50": 11, "p95": 12, "p99": 12}, "acceptance": {"verdict": "NOT_EVALUATED"}, "stale_digest_execution": false, "recovery_reported": true, "instant_path_proof": {"applicable": false, "docker_start_delta": 0, "dependency_operations": {}, "sentinel_test_passed": false, "trace_request_id": "synthetic-reload"}},
+    {"scenario_id": "host_drain", "sample_count": 3, "failures": [], "latency_samples_ms": [13, 14, 15], "percentiles_ms": {"p50": 14, "p95": 15, "p99": 15}, "acceptance": {"verdict": "NOT_EVALUATED"}, "assignment_after_drain": false, "all_sessions_terminal": true, "instant_path_proof": {"applicable": false, "docker_start_delta": 0, "dependency_operations": {}, "sentinel_test_passed": false, "trace_request_id": "synthetic-drain"}},
+    {"scenario_id": "batch_handoff", "sample_count": 3, "failures": [], "latency_samples_ms": [16, 17, 18], "percentiles_ms": {"p50": 17, "p95": 18, "p99": 18}, "acceptance": {"verdict": "NOT_EVALUATED"}, "http_status": 202, "job_id": "synthetic-job-0001", "inline_terminal_result": false, "instant_path_proof": {"applicable": false, "docker_start_delta": 0, "dependency_operations": {}, "sentinel_test_passed": false, "trace_request_id": "synthetic-batch"}}
+  ],
+  "overall_acceptance": {"verdict": "NOT_EVALUATED"}
+}

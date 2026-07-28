@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/instant-execution/usage-record.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "usage_id", "invocation_id", "attempt", "tenant_id", "session_id", "execution_class", "effective_catalog_digest", "code_digest", "artifact_digest", "status", "recorded_at", "wall_ms", "cpu_ms", "output_bytes", "tool_calls"],
+  "properties": {
+    "contract": {"const": "leaf.instant-execution/v1"}, "usage_id": {"type": "string", "pattern": "^usage:[0-9a-fA-F-]{36}:[1-9][0-9]*$"}, "invocation_id": {"type": "string", "format": "uuid"}, "attempt": {"type": "integer", "minimum": 1}, "tenant_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,127}$"}, "session_id": {"type": "string", "format": "uuid"}, "execution_class": {"const": "instant"}, "effective_catalog_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "code_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "status": {"enum": ["succeeded", "failed", "cancelled", "rejected"]}, "recorded_at": {"type": "string", "format": "date-time"}, "wall_ms": {"type": "integer", "minimum": 0}, "cpu_ms": {"type": "integer", "minimum": 0}, "output_bytes": {"type": "integer", "minimum": 0}, "tool_calls": {"type": "integer", "minimum": 0}
+  }
+}

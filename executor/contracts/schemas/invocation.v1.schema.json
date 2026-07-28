@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/instant-execution/invocation.v1.schema.json",
+  "title": "Leaf instant execution invocation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "invocation_id", "tenant_id", "session_id", "assignment_id", "binding_epoch", "lease_id", "effective_catalog_digest", "code_digest", "artifact_digest", "deadline_at", "capability", "params", "drawing_context"],
+  "properties": {
+    "contract": {"const": "leaf.instant-execution/v1"},
+    "invocation_id": {"type": "string", "format": "uuid"},
+    "tenant_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,127}$"},
+    "session_id": {"type": "string", "format": "uuid"},
+    "assignment_id": {"type": "string", "format": "uuid"},
+    "binding_epoch": {"type": "integer", "minimum": 1},
+    "lease_id": {"type": "string", "format": "uuid"},
+    "effective_catalog_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "code_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "deadline_at": {"type": "string", "format": "date-time"},
+    "capability": {"type": "object", "additionalProperties": false, "required": ["capability_id", "tool_id", "tool_version"], "properties": {"capability_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"}, "tool_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{2,127}$"}, "tool_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"}}},
+    "params": {"type": "object", "maxProperties": 128},
+    "drawing_context": {"type": "object", "additionalProperties": false, "required": ["drawing_id", "version_id", "content_digest", "geometry_ref"], "properties": {"drawing_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,127}$"}, "version_id": {"type": "string", "format": "uuid"}, "content_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "geometry_ref": {"type": "string", "pattern": "^drawing-context:[a-zA-Z0-9._:-]{8,256}$"}}}
+  }
+}

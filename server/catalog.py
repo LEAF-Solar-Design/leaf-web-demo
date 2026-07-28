@@ -49,6 +49,10 @@ def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any]
 
 
 def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
+    effective_digest = tool.get("effective_catalog_digest")
+    if (tool.get("execution_class") == "instant" and isinstance(effective_digest, str)
+            and len(effective_digest) == 64 and not effective_digest.startswith("sha256:")):
+        effective_digest = "sha256:" + effective_digest
     return {
         "name": tool.get("name"),
         "version": tool.get("version", "1.0.0"),
@@ -61,7 +65,14 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         "catalog_digest": tool.get("catalog_digest"),
         "tool_manifest_sha256": tool.get("tool_manifest_sha256"),
         "catalog_commit": tool.get("catalog_commit"),
-        "effective_catalog_digest": tool.get("effective_catalog_digest"),
+        "effective_catalog_digest": effective_digest,
+        # Execution routing is catalog authority. The harness must never infer
+        # instant eligibility from drawing.read or silently switch lanes.
+        "execution_class": tool.get("execution_class", "batch"),
+        "runtime": tool.get("runtime"),
+        "limits": tool.get("limits"),
+        "artifact_digest": tool.get("artifact_digest"),
+        "batch_fallback": bool(tool.get("batch_fallback", False)),
     }
 
 

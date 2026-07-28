@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/instant-execution/session-assignment.v1.schema.json",
+  "title": "Leaf instant execution session assignment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "assignment_id", "tenant_id", "session_id", "executor_id", "executor_endpoint", "binding_epoch", "lease_id", "lease_token", "execution_class", "effective_catalog_digest", "code_digest", "artifact_digest", "drawing_context", "issued_at", "expires_at"],
+  "properties": {
+    "contract": {"const": "leaf.instant-execution/v1"},
+    "assignment_id": {"type": "string", "format": "uuid"},
+    "tenant_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,127}$"},
+    "session_id": {"type": "string", "format": "uuid"},
+    "executor_id": {"type": "string", "pattern": "^executor-[a-zA-Z0-9-]{3,127}$"},
+    "executor_endpoint": {"type": "string", "pattern": "^(?:https://|http://(?:127\\.0\\.0\\.1|localhost)(?::|/))", "maxLength": 512},
+    "binding_epoch": {"type": "integer", "minimum": 1},
+    "lease_id": {"type": "string", "format": "uuid"},
+    "lease_token": {"type": "string", "minLength": 32, "maxLength": 8192},
+    "execution_class": {"const": "instant"},
+    "effective_catalog_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "code_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "drawing_context": {"type": "object", "additionalProperties": false, "required": ["drawing_id", "version_id", "content_digest", "geometry_ref"], "properties": {"drawing_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,127}$"}, "version_id": {"type": "string", "format": "uuid"}, "content_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "geometry_ref": {"type": "string", "pattern": "^drawing-context:[a-zA-Z0-9._:-]{8,256}$"}}},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"}
+  }
+}

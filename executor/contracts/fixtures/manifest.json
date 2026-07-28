@@ -1,0 +1,6 @@
+{
+  "fixtures": [
+    {"bundle": "valid/messages.json", "valid": true},
+    {"bundle": "invalid/messages.json", "valid": false}
+  ]
+}
