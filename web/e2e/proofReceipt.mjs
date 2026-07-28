@@ -25,14 +25,24 @@ function ledgerSubCases(capabilityId) {
     // Only genuine table lines count: the line must start with a pipe and be
     // OUTSIDE fenced code blocks, so a ``` example quoting a row can never
     // become a second match.
-    let inFence = false
+    // CommonMark-faithful fence tracking: a fence only CLOSES on the same
+    // marker character with at least the opener's length, so a four-backtick
+    // block containing ``` or ~~~ stays one block (round-6 finding: a naive
+    // toggle reopened early and counted a quoted row).
+    let openFence = null
     const matches = ledgerText.split(/\r?\n/)
       .filter((line) => {
-        if (/^\s*(```|~~~)/.test(line)) {
-          inFence = !inFence
+        const fence = line.match(/^\s*(`{3,}|~{3,})/)
+        if (fence) {
+          const marker = fence[1]
+          if (!openFence) {
+            openFence = marker
+          } else if (marker[0] === openFence[0] && marker.length >= openFence.length) {
+            openFence = null
+          }
           return false
         }
-        return !inFence && line.trimStart().startsWith('|')
+        return !openFence && line.trimStart().startsWith('|')
       })
       .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()))
       .filter((cells) => cells[0] === capabilityId)
