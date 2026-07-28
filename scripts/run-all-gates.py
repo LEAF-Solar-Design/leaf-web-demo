@@ -746,7 +746,7 @@ def build_suites() -> List[Suite]:
         # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
         # tree 2026-07-27.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 27),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 29),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
