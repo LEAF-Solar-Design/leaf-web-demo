@@ -148,6 +148,32 @@ test('rejects a staging receipt with multiple capability ids', () => {
   )
 })
 
+test('a granular behavior-pin row (4 cells) yields its single behavior as the sub-case set', () => {
+  // MO-02 lives in the ledger's granular table, not the main capability
+  // table; its sub-case set is exactly the one Behavior cell.
+  const receipt = makeProofReceipt({
+    ...stagingBaseInput,
+    capability_ids: ['MO-02'],
+    sub_cases: { proven: [], not_proven: ['No fill-mode snap under reduced motion'] },
+  })
+  assert.deepEqual(receipt.sub_cases.not_proven, ['No fill-mode snap under reduced motion'])
+  assert.equal(receipt.sub_cases.row_complete, false)
+})
+
+test('an id with no single unambiguous ledger row fails closed', () => {
+  // The round-4 reviewer reproduced first-row-wins with a duplicated row;
+  // the parser now requires EXACTLY one match across both tables (zero
+  // matches exercises the same rule).
+  assert.throws(
+    () => makeProofReceipt({
+      ...stagingBaseInput,
+      capability_ids: ['QQ-99'],
+      sub_cases: { proven: [], not_proven: ['anything'] },
+    }),
+    /exactly one row/,
+  )
+})
+
 test('requires every staging artifact to exist before writing the receipt', () => {
   const receiptDir = mkdtempSync(join(tmpdir(), 'proof-receipt-'))
   try {

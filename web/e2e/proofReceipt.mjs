@@ -19,13 +19,37 @@ function ledgerSubCases(capabilityId) {
   }
 
   if (!ledgerRows.has(capabilityId)) {
-    const row = ledgerText.split(/\r?\n/)
+    // Fail-closed row resolution: collect EVERY table row whose first cell is
+    // this id, across BOTH ledger tables. Exactly one match is required — a
+    // duplicated or wrapped row must throw, never silently win by position.
+    const matches = ledgerText.split(/\r?\n/)
       .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()))
-      .find((cells) => cells[0] === capabilityId)
-    if (!row || row.length !== 6 || row.some((cell) => !cell)) {
+      .filter((cells) => cells[0] === capabilityId)
+    if (matches.length !== 1) {
+      throw new Error(
+        `staging proof receipt ledger must contain exactly one row for ${capabilityId}, found ${matches.length}`,
+      )
+    }
+    const row = matches[0]
+    let subCases
+    if (row.length === 6) {
+      // Main capability table: | ID | Capability | Mechanism | Surface |
+      // STATUS | subcase, subcase, ... |
+      if (row.some((cell) => !cell)) {
+        throw new Error(`staging proof receipt ledger row is unparseable for ${capabilityId}`)
+      }
+      subCases = row.at(-1).split(',').map((subCase) => subCase.trim())
+    } else if (row.length === 4) {
+      // Granular behavior-pin table: | ID | Behavior | Initial status |
+      // Required proof |. A pin IS its single behavior — the sub-case set is
+      // exactly that one behavior string.
+      if (row.some((cell) => !cell)) {
+        throw new Error(`staging proof receipt ledger row is unparseable for ${capabilityId}`)
+      }
+      subCases = [row[1]]
+    } else {
       throw new Error(`staging proof receipt ledger row is missing or unparseable for ${capabilityId}`)
     }
-    const subCases = row.at(-1).split(',').map((subCase) => subCase.trim())
     if (subCases.length === 0 || subCases.some((subCase) => !subCase) || new Set(subCases).size !== subCases.length) {
       throw new Error(`staging proof receipt found an unparseable sub-case list for ${capabilityId}`)
     }

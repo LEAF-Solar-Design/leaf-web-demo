@@ -42,6 +42,46 @@ export function allowedStagingHostnames(env = process.env) {
   return allowed
 }
 
+/** The same https+allowlist rule for API responses: a redirect that resolves
+ * an authenticated call off-origin must fail the test, not become evidence. */
+export function assertResponseOnAllowedOrigin(response, env = process.env) {
+  let parsed
+  try {
+    parsed = new URL(response.url())
+  } catch {
+    throw new StagingHostError(`staging API call resolved to an invalid URL: ${response.url()}`)
+  }
+  if (parsed.protocol !== 'https:' || !allowedStagingHostnames(env).has(parsed.hostname.toLowerCase())) {
+    throw new StagingHostError(`staging API call resolved off the allowed HTTPS origin: ${response.url()}`)
+  }
+  return parsed
+}
+
+/** Registers a page-wide monitor for BEARER leakage: every browser request
+ * that carries an Authorization header must target an allowed https origin
+ * (the app attaches the JWT to its built-in API base, so a bundle built with
+ * a foreign base would otherwise exfiltrate silently). Returns the mutable
+ * violations array; assert it is empty at the end of the test. */
+export function collectBearerLeaks(page, env = process.env) {
+  const allowed = allowedStagingHostnames(env)
+  const leaks = []
+  page.on('request', (request) => {
+    const headers = request.headers()
+    if (!headers.authorization) return
+    let parsed
+    try {
+      parsed = new URL(request.url())
+    } catch {
+      leaks.push(request.url())
+      return
+    }
+    if (parsed.protocol !== 'https:' || !allowed.has(parsed.hostname.toLowerCase())) {
+      leaks.push(request.url())
+    }
+  })
+  return leaks
+}
+
 export function assertPageOnAllowedOrigin(page, env = process.env) {
   let parsed
   try {

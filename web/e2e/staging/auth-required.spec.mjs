@@ -1,6 +1,12 @@
 import { expect, test } from '@playwright/test'
 import { captureStagingIdentity } from './stagingIdentity.mjs'
-import { allowedStagingHostnames, assertPageOnAllowedOrigin, stagingProofPath } from './stagingConfig.mjs'
+import {
+  allowedStagingHostnames,
+  assertPageOnAllowedOrigin,
+  assertResponseOnAllowedOrigin,
+  collectBearerLeaks,
+  stagingProofPath,
+} from './stagingConfig.mjs'
 import { writeProofReceipt } from '../proofReceipt.mjs'
 
 // Observed on the deployed staging surface (2026-07-27, signed-out browser
@@ -39,12 +45,22 @@ test('ID-01 + CA-01: an authenticated staging session reaches the operator surfa
   test.skip(!STAGING_JWT, 'LEAF_E2E_STAGING_JWT is not set; skipping the authenticated ID-01/CA-01 sub-cases today')
   const identity = await captureStagingIdentity(request)
   await primeAuthenticatedPage(page)
+  const bearerLeaks = collectBearerLeaks(page)
   const observedEndpoints = [identity.endpoint]
   const stagingOrigin = new URL(baseURL).origin
   page.on('response', (response) => {
     const url = new URL(response.url())
     if (url.origin === stagingOrigin) observedEndpoints.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
+  // Registered BEFORE navigation: the browser's OWN authenticated catalog
+  // fetch is the signal that the controller's live reload completed, and the
+  // stale-mock-card hole (createCatalogController.js ~257) closes only once
+  // that response has landed -- a shared tool name alone can match a stale
+  // mock card while the live load is still in flight.
+  const browserCatalogLoaded = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/api/tools' && response.ok(),
+    { timeout: 30_000 },
+  )
   await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
   assertPageOnAllowedOrigin(page)
   await expect(page.getByRole('heading', { name: 'You are not signed in' })).toHaveCount(0)
@@ -52,10 +68,13 @@ test('ID-01 + CA-01: an authenticated staging session reaches the operator surfa
   await expect(catalogTab).toBeEnabled()
 
   // CA-01 at API level: the app contract is exactly { tools: [...] }, never
-  // a bare array. This is a non-mutating GET against the deployed endpoint.
+  // a bare array. This is a non-mutating GET against the deployed endpoint,
+  // and the RESOLVED response URL must still be the allowed origin (a
+  // redirect off-host must fail the test, not become evidence).
   const toolsResponse = await request.get('/api/tools', {
     headers: { Authorization: `Bearer ${STAGING_JWT}` },
   })
+  assertResponseOnAllowedOrigin(toolsResponse)
   expect(toolsResponse.status()).toBe(200)
   const toolsBody = await toolsResponse.json()
   expect(Array.isArray(toolsBody?.tools)).toBe(true)
@@ -65,9 +84,11 @@ test('ID-01 + CA-01: an authenticated staging session reaches the operator surfa
   expect(realName).toBeTruthy()
   observedEndpoints.push(`GET /api/tools ${toolsResponse.status()}`)
   await catalogTab.click()
-  // The catalog controller keeps stale mock cards across this mode change
-  // (createCatalogController.js ~257), so require a returned real tool name.
+  const browserCatalogResponse = await browserCatalogLoaded
+  assertResponseOnAllowedOrigin(browserCatalogResponse)
   await expect(page.locator('.tool-card').filter({ hasText: realName })).toBeVisible({ timeout: 15_000 })
+  // No browser request carried the bearer off the allowed origin.
+  expect(bearerLeaks).toEqual([])
 
   const screenshotPath = stagingProofPath('auth-required', 'id-01-ca-01.png')
   await page.screenshot({ path: screenshotPath, fullPage: true })
@@ -107,6 +128,7 @@ test('VR-01: the version drawer opens with real, non-empty history for an authen
   test.skip(!STAGING_JWT, 'LEAF_E2E_STAGING_JWT is not set; VR-01 requires an active session on the deployed surface')
   const identity = await captureStagingIdentity(request)
   await primeAuthenticatedPage(page)
+  const bearerLeaks = collectBearerLeaks(page)
   const observedEndpoints = [identity.endpoint]
   const stagingOrigin = new URL(baseURL).origin
   page.on('response', (response) => {
@@ -130,6 +152,7 @@ test('VR-01: the version drawer opens with real, non-empty history for an authen
     await expect(versionEntries.first()).toBeVisible({ timeout: 15_000 })
     const versionCount = await versionEntries.count()
     expect(versionCount).toBeGreaterThan(0)
+  expect(bearerLeaks).toEqual([])
 
   const screenshotPath = stagingProofPath('auth-required', 'vr-01.png')
   await page.screenshot({ path: screenshotPath, fullPage: true })
@@ -168,10 +191,12 @@ test('VR-01: the version drawer opens with real, non-empty history for an authen
 test('authoring entry point renders for an authenticated staging session (no AU-01 claim; staging/publishing is out of scope for a read-only suite)', async ({ page, request }) => {
   test.skip(!STAGING_JWT, 'LEAF_E2E_STAGING_JWT is not set; skipping today')
   await primeAuthenticatedPage(page)
+  const bearerLeaks = collectBearerLeaks(page)
   await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
   assertPageOnAllowedOrigin(page)
   const authorTab = page.locator('#workspace-tab-author')
   await expect(authorTab).toBeEnabled()
   await authorTab.click()
   await expect(page.getByLabel('What should the tool do?')).toBeVisible({ timeout: 15_000 })
+  expect(bearerLeaks).toEqual([])
 })
