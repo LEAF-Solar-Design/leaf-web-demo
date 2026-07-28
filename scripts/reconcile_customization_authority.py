@@ -12,6 +12,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -94,27 +95,66 @@ def authority_counts(
     return {table: len(snapshot.get(table, ())) for table in TABLE_COLUMNS}
 
 
-def _ensure_source_schema(path: Path) -> None:
+_ENSURE_ATTEMPTS = 6
+_ENSURE_BACKOFF_SECONDS = 2.0
+
+
+def _is_locked_error(error: sqlite3.OperationalError) -> bool:
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
+
+
+def _ensure_source_schema(
+    path: Path,
+    *,
+    attempts: int = _ENSURE_ATTEMPTS,
+    backoff_seconds: float = _ENSURE_BACKOFF_SECONDS,
+    sleep: Any = time.sleep,
+) -> None:
     """Run the app's own idempotent schema init and migrations on the source.
 
-    ``SQLiteCustomizationStore`` creates its tables lazily and carries guarded
-    legacy migrations (``initialize()`` is CREATE TABLE IF NOT EXISTS plus the
-    publication-request and confirmation-binding migrations), so a store that
-    was never touched, or that predates a migration, legitimately lacks
-    tables. Snapshotting such a store without the app's migration would
-    misread legacy rows, and refusing outright (the prior behavior) blocked
-    authored-execution activation on every environment whose store had simply
-    never been used ("SQLite customization source is incomplete", observed
-    live on staging 2026-07-28). Initializing first is therefore the only
-    correct read, in every mode; it also creates the file for a brand-new
-    environment, which then snapshots as complete-and-empty.
+    ``SQLiteCustomizationStore`` creates its tables lazily, so a store that was
+    never touched, or one written before a table existed, legitimately lacks
+    tables and the snapshot's completeness check rejects it ("SQLite
+    customization source is incomplete", which blocked staging
+    authored-execution activation live on 2026-07-28). Calling the store's own
+    ``initialize()`` is preferred over creating the missing table here for two
+    reasons: it also runs ``_migrate_confirmation_bindings``, which backfills
+    rows that a bare CREATE TABLE would leave unpopulated, and it keeps this
+    script from drifting from the schema the app actually maintains. It also
+    creates the file for a brand-new environment, which then snapshots as
+    complete-and-empty.
+
+    This runs against the SAME database the live app is serving from (the
+    staging activation task shares the app's EFS volume), so a write lock held
+    by a concurrent request is expected and recoverable. SQLite's own five
+    second timeout is not enough on its own: a busy database would otherwise
+    turn a transient condition into a failed activation. Retry a bounded
+    number of times and let every other error surface immediately.
     """
     server_dir = str(ROOT / "server")
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
     from customization_store import SQLiteCustomizationStore
 
-    SQLiteCustomizationStore(path).initialize()
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            # A fresh store per attempt: initialize() latches _initialized on
+            # the instance, so a failed attempt must not be retried through an
+            # object that believes it already succeeded.
+            SQLiteCustomizationStore(path).initialize()
+            return
+        except sqlite3.OperationalError as error:
+            if not _is_locked_error(error):
+                raise
+            last_error = error
+            if attempt < attempts:
+                sleep(backoff_seconds)
+    raise RuntimeError(
+        "SQLite customization source stayed locked after "
+        f"{attempts} initialization attempts: {last_error}"
+    )
 
 
 def _sqlite_snapshot(path: Path) -> dict[str, list[dict[str, Any]]]:

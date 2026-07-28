@@ -126,3 +126,95 @@ def test_ensure_is_idempotent_and_preserves_rows(tmp_path):
     assert len(rows) == 1
     assert rows[0]["tenant_id"] == "t1"
     assert rows[0]["change_set_id"] == "c1"
+
+
+def test_locked_source_is_retried_then_fails_loud(tmp_path):
+    """A busy database must not turn a transient lock into a failed activation.
+
+    The activation task runs against the same EFS file the live app serves
+    from, so SQLite write locks are expected. Bounded retry converts the
+    common case into success; an unrelenting lock still fails loud rather
+    than silently proceeding to snapshot an unmigrated store.
+    """
+    script = _script()
+    path = tmp_path / "customization.db"
+    slept: list[float] = []
+
+    calls = {"n": 0}
+    real_ensure_store = None
+
+    class _Flaky:
+        def __init__(self, target):
+            self.target = target
+
+        def initialize(self):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise sqlite3.OperationalError("database is locked")
+            _real_store(self.target).initialize()
+
+    import customization_store as store_module
+
+    _real_store = store_module.SQLiteCustomizationStore
+    store_module.SQLiteCustomizationStore = _Flaky
+    try:
+        script._ensure_source_schema(path, sleep=slept.append)
+    finally:
+        store_module.SQLiteCustomizationStore = _real_store
+    assert calls["n"] == 3
+    assert slept == [script._ENSURE_BACKOFF_SECONDS] * 2
+    assert path.exists()
+
+    calls["n"] = 0
+    slept.clear()
+
+    class _AlwaysLocked:
+        def __init__(self, target):
+            pass
+
+        def initialize(self):
+            calls["n"] += 1
+            raise sqlite3.OperationalError("database is locked")
+
+    store_module.SQLiteCustomizationStore = _AlwaysLocked
+    try:
+        try:
+            script._ensure_source_schema(
+                tmp_path / "other.db", attempts=3, sleep=slept.append
+            )
+        except RuntimeError as error:
+            assert "stayed locked after 3" in str(error)
+        else:  # pragma: no cover - the bound must fail loud
+            raise AssertionError("an unrelenting lock did not fail loud")
+    finally:
+        store_module.SQLiteCustomizationStore = _real_store
+    assert calls["n"] == 3
+    assert len(slept) == 2
+
+
+def test_non_lock_operational_error_is_not_retried(tmp_path):
+    script = _script()
+    import customization_store as store_module
+
+    calls = {"n": 0}
+    _real_store = store_module.SQLiteCustomizationStore
+
+    class _Corrupt:
+        def __init__(self, target):
+            pass
+
+        def initialize(self):
+            calls["n"] += 1
+            raise sqlite3.OperationalError("file is not a database")
+
+    store_module.SQLiteCustomizationStore = _Corrupt
+    try:
+        try:
+            script._ensure_source_schema(tmp_path / "bad.db", sleep=lambda _: None)
+        except sqlite3.OperationalError as error:
+            assert "not a database" in str(error)
+        else:  # pragma: no cover
+            raise AssertionError("a non-lock error was swallowed")
+    finally:
+        store_module.SQLiteCustomizationStore = _real_store
+    assert calls["n"] == 1
