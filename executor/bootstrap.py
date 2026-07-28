@@ -111,7 +111,7 @@ def _harden_directory(root: Path) -> None:
     try:
         os.chmod(root, 0o700)
     except PermissionError as exc:
-        if exc.errno != errno.EPERM or not os.access(root, os.W_OK | os.X_OK):
+        if exc.errno != errno.EPERM:
             raise
 
 
