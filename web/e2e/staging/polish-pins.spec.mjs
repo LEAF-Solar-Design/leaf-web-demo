@@ -44,8 +44,11 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   })
   const unrestrictedMotion = await readMotionStyle()
   expect(unrestrictedMotion.transitionDuration).not.toBe('0s')
-  await page.emulateMedia({ reducedMotion: 'reduce' })
+  // Stamp BEFORE the awaited call: the RPC completes after the browser
+  // applies the emulation, so anchoring here can only shorten the allowance,
+  // never extend it past 4s from the actual flip.
   const reducedMotionFlipAt = Date.now()
+  await page.emulateMedia({ reducedMotion: 'reduce' })
   const reducedMotion = await readMotionStyle()
   expect(reducedMotion.animationDuration).toBe('0s')
   expect(reducedMotion.transitionDuration).toBe('0s')
@@ -80,11 +83,17 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   // so keep sampling until the window has passed AND at least six samples
   // landed on or past the boundary; the hard stop only trips if sampling
   // itself degrades, and then the count assertion below fails loud.
+  // Samples are stamped AFTER the bounding-box read completes, so a read
+  // that starts before the boundary but observes geometry after it is
+  // included rather than escaping between stamps; the trade is strictness
+  // (a straddling read may carry the entrance tail's final sub-pixel),
+  // which the 4s allowance vs the 1730ms entrance absorbs.
   const hardStop = reducedMotionFlipAt + 10_000
   let settledCount = 0
   while ((Date.now() < windowEnd || settledCount < 6) && Date.now() < hardStop) {
+    const box = await canvas.boundingBox()
     const at = Date.now() - reducedMotionFlipAt
-    samples.push({ at, box: await canvas.boundingBox() })
+    samples.push({ at, box })
     if (at >= boundaryMs) settledCount += 1
     await page.waitForTimeout(100)
   }
