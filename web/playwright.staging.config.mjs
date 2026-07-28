@@ -1,14 +1,21 @@
 import { defineConfig } from '@playwright/test'
+import { resolveStagingBaseURL } from './e2e/staging/stagingConfig.mjs'
 
 export default defineConfig({
   testDir: './e2e/staging',
+  // Runs before any spec: refuses a non-allowlisted host and clears this
+  // run's prior receipts/screenshots/report so stale evidence can't survive.
+  globalSetup: './e2e/staging/globalSetup.mjs',
   outputDir: '../artifacts/unified-surface-proof/staging/test-results',
   reporter: [['list'], ['html', {
     open: 'never',
     outputFolder: '../artifacts/unified-surface-proof/staging/report',
   }]],
   use: {
-    baseURL: process.env.LEAF_E2E_PROD_BASE_URL || 'https://platform-staging.leafdesign.ai',
+    // Deliberately LEAF_E2E_STAGING_BASE_URL, not LEAF_E2E_PROD_BASE_URL --
+    // see e2e/staging/stagingConfig.mjs for why reusing the prod variable is
+    // unsafe here.
+    baseURL: resolveStagingBaseURL(),
     browserName: 'chromium',
     headless: true,
     video: 'on',
