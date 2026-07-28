@@ -403,6 +403,14 @@
 }
 .tc-operator-rail .converse-turn { padding: 8px; }
 .tc-operator-rail .converse-msg { font-size: 12px; line-height: 1.45; }
+.demo-conversation-welcome { gap: 10px; }
+.demo-conversation-suggestions { display: flex; flex-wrap: wrap; gap: 6px; }
+.demo-conversation-suggestions .chip-neutral {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tc-operator-rail .strip-decision {
   align-items: flex-start;
   flex-wrap: wrap;

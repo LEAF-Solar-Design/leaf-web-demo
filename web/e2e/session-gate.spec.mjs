@@ -50,11 +50,20 @@ test('Explore the demo keeps the CAD operator on try and runs without private AP
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   await expect(page.getByText('Interactive demo')).toBeVisible()
   await expect(page.getByText('Ask Claude for the cat edit')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
 
   calls.length = 0
+  await page.getByRole('textbox', { name: 'Command bar' }).fill('hello')
+  await page.getByRole('textbox', { name: 'Command bar' }).press('Enter')
+  await expect(page.getByTestId('demo-conversation')).toContainText('hello')
+  await expect(page.getByTestId('demo-conversation')).toContainText('interactive Leaf CAD demo')
+  await expect(page.getByRole('textbox', { name: 'Command bar' })).toHaveValue('')
+  await expect(page.getByRole('button', { name: 'Run count-by-layer' })).toHaveCount(0)
+  expect(calls.filter((call) => call.path.startsWith('/api/') && !call.path.startsWith('/api/site/'))).toEqual([])
+
   await page.getByRole('textbox', { name: 'Command bar' }).fill('count panels per layer')
-  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByTestId('demo-conversation')).toContainText('count-by-layer')
   await expect(page.getByRole('button', { name: 'Run count-by-layer' })).toBeVisible()
   await page.getByRole('button', { name: 'Run count-by-layer' }).click()
   await expect(page.getByRole('tab', { name: 'Execution' })).toBeVisible()
