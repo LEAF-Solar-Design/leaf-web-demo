@@ -321,6 +321,31 @@ export default function useDrawingVersionController({
   // neither seat over the newer context nor re-arm an obsolete lock.
   const restoreGenerationRef = useRef(0)
 
+  const recordCommittedUnreadableHead = useCallback((newVersion) => {
+    const drawingId = newVersion?.drawing_id ?? drawingState?.drawing_id
+    const head = Number(newVersion?.version)
+    if (drawingId == null || !Number.isFinite(head)) return null
+    restoreGenerationRef.current += 1
+    const nextState = drawingStateFrom({
+      drawing_id: drawingId,
+      version: head,
+      head,
+      latest: head,
+    }, drawingId, drawingState)
+    setDrawingState(nextState)
+    setOverlayStale(true)
+    setPreviewIntake(null)
+    setPreviewing(null)
+    setRefreshFailure(null)
+    setUnreadableHead({
+      drawing_id: drawingId,
+      head,
+      latest: head,
+      message: `Version ${head} was created, but its intake is not readable yet. Editing stays locked until it loads or you recover a historical version.`,
+    })
+    return nextState
+  }, [drawingState])
+
   const recordRestore = useCallback(async (result) => {
     const drawingId = result?.drawing_id ?? drawingState?.drawing_id
     if (drawingId == null || result?.head == null) return null
@@ -478,6 +503,7 @@ export default function useDrawingVersionController({
     retryRefresh,
     refreshHead,
     recordRestore,
+    recordCommittedUnreadableHead,
     retryUnreadableHead,
   }), [
     backToHead,
@@ -488,6 +514,7 @@ export default function useDrawingVersionController({
     redo,
     refreshHead,
     recordRestore,
+    recordCommittedUnreadableHead,
     reset,
     retryRefresh,
     retryUnreadableHead,

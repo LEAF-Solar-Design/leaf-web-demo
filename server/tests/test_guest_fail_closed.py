@@ -662,6 +662,84 @@ def test_live_write_stages_filesystem_blob_in_broker_owned_aps_scratch():
     assert all(key.startswith(f"t/{tenant}/") for key in da.deleted)
 
 
+@pytest.mark.parametrize("fault, readable", [("proof", True), ("cache", False)])
+def test_live_write_publication_failure_reports_committed_truth(fault, readable):
+    """A post-commit cache/proof fault never invites a paid retry."""
+    import store
+    import time
+
+    backend = store.InMemoryBackend()
+    tenant, drawing = "publication-tenant", "publication-drawing"
+    raw = b"AC1032" + b"\x00" * 32
+    backend.put(store.drawing_version_key(tenant, drawing, 1), raw)
+    backend.put(
+        store.manifest_key(tenant, drawing),
+        json.dumps({
+            "schema": 1, "tenant_id": tenant, "drawing_id": drawing,
+            "head": 1, "latest": 1,
+            "versions": [{
+                "v": 1, "parent": None, "created": "now",
+                "bytes": len(raw), "sha256": "source",
+                "workitem_id": None, "tool": None, "note": "upload",
+            }],
+            "checkout": None,
+        }).encode(),
+    )
+    backend.put(
+        write_loop.upload_marker_key(tenant, drawing),
+        json.dumps({"status": "ready", "source_ext": ".dwg"}).encode(),
+    )
+
+    original_publish = backend.put_if_absent_or_verify
+    cache_key = write_loop.intake_cache_key(tenant, drawing, 2)
+    proof_key = write_loop.intake_cache_proof_key(tenant, drawing, 2)
+
+    def fail_selected_publication(key, data):
+        if (fault == "cache" and key == cache_key) or (
+            fault == "proof" and key == proof_key
+        ):
+            raise OSError(f"simulated {fault} publication failure")
+        return original_publish(key, data)
+
+    backend.put_if_absent_or_verify = fail_selected_publication
+
+    class DA:
+        submissions = 0
+
+        def upload_scratch_object(self, *_args): pass
+        def scratch_signed_download_url(self, _key): return "https://aps.test/input"
+        def scratch_signed_upload_url(self, _key): return "upload", "https://aps.test/output"
+        def activity_qualified(self, name): return name
+        def submit_workitem(self, *_args, **_kwargs):
+            self.submissions += 1
+            return {"id": "wi-publication", "status": "success"}
+        def finalize_scratch_upload(self, *_args): pass
+        def download_scratch_object(self, _key): return raw + b"-updated"
+        def delete_scratch_object(self, _key): pass
+        def extract(self, _path): return {"layers": ["Updated"], "polylines": []}
+        def _engine_seconds(self, _status): return 1.0
+
+    da = DA()
+    env, status = write_loop.run_write_live(
+        {"name": "write"}, {"drawing_id": drawing}, tenant,
+        backend=backend, da=da, t0=time.perf_counter(),
+    )
+
+    assert status == 200 and env["ok"] is True
+    assert env["result"]["new_version"] == {
+        "drawing_id": drawing, "version": 2, "parent": 1,
+    }
+    assert env["result"]["new_version_readable"] is readable
+    assert da.submissions == 1
+    manifest = store.load_manifest(backend, tenant, drawing)
+    assert manifest["head"] == 2 and manifest["latest"] == 2
+    if readable:
+        assert write_loop.read_intake(backend, tenant, drawing, 2)[0] == 2
+    else:
+        with pytest.raises(ValueError, match="no intake cache"):
+            write_loop.read_intake(backend, tenant, drawing, 2)
+
+
 def test_live_write_scratch_keys_are_unique_within_one_second(monkeypatch):
     """Concurrent tenant writes cannot share APS input or output objects."""
     import store

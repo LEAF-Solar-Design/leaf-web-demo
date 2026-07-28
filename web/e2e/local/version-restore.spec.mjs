@@ -6,9 +6,13 @@ function versionRows(head) {
     { v: 1, parent: null, tool: 'base', note: 'Original drawing', delta: null },
     { v: 2, parent: 1, tool: 'move-panel', note: 'Moved A', delta: { added: 0, modified: 1, deleted: 0 } },
     { v: 3, parent: 2, tool: 'delete-panel', note: 'Removed B', delta: { added: 0, modified: 0, deleted: 1 } },
-    ...(head === 4 ? [{
+    ...(head >= 4 ? [{
       v: 4, parent: 3, tool: 'restore', note: 'restore of version 1',
       delta: { added: 1, modified: 1, deleted: 0 },
+    }] : []),
+    ...(head >= 5 ? [{
+      v: 5, parent: 4, tool: 'restore', note: 'restore of version 2',
+      delta: { added: 0, modified: 1, deleted: 0 },
     }] : []),
   ]
 }
@@ -47,15 +51,16 @@ async function mountVersionSurface(page, {
           versions: versionRows(head),
         },
       }
-    } else if (path === '/api/drawings/cat-panels/versions/1/restore' && method === 'POST') {
+    } else if (/^\/api\/drawings\/cat-panels\/versions\/[12]\/restore$/.test(path) && method === 'POST') {
+      const restoredFrom = Number(path.split('/').at(-2))
       restoreCount += 1
-      head = 4
+      head = 3 + restoreCount
       result = {
         status: 200,
         body: {
-          error: null, restored_from: 1, head: 4, latest: 4,
-          restored_head_readable: restoredHeadReadable,
-          new_version: { drawing_id: 'cat-panels', version: 4, parent: 3 },
+          error: null, restored_from: restoredFrom, head, latest: head,
+          restored_head_readable: restoreCount > 1 || restoredHeadReadable,
+          new_version: { drawing_id: 'cat-panels', version: head, parent: head - 1 },
         },
       }
     } else if (path === '/api/drawings/cat-panels/intake' && method === 'GET' && restoreCount) {
@@ -177,13 +182,16 @@ test('an unreadable restored head keeps its warning through history refresh and 
   await page.getByRole('button', { name: 'History' }).click()
   const reopened = page.getByRole('dialog', { name: 'Version history' })
   await expect(reopened.getByTestId('vh-head-warning')).toBeVisible()
-  await expect(reopened.getByTestId('vh-row-v1').getByRole('button', { name: 'Restore', exact: true })).toBeDisabled()
-  await reopened.getByRole('button', { name: 'Close version history' }).click()
+  const recovery = reopened.getByTestId('vh-row-v2')
+  await expect(recovery.getByRole('button', { name: 'Recover', exact: true })).toBeEnabled()
+  await recovery.getByRole('button', { name: 'Recover', exact: true }).click()
+  await recovery.getByRole('button', { name: 'Recover from v2' }).click()
 
-  // A successful head intake read repairs the state and only then unlocks edits.
-  await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
+  // Only the historical recovery bypasses the lock. It appends v5 with v4 as
+  // parent, seats the coherent new head, and only then re-enables mutations.
   await expect(persistentLock).toBeHidden()
   expect(observed.intakeReadsAfterRestore()).toBe(1)
+  expect(observed.restoreCount()).toBe(2)
   await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
 })
 

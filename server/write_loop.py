@@ -328,11 +328,20 @@ def publish_intake_cache(backend, tenant_id: str, drawing_id: str, version: int,
         "intake_ref": cache_key,
         "intake_sha256": hashlib.sha256(cache_bytes).hexdigest(),
     }
-    backend.put(cache_key, cache_bytes)
-    backend.put(
-        intake_cache_proof_key(tenant_id, drawing_id, version),
-        json.dumps(proof, separators=(",", ":")).encode("utf-8"),
-    )
+    # The cache is the ordered publication boundary. PR #254 made a missing
+    # proof readable through trust-on-first-read plus self-heal, so once these
+    # exact cache bytes win the immutable key readers never observe a rejected
+    # cache solely because the following proof write was interrupted.
+    backend.put_if_absent_or_verify(cache_key, cache_bytes)
+    proof_key = intake_cache_proof_key(tenant_id, drawing_id, version)
+    proof_bytes = json.dumps(proof, separators=(",", ":")).encode("utf-8")
+    try:
+        backend.put_if_absent_or_verify(proof_key, proof_bytes)
+    except Exception:  # noqa: BLE001
+        # Do not guess whether this was transport or a conflicting winner.
+        # The one authoritative reader either validates/self-heals the exact
+        # source/cache pair or raises with PR #254's proof taxonomy.
+        read_intake(backend, tenant_id, drawing_id, version)
     return cache_key
 
 
@@ -1104,6 +1113,16 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             except OSError:
                 pass
         wi_id = status.get("id")
+        # Everything fallible that is not publication belongs before the
+        # immutable commit. Once new_v exists, retrying can repeat paid work.
+        eng_s = da._engine_seconds(status)
+        cost = None if eng_s is None else {
+            "engine_seconds": eng_s,
+            "usd_est": round(eng_s / 3600.0 * USD_PER_HR, 4)}
+        if ledger_entry is not None and isinstance(cost, dict):
+            ledger_entry["engine_seconds"] = cost["engine_seconds"]
+            ledger_entry["usd_est"] = cost["usd_est"]
+
         with drawing_mutation_commit_guard() as commit_enabled:
             if not commit_enabled:
                 return (err_envelope(
@@ -1117,19 +1136,21 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 meta={"tool": name, "workitem_id": wi_id,
                       "note": "live write (output.dwg)"},
                 holder=holder, fence=fence)
-            publish_intake_cache(
-                backend, tenant_id, drawing_id, new_v, out_bytes, intake)
-
-        eng_s = da._engine_seconds(status)
-        cost = None if eng_s is None else {
-            "engine_seconds": eng_s,
-            "usd_est": round(eng_s / 3600.0 * USD_PER_HR, 4)}
-        if ledger_entry is not None and isinstance(cost, dict):
-            ledger_entry["engine_seconds"] = cost["engine_seconds"]
-            ledger_entry["usd_est"] = cost["usd_est"]
+            new_version_readable = False
+            try:
+                publish_intake_cache(
+                    backend, tenant_id, drawing_id, new_v, out_bytes, intake)
+                read_intake(backend, tenant_id, drawing_id, new_v)
+                new_version_readable = True
+            except Exception:  # noqa: BLE001
+                # The immutable version is already the head. Report that
+                # committed truth as success and let the product enter its
+                # recovery-only lock. A retry could repeat the paid WorkItem.
+                new_version_readable = False
 
         result = {
             "new_version": {"drawing_id": drawing_id, "version": new_v, "parent": head_v},
+            "new_version_readable": new_version_readable,
             "workitem_id": wi_id,
             "probe_layer": PROBE_LAYER,
             "output_dwg_bytes": len(out_bytes),

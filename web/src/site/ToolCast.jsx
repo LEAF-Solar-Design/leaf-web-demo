@@ -414,6 +414,11 @@ export default function ToolCast({
         if (!mockVersions.isSeeded() && drawing.shown) mockVersions.seedBase(drawing.shown)
         mockVersions.applyDelete(envelope?.result?.removed)
       }
+      if (envelope?.result?.new_version_readable === false) {
+        drawing.actions.recordCommittedUnreadableHead(newVersion)
+        showToast({ text: `Version ${newVersion?.version || 'created'} created` })
+        return
+      }
       const view = await getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
       seatVersion(view, { drawingId, source: 'job', event: 'complete' })
     } catch {
@@ -1143,6 +1148,22 @@ export default function ToolCast({
             onRetry={checkout.actions.refresh}
           />
         </div>
+        {drawing.unreadableHead && (
+          <div
+            className="inline-error"
+            role="alert"
+            data-testid="unreadable-head-lock"
+            data-head={drawing.unreadableHead.head}
+            data-latest={drawing.unreadableHead.latest}
+          >
+            {drawing.unreadableHead.message}
+            {!drawing.unreadableHead.pending ? (
+              <button type="button" className="chip-act" onClick={drawing.actions.retryUnreadableHead} disabled={drawing.refreshing}>
+                {drawing.refreshing ? 'Loading…' : 'Retry loading'}
+              </button>
+            ) : null}
+          </div>
+        )}
         {drawing.refreshFailure && (
           <div className="inline-error tc-refresh-failure" role="alert">
             Couldn’t refresh the viewer. The previous version is still shown.

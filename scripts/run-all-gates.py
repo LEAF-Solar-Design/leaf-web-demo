@@ -346,7 +346,7 @@ def build_suites() -> List[Suite]:
         # honest with the exact measured floor for every portable test and an
         # allowlist for only that named deployment-contract skip.
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
-              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 34,
+              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 36,
               allowed_skip_reasons=(r"fcntl is a Linux deployment contract",)),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_purge.py"), 13),
@@ -562,7 +562,7 @@ def build_suites() -> List[Suite]:
         # separately enforced by upload-authority-postgres.yml and is the only
         # allowed skip on the hermetic test-gate runner.
         Suite("server-version-restore", "server tests/test_version_restore.py",
-              "pytest", SERVER, _py_pytest("tests/test_version_restore.py"), 17,
+              "pytest", SERVER, _py_pytest("tests/test_version_restore.py"), 26,
               allowed_skip_reasons=(
                   r"PostgreSQL restore proof requires the EXPLICIT opt-in "
                   r"LEAF_RESTORE_PG_PROOF_DB \(a disposable database URL\)\. "
