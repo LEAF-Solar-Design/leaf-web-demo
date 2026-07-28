@@ -19,8 +19,11 @@ def main() -> None:
     assert "source_sha must be a full 40-character lowercase hexadecimal commit" in text
     assert "Checkout did not resolve to source_sha" in text
     assert "GH_TOKEN: ${{ github.token }}" in text
-    assert 'http.https://github.com/.extraheader="AUTHORIZATION: bearer $GH_TOKEN"' in text
-    assert "fetch --no-tags origin main" in text
+    assert 'https://api.github.com/repos/$GITHUB_REPOSITORY/compare/$current_sha...main' in text
+    assert "merge_base_commit.sha" in text
+    assert "status" in text
+    assert "fetch --no-tags origin main" not in text
+    assert "http.https://github.com/.extraheader" not in text
 
     assert 'image_tag="sha-$current_sha"' in text
     assert "IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}" in text
