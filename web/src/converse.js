@@ -42,12 +42,15 @@ function tagged(res, body, fallback) {
 }
 
 async function post(path, payload) {
-  const res = noteUnauthorized(await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify(payload),
-  }), path)
+  })
   const body = await res.json().catch(() => null)
+  const code = String(body?.error?.error_code || '').toLowerCase()
+  const grantRequired = res.status === 401 && (code === 'grant_required' || body?.grant_required === true)
+  if (!grantRequired) noteUnauthorized(res, path)
   return { res, body }
 }
 
