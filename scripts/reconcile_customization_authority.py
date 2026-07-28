@@ -140,9 +140,10 @@ def _ensure_source_schema(
     last_error: sqlite3.OperationalError | None = None
     for attempt in range(1, attempts + 1):
         try:
-            # A fresh store per attempt: initialize() latches _initialized on
-            # the instance, so a failed attempt must not be retried through an
-            # object that believes it already succeeded.
+            # A fresh store per attempt is defensive only: initialize() sets
+            # _initialized after the connection closes successfully, so a
+            # failed attempt leaves it false and reusing the instance would
+            # also be correct.
             SQLiteCustomizationStore(path).initialize()
             return
         except sqlite3.OperationalError as error:
@@ -165,6 +166,13 @@ def _sqlite_snapshot(path: Path) -> dict[str, list[dict[str, Any]]]:
         f"file:{resolved.as_posix()}?mode=ro", uri=True, isolation_level=None
     )
     connection.row_factory = sqlite3.Row
+    # ONE encompassing read transaction. The connection is autocommit
+    # (isolation_level=None), so without this each table's SELECT would be its
+    # own implicit transaction and a writer committing between them would
+    # yield a source snapshot that never existed as a single state -- the
+    # digest would then certify a mixture. That matters precisely because this
+    # runs against the database the live app is serving from.
+    connection.execute("BEGIN DEFERRED")
     try:
         found = {
             row["name"]
@@ -188,6 +196,12 @@ def _sqlite_snapshot(path: Path) -> dict[str, list[dict[str, Any]]]:
             for table, columns in TABLE_COLUMNS.items()
         }
     finally:
+        # Read-only: nothing to commit, and ROLLBACK releases the read lock
+        # promptly rather than waiting for close().
+        try:
+            connection.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
         connection.close()
 
 
