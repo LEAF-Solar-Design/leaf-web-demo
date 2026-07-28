@@ -229,6 +229,66 @@ def test_restore_creates_new_head_preserving_chain(client, tmp_path):
     assert rows[4]["delta"] == {"added": 1, "modified": 1, "deleted": 2}
 
 
+def test_concurrent_restores_stay_linear(client, tmp_path):
+    """Round-2 BLOCKING: the legacy authority accepts any parent_version, so
+    two racing restores forked the chain (both parent 1). The in-process
+    restore lock serializes them: each re-reads a fresh head, so the chain
+    stays LINEAR (v4 parent 3, v5 parent 4 — in either completion order)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    _seed_chain(tmp_path)
+
+    def _restore(v):
+        return client.post(f"/api/drawings/{DRAWING}/versions/{v}/restore", headers=_h(TENANT))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(_restore, [1, 2])
+    assert first.status_code == 200 and second.status_code == 200
+
+    versions = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
+    rows = {row["v"]: row for row in versions["versions"]}
+    assert set(rows) == {1, 2, 3, 4, 5}
+    assert rows[4]["parent"] == 3
+    assert rows[5]["parent"] == 4  # NOT a fork: the second saw the first's head
+    assert versions["head"] == 5
+
+
+def test_restore_of_unreadable_live_source_is_refused(client, tmp_path):
+    """Round-2 MAJOR: a live-representation version (raw DWG bytes) with no
+    intake cache must be refused up front — promoting it would 200 and then
+    break every read_intake on the new head."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01DWGBYTES-NOT-JSON",
+        parent_version=3, meta={"tool": "test-seed", "note": "live-rep, no cache"},
+    )
+    assert v4 == 4
+
+    r = client.post(f"/api/drawings/{DRAWING}/versions/4/restore", headers=_h(TENANT))
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["retryable"] is False
+
+    versions = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
+    assert versions["head"] == 4  # nothing was appended
+
+
+def test_corrupt_manifest_matches_the_mutating_route_family(client, tmp_path):
+    """Round-2 MAJOR follow-through: a malformed manifest must surface from
+    restore EXACTLY as it does from the rest of the mutating family. All of
+    them hit it in the shared preflight (ensure_demo_drawing), whose
+    documented idiom answers 400 non-retryable — never a retryable 409 that
+    would invite duplicate appends. Undo is the family witness."""
+    import store  # noqa: PLC0415
+
+    backend = _seed_chain(tmp_path)
+    backend.put(store.manifest_key(TENANT, DRAWING), b"{not valid json")
+
+    restore = client.post(f"/api/drawings/{DRAWING}/versions/1/restore", headers=_h(TENANT))
+    undo = client.post(f"/api/drawings/{DRAWING}/undo", headers=_h(TENANT))
+    assert restore.status_code == undo.status_code == 400, (restore.text, undo.text)
+    assert restore.json()["error"]["retryable"] is False
+
+
 def test_restore_of_missing_version_404s(client, tmp_path):
     _seed_chain(tmp_path)
 

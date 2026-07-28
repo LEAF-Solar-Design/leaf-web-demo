@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header
@@ -38,6 +39,11 @@ from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 
 router = APIRouter()
 SUMMARY_LAYER_CAP = 50
+
+# Serializes restore commits in this process (see restore_version): the legacy
+# filesystem authority accepts any parent_version, so two racing restores
+# would fork the chain without it.
+_RESTORE_LOCK = threading.Lock()
 CACHED_DEMO_DRAWING_ID = "rooftop_demo"
 
 
@@ -505,51 +511,93 @@ def restore_version(drawing_id: str, version: int,
                               f"version {version} unavailable: {exc}",
                               retryable=False, status_code=404)
 
-    try:
-        with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-            if not commit_enabled:
-                return error_response(
-                    ErrorCode.INTERNAL,
-                    "drawing mutations are temporarily disabled for a storage cutover",
-                    retryable=True, status_code=503,
-                )
-            # Head is read INSIDE the guard, as late as this process can
-            # manage; the store's own put remains the authority and refuses a
-            # stale parent under its row lock (surfaced as 409 below), so two
-            # concurrent restores cannot both claim the same parent.
-            try:
-                m = store.load_manifest(backend, str(tenant_id), drawing_id)
-            except KeyError as exc:
-                return error_response(ErrorCode.BAD_PARAMS,
-                                      f"drawing unavailable: {exc}",
-                                      retryable=False, status_code=404)
-            head_v = int(m["head"])
-            new_v = write_loop._put_bytes_version(
-                backend, str(tenant_id), drawing_id, source_bytes,
-                parent_version=head_v,
-                meta={"tool": "restore", "note": f"restore of version {version}"},
-                holder=holder, fence=fence,
-            )
-            # Live representation: mirror the source version's intake cache to
-            # the new head so it has its intake without a re-extract. In mock
-            # representation there is no cache key and this is a no-op.
-            source_ckey = write_loop.intake_cache_key(
-                str(tenant_id), drawing_id, source_v)
-            if backend.exists(source_ckey):
-                backend.put(
-                    write_loop.intake_cache_key(str(tenant_id), drawing_id, new_v),
-                    backend.get(source_ckey),
-                )
-    except store.CheckoutDenied as exc:
-        return _denied(checkout_capability.CapabilityRejected(str(exc)))
-    except (KeyError, ValueError) as exc:
-        # The store refused the commit under its own lock (stale parent from a
-        # concurrent write, or a backend-specific precondition such as the
-        # PostgreSQL authority requiring an active checkout). Not a 500: the
-        # client can re-read the chain and retry.
-        return error_response(ErrorCode.BAD_PARAMS,
-                              f"restore could not commit: {exc}",
-                              retryable=True, status_code=409)
+    # Readability pre-check: the restored head must be consumable. Either the
+    # source has an intake cache to mirror (live representation), or its blob
+    # IS intake JSON (mock representation). Promoting live DWG bytes with no
+    # cache would 200 and then break every read_intake on the new head.
+    source_ckey = write_loop.intake_cache_key(str(tenant_id), drawing_id, source_v)
+    source_cache_bytes = backend.get(source_ckey) if backend.exists(source_ckey) else None
+    if source_cache_bytes is None:
+        try:
+            json.loads(source_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                f"version {version} has no intake cache and its payload is not "
+                "readable intake JSON; restoring it would produce an unusable head",
+                retryable=False, status_code=422)
+
+    with _RESTORE_LOCK:
+        # Serializes concurrent restores IN THIS PROCESS so both re-read a
+        # fresh head and the chain stays linear (the legacy filesystem
+        # authority accepts any parent_version — reproduced: two racing
+        # restores fork the chain). The deployed shape pins one app process
+        # (docker-compose.yml's SESSIONS_DB single-writer note); under the
+        # PostgreSQL authority the store's own row lock is the cross-process
+        # authority and refuses a stale parent (surfaced as 409 below).
+        try:
+            with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+                if not commit_enabled:
+                    return error_response(
+                        ErrorCode.INTERNAL,
+                        "drawing mutations are temporarily disabled for a storage cutover",
+                        retryable=True, status_code=503,
+                    )
+                # Manifest read INSIDE lock+guard. KeyError -> 404; a CORRUPT
+                # manifest (json errors are ValueError) deliberately propagates
+                # to the route family's pinned 500 rather than masquerading as
+                # a client error.
+                try:
+                    m = store.load_manifest(backend, str(tenant_id), drawing_id)
+                except KeyError as exc:
+                    return error_response(ErrorCode.BAD_PARAMS,
+                                          f"drawing unavailable: {exc}",
+                                          retryable=False, status_code=404)
+                head_v = int(m["head"])
+                # Re-check the single-writer gate against the FRESH manifest: a
+                # checkout acquired after the preflight above must not be
+                # bypassed by a stale (None, None) authorization. The residual
+                # window between this check and the put is the same one every
+                # mutating route here has; closing it fully needs the store to
+                # refuse holder-less puts under an active checkout, a
+                # product-wide change shared with undo/redo/publish.
+                if m.get("checkout") and holder is None:
+                    try:
+                        holder, fence = _lock_authorization(
+                            drawing_id, tenant_id, backend, x_checkout_capability)
+                    except (checkout_capability.CapabilityRejected,
+                            checkout_capability.CapabilityUnavailable) as exc:
+                        return _denied(exc)
+                try:
+                    new_v = write_loop._put_bytes_version(
+                        backend, str(tenant_id), drawing_id, source_bytes,
+                        parent_version=head_v,
+                        meta={"tool": "restore", "note": f"restore of version {version}"},
+                        holder=holder, fence=fence,
+                    )
+                except ValueError as exc:
+                    # The store refused THIS put under its own lock (stale
+                    # parent from a concurrent write, or the PostgreSQL
+                    # authority's checkout precondition). The commit did not
+                    # happen, so a retry is safe.
+                    return error_response(ErrorCode.BAD_PARAMS,
+                                          f"restore could not commit: {exc}",
+                                          retryable=True, status_code=409)
+                # The head is COMMITTED past this point: nothing below may
+                # convert into a retryable error (a retry would append a
+                # duplicate head). Mirror the pre-read cache bytes to the new
+                # head; best-effort by design — the pre-check above guarantees
+                # the head is readable even if this put fails.
+                if source_cache_bytes is not None:
+                    try:
+                        backend.put(
+                            write_loop.intake_cache_key(str(tenant_id), drawing_id, new_v),
+                            source_cache_bytes,
+                        )
+                    except OSError:
+                        pass
+        except store.CheckoutDenied as exc:
+            return _denied(checkout_capability.CapabilityRejected(str(exc)))
 
     view = deps.tenant_echo({
         "drawing_id": drawing_id,

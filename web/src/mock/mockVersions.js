@@ -202,15 +202,25 @@ export function view(version) {
   }
 }
 
-/** Step head back one version. Returns the LIVE undo shape. */
+/** Step head back along the PARENT LINK (not numeric adjacency: after a
+ * restore, v4's parent is wherever head stood when it was restored, so undo
+ * from v4 must land there — live parity). Returns the LIVE undo shape. */
 export function undo() {
-  if (chain.head > 1) chain.head -= 1
+  const current = chain.versions[chain.head - 1]
+  if (current && current.parent != null) chain.head = current.parent
   return view('head')
 }
 
-/** Step head forward one version. Returns the LIVE redo shape. */
+/** Step head forward one hop along LATEST's lineage: walk from `latest` back
+ * along parent pointers until the version whose parent IS the current head
+ * (the exact live rule, da/store.py `redo`; numeric +1 diverges after a
+ * restore). No such child means head is not on latest's lineage — no-op. */
 export function redo() {
-  if (chain.head < chain.latest) chain.head += 1
+  let cursor = chain.versions[chain.latest - 1]
+  while (cursor && cursor.parent != null && cursor.parent !== chain.head) {
+    cursor = chain.versions[cursor.parent - 1]
+  }
+  if (cursor && cursor.parent === chain.head) chain.head = cursor.v
   return view('head')
 }
 
@@ -218,8 +228,8 @@ export function redo() {
  * Restore-as-new-head: append a new version whose intake equals `intakeAt`'s
  * resolution of `version`, with parent = the CURRENT head. Mirrors the live
  * POST .../versions/{v}/restore route — history is APPENDED to, never
- * rewritten. Any redo tail above head is discarded first (same rule
- * `applyDelete` uses: a write after an undo forks from head). Throws if
+ * rewritten, and the redo tail is PRESERVED (only a write-after-undo via
+ * `applyDelete` forks and truncates). Throws if
  * `version` does not exist (`intakeAt`), matching the live route's 404.
  * Returns the LIVE restore shape: {drawing_id, restored_from, new_version:
  * {drawing_id, version, parent}, head, latest}.

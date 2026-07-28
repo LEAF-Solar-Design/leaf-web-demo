@@ -22,14 +22,10 @@ import './popovers.css'
 // POST .../versions/{v}/restore endpoint: it appends a NEW head whose content
 // equals that version's, so history is never rewritten.
 //
-// INTEGRATION NOTE (flagged, not applied — App.jsx is outside this lane's file
-// ownership): the caller does not yet pass `mock` or `capability`. Without
-// them this component falls back to `config.mockDefault` (correct unless the
-// user has flipped the mock/live toggle mid-session) and to no checkout
-// capability (correct whenever no lock is held — the demo's ordinary state).
-// Wiring both through is a two-line addition once this file's owner also owns
-// App.jsx: `mock={mock}` and `capability={capabilityRef.current}` on the
-// existing <VersionHistory> call site.
+// INTEGRATION: App.jsx's call site passes `mock`, `capability`, and
+// `onRestored` (wired to the version controller's refreshHead). The
+// `config.mockDefault` / no-capability fallbacks below remain only for a
+// caller that omits the props (none in-tree today).
 
 function fmtWhen(iso) {
   if (!iso) return ''
