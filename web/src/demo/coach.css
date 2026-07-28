@@ -1,0 +1,134 @@
+/* HP-01 — first-run coach mark.
+   Uses ONLY the existing dark-emerald tokens from styles.css (--card, --border,
+   --primary, --muted, …), same convention as demo.css's tour overlay. No new
+   color system, no new fonts. */
+
+/* Placement: the card lives INSIDE the command bar's own column and sits
+   ABOVE it, right-aligned. The bar column is the one horizontal band that is
+   clear of both rails at every width, by the app's own layout contract --
+   .coach-root mirrors .tc-bar-wrap's horizontal rules verbatim (landing.css:
+   default = centered 720px; <=1279px = left/right 270, max 720, anchored
+   left). bottom: 188px clears the bar (top edge ~ 18px + ~105px signed-out
+   height) and the caption (.tc-caption bottom: 122px + ~50px of text). The
+   bar only grows taller (.strip-decision/.resolver rows) after an
+   interaction, and the coach's first outside pointerdown hides it, so the
+   two can't coexist. Above 188px the card covers only the stage canvas,
+   which holds no interactive controls for a signed-out visitor.
+   data-cast="tool" (set in FirstRunCoach.jsx) opts the card into the same
+   scene choreography as every other tool pane: hidden, pointer-inert, and
+   inert on the landing scene. */
+.coach-root {
+  position: absolute;
+  left: 50%;
+  margin-left: -360px;
+  width: 720px;
+  bottom: 188px;
+  z-index: 80;
+  /* !important: the scene rule `.stage-root[data-scene="tool"]
+     [data-cast="tool"]` sets pointer-events: auto at higher specificity,
+     which would make the EMPTY part of this 720px strip eat stage clicks
+     (and read as "inside the coach" to the outside-pointerdown hide). The
+     root stays transparent always; only the card is interactive, and
+     off-scene the inert sweep kills even that. */
+  pointer-events: none !important;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.coach-card {
+  pointer-events: auto;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-sans);
+  animation: coach-rise var(--m-enter, 220ms) var(--m-curve, ease-out) both;
+}
+
+.coach-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--foreground);
+  margin-bottom: 4px;
+}
+
+.coach-body {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 10px;
+  line-height: 1.4;
+}
+
+.coach-keys {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.coach-key-label {
+  font-size: 11px;
+  color: var(--muted-2);
+  margin-right: 8px;
+}
+
+.coach-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 1280-1336px: the default rails are 300px wide, so the centered 720px bar
+   column itself slides up to 20px under the right rail's edge (720 + 2*300 >
+   vw). Pull the card left of the rail with an 8px gap: rail left edge =
+   100vw - 300px, column right edge = 50vw + 360px, overhang + gap =
+   668px - 50vw, clamped to 0 from 1336px up. Scoped >=1280 so the <=1279
+   column rules stay exact. */
+@media (min-width: 1280px) {
+  .coach-card { margin-right: max(0px, calc(668px - 50vw)); }
+}
+
+/* Mirror of landing.css's <=1279px .tc-bar-wrap rule. */
+@media (max-width: 1279px) {
+  .coach-root {
+    left: 270px;
+    right: 270px;
+    margin-left: 0;
+    width: auto;
+    max-width: 720px;
+    margin-right: auto;
+  }
+}
+
+/* <=980px: landing.css hands the whole bottom half of the viewport to the
+   rails (.tc-rail { top: 54%; bottom: 0; width: 50% }, .tc-rail-r at
+   left: 50%), so there is NO placement for the card in this layout class.
+   Belt only -- FirstRunCoach.jsx's matchMedia gate renders null (and installs
+   no listeners) at these widths. */
+@media (max-width: 980px) {
+  .coach-root { display: none; }
+}
+
+/* Pre-entrance state, released one committed frame after mount (see
+   FirstRunCoach.jsx). Must OUTRANK the active-scene rule
+   `.stage-root[data-scene="tool"] [data-cast="tool"] { opacity: 1 }`
+   ((0,3,0)) so a late-mounting card starts transparent; removing the
+   attribute then lets that rule's own delayed transition run the rank-4
+   fade-in. */
+.stage-root[data-scene="tool"] .coach-root[data-entering] {
+  opacity: 0;
+}
+
+@keyframes coach-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coach-card {
+    animation: none;
+  }
+}
