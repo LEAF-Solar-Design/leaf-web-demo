@@ -54,6 +54,18 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     )
 
 
+def test_test_gate_installs_the_locked_playwright_browser_before_running():
+    workflow = (REPO / ".github" / "workflows" / "test-gate.yml").read_text(
+        encoding="utf-8"
+    )
+    install_dependencies = workflow.index("name: Install web dependencies")
+    install_browser = workflow.index(
+        "run: npx playwright install --with-deps chromium"
+    )
+    run_gate = workflow.index("name: Run the full gate")
+    assert install_dependencies < install_browser < run_gate
+
+
 def test_spawn_failure_is_retryable_fail_row(tmp_path):
     g = _load_runner()
     suite = g.Suite("spawn-victim", "spawn victim", "script", SCRIPTS,
