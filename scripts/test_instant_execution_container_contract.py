@@ -7,11 +7,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "deploy" / "Dockerfile.instant-execution"
 DEPLOY_DOC = ROOT / "deploy" / "README.md"
+CONTROL_PLANE_REQUIREMENTS = ROOT / "executor" / "control_plane" / "requirements.txt"
+RUNTIME_REQUIREMENTS = ROOT / "executor" / "runtime" / "requirements.txt"
 
 
 def main() -> None:
     text = DOCKERFILE.read_text(encoding="utf-8")
     documentation = DEPLOY_DOC.read_text(encoding="utf-8")
+    control_plane_requirements = CONTROL_PLANE_REQUIREMENTS.read_text(encoding="utf-8")
+    runtime_requirements = RUNTIME_REQUIREMENTS.read_text(encoding="utf-8")
 
     assert "FROM python:3.12-slim" in text
     assert "executor/control_plane/requirements.txt" in text
@@ -43,6 +47,8 @@ def main() -> None:
     assert "python -m executor.bootstrap control" in documentation
     assert "python -m executor.bootstrap executor" in documentation
     assert "mode `0600`" in documentation
+    assert "cryptography>=48.0.1,<49" in control_plane_requirements
+    assert "cryptography>=48.0.1,<49" in runtime_requirements
 
     forbidden = (
         "AWS_ACCESS_KEY_ID",
