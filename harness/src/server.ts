@@ -40,6 +40,7 @@
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
@@ -54,6 +55,14 @@ import { parseWireGrant } from "./ports/wireGrant.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 
 export { DEFAULT_TENANT };
+
+function readConfiguredSecret(name: string): string {
+  const inline = (process.env[name] ?? "").trim();
+  const filename = (process.env[`${name}_FILE`] ?? "").trim();
+  if (inline && filename) throw new Error(`configure ${name} or ${name}_FILE, not both`);
+  if (filename) return readFileSync(filename, "utf8").trim();
+  return inline;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -612,12 +621,25 @@ export async function startReal(port = 8130): Promise<Server> {
   const { HttpGateClient } = await import("./ports/impl/gateClient.js");
   const { ConverseSdkRunner } = await import("./ports/impl/converseSdkRunner.js");
   const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
-  const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
+  const { HttpInstantExecutorProxyClient, InstantExecutorClientError } = await import("./ports/impl/instantExecutorClient.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
   const tenantGitDir = process.env.LEAF_TENANT_GIT_DIR ?? `${tenantsDir}/tenant-git`;
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
+  const directExecutorCredentialEnv = [
+    "LEAF_INSTANT_EXECUTOR_CA_FILE",
+    "LEAF_INSTANT_EXECUTOR_CERT_FILE",
+    "LEAF_INSTANT_EXECUTOR_KEY_FILE",
+  ].filter((name) => (process.env[name] ?? "").trim());
+  if (directExecutorCredentialEnv.length) {
+    throw new InstantExecutorClientError(
+      `executor mTLS files must be mounted only in the instant executor proxy, not the harness: ${directExecutorCredentialEnv.join(",")}`,
+      "configuration",
+    );
+  }
+  const instantExecutorProxyUrl = (process.env.LEAF_INSTANT_EXECUTOR_PROXY_URL ?? "").trim();
+  const instantExecutorProxySecret = readConfiguredSecret("LEAF_INSTANT_EXECUTOR_PROXY_SECRET");
   // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
   const grantStore = createTenantGrantStore();
   const sessionStore = appUrl && dispatchSecret ? createSessionStore() : null;
@@ -628,12 +650,10 @@ export async function startReal(port = 8130): Promise<Server> {
         gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
         store: sessionStore.store,
         runnerFor: (grant) => new ConverseSdkRunner({ grant }),
-        instantExecutor: new HttpInstantExecutorClient({
-          requireTls: true,
-          caFile: process.env.LEAF_INSTANT_EXECUTOR_CA_FILE,
-          clientCertificateFile: process.env.LEAF_INSTANT_EXECUTOR_CERT_FILE,
-          clientPrivateKeyFile: process.env.LEAF_INSTANT_EXECUTOR_KEY_FILE,
-          tlsServerName: process.env.LEAF_INSTANT_EXECUTOR_TLS_SERVER_NAME,
+        instantExecutor: new HttpInstantExecutorProxyClient({
+          proxyUrl: instantExecutorProxyUrl,
+          proxySecret: instantExecutorProxySecret,
+          allowNetworkProxy: true,
         }),
       })
     : undefined;

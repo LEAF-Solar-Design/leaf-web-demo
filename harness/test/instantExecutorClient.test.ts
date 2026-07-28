@@ -5,8 +5,9 @@ import { createServer as createHttpsServer, request as httpsRequest } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { HttpInstantExecutorClient, InstantExecutorClientError } from "../src/ports/impl/instantExecutorClient.js";
-import type { InstantInvocation, InstantSessionAssignment } from "../src/ports/index.js";
+import { HttpInstantExecutorClient, HttpInstantExecutorProxyClient, InstantExecutorClientError } from "../src/ports/impl/instantExecutorClient.js";
+import { createInstantExecutorProxy } from "../src/ports/impl/instantExecutorProxy.js";
+import type { InstantExecutorClient, InstantInvocation, InstantInvocationResponse, InstantSessionAssignment } from "../src/ports/index.js";
 
 const digest = `sha256:${"a".repeat(64)}`;
 const assignment = (endpoint: string): InstantSessionAssignment => ({
@@ -138,5 +139,76 @@ describe("HttpInstantExecutorClient", () => {
     } finally {
       client.close();
     }
+  });
+
+  it("routes through a loopback proxy without exposing executor mTLS material to the harness client", async () => {
+    const proxySecret = "p".repeat(32);
+    let forwarded = 0;
+    const fakeExecutor: InstantExecutorClient = {
+      async invoke(seenAssignment, seenInvocation): Promise<InstantInvocationResponse> {
+        forwarded += 1;
+        expect(seenAssignment.executor_endpoint).toBe("https://10.20.4.5:8088");
+        expect(seenInvocation.invocation_id).toBe(invocation.invocation_id);
+        return {
+          contract: "leaf.instant-execution/v1",
+          invocation_id: seenInvocation.invocation_id,
+          tenant_id: seenInvocation.tenant_id,
+          session_id: seenInvocation.session_id,
+          status: "succeeded",
+          code_digest: seenInvocation.code_digest,
+          completed_at: new Date().toISOString(),
+          result: { ok: true },
+        };
+      },
+    };
+    const proxy = createInstantExecutorProxy({ proxySecret, executorClient: fakeExecutor });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (proxy.address() as import("node:net").AddressInfo).port;
+      const denied = await fetch(`http://127.0.0.1:${port}/v1/invoke`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-instant-proxy-secret": "wrong" },
+        body: JSON.stringify({ assignment: assignment("https://10.20.4.5:8088"), invocation }),
+      });
+      expect(denied.status).toBe(401);
+      expect(forwarded).toBe(0);
+
+      const client = new HttpInstantExecutorProxyClient({
+        proxyUrl: `http://127.0.0.1:${port}`,
+        proxySecret,
+      });
+      try {
+        await expect(client.invoke(assignment("https://10.20.4.5:8088"), invocation)).resolves.toMatchObject({
+          status: "succeeded",
+          result: { ok: true },
+        });
+      } finally {
+        client.close();
+      }
+      expect(forwarded).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    }
+  });
+
+  it("keeps the harness side on a loopback proxy and out of the direct mTLS client", () => {
+    expect(() => new HttpInstantExecutorProxyClient({
+      proxyUrl: "http://127.0.0.1:8170",
+      proxySecret: "short",
+    })).toThrow(InstantExecutorClientError);
+    expect(() => new HttpInstantExecutorProxyClient({
+      proxyUrl: "http://192.0.2.3:8170",
+      proxySecret: "p".repeat(32),
+    })).toThrow(InstantExecutorClientError);
+    const privateNetworkClient = new HttpInstantExecutorProxyClient({
+      proxyUrl: "http://instant-proxy.leaf-platform-staging.local:8170",
+      proxySecret: "p".repeat(32),
+      allowNetworkProxy: true,
+    });
+    privateNetworkClient.close();
+    const serverSource = readFileSync(join(process.cwd(), "src/server.ts"), "utf8");
+    expect(serverSource).toContain("HttpInstantExecutorProxyClient");
+    expect(serverSource).toContain("executor mTLS files must be mounted only in the instant executor proxy");
+    expect(serverSource).not.toContain("new HttpInstantExecutorClient");
   });
 });

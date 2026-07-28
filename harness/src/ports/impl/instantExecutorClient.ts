@@ -33,6 +33,14 @@ export interface HttpInstantExecutorClientOptions {
   tlsServerName?: string;
 }
 
+export interface HttpInstantExecutorProxyClientOptions {
+  proxyUrl: string;
+  proxySecret: string;
+  timeoutMs?: number;
+  /** Allow a private network proxy service. The default accepts only loopback HTTP. */
+  allowNetworkProxy?: boolean;
+}
+
 type TlsMaterial = { ca: Buffer; cert: Buffer; key: Buffer };
 
 function configuredText(value: string | undefined): string | undefined {
@@ -75,6 +83,66 @@ function isLoopbackHostname(hostname: string): boolean {
   if (host === "localhost") return true;
   if (isIP(host) === 4) return host.split(".")[0] === "127";
   return host === "::1";
+}
+
+function requestJson<T>(opts: {
+  url: URL;
+  httpAgent: http.Agent;
+  httpsAgent: https.Agent;
+  timeoutMs: number;
+  headers: Record<string, string>;
+  body: object;
+  tlsServerName?: string;
+  signal?: AbortSignal;
+}): Promise<T> {
+  const payload = JSON.stringify(opts.body);
+  const requestFn = opts.url.protocol === "https:" ? https.request : opts.url.protocol === "http:" ? http.request : null;
+  if (!requestFn) return Promise.reject(new InstantExecutorClientError("unsupported executor protocol", "transport"));
+  return new Promise<T>((resolve, reject) => {
+    let timedOut = false;
+    let cancelled = false;
+    const req = requestFn(opts.url, {
+      method: "POST",
+      agent: opts.url.protocol === "https:" ? opts.httpsAgent : opts.httpAgent,
+      rejectUnauthorized: true,
+      ...(opts.url.protocol === "https:" && opts.tlsServerName ? { servername: opts.tlsServerName } : {}),
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(payload).toString(),
+        ...opts.headers,
+      },
+    }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => { text += chunk; });
+      res.on("end", () => {
+        let parsed: unknown;
+        try { parsed = JSON.parse(text); } catch {
+          reject(new InstantExecutorClientError("invalid executor response", "response"));
+          return;
+        }
+        if (parsed && typeof parsed === "object" && "status" in parsed) {
+          resolve(parsed as T);
+          return;
+        }
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) resolve(parsed as T);
+        else reject(new InstantExecutorClientError(`executor returned ${res.statusCode ?? 0}`, "response"));
+      });
+    });
+    const timer = setTimeout(() => { timedOut = true; req.destroy(); }, opts.timeoutMs);
+    const onAbort = () => { cancelled = true; req.destroy(); };
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    req.on("error", () => {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onAbort);
+      reject(new InstantExecutorClientError(
+        timedOut ? "instant executor timeout" : cancelled ? "instant executor cancelled" : "instant executor transport error",
+        timedOut ? "timeout" : cancelled ? "cancelled" : "transport",
+      ));
+    });
+    req.on("close", () => { clearTimeout(timer); opts.signal?.removeEventListener("abort", onAbort); });
+    req.end(payload);
+  });
 }
 
 export class HttpInstantExecutorClient implements InstantExecutorClient {
@@ -139,59 +207,55 @@ export class HttpInstantExecutorClient implements InstantExecutorClient {
   ): Promise<T> {
     const endpoint = new URL(assignment.executor_endpoint);
     const url = new URL(path, endpoint.pathname.endsWith("/") ? endpoint : `${endpoint}/`);
-    const payload = JSON.stringify(body);
-    const requestFn = url.protocol === "https:" ? https.request : url.protocol === "http:" ? http.request : null;
-    if (!requestFn) return Promise.reject(new InstantExecutorClientError("unsupported executor protocol", "transport"));
     if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
       return Promise.reject(new InstantExecutorClientError("plain HTTP executor endpoint must be loopback", "configuration"));
     }
     if (url.protocol === "https:" && !this.tlsConfigured) {
       return Promise.reject(new InstantExecutorClientError("instant executor TLS credentials are required for HTTPS", "configuration"));
     }
-    return new Promise<T>((resolve, reject) => {
-      let timedOut = false;
-      let cancelled = false;
-      const req = requestFn(url, {
-        method: "POST",
-        agent: url.protocol === "https:" ? this.httpsAgent : this.httpAgent,
-        rejectUnauthorized: true,
-        ...(url.protocol === "https:" && this.tlsServerName ? { servername: this.tlsServerName } : {}),
-        headers: {
-          "content-type": "application/json",
-          "content-length": Buffer.byteLength(payload),
-          authorization: `Bearer ${assignment.lease_token}`,
-        },
-      }, (res) => {
-        let text = "";
-        res.setEncoding("utf8");
-        res.on("data", (chunk: string) => { text += chunk; });
-        res.on("end", () => {
-          let parsed: unknown;
-          try { parsed = JSON.parse(text); } catch {
-            reject(new InstantExecutorClientError("invalid executor response", "response"));
-            return;
-          }
-          if (parsed && typeof parsed === "object" && "status" in parsed) {
-            resolve(parsed as T);
-            return;
-          }
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) resolve(parsed as T);
-          else reject(new InstantExecutorClientError(`executor returned ${res.statusCode ?? 0}`, "response"));
-        });
-      });
-      const timer = setTimeout(() => { timedOut = true; req.destroy(); }, this.timeoutMs);
-      const onAbort = () => { cancelled = true; req.destroy(); };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      req.on("error", () => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-        reject(new InstantExecutorClientError(
-          timedOut ? "instant executor timeout" : cancelled ? "instant executor cancelled" : "instant executor transport error",
-          timedOut ? "timeout" : cancelled ? "cancelled" : "transport",
-        ));
-      });
-      req.on("close", () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); });
-      req.end(payload);
+    return requestJson<T>({
+      url, httpAgent: this.httpAgent, httpsAgent: this.httpsAgent, timeoutMs: this.timeoutMs,
+      tlsServerName: this.tlsServerName, body, signal,
+      headers: { authorization: `Bearer ${assignment.lease_token}` },
+    });
+  }
+}
+
+export class HttpInstantExecutorProxyClient implements InstantExecutorClient {
+  private readonly httpAgent = new http.Agent({ keepAlive: true });
+  private readonly httpsAgent = new https.Agent({ keepAlive: true, rejectUnauthorized: true });
+  private readonly proxyUrl: URL;
+  private readonly proxySecret: string;
+  private readonly timeoutMs: number;
+
+  constructor(opts: HttpInstantExecutorProxyClientOptions) {
+    const secret = configuredText(opts.proxySecret);
+    if (!secret || secret.length < 32) {
+      throw new InstantExecutorClientError("instant executor proxy secret must contain at least 32 characters", "configuration");
+    }
+    this.proxyUrl = new URL(opts.proxyUrl);
+    if (this.proxyUrl.protocol !== "http:" || (!opts.allowNetworkProxy && !isLoopbackHostname(this.proxyUrl.hostname))) {
+      throw new InstantExecutorClientError("instant executor proxy URL must be loopback HTTP unless network proxy mode is explicit", "configuration");
+    }
+    this.proxySecret = secret;
+    this.timeoutMs = opts.timeoutMs ?? 15_000;
+  }
+
+  close(): void {
+    this.httpAgent.destroy();
+    this.httpsAgent.destroy();
+  }
+
+  invoke(
+    assignment: InstantSessionAssignment,
+    invocation: InstantInvocation,
+    opts?: { signal?: AbortSignal },
+  ): Promise<InstantInvocationResponse> {
+    const url = new URL("/v1/invoke", this.proxyUrl);
+    return requestJson<InstantInvocationResponse>({
+      url, httpAgent: this.httpAgent, httpsAgent: this.httpsAgent, timeoutMs: this.timeoutMs,
+      body: { assignment, invocation }, signal: opts?.signal,
+      headers: { "x-instant-proxy-secret": this.proxySecret },
     });
   }
 }
