@@ -487,7 +487,7 @@ def test_restore_of_missing_version_404s(client, tmp_path):
            "environment.",
 )
 def test_postgres_live_dwg_restore_preserves_blob_and_readable_cache(
-    client, tmp_path, monkeypatch,
+    client, tmp_path, monkeypatch, request,
 ):
     """Staging-representative proof without touching staging.
 
@@ -504,6 +504,12 @@ def test_postgres_live_dwg_restore_preserves_blob_and_readable_cache(
     # ambient DATABASE_URL (see skipif).
     monkeypatch.setenv("DATABASE_URL", os.environ["LEAF_RESTORE_PG_PROOF_DB"])
     db = store._db()
+    # get_pool() caches its conninfo at creation: reset BEFORE so a pool that
+    # pre-dates the monkeypatch (bound to an ambient database) can never be
+    # reused here, and AGAIN at teardown so no pool bound to the disposable
+    # database leaks into later tests after the env is restored.
+    db.reset_pool()
+    request.addfinalizer(db.reset_pool)
     db.apply_migration()
     monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
 

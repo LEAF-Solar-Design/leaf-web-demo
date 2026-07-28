@@ -295,8 +295,21 @@ export default function useDrawingVersionController({
       return result
     }
 
+    // Even a READABLE restore moves the server head before this client can
+    // read it: until the new head's intake actually seats, the stale viewer
+    // must not mutate (undo or a write against a head it has not seen). The
+    // lock is armed BEFORE the read — a pending GET window with mutations
+    // enabled was the round-1 hole — and only seatVersion clears it.
+    setUnreadableHead({
+      drawing_id: drawingId,
+      head: Number(result.head),
+      latest: Number(result.latest ?? result.head),
+      restored_from: result.restored_from,
+      message: `Restored as v${result.head}. Loading the new head…`,
+    })
     if (typeof loadHead !== 'function') {
-      setUnreadableHead(null)
+      // No reader available: the new head cannot be seated, so the lock
+      // STAYS (fail-safe; every in-tree caller passes loadHead).
       return result
     }
     try {
