@@ -13,12 +13,18 @@ function versionRows(head) {
   ]
 }
 
-async function mountVersionSurface(page, { restoredHeadReadable = true } = {}) {
+async function mountVersionSurface(page, {
+  restoredHeadReadable = true,
+  stallHistoryAfterRestore = false,
+  failFirstRepairRead = false,
+} = {}) {
   const proofState = makeCatProofState()
   let head = 3
   let restoreCount = 0
   let intakeReadsAfterRestore = 0
   let deltasRequested = false
+  let releaseHistoryRefresh
+  const historyRefreshGate = new Promise((resolve) => { releaseHistoryRefresh = resolve })
 
   await page.route('**/api/**', async (route) => {
     const request = route.request()
@@ -30,6 +36,7 @@ async function mountVersionSurface(page, { restoredHeadReadable = true } = {}) {
 
     if (path === '/api/drawings/cat-panels/versions' && method === 'GET') {
       deltasRequested ||= url.searchParams.get('include_deltas') === '1'
+      if (restoreCount && stallHistoryAfterRestore) await historyRefreshGate
       result = {
         status: 200,
         body: {
@@ -50,13 +57,15 @@ async function mountVersionSurface(page, { restoredHeadReadable = true } = {}) {
       }
     } else if (path === '/api/drawings/cat-panels/intake' && method === 'GET' && restoreCount) {
       intakeReadsAfterRestore += 1
-      result = {
-        status: 200,
-        body: {
-          drawing_id: 'cat-panels', intake: proofState.base,
-          version: head, head, latest: head,
-        },
-      }
+      result = failFirstRepairRead && intakeReadsAfterRestore === 1
+        ? { status: 503, body: { detail: 'intake cache is still unavailable' } }
+        : {
+            status: 200,
+            body: {
+              drawing_id: 'cat-panels', intake: proofState.base,
+              version: head, head, latest: head,
+            },
+          }
     } else {
       result = catProofResponse({
         method, path, body, query: Object.fromEntries(url.searchParams),
@@ -93,6 +102,7 @@ async function mountVersionSurface(page, { restoredHeadReadable = true } = {}) {
     deltasRequested: () => deltasRequested,
     intakeReadsAfterRestore: () => intakeReadsAfterRestore,
     restoreCount: () => restoreCount,
+    releaseHistoryRefresh,
   }
 }
 
@@ -159,6 +169,39 @@ test('an unreadable restored head keeps its warning through history refresh and 
   await expect(persistentLock).toBeHidden()
   expect(observed.intakeReadsAfterRestore()).toBe(1)
   await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
+})
+
+test('an unreadable committed head locks writes before a stalled history refresh and survives a failed repair', async ({ page }) => {
+  test.setTimeout(60_000)
+  const observed = await mountVersionSurface(page, {
+    restoredHeadReadable: false,
+    stallHistoryAfterRestore: true,
+    failFirstRepairRead: true,
+  })
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  const v1 = history.getByTestId('vh-row-v1')
+
+  await v1.getByRole('button', { name: 'Restore', exact: true }).click()
+  await v1.getByRole('button', { name: 'Restore v1' }).click()
+
+  // The post-commit history GET is still pending, but the committed response
+  // must already have moved the controller head and locked every write path.
+  const persistentLock = page.getByTestId('unreadable-head-lock')
+  await expect(persistentLock).toHaveAttribute('data-head', '4')
+  await history.getByRole('button', { name: 'Close version history' }).click()
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Redo' })).toBeDisabled()
+
+  // A failed intake retry cannot clear the lock. Only a later successful read
+  // can seat the committed head and make mutations eligible again.
+  await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
+  await expect(persistentLock).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
+  await expect(persistentLock).toBeHidden()
+  expect(observed.intakeReadsAfterRestore()).toBe(2)
+
+  observed.releaseHistoryRefresh()
 })
 
 test('/try neither requests deltas nor exposes restore controls', async ({ page }) => {

@@ -118,6 +118,10 @@ export default function VersionHistory({
     try {
       const result = await restoreDrawingVersion(useMock, drawingId, v, capability)
       setConfirmingVersion(null)
+      // The restore is already committed. Record its new head before any
+      // best-effort history refresh, which can fail or remain pending. This
+      // makes an unreadable head lock edits at the first committed response.
+      await onRestored?.(result)
       if (onRetry) {
         // The real integration path: the parent's own history state refreshes,
         // and `data` (a fresh prop) will clear `overrideData` above.
@@ -127,9 +131,6 @@ export default function VersionHistory({
         try { setOverrideData(await getDrawingVersions(useMock, drawingId, { includeDeltas: true })) }
         catch { /* the restore itself already succeeded; the list just won't advance */ }
       }
-      // The controller records the committed head before deciding whether a
-      // viewer refresh is safe.
-      await onRestored?.(result)
     } catch (e) {
       setRestoreErr({ version: v, message: e?.message || 'Restore failed.' })
     } finally {
