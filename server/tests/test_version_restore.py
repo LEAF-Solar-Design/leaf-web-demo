@@ -538,6 +538,54 @@ def test_non_conflict_valueerror_from_mint_is_transport_not_conflict(client, tmp
     assert v == v4 and intake == legacy_intake
 
 
+def test_exists_probe_transport_failure_is_retryable_503(client, tmp_path, monkeypatch):
+    """Round-5 pin: a transport failure on the proof EXISTENCE probe is
+    ProofStateUnreadable -> retryable 503 on the intake route, never an
+    escaped 500 or a non-retryable client error."""
+    backend_holder = {}
+    import store  # noqa: PLC0415
+
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\\x00\\x01LIVE-DWG7",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+    original_exists = store.FilesystemBackend.exists
+
+    def failing_exists(self, key):
+        if key == proof_key:
+            raise OSError("simulated transport failure")
+        return original_exists(self, key)
+
+    monkeypatch.setattr(store.FilesystemBackend, "exists", failing_exists)
+    r = client.get(f"/api/drawings/{DRAWING}/intake",
+                   params={"version": str(v4)}, headers=_h(TENANT))
+    assert r.status_code == 503, r.text
+    assert r.json()["error"]["retryable"] is True
+    del backend_holder
+
+
+def test_undo_commit_with_unreadable_head_is_never_retryable(client, tmp_path, monkeypatch):
+    """Round-5 pin: undo moves the head BEFORE the response-building read; a
+    ProofStateUnreadable there must surface as retryable=False (a retry would
+    undo a further version), not an unhandled 500."""
+    from routers import drawings as drawings_router  # noqa: PLC0415
+
+    _seed_chain(tmp_path)
+
+    def committed_but_unreadable(*args, **kwargs):
+        raise write_loop.ProofStateUnreadable("simulated post-commit read failure")
+
+    monkeypatch.setattr(drawings_router.write_loop, "undo_view", committed_but_unreadable)
+    r = client.post(f"/api/drawings/{DRAWING}/undo", headers=_h(TENANT))
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["error"]["retryable"] is False
+    assert "refresh" in body["error"]["message"]
+
+
 def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypatch):
     """Round-4 MAJOR pin: when the source is live-representation (DWG blob +
     valid cache) and the cache mirror fails post-commit, the response still

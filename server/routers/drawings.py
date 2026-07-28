@@ -202,6 +202,15 @@ def undo(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant),
         # The lock changed between the gate above and the store's own check under
         # its row lock. The store is authoritative; report ITS answer.
         return _denied(checkout_capability.CapabilityRejected(str(exc)))
+    except write_loop.ProofStateUnreadable as exc:
+        # The head repoint COMMITTED; only the response-building intake read
+        # failed on transport. NOT retryable: retrying would undo a further
+        # version. The client should refresh instead.
+        return error_response(
+            ErrorCode.INTERNAL,
+            f"the undo committed, but the head's intake is temporarily unreadable ({exc}); "
+            "refresh instead of retrying",
+            retryable=False, status_code=503)
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
@@ -232,6 +241,13 @@ def redo(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant),
                                     holder=holder, fence=fence)
     except _store_checkout_denied() as exc:
         return _denied(checkout_capability.CapabilityRejected(str(exc)))
+    except write_loop.ProofStateUnreadable as exc:
+        # Same committed-but-unreadable shape as undo: never retryable.
+        return error_response(
+            ErrorCode.INTERNAL,
+            f"the redo committed, but the head's intake is temporarily unreadable ({exc}); "
+            "refresh instead of retrying",
+            retryable=False, status_code=503)
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))

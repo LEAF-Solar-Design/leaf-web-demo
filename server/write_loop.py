@@ -399,7 +399,12 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
             "intake_ref": ckey,
             "intake_sha256": intake_digest,
         }
-        if not backend.exists(pkey):
+        try:
+            proof_exists = backend.exists(pkey)
+        except Exception as exc:  # noqa: BLE001 — transport, retryable
+            raise ProofStateUnreadable(
+                "raw DWG intake cache proof state is unreadable") from exc
+        if not proof_exists:
             # PRE-PROOF-ERA version: the sidecar proof was introduced with the
             # restore lane (PR #243) and no backfill exists, so every live DWG
             # version created before it has a cache and NO proof. Refusing
@@ -477,9 +482,18 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
         else:
             # A PRESENT proof is authoritative: corrupt or mismatched fails
             # closed exactly as before (a swapped cache must never be served).
+            # Transport failures fetching it are NOT corruption: a backend
+            # ValueError (OSS credential/response parsing) or OSError here
+            # proves nothing about the proof's content and must stay
+            # retryable rather than becoming a permanent refusal.
             try:
-                proof = json.loads(backend.get(pkey).decode("utf-8"))
-            except (KeyError, UnicodeDecodeError, ValueError) as exc:
+                raw_present_proof = backend.get(pkey)
+            except Exception as exc:  # noqa: BLE001 — transport, retryable
+                raise ProofStateUnreadable(
+                    "raw DWG intake cache proof state is unreadable") from exc
+            try:
+                proof = json.loads(raw_present_proof.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
                 raise ValueError("raw DWG intake cache has no source binding") from exc
             if not isinstance(proof, dict) or any(
                 not hmac.compare_digest(str(proof.get(key)), str(value))
@@ -854,6 +868,12 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     try:
         ensure_demo_drawing(backend, tenant_id, drawing_id)
         head_v, cur_intake = read_intake(backend, tenant_id, drawing_id, version)
+    except ProofStateUnreadable as exc:
+        # The base version exists; its proof state is unreachable right now.
+        # Retryable — nothing has been written yet at this point.
+        return (err_envelope(ErrorCode.INTERNAL, str(exc),
+                             retryable=True, tool=name, version=tool_version),
+                503)
     except (KeyError, ValueError) as exc:
         return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
                              retryable=False, tool=name, version=tool_version),

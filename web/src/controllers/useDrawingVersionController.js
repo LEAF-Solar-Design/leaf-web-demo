@@ -168,6 +168,12 @@ export default function useDrawingVersionController({
     setVersionError(null)
     setRefreshFailure(null)
     releaseLockIfSeated(view, options.drawingId)
+    // ANY seat supersedes an in-flight restore completion (round-5 finding):
+    // a background job/undo/refresh seating a newer view here must prevent a
+    // delayed restore read from later seating its OLDER view over this one.
+    // recordRestore checks its generation BEFORE calling seatVersion, so its
+    // own seat is unaffected by this bump.
+    restoreGenerationRef.current += 1
     resetPreview()
     onResetSelection?.({ source: options.source || 'version' })
     onApplyIntake?.(view.intake, {
