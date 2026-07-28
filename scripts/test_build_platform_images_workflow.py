@@ -39,6 +39,8 @@ def main() -> None:
     assert "AUTOFILL_SOLVER_REVISION={0}" in text
     assert "autofill_solver=./autofill-solver" in text
     assert "repository: LEAF-Solar-Design/autofill-solver" in text
+    assert "CANONICAL_SOLVER_DEPLOY_KEY is required" in text
+    assert "ssh-key: ${{ secrets.CANONICAL_SOLVER_DEPLOY_KEY }}" in text
     assert "pull-requests: read" in text
     assert "source_sha must be a full 40-character lowercase hexadecimal commit" in text
     assert '.state == "open"' in text
