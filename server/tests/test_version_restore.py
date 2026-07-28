@@ -234,11 +234,16 @@ def test_concurrent_restores_stay_linear(client, tmp_path):
     two racing restores forked the chain (both parent 1). The in-process
     restore lock serializes them: each re-reads a fresh head, so the chain
     stays LINEAR (v4 parent 3, v5 parent 4 — in either completion order)."""
+    import threading
     from concurrent.futures import ThreadPoolExecutor
 
     _seed_chain(tmp_path)
+    barrier = threading.Barrier(2)
 
     def _restore(v):
+        # The barrier forces both requests to reach the route concurrently so
+        # the pass cannot come from favorable sequential scheduling.
+        barrier.wait(timeout=10)
         return client.post(f"/api/drawings/{DRAWING}/versions/{v}/restore", headers=_h(TENANT))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -287,6 +292,38 @@ def test_corrupt_manifest_matches_the_mutating_route_family(client, tmp_path):
     undo = client.post(f"/api/drawings/{DRAWING}/undo", headers=_h(TENANT))
     assert restore.status_code == undo.status_code == 400, (restore.text, undo.text)
     assert restore.json()["error"]["retryable"] is False
+
+
+def test_checkout_acquired_after_preflight_is_refused_at_the_store(client, tmp_path, monkeypatch):
+    """Round-3 BLOCKING pin: a checkout acquired AFTER the preflight saw none
+    must be refused ATOMICALLY at put time. The route passes ANONYMOUS_HOLDER
+    (never None) for a lease-less caller, and the store's own holder check
+    fails closed under an active checkout. The race is simulated by letting
+    the preflight report (None, None) while the checkout is already active."""
+    import store  # noqa: PLC0415
+    from routers import drawings as drawings_router  # noqa: PLC0415
+
+    backend = _seed_chain(tmp_path)
+    store.acquire_checkout(backend, TENANT, DRAWING, holder="racing-session", ttl_s=300)
+    monkeypatch.setattr(drawings_router, "_lock_authorization",
+                        lambda *args, **kwargs: (None, None))
+
+    r = client.post(f"/api/drawings/{DRAWING}/versions/1/restore", headers=_h(TENANT))
+    assert r.status_code == 403, r.text
+
+    versions = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
+    assert versions["head"] == 3  # the refused write never landed
+
+
+def test_corrupt_intake_cache_is_refused(client, tmp_path):
+    """Round-3 MAJOR pin: an existing-but-corrupt cache must be refused, not
+    mirrored unexamined onto the new head."""
+    backend = _seed_chain(tmp_path)
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, 2), b"{not intake json")
+
+    r = client.post(f"/api/drawings/{DRAWING}/versions/2/restore", headers=_h(TENANT))
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["retryable"] is False
 
 
 def test_restore_of_missing_version_404s(client, tmp_path):
