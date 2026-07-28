@@ -218,3 +218,53 @@ def test_non_lock_operational_error_is_not_retried(tmp_path):
     finally:
         store_module.SQLiteCustomizationStore = _real_store
     assert calls["n"] == 1
+
+
+def test_snapshot_reads_inside_one_encompassing_transaction(tmp_path, monkeypatch):
+    """Every table must be read in ONE read transaction.
+
+    The connection is autocommit, so without an explicit BEGIN each table's
+    SELECT is its own transaction and a writer committing between them yields
+    a source snapshot that never existed as a single state; the authority
+    digest would then certify a mixture. This runs against the database the
+    live app serves from, so that window is real. Record the exact statement
+    order and pin the bracket.
+    """
+    script = _script()
+    path = tmp_path / "customization.db"
+    script._ensure_source_schema(path)
+
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    class _Recorder:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args):
+            statements.append(sql.strip().split("\n")[0])
+            return self._inner.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __setattr__(self, name, value):
+            if name == "_inner":
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._inner, name, value)
+
+    def recording_connect(*args, **kwargs):
+        return _Recorder(real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    script._sqlite_snapshot(path)
+
+    assert statements[0].upper().startswith("BEGIN")
+    assert statements[-1].upper().startswith("ROLLBACK")
+    selects = [s for s in statements if s.upper().startswith("SELECT")]
+    # sqlite_master probe plus one SELECT per authority table, all bracketed.
+    assert len(selects) == len(script.TABLE_COLUMNS) + 1
+    assert all(
+        statements.index("BEGIN DEFERRED") < statements.index(s) for s in selects
+    )
