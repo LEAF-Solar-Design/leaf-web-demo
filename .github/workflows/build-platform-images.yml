@@ -277,6 +277,17 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
+      - name: Require the read-only canonical solver deploy key
+        if: matrix.image == 'canonical-worker'
+        env:
+          CANONICAL_SOLVER_DEPLOY_KEY: ${{ secrets.CANONICAL_SOLVER_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$CANONICAL_SOLVER_DEPLOY_KEY" ] || {
+            echo "::error::CANONICAL_SOLVER_DEPLOY_KEY is required for the private canonical solver checkout."
+            exit 1
+          }
+
       - name: Check out the exact canonical solver source
         if: matrix.image == 'canonical-worker'
         uses: actions/checkout@v4
@@ -284,6 +295,7 @@ jobs:
           repository: LEAF-Solar-Design/autofill-solver
           ref: ${{ needs.prepare.outputs.solver_revision }}
           path: autofill-solver
+          ssh-key: ${{ secrets.CANONICAL_SOLVER_DEPLOY_KEY }}
           persist-credentials: false
 
       - name: Set up Docker Buildx
