@@ -10,7 +10,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 21)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 22)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
@@ -183,7 +183,7 @@ def _inventory_errors(inventory: dict) -> list[str]:
 
     scope = inventory.get("scope", {})
     if scope.get("migration_ids") != EXPECTED_MIGRATIONS:
-        errors.append("scope migration_ids must be exactly 0001 through 0020")
+        errors.append("scope migration_ids must be exactly 0001 through 0021")
     if scope.get("completeness") == "complete":
         unresolved = [
             authority["id"]

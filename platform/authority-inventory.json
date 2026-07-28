@@ -4,7 +4,7 @@
     "migration_ids": [
       "0001", "0002", "0003", "0004", "0005", "0006", "0007",
       "0008", "0009", "0010", "0011", "0012", "0013", "0014",
-      "0015", "0016", "0017", "0018", "0019", "0020"
+      "0015", "0016", "0017", "0018", "0019", "0020", "0021"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands and current live staging and production selector values are not present in this repository."
@@ -167,7 +167,10 @@
       "selectors": [
         {"name": "LEAF_DRAWING_STORE", "allowed_modes": ["legacy", "postgres"], "repository_default": "legacy"}
       ],
-      "postgres_tables": ["drawing_store_manifests", "drawing_store_versions"],
+      "postgres_tables": [
+        "drawing_store_manifests", "drawing_store_versions",
+        "drawing_authority_cutover"
+      ],
       "legacy_source": ["LEAF_STORE_DIR per-drawing manifest JSON and version files"],
       "backfill": {"command": null, "status": "not_implemented", "note": "No manifest, version, checkout, or reservation import command exists."},
       "parity": {"command": "python -m pytest -q server/tests/test_drawing_upload_authority_postgres.py", "status": "contract_tests_only", "note": "Tests cover authority behavior, not filesystem-to-table parity."},
