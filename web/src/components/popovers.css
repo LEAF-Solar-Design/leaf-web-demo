@@ -71,3 +71,17 @@ button.key:disabled { opacity: .6; cursor: default; }
 .vh-list .vh-row .lbar { width: 2px; align-self: stretch; flex: 0 0 auto; }
 .vh-list .vh-row.active .lbar { background: var(--primary); border-radius: 1px; }
 .vh-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+
+/* ruling-4 (lane S5): per-row delta chip + Restore action. The row button and
+   the restore control sit as SIBLINGS (never a button inside a button). */
+.vh-row-line { display: flex; align-items: stretch; gap: 6px; }
+.vh-row-line .vh-row { flex: 1; min-width: 0; }
+.vh-restore { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; padding-right: 4px; white-space: nowrap; }
+.vh-restore .chip-act, .vh-restore .chip-neutral { font-size: 10.5px; padding: 3px 7px; }
+.vh-restore-err { padding: 4px 8px 6px 12px; }
+
+.vh-delta { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.vh-delta-add { color: var(--primary); }
+.vh-delta-mod { color: var(--status-warning); }
+.vh-delta-del { color: var(--status-danger); }
+.vh-delta-none { color: var(--muted); }

@@ -108,16 +108,6 @@
     filter var(--recast-focus) var(--recast-curve) calc(var(--recast-gap) + var(--rank, 0) * var(--recast-stagger));
 }
 
-/* Reduced motion = immediate completion, everywhere on the stage. */
-@media (prefers-reduced-motion: reduce) {
-  .stage-root, .stage-root * {
-    transition-duration: 0s !important;
-    transition-delay: 0s !important;
-    animation-duration: 0s !important;
-    animation-delay: 0s !important;
-  }
-}
-
 /* ---------------- top bar (persistent chrome, z 50) ---------------- */
 
 .lp-topbar {
@@ -568,4 +558,14 @@
   .tc-caption { display: none; }
   .tc-rail-head { padding-top: 8px; }
   .tc-rail-tabs { padding-bottom: 6px; }
+}
+
+/* Equal-specificity !important ties resolve by source order, so this follows the caption's transition: ... !important (issue #246). */
+@media (prefers-reduced-motion: reduce) {
+  .stage-root, .stage-root * {
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+  }
 }

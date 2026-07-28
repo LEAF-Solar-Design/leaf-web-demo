@@ -39,16 +39,49 @@ def main() -> None:
     assert "AUTOFILL_SOLVER_REVISION={0}" in text
     assert "autofill_solver=./autofill-solver" in text
     assert "repository: LEAF-Solar-Design/autofill-solver" in text
+    assert "AUTOFILL_SOLVER_DEPLOY_KEY is required" in text
+    assert "ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}" in text
     assert "pull-requests: read" in text
     assert "source_sha must be a full 40-character lowercase hexadecimal commit" in text
-    assert '.state == "open"' in text
-    assert ".draft == true" in text
-    assert '.base.ref == "main"' in text
-    assert "(.head.sha | ascii_downcase) == $sha" in text
-    assert "Build source must be on main or the exact head of an open draft PR" in text
+    source_start = text.index("      - name: Require exact source to be reviewed")
+    solver_start = text.index("      - name: Resolve canonical solver provenance")
+    source_body = text[source_start:solver_start]
+    assert '--arg repo "$GITHUB_REPOSITORY"' in source_body
+    for required_check in (
+        '.state == "open"',
+        ".draft == true",
+        '.base.ref == "main"',
+        ".head.repo.full_name == $repo",
+        ".head.repo.fork == false",
+        "(.head.sha | ascii_downcase) == $sha",
+    ):
+        assert source_body.count(required_check) == 1
+    assert "exact head of an open same-repository draft PR" in source_body
     assert "Only a source commit on main may request production promotion" in text
     assert "needs.prepare.outputs.source_mode == 'main'" in text
     assert text.count("id-token: write") == 2
+
+    # The private key is scoped to the canonical-worker lane. It is used only
+    # for a fail-closed presence check and the one exact solver checkout. It is
+    # never passed to Docker as an argument or inherited by the whole job.
+    secret_ref = "secrets.AUTOFILL_SOLVER_DEPLOY_KEY"
+    assert text.count(secret_ref) == 2
+    require_start = text.index(
+        "      - name: Require the read-only canonical solver deploy key"
+    )
+    checkout_start = text.index(
+        "      - name: Check out the exact canonical solver source"
+    )
+    buildx_start = text.index("      - name: Set up Docker Buildx", checkout_start)
+    require_body = text[require_start:checkout_start]
+    checkout_body = text[checkout_start:buildx_start]
+    assert "if: matrix.image == 'canonical-worker'" in require_body
+    assert "if: matrix.image == 'canonical-worker'" in checkout_body
+    assert "persist-credentials: false" in checkout_body
+    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 1
+    assert "AUTOFILL_SOLVER_DEPLOY_KEY=" not in text
+    assert "AUTOFILL_SOLVER_DEPLOY_KEY:" not in text[:require_start]
+    assert "AUTOFILL_SOLVER_DEPLOY_KEY" not in text[buildx_start:]
 
     # An untested image can never reach ECR: the build job waits on the full
     # gate, run against the exact commit `prepare` resolved. Branch protection

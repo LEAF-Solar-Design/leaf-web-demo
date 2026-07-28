@@ -62,6 +62,7 @@ import { classifyAgentError } from '../converse.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
+import FirstRunCoach from '../demo/FirstRunCoach.jsx'
 import { shouldStartTour } from '../demo/tourEntry.js'
 import * as mockVersions from '../mock/mockVersions.js'
 
@@ -199,6 +200,11 @@ function moveTab(event) {
   tabs[next].click()
 }
 
+// Whether this SPA page load ever saw an ACTIVE platform session. Lives at
+// module scope so it survives ToolCast unmounts (route to /sheets or /app and
+// back); see the first-run coach gate below.
+let sessionWasActiveThisPageLoad = false
+
 export default function ToolCast({
   active,
   onFitDrawing,
@@ -217,6 +223,16 @@ export default function ToolCast({
   const transportMock = PUBLIC_DEMO || !sessionReady
   const sessionReadyRef = useRef(sessionReady)
   sessionReadyRef.current = sessionReady
+  // The first-run coach is only for visitors who were never signed in during
+  // this page view. An active session that later expires flips status back
+  // to 'required' (any subscribed 401 does it), and a first-run hint
+  // surfacing mid-session for a returning user is noise, not coaching.
+  // Module-scoped (not a ref): navigating through /sheets or /app unmounts
+  // ToolCast, and a remount within the same SPA page load must not forget
+  // that the visitor was signed in.
+  useEffect(() => {
+    if (platformSession.status === 'active') sessionWasActiveThisPageLoad = true
+  }, [platformSession.status])
   const requireAuth = platformSession.actions.requireAuth
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
@@ -1402,6 +1418,18 @@ export default function ToolCast({
           busy={routing || busy || jobRunning}
           bannerTitle="Leaf operator walkthrough"
           bannerSubtitle="One scene for request, approval, job, drawing, version, and trust."
+        />
+      )}
+      {!tourOn && sessionAuthRequired && !sessionWasActiveThisPageLoad && (
+        // Mounted independent of the scene so the data-cast choreography can
+        // fade it with the other tool panes (a mount gated on `active` pops
+        // in over the fading landing scene and unmounts without the exit
+        // fade). The scene CSS + SiteRoot's inert sweep hide it off-scene;
+        // sceneActive only gates its document listeners.
+        <FirstRunCoach
+          signedIn={platformSession.status === 'active'}
+          active={!focusView}
+          sceneActive={active}
         />
       )}
     </>

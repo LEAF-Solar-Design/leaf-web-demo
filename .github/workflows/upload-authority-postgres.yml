@@ -56,6 +56,7 @@ on:
       - 'server/tests/test_ops_metrics_pg.py'
       - 'server/tests/test_postgres_authority_inventory_contract.py'
       - 'server/tests/test_postgres_container_wiring.py'
+      - 'server/tests/test_version_restore.py'
   workflow_dispatch:
 
 permissions:
@@ -129,6 +130,12 @@ jobs:
       - name: Run PostgreSQL authority and race tests
         working-directory: server
         run: python -m pytest -q tests/test_drawing_upload_authority_postgres.py
+
+      - name: Run PostgreSQL live-DWG version restore proof
+        working-directory: server
+        run: >-
+          python -m pytest -q tests/test_version_restore.py
+          -k postgres_live_dwg_restore_preserves_blob_and_readable_cache
 
       - name: Run observability read-model PostgreSQL verifier
         working-directory: server

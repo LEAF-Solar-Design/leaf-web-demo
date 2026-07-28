@@ -109,6 +109,15 @@ def test_upload_import_boundary_has_a_real_postgres_pr_gate():
     assert "../platform/tests/test_drawing_import.py" in workflow
 
 
+def test_live_dwg_version_restore_has_a_real_postgres_pr_gate():
+    workflow = _read(".github/workflows/upload-authority-postgres.yml")
+
+    assert "- 'server/tests/test_version_restore.py'" in workflow
+    assert "Run PostgreSQL live-DWG version restore proof" in workflow
+    assert "tests/test_version_restore.py" in workflow
+    assert "postgres_live_dwg_restore_preserves_blob_and_readable_cache" in workflow
+
+
 def test_customization_authority_has_a_real_postgres_pr_gate():
     _assert_customization_postgres_gate(
         _read(".github/workflows/upload-authority-postgres.yml")

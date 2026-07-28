@@ -108,6 +108,10 @@ jobs:
         working-directory: web
         run: npm ci
 
+      - name: Install Chromium for browser proofs
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
       - name: Run the full gate
         env:
           # The autofill-solver is a sibling checkout on an operator box and is

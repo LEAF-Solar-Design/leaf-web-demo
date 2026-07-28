@@ -560,6 +560,13 @@ def build_suites() -> List[Suite]:
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
               _py_pytest("tests/test_postgres_container_wiring.py"), 7),
+        # Offline restore coverage always runs. The one real PostgreSQL case is
+        # separately enforced by upload-authority-postgres.yml and is the only
+        # allowed skip on the hermetic test-gate runner.
+        Suite("server-version-restore", "server tests/test_version_restore.py",
+              "pytest", SERVER, _py_pytest("tests/test_version_restore.py"), 17,
+              allowed_skip_reasons=(
+                  r"PostgreSQL restore proof requires explicit DATABASE_URL",)),
         Suite("server-agent-gate-postgres", "server tests/test_agent_gate_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_gate_postgres.py"), 14,
               allowed_skip_reasons=(r"DATABASE_URL is not set",)),
@@ -742,7 +749,7 @@ def build_suites() -> List[Suite]:
         # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
         # tree 2026-07-27.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 27),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 29),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #
@@ -770,6 +777,12 @@ def build_suites() -> List[Suite]:
         Suite("web-deployed-acceptance-contract",
               "web deployed authored CAD acceptance contract", "script", WEB,
               [_npm(), "run", "check:deployed-acceptance-contract"], None),
+        Suite("web-proof-receipt-contract",
+              "web proof receipt contract", "script", WEB,
+              [_npm(), "run", "check:proof-receipt"], None),
+        Suite("web-version-restore-proof",
+              "web /app version restore browser proof", "script", WEB,
+              [_npm(), "run", "proof:version-restore"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #

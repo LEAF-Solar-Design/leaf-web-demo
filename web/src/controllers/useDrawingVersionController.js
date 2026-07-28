@@ -54,13 +54,18 @@ export default function useDrawingVersionController({
 
   const [refreshFailure, setRefreshFailure] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
+  // A restore can commit a new immutable head before its derived intake cache
+  // is readable. This is drawing state, not drawer state: closing history must
+  // not make the stale viewer eligible to mutate the newer server head.
+  const [unreadableHead, setUnreadableHead] = useState(null)
 
   const shown = previewIntake || versionIntake || intake
   const activeVersion = previewing?.version ?? drawingState?.head ?? drawingState?.version ?? null
   const numericHead = Number(drawingState?.head)
   const numericLatest = Number(drawingState?.latest)
-  const canUndo = Number.isFinite(numericHead) && numericHead > 1
-  const canRedo = Number.isFinite(numericHead) && Number.isFinite(numericLatest) && numericHead < numericLatest
+  const mutationsBlocked = unreadableHead != null
+  const canUndo = !mutationsBlocked && Number.isFinite(numericHead) && numericHead > 1
+  const canRedo = !mutationsBlocked && Number.isFinite(numericHead) && Number.isFinite(numericLatest) && numericHead < numericLatest
 
   const reportError = useCallback((error, operation) => {
     setVersionError(formatError(error))
@@ -91,6 +96,7 @@ export default function useDrawingVersionController({
     setPreviewIntake(null)
     setRefreshFailure(null)
     setRefreshing(false)
+    setUnreadableHead(null)
     onResetSelection?.({ source: 'reset' })
   }, [onResetSelection])
 
@@ -101,6 +107,7 @@ export default function useDrawingVersionController({
     setVersionError(null)
     setOverlayStale(false)
     setRefreshFailure(null)
+    setUnreadableHead(null)
     resetPreview()
     onResetSelection?.({ source: 'intake' })
 
@@ -123,6 +130,7 @@ export default function useDrawingVersionController({
     setVersionIntake(view.intake)
     setVersionError(null)
     setRefreshFailure(null)
+    setUnreadableHead(null)
     resetPreview()
     onResetSelection?.({ source: options.source || 'version' })
     onApplyIntake?.(view.intake, {
@@ -139,7 +147,7 @@ export default function useDrawingVersionController({
 
   const runVersionMutation = useCallback(async (operation, adapter, event, context) => {
     const drawingId = drawingState?.drawing_id
-    if (drawingId == null || versionBusy || typeof adapter !== 'function') return null
+    if (drawingId == null || versionBusy || mutationsBlocked || typeof adapter !== 'function') return null
 
     setVersionBusy(true)
     setVersionError(null)
@@ -154,7 +162,7 @@ export default function useDrawingVersionController({
     } finally {
       setVersionBusy(false)
     }
-  }, [drawingState, reportError, seatVersion, versionBusy])
+  }, [drawingState, mutationsBlocked, reportError, seatVersion, versionBusy])
 
   const undo = useCallback(
     (context) => runVersionMutation('undo', undoVersion, 'undo', context),
@@ -173,7 +181,10 @@ export default function useDrawingVersionController({
     setHistoryLoading(true)
     setHistoryError(null)
     try {
-      const nextHistory = await loadVersions(drawingId)
+      // The drawer is the one surface that wants per-row delta chips; the
+      // adapter forwards the flag to ?include_deltas=1 (server-side cost:
+      // every version payload is loaded, so nothing else requests it).
+      const nextHistory = await loadVersions(drawingId, { includeDeltas: true })
       setHistory(nextHistory)
       return nextHistory
     } catch (error) {
@@ -221,6 +232,7 @@ export default function useDrawingVersionController({
         setDrawingState((previous) => drawingStateFrom(view, drawingId, previous))
         setPreviewIntake(null)
         setPreviewing(null)
+        setUnreadableHead(null)
       } else {
         setPreviewIntake(view.intake)
         setPreviewing({ version })
@@ -238,6 +250,78 @@ export default function useDrawingVersionController({
     if (drawingState?.head == null) return null
     return previewVersion(drawingState.head)
   }, [drawingState, previewVersion])
+
+  // After a restore the SERVER head moved; the intake, head, and version
+  // state this controller feeds the viewer must move with it, or the next
+  // write operates on the restored head while the viewer still shows the old
+  // drawing. seatVersion also closes the history drawer (resetPreview), which
+  // is the intended landing: the user restored, show them the result.
+  const refreshHead = useCallback(async () => {
+    const drawingId = drawingState?.drawing_id
+    if (drawingId == null || typeof loadHead !== 'function') return null
+    try {
+      const view = await loadHead(drawingId)
+      seatVersion(view, { drawingId, source: 'restore' })
+      return view
+    } catch (error) {
+      reportError(error, 'restore-refresh')
+      return null
+    }
+  }, [drawingState, loadHead, reportError, seatVersion])
+
+  const recordRestore = useCallback(async (result) => {
+    const drawingId = result?.drawing_id ?? drawingState?.drawing_id
+    if (drawingId == null || result?.head == null) return null
+    const nextState = drawingStateFrom({
+      drawing_id: drawingId,
+      version: result.head,
+      head: result.head,
+      latest: result.latest ?? result.head,
+    }, drawingId, drawingState)
+    // Propagate the committed server state before any optional intake read.
+    setDrawingState(nextState)
+    setOverlayStale(true)
+    setPreviewIntake(null)
+    setPreviewing(null)
+
+    if (result.restored_head_readable === false) {
+      setUnreadableHead({
+        drawing_id: drawingId,
+        head: Number(result.head),
+        latest: Number(result.latest ?? result.head),
+        restored_from: result.restored_from,
+        message: `Restored as v${result.head}, but the new head is not readable yet. Editing stays locked until its intake cache is repaired.`,
+      })
+      return result
+    }
+
+    setUnreadableHead(null)
+    if (typeof loadHead !== 'function') return result
+    try {
+      const view = await loadHead(drawingId)
+      seatVersion(view, { drawingId, source: 'restore' })
+      return view
+    } catch (error) {
+      reportError(error, 'restore-refresh')
+      return null
+    }
+  }, [drawingState, loadHead, reportError, seatVersion])
+
+  const retryUnreadableHead = useCallback(async () => {
+    const drawingId = unreadableHead?.drawing_id
+    if (drawingId == null || refreshing || typeof loadHead !== 'function') return null
+    setRefreshing(true)
+    try {
+      const view = await loadHead(drawingId)
+      seatVersion(view, { drawingId, source: 'restore-repair' })
+      return view
+    } catch (error) {
+      onError?.(error, { operation: 'restore-repair' })
+      return null
+    } finally {
+      setRefreshing(false)
+    }
+  }, [loadHead, onError, refreshing, seatVersion, unreadableHead])
 
   const markRefreshFailure = useCallback((failure) => {
     setRefreshFailure(failure || null)
@@ -277,6 +361,9 @@ export default function useDrawingVersionController({
     backToHead,
     markRefreshFailure,
     retryRefresh,
+    refreshHead,
+    recordRestore,
+    retryUnreadableHead,
   }), [
     backToHead,
     closeHistory,
@@ -284,8 +371,11 @@ export default function useDrawingVersionController({
     markRefreshFailure,
     previewVersion,
     redo,
+    refreshHead,
+    recordRestore,
     reset,
     retryRefresh,
+    retryUnreadableHead,
     seatIntake,
     seatVersion,
     toggleHistory,
@@ -314,6 +404,8 @@ export default function useDrawingVersionController({
     previewIntake,
     refreshFailure,
     refreshing,
+    unreadableHead,
+    mutationsBlocked,
     actions,
   }
 }

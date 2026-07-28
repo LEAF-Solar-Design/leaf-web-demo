@@ -8,6 +8,7 @@ Run:  cd server && python -m pytest tests/test_guest_fail_closed.py -q
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -362,6 +363,9 @@ def test_postgres_upload_intake_read_rejects_cache_without_matching_proof(
     backend = _in_memory_backend()
     tenant, drawing = "acme-solar", "source-drawing"
     cache_key = write_loop.intake_cache_key(tenant, drawing, 1)
+    source_key = store.drawing_version_key(tenant, drawing, 1)
+    source_bytes = b"AC1032\x00SOURCE-DWG"
+    backend.put(source_key, source_bytes)
     backend.put(cache_key, b'{"layers":["wrong"],"polylines":[]}')
     monkeypatch.setattr(store, "authority_mode", lambda: "postgres")
     monkeypatch.setattr(
@@ -374,9 +378,10 @@ def test_postgres_upload_intake_read_rejects_cache_without_matching_proof(
         guest_uploads, "read_marker",
         lambda *_args, **_kwargs: {
             "status": "ready",
-            "extracted_version": 1,
-            "intake_ref": cache_key,
-            "intake_sha256": "0" * 64,
+                "extracted_version": 1,
+                "intake_ref": cache_key,
+                "content_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "intake_sha256": "0" * 64,
         },
     )
 
