@@ -88,7 +88,14 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   // included rather than escaping between stamps; the trade is strictness
   // (a straddling read may carry the entrance tail's final sub-pixel),
   // which the 4s allowance vs the 1730ms entrance absorbs.
-  const hardStop = reducedMotionFlipAt + 10_000
+  // The hard stop is anchored to LOOP ENTRY, not to the flip. Waiting for the
+  // canvas to become visible sits between the two and can itself take many
+  // seconds on a busy deployed surface; anchoring the stop to the flip let
+  // that wait consume the whole budget, so the loop exited before it ever
+  // reached the boundary and the pin failed with zero post-boundary samples
+  // instead of measuring anything. Observed on staging under a concurrent
+  // service rollout.
+  const hardStop = Date.now() + Math.max(0, boundaryMs - (Date.now() - reducedMotionFlipAt)) + 20_000
   let settledCount = 0
   while ((Date.now() < windowEnd || settledCount < 6) && Date.now() < hardStop) {
     const box = await canvas.boundingBox()
@@ -98,7 +105,10 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
     await page.waitForTimeout(100)
   }
   const settledSamples = samples.filter((sample) => sample.at >= boundaryMs)
-  expect(settledSamples.length).toBeGreaterThanOrEqual(6)
+  expect(
+    settledSamples.length,
+    `expected at least 6 canvas samples past the ${boundaryMs}ms allowance; sampling collected ${samples.length} in total, last at ${samples.length ? samples[samples.length - 1].at : 'n/a'}ms`,
+  ).toBeGreaterThanOrEqual(6)
   const canvasBoxBefore = settledSamples[settledSamples.length - 1].box
   expect(canvasBoxBefore).not.toBeNull()
   expect(canvasBoxBefore.width).toBeGreaterThan(0)
