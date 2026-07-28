@@ -145,8 +145,10 @@ def test_deployed_environment_without_demand_db_fails_closed(monkeypatch, tmp_pa
     [
         "demand.db",  # relative: resolves under /app/server, task-local
         "/tmp/demand.db",  # absolute but ephemeral
-        "/data/../tmp/demand.db",  # parent check alone would accept this
-        "data/demand.db",
+        "/data/demand.db",  # /data is NOT a mount; container-local (round-3 finding)
+        "/data/ephemeral/demand.db",  # under /data but outside the state mount
+        "/data/state/../../tmp/demand.db",  # dot-dot escape past the lexical check
+        "data/state/demand.db",
     ],
 )
 def test_deployed_non_durable_demand_db_fails_closed(monkeypatch, configured):
@@ -166,13 +168,16 @@ def test_deployed_non_durable_demand_db_fails_closed(monkeypatch, configured):
 
 
 def test_deployed_durable_demand_db_is_accepted():
-    """The guard must accept exactly the durable-mount shape the task
-    definitions provide (checked at the pure-function level so the test
-    writes nothing under /data on a dev machine)."""
+    """The guard must accept exactly the durable state-mount shape that
+    compose pins (DEMAND_DB=/data/state/demand.db) and the task definitions
+    will inject (checked at the pure-function level so the test writes
+    nothing under /data on a dev machine)."""
     assert demand._durable_deployed_path("/data/state/demand.db") is True
-    assert demand._durable_deployed_path("/data/demand.db") is True
-    assert demand._durable_deployed_path("/data") is False  # the mount itself, not a file in it
-    assert demand._durable_deployed_path("/datax/demand.db") is False
+    assert demand._durable_deployed_path("/data/state/sub/demand.db") is True
+    assert demand._durable_deployed_path("/data/demand.db") is False  # /data is not a mount
+    assert demand._durable_deployed_path("/data/state") is False  # the mount itself, not a file in it
+    assert demand._durable_deployed_path("/data/statex/demand.db") is False
+    assert demand._durable_deployed_path("/datax/state/demand.db") is False
 
 
 def test_deeply_nested_json_is_422_not_500(client, db_path):

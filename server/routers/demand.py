@@ -38,9 +38,14 @@ _LOCAL_PART = re.compile(
 _DOMAIN_LABEL = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$")
 _TLD = re.compile(r"^[A-Za-z]{2,}$")
 
-# The only mount the deployed task definitions back with durable storage.
-# See docker-compose.yml JOBS_DB and the /data volume contract.
-_DURABLE_ROOT = PurePosixPath("/data")
+# The durable state mount. `/data` itself is NOT a mount (compose and the
+# task definitions mount volumes at /data/state, /data/drawings,
+# /data/uploads, ...), so a path like /data/demand.db lands on the container
+# filesystem and vanishes at task replacement. Small state databases live
+# under /data/state (JOBS_DB, SESSIONS_DB, and compose's own
+# DEMAND_DB=/data/state/demand.db), so that is the one root this guard
+# accepts.
+_DURABLE_ROOT = PurePosixPath("/data/state")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS demand_captures (
@@ -73,8 +78,7 @@ def _configured_db_path() -> Optional[Path]:
     silently lose every capture on task replacement, so we fail closed
     instead. Local dev and tests keep the JOBS_DB-style repo default."""
     configured = os.environ.get("DEMAND_DB", "").strip()
-    runtime = os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower()
-    deployed = runtime in ("staging", "production")
+    deployed = _deployed_runtime()
     if configured:
         if deployed and not _durable_deployed_path(configured):
             # A nonempty but non-durable value (relative path, /tmp, a typo
@@ -88,21 +92,50 @@ def _configured_db_path() -> Optional[Path]:
     return SERVER_DIR / "demand.db"
 
 
-def _durable_deployed_path(configured: str) -> bool:
-    """True only for an absolute POSIX path under the /data durable mount,
-    with no `..` segments (PurePosixPath does not resolve them, so
-    `/data/../tmp/x` would otherwise pass the parent check while the OS
-    writes outside the mount)."""
-    path = PurePosixPath(configured)
-    if not path.is_absolute() or ".." in path.parts:
-        return False
+def _deployed_runtime() -> bool:
+    """Deployed posture. LEAF_RUNTIME_ENV is the primary signal and is part
+    of the deploy contract (deploy/required-config.app.json requires it in
+    every deployed app task). Belt-and-suspenders: if that variable were
+    ever dropped from a task definition, the durable state mount is a
+    deployment signal the container still has -- POSIX-only, so a dev
+    machine with a stray local `\\data\\state` directory cannot trip it."""
+    runtime = os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower()
+    if runtime in ("staging", "production"):
+        return True
+    return os.name == "posix" and Path("/data/state").is_dir()
+
+
+def _under_durable_root(path: PurePosixPath) -> bool:
     return _DURABLE_ROOT in path.parents
 
 
-def _db(db_path: Path) -> sqlite3.Connection:
+def _durable_deployed_path(configured: str) -> bool:
+    """True only for an absolute POSIX path strictly under /data/state, with
+    no `..` segments (PurePosixPath does not resolve them, so
+    `/data/state/../../tmp/x` would otherwise pass the parent check while
+    the OS writes outside the mount). Lexical only; `_db` re-verifies the
+    REAL path once the parent directory exists (symlink escape)."""
+    path = PurePosixPath(configured)
+    if not path.is_absolute() or ".." in path.parts:
+        return False
+    return _under_durable_root(path)
+
+
+def _db(db_path: Path, require_durable: bool = False) -> sqlite3.Connection:
     global _CONN
     if _CONN is None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        if require_durable:
+            # The configured-path check is lexical; a symlink under an
+            # accepted prefix could still point outside the mount. Re-verify
+            # the REAL parent directory once it exists, before the first
+            # connect. First-connect-only by design: the connection is cached
+            # for the process lifetime, so this bounds where it can open.
+            real_parent = PurePosixPath(db_path.parent.resolve().as_posix())
+            if not (_under_durable_root(real_parent) or real_parent == _DURABLE_ROOT):
+                raise OSError(
+                    f"DEMAND_DB resolves outside the durable mount: {real_parent}"
+                )
         _CONN = sqlite3.connect(str(db_path), check_same_thread=False)
         _CONN.execute("PRAGMA busy_timeout = 5000")
         # DELETE, not WAL: the deployed path lives on EFS, where WAL is
@@ -221,7 +254,7 @@ def _store_capture(
     checks or unrelated requests while they do."""
     try:
         with _LOCK:
-            conn = _db(db_path)
+            conn = _db(db_path, require_durable=_deployed_runtime())
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT email FROM demand_captures WHERE email = ?", (email,)
