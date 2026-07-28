@@ -28,6 +28,74 @@ test('session 401 renders one calm gate and disables execution', async ({ page }
   await expect(page).toHaveURL(/\/try$/)
 })
 
+test('a valid first login can create its owner workspace and reach Claude mounts', async ({ page }) => {
+  const state = makeCatProofState()
+  const calls = []
+  let provisioned = false
+  await page.addInitScript(() => localStorage.setItem('leaf.jwt', 'fixture-token'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    calls.push({ method: request.method(), path: url.pathname, authorization: request.headers().authorization })
+    if (url.pathname === '/api/session' && !provisioned) {
+      await route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'verified subject has no active platform tenant authority' }),
+      })
+      return
+    }
+    if (url.pathname === '/api/orgs' && request.method() === 'POST') {
+      provisioned = true
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ org: { org_id: 'cat-proof-org', name: 'My solar workspace', tier: 'hosted_starter', status: 'active' } }),
+      })
+      return
+    }
+    const result = catProofResponse({ method: request.method(), path: url.pathname, body: request.postDataJSON?.() }, state)
+    await route.fulfill({ status: result.status, contentType: 'application/json', body: JSON.stringify(result.body || {}) })
+  })
+
+  await page.goto('/try')
+  await expect(page.getByRole('heading', { name: 'Create your Leaf workspace' })).toBeVisible()
+  await expect(page.getByText(/drawing backend is unavailable/i)).toHaveCount(0)
+  await page.getByRole('textbox', { name: 'Workspace name' }).fill('My solar workspace')
+  await page.getByRole('button', { name: 'Create workspace' }).click()
+
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await page.getByRole('tab', { name: 'Trust' }).click()
+  await expect(page.getByRole('button', { name: /Claude accounts/ })).toBeVisible()
+  expect(calls.filter((call) => call.path === '/api/orgs')).toEqual([
+    { method: 'POST', path: '/api/orgs', authorization: 'Bearer fixture-token' },
+  ])
+  expect(calls.filter((call) => call.path === '/api/session').length).toBeGreaterThanOrEqual(2)
+})
+
+test('a malformed Auth0 tenant claim cannot enter workspace bootstrap', async ({ page }) => {
+  const state = makeCatProofState()
+  await page.addInitScript(() => localStorage.setItem('leaf.jwt', 'fixture-token'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (url.pathname === '/api/session') {
+      await route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: "token verified but missing tenant claim 'https://leafdesign.ai/tenant_id'" }),
+      })
+      return
+    }
+    const result = catProofResponse({ method: request.method(), path: url.pathname }, state)
+    await route.fulfill({ status: result.status, contentType: 'application/json', body: JSON.stringify(result.body || {}) })
+  })
+
+  await page.goto('/try')
+  await expect(page.getByRole('heading', { name: 'Create your Leaf workspace' })).toHaveCount(0)
+  await expect(page.getByText(/drawing backend is unavailable/i)).toBeVisible()
+})
+
 test('Explore the demo keeps the CAD operator on try and runs without private APIs', async ({ page }) => {
   const state = makeCatProofState()
   const calls = []
