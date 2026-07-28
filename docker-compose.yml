@@ -141,6 +141,7 @@ services:
       BROKER_LEDGER: /data/state/broker_ledger.jsonl   # app reads the broker's ledger for /api/usage
       LEAF_BROKER_SECRET: ${LEAF_BROKER_SECRET:-}      # §8 F4 hop — MUST match the broker's value (same env, both sides)
       JOBS_DB: /data/state/jobs.db                     # durable async job records (restart-survivable)
+      DEMAND_DB: /data/state/demand.db                 # public demand captures; deployed envs REQUIRE an explicit durable path (the router fails closed without one)
       SESSIONS_DB: /data/state/sessions.db             # conversational sessions/events/approvals (same durability tier as jobs.db). SINGLE-WRITER: SQLite+WAL+threading.Lock assumes ONE app process — keep one replica/one uvicorn worker, and on network filesystems (EFS/NFS, where WAL is unsafe) point JOBS_DB/SESSIONS_DB at task-local storage instead (see the production task definition)
       # Converse back-edge (§18.5): SAME value as the harness's copy above.
       # Empty => /internal/agent/gate and the dispatch back-edge answer 401

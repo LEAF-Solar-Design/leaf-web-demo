@@ -147,7 +147,7 @@ def _not_found(confirmation_id: str):
 
 @router.post("/api/agent/approvals/{confirmation_id}")
 def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
-                     tenant=Depends(deps.require_tenant)):
+                     tenant=Depends(deps.require_active_tenant)):
     """Record-only: approve/reject a pending confirmation. Never starts a turn."""
     approval = session_store.get_approval(confirmation_id)
     if approval is None or approval["tenant_id"] != str(tenant):

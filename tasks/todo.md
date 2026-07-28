@@ -284,3 +284,11 @@ Risks:
 - An unauthenticated or expired session must never create a tenant.
 - Workspace creation must remain an explicit user action and must not silently recreate an offboarded tenant.
 - No Claude credential may enter browser storage, logs, or a response.
+
+# Canonical tenant subscription routing
+
+- [x] Resolve intake and all conversation session routes through the active platform tenant binding.
+- [x] Resolve approval decisions through the same tenant authority as the mounted account.
+- [x] Keep a downstream `grant_required` response from deleting the separate Leaf login token.
+- [x] Prove stale JWT tenant claims cannot split mount storage from live turn routing.
+- [ ] Merge, deploy the app-only fix, and complete a real mounted turn on staging.

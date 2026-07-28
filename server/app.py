@@ -36,6 +36,7 @@ from routers import (
     author,
     capabilities,
     deployment_identity,
+    demand,
     drawings,
     jobs as jobs_router,
     ops,
@@ -111,6 +112,7 @@ app.include_router(tools.router)
 app.include_router(jobs_router.router)
 app.include_router(capabilities.router)
 app.include_router(deployment_identity.router)
+app.include_router(demand.router)  # public waitlist capture, no auth required
 app.include_router(author.router)
 app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoints
 app.include_router(prompt.router)  # M3: NL prompt router (MATRIX gap #2 — one prompt box -> lanes)
