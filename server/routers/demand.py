@@ -8,10 +8,11 @@ import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Optional, Union
 
 from fastapi import APIRouter, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
@@ -28,8 +29,18 @@ _CONN: Optional[sqlite3.Connection] = None
 _MAX_BODY_BYTES = 16_384
 
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+# RFC 5321 unquoted local part: dot-separated atoms of atext only. This is
+# what rejects `a,b@`, `a:b@`, `a(b)@`, `a<b>@`, `a[b]@`, `a\b@`, `a"b@` --
+# printable ASCII, but not valid unquoted mailbox syntax.
+_LOCAL_PART = re.compile(
+    r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$"
+)
 _DOMAIN_LABEL = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$")
 _TLD = re.compile(r"^[A-Za-z]{2,}$")
+
+# The only mount the deployed task definitions back with durable storage.
+# See docker-compose.yml JOBS_DB and the /data volume contract.
+_DURABLE_ROOT = PurePosixPath("/data")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS demand_captures (
@@ -62,12 +73,30 @@ def _configured_db_path() -> Optional[Path]:
     silently lose every capture on task replacement, so we fail closed
     instead. Local dev and tests keep the JOBS_DB-style repo default."""
     configured = os.environ.get("DEMAND_DB", "").strip()
-    if configured:
-        return Path(configured)
     runtime = os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower()
-    if runtime in ("staging", "production"):
+    deployed = runtime in ("staging", "production")
+    if configured:
+        if deployed and not _durable_deployed_path(configured):
+            # A nonempty but non-durable value (relative path, /tmp, a typo
+            # like "demand.db") must fail closed too: returning 200 while
+            # writing task-local storage is the exact silent-loss failure
+            # this guard exists to prevent.
+            return None
+        return Path(configured)
+    if deployed:
         return None
     return SERVER_DIR / "demand.db"
+
+
+def _durable_deployed_path(configured: str) -> bool:
+    """True only for an absolute POSIX path under the /data durable mount,
+    with no `..` segments (PurePosixPath does not resolve them, so
+    `/data/../tmp/x` would otherwise pass the parent check while the OS
+    writes outside the mount)."""
+    path = PurePosixPath(configured)
+    if not path.is_absolute() or ".." in path.parts:
+        return False
+    return _DURABLE_ROOT in path.parents
 
 
 def _db(db_path: Path) -> sqlite3.Connection:
@@ -134,7 +163,7 @@ def _valid_email(value: str) -> bool:
     local, _, domain = value.rpartition("@")
     if not 1 <= len(local) <= 64:
         return False
-    if local.startswith(".") or local.endswith(".") or ".." in local:
+    if not _LOCAL_PART.fullmatch(local):
         return False
     labels = domain.split(".")
     if len(labels) < 2 or any(len(label) > 63 for label in labels):
@@ -182,26 +211,14 @@ async def _read_bounded_body(request: Request) -> Optional[bytes]:
     return bytes(received)
 
 
-@router.post("/api/demand")
-async def capture_demand(request: Request) -> Any:
-    """Store one public interest record, without charging an existing email twice."""
-    body = await _read_bounded_body(request)
-    if body is None:
-        return _error(413, "Request is too large.")
-    try:
-        payload = DemandCaptureInput(**json.loads(body.decode("utf-8")))
-    except (ValueError, TypeError, ValidationError):
-        return _error(422, "Send a JSON body with an email address.")
-
-    try:
-        email, interest, org = _clean_input(payload)
-    except ValueError as exc:
-        return _error(422, str(exc))
-
-    db_path = _configured_db_path()
-    if db_path is None:
-        return _error(503, "We could not save your request. Please try again.", retryable=True)
-
+def _store_capture(
+    db_path: Path, email: str, interest: str, org: Optional[str], client_ip: str
+) -> Union[dict, JSONResponse]:
+    """The whole blocking section: sqlite transaction under the module lock.
+    Runs in the threadpool (run_in_threadpool below), never on the event
+    loop: `BEGIN IMMEDIATE`, the 5s busy timeout, and the threading.Lock can
+    all stall on a contended database, and none of them may block health
+    checks or unrelated requests while they do."""
     try:
         with _LOCK:
             conn = _db(db_path)
@@ -215,7 +232,7 @@ async def capture_demand(request: Request) -> Any:
 
             day = _day()
             counters = (
-                (_ip_digest(_client_ip(request)), _per_ip_daily_cap()),
+                (_ip_digest(client_ip), _per_ip_daily_cap()),
                 (_GLOBAL_KEY, _global_daily_cap()),
             )
             for key, cap in counters:
@@ -243,6 +260,33 @@ async def capture_demand(request: Request) -> Any:
                 _CONN.rollback()
         return _error(503, "We could not save your request. Please try again.", retryable=True)
     return {"ok": True, "stored": True, "duplicate": False}
+
+
+@router.post("/api/demand")
+async def capture_demand(request: Request) -> Any:
+    """Store one public interest record, without charging an existing email twice."""
+    body = await _read_bounded_body(request)
+    if body is None:
+        return _error(413, "Request is too large.")
+    try:
+        payload = DemandCaptureInput(**json.loads(body.decode("utf-8")))
+    except (ValueError, TypeError, ValidationError, RecursionError):
+        # RecursionError: a bounded body can still be thousands of nested JSON
+        # arrays; the parser blowing the stack is malformed input (422), not a
+        # server fault (500).
+        return _error(422, "Send a JSON body with an email address.")
+
+    try:
+        email, interest, org = _clean_input(payload)
+    except ValueError as exc:
+        return _error(422, str(exc))
+
+    db_path = _configured_db_path()
+    if db_path is None:
+        return _error(503, "We could not save your request. Please try again.", retryable=True)
+
+    client_ip = _client_ip(request)
+    return await run_in_threadpool(_store_capture, db_path, email, interest, org, client_ip)
 
 
 def _reset_for_tests() -> None:

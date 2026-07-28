@@ -82,6 +82,16 @@ def test_duplicate_email_is_idempotent(client, db_path):
         "a@example..com",
         "a@-example.com",
         "a@example-.com",
+        # Printable ASCII that is NOT valid unquoted local-part syntax
+        # (round-2 finding: these all passed the previous checks).
+        "a,b@example.com",
+        "a:b@example.com",
+        "a(b)@example.com",
+        "a<b>@example.com",
+        "a[b]@example.com",
+        "a\\b@example.com",
+        'a"b@example.com',
+        "a;b@example.com",
     ],
 )
 def test_invalid_email_is_rejected_fail_closed(client, db_path, email):
@@ -128,6 +138,66 @@ def test_deployed_environment_without_demand_db_fails_closed(monkeypatch, tmp_pa
         assert not (demand.SERVER_DIR / "demand.db").exists()
     finally:
         demand._reset_for_tests()
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "demand.db",  # relative: resolves under /app/server, task-local
+        "/tmp/demand.db",  # absolute but ephemeral
+        "/data/../tmp/demand.db",  # parent check alone would accept this
+        "data/demand.db",
+    ],
+)
+def test_deployed_non_durable_demand_db_fails_closed(monkeypatch, configured):
+    """Round-2 BLOCKING: a nonempty but non-durable DEMAND_DB must 503, not
+    silently store captures on storage that vanishes at task replacement."""
+    monkeypatch.setenv("DEMAND_DB", configured)
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    demand._reset_for_tests()
+    try:
+        with TestClient(app_module.app, raise_server_exceptions=False) as test_client:
+            response = post(test_client)
+        assert response.status_code == 503
+        assert response.json()["error"]["retryable"] is True
+        assert not (demand.SERVER_DIR / "demand.db").exists()
+    finally:
+        demand._reset_for_tests()
+
+
+def test_deployed_durable_demand_db_is_accepted():
+    """The guard must accept exactly the durable-mount shape the task
+    definitions provide (checked at the pure-function level so the test
+    writes nothing under /data on a dev machine)."""
+    assert demand._durable_deployed_path("/data/state/demand.db") is True
+    assert demand._durable_deployed_path("/data/demand.db") is True
+    assert demand._durable_deployed_path("/data") is False  # the mount itself, not a file in it
+    assert demand._durable_deployed_path("/datax/demand.db") is False
+
+
+def test_deeply_nested_json_is_422_not_500(client, db_path):
+    """Round-2 MINOR: a bounded body of thousands of nested arrays raises
+    RecursionError in the parser; that is malformed input, not a server
+    fault."""
+    depth = 3000
+    body = ("[" * depth) + ("]" * depth)
+    response = client.post(
+        "/api/demand", content=body.encode(), headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert row_count(db_path) == 0
+
+
+def test_storage_section_is_synchronous_threadpool_work():
+    """Round-2 MAJOR: the sqlite transaction must not run on the event loop.
+    The route stays async (it streams the bounded body) and hands the
+    blocking section to run_in_threadpool; this pins that the blocking
+    section is a plain sync function, so it cannot silently move back onto
+    the loop."""
+    import inspect
+
+    assert not inspect.iscoroutinefunction(demand._store_capture)
+    assert inspect.iscoroutinefunction(demand.capture_demand)
 
 
 def test_forwarded_for_uses_the_proxy_attested_last_entry(client, db_path, monkeypatch):
