@@ -531,11 +531,29 @@ def test_ready_route_is_separate_from_unchanged_liveness(monkeypatch):
     assert set(original_health) == {
         "ok", "aps_live", "data_file_present", "engine_registry_present",
         "da_client_present", "n_tools", "n_authored", "error", "degraded_mode",
-        "source_sha",
+        "source_sha", "drawing_mutation_fence_state",
     }
     paths = set(app.app.openapi()["paths"])
     assert "/api/ready" in paths
     assert "/api/projects" in paths
+
+
+def test_liveness_reports_exact_mutation_fence_state(tmp_path, monkeypatch):
+    import app
+
+    fence = tmp_path / "drawing-mutations"
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+    for value, expected in (
+        ("1\n", "open"),
+        ("0\n", "closed"),
+        ("unexpected\n", "invalid"),
+    ):
+        fence.write_text(value, encoding="utf-8")
+        assert app.health()["drawing_mutation_fence_state"] == expected
+    fence.unlink()
+    assert app.health()["drawing_mutation_fence_state"] == "unreadable"
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE")
+    assert app.health()["drawing_mutation_fence_state"] == "unconfigured"
 
 
 def test_liveness_ignores_unsupported_shared_customization_while_disabled(

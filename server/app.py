@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import FastAPI
@@ -173,6 +174,20 @@ def _mount_platform_router() -> None:
 _mount_platform_router()
 
 
+def _drawing_mutation_fence_state() -> str:
+    """Report the live shared-fence state without changing liveness."""
+    configured = os.environ.get(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", ""
+    ).strip()
+    if not configured:
+        return "unconfigured"
+    try:
+        value = Path(configured).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return "unreadable"
+    return {"0": "closed", "1": "open"}.get(value, "invalid")
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     return with_envelope_fields({
@@ -184,6 +199,7 @@ def health() -> Dict[str, Any]:
         "n_tools": len(deps.all_tools()),
         "n_authored": len(deps._AUTHORED),
         "source_sha": os.environ.get("LEAF_SOURCE_SHA", "unknown"),
+        "drawing_mutation_fence_state": _drawing_mutation_fence_state(),
     })
 
 
