@@ -1920,7 +1920,22 @@ export default function App() {
         )}
 
         <div className="workspace-card enter" style={{ '--rank': 1 }} ref={workspaceCardRef}>
-          {unreadableHead && (
+          {unreadableHead && unreadableHead.pending && (
+            // The routine post-restore load: calm progress, not a failure —
+            // no alert role, no retry (the load is already in flight).
+            <div
+              className="strip-running"
+              role="status"
+              data-testid="unreadable-head-lock"
+              data-head={unreadableHead.head}
+              data-latest={unreadableHead.latest}
+              data-pending="true"
+            >
+              <span className="dot square" aria-hidden="true" />
+              <span className="strip-sentence">{unreadableHead.message}</span>
+            </div>
+          )}
+          {unreadableHead && !unreadableHead.pending && (
             <div
               className="strip-failed"
               role="alert"

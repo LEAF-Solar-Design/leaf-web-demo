@@ -564,7 +564,13 @@ def build_suites() -> List[Suite]:
         Suite("server-version-restore", "server tests/test_version_restore.py",
               "pytest", SERVER, _py_pytest("tests/test_version_restore.py"), 17,
               allowed_skip_reasons=(
-                  r"PostgreSQL restore proof requires explicit DATABASE_URL",)),
+                  r"PostgreSQL restore proof requires the EXPLICIT opt-in "
+                  r"LEAF_RESTORE_PG_PROOF_DB \(a disposable database URL\)\. "
+                  r"A generic ambient DATABASE_URL must never trigger this test: "
+                  r"it applies every repository migration and leaves randomized "
+                  r"manifest, version, and checkout rows behind, which would mutate "
+                  r"a staging or production database whose URL happens to be in the "
+                  r"environment\.",)),
         Suite("server-agent-gate-postgres", "server tests/test_agent_gate_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_gate_postgres.py"), 14,
               allowed_skip_reasons=(r"DATABASE_URL is not set",)),

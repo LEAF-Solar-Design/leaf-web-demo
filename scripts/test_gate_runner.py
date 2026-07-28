@@ -53,6 +53,18 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         for arg in static.argv
     )
 
+    restore = suites["server-version-restore"]
+    assert restore.expected == 17
+    assert restore.allowed_skip_reasons == (
+        r"PostgreSQL restore proof requires the EXPLICIT opt-in "
+        r"LEAF_RESTORE_PG_PROOF_DB \(a disposable database URL\)\. "
+        r"A generic ambient DATABASE_URL must never trigger this test: "
+        r"it applies every repository migration and leaves randomized "
+        r"manifest, version, and checkout rows behind, which would mutate "
+        r"a staging or production database whose URL happens to be in the "
+        r"environment\.",
+    )
+
 
 def test_test_gate_installs_the_locked_playwright_browser_before_running():
     workflow = (REPO / ".github" / "workflows" / "test-gate.yml").read_text(

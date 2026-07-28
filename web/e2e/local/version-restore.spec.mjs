@@ -17,6 +17,9 @@ async function mountVersionSurface(page, {
   restoredHeadReadable = true,
   stallHistoryAfterRestore = false,
   failFirstRepairRead = false,
+  staleFirstHeadAfterRestore = false,
+  splitReadFirstHeadAfterRestore = false,
+  undoLandedOnSecondRead = false,
 } = {}) {
   const proofState = makeCatProofState()
   let head = 3
@@ -59,13 +62,26 @@ async function mountVersionSurface(page, {
       intakeReadsAfterRestore += 1
       result = failFirstRepairRead && intakeReadsAfterRestore === 1
         ? { status: 503, body: { detail: 'intake cache is still unavailable' } }
-        : {
-            status: 200,
-            body: {
-              drawing_id: 'cat-panels', intake: proofState.base,
-              version: head, head, latest: head,
-            },
-          }
+        : (() => {
+            if (staleFirstHeadAfterRestore && intakeReadsAfterRestore === 1) {
+              // A truly STALE pre-restore response: generated before the
+              // restore committed, so it reports the OLD latest too — a
+              // pre-restore server cannot know about v4.
+              return { status: 200, body: { drawing_id: 'cat-panels', intake: proofState.base, version: 3, head: 3, latest: 3 } }
+            }
+            if (splitReadFirstHeadAfterRestore && intakeReadsAfterRestore === 1) {
+              // A SPLIT read: the intake was resolved at v3 but the manifest
+              // reloaded after the restore committed — head/latest are new,
+              // the seated geometry is not.
+              return { status: 200, body: { drawing_id: 'cat-panels', intake: proofState.base, version: 3, head: 4, latest: 4 } }
+            }
+            if (undoLandedOnSecondRead && intakeReadsAfterRestore >= 2) {
+              // An undo issued around the restore landed AFTER it: head is
+              // legitimately BELOW the restored version, latest keeps it.
+              return { status: 200, body: { drawing_id: 'cat-panels', intake: proofState.base, version: 3, head: 3, latest: 4 } }
+            }
+            return { status: 200, body: { drawing_id: 'cat-panels', intake: proofState.base, version: head, head, latest: head } }
+          })()
     } else {
       result = catProofResponse({
         method, path, body, query: Object.fromEntries(url.searchParams),
@@ -202,6 +218,77 @@ test('an unreadable committed head locks writes before a stalled history refresh
   expect(observed.intakeReadsAfterRestore()).toBe(2)
 
   observed.releaseHistoryRefresh()
+})
+
+test('a stale post-restore head response cannot clear the write lock', async ({ page }) => {
+  test.setTimeout(60_000)
+  const observed = await mountVersionSurface(page, { staleFirstHeadAfterRestore: true })
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  const v1 = history.getByTestId('vh-row-v1')
+
+  await v1.getByRole('button', { name: 'Restore', exact: true }).click()
+  await v1.getByRole('button', { name: 'Restore v1' }).click()
+
+  const persistentLock = page.getByTestId('unreadable-head-lock')
+  await expect(persistentLock).toHaveAttribute('data-head', '4')
+  await expect(persistentLock).not.toHaveAttribute('data-pending', 'true')
+  await expect(persistentLock.getByRole('button', { name: 'Retry loading' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  expect(observed.intakeReadsAfterRestore()).toBe(1)
+
+  await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
+  await expect(persistentLock).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
+  expect(observed.intakeReadsAfterRestore()).toBe(2)
+})
+
+test('a split head response (new head, old geometry) cannot clear the write lock', async ({ page }) => {
+  // Round-3 pin: the server can resolve the intake at v3 and reload the
+  // manifest AFTER a restore commits, reporting {intake v3, head 4}. The
+  // head field proves nothing about what was seated; the lock must hold
+  // until a COHERENT response (version === head) arrives.
+  test.setTimeout(60_000)
+  const observed = await mountVersionSurface(page, { splitReadFirstHeadAfterRestore: true })
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  const v1 = history.getByTestId('vh-row-v1')
+
+  await v1.getByRole('button', { name: 'Restore', exact: true }).click()
+  await v1.getByRole('button', { name: 'Restore v1' }).click()
+
+  const persistentLock = page.getByTestId('unreadable-head-lock')
+  await expect(persistentLock).toHaveAttribute('data-head', '4')
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  expect(observed.intakeReadsAfterRestore()).toBe(1)
+
+  await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
+  await expect(persistentLock).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
+  expect(observed.intakeReadsAfterRestore()).toBe(2)
+})
+
+test('an undo that landed after the restore releases the lock instead of wedging it', async ({ page }) => {
+  // Round-3 pin: head legitimately DECREASES when an in-flight undo lands
+  // after the restore. The response {version 3, head 3, latest 4} is
+  // coherent AND post-restore (latest watermark), so the lock must release
+  // — a >= head rule would wedge with redo disabled forever.
+  test.setTimeout(60_000)
+  const observed = await mountVersionSurface(page, { failFirstRepairRead: true, undoLandedOnSecondRead: true })
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  const v1 = history.getByTestId('vh-row-v1')
+
+  await v1.getByRole('button', { name: 'Restore', exact: true }).click()
+  await v1.getByRole('button', { name: 'Restore v1' }).click()
+
+  const persistentLock = page.getByTestId('unreadable-head-lock')
+  await expect(persistentLock).toHaveAttribute('data-head', '4')
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  expect(observed.intakeReadsAfterRestore()).toBe(1)
+
+  await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
+  await expect(persistentLock).toBeHidden()
+  // head 3 / latest 4: redo is the operation that makes sense here.
+  await expect(page.getByRole('button', { name: 'Redo' })).toBeEnabled()
+  expect(observed.intakeReadsAfterRestore()).toBe(2)
 })
 
 test('/try neither requests deltas nor exposes restore controls', async ({ page }) => {

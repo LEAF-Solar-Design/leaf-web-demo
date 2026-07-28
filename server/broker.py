@@ -2607,6 +2607,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             _, intake = write_loop.read_intake(
                 backend, req.tenant_id, store_dwg,
                 req.dwg_version if req.dwg_version is not None else "head")
+        except write_loop.ProofStateUnreadable as exc:
+            # Transport-unreadable proof state: the version exists; retryable.
+            return (err_envelope(ErrorCode.INTERNAL, str(exc),
+                                 retryable=True, tool=tool.get("name")),
+                    503)
         except (KeyError, ValueError) as exc:
             return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
                                  retryable=False, tool=tool.get("name")),

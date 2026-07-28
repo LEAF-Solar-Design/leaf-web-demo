@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 
 const identity = (value) => value
 
@@ -72,6 +72,41 @@ export default function useDrawingVersionController({
     onError?.(error, { operation })
   }, [formatError, onError])
 
+  // Conditional lock release: a seated view lifts the unreadable-head lock
+  // ONLY when it proves the lock's target was reached — same drawing and a
+  // head at or past the locked head. Round-2 finding: an unconditional clear
+  // let a STALE in-flight head GET (started before the restore, e.g. the
+  // job-completion read) seat old geometry and re-enable mutations against
+  // the moved server head. Other drawing responses cannot prove this restored
+  // head is seated, so they leave the lock unchanged.
+  const releaseLockIfSeated = useCallback((view, seatedDrawingId) => {
+    setUnreadableHead((lock) => {
+      if (!lock) return null
+      const seatedDrawing = view?.drawing_id ?? seatedDrawingId ?? null
+      if (seatedDrawing !== lock.drawing_id) return lock
+      // Two proofs, both required (round-3 findings):
+      //  * COHERENCE — the SEATED GEOMETRY is the response's own head
+      //    (version === head). A split read can report {intake v3, head 4}
+      //    when a restore commits between the server's two reads; its head
+      //    field proves nothing about what was seated.
+      //  * POST-RESTORE — the response's `latest` watermark reaches the
+      //    lock's. `latest` is monotone where `head` is not: a legitimate
+      //    undo AFTER the restore lowers head but keeps latest at the
+      //    restored version (this response must release, or the lock wedges
+      //    with redo disabled), while a STALE pre-restore read necessarily
+      //    reports the old, smaller latest.
+      const seatedVersion = Number(view?.version)
+      const responseHead = Number(view?.head)
+      const responseLatest = Number(view?.latest)
+      const coherent = Number.isFinite(seatedVersion) && Number.isFinite(responseHead)
+        && seatedVersion === responseHead
+      const postRestore = Number.isFinite(responseLatest)
+        ? responseLatest >= Number(lock.latest ?? lock.head)
+        : coherent && seatedVersion >= Number(lock.head)
+      return coherent && postRestore ? null : lock
+    })
+  }, [])
+
   const resetPreview = useCallback(() => {
     setHistoryOpen(false)
     setHistory(null)
@@ -97,6 +132,7 @@ export default function useDrawingVersionController({
     setRefreshFailure(null)
     setRefreshing(false)
     setUnreadableHead(null)
+    restoreGenerationRef.current += 1 // abandon any in-flight restore completion
     onResetSelection?.({ source: 'reset' })
   }, [onResetSelection])
 
@@ -108,6 +144,7 @@ export default function useDrawingVersionController({
     setOverlayStale(false)
     setRefreshFailure(null)
     setUnreadableHead(null)
+    restoreGenerationRef.current += 1 // drawing switch: abandon in-flight restore completions
     resetPreview()
     onResetSelection?.({ source: 'intake' })
 
@@ -130,7 +167,13 @@ export default function useDrawingVersionController({
     setVersionIntake(view.intake)
     setVersionError(null)
     setRefreshFailure(null)
-    setUnreadableHead(null)
+    releaseLockIfSeated(view, options.drawingId)
+    // ANY seat supersedes an in-flight restore completion (round-5 finding):
+    // a background job/undo/refresh seating a newer view here must prevent a
+    // delayed restore read from later seating its OLDER view over this one.
+    // recordRestore checks its generation BEFORE calling seatVersion, so its
+    // own seat is unaffected by this bump.
+    restoreGenerationRef.current += 1
     resetPreview()
     onResetSelection?.({ source: options.source || 'version' })
     onApplyIntake?.(view.intake, {
@@ -143,7 +186,7 @@ export default function useDrawingVersionController({
       drawingState: nextDrawingState,
     })
     return view
-  }, [drawingState, onApplyIntake, onResetSelection, onVersionEvent, resetPreview])
+  }, [drawingState, onApplyIntake, onResetSelection, onVersionEvent, releaseLockIfSeated, resetPreview])
 
   const runVersionMutation = useCallback(async (operation, adapter, event, context) => {
     const drawingId = drawingState?.drawing_id
@@ -232,7 +275,9 @@ export default function useDrawingVersionController({
         setDrawingState((previous) => drawingStateFrom(view, drawingId, previous))
         setPreviewIntake(null)
         setPreviewing(null)
-        setUnreadableHead(null)
+        // Same conditional release as seatVersion: a stale head view started
+        // before a restore must not lift the lock (round-2 finding).
+        releaseLockIfSeated(view, drawingId)
       } else {
         setPreviewIntake(view.intake)
         setPreviewing({ version })
@@ -244,7 +289,7 @@ export default function useDrawingVersionController({
       onError?.(error, { operation: 'preview', version })
       return null
     }
-  }, [drawingState, formatError, loadHead, loadVersion, onApplyIntake, onError, onResetSelection])
+  }, [drawingState, formatError, loadHead, loadVersion, onApplyIntake, onError, onResetSelection, releaseLockIfSeated])
 
   const backToHead = useCallback(() => {
     if (drawingState?.head == null) return null
@@ -269,9 +314,18 @@ export default function useDrawingVersionController({
     }
   }, [drawingState, loadHead, reportError, seatVersion])
 
+  // Generation token for the ASYNC restore completion (round-4 finding): the
+  // awaited head read can resolve after another actor already settled the
+  // lock (a parallel valid read cleared it, a drawing switch replaced the
+  // context, a newer restore superseded this one). A stale completion must
+  // neither seat over the newer context nor re-arm an obsolete lock.
+  const restoreGenerationRef = useRef(0)
+
   const recordRestore = useCallback(async (result) => {
     const drawingId = result?.drawing_id ?? drawingState?.drawing_id
     if (drawingId == null || result?.head == null) return null
+    const generation = restoreGenerationRef.current + 1
+    restoreGenerationRef.current = generation
     const nextState = drawingStateFrom({
       drawing_id: drawingId,
       version: result.head,
@@ -295,13 +349,74 @@ export default function useDrawingVersionController({
       return result
     }
 
-    setUnreadableHead(null)
-    if (typeof loadHead !== 'function') return result
+    // Even a READABLE restore moves the server head before this client can
+    // read it: until the new head's intake actually seats, the stale viewer
+    // must not mutate (undo or a write against a head it has not seen). The
+    // lock is armed BEFORE the read — a pending GET window with mutations
+    // enabled was the round-1 hole — and only seatVersion clears it.
+    setUnreadableHead({
+      drawing_id: drawingId,
+      head: Number(result.head),
+      latest: Number(result.latest ?? result.head),
+      restored_from: result.restored_from,
+      // pending: the routine post-restore load, rendered as calm progress —
+      // never as a failure alert (round-2 MINOR).
+      pending: true,
+      message: `Restored as v${result.head}. Loading the new head…`,
+    })
+    if (typeof loadHead !== 'function') {
+      // No reader available: the new head cannot be seated, so the lock
+      // STAYS (fail-safe; every in-tree caller passes loadHead).
+      return result
+    }
     try {
       const view = await loadHead(drawingId)
+      if (restoreGenerationRef.current !== generation) {
+        // Superseded while awaiting (newer restore, drawing switch, reset):
+        // this completion must not seat old context over the new one.
+        return null
+      }
+      const seatedDrawing = view?.drawing_id ?? drawingId
+      // Same coherence + watermark proof as releaseLockIfSeated: the SEATED
+      // version must BE the response's own head (a split read can report
+      // {intake v3, head 4}), and the response must post-date the restore
+      // via the monotone `latest` (an undo landing after the restore lowers
+      // head legitimately). An incoherent-but-successful read throws so the
+      // catch escalates the pending lock to the retryable alert instead of
+      // leaving calm progress stuck with no affordance.
+      const seatedVersion = Number(view?.version ?? view?.head)
+      const responseHead = Number(view?.head ?? view?.version)
+      const responseLatest = Number(view?.latest)
+      const coherent = seatedDrawing === drawingId
+        && Number.isFinite(seatedVersion) && Number.isFinite(responseHead)
+        && seatedVersion === responseHead
+      const postRestore = Number.isFinite(responseLatest)
+        ? responseLatest >= Number(result.latest ?? result.head)
+        : seatedVersion >= Number(result.head)
+      if (!coherent || !postRestore) {
+        throw new Error(`The restored head v${result.head} is not readable yet.`)
+      }
+      // seatVersion clears unreadableHead itself — the lock lifts only once
+      // the NEW head's intake is actually seated in the viewer.
       seatVersion(view, { drawingId, source: 'restore' })
       return view
     } catch (error) {
+      if (restoreGenerationRef.current !== generation) return null
+      // The server head moved but we could not read it: the stale viewer
+      // must NOT become eligible to mutate the newer head. Re-arm ONLY if
+      // the current lock is still THIS restore's (a parallel valid read may
+      // already have released it; an obsolete failure must not resurrect an
+      // obsolete lock).
+      setUnreadableHead((lock) => {
+        if (!lock || lock.drawing_id !== drawingId || Number(lock.head) !== Number(result.head)) return lock
+        return {
+          drawing_id: drawingId,
+          head: Number(result.head),
+          latest: Number(result.latest ?? result.head),
+          restored_from: result.restored_from,
+          message: `Restored as v${result.head}, but the new head could not be loaded. Editing stays locked until it loads.`,
+        }
+      })
       reportError(error, 'restore-refresh')
       return null
     }

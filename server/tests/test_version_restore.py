@@ -395,6 +395,197 @@ def test_non_dict_intake_json_is_refused(client, tmp_path):
     assert r.status_code == 422, r.text
 
 
+def test_pre_proof_era_live_version_still_reads_and_self_heals(client, tmp_path):
+    """Post-merge BLOCKING pin: live DWG versions created BEFORE the proof
+    sidecar existed (cache present, no .proof.json — every pre-#243 live
+    version, no backfill) must keep reading. Trust-on-first-read: the read
+    accepts the cache exactly as pre-proof readers did AND mints the missing
+    proof, so the version is bound from then on."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG",
+        parent_version=3, meta={"tool": "test-seed", "note": "pre-proof live"})
+    legacy_intake = _intake([_poly("A")])
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(legacy_intake, separators=(",", ":")).encode("utf-8"))
+    pkey = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+    assert not backend.exists(pkey)
+
+    v, intake = write_loop.read_intake(backend, TENANT, DRAWING, v4)
+    assert v == v4 and intake == legacy_intake
+    assert backend.exists(pkey)  # self-healed binding minted by the read
+    # The minted proof verifies: a second read takes the strict path.
+    _, intake_again = write_loop.read_intake(backend, TENANT, DRAWING, v4)
+    assert intake_again == legacy_intake
+
+
+def test_present_but_wrong_proof_still_fails_closed(client, tmp_path):
+    """The legacy fallback is ONLY for a MISSING proof: a present-but-wrong
+    proof (swapped cache, corrupt sidecar) still refuses, unchanged."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG2",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    backend.put(write_loop.intake_cache_proof_key(TENANT, DRAWING, v4),
+                b'{"schema": 1, "version": 999}')
+    with pytest.raises(ValueError, match="source binding"):
+        write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
+def test_wrong_proof_winning_self_heal_race_fails_closed(client, tmp_path):
+    """A missing-proof read must refuse a wrong proof that appears while the
+    compatibility self-heal publishes its binding."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG3",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+    publish_proof = backend.put_if_absent_or_verify
+
+    def race_wrong_proof(key, data):
+        if key == proof_key:
+            backend.put(key, b'{"schema":1,"version":999}')
+        return publish_proof(key, data)
+
+    backend.put_if_absent_or_verify = race_wrong_proof
+    with pytest.raises(ValueError, match="source binding"):
+        write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
+def test_mint_conflict_with_unreadable_reread_still_fails_closed(client, tmp_path):
+    """Round-3 (post-merge PR) BLOCKING pin: a conflict raised by the mint
+    must refuse the read even when a subsequent proof re-read would fail with
+    a transport error — the reproduction was conflict + OSError => served."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG4",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+
+    def conflicting_mint(key, data):
+        import store  # noqa: PLC0415
+        if key == proof_key:
+            raise store.ImmutableConflict(
+                "immutable object already exists with different content")
+        raise AssertionError("unexpected key")
+
+    original_get = backend.get
+
+    def failing_proof_get(key):
+        if key == proof_key:
+            raise OSError("simulated transport failure")
+        return original_get(key)
+
+    backend.put_if_absent_or_verify = conflicting_mint
+    backend.get = failing_proof_get
+    with pytest.raises(ValueError, match="source binding"):
+        write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
+def test_transport_only_mint_failure_with_unreadable_proof_refuses(client, tmp_path):
+    """Companion pin: when the mint fails on TRANSPORT (not conflict) and the
+    proof state cannot be read either, the read refuses (retryable blip)
+    rather than serving past a possibly-conflicting proof."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG5",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+
+    def transport_failing_mint(key, data):
+        raise OSError("simulated mint transport failure")
+
+    original_get = backend.get
+
+    def failing_proof_get(key):
+        if key == proof_key:
+            raise OSError("simulated transport failure")
+        return original_get(key)
+
+    backend.put_if_absent_or_verify = transport_failing_mint
+    backend.get = failing_proof_get
+    # ProofStateUnreadable is deliberately NOT a ValueError: routes surface
+    # it as a retryable 503, never the version-does-not-exist 404/422.
+    with pytest.raises(write_loop.ProofStateUnreadable):
+        write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
+def test_non_conflict_valueerror_from_mint_is_transport_not_conflict(client, tmp_path):
+    """Round-4 pin: a bare ValueError from the mint (OSS credential parsing,
+    response decoding) is NOT a conflict signal. With the proof state absent
+    on re-read, the legacy trust-on-first-read still serves."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG6",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    legacy_intake = _intake([_poly("A")])
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(legacy_intake, separators=(",", ":")).encode("utf-8"))
+
+    def oss_style_valueerror_mint(key, data):
+        raise ValueError("substring not found while parsing OSS response")
+
+    backend.put_if_absent_or_verify = oss_style_valueerror_mint
+    v, intake = write_loop.read_intake(backend, TENANT, DRAWING, v4)
+    assert v == v4 and intake == legacy_intake
+
+
+def test_exists_probe_transport_failure_is_retryable_503(client, tmp_path, monkeypatch):
+    """Round-5 pin: a transport failure on the proof EXISTENCE probe is
+    ProofStateUnreadable -> retryable 503 on the intake route, never an
+    escaped 500 or a non-retryable client error."""
+    backend_holder = {}
+    import store  # noqa: PLC0415
+
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\\x00\\x01LIVE-DWG7",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+    original_exists = store.FilesystemBackend.exists
+
+    def failing_exists(self, key):
+        if key == proof_key:
+            raise OSError("simulated transport failure")
+        return original_exists(self, key)
+
+    monkeypatch.setattr(store.FilesystemBackend, "exists", failing_exists)
+    r = client.get(f"/api/drawings/{DRAWING}/intake",
+                   params={"version": str(v4)}, headers=_h(TENANT))
+    assert r.status_code == 503, r.text
+    assert r.json()["error"]["retryable"] is True
+    del backend_holder
+
+
+def test_undo_commit_with_unreadable_head_is_never_retryable(client, tmp_path, monkeypatch):
+    """Round-5 pin: undo moves the head BEFORE the response-building read; a
+    ProofStateUnreadable there must surface as retryable=False (a retry would
+    undo a further version), not an unhandled 500."""
+    from routers import drawings as drawings_router  # noqa: PLC0415
+
+    _seed_chain(tmp_path)
+
+    def committed_but_unreadable(*args, **kwargs):
+        raise write_loop.ProofStateUnreadable("simulated post-commit read failure")
+
+    monkeypatch.setattr(drawings_router.write_loop, "undo_view", committed_but_unreadable)
+    r = client.post(f"/api/drawings/{DRAWING}/undo", headers=_h(TENANT))
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["error"]["retryable"] is False
+    assert "refresh" in body["error"]["message"]
+
+
 def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypatch):
     """Round-4 MAJOR pin: when the source is live-representation (DWG blob +
     valid cache) and the cache mirror fails post-commit, the response still
@@ -438,11 +629,17 @@ def test_restore_of_missing_version_404s(client, tmp_path):
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DATABASE_URL"),
-    reason="PostgreSQL restore proof requires explicit DATABASE_URL",
+    not os.environ.get("LEAF_RESTORE_PG_PROOF_DB"),
+    reason="PostgreSQL restore proof requires the EXPLICIT opt-in "
+           "LEAF_RESTORE_PG_PROOF_DB (a disposable database URL). A generic "
+           "ambient DATABASE_URL must never trigger this test: it applies "
+           "every repository migration and leaves randomized manifest, "
+           "version, and checkout rows behind, which would mutate a staging "
+           "or production database whose URL happens to be in the "
+           "environment.",
 )
 def test_postgres_live_dwg_restore_preserves_blob_and_readable_cache(
-    client, tmp_path, monkeypatch,
+    client, tmp_path, monkeypatch, request,
 ):
     """Staging-representative proof without touching staging.
 
@@ -455,7 +652,16 @@ def test_postgres_live_dwg_restore_preserves_blob_and_readable_cache(
     import store  # noqa: PLC0415
     from routers import drawings as drawings_router  # noqa: PLC0415
 
+    # The dedicated opt-in URL IS the database for this test; never the
+    # ambient DATABASE_URL (see skipif).
+    monkeypatch.setenv("DATABASE_URL", os.environ["LEAF_RESTORE_PG_PROOF_DB"])
     db = store._db()
+    # get_pool() caches its conninfo at creation: reset BEFORE so a pool that
+    # pre-dates the monkeypatch (bound to an ambient database) can never be
+    # reused here, and AGAIN at teardown so no pool bound to the disposable
+    # database leaks into later tests after the env is restored.
+    db.reset_pool()
+    request.addfinalizer(db.reset_pool)
     db.apply_migration()
     monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
 

@@ -61,6 +61,10 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant
         try:
             write_loop.ensure_demo_drawing(backend, str(tenant), dwg)
             _, intake = write_loop.read_intake(backend, str(tenant), dwg, "head")
+        except write_loop.ProofStateUnreadable as exc:
+            # Transport-unreadable proof state: the drawing exists; retryable.
+            return error_response(ErrorCode.INTERNAL, str(exc),
+                                  retryable=True, status_code=503)
         except (KeyError, ValueError) as exc:
             return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                                   retryable=False, status_code=404)

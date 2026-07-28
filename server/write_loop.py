@@ -70,6 +70,15 @@ PROBE_LAYER = "LEAF_WRITE_PROBE"
 USD_PER_HR = float(os.environ.get("APS_USD_PER_HR", "10"))
 
 
+class ProofStateUnreadable(RuntimeError):
+    """A version's cache-proof state could not be READ (transport), so the
+    reader can neither trust nor refute the cache. Deliberately NOT a
+    ValueError: the route family maps (KeyError, ValueError) to non-retryable
+    404/400 ("that version does not exist"), and this is a different answer —
+    the version exists, the store is just unreachable right now. Callers
+    surface it as a retryable 503."""
+
+
 # --------------------------------------------------------------------------- #
 # tool classification + backend selection
 # --------------------------------------------------------------------------- #
@@ -383,10 +392,6 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
 
     if not marker_bound:
         pkey = intake_cache_proof_key(tenant_id, drawing_id, v)
-        try:
-            proof = json.loads(backend.get(pkey).decode("utf-8"))
-        except (KeyError, UnicodeDecodeError, ValueError) as exc:
-            raise ValueError("raw DWG intake cache has no source binding") from exc
         expected = {
             "schema": 1,
             "version": int(v),
@@ -394,11 +399,107 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
             "intake_ref": ckey,
             "intake_sha256": intake_digest,
         }
-        if not isinstance(proof, dict) or any(
-            not hmac.compare_digest(str(proof.get(key)), str(value))
-            for key, value in expected.items()
-        ):
-            raise ValueError("raw DWG intake cache does not match its source binding")
+        try:
+            proof_exists = backend.exists(pkey)
+        except Exception as exc:  # noqa: BLE001 — transport, retryable
+            raise ProofStateUnreadable(
+                "raw DWG intake cache proof state is unreadable") from exc
+        if not proof_exists:
+            # PRE-PROOF-ERA version: the sidecar proof was introduced with the
+            # restore lane (PR #243) and no backfill exists, so every live DWG
+            # version created before it has a cache and NO proof. Refusing
+            # here bricked all of them (head reads, write preflights,
+            # undo/redo, restore). Trust-on-first-read: accept the cache
+            # exactly as every reader did before the proof era — strictly
+            # stronger than that status quo, never weaker for new versions —
+            # and MINT the missing proof from what we just read, so this
+            # version is bound from now on (self-healing backfill). The
+            # backfill write is best-effort: a read must not fail because a
+            # repair write could not land; the next read retries it.
+            # Mint ladder, fail-closed on every DETECTED conflict:
+            #  * put_if_absent_or_verify raising store.ImmutableConflict means
+            #    a DIFFERENT proof already won this key — that is a detected
+            #    conflict, never a transport blip, and must refuse the read.
+            #    (A bare ValueError is NOT a conflict signal: OSS credential
+            #    parsing or response decoding can raise it for transport
+            #    reasons; those fall to the re-read.)
+            #  * a transport failure during the mint proves nothing; the key
+            #    state is then confirmed by a re-read, where ABSENT means the
+            #    pure legacy case (serve, pre-proof status quo), a readable
+            #    proof must match, and an UNREADABLE state refuses the read
+            #    (retryable blip; serving past a possibly-conflicting proof
+            #    is the round-3 reproduction).
+            # When the mint returns cleanly it has already get-verified the
+            # winner equals our bytes, so no re-read is needed. Note the OSS
+            # backend's mint is exists->put->get (no compare-and-swap), so a
+            # conflicting proof landing inside that window can be overwritten
+            # undetected on the FIRST read of a legacy version; the served
+            # intake is still exactly the bytes digested into our proof, and
+            # every later read takes the strict path — the same
+            # trust-on-first-read bound stated above.
+            minted = False
+            try:
+                backend.put_if_absent_or_verify(
+                    pkey,
+                    json.dumps(expected, separators=(",", ":")).encode("utf-8"),
+                )
+                minted = True
+            except store.ImmutableConflict as exc:
+                raise ValueError(
+                    "raw DWG intake cache does not match its source binding"
+                ) from exc
+            except Exception:  # noqa: BLE001 — transport only; re-read decides
+                pass
+            if not minted:
+                try:
+                    raw_proof = backend.get(pkey)
+                except KeyError:
+                    healed_proof = None  # pure legacy: nothing won the key
+                except Exception as exc:  # noqa: BLE001 — transport, retryable
+                    raise ProofStateUnreadable(
+                        "raw DWG intake cache proof state is unreadable"
+                    ) from exc
+                else:
+                    try:
+                        healed_proof = json.loads(raw_proof.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        # A READABLE but unparseable proof is corruption, not
+                        # transport: fail closed non-retryably as before.
+                        raise ValueError(
+                            "raw DWG intake cache has no source binding"
+                        ) from exc
+                if healed_proof is not None and (
+                    not isinstance(healed_proof, dict) or any(
+                        not hmac.compare_digest(
+                            str(healed_proof.get(key)), str(value)
+                        )
+                        for key, value in expected.items()
+                    )
+                ):
+                    raise ValueError(
+                        "raw DWG intake cache does not match its source binding"
+                    )
+        else:
+            # A PRESENT proof is authoritative: corrupt or mismatched fails
+            # closed exactly as before (a swapped cache must never be served).
+            # Transport failures fetching it are NOT corruption: a backend
+            # ValueError (OSS credential/response parsing) or OSError here
+            # proves nothing about the proof's content and must stay
+            # retryable rather than becoming a permanent refusal.
+            try:
+                raw_present_proof = backend.get(pkey)
+            except Exception as exc:  # noqa: BLE001 — transport, retryable
+                raise ProofStateUnreadable(
+                    "raw DWG intake cache proof state is unreadable") from exc
+            try:
+                proof = json.loads(raw_present_proof.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise ValueError("raw DWG intake cache has no source binding") from exc
+            if not isinstance(proof, dict) or any(
+                not hmac.compare_digest(str(proof.get(key)), str(value))
+                for key, value in expected.items()
+            ):
+                raise ValueError("raw DWG intake cache does not match its source binding")
 
     intake = json.loads(candidate.decode("utf-8"))
     if not isinstance(intake, dict):
@@ -767,6 +868,12 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     try:
         ensure_demo_drawing(backend, tenant_id, drawing_id)
         head_v, cur_intake = read_intake(backend, tenant_id, drawing_id, version)
+    except ProofStateUnreadable as exc:
+        # The base version exists; its proof state is unreachable right now.
+        # Retryable — nothing has been written yet at this point.
+        return (err_envelope(ErrorCode.INTERNAL, str(exc),
+                             retryable=True, tool=name, version=tool_version),
+                503)
     except (KeyError, ValueError) as exc:
         return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
                              retryable=False, tool=name, version=tool_version),
