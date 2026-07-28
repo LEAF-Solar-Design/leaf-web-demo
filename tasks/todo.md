@@ -1,3 +1,23 @@
+# Production authored acceptance
+
+- [x] Keep the existing staging driver production-denied while exposing only target-neutral execution helpers.
+- [x] Add a production-only driver with exact-host, execute-only, confirmation, and signed non-customer tenant gates.
+- [x] Add the Auth0 machine-token classification claim required by the production driver.
+- [x] Add negative contract tests for target aliases, missing confirmation, token signature and claim failures, and receipt leaks.
+- [x] Run the focused Node tests, Auth0 action tests, web build, full applicable gates, and independent review.
+
+Risks:
+
+- A broad environment switch could weaken the existing staging production denylist.
+- Unsigned JWT decoding cannot prove that the test identities are non-customer tenants.
+- Production acceptance writes two durable synthetic drawings and tools, so target and run identity must be source-fixed.
+
+Controls:
+
+- Use a separate production entry point and keep the staging validator unchanged.
+- Verify both access tokens against the exact Auth0 issuer, audience, JWKS, short lifetime, and signed `tenant_class` claim.
+- Permit only `https://leaf-platform-web.vercel.app` for the web, `https://platform.leafdesign.ai` for the API, exact run-scoped drawing IDs, and source-fixed prompts.
+
 # Staging failed-test repair
 
 - [x] Wave 0: capture the current gate baseline and add failing regression checks.
