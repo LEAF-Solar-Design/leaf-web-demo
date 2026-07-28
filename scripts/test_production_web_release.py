@@ -63,6 +63,33 @@ def _dist(root: Path) -> tuple[Path, str]:
     return dist, web_dist_digest(dist)
 
 
+def _approval(digest: str) -> dict:
+    return {
+        "schema": "leaf.production-web-approval.v1",
+        "project_id": PROJECT_ID,
+        "source_revision": SOURCE,
+        "release_workflow_run_id": 123456,
+        "release_workflow_run_attempt": 2,
+        "handoff_workflow_run_id": 654322,
+        "handoff_workflow_run_attempt": 4,
+        "web_artifact_sha256": digest,
+        "workflow_head_sha": "f" * 40,
+        "deployment_workflow_run_id": 765432,
+        "deployment_workflow_run_attempt": 5,
+        "issue_number": 42,
+        "comment_id": 987654,
+        "approver_login": "qualified-reviewer",
+        "approver_id": 12345,
+        "permission": "write",
+        "created_at": "2026-07-28T12:00:00Z",
+        "validated_at": "2026-07-28T12:05:00Z",
+        "approval_payload_sha256": "e" * 64,
+        "exact_body_verified": True,
+        "author_separated": True,
+        "timely_at_promotion": True,
+    }
+
+
 def _handoff(web_hash: str) -> dict:
     services = {
         name: {
@@ -206,6 +233,7 @@ def test_receipt_binds_new_stable_deployment_and_all_workflow_attempts(tmp_path:
         baseline,
         deployed,
         deployed,
+        _approval(digest),
         handoff_run_id="654322",
         handoff_attempt="4",
         workflow_run_id="765432",
@@ -219,6 +247,7 @@ def test_receipt_binds_new_stable_deployment_and_all_workflow_attempts(tmp_path:
     assert receipt["web_artifact_sha256"] == digest
     assert receipt["build_performed"] is False
     assert receipt["secret_values_observed"] is False
+    assert receipt["approval"]["comment_id"] == 987654
 
 
 def test_receipt_rejects_stable_alias_or_project_mismatch(tmp_path: Path):
@@ -243,12 +272,38 @@ def test_receipt_rejects_stable_alias_or_project_mismatch(tmp_path: Path):
             baseline,
             deployed,
             wrong,
+            _approval(digest),
             handoff_run_id="654322",
             handoff_attempt="4",
             workflow_run_id="765432",
             workflow_attempt="5",
             workflow_head_sha="f" * 40,
         )
+
+
+def test_receipt_rejects_replayed_or_unbound_approval(tmp_path: Path):
+    dist, digest = _dist(tmp_path)
+    prepared = prepare(
+        _handoff(digest), dist, tmp_path / "output", source=SOURCE,
+        release_run_id=RELEASE_RUN_ID, release_attempt=RELEASE_ATTEMPT,
+        expected_web_sha256=digest,
+    )
+    baseline = _inspect("dpl_" + "A" * 24, "leaf-old.vercel.app")
+    deployed = _inspect("dpl_" + "B" * 24, "leaf-new.vercel.app")
+    for field, value in (
+        ("deployment_workflow_run_id", 765433),
+        ("timely_at_promotion", False),
+        ("permission", "read"),
+    ):
+        approval = _approval(digest)
+        approval[field] = value
+        with pytest.raises(ReleaseError):
+            deployment_receipt(
+                prepared, baseline, deployed, deployed, approval,
+                handoff_run_id="654322", handoff_attempt="4",
+                workflow_run_id="765432", workflow_attempt="5",
+                workflow_head_sha="f" * 40,
+            )
 
 
 def test_workflow_is_protected_prebuilt_two_phase_and_receipted():

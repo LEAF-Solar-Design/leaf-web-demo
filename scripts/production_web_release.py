@@ -20,6 +20,7 @@ STABLE_URL = "https://leaf-platform-web.vercel.app"
 HANDOFF_SCHEMA = "leaf.production-handoff-candidate.v1"
 PREPARED_SCHEMA = "leaf.production-web-prepared.v1"
 RECEIPT_SCHEMA = "leaf.production-web-deployment.v1"
+APPROVAL_SCHEMA = "leaf.production-web-approval.v1"
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -29,6 +30,8 @@ _ATTEMPT = re.compile(r"^[1-9][0-9]*$")
 _DEPLOYMENT_ID = re.compile(r"^dpl_[A-Za-z0-9]{20,64}$")
 _DEPLOYMENT_URL = re.compile(r"^[a-z0-9][a-z0-9-]*\.vercel\.app$")
 _ENTRY_ASSET = re.compile(rb"assets/index-[A-Za-z0-9_-]+\.js")
+_LOGIN = re.compile(r"^[A-Za-z0-9-]{1,39}$")
+_UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
 
 class ReleaseError(ValueError):
@@ -303,6 +306,7 @@ def deployment_receipt(
     baseline: dict[str, Any],
     deployment: dict[str, Any],
     stable: dict[str, Any],
+    approval: dict[str, Any],
     *,
     handoff_run_id: str,
     handoff_attempt: str,
@@ -335,6 +339,48 @@ def deployment_receipt(
     handoff_try = _positive(handoff_attempt, _ATTEMPT, "handoff run attempt")
     current_id = _positive(workflow_run_id, _RUN_ID, "deployment workflow run ID")
     current_try = _positive(workflow_attempt, _ATTEMPT, "deployment run attempt")
+    approval_keys = {
+        "schema", "project_id", "source_revision", "release_workflow_run_id",
+        "release_workflow_run_attempt", "handoff_workflow_run_id",
+        "handoff_workflow_run_attempt", "web_artifact_sha256", "workflow_head_sha",
+        "deployment_workflow_run_id", "deployment_workflow_run_attempt",
+        "issue_number", "comment_id", "approver_login", "approver_id", "permission",
+        "created_at", "validated_at", "approval_payload_sha256",
+        "exact_body_verified", "author_separated", "timely_at_promotion",
+    }
+    _exact(approval, approval_keys, "production approval proof")
+    if (
+        approval["schema"] != APPROVAL_SCHEMA
+        or approval["project_id"] != PROJECT_ID
+        or approval["source_revision"] != prepared["source_revision"]
+        or approval["release_workflow_run_id"] != prepared["release_workflow_run_id"]
+        or approval["release_workflow_run_attempt"] != prepared["release_workflow_run_attempt"]
+        or approval["handoff_workflow_run_id"] != handoff_id
+        or approval["handoff_workflow_run_attempt"] != handoff_try
+        or approval["web_artifact_sha256"] != prepared["web_artifact_sha256"]
+        or approval["workflow_head_sha"] != workflow_head_sha
+        or approval["deployment_workflow_run_id"] != current_id
+        or approval["deployment_workflow_run_attempt"] != current_try
+        or not isinstance(approval["issue_number"], int)
+        or approval["issue_number"] < 1
+        or not isinstance(approval["comment_id"], int)
+        or approval["comment_id"] < 1
+        or not isinstance(approval["approver_id"], int)
+        or approval["approver_id"] < 1
+        or not isinstance(approval["approver_login"], str)
+        or not _LOGIN.fullmatch(approval["approver_login"])
+        or approval["permission"] not in {"write", "maintain", "admin"}
+        or not isinstance(approval["created_at"], str)
+        or not _UTC.fullmatch(approval["created_at"])
+        or not isinstance(approval["validated_at"], str)
+        or not _UTC.fullmatch(approval["validated_at"])
+        or not isinstance(approval["approval_payload_sha256"], str)
+        or not _SHA256.fullmatch(approval["approval_payload_sha256"])
+        or approval["exact_body_verified"] is not True
+        or approval["author_separated"] is not True
+        or approval["timely_at_promotion"] is not True
+    ):
+        raise ReleaseError("production approval proof is invalid or unbound")
     for label, value in (
         ("baseline", baseline),
         ("deployment", deployment),
@@ -380,6 +426,7 @@ def deployment_receipt(
         "deployment_workflow_run_id": current_id,
         "deployment_workflow_run_attempt": current_try,
         "deployment_workflow_head_sha": workflow_head_sha,
+        "approval": approval,
         "build_performed": False,
         "pre_promotion_verified": True,
         "stable_routes_verified": True,
@@ -415,6 +462,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     receipt.add_argument("--baseline", type=Path, required=True)
     receipt.add_argument("--deployment", type=Path, required=True)
     receipt.add_argument("--stable", type=Path, required=True)
+    receipt.add_argument("--approval", type=Path, required=True)
     receipt.add_argument("--handoff-run-id", required=True)
     receipt.add_argument("--handoff-attempt", required=True)
     receipt.add_argument("--workflow-run-id", required=True)
@@ -443,6 +491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             load_json(args.baseline),
             load_json(args.deployment),
             load_json(args.stable),
+            load_json(args.approval),
             handoff_run_id=args.handoff_run_id,
             handoff_attempt=args.handoff_attempt,
             workflow_run_id=args.workflow_run_id,

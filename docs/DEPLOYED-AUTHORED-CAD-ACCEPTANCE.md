@@ -169,11 +169,14 @@ supplies the exact source SHA, release and handoff run IDs and attempts,
 reviewed web artifact SHA-256, and the confirmation string printed by the
 workflow contract.
 
-Before dispatch, a different collaborator with write access must add the exact
-approval string to an open repository issue. Supply that issue number and exact
-comment ID. The comment author cannot be the actor or triggering actor, and the
-comment expires after 24 hours. This issue gate provides independent approval
-on private repositories whose GitHub plan cannot enforce environment reviewers.
+Supply an open approval issue number when dispatching. The workflow prints and
+waits for an approval string that includes its exact run ID and attempt. A
+different collaborator with write access must add that exact string to the
+issue within five minutes. The comment author cannot be the actor or triggering
+actor. The workflow rechecks the unchanged comment, open issue, live permission,
+and 24-hour expiry immediately before promotion. This issue gate provides
+independent, single-execution approval on private repositories whose GitHub plan
+cannot enforce environment reviewers.
 
 The workflow downloads only the attempt-bound handoff and `web-dist` artifacts.
 It checks their GitHub workflow identity, successful conclusion, protected
@@ -189,4 +192,5 @@ verifies the stable project URL and uploads an attempt-bound
 `leaf.production-web-deployment.v1`
 receipt. If promotion or any later required gate fails, it restores the exact
 baseline deployment ID. This receipt proves the Vercel half of the production
-identity. The backend identity remains four OCI digests.
+identity and retains the sanitized immutable approval proof. The backend
+identity remains four OCI digests.
