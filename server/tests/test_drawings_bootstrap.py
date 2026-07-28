@@ -176,7 +176,6 @@ def test_demo_bootstrap_unchanged(client):
         "bytes": body["versions"][0]["bytes"],
         "sha256": body["versions"][0]["sha256"],
         "tool": None, "workitem_id": None, "note": "initial ingest",
-        "delta": None,  # root version has no parent to diff against (ruling-4)
     }
 
     ir = client.get(f"/api/drawings/{write_loop.DEMO_DRAWING_ID}/intake",

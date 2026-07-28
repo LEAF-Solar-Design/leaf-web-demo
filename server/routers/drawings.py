@@ -312,7 +312,15 @@ def _entity_identity(kind: str, entity: Dict[str, Any]) -> Any:
     still recognizes an UNCHANGED entity across versions but cannot tell a
     modified handle-less entity from a delete+add — there is no id to hang
     "modified" on, so it reads as one of each. That is the honest limit of a
-    read-time diff over opaque JSON, not a bug."""
+    read-time diff over opaque JSON, not a bug.
+
+    Two more documented limits of the identity model: DUPLICATE handles within
+    one kind collapse to one map entry (last wins), so a parent with two "A"
+    polylines and a child with one reads as unchanged rather than one delete —
+    the store never mints duplicate handles, so this only occurs on corrupt
+    payloads; and an entity MOVING between kinds (same handle, polylines →
+    inserts) counts as one add plus one delete, because kind is part of the
+    identity key."""
     handle = entity.get("handle") if isinstance(entity, dict) else None
     if isinstance(handle, str) and handle:
         return (kind, "handle", handle)
@@ -382,13 +390,16 @@ def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
             continue
         try:
             out[v] = _version_delta(parent_intake, child_intake)
-        except Exception:  # noqa: BLE001 — a malformed payload must not 500 the whole chain
+        except (KeyError, ValueError, TypeError):
+            # Expected malformed-data failures only: a programming defect must
+            # surface as a 500, not vanish into a delta:null row.
             out[v] = None
     return out
 
 
 @router.get("/api/drawings/{drawing_id}/versions")
-def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
+def get_versions(drawing_id: str, include_deltas: bool = False,
+                 tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     """Full version-history chain straight from the store manifest — the read the
     UI's version-chain popover needs (undo/redo only stepped head one hop).
 
@@ -419,12 +430,20 @@ def get_versions(drawing_id: str, tenant_id: str = Depends(deps.require_active_t
         return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                               retryable=False, status_code=404)
     entries = m.get("versions", [])
-    deltas = _version_deltas(backend, str(tenant_id), drawing_id, entries)
+    # Deltas are OPT-IN (?include_deltas=1): computing them loads and parses
+    # EVERY version payload (O(N) blob reads, O(N^2) row work under the
+    # PostgreSQL authority), and the app hits this route at startup merely to
+    # read checkout state. Only the history drawer asks for deltas, and the
+    # default response shape stays exactly what it was before this feature.
     rows = []
-    for e in entries:
-        row = _version_row(e)
-        row["delta"] = deltas.get(row["v"])
-        rows.append(row)
+    if include_deltas:
+        deltas = _version_deltas(backend, str(tenant_id), drawing_id, entries)
+        for e in entries:
+            row = _version_row(e)
+            row["delta"] = deltas.get(row["v"])
+            rows.append(row)
+    else:
+        rows = [_version_row(e) for e in entries]
     view = {
         "drawing_id": drawing_id,
         "head": int(m["head"]),
@@ -471,15 +490,16 @@ def restore_version(drawing_id: str, version: int,
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
                               status_code=400)
 
+    # The RAW stored payload, verbatim — never a re-serialization. In live
+    # representation (APS_LIVE=1) a version's payload is DWG bytes and the
+    # intake rides a sibling cache key; re-serializing parsed intake here
+    # would store JSON where the next APS write expects a DWG. Copying the
+    # blob byte-for-byte also keeps the restored version's sha256 equal to
+    # its source, which the tests pin.
     try:
-        m = store.load_manifest(backend, str(tenant_id), drawing_id)
-    except KeyError as exc:
-        return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
-                              retryable=False, status_code=404)
-    head_v = int(m["head"])
-
-    try:
-        _, source_intake = write_loop.read_intake(backend, str(tenant_id), drawing_id, int(version))
+        source_v, source_key = store.resolve_version(
+            backend, str(tenant_id), drawing_id, int(version))
+        source_bytes = backend.get(source_key)
     except (KeyError, ValueError) as exc:
         return error_response(ErrorCode.BAD_PARAMS,
                               f"version {version} unavailable: {exc}",
@@ -493,15 +513,43 @@ def restore_version(drawing_id: str, version: int,
                     "drawing mutations are temporarily disabled for a storage cutover",
                     retryable=True, status_code=503,
                 )
+            # Head is read INSIDE the guard, as late as this process can
+            # manage; the store's own put remains the authority and refuses a
+            # stale parent under its row lock (surfaced as 409 below), so two
+            # concurrent restores cannot both claim the same parent.
+            try:
+                m = store.load_manifest(backend, str(tenant_id), drawing_id)
+            except KeyError as exc:
+                return error_response(ErrorCode.BAD_PARAMS,
+                                      f"drawing unavailable: {exc}",
+                                      retryable=False, status_code=404)
+            head_v = int(m["head"])
             new_v = write_loop._put_bytes_version(
-                backend, str(tenant_id), drawing_id,
-                json.dumps(source_intake, separators=(",", ":")).encode("utf-8"),
+                backend, str(tenant_id), drawing_id, source_bytes,
                 parent_version=head_v,
                 meta={"tool": "restore", "note": f"restore of version {version}"},
                 holder=holder, fence=fence,
             )
+            # Live representation: mirror the source version's intake cache to
+            # the new head so it has its intake without a re-extract. In mock
+            # representation there is no cache key and this is a no-op.
+            source_ckey = write_loop.intake_cache_key(
+                str(tenant_id), drawing_id, source_v)
+            if backend.exists(source_ckey):
+                backend.put(
+                    write_loop.intake_cache_key(str(tenant_id), drawing_id, new_v),
+                    backend.get(source_ckey),
+                )
     except store.CheckoutDenied as exc:
         return _denied(checkout_capability.CapabilityRejected(str(exc)))
+    except (KeyError, ValueError) as exc:
+        # The store refused the commit under its own lock (stale parent from a
+        # concurrent write, or a backend-specific precondition such as the
+        # PostgreSQL authority requiring an active checkout). Not a 500: the
+        # client can re-read the chain and retry.
+        return error_response(ErrorCode.BAD_PARAMS,
+                              f"restore could not commit: {exc}",
+                              retryable=True, status_code=409)
 
     view = deps.tenant_echo({
         "drawing_id": drawing_id,

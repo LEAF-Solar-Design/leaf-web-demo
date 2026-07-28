@@ -127,7 +127,7 @@ export default function VersionHistory({
         await onRetry()
       } else {
         // No parent refresh wired — refetch ourselves so the new head shows up.
-        try { setOverrideData(await getDrawingVersions(useMock, drawingId)) }
+        try { setOverrideData(await getDrawingVersions(useMock, drawingId, { includeDeltas: true })) }
         catch { /* the restore itself already succeeded; the list just won't advance */ }
       }
       onRestored?.(result)

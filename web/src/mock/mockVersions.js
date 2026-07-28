@@ -229,23 +229,27 @@ export function restore(version) {
   const resolved = version === 'head' || version == null ? chain.head : Number(version)
   const parent = chain.head
 
-  chain.intakes = chain.intakes.slice(0, chain.head)
-  chain.versions = chain.versions.slice(0, chain.head)
+  // Live parity: restore APPENDS, numbered past EVERY existing version, with
+  // parent = the current head — and, unlike a write after an undo, it never
+  // truncates the redo tail (the live store keeps all versions; only the
+  // write-after-undo fork discards). After v1..v3 with head undone to v2,
+  // restoring v1 yields v4 (parent 2) and v3 survives.
+  const newV = chain.versions.length + 1
   chain.intakes.push({ ...source })
-  chain.head = chain.latest = chain.intakes.length
   chain.versions.push({
-    v: chain.head,
+    v: newV,
     parent,
     tool: 'restore',
     note: `Restored version ${resolved}`,
     created: nowIso(),
     sha256: fingerprint(source),
   })
+  chain.head = chain.latest = newV
 
   return {
     drawing_id: DRAWING_ID,
     restored_from: resolved,
-    new_version: { drawing_id: DRAWING_ID, version: chain.head, parent },
+    new_version: { drawing_id: DRAWING_ID, version: newV, parent },
     head: chain.head,
     latest: chain.latest,
   }
@@ -254,15 +258,19 @@ export function restore(version) {
 /** LIVE /versions shape consumed by VersionHistory.jsx. `delta` is computed
  * HERE, at read time, from the intake chain (never stamped at write time) —
  * the same rule the live route follows. */
-export function list() {
+export function list({ includeDeltas = false } = {}) {
+  // Wire parity with GET /versions: `delta` appears ONLY when requested
+  // (?include_deltas=1) — the default shape matches the pre-feature contract.
   return {
     drawing_id: DRAWING_ID,
     head: chain.head,
     latest: chain.latest,
     checkout: null,
-    versions: chain.versions.map((r) => ({
-      ...r,
-      delta: r.parent == null ? null : versionDelta(chain.intakes[r.parent - 1], chain.intakes[r.v - 1]),
-    })),
+    versions: chain.versions.map((r) => (includeDeltas
+      ? {
+        ...r,
+        delta: r.parent == null ? null : versionDelta(chain.intakes[r.parent - 1], chain.intakes[r.v - 1]),
+      }
+      : { ...r })),
   }
 }

@@ -280,7 +280,7 @@ export default function App() {
   const drawingAdapters = useMemo(() => ({
     loadHead: (drawingId) => getDrawingIntake(mock, drawingId, 'head'),
     loadVersion: (drawingId, version) => getDrawingIntake(mock, drawingId, version),
-    loadVersions: (drawingId) => getDrawingVersions(mock, drawingId),
+    loadVersions: (drawingId, options) => getDrawingVersions(mock, drawingId, options),
     undoVersion: (drawingId) => undoDrawing(mock, drawingId, capabilityRef.current),
     redoVersion: (drawingId) => redoDrawing(mock, drawingId, capabilityRef.current),
   }), [mock])
@@ -1988,6 +1988,9 @@ export default function App() {
                         onRetry={loadHistory}
                         retryKey={rTarget === 'history'}
                         exiting={historyExit.exiting}
+                        mock={mock}
+                        capability={capabilityRef.current}
+                        onRestored={() => drawingActions.refreshHead()}
                       />
                     )}
                   </div>

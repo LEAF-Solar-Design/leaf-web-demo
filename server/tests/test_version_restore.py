@@ -136,7 +136,8 @@ def _seed_chain(tmp_path):
 def test_delta_correct_on_a_three_version_chain(client, tmp_path):
     _seed_chain(tmp_path)
 
-    r = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT))
+    r = client.get(f"/api/drawings/{DRAWING}/versions",
+                   params={"include_deltas": 1}, headers=_h(TENANT))
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["head"] == 3 and body["latest"] == 3
@@ -163,12 +164,24 @@ def test_delta_is_null_when_a_stored_payload_is_unparseable(client, tmp_path):
     vkey = store.drawing_version_key(TENANT, DRAWING, 2)
     backend.put(vkey, b"{not valid json")
 
-    body = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
+    body = client.get(f"/api/drawings/{DRAWING}/versions",
+                      params={"include_deltas": 1}, headers=_h(TENANT)).json()
     rows = {row["v"]: row for row in body["versions"]}
     assert rows[1]["delta"] is None       # unaffected: still the root
     assert rows[2]["delta"] is None       # its own payload is corrupt
     assert rows[3]["delta"] is None       # its PARENT (v2) is corrupt
     assert body["error"] is None          # the corruption did not fault the whole read
+
+
+def test_default_versions_shape_has_no_delta_key(client, tmp_path):
+    """Deltas are opt-in (?include_deltas=1): the DEFAULT response keeps the
+    exact pre-feature row shape (tests/test_ui_wave.py pins it), because the
+    delta computation loads every version payload and the app reads this
+    route at startup merely for checkout state."""
+    _seed_chain(tmp_path)
+
+    body = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
+    assert all("delta" not in row for row in body["versions"])
 
 
 # --------------------------------------------------------------------------- #
@@ -185,10 +198,17 @@ def test_restore_creates_new_head_preserving_chain(client, tmp_path):
     assert body["new_version"] == {"drawing_id": DRAWING, "version": 4, "parent": 3}
     assert body["head"] == 4 and body["latest"] == 4
 
-    versions = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
+    versions = client.get(f"/api/drawings/{DRAWING}/versions",
+                          params={"include_deltas": 1}, headers=_h(TENANT)).json()
     assert versions["head"] == 4 and versions["latest"] == 4
     rows = {row["v"]: row for row in versions["versions"]}
     assert set(rows) == {1, 2, 3, 4}
+    # Raw-byte fidelity: restore copies the stored payload VERBATIM (never a
+    # re-serialization), so the restored version's sha256 equals its source's.
+    # In live representation the payload is DWG bytes; storing re-serialized
+    # intake JSON there would poison the next APS write.
+    assert rows[4]["sha256"] == rows[1]["sha256"]
+    assert rows[4]["bytes"] == rows[1]["bytes"]
     # the chain is APPENDED to, never rewritten: v1..v3 are untouched
     assert rows[1] == {
         "v": 1, "parent": None, "created": rows[1]["created"],

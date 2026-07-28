@@ -173,7 +173,10 @@ export default function useDrawingVersionController({
     setHistoryLoading(true)
     setHistoryError(null)
     try {
-      const nextHistory = await loadVersions(drawingId)
+      // The drawer is the one surface that wants per-row delta chips; the
+      // adapter forwards the flag to ?include_deltas=1 (server-side cost:
+      // every version payload is loaded, so nothing else requests it).
+      const nextHistory = await loadVersions(drawingId, { includeDeltas: true })
       setHistory(nextHistory)
       return nextHistory
     } catch (error) {
@@ -239,6 +242,24 @@ export default function useDrawingVersionController({
     return previewVersion(drawingState.head)
   }, [drawingState, previewVersion])
 
+  // After a restore the SERVER head moved; the intake, head, and version
+  // state this controller feeds the viewer must move with it, or the next
+  // write operates on the restored head while the viewer still shows the old
+  // drawing. seatVersion also closes the history drawer (resetPreview), which
+  // is the intended landing: the user restored, show them the result.
+  const refreshHead = useCallback(async () => {
+    const drawingId = drawingState?.drawing_id
+    if (drawingId == null || typeof loadHead !== 'function') return null
+    try {
+      const view = await loadHead(drawingId)
+      seatVersion(view, { drawingId, source: 'restore' })
+      return view
+    } catch (error) {
+      reportError(error, 'restore-refresh')
+      return null
+    }
+  }, [drawingState, loadHead, reportError, seatVersion])
+
   const markRefreshFailure = useCallback((failure) => {
     setRefreshFailure(failure || null)
   }, [])
@@ -277,6 +298,7 @@ export default function useDrawingVersionController({
     backToHead,
     markRefreshFailure,
     retryRefresh,
+    refreshHead,
   }), [
     backToHead,
     closeHistory,
@@ -284,6 +306,7 @@ export default function useDrawingVersionController({
     markRefreshFailure,
     previewVersion,
     redo,
+    refreshHead,
     reset,
     retryRefresh,
     seatIntake,

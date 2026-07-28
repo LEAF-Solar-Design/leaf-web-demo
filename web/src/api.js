@@ -726,9 +726,13 @@ export async function getUploadedDrawingIntake(drawingId, guestSession = null, t
 // {drawing_id, head, latest, versions:[{v, parent, created, bytes, sha256, tool,
 // workitem_id, note}]}. LIVE only. Throws if the sibling endpoint isn't live yet
 // so the caller can render a calm "history unavailable" note.
-export async function getDrawingVersions(mock, drawingId) {
-  if (mock) { await nap(120); return mockVersions.list() }
-  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions`, {
+// `includeDeltas`: opt-in per-row `delta` chips (?include_deltas=1). The
+// server computes them by loading EVERY version payload, so only the history
+// drawer asks; checkout-state reads keep the cheap default shape.
+export async function getDrawingVersions(mock, drawingId, { includeDeltas = false } = {}) {
+  if (mock) { await nap(120); return mockVersions.list({ includeDeltas }) }
+  const query = includeDeltas ? '?include_deltas=1' : ''
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions${query}`, {
     headers: { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId) },
   })
 }

@@ -32,8 +32,12 @@ test('a 3-version chain renders delta chips, and restoring v1 appends a new head
   // as the executable statement of the intended end-state and un-skips when
   // either (a) ToolCast's inline panel adopts the delta/restore UI, or
   // (b) this spec is rewritten to drive /app's own chrome. The server-side
-  // contract (delta computation, restore-as-new-head, chain integrity) is
-  // fully covered today by server/tests/test_version_restore.py.
+  // contract (delta computation, restore-as-new-head, chain integrity,
+  // raw-byte restore fidelity) is covered by
+  // server/tests/test_version_restore.py -- under the LEGACY JSON-backed
+  // APS_LIVE=0 storage only; the PostgreSQL authority and live-DWG
+  // representations are NOT exercised by those tests, which is part of what
+  // this spec still owes when it un-skips.
   test.skip(true, 'delta/restore UI mounts on /app (VersionHistory.jsx), not /try; see finding above')
   await requireLocalReady(request, test, API_BASE)
 
