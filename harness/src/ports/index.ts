@@ -662,6 +662,7 @@ export interface AppRunClient {
   authorTool(
     tenantId: string,
     description: string,
+    mode: "build" | "one_off",
     idempotencyKey: string,
   ): Promise<Record<string, unknown>>;
   /** Request or resume publication of one durable staged change set. */

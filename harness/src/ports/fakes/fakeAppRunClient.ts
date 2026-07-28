@@ -77,6 +77,7 @@ export class FakeAppRunClient implements AppRunClient {
   readonly authorCalls: Array<{
     tenantId: string;
     description: string;
+    mode: "build" | "one_off";
     idempotencyKey: string;
   }> = [];
   readonly publicationCalls: Array<{ tenantId: string; changeSetId: string }> = [];
@@ -134,10 +135,11 @@ export class FakeAppRunClient implements AppRunClient {
   async authorTool(
     tenantId: string,
     description: string,
+    mode: "build" | "one_off",
     idempotencyKey: string,
   ): Promise<Record<string, unknown>> {
     this.methodLog.push("authorTool");
-    this.authorCalls.push({ tenantId, description, idempotencyKey });
+    this.authorCalls.push({ tenantId, description, mode, idempotencyKey });
     return {
       tool: { name: "panel-gap-checker", capabilities: ["drawing.read"] },
       preview: "Created panel-gap-checker.",

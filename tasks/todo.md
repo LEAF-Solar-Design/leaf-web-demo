@@ -322,3 +322,21 @@ Risks:
 - A weak catalog check can report ready for a same-name object on the wrong relation.
 - A stale test floor can hide an unregistered authority proof or fail a valid current tree.
 - Stricter startup checks must not change selector state or claim that a PostgreSQL cutover occurred.
+
+# Staging author-tool refusal recovery
+
+- [x] Preserve the requested authoring mode through approval replay and the app back-edge.
+- [x] Return a safe, actionable customization error instead of hiding every reason behind a generic refusal.
+- [x] Add server and harness regressions for disabled R5, mode binding, and reason-code propagation.
+- [ ] Run focused tests, type-check, build, full gates, review, and protected staging deployment.
+
+Verification note: focused server and harness checks, type-check, and build pass.
+The registered local subset passed every customization gate, but the full
+harness suite hit Windows Git-worktree timeouts. Protected Linux CI remains the
+canonical full-suite gate before merge and deployment.
+
+Risks:
+
+- Authoring approval arguments and idempotency keys must bind the requested mode.
+- Disabled authored execution must remain fail closed until the E2B and independent-approval gates pass.
+- Error details must explain operator state without exposing tenant data or credentials.

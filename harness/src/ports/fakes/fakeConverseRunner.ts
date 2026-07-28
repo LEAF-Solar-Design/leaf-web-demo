@@ -89,7 +89,7 @@ export class FakeConverseRunner implements SpineConverseRunner {
       }
     } else {
       const directive =
-        /(RUN|SEARCH|STATE|JOB|AUTHOR|PUBLISH|CONFIRM_REQ):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
+        /(RUN|SEARCH|STATE|JOB|AUTHOR|AUTHOR_ONCE|PUBLISH|CONFIRM_REQ):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
       if (tail.includes("FORBIDDEN_TOOL")) {
         const verdict = await input.canUseTool("mcp__other__shell", {});
         yield say(
@@ -109,6 +109,7 @@ export class FakeConverseRunner implements SpineConverseRunner {
           STATE: ["drawing_state", { what: value }],
           JOB: ["job_status", { job_id: value }],
           AUTHOR: ["author_tool", { description: value, mode: "build" }],
+          AUTHOR_ONCE: ["author_tool", { description: value, mode: "one_off" }],
           PUBLISH: ["request_publication", { change_set_id: value }],
           CONFIRM_REQ: ["request_confirmation", { kind: value, payload: {} }],
         };

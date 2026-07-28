@@ -75,10 +75,11 @@ export class HttpAppRunClient implements AppRunClient {
     // App error bodies are section-10 envelopes: {error: {error_code, message, ...}}.
     if (!res.ok && res.status !== 202) {
       const err = (json.error ?? {}) as Record<string, unknown>;
+      const reasonCode = typeof json.reason_code === "string" ? json.reason_code : undefined;
       throw new AppRunClientError(
         typeof err.message === "string" ? err.message : `app back-edge ${res.status} on ${path}`,
         res.status,
-        typeof err.error_code === "string" ? err.error_code : undefined,
+        reasonCode ?? (typeof err.error_code === "string" ? err.error_code : undefined),
       );
     }
     return json;
@@ -115,13 +116,14 @@ export class HttpAppRunClient implements AppRunClient {
   async authorTool(
     tenantId: string,
     description: string,
+    mode: "build" | "one_off",
     idempotencyKey: string,
   ): Promise<Record<string, unknown>> {
     return this.request(
       tenantId,
       "POST",
       "/api/author",
-      { description },
+      { description, mode },
       { "idempotency-key": idempotencyKey },
     );
   }
