@@ -5,14 +5,19 @@
 //
 // Run with: node --test web/e2e/proofReceipt.test.mjs
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
-import { makeProofReceipt } from './proofReceipt.mjs'
+import { makeProofReceipt, writeProofReceipt } from './proofReceipt.mjs'
 
 const baseInput = {
   evidence_tier: 'staging',
   route: '/try',
   runtime: 'test',
   result: { verdict: 'pass' },
+  source_commit: 'd6f548b',
+  sub_cases: { proven: ['healthy'], not_proven: [] },
 }
 
 test('accepts a plain two-letter/two-digit capability id', () => {
@@ -58,4 +63,62 @@ test('rejects garbage that merely contains a valid-looking id', () => {
 test('the regex checks shape only; the ledger, not this file, is the authority on real ids', () => {
   const receipt = makeProofReceipt({ ...baseInput, capability_ids: ['ZZ-99Z'] })
   assert.deepEqual(receipt.capability_ids, ['ZZ-99Z'])
+})
+
+test('rejects a staging receipt without sub-case accounting', () => {
+  const { sub_cases, ...withoutSubCases } = baseInput
+  assert.throws(
+    () => makeProofReceipt({ ...withoutSubCases, capability_ids: ['HL-01'] }),
+    /requires sub_cases/,
+  )
+})
+
+test('rejects a malformed staging source commit', () => {
+  assert.throws(
+    () => makeProofReceipt({ ...baseInput, capability_ids: ['HL-01'], source_commit: 'local-worktree' }),
+    /well-formed source_commit/,
+  )
+})
+
+test('requires an explicit staging source commit', () => {
+  const { source_commit, ...withoutSourceCommit } = baseInput
+  assert.throws(
+    () => makeProofReceipt({ ...withoutSourceCommit, capability_ids: ['HL-01'] }),
+    /well-formed source_commit/,
+  )
+})
+
+test('accepts the readiness sha256 source revision form', () => {
+  const receipt = makeProofReceipt({
+    ...baseInput,
+    capability_ids: ['HL-01'],
+    source_commit: `sha256:${'a'.repeat(64)}`,
+  })
+  assert.equal(receipt.source_commit, `sha256:${'a'.repeat(64)}`)
+})
+
+test('requires every staging artifact to exist before writing the receipt', () => {
+  const receiptDir = mkdtempSync(join(tmpdir(), 'proof-receipt-'))
+  try {
+    const missingPath = join(receiptDir, 'missing.png')
+    assert.throws(
+      () => writeProofReceipt(join(receiptDir, 'receipt.json'), {
+        ...baseInput,
+        capability_ids: ['HL-01'],
+        artifacts: [missingPath],
+      }),
+      /artifact does not exist/,
+    )
+
+    const artifactPath = join(receiptDir, 'evidence.png')
+    writeFileSync(artifactPath, 'evidence')
+    const receipt = writeProofReceipt(join(receiptDir, 'receipt.json'), {
+      ...baseInput,
+      capability_ids: ['HL-01'],
+      artifacts: [artifactPath],
+    })
+    assert.equal(receipt.sub_cases.row_complete, true)
+  } finally {
+    rmSync(receiptDir, { recursive: true, force: true })
+  }
 })

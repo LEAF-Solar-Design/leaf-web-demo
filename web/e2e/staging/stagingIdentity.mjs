@@ -1,3 +1,5 @@
+import { assertAllowedStagingHost } from './stagingConfig.mjs'
+
 // Mandatory, fail-hard deployed identity capture for the staging proof suite.
 //
 // Unlike scripts/deployed_authored_cad_acceptance.mjs (~lines 127-203), this
@@ -7,7 +9,7 @@
 // to name a real revision: identity is load-bearing evidence stamped into
 // every receipt's `source_commit`, so a silent failure here must never let a
 // spec fall through to a stale or fabricated commit.
-const SOURCE_REVISION = /^[0-9a-f]{7,64}$/i
+const SOURCE_REVISION = /^(?:[0-9a-f]{7,64}|sha256:[0-9a-f]{64})$/i
 
 export class StagingIdentityError extends Error {}
 
@@ -30,6 +32,17 @@ export async function captureStagingIdentity(request, { requireEnvironment = 'st
   }
   if (!response.ok()) {
     throw new StagingIdentityError(`GET /api/ready returned HTTP ${response.status()}, expected 2xx`)
+  }
+  let responseURL
+  try {
+    responseURL = new URL(response.url())
+  } catch {
+    throw new StagingIdentityError(`GET /api/ready returned an invalid response URL: ${response.url()}`)
+  }
+  try {
+    assertAllowedStagingHost(responseURL.toString())
+  } catch (error) {
+    throw new StagingIdentityError(`GET /api/ready redirected outside the allowed staging hosts: ${error.message}`)
   }
   let body
   try {

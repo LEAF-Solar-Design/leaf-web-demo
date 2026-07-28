@@ -1,9 +1,7 @@
 import { expect, test } from '@playwright/test'
-import { join } from 'node:path'
 import { captureStagingIdentity } from './stagingIdentity.mjs'
+import { stagingProofPath } from './stagingConfig.mjs'
 import { writeProofReceipt } from '../proofReceipt.mjs'
-
-const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'staging', 'polish-pins')
 
 test('the command-bar shortcut and the center-stage reduced-motion pin hold on the deployed surface', async ({ page, request, baseURL }) => {
   const identity = await captureStagingIdentity(request)
@@ -16,7 +14,6 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
     }
   })
 
-  await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
 
   // HP-01: the command bar keycap is not just a static label -- Control+K
@@ -32,11 +29,25 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   await page.keyboard.press('Control+k')
   await expect(commandInput).toBeFocused()
 
-  // MO-01: under a forced prefers-reduced-motion preference, the CENTER
-  // STAGE (StageLayer's canvas mounts at main.stage-root, not the left
-  // workspace rail) stays painted with a non-zero-area canvas, and the
-  // three-column grid geometry does not drift or reflow across a settle
-  // window. A blank, animated, or reflowing stage fails this.
+  // MO-01: use the caption, which has a nonzero opacity transition without
+  // reduced motion, rather than the non-animated stage root. Then force the
+  // preference and prove both animation and transition durations are zero.
+  const motionTarget = page.locator('.tc-caption')
+  await expect(motionTarget).toBeVisible()
+  const readMotionStyle = () => motionTarget.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    return { animationDuration: computed.animationDuration, transitionDuration: computed.transitionDuration }
+  })
+  const unrestrictedMotion = await readMotionStyle()
+  expect(unrestrictedMotion.transitionDuration).not.toBe('0s')
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const reducedMotion = await readMotionStyle()
+  expect(reducedMotion.animationDuration).toBe('0s')
+  expect(reducedMotion.transitionDuration).toBe('0s')
+
+  // The stage canvas is geometrically stable under reduced motion. WebGL
+  // readback is unavailable in this read-only proof, so this does not claim
+  // that visibility alone proves non-blank canvas pixels.
   const stageRoot = page.locator('main.stage-root')
   await expect(stageRoot).toBeVisible()
   const canvas = stageRoot.locator('canvas').first()
@@ -45,13 +56,6 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   expect(canvasBoxBefore).not.toBeNull()
   expect(canvasBoxBefore.width).toBeGreaterThan(0)
   expect(canvasBoxBefore.height).toBeGreaterThan(0)
-
-  const readStageStyle = () => stageRoot.evaluate((element) => {
-    const computed = getComputedStyle(element)
-    return { opacity: computed.opacity, animationDuration: computed.animationDuration }
-  })
-  const stageStyleBefore = await readStageStyle()
-  expect(stageStyleBefore.animationDuration).toBe('0s')
 
   const columnSelectors = ['.tc-rail-l', '.tc-bar-wrap', '.tc-rail-r']
   const boxesBefore = {}
@@ -64,44 +68,54 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
 
   const canvasBoxAfter = await canvas.boundingBox()
   expect(canvasBoxAfter).toEqual(canvasBoxBefore)
-  const stageStyleAfter = await readStageStyle()
-  expect(stageStyleAfter).toEqual(stageStyleBefore)
+  const reducedMotionAfter = await readMotionStyle()
+  expect(reducedMotionAfter).toEqual(reducedMotion)
   for (const selector of columnSelectors) {
     const boxAfter = await page.locator(selector).first().boundingBox()
     expect(boxAfter).toEqual(boxesBefore[selector])
   }
 
-  const screenshotPath = join(PROOF_DIR, 'polish-pins.png')
+  const screenshotPath = stagingProofPath('polish-pins', 'polish-pins.png')
   await page.screenshot({ path: screenshotPath, fullPage: true })
-  const videoPath = await page.video()?.path().catch(() => null)
-  const artifacts = [screenshotPath, ...(videoPath ? [videoPath] : [])].map((p) => p.replaceAll('\\', '/'))
 
-  writeProofReceipt(join(PROOF_DIR, 'receipt.json'), {
-    capability_ids: ['HP-01', 'MO-01'],
+  const common = {
     evidence_tier: 'staging',
     route: '/try',
     runtime: 'deployed staging origin, real browser with prefers-reduced-motion: reduce, no request interception',
     source_commit: identity.source_revision,
     api_endpoints: [...new Set(observedEndpoints)],
-    assertions: [
-      'the command bar keycap rendered the exact shortcut label without a session',
-      'pressing Control+K actually moved focus onto the command-bar input',
-      'the center-stage canvas painted with a non-zero area',
-      'the center-stage element animation duration was zero seconds under forced reduced motion',
-      'the canvas geometry, stage computed style, and the three workspace grid columns were bit-for-bit stable across a 600ms settle window',
-    ],
-    artifacts,
+    artifacts: [screenshotPath],
     result: {
       verdict: 'pass',
       canvas_box: canvasBoxBefore,
-      stage_computed_style: stageStyleBefore,
+      unrestricted_motion: unrestrictedMotion,
+      reduced_motion: reducedMotion,
       observed_source_revision: identity.source_revision,
       observed_ready: identity.ready,
     },
+  }
+  writeProofReceipt(stagingProofPath('polish-pins', 'hp-01-receipt.json'), {
+    ...common,
+    capability_ids: ['HP-01'],
+    sub_cases: { proven: ['shortcut labels'], not_proven: ['hover/focus hints', 'first-run coach'] },
+    assertions: [
+      'the command bar keycap rendered the exact shortcut label without a session',
+      'pressing Control+K actually moved focus onto the command-bar input',
+    ],
+    limitations: ['The hover/focus hints and first-run coach sub-cases are not exercised.'],
+  })
+  writeProofReceipt(stagingProofPath('polish-pins', 'mo-01-receipt.json'), {
+    ...common,
+    capability_ids: ['MO-01'],
+    sub_cases: { proven: ['allowed transitions', 'stable grid', 'zero duration preference'], not_proven: [] },
+    assertions: [
+      'the caption had a nonzero transition duration without reduced motion',
+      'the caption animation and transition durations were zero seconds under forced reduced motion',
+      'the canvas geometry and the three workspace grid columns were bit-for-bit stable across a 600ms settle window',
+    ],
     limitations: [
+      'Canvas non-blankness is not proven because this read-only WebGL proof does not use pixel readback.',
       'This does not exercise a completed run under reduced motion (MO-02), because reaching a completed result requires an active session on the deployed surface.',
-      'HP-01 is proven for the command-bar keycap and its focus behavior only, not hover/focus hints elsewhere or the first-run coach.',
-      'The center-stage canvas rendered here is the public landing/demo scene (StageLayer loads a fixed rooftop intake), not a real authenticated drawing.',
     ],
   })
 })

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
-import { join } from 'node:path'
 import { captureStagingIdentity } from './stagingIdentity.mjs'
+import { stagingProofPath } from './stagingConfig.mjs'
 import { writeProofReceipt } from '../proofReceipt.mjs'
 
 // Observed on the deployed staging surface (2026-07-27, signed-out browser
@@ -27,91 +27,86 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 // alone the first time real credentials are supplied.
 const STAGING_JWT = process.env.LEAF_E2E_STAGING_JWT || ''
 
-const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'staging', 'auth-required')
-
-async function primeAuthenticatedContext(context) {
-  await context.addInitScript((token) => {
+async function primeAuthenticatedPage(page) {
+  await page.addInitScript((token) => {
     window.localStorage.setItem('leaf.jwt', token)
   }, STAGING_JWT)
 }
 
-test('ID-01 + CA-01: an authenticated staging session reaches the operator surface and a real tool catalog', async ({ browser, request, baseURL }) => {
+test('ID-01 + CA-01: an authenticated staging session reaches the operator surface and a real tool catalog', async ({ page, request, baseURL }) => {
   test.skip(!STAGING_JWT, 'LEAF_E2E_STAGING_JWT is not set; skipping the authenticated ID-01/CA-01 sub-cases today')
   const identity = await captureStagingIdentity(request)
-  const context = await browser.newContext()
-  await primeAuthenticatedContext(context)
-  const page = await context.newPage()
+  await primeAuthenticatedPage(page)
   const observedEndpoints = [identity.endpoint]
   const stagingOrigin = new URL(baseURL).origin
   page.on('response', (response) => {
     const url = new URL(response.url())
     if (url.origin === stagingOrigin) observedEndpoints.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
-  try {
-    await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
-    await expect(page.getByRole('heading', { name: 'You are not signed in' })).toHaveCount(0)
-    await expect(page.locator('#workspace-tab-catalog')).toBeEnabled()
+  await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
+  await expect(page.getByRole('heading', { name: 'You are not signed in' })).toHaveCount(0)
+  const catalogTab = page.locator('#workspace-tab-catalog')
+  await expect(catalogTab).toBeEnabled()
 
-    // CA-01 at API level: the authenticated bearer must reach the real
-    // catalog endpoint, not a client mock, and it must return at least one
-    // real tool. This is a non-mutating GET.
-    const toolsResponse = await request.get('/api/tools', {
-      headers: { Authorization: `Bearer ${STAGING_JWT}` },
-    })
-    expect(toolsResponse.status()).toBe(200)
-    const toolsBody = await toolsResponse.json()
-    const tools = Array.isArray(toolsBody) ? toolsBody : toolsBody?.tools
-    expect(Array.isArray(tools)).toBe(true)
-    expect(tools.length).toBeGreaterThan(0)
-    observedEndpoints.push(`GET /api/tools ${toolsResponse.status()}`)
+  // CA-01 at API level: the app contract is exactly { tools: [...] }, never
+  // a bare array. This is a non-mutating GET against the deployed endpoint.
+  const toolsResponse = await request.get('/api/tools', {
+    headers: { Authorization: `Bearer ${STAGING_JWT}` },
+  })
+  expect(toolsResponse.status()).toBe(200)
+  const toolsBody = await toolsResponse.json()
+  expect(Array.isArray(toolsBody?.tools)).toBe(true)
+  const tools = toolsBody.tools
+  expect(tools.length).toBeGreaterThan(0)
+  observedEndpoints.push(`GET /api/tools ${toolsResponse.status()}`)
+  await catalogTab.click()
+  await expect(page.locator('.tool-card').first()).toBeVisible({ timeout: 15_000 })
 
-    const screenshotPath = join(PROOF_DIR, 'id-01-ca-01.png')
-    await page.screenshot({ path: screenshotPath, fullPage: true })
-    const videoPath = await page.video()?.path().catch(() => null)
+  const screenshotPath = stagingProofPath('auth-required', 'id-01-ca-01.png')
+  await page.screenshot({ path: screenshotPath, fullPage: true })
 
-    writeProofReceipt(join(PROOF_DIR, 'id-01-ca-01-receipt.json'), {
-      capability_ids: ['ID-01', 'CA-01'],
-      evidence_tier: 'staging',
-      route: '/try',
-      runtime: 'deployed staging origin, authenticated real browser session and real API bearer token',
-      source_commit: identity.source_revision,
-      api_endpoints: [...new Set(observedEndpoints)],
-      assertions: [
-        'the signed-out gate did not render for a primed authenticated session',
-        'the Catalog tab became enabled once the session was active',
-        'GET /api/tools with the real bearer token returned 200 and at least one real tool',
-      ],
-      artifacts: [screenshotPath, ...(videoPath ? [videoPath] : [])].map((p) => p.replaceAll('\\', '/')),
-      result: {
-        verdict: 'pass',
-        observed_source_revision: identity.source_revision,
-        real_tool_count: tools.length,
-      },
-      limitations: [
-        'This uses a pre-provisioned staging JWT, not a live Auth0 interactive login, so sign-in itself and expired-session recovery are not proven.',
-        'CA-01 is proven for catalog load only, not family filter, tool detail, empty, or retry.',
-        'This test has not yet run with real credentials; treat its first real receipt as unreviewed until checked against this file.',
-      ],
-    })
-  } finally {
-    await context.close()
+  const common = {
+    evidence_tier: 'staging',
+    route: '/try',
+    runtime: 'deployed staging origin, authenticated real browser session and real API bearer token',
+    source_commit: identity.source_revision,
+    api_endpoints: [...new Set(observedEndpoints)],
+    artifacts: [screenshotPath],
+    result: { verdict: 'pass', observed_source_revision: identity.source_revision, real_tool_count: tools.length },
   }
+  writeProofReceipt(stagingProofPath('auth-required', 'id-01-receipt.json'), {
+    ...common,
+    capability_ids: ['ID-01'],
+    sub_cases: { proven: ['authenticated'], not_proven: ['signed-out', 'expired-session recovery'] },
+    assertions: [
+      'the signed-out gate did not render for a primed authenticated session',
+      'the Catalog tab became enabled once the session was active',
+    ],
+    limitations: ['This uses a pre-provisioned staging JWT, not a live Auth0 interactive login.'],
+  })
+  writeProofReceipt(stagingProofPath('auth-required', 'ca-01-receipt.json'), {
+    ...common,
+    capability_ids: ['CA-01'],
+    sub_cases: { proven: ['load'], not_proven: ['family filter', 'tool detail', 'empty', 'retry'] },
+    assertions: [
+      'GET /api/tools with the real bearer token returned exactly { tools: [...] } with at least one tool',
+      'the enabled Catalog tab rendered at least one real tool card',
+    ],
+    limitations: ['This test has not yet run with real credentials; treat its first real receipt as unreviewed until checked against this file.'],
+  })
 })
 
-test('VR-01: the version drawer opens with real, non-empty history for an authenticated staging session', async ({ browser, request, baseURL }) => {
+test('VR-01: the version drawer opens with real, non-empty history for an authenticated staging session', async ({ page, request, baseURL }) => {
   test.skip(!STAGING_JWT, 'LEAF_E2E_STAGING_JWT is not set; VR-01 requires an active session on the deployed surface')
   const identity = await captureStagingIdentity(request)
-  const context = await browser.newContext()
-  await primeAuthenticatedContext(context)
-  const page = await context.newPage()
+  await primeAuthenticatedPage(page)
   const observedEndpoints = [identity.endpoint]
   const stagingOrigin = new URL(baseURL).origin
   page.on('response', (response) => {
     const url = new URL(response.url())
     if (url.origin === stagingOrigin) observedEndpoints.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
-  try {
-    await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
+  await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
     const versionsTab = page.locator('#operations-tab-versions')
     await expect(versionsTab).toBeEnabled()
     await versionsTab.click()
@@ -128,11 +123,10 @@ test('VR-01: the version drawer opens with real, non-empty history for an authen
     const versionCount = await versionEntries.count()
     expect(versionCount).toBeGreaterThan(0)
 
-    const screenshotPath = join(PROOF_DIR, 'vr-01.png')
-    await page.screenshot({ path: screenshotPath, fullPage: true })
-    const videoPath = await page.video()?.path().catch(() => null)
+  const screenshotPath = stagingProofPath('auth-required', 'vr-01.png')
+  await page.screenshot({ path: screenshotPath, fullPage: true })
 
-    writeProofReceipt(join(PROOF_DIR, 'vr-01-receipt.json'), {
+  writeProofReceipt(stagingProofPath('auth-required', 'vr-01-receipt.json'), {
       capability_ids: ['VR-01'],
       evidence_tier: 'staging',
       route: '/try',
@@ -144,16 +138,14 @@ test('VR-01: the version drawer opens with real, non-empty history for an authen
         'no history error or loading state was left showing',
         'at least one real version entry rendered in the list',
       ],
-      artifacts: [screenshotPath, ...(videoPath ? [videoPath] : [])].map((p) => p.replaceAll('\\', '/')),
+      artifacts: [screenshotPath],
+      sub_cases: { proven: ['list'], not_proven: ['preview', 'return to head', 'parent relation'] },
       result: { verdict: 'pass', observed_source_revision: identity.source_revision, version_entry_count: versionCount },
       limitations: [
         'Only listing is proven, not preview, return-to-head, or parent-relation navigation.',
         'This test has not yet run with real credentials; treat its first real receipt as unreviewed until checked against this file.',
       ],
-    })
-  } finally {
-    await context.close()
-  }
+  })
 })
 
 // AU-01 ("Author, stage, publish, use tool") requires stage, an independent
@@ -165,18 +157,12 @@ test('VR-01: the version drawer opens with real, non-empty history for an authen
 // test therefore does not claim AU-01 and writes no receipt: it only checks
 // that the guided authoring entry point renders for an authenticated
 // tenant, which is not itself ledger evidence.
-test('authoring entry point renders for an authenticated staging session (no AU-01 claim; staging/publishing is out of scope for a read-only suite)', async ({ browser, request }) => {
+test('authoring entry point renders for an authenticated staging session (no AU-01 claim; staging/publishing is out of scope for a read-only suite)', async ({ page, request }) => {
   test.skip(!STAGING_JWT, 'LEAF_E2E_STAGING_JWT is not set; skipping today')
-  const context = await browser.newContext()
-  await primeAuthenticatedContext(context)
-  const page = await context.newPage()
-  try {
-    await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
-    const authorTab = page.locator('#workspace-tab-author')
-    await expect(authorTab).toBeEnabled()
-    await authorTab.click()
-    await expect(page.getByLabel('What should the tool do?')).toBeVisible({ timeout: 15_000 })
-  } finally {
-    await context.close()
-  }
+  await primeAuthenticatedPage(page)
+  await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
+  const authorTab = page.locator('#workspace-tab-author')
+  await expect(authorTab).toBeEnabled()
+  await authorTab.click()
+  await expect(page.getByLabel('What should the tool do?')).toBeVisible({ timeout: 15_000 })
 })

@@ -1,15 +1,15 @@
 import { defineConfig } from '@playwright/test'
-import { resolveStagingBaseURL } from './e2e/staging/stagingConfig.mjs'
+import { resolveStagingBaseURL, stagingProofPath } from './e2e/staging/stagingConfig.mjs'
 
 export default defineConfig({
   testDir: './e2e/staging',
   // Runs before any spec: refuses a non-allowlisted host and clears this
   // run's prior receipts/screenshots/report so stale evidence can't survive.
   globalSetup: './e2e/staging/globalSetup.mjs',
-  outputDir: '../artifacts/unified-surface-proof/staging/test-results',
+  outputDir: stagingProofPath('test-results'),
   reporter: [['list'], ['html', {
     open: 'never',
-    outputFolder: '../artifacts/unified-surface-proof/staging/report',
+    outputFolder: stagingProofPath('report'),
   }]],
   use: {
     // Deliberately LEAF_E2E_STAGING_BASE_URL, not LEAF_E2E_PROD_BASE_URL --

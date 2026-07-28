@@ -1,3 +1,6 @@
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 // Shared, single-source-of-truth config for the staging proof suite: which
 // base URL to hit and which hosts that base URL is allowed to resolve to.
 //
@@ -9,11 +12,19 @@
 export const STAGING_BASE_URL_ENV = 'LEAF_E2E_STAGING_BASE_URL'
 export const STAGING_ALLOW_HOST_ENV = 'LEAF_E2E_STAGING_ALLOW_HOST'
 export const DEFAULT_STAGING_BASE_URL = 'https://platform-staging.leafdesign.ai'
+const ALLOWED_OVERRIDE_HOST = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.leafdesign\.ai$/i
+const PRODUCTION_HOST = 'platform.leafdesign.ai'
+const HERE = dirname(fileURLToPath(import.meta.url))
+export const STAGING_OUTPUT_ROOT = resolve(HERE, '..', '..', '..', 'artifacts', 'unified-surface-proof', 'staging')
 
 export class StagingHostError extends Error {}
 
 export function resolveStagingBaseURL(env = process.env) {
   return env[STAGING_BASE_URL_ENV] || DEFAULT_STAGING_BASE_URL
+}
+
+export function stagingProofPath(...segments) {
+  return join(STAGING_OUTPUT_ROOT, ...segments)
 }
 
 /**
@@ -31,8 +42,18 @@ export function assertAllowedStagingHost(baseURL, env = process.env) {
   const defaultHost = new URL(DEFAULT_STAGING_BASE_URL).hostname
   const override = env[STAGING_ALLOW_HOST_ENV] || ''
   const allowed = new Set([defaultHost])
-  if (override) allowed.add(override)
-  if (!allowed.has(parsed.hostname)) {
+  if (baseURL !== DEFAULT_STAGING_BASE_URL && parsed.protocol !== 'https:') {
+    throw new StagingHostError(`LEAF_E2E_STAGING_BASE_URL must use https: ${baseURL}`)
+  }
+  if (override) {
+    if (!ALLOWED_OVERRIDE_HOST.test(override) || override.toLowerCase() === PRODUCTION_HOST) {
+      throw new StagingHostError(
+        `${STAGING_ALLOW_HOST_ENV} must be a non-production *.leafdesign.ai hostname: ${override}`,
+      )
+    }
+    allowed.add(override.toLowerCase())
+  }
+  if (!allowed.has(parsed.hostname.toLowerCase())) {
     throw new StagingHostError(
       `refusing to run the staging proof suite against host "${parsed.hostname}". ` +
       `It must equal "${defaultHost}", or exactly match ${STAGING_ALLOW_HOST_ENV} if that is set. ` +
