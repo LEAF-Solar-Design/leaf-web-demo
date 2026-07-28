@@ -50,11 +50,12 @@ const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
 
 const OPERATOR_DRAWING_ID = 'cat-panels'
-const loadHead = (drawingId) => getDrawingIntake(false, drawingId, 'head')
-const loadVersion = (drawingId, version) => getDrawingIntake(false, drawingId, version)
-const loadVersions = (drawingId) => getDrawingVersions(false, drawingId)
-const undoVersion = (drawingId, capability) => undoDrawing(false, drawingId, capability)
-const redoVersion = (drawingId, capability) => redoDrawing(false, drawingId, capability)
+const PUBLIC_DEMO = new URLSearchParams(window.location.search).get('demo') === '1'
+const loadHead = (drawingId) => getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
+const loadVersion = (drawingId, version) => getDrawingIntake(PUBLIC_DEMO, drawingId, version)
+const loadVersions = (drawingId) => getDrawingVersions(PUBLIC_DEMO, drawingId)
+const undoVersion = (drawingId, capability) => undoDrawing(PUBLIC_DEMO, drawingId, capability)
+const redoVersion = (drawingId, capability) => redoDrawing(PUBLIC_DEMO, drawingId, capability)
 
 export default function SiteRoot() {
   // Evaluated once at boot — deep links into the console never see the site.
