@@ -128,13 +128,20 @@ def _db(db_path: Path, require_durable: bool = False) -> sqlite3.Connection:
         if require_durable:
             # The configured-path check is lexical; a symlink under an
             # accepted prefix could still point outside the mount. Re-verify
-            # the REAL parent directory once it exists, before the first
-            # connect. First-connect-only by design: the connection is cached
-            # for the process lifetime, so this bounds where it can open.
-            real_parent = PurePosixPath(db_path.parent.resolve().as_posix())
-            if not (_under_durable_root(real_parent) or real_parent == _DURABLE_ROOT):
+            # the REAL path once the parent exists, before the first
+            # connect -- including the FINAL component: sqlite follows a
+            # symlink at the filename itself, so a db_path that is a symlink
+            # is refused outright, and the fully resolved path (which
+            # resolves an existing final component too) must stay under the
+            # durable root. First-connect-only by design: the connection is
+            # cached for the process lifetime, so this bounds where it can
+            # open.
+            if db_path.is_symlink():
+                raise OSError(f"DEMAND_DB must not be a symlink: {db_path}")
+            real = PurePosixPath(db_path.resolve().as_posix())
+            if not (_under_durable_root(real) and real.name == db_path.name):
                 raise OSError(
-                    f"DEMAND_DB resolves outside the durable mount: {real_parent}"
+                    f"DEMAND_DB resolves outside the durable mount: {real}"
                 )
         _CONN = sqlite3.connect(str(db_path), check_same_thread=False)
         _CONN.execute("PRAGMA busy_timeout = 5000")

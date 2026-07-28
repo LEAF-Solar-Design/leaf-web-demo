@@ -1,6 +1,7 @@
 """Contract tests for the public demand-capture endpoint."""
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -178,6 +179,27 @@ def test_deployed_durable_demand_db_is_accepted():
     assert demand._durable_deployed_path("/data/state") is False  # the mount itself, not a file in it
     assert demand._durable_deployed_path("/data/statex/demand.db") is False
     assert demand._durable_deployed_path("/datax/state/demand.db") is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks need POSIX; CI's Linux cell runs this")
+def test_symlinked_db_filename_is_refused_at_connect(monkeypatch, tmp_path):
+    """Round-4 BLOCKING: sqlite follows a symlink at the FILENAME, so a
+    db_path whose final component links outside the mount must be refused
+    before the first connect (parent-only resolution missed it)."""
+    durable = tmp_path / "state"
+    durable.mkdir()
+    outside = tmp_path / "outside.db"
+    outside.touch()
+    link = durable / "demand.db"
+    link.symlink_to(outside)
+    monkeypatch.setattr(demand, "_DURABLE_ROOT", demand.PurePosixPath(durable.as_posix()))
+    demand._reset_for_tests()
+    try:
+        with pytest.raises(OSError, match="symlink"):
+            demand._db(link, require_durable=True)
+        assert demand._CONN is None  # a later corrected env can still connect
+    finally:
+        demand._reset_for_tests()
 
 
 def test_deeply_nested_json_is_422_not_500(client, db_path):
