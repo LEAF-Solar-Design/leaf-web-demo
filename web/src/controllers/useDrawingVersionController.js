@@ -84,8 +84,26 @@ export default function useDrawingVersionController({
       if (!lock) return null
       const seatedDrawing = view?.drawing_id ?? seatedDrawingId ?? null
       if (seatedDrawing !== lock.drawing_id) return lock
-      const seatedHead = Number(view?.head ?? view?.version)
-      return Number.isFinite(seatedHead) && seatedHead >= Number(lock.head) ? null : lock
+      // Two proofs, both required (round-3 findings):
+      //  * COHERENCE — the SEATED GEOMETRY is the response's own head
+      //    (version === head). A split read can report {intake v3, head 4}
+      //    when a restore commits between the server's two reads; its head
+      //    field proves nothing about what was seated.
+      //  * POST-RESTORE — the response's `latest` watermark reaches the
+      //    lock's. `latest` is monotone where `head` is not: a legitimate
+      //    undo AFTER the restore lowers head but keeps latest at the
+      //    restored version (this response must release, or the lock wedges
+      //    with redo disabled), while a STALE pre-restore read necessarily
+      //    reports the old, smaller latest.
+      const seatedVersion = Number(view?.version)
+      const responseHead = Number(view?.head)
+      const responseLatest = Number(view?.latest)
+      const coherent = Number.isFinite(seatedVersion) && Number.isFinite(responseHead)
+        && seatedVersion === responseHead
+      const postRestore = Number.isFinite(responseLatest)
+        ? responseLatest >= Number(lock.latest ?? lock.head)
+        : coherent && seatedVersion >= Number(lock.head)
+      return coherent && postRestore ? null : lock
     })
   }, [])
 
@@ -337,8 +355,23 @@ export default function useDrawingVersionController({
     try {
       const view = await loadHead(drawingId)
       const seatedDrawing = view?.drawing_id ?? drawingId
-      const seatedHead = Number(view?.head ?? view?.version)
-      if (seatedDrawing !== drawingId || !Number.isFinite(seatedHead) || seatedHead < Number(result.head)) {
+      // Same coherence + watermark proof as releaseLockIfSeated: the SEATED
+      // version must BE the response's own head (a split read can report
+      // {intake v3, head 4}), and the response must post-date the restore
+      // via the monotone `latest` (an undo landing after the restore lowers
+      // head legitimately). An incoherent-but-successful read throws so the
+      // catch escalates the pending lock to the retryable alert instead of
+      // leaving calm progress stuck with no affordance.
+      const seatedVersion = Number(view?.version ?? view?.head)
+      const responseHead = Number(view?.head ?? view?.version)
+      const responseLatest = Number(view?.latest)
+      const coherent = seatedDrawing === drawingId
+        && Number.isFinite(seatedVersion) && Number.isFinite(responseHead)
+        && seatedVersion === responseHead
+      const postRestore = Number.isFinite(responseLatest)
+        ? responseLatest >= Number(result.latest ?? result.head)
+        : seatedVersion >= Number(result.head)
+      if (!coherent || !postRestore) {
         throw new Error(`The restored head v${result.head} is not readable yet.`)
       }
       // seatVersion clears unreadableHead itself — the lock lifts only once

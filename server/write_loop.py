@@ -402,34 +402,57 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
             # version is bound from now on (self-healing backfill). The
             # backfill write is best-effort: a read must not fail because a
             # repair write could not land; the next read retries it.
+            # Mint ladder, fail-closed on every DETECTED conflict:
+            #  * put_if_absent_or_verify raising ValueError means a DIFFERENT
+            #    proof already won this key — that is a detected conflict,
+            #    never a transport blip, and must refuse the read.
+            #  * a transport failure during the mint proves nothing; the key
+            #    state is then confirmed by a re-read, where ABSENT means the
+            #    pure legacy case (serve, pre-proof status quo), a readable
+            #    proof must match, and an UNREADABLE state refuses the read
+            #    (retryable blip; serving past a possibly-conflicting proof
+            #    is the round-3 reproduction).
+            # When the mint returns cleanly it has already get-verified the
+            # winner equals our bytes, so no re-read is needed. Note the OSS
+            # backend's mint is exists->put->get (no compare-and-swap), so a
+            # conflicting proof landing inside that window can be overwritten
+            # undetected on the FIRST read of a legacy version; the served
+            # intake is still exactly the bytes digested into our proof, and
+            # every later read takes the strict path — the same
+            # trust-on-first-read bound stated above.
+            minted = False
             try:
                 backend.put_if_absent_or_verify(
                     pkey,
                     json.dumps(expected, separators=(",", ":")).encode("utf-8"),
                 )
-            except Exception:  # noqa: BLE001 — see above
-                pass
-            try:
-                healed_proof = json.loads(backend.get(pkey).decode("utf-8"))
-            except KeyError:
-                healed_proof = None
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise ValueError(
-                    "raw DWG intake cache has no source binding"
-                ) from exc
-            except Exception:  # noqa: BLE001
-                healed_proof = None
-            if healed_proof is not None and (
-                not isinstance(healed_proof, dict) or any(
-                    not hmac.compare_digest(
-                        str(healed_proof.get(key)), str(value)
-                    )
-                    for key, value in expected.items()
-                )
-            ):
+                minted = True
+            except ValueError as exc:
                 raise ValueError(
                     "raw DWG intake cache does not match its source binding"
-                )
+                ) from exc
+            except Exception:  # noqa: BLE001 — transport only; re-read decides
+                pass
+            if not minted:
+                try:
+                    healed_proof = json.loads(backend.get(pkey).decode("utf-8"))
+                except KeyError:
+                    healed_proof = None  # pure legacy: nothing won the key
+                except Exception as exc:  # noqa: BLE001
+                    raise ValueError(
+                        "raw DWG intake cache proof state is unreadable"
+                    ) from exc
+                if healed_proof is not None and (
+                    not isinstance(healed_proof, dict) or any(
+                        not hmac.compare_digest(
+                            str(healed_proof.get(key)), str(value)
+                        )
+                        for key, value in expected.items()
+                    )
+                ):
+                    raise ValueError(
+                        "raw DWG intake cache does not match its source binding"
+                    )
         else:
             # A PRESENT proof is authoritative: corrupt or mismatched fails
             # closed exactly as before (a swapped cache must never be served).

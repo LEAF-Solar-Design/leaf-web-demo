@@ -456,6 +456,64 @@ def test_wrong_proof_winning_self_heal_race_fails_closed(client, tmp_path):
         write_loop.read_intake(backend, TENANT, DRAWING, v4)
 
 
+def test_mint_conflict_with_unreadable_reread_still_fails_closed(client, tmp_path):
+    """Round-3 (post-merge PR) BLOCKING pin: a conflict raised by the mint
+    must refuse the read even when a subsequent proof re-read would fail with
+    a transport error — the reproduction was conflict + OSError => served."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG4",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+
+    def conflicting_mint(key, data):
+        if key == proof_key:
+            raise ValueError("immutable object already exists with different content")
+        raise AssertionError("unexpected key")
+
+    original_get = backend.get
+
+    def failing_proof_get(key):
+        if key == proof_key:
+            raise OSError("simulated transport failure")
+        return original_get(key)
+
+    backend.put_if_absent_or_verify = conflicting_mint
+    backend.get = failing_proof_get
+    with pytest.raises(ValueError, match="source binding"):
+        write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
+def test_transport_only_mint_failure_with_unreadable_proof_refuses(client, tmp_path):
+    """Companion pin: when the mint fails on TRANSPORT (not conflict) and the
+    proof state cannot be read either, the read refuses (retryable blip)
+    rather than serving past a possibly-conflicting proof."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG5",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+
+    def transport_failing_mint(key, data):
+        raise OSError("simulated mint transport failure")
+
+    original_get = backend.get
+
+    def failing_proof_get(key):
+        if key == proof_key:
+            raise OSError("simulated transport failure")
+        return original_get(key)
+
+    backend.put_if_absent_or_verify = transport_failing_mint
+    backend.get = failing_proof_get
+    with pytest.raises(ValueError, match="proof state is unreadable"):
+        write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
 def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypatch):
     """Round-4 MAJOR pin: when the source is live-representation (DWG blob +
     valid cache) and the cache mirror fails post-commit, the response still
