@@ -145,7 +145,12 @@ export default function VersionHistory({
         try { setOverrideData(await getDrawingVersions(useMock, drawingId, { includeDeltas: true })) }
         catch { /* the restore itself already succeeded; the list just won't advance */ }
       }
-      onRestored?.(result)
+      // History must refresh after every committed restore so the immutable
+      // version appears. The CAD viewer refresh is a normal-success action and
+      // must wait until the server says the new head is readable.
+      if (result?.restored_head_readable !== false) {
+        await onRestored?.(result)
+      }
     } catch (e) {
       setRestoreErr({ version: v, message: e?.message || 'Restore failed.' })
     } finally {

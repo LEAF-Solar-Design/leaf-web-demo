@@ -1,126 +1,137 @@
 import { expect, test } from '@playwright/test'
-import { join } from 'node:path'
-import { writeProofReceipt } from '../proofReceipt.mjs'
-import { requireLocalReady } from './requireReady.mjs'
+import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture.mjs'
 
-// ruling-4 (lane S5): version delta chips + restore-to-version, exercised
-// against the REAL local stack (Vite + FastAPI + broker + worker + the
-// filesystem version store), the same harness style as version-depth.spec.mjs.
-const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
-const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
-const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
-
-async function runWrite(page, toolCard) {
-  await toolCard.getByRole('button', { name: 'Review & run' }).click()
-  const confirm = page.getByRole('button', { name: 'Run delete-marked-panel' })
-  await expect(confirm).toBeVisible()
-  const submission = page.waitForResponse((response) => {
-    const url = new URL(response.url())
-    return response.request().method() === 'POST' && url.pathname === '/api/run'
-  })
-  await confirm.click()
-  expect((await submission).status()).toBe(202)
+function versionRows(head) {
+  return [
+    { v: 1, parent: null, tool: 'base', note: 'Original drawing', delta: null },
+    { v: 2, parent: 1, tool: 'move-panel', note: 'Moved A', delta: { added: 0, modified: 1, deleted: 0 } },
+    { v: 3, parent: 2, tool: 'delete-panel', note: 'Removed B', delta: { added: 0, modified: 0, deleted: 1 } },
+    ...(head === 4 ? [{
+      v: 4, parent: 3, tool: 'restore', note: 'restore of version 1',
+      delta: { added: 1, modified: 1, deleted: 0 },
+    }] : []),
+  ]
 }
 
-test('a 3-version chain renders delta chips, and restoring v1 appends a new head', async ({ page, request }) => {
-  // ARCHITECTURE FINDING (skip-gated, not deleted): this spec builds its
-  // 3-version chain through /try's ToolCast flow, but the delta-chip/restore
-  // UI this lane shipped lives in VersionHistory.jsx, whose ONLY mount is the
-  // /app route (App.jsx ~line 1980). /try renders ToolCast's own inline
-  // version panel, so the vh-row-* assertions below can never pass there --
-  // confirmed by two real runs against the live local stack. The spec stays
-  // as the executable statement of the intended end-state and un-skips when
-  // either (a) ToolCast's inline panel adopts the delta/restore UI, or
-  // (b) this spec is rewritten to drive /app's own chrome. The server-side
-  // contract (delta computation, restore-as-new-head, chain integrity,
-  // raw-byte restore fidelity) is covered by
-  // server/tests/test_version_restore.py -- under the LEGACY JSON-backed
-  // APS_LIVE=0 storage only; the PostgreSQL authority and live-DWG
-  // representations are NOT exercised by those tests, which is part of what
-  // this spec still owes when it un-skips. Also owed here (no component
-  // harness exists in this repo -- node --test covers headless modules
-  // only): the committed-but-unreadable-head lifecycle, where a failed
-  // cache mirror must surface the drawer-level [data-testid=vh-head-warning]
-  // banner and that banner must SURVIVE the post-restore history refresh.
-  test.skip(true, 'delta/restore UI mounts on /app (VersionHistory.jsx), not /try; see finding above')
-  await requireLocalReady(request, test, API_BASE)
+async function mountVersionSurface(page, { restoredHeadReadable = true } = {}) {
+  const proofState = makeCatProofState()
+  let head = 3
+  let restoreCount = 0
+  let intakeReadsAfterRestore = 0
+  let deltasRequested = false
 
-  const observed = []
-  page.on('response', (response) => {
-    if (!response.url().startsWith(API_BASE)) return
-    const url = new URL(response.url())
-    observed.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const method = request.method()
+    const path = url.pathname
+    const body = request.postData() ? request.postDataJSON() : {}
+    let result
+
+    if (path === '/api/drawings/cat-panels/versions' && method === 'GET') {
+      deltasRequested ||= url.searchParams.get('include_deltas') === '1'
+      result = {
+        status: 200,
+        body: {
+          drawing_id: 'cat-panels', head, latest: head, checkout: null,
+          versions: versionRows(head),
+        },
+      }
+    } else if (path === '/api/drawings/cat-panels/versions/1/restore' && method === 'POST') {
+      restoreCount += 1
+      head = 4
+      result = {
+        status: 200,
+        body: {
+          error: null, restored_from: 1, head: 4, latest: 4,
+          restored_head_readable: restoredHeadReadable,
+          new_version: { drawing_id: 'cat-panels', version: 4, parent: 3 },
+        },
+      }
+    } else if (path === '/api/drawings/cat-panels/intake' && method === 'GET' && restoreCount) {
+      intakeReadsAfterRestore += 1
+      result = {
+        status: 200,
+        body: {
+          drawing_id: 'cat-panels', intake: proofState.base,
+          version: head, head, latest: head,
+        },
+      }
+    } else {
+      result = catProofResponse({
+        method, path, body, query: Object.fromEntries(url.searchParams),
+      }, proofState)
+    }
+
+    await route.fulfill({
+      status: result.status,
+      contentType: result.body == null ? undefined : 'application/json',
+      body: result.body == null ? '' : JSON.stringify(result.body),
+      headers: {
+        'access-control-allow-origin': '*',
+        'access-control-allow-headers': '*',
+      },
+    })
   })
 
-  await page.goto('/try')
-  // "Drawing ready" vs "Backend ready" is a PROOF_MODE (VITE_CAT_PROOF) label
-  // choice in ToolCast.jsx unrelated to this feature; accept either so this
-  // spec does not depend on that env flag being set.
-  await expect(page.getByTestId('operator-phase')).toContainText(/ready/i, { timeout: 15_000 })
-  await page.getByRole('tab', { name: /Catalog/ }).click()
-  const toolCard = page.locator('.tool-card').filter({ hasText: 'delete-marked-panel' })
-  await expect(toolCard).toBeVisible()
-  await toolCard.getByRole('button').first().click()
+  await page.goto('/app?drawing=cat-panels')
+  await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 15_000 })
+  // Seat a real versioned drawing through App's production controller path.
+  // The initial session intake alone is intentionally unversioned.
+  await page.getByRole('combobox', { name: 'Command bar' }).fill(REQUEST)
+  await page.getByRole('button', { name: 'Run' }).click()
+  const approval = page.locator('.converse-confirm').filter({ hasText: 'arrange-panels-as-cat' })
+  await approval.getByRole('button', { name: 'Approve' }).click()
+  const attach = page.getByRole('button', { name: 'Attach' })
+  await expect(attach).toBeVisible({ timeout: 15_000 })
+  await attach.click()
+  await expect(page.getByRole('button', { name: 'History' })).toBeVisible({ timeout: 15_000 })
+  await page.getByRole('button', { name: 'History' }).click()
+  await expect(page.getByRole('dialog', { name: 'Version history' })).toBeVisible()
 
-  // v1 -> v2 -> v3: a real 3-version chain, each write removing exactly one panel.
-  await runWrite(page, toolCard)
-  await expect(page.getByTestId('version-head')).toHaveText('Version 2', { timeout: 30_000 })
-  await runWrite(page, toolCard)
-  await expect(page.getByTestId('version-head')).toHaveText('Version 3', { timeout: 30_000 })
+  return {
+    deltasRequested: () => deltasRequested,
+    intakeReadsAfterRestore: () => intakeReadsAfterRestore,
+    restoreCount: () => restoreCount,
+  }
+}
 
-  await page.getByRole('tab', { name: /Versions/ }).click()
-  const history = page.getByRole('region', { name: 'Version history' })
-  await expect(history).toBeVisible()
+test('the /app history drawer shows deltas and restores an old version as a new head', async ({ page }) => {
+  test.setTimeout(60_000)
+  const observed = await mountVersionSurface(page)
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  const v1 = history.getByTestId('vh-row-v1')
 
-  const v1Row = history.getByTestId('vh-row-v1')
-  const v2Row = history.getByTestId('vh-row-v2')
-  const v3Row = history.getByTestId('vh-row-v3')
-  await expect(v1Row).toBeVisible()
-  await expect(v2Row).toBeVisible()
-  await expect(v3Row).toBeVisible()
+  expect(observed.deltasRequested()).toBe(true)
+  await expect(v1.getByTestId('vh-delta')).toHaveCount(0)
+  await expect(history.getByTestId('vh-row-v2').getByTestId('vh-delta')).toContainText('~1')
+  await expect(history.getByTestId('vh-row-v3').getByTestId('vh-delta')).toContainText('-1')
 
-  // v1 is the root -- no parent to diff against, so no delta chip renders.
-  await expect(v1Row.getByTestId('vh-delta')).toHaveCount(0)
-  // v2 and v3 each removed exactly one panel from their parent -- a "-1" chip.
-  await expect(v2Row.getByTestId('vh-delta')).toContainText('-1')
-  await expect(v3Row.getByTestId('vh-delta')).toContainText('-1')
+  await v1.getByRole('button', { name: 'Restore', exact: true }).click()
+  await v1.getByRole('button', { name: 'Restore v1' }).click()
 
-  // Restore v1 -> a NEW head (v4), never a rewrite of v1..v3 (two-step confirm).
-  await v1Row.getByRole('button', { name: 'Restore', exact: true }).click()
-  const restoreSubmission = page.waitForResponse((response) => {
-    const url = new URL(response.url())
-    return response.request().method() === 'POST' && url.pathname === '/api/drawings/demo/versions/1/restore'
-  })
-  await v1Row.getByRole('button', { name: 'Restore v1' }).click()
-  const restoreResponse = await restoreSubmission
-  expect(restoreResponse.status()).toBe(200)
+  await expect(history).toBeHidden()
+  await page.getByRole('button', { name: 'History' }).click()
+  const reopened = page.getByRole('dialog', { name: 'Version history' })
+  const v4 = reopened.getByTestId('vh-row-v4')
+  await expect(v4).toBeVisible()
+  await expect(v4).toContainText('head')
+  await expect(reopened.getByTestId('vh-row-v1')).toBeVisible()
+  expect(observed.restoreCount()).toBe(1)
+  expect(observed.intakeReadsAfterRestore()).toBeGreaterThan(0)
+})
 
-  await expect(page.getByTestId('vh-row-v4')).toBeVisible({ timeout: 30_000 })
+test('an unreadable restored head keeps its warning through history refresh and does not refresh the viewer', async ({ page }) => {
+  test.setTimeout(60_000)
+  const observed = await mountVersionSurface(page, { restoredHeadReadable: false })
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  const v1 = history.getByTestId('vh-row-v1')
 
-  const versionsResponse = await request.get(`${API_BASE}/api/drawings/demo/versions`, { headers: TENANT_HEADERS })
-  expect(versionsResponse.ok()).toBe(true)
-  const versionsBody = await versionsResponse.json()
-  expect(versionsBody).toMatchObject({ drawing_id: 'demo', head: 4, latest: 4 })
-  const rows = Object.fromEntries(versionsBody.versions.map((r) => [r.v, r]))
-  expect(rows[4].parent).toBe(3)                          // appended after the head, chain intact
-  expect(rows[1]).toMatchObject({ v: 1, parent: null })   // v1 itself is untouched
+  await v1.getByRole('button', { name: 'Restore', exact: true }).click()
+  await v1.getByRole('button', { name: 'Restore v1' }).click()
 
-  writeProofReceipt(join(PROOF_DIR, 'version-restore-receipt.json'), {
-    capability_ids: ['VR-05', 'VR-06'],
-    evidence_tier: 'local-e2e',
-    route: '/try',
-    runtime: 'real local Vite, FastAPI, broker, worker, version store, and drawing controller',
-    api_endpoints: observed,
-    assertions: [
-      'v2 and v3 each render a delta chip counting the one panel removed from their parent',
-      'v1 (the root version) renders no delta chip',
-      'restoring v1 creates a NEW head (v4) rather than rewriting history',
-      'v1..v3 remain unchanged after the restore',
-    ],
-    result: { verdict: 'pass', drawing_id: 'demo', head: 4, latest: 4, restored_from: 1 },
-    limitations: [
-      'APS_LIVE=0 substitutes the local write engine for Autodesk APS.',
-      'exercises LIVE mode only; mock mode delta/restore parity is covered by web/scripts and unit-level checks, not this spec.',
-    ],
-  })
+  await expect(history.getByTestId('vh-row-v4')).toBeVisible()
+  await expect(history.getByTestId('vh-head-warning')).toContainText('not readable yet')
+  expect(observed.restoreCount()).toBe(1)
+  expect(observed.intakeReadsAfterRestore()).toBe(0)
 })

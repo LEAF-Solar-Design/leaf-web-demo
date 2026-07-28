@@ -27,6 +27,7 @@ import json
 import os
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Dict, List
 
@@ -423,6 +424,76 @@ def test_restore_of_missing_version_404s(client, tmp_path):
     # nothing was written
     versions = client.get(f"/api/drawings/{DRAWING}/versions", headers=_h(TENANT)).json()
     assert versions["head"] == 3 and versions["latest"] == 3
+
+
+@pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="PostgreSQL restore proof requires explicit DATABASE_URL",
+)
+def test_postgres_live_dwg_restore_preserves_blob_and_readable_cache(
+    client, tmp_path, monkeypatch,
+):
+    """Staging-representative proof without touching staging.
+
+    PostgreSQL owns the manifest, version reservation, checkout fence, and
+    head compare-and-set. The blob is a raw DWG representation and its parsed
+    intake rides the same sibling cache used by APS live reads. Restoring it
+    must append a PostgreSQL-authoritative head, copy the DWG bytes exactly,
+    and mirror a readable cache for that new head.
+    """
+    import store  # noqa: PLC0415
+    from routers import drawings as drawings_router  # noqa: PLC0415
+
+    db = store._db()
+    db.apply_migration()
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
+
+    suffix = uuid.uuid4().hex[:12]
+    tenant = f"s5-pg-{suffix}"
+    drawing = f"live-dwg-{suffix}"
+    holder = f"session-{suffix}"
+    backend = _backend(tmp_path)
+
+    source = tmp_path / "initial.json"
+    source.write_bytes(json.dumps(_intake([_poly("A")])).encode("utf-8"))
+    store.ingest_drawing(backend, tenant, str(source), drawing_id=drawing)
+    fence = store.acquire_checkout_fence(backend, tenant, drawing, holder, 300)
+    assert fence is not None
+
+    live_bytes = b"AC1032\x00S5-LIVE-DWG-RESTORE-PROOF"
+    live_version = write_loop._put_bytes_version(
+        backend, tenant, drawing, live_bytes,
+        parent_version=1, meta={"tool": "aps-live-proof", "note": "raw DWG"},
+        holder=holder, fence=fence,
+    )
+    assert live_version == 2
+    live_intake = _intake([_poly("A"), _poly("B")])
+    backend.put(
+        write_loop.intake_cache_key(tenant, drawing, live_version),
+        json.dumps(live_intake, separators=(",", ":")).encode("utf-8"),
+    )
+
+    monkeypatch.setattr(
+        drawings_router, "_lock_authorization",
+        lambda *_args, **_kwargs: (holder, fence),
+    )
+    response = client.post(
+        f"/api/drawings/{drawing}/versions/{live_version}/restore",
+        headers=_h(tenant),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["head"] == 3
+    assert body["restored_head_readable"] is True
+
+    source_key = store.drawing_version_key(tenant, drawing, live_version)
+    restored_key = store.drawing_version_key(tenant, drawing, 3)
+    assert backend.get(restored_key) == backend.get(source_key) == live_bytes
+    _, restored_intake = write_loop.read_intake(backend, tenant, drawing, 3)
+    assert restored_intake == live_intake
+    manifest = store.load_manifest(backend, tenant, drawing)
+    restored_row = next(row for row in manifest["versions"] if row["v"] == 3)
+    assert restored_row["parent"] == 2
 
 
 def test_restore_denied_without_the_current_checkout_capability(client, tmp_path):

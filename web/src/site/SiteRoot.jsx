@@ -54,7 +54,9 @@ const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') =
 const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
 const loadHead = (drawingId) => getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
 const loadVersion = (drawingId, version) => getDrawingIntake(PUBLIC_DEMO, drawingId, version)
-const loadVersions = (drawingId, options) => getDrawingVersions(PUBLIC_DEMO, drawingId, options)
+// /try does not render delta chips or restore controls. Keep its startup read
+// on the stable, inexpensive response shape; /app opts into deltas.
+const loadVersions = (drawingId) => getDrawingVersions(PUBLIC_DEMO, drawingId)
 const undoVersion = (drawingId, capability) => undoDrawing(PUBLIC_DEMO, drawingId, capability)
 const redoVersion = (drawingId, capability) => redoDrawing(PUBLIC_DEMO, drawingId, capability)
 
