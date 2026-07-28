@@ -121,6 +121,14 @@ accident. Production should inject the broker connection as a broker-only
 secret. The broker image still excludes the Anthropic SDK, Claude grants, and
 tenant grant storage.
 
+The app and broker share a lazy PostgreSQL pool with no minimum connection,
+at most five connections, and a 600-second idle lifetime. This lets a direct
+staging Aurora connection count reach zero during idle periods. It does not by
+itself enable Aurora auto-pause. An associated RDS Proxy keeps its own database
+connections open, so operators must first prove the direct TLS path and cold
+resume behavior, then remove the proxy through the reviewed infrastructure
+workflow before setting the staging Aurora minimum to zero ACUs.
+
 Run schema work as a separate one-shot stage. Do not call
 `apply_migration()` from an app, broker, or harness startup command.
 

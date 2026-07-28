@@ -38,10 +38,10 @@ class _FakePool:
         yield self.conn
 
 
-def test_pool_checks_connections_and_retires_them_before_proxy_idle_timeout(
+def test_pool_starts_empty_checks_connections_and_retires_idle_connections(
     monkeypatch,
 ):
-    """A closed RDS Proxy connection must not be handed to a request."""
+    """Idle staging can release every direct Aurora connection."""
     captured = {}
 
     class CapturingPool:
@@ -61,9 +61,27 @@ def test_pool_checks_connections_and_retires_them_before_proxy_idle_timeout(
     pool = db.get_pool()
 
     assert isinstance(pool, CapturingPool)
+    assert captured["min_size"] == 0
+    assert captured["max_size"] == 5
     assert captured["check"] is CapturingPool.check_connection
     assert captured["max_idle"] == 600
     assert captured["max_idle"] < 900
+
+
+def test_reset_pool_closes_and_clears_the_shared_pool(monkeypatch):
+    class ClosingPool:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    pool = ClosingPool()
+    monkeypatch.setattr(db, "_pool", pool)
+
+    db.reset_pool()
+
+    assert pool.closed is True
+    assert db._pool is None
 
 
 def test_transaction_uses_non_leaking_transaction_settings(monkeypatch):
