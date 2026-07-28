@@ -560,9 +560,9 @@
   .tc-rail-tabs { padding-bottom: 6px; }
 }
 
-/* Equal-specificity !important ties resolve by source order, so this follows the caption's transition: ... !important (issue #246). */
+/* Match the scene caption's specificity so reduced motion wins its !important transition declaration (issue #246). */
 @media (prefers-reduced-motion: reduce) {
-  .stage-root, .stage-root * {
+  .stage-root, .stage-root *, .stage-root[data-scene="tool"] .tc-caption {
     transition-duration: 0s !important;
     transition-delay: 0s !important;
     animation-duration: 0s !important;
