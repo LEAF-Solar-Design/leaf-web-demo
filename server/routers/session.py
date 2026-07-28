@@ -13,13 +13,13 @@ router = APIRouter()
 
 
 @router.get("/api/session")
-def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_tenant)):
+def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant)):
     """Return the Intake JSON (contract section 1). APS_LIVE=0 -> cached sample.
 
-    AUTH (LEAF_AUTH_LIVE): `require_tenant` is a no-op passthrough when off, so
+    AUTH (LEAF_AUTH_LIVE): `require_active_tenant` is a no-op passthrough when off, so
     the body is byte-identical to today. When on, it enforces the Bearer token
-    (401 no-token / 403 no-tenant-claim) BEFORE this body runs, and the success
-    body additively echoes the resolved `tenant_id`/`org_id` (deps.tenant_echo).
+    and resolves the current platform identity binding before any drawing read.
+    The success body additively echoes that canonical `tenant_id`/`org_id`.
 
     APS_LIVE=1 extraction crosses the same internal broker boundary as tool
     runs. The app process never imports the APS client or reads its credential.

@@ -382,7 +382,7 @@ def _busy_response(session_id: str, approval_lost: bool = False) -> JSONResponse
 # POST /api/sessions
 # --------------------------------------------------------------------------- #
 @router.post("/api/sessions")
-def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_tenant)):
+def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active_tenant)):
     """Idempotent per (tenant, drawing_id) — a repeat POST with the same
     drawing_id returns the SAME session (session_store's UNIQUE constraint +
     INSERT OR IGNORE, not re-derived here). An optional `model` (validated against
@@ -406,7 +406,7 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_tenant
 # --------------------------------------------------------------------------- #
 @router.post("/api/sessions/{session_id}/messages")
 def post_message(session_id: str, req: MessageRequest, request: Request,
-                 tenant=Depends(deps.require_tenant)):
+                 tenant=Depends(deps.require_active_tenant)):
     # 1. ownership guard (404-not-403, no existence leak).
     if _require_owned_session(session_id, tenant) is None:
         return _session_not_found(session_id)
@@ -591,7 +591,8 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
 # GET /api/sessions/{id}/stream (SSE)
 # --------------------------------------------------------------------------- #
 @router.get("/api/sessions/{session_id}/stream")
-async def stream_session(session_id: str, after_seq: int = 0, tenant=Depends(deps.require_tenant)):
+async def stream_session(session_id: str, after_seq: int = 0,
+                         tenant=Depends(deps.require_active_tenant)):
     """Event-per-frame SSE (the client's EventSource addEventListener's per
     type — see converse.js openStream): `event: {type}\\ndata: {envelope}\\n\\n`.
     404 guard runs BEFORE the generator is constructed (matches
@@ -636,7 +637,7 @@ async def stream_session(session_id: str, after_seq: int = 0, tenant=Depends(dep
 # --------------------------------------------------------------------------- #
 @router.get("/api/sessions/{session_id}/transcript")
 def get_transcript(session_id: str, limit: int = TRANSCRIPT_DEFAULT_LIMIT,
-                   tenant=Depends(deps.require_tenant)):
+                   tenant=Depends(deps.require_active_tenant)):
     """Most-recent-N envelopes, ascending by seq — no after_seq cursor (§2.1.4:
     'most recent N, ascending by seq'). `limit` is clamped to
     [1, TRANSCRIPT_MAX_LIMIT] regardless of what the caller sends."""
