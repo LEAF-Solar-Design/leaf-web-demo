@@ -327,6 +327,7 @@ export default function App() {
     markRefreshFailure,
     retryRefresh: onRetryViewerRefresh,
     recordRestore: onRestoreCommitted,
+    recordCommittedUnreadableHead,
     retryUnreadableHead,
   } = drawingActions
   const platform = usePlatformTrustController({ mock })
@@ -827,6 +828,11 @@ export default function App() {
         return
       }
     }
+    if (envelope?.result?.new_version_readable === false) {
+      recordCommittedUnreadableHead(newVersion)
+      showToast({ text: `Version ${version} created` })
+      return
+    }
     try {
       const view = await getDrawingIntake(mock, newVersion.drawing_id, 'head')
       seatVersion(view, newVersion.drawing_id, `Version ${version} created`)
@@ -834,7 +840,7 @@ export default function App() {
       showToast({ text: `Version ${version} created` })
       markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
     }
-  }, [intake, markRefreshFailure, mock, seatVersion, showToast])
+  }, [intake, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
   completedVersionRef.current = seatCompletedVersion
 
   const onUndo = useCallback(async () => {

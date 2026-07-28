@@ -288,6 +288,11 @@ A successful `drawing.write` run's §3 envelope carries, inside `result`:
 ```
 
 This is ADDITIVE — the 8 core §3 keys are unchanged; read tools never carry it.
+Live writes also carry additive `new_version_readable: boolean`. Once
+`new_version` commits, the run succeeds and is never reported as retryable.
+`false` means the immutable head exists but its derived intake cache could not
+be verified, so clients must lock ordinary mutations and offer historical
+restore recovery until a coherent head intake can be seated.
 The mock envelope's `result` also carries `mutations` / `deleted_handle` /
 `added_marker_handle` (tool-specific data).
 

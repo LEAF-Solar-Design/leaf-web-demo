@@ -601,19 +601,45 @@ def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypat
         _intake([_poly("A")]))
 
     new_head_ckey = write_loop.intake_cache_key(TENANT, DRAWING, 5)
-    original_put = store.FilesystemBackend.put
+    original_put = store.FilesystemBackend.put_if_absent_or_verify
 
     def _failing_put(self, key, data):
         if key == new_head_ckey:
             raise OSError("simulated cache-write failure")
         return original_put(self, key, data)
 
-    monkeypatch.setattr(store.FilesystemBackend, "put", _failing_put)
+    monkeypatch.setattr(
+        store.FilesystemBackend, "put_if_absent_or_verify", _failing_put
+    )
     r = client.post(f"/api/drawings/{DRAWING}/versions/4/restore", headers=_h(TENANT))
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["head"] == 5
     assert body["restored_head_readable"] is False
+
+
+def test_readable_history_recovers_an_unreadable_committed_head(client, tmp_path):
+    """Recovery appends from readable history without rewriting the bad head."""
+    backend = _seed_chain(tmp_path)
+    _, expected_intake = write_loop.read_intake(backend, TENANT, DRAWING, 1)
+    unreadable = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01UNREADABLE-HEAD",
+        parent_version=3,
+        meta={"tool": "test-seed", "note": "committed without intake cache"},
+    )
+    assert unreadable == 4
+
+    response = client.post(
+        f"/api/drawings/{DRAWING}/versions/1/restore", headers=_h(TENANT)
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["new_version"] == {
+        "drawing_id": DRAWING, "version": 5, "parent": 4,
+    }
+    assert body["restored_head_readable"] is True
+    version, intake = write_loop.read_intake(backend, TENANT, DRAWING, 5)
+    assert version == 5 and intake == expected_intake
 
 
 def test_restore_of_missing_version_404s(client, tmp_path):

@@ -54,7 +54,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     )
 
     restore = suites["server-version-restore"]
-    assert restore.expected == 17
+    assert restore.expected == 26
     assert restore.allowed_skip_reasons == (
         r"PostgreSQL restore proof requires the EXPLICIT opt-in "
         r"LEAF_RESTORE_PG_PROOF_DB \(a disposable database URL\)\. "

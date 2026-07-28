@@ -103,6 +103,8 @@ export default function VersionHistory({
   const drawingId = effective?.drawing_id
   const rows = [...(effective?.versions || [])].sort((a, b) => (b.v || 0) - (a.v || 0))
   const useMock = mock ?? config.mockDefault
+  const recoveryRestoreAllowed = Boolean(headWarning && !headWarning.pending)
+  const restoreBlocked = mutationBlocked && !recoveryRestoreAllowed
 
   // Esc closes — the header cap is the affordance, the key must actually work.
   useEffect(() => {
@@ -112,7 +114,7 @@ export default function VersionHistory({
   }, [onClose])
 
   async function doRestore(v) {
-    if (drawingId == null || restoringVersion != null) return
+    if (drawingId == null || restoringVersion != null || restoreBlocked) return
     setRestoringVersion(v)
     setRestoreErr(null)
     try {
@@ -233,10 +235,12 @@ export default function VersionHistory({
                             <span className="confirm-q">Restore v{r.v} as the new head?</span>
                             <button
                               className="chip-act"
-                              disabled={isRestoring || mutationBlocked}
+                              disabled={isRestoring || restoreBlocked}
                               onClick={() => doRestore(r.v)}
                             >
-                              {isRestoring ? 'Restoring…' : `Restore v${r.v}`}
+                              {isRestoring
+                                ? (recoveryRestoreAllowed ? 'Recovering…' : 'Restoring…')
+                                : `${recoveryRestoreAllowed ? 'Recover from' : 'Restore'} v${r.v}`}
                             </button>
                             <button
                               className="chip-neutral"
@@ -249,10 +253,10 @@ export default function VersionHistory({
                         ) : (
                           <button
                             className="chip-act"
-                            disabled={restoringVersion != null || mutationBlocked}
+                            disabled={restoringVersion != null || restoreBlocked}
                             onClick={() => { setRestoreErr(null); setConfirmingVersion(r.v) }}
                           >
-                            Restore
+                            {recoveryRestoreAllowed ? 'Recover' : 'Restore'}
                           </button>
                         )}
                       </span>
