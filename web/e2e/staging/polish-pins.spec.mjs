@@ -45,6 +45,7 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   const unrestrictedMotion = await readMotionStyle()
   expect(unrestrictedMotion.transitionDuration).not.toBe('0s')
   await page.emulateMedia({ reducedMotion: 'reduce' })
+  const reducedMotionFlipAt = Date.now()
   const reducedMotion = await readMotionStyle()
   expect(reducedMotion.animationDuration).toBe('0s')
   expect(reducedMotion.transitionDuration).toBe('0s')
@@ -63,28 +64,39 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
   // already started keeps its original duration when transition-* later
   // changes (CSS Transitions L1). A real reduced-motion user carries the
   // preference from first paint, so the entrance never animates for them.
-  // Allow that legitimate tail a BOUNDED window: 4s generously covers the
-  // 1730ms transform leg plus a late `.in` and scheduling latency, while any
-  // motion still running past it is a genuine reduced-motion violation.
-  // Limitation (also mirrored in the receipt): a one-shot motion that both
-  // starts and completes inside this allowance is geometrically
-  // indistinguishable from the entrance tail and is not detected; continuous
-  // or looping motion still fails here or in the dense window below.
-  const settleDeadline = Date.now() + 4_000
-  let settled = false
-  let lastSeen = await canvas.boundingBox()
-  while (Date.now() < settleDeadline) {
-    await page.waitForTimeout(150)
-    const next = await canvas.boundingBox()
-    if (JSON.stringify(next) === JSON.stringify(lastSeen)) { settled = true; break }
-    lastSeen = next
+  // That legitimate tail gets a BOUNDED allowance of 4s measured FROM THE
+  // FLIP (1730ms transform leg + a late `.in` + scheduling latency). The
+  // canvas is sampled continuously from here THROUGH the boundary until at
+  // least 600ms past it, with no early exit, and every sample taken at or
+  // after the boundary must be bit-for-bit identical: motion that starts
+  // late, pauses, or resumes past the boundary is observed and fails.
+  // Limitation (also mirrored in the receipt): motion confined entirely to
+  // the pre-boundary allowance is geometrically indistinguishable from the
+  // entrance tail and is not detected.
+  const boundaryMs = 4_000
+  const samples = []
+  const windowEnd = Math.max(reducedMotionFlipAt + boundaryMs + 600, Date.now() + 600)
+  // Each sample costs ~150-200ms (boundingBox round trip + the 100ms pause),
+  // so keep sampling until the window has passed AND at least six samples
+  // landed on or past the boundary; the hard stop only trips if sampling
+  // itself degrades, and then the count assertion below fails loud.
+  const hardStop = reducedMotionFlipAt + 10_000
+  let settledCount = 0
+  while ((Date.now() < windowEnd || settledCount < 6) && Date.now() < hardStop) {
+    const at = Date.now() - reducedMotionFlipAt
+    samples.push({ at, box: await canvas.boundingBox() })
+    if (at >= boundaryMs) settledCount += 1
+    await page.waitForTimeout(100)
   }
-  expect(settled, 'stage geometry was still moving 4s after the reduced-motion flip').toBe(true)
-
-  const canvasBoxBefore = await canvas.boundingBox()
+  const settledSamples = samples.filter((sample) => sample.at >= boundaryMs)
+  expect(settledSamples.length).toBeGreaterThanOrEqual(6)
+  const canvasBoxBefore = settledSamples[settledSamples.length - 1].box
   expect(canvasBoxBefore).not.toBeNull()
   expect(canvasBoxBefore.width).toBeGreaterThan(0)
   expect(canvasBoxBefore.height).toBeGreaterThan(0)
+  for (const sample of settledSamples) {
+    expect(sample.box, `canvas moved ${sample.at}ms after the reduced-motion flip (allowance is ${boundaryMs}ms)`).toEqual(canvasBoxBefore)
+  }
 
   const columnSelectors = ['.tc-rail-l', '.tc-bar-wrap', '.tc-rail-r']
   const boxesBefore = {}
@@ -152,7 +164,7 @@ test('the command-bar shortcut and the center-stage reduced-motion pin hold on t
     limitations: [
       'Canvas non-blankness is not proven because this read-only WebGL proof does not use pixel readback.',
       'This does not exercise a completed run under reduced motion (MO-02), because reaching a completed result requires an active session on the deployed surface.',
-      'The pin grants a bounded 4s allowance for the tail of the pre-flip stage entrance (a running CSS transition keeps its original duration when the media preference changes mid-flight); a one-shot motion that starts and completes inside that allowance is indistinguishable from the entrance tail and is not detected.',
+      'The pin grants a bounded 4s post-flip allowance for the tail of the pre-flip stage entrance (a running CSS transition keeps its original duration when the media preference changes mid-flight); the canvas is sampled continuously through that boundary and must hold bit-for-bit from the boundary onward, but motion confined entirely to the pre-boundary allowance is indistinguishable from the entrance tail and is not detected.',
     ],
   })
 })
