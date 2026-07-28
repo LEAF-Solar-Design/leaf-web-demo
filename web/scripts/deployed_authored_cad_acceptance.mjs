@@ -204,12 +204,19 @@ export function validateConfig(env = process.env, execute = false) {
   }
 }
 
-export function evaluateDeploymentIdentity(identity, expectedRevision) {
+export function evaluateDeploymentIdentity(
+  identity,
+  expectedRevision,
+  expectedEnvironment = 'staging',
+) {
   if (!identity || identity.schema !== 'leaf.deployment-identity.v1') {
     throw new AcceptanceError('deployment_identity', 'unsupported live deployment identity')
   }
-  if (identity.environment !== 'staging') {
-    throw new AcceptanceError('deployment_identity', 'live deployment identity is not for staging')
+  if (identity.environment !== expectedEnvironment) {
+    throw new AcceptanceError(
+      'deployment_identity',
+      `live deployment identity is not for ${expectedEnvironment}`,
+    )
   }
   if (!SOURCE_SHA.test(String(identity.source_revision || ''))) {
     throw new AcceptanceError('deployment_identity', 'live deployment identity lacks a full source SHA')
@@ -341,7 +348,11 @@ export async function runApiPreflight(config, fetchImpl = fetch) {
   const [a, b] = config.tenants
   const deploymentIdentity = await requestJson(config, a, '/api/deployment-identity', { fetchImpl })
   expectStatus(deploymentIdentity, [200], 'deployment_identity')
-  const identity = evaluateDeploymentIdentity(deploymentIdentity.body, config.expectedRevision)
+  const identity = evaluateDeploymentIdentity(
+    deploymentIdentity.body,
+    config.expectedRevision,
+    config.environment,
+  )
   const readiness = await requestJson(config, a, '/api/ready', { fetchImpl })
   expectStatus(readiness, [200], 'readiness')
   evaluateReadiness(readiness.body, config.expectedRevision)
@@ -1028,7 +1039,7 @@ export function buildReceipt(
 ) {
   return {
     schema: 'leaf.deployed-authored-cad-acceptance.v1',
-    environment: 'staging',
+    environment: config.environment,
     mode: config.execute ? 'execute' : 'preflight',
     ok: true,
     run_id: config.runId,
@@ -1113,7 +1124,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       config,
       {
         schema: 'leaf.deployment-identity.v1',
-        environment: 'staging',
+        environment: config.environment,
         source_revision: api.deployment_identity.source_revision,
         services: Object.fromEntries(
           Object.entries(api.deployment_identity.services).map(([name, image_digest]) => [
