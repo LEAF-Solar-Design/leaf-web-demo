@@ -17,6 +17,7 @@ async function mountVersionSurface(page, {
   restoredHeadReadable = true,
   stallHistoryAfterRestore = false,
   failFirstRepairRead = false,
+  staleFirstHeadAfterRestore = false,
 } = {}) {
   const proofState = makeCatProofState()
   let head = 3
@@ -63,7 +64,9 @@ async function mountVersionSurface(page, {
             status: 200,
             body: {
               drawing_id: 'cat-panels', intake: proofState.base,
-              version: head, head, latest: head,
+              version: staleFirstHeadAfterRestore && intakeReadsAfterRestore === 1 ? 3 : head,
+              head: staleFirstHeadAfterRestore && intakeReadsAfterRestore === 1 ? 3 : head,
+              latest: head,
             },
           }
     } else {
@@ -202,6 +205,28 @@ test('an unreadable committed head locks writes before a stalled history refresh
   expect(observed.intakeReadsAfterRestore()).toBe(2)
 
   observed.releaseHistoryRefresh()
+})
+
+test('a stale post-restore head response cannot clear the write lock', async ({ page }) => {
+  test.setTimeout(60_000)
+  const observed = await mountVersionSurface(page, { staleFirstHeadAfterRestore: true })
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  const v1 = history.getByTestId('vh-row-v1')
+
+  await v1.getByRole('button', { name: 'Restore', exact: true }).click()
+  await v1.getByRole('button', { name: 'Restore v1' }).click()
+
+  const persistentLock = page.getByTestId('unreadable-head-lock')
+  await expect(persistentLock).toHaveAttribute('data-head', '4')
+  await expect(persistentLock).not.toHaveAttribute('data-pending', 'true')
+  await expect(persistentLock.getByRole('button', { name: 'Retry loading' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  expect(observed.intakeReadsAfterRestore()).toBe(1)
+
+  await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
+  await expect(persistentLock).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
+  expect(observed.intakeReadsAfterRestore()).toBe(2)
 })
 
 test('/try neither requests deltas nor exposes restore controls', async ({ page }) => {

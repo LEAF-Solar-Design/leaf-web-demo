@@ -403,9 +403,33 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
             # backfill write is best-effort: a read must not fail because a
             # repair write could not land; the next read retries it.
             try:
-                backend.put(pkey, json.dumps(expected, separators=(",", ":")).encode("utf-8"))
+                backend.put_if_absent_or_verify(
+                    pkey,
+                    json.dumps(expected, separators=(",", ":")).encode("utf-8"),
+                )
             except Exception:  # noqa: BLE001 — see above
                 pass
+            try:
+                healed_proof = json.loads(backend.get(pkey).decode("utf-8"))
+            except KeyError:
+                healed_proof = None
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise ValueError(
+                    "raw DWG intake cache has no source binding"
+                ) from exc
+            except Exception:  # noqa: BLE001
+                healed_proof = None
+            if healed_proof is not None and (
+                not isinstance(healed_proof, dict) or any(
+                    not hmac.compare_digest(
+                        str(healed_proof.get(key)), str(value)
+                    )
+                    for key, value in expected.items()
+                )
+            ):
+                raise ValueError(
+                    "raw DWG intake cache does not match its source binding"
+                )
         else:
             # A PRESENT proof is authoritative: corrupt or mismatched fails
             # closed exactly as before (a swapped cache must never be served).

@@ -72,6 +72,23 @@ export default function useDrawingVersionController({
     onError?.(error, { operation })
   }, [formatError, onError])
 
+  // Conditional lock release: a seated view lifts the unreadable-head lock
+  // ONLY when it proves the lock's target was reached — same drawing and a
+  // head at or past the locked head. Round-2 finding: an unconditional clear
+  // let a STALE in-flight head GET (started before the restore, e.g. the
+  // job-completion read) seat old geometry and re-enable mutations against
+  // the moved server head. Other drawing responses cannot prove this restored
+  // head is seated, so they leave the lock unchanged.
+  const releaseLockIfSeated = useCallback((view, seatedDrawingId) => {
+    setUnreadableHead((lock) => {
+      if (!lock) return null
+      const seatedDrawing = view?.drawing_id ?? seatedDrawingId ?? null
+      if (seatedDrawing !== lock.drawing_id) return lock
+      const seatedHead = Number(view?.head ?? view?.version)
+      return Number.isFinite(seatedHead) && seatedHead >= Number(lock.head) ? null : lock
+    })
+  }, [])
+
   const resetPreview = useCallback(() => {
     setHistoryOpen(false)
     setHistory(null)
@@ -130,7 +147,7 @@ export default function useDrawingVersionController({
     setVersionIntake(view.intake)
     setVersionError(null)
     setRefreshFailure(null)
-    setUnreadableHead(null)
+    releaseLockIfSeated(view, options.drawingId)
     resetPreview()
     onResetSelection?.({ source: options.source || 'version' })
     onApplyIntake?.(view.intake, {
@@ -143,7 +160,7 @@ export default function useDrawingVersionController({
       drawingState: nextDrawingState,
     })
     return view
-  }, [drawingState, onApplyIntake, onResetSelection, onVersionEvent, resetPreview])
+  }, [drawingState, onApplyIntake, onResetSelection, onVersionEvent, releaseLockIfSeated, resetPreview])
 
   const runVersionMutation = useCallback(async (operation, adapter, event, context) => {
     const drawingId = drawingState?.drawing_id
@@ -232,7 +249,9 @@ export default function useDrawingVersionController({
         setDrawingState((previous) => drawingStateFrom(view, drawingId, previous))
         setPreviewIntake(null)
         setPreviewing(null)
-        setUnreadableHead(null)
+        // Same conditional release as seatVersion: a stale head view started
+        // before a restore must not lift the lock (round-2 finding).
+        releaseLockIfSeated(view, drawingId)
       } else {
         setPreviewIntake(view.intake)
         setPreviewing({ version })
@@ -244,7 +263,7 @@ export default function useDrawingVersionController({
       onError?.(error, { operation: 'preview', version })
       return null
     }
-  }, [drawingState, formatError, loadHead, loadVersion, onApplyIntake, onError, onResetSelection])
+  }, [drawingState, formatError, loadHead, loadVersion, onApplyIntake, onError, onResetSelection, releaseLockIfSeated])
 
   const backToHead = useCallback(() => {
     if (drawingState?.head == null) return null
@@ -305,6 +324,9 @@ export default function useDrawingVersionController({
       head: Number(result.head),
       latest: Number(result.latest ?? result.head),
       restored_from: result.restored_from,
+      // pending: the routine post-restore load, rendered as calm progress —
+      // never as a failure alert (round-2 MINOR).
+      pending: true,
       message: `Restored as v${result.head}. Loading the new head…`,
     })
     if (typeof loadHead !== 'function') {
@@ -314,6 +336,11 @@ export default function useDrawingVersionController({
     }
     try {
       const view = await loadHead(drawingId)
+      const seatedDrawing = view?.drawing_id ?? drawingId
+      const seatedHead = Number(view?.head ?? view?.version)
+      if (seatedDrawing !== drawingId || !Number.isFinite(seatedHead) || seatedHead < Number(result.head)) {
+        throw new Error(`The restored head v${result.head} is not readable yet.`)
+      }
       // seatVersion clears unreadableHead itself — the lock lifts only once
       // the NEW head's intake is actually seated in the viewer.
       seatVersion(view, { drawingId, source: 'restore' })

@@ -434,6 +434,28 @@ def test_present_but_wrong_proof_still_fails_closed(client, tmp_path):
         write_loop.read_intake(backend, TENANT, DRAWING, v4)
 
 
+def test_wrong_proof_winning_self_heal_race_fails_closed(client, tmp_path):
+    """A missing-proof read must refuse a wrong proof that appears while the
+    compatibility self-heal publishes its binding."""
+    backend = _seed_chain(tmp_path)
+    v4 = write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, b"\x00\x01LEGACY-DWG3",
+        parent_version=3, meta={"tool": "test-seed", "note": "live"})
+    backend.put(write_loop.intake_cache_key(TENANT, DRAWING, v4),
+                json.dumps(_intake([_poly("A")]), separators=(",", ":")).encode("utf-8"))
+    proof_key = write_loop.intake_cache_proof_key(TENANT, DRAWING, v4)
+    publish_proof = backend.put_if_absent_or_verify
+
+    def race_wrong_proof(key, data):
+        if key == proof_key:
+            backend.put(key, b'{"schema":1,"version":999}')
+        return publish_proof(key, data)
+
+    backend.put_if_absent_or_verify = race_wrong_proof
+    with pytest.raises(ValueError, match="source binding"):
+        write_loop.read_intake(backend, TENANT, DRAWING, v4)
+
+
 def test_mirror_failure_reports_unreadable_live_head(client, tmp_path, monkeypatch):
     """Round-4 MAJOR pin: when the source is live-representation (DWG blob +
     valid cache) and the cache mirror fails post-commit, the response still
