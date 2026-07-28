@@ -141,8 +141,28 @@ request must carry that tenant's exact request. It accepts only a run request
 for that tool, the exact acceptance drawing, and drawing version 1. It does not
 click generic approval buttons. After the server creates version 2, it records a
 stable camera pose, performs the real drag, and rejects an unchanged pose. It
-then runs Undo and Redo. Forged tenant-header reads of the other drawing must
-return only 403 or 404. Every 2xx response fails.
+then runs Undo and Redo. It opens version 1 as a read-only preview, proves that
+the write control is disabled, proves that the head stays at version 2, and
+proves that preview sends no mutating API request.
+
+Before each staged change is published, the driver calls the protected
+`/internal/customization/confirm` authority with the other tenant identity and
+the exact staged change set. That call must return 403 or 404. It then calls
+the same authority with the owner identity and requires a valid confirmation.
+This proves both directions of publication approval isolation before the
+confirmation is consumed.
+
+The later API phase checks both directions of the remaining tenant isolation.
+The other tenant's authored tool must be absent from the catalog. Direct reads
+of the other staged change, drawing, and job must return only 403 or 404.
+Forged tenant headers must not change the caller's audit projection. Every 2xx
+response for a cross-tenant authority probe fails.
+
+Finally, the driver resubmits the exact version-1 write after the head advanced
+to version 2 and submits the same request with a stale catalog digest. Both
+must return 409, and the drawing head must remain at version 2. This proves
+stale-head, stale-catalog, and exact-request replay denial.
+It does not claim that a time-expired approval was exercised.
 
 The driver creates the receipt with exclusive file creation. It never
 overwrites an earlier receipt. The receipt contains tenant and drawing hashes,
@@ -159,6 +179,14 @@ run ID.
 This driver does not provision secrets, run migrations, deploy images, enable
 authored execution, or promote production. Those actions need their own
 reviewed workflows and receipts.
+
+The receipt marks these items as `external_evidence.status = required` because
+the browser driver cannot prove them honestly: time-expired approval rejection,
+service restart persistence, canonical worker lease ownership, CloudWatch logs
+and metrics, and durable audit-row inspection. The protected staging operator
+must attach those receipts separately. In particular, staging has no safe
+clock-control endpoint, so this driver does not wait out or simulate an approval
+expiry.
 
 ## Protected production web publication
 

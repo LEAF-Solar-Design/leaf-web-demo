@@ -6,8 +6,9 @@
  * real tenant identities, linked Claude grants, and a clean browser workbench
  * without request interception. Loading the workbench may initialize version 1
  * of the two explicitly named acceptance drawings. `--execute` adds authoring,
- * approval, cross-tenant drawing checks, version, orbit, undo, and redo. No mode
- * can target a production hostname.
+ * approval, read-only preview, cross-tenant authority checks, pinned-write
+ * rejection probes, version, orbit, undo, and redo. No mode can target a
+ * production hostname.
  */
 
 import { createHash } from 'node:crypto'
@@ -32,6 +33,13 @@ const PRODUCTION_HOSTS = new Set([
 const DEFAULT_TIMEOUT_MS = 30_000
 const AUTHOR_TIMEOUT_MS = 10 * 60_000
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+const EXTERNAL_EVIDENCE_REQUIRED = [
+  'expired approval rejection (no staging clock-control seam)',
+  'service restart persistence',
+  'canonical worker lease ownership',
+  'CloudWatch logs and metrics',
+  'durable audit-row inspection',
+]
 
 export class AcceptanceError extends Error {
   constructor(check, message, details = undefined) {
@@ -388,21 +396,22 @@ export async function runApiPreflight(config, fetchImpl = fetch) {
   }
 }
 
-export async function approveStagedPublication(
+async function requestStagedPublicationApproval(
   config,
   tenant,
   changeSetId,
-  fetchImpl = fetch,
+  fetchImpl,
+  check,
 ) {
   if (!config.execute || !config.publicationApprovalSecret) {
     throw new AcceptanceError(
-      'independent_publication_approval',
+      check,
       'execute mode requires the independent publication approval credential',
     )
   }
   if (!UUID.test(changeSetId)) {
     throw new AcceptanceError(
-      'independent_publication_approval',
+      check,
       'the staged change set id is invalid',
     )
   }
@@ -423,23 +432,71 @@ export async function approveStagedPublication(
       },
       body: JSON.stringify({ change_set_id: changeSetId }),
     })
-    const body = await parseJsonResponse(response, 'independent_publication_approval')
-    if (response.status !== 200 || typeof body.confirmation_id !== 'string') {
-      throw new AcceptanceError(
-        'independent_publication_approval',
-        `approval authority returned HTTP ${response.status}`,
-      )
-    }
-    return { status: 'approved', confirmation_hash: sha256(body.confirmation_id) }
+    const body = await parseJsonResponse(response, check)
+    return { status: response.status, body }
   } catch (error) {
     if (error instanceof AcceptanceError) throw error
     throw new AcceptanceError(
-      'independent_publication_approval',
+      check,
       `approval authority request failed: ${error?.name || 'Error'}`,
     )
   } finally {
     clearTimeout(timer)
   }
+}
+
+export async function approveStagedPublication(
+  config,
+  tenant,
+  changeSetId,
+  fetchImpl = fetch,
+) {
+  const check = 'independent_publication_approval'
+  const result = await requestStagedPublicationApproval(
+    config, tenant, changeSetId, fetchImpl, check,
+  )
+  if (result.status !== 200 || typeof result.body.confirmation_id !== 'string') {
+    throw new AcceptanceError(check, `approval authority returned HTTP ${result.status}`)
+  }
+  return {
+    status: 'approved',
+    confirmation_hash: sha256(result.body.confirmation_id),
+    _confirmation_id: result.body.confirmation_id,
+  }
+}
+
+export async function rejectCrossTenantStagedPublication(
+  config,
+  ownerTenant,
+  otherTenant,
+  changeSetId,
+  fetchImpl = fetch,
+) {
+  const check = `cross_tenant_publication_approval_${ownerTenant.label}`
+  const result = await requestStagedPublicationApproval(
+    config, otherTenant, changeSetId, fetchImpl, check,
+  )
+  if (![403, 404].includes(result.status)) {
+    throw new AcceptanceError(
+      check,
+      `wrong-tenant approval authority returned HTTP ${result.status}`,
+      { status: result.status },
+    )
+  }
+  return { status: 'denied' }
+}
+
+export async function approveIsolatedStagedPublication(
+  config,
+  ownerTenant,
+  otherTenant,
+  changeSetId,
+  fetchImpl = fetch,
+) {
+  await rejectCrossTenantStagedPublication(
+    config, ownerTenant, otherTenant, changeSetId, fetchImpl,
+  )
+  return approveStagedPublication(config, ownerTenant, changeSetId, fetchImpl)
 }
 
 export function validateStagedAuthorResponse(body, tenant) {
@@ -483,12 +540,24 @@ export function requireDistinctStagedResults(results, tenants) {
   }
 }
 
+export function isMutatingApiRequest(requestUrl, method, allowedOrigins) {
+  const url = new URL(requestUrl)
+  return allowedOrigins.has(url.origin)
+    && url.pathname.startsWith('/api/')
+    && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+}
+
 async function runBrowserTenant(config, tenant, browser, execute) {
   const context = await browser.newContext({
     baseURL: config.webUrl,
     serviceWorkers: 'block',
   })
   const unexpected = []
+  const mutatingApiRequests = []
+  const allowedOrigins = new Set([
+    new URL(config.webUrl).origin,
+    new URL(config.apiUrl).origin,
+  ])
   try {
     await context.addInitScript(({ token, drawingId }) => {
       window.localStorage.setItem('leaf.jwt', token)
@@ -497,12 +566,11 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     const page = await context.newPage()
     page.on('request', (request) => {
       const url = new URL(request.url())
-      const allowedOrigins = new Set([
-        new URL(config.webUrl).origin,
-        new URL(config.apiUrl).origin,
-      ])
       if (!allowedOrigins.has(url.origin)) {
         unexpected.push(`${request.method()} ${url.origin}${url.pathname}`)
+      }
+      if (isMutatingApiRequest(url, request.method(), allowedOrigins)) {
+        mutatingApiRequests.push(`${request.method()} ${url.pathname}`)
       }
     })
     await page.goto('/try', { waitUntil: 'networkidle', timeout: 120_000 })
@@ -582,9 +650,11 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     await page.getByText('Staged and awaiting approval.', { exact: false })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
 
-    const independentApproval = await approveStagedPublication(
+    const otherTenant = config.tenants.find((candidate) => candidate.id !== tenant.id)
+    const independentApproval = await approveIsolatedStagedPublication(
       config,
       tenant,
+      otherTenant,
       staged.changeSetId,
     )
     const publishResponsePromise = page.waitForResponse(
@@ -616,7 +686,14 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     )
     await runButton.click()
     const runResponse = await runResponsePromise
-    const runRequest = runResponse.request().postDataJSON()
+    const acceptedRunRequest = runResponse.request()
+    const runRequest = acceptedRunRequest.postDataJSON()
+    const acceptedRunHeaders = acceptedRunRequest.headers()
+    const runReplayHeaders = Object.fromEntries(
+      ['idempotency-key', 'x-checkout-capability']
+        .filter((name) => typeof acceptedRunHeaders[name] === 'string')
+        .map((name) => [name, acceptedRunHeaders[name]]),
+    )
     if (
       runResponse.status() !== 202 ||
       runRequest?.tool !== staged.toolName ||
@@ -630,6 +707,11 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
+    const runBody = await runResponse.json()
+    const jobId = runBody?.job_id
+    if (typeof jobId !== 'string' || !jobId) {
+      throw new AcceptanceError('exact_write', 'the accepted write did not return a job id')
+    }
     const camera = page.getByTestId('camera-controls')
     await camera.waitFor({ state: 'visible', timeout: 120_000 })
     const canvas = page.locator('canvas').first()
@@ -666,6 +748,24 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     await redo.click()
     await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
       .waitFor({ state: 'visible', timeout: 120_000 })
+
+    const previewMutationCount = mutatingApiRequests.length
+    await page.getByRole('button', { name: 'History', exact: true }).click()
+    const history = page.getByRole('dialog', { name: 'Version history' })
+    await history.waitFor({ state: 'visible' })
+    await history.getByTestId('vh-row-v1').getByRole('button').first().click()
+    await history.getByText(/Viewing v1.*read-only preview/).waitFor({ state: 'visible' })
+    if (!await runButton.isDisabled()) {
+      throw new AcceptanceError('read_only_preview', 'a write remained enabled in version preview')
+    }
+    if (!await page.getByTestId('version-head').innerText().then((text) => text.includes('Version 2'))) {
+      throw new AcceptanceError('read_only_preview', 'version preview changed the drawing head')
+    }
+    await history.getByRole('button', { name: 'Back to head', exact: true }).click()
+    await history.getByRole('button', { name: 'Close version history' }).click()
+    if (mutatingApiRequests.length !== previewMutationCount) {
+      throw new AcceptanceError('read_only_preview', 'version preview sent a mutating API request')
+    }
     if (unexpected.length) {
       throw new AcceptanceError(
         'request_scope',
@@ -679,9 +779,15 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       staged_request_hash: sha256(stageRequest.description),
       _staged_tool_name: staged.toolName,
       _staged_change_set_id: staged.changeSetId,
+      _run_request: runRequest,
+      _run_headers: runReplayHeaders,
+      _job_id: jobId,
+      _publication_confirmation_id: independentApproval._confirmation_id,
+      cross_tenant_publication_approval: 'denied',
       independent_publication_approval: independentApproval.status,
       publication_confirmation_hash: independentApproval.confirmation_hash,
       exact_write_approval: true,
+      read_only_preview: true,
       executed: true,
       version: 2,
       orbit: true,
@@ -769,6 +875,149 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
   return { status: 'denied', distinct_result_hashes: true }
 }
 
+function requireDenied(result, check) {
+  if (![403, 404].includes(result.status)) {
+    throw new AcceptanceError(check, `cross-tenant authority read returned HTTP ${result.status}`, {
+      status: result.status,
+    })
+  }
+}
+
+export async function proveExecutedAuthorityIsolation(config, browserResults, fetchImpl = fetch) {
+  if (!config.execute || browserResults.some((result) => !result.executed)) {
+    return { status: 'not_run_in_preflight' }
+  }
+  const [a, b] = config.tenants
+  const checks = []
+  for (const [tenant, other, ownResult, otherResult] of [
+    [a, b, browserResults[0], browserResults[1]],
+    [b, a, browserResults[1], browserResults[0]],
+  ]) {
+    const ownCatalog = await requestJson(config, tenant, '/api/tools', { fetchImpl })
+    expectStatus(ownCatalog, [200], `own_catalog_${tenant.label}`)
+    const ownNames = (ownCatalog.body?.tools || []).map((tool) => tool?.name)
+    if (!ownNames.includes(ownResult._staged_tool_name)) {
+      throw new AcceptanceError(`own_catalog_${tenant.label}`, 'the published tool is absent')
+    }
+    if (ownNames.includes(otherResult._staged_tool_name)) {
+      throw new AcceptanceError(`cross_tenant_catalog_${tenant.label}`, 'another tenant tool leaked')
+    }
+
+    const staged = await requestJson(
+      config,
+      tenant,
+      '/api/author/publication-requests',
+      { method: 'POST', body: { change_set_id: otherResult._staged_change_set_id }, fetchImpl },
+    )
+    requireDenied(staged, `cross_tenant_repository_${tenant.label}`)
+
+    const job = await requestJson(
+      config,
+      tenant,
+      `/api/jobs/${encodeURIComponent(otherResult._job_id)}`,
+      { fetchImpl },
+    )
+    requireDenied(job, `cross_tenant_job_${tenant.label}`)
+
+    const ownAudit = await requestJson(config, tenant, '/api/agent/audit?limit=100', { fetchImpl })
+    expectStatus(ownAudit, [200], `own_audit_${tenant.label}`)
+    const forgedAudit = await requestJson(
+      config,
+      tenant,
+      '/api/agent/audit?limit=100',
+      { fetchImpl, extraHeaders: { 'X-Tenant-Id': other.id, 'X-Org-Id': other.id } },
+    )
+    expectStatus(forgedAudit, [200], `cross_tenant_audit_${tenant.label}`)
+    if (JSON.stringify(forgedAudit.body) !== JSON.stringify(ownAudit.body)) {
+      throw new AcceptanceError(
+        `cross_tenant_audit_${tenant.label}`,
+        'forged tenant headers changed the audit projection',
+      )
+    }
+    checks.push(tenant.label)
+  }
+  return {
+    status: 'denied',
+    authorities: ['repository', 'catalog', 'job', 'audit'],
+    tenants: checks,
+  }
+}
+
+export async function provePinnedWriteRejections(config, browserResults, fetchImpl = fetch) {
+  if (!config.execute || browserResults.some((result) => !result.executed)) {
+    return { status: 'not_run_in_preflight' }
+  }
+  for (const [index, tenant] of config.tenants.entries()) {
+    const original = browserResults[index]._run_request
+    const replayHeaders = browserResults[index]._run_headers || {}
+    if (!original || typeof original !== 'object') {
+      throw new AcceptanceError('write_rejection', 'the accepted write request was not captured')
+    }
+    const before = await requestJson(
+      config,
+      tenant,
+      `/api/drawings/${encodeURIComponent(tenant.drawingId)}/versions`,
+      { fetchImpl },
+    )
+    expectStatus(before, [200], `write_rejection_head_${tenant.label}`)
+    const head = before.body?.head
+    if (head !== 2) {
+      throw new AcceptanceError(`write_rejection_head_${tenant.label}`, 'expected drawing head 2')
+    }
+
+    const staleHeadReplay = await requestJson(
+      config,
+      tenant,
+      '/api/run',
+      { method: 'POST', body: original, extraHeaders: replayHeaders, fetchImpl },
+    )
+    expectStatus(staleHeadReplay, [409], `stale_head_replay_${tenant.label}`)
+    if (!/drawing head changed after approval/i.test(staleHeadReplay.body?.error?.message || '')) {
+      throw new AcceptanceError(
+        `stale_head_replay_${tenant.label}`,
+        'the exact replay was not rejected by the stale drawing-head pin',
+      )
+    }
+
+    const staleCatalog = await requestJson(
+      config,
+      tenant,
+      '/api/run',
+      {
+        method: 'POST',
+        body: { ...original, catalog_digest: `sha256:${'0'.repeat(64)}` },
+        extraHeaders: replayHeaders,
+        fetchImpl,
+      },
+    )
+    expectStatus(staleCatalog, [409], `stale_catalog_${tenant.label}`)
+    if (!/catalog tool changed/i.test(staleCatalog.body?.error?.message || '')) {
+      throw new AcceptanceError(
+        `stale_catalog_${tenant.label}`,
+        'the changed digest was not rejected by the catalog pin',
+      )
+    }
+
+    const after = await requestJson(
+      config,
+      tenant,
+      `/api/drawings/${encodeURIComponent(tenant.drawingId)}/versions`,
+      { fetchImpl },
+    )
+    expectStatus(after, [200], `write_rejection_head_${tenant.label}`)
+    if (after.body?.head !== head) {
+      throw new AcceptanceError('write_rejection', 'a rejected write changed the drawing head')
+    }
+  }
+  return {
+    status: 'denied_without_mutation',
+    stale_head: true,
+    stale_catalog: true,
+    replayed_exact_request: true,
+    expired_approval: 'requires_external_evidence',
+  }
+}
+
 export function buildReceipt(
   config,
   deploymentIdentity,
@@ -796,7 +1045,20 @@ export function buildReceipt(
       drawing_hash: sha256(tenant.drawingId),
     })),
     api,
-    browser: browser.map(({ _workbench_id, _staged_tool_name, _staged_change_set_id, ...safe }) => safe),
+    browser: browser.map(({
+      _workbench_id,
+      _staged_tool_name,
+      _staged_change_set_id,
+      _run_request,
+      _run_headers,
+      _job_id,
+      _publication_confirmation_id,
+      ...safe
+    }) => safe),
+    external_evidence: {
+      status: 'required',
+      requirements: EXTERNAL_EVIDENCE_REQUIRED,
+    },
     started_at: startedAt,
     stopped_at: stoppedAt,
     secrets_recorded: false,
@@ -844,6 +1106,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     const api = await runApiPreflight(config)
     const browser = await runBrowserAcceptance(config, args.execute)
     api.executed_drawing_isolation = await proveExecutedDrawingIsolation(config, browser)
+    api.executed_authority_isolation = await proveExecutedAuthorityIsolation(config, browser)
+    api.pinned_write_rejections = await provePinnedWriteRejections(config, browser)
     const stoppedAt = new Date().toISOString()
     const receipt = buildReceipt(
       config,
