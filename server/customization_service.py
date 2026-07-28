@@ -1287,8 +1287,21 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
 def effective_catalog_pin(tenant_id: str) -> dict[str, str] | None:
     """Return the durable effective catalog generation without materializing it."""
     tenant_id = _tenant_id(tenant_id)
+    postgres = customization_store_mode() == "postgres"
     path = database_path()
-    if customization_store_mode() != "postgres" and not path.exists():
+    if not postgres and _shared_sqlite_path(path):
+        if (
+            mode("LEAF_CUSTOMIZATION_R5_MODE") is RolloutMode.OFF
+            and mode("LEAF_CUSTOMIZATION_R6_MODE") is RolloutMode.OFF
+        ):
+            # Match effective_catalog_dir: an unsupported shared SQLite file
+            # cannot be runtime authority, but dark rollout keeps the base
+            # catalog available without opening that file.
+            return None
+        raise CustomizationServiceError(
+            "customization_shared_sqlite_unsupported", 503
+        )
+    if not postgres and not path.exists():
         return None
     try:
         pin = CustomizationService.configured().store.get_effective_catalog(
