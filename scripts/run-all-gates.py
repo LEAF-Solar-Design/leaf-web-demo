@@ -609,7 +609,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
-              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 4),
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 6),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),
@@ -706,10 +706,10 @@ def build_suites() -> List[Suite]:
         # also explicit here so this PR cannot ship its dependency-free
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
-        # invariant to DB presence: 71 collected either way, measured on this
+        # invariant to DB presence: 82 collected either way, measured on this
         # tree 2026-07-25. The floor below is the EXECUTED count on a host with
-        # no DATABASE_URL -- 71 collected minus the 2 DB-gated skips named in
-        # allowed_skip_reasons = 69.
+        # no DATABASE_URL -- 82 collected minus the 2 DB-gated skips named in
+        # allowed_skip_reasons = 80.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
@@ -717,7 +717,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
-                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 69,
+                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 80,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -734,10 +734,10 @@ def build_suites() -> List[Suite]:
               "scripts test_build_platform_images_workflow.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
-        # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
-        # tree 2026-07-27.
+        # Floor 28: 27 on current main, plus the PostgreSQL proof registration
+        # test measured on this tree 2026-07-28.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 27),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 28),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # --- harness (cwd=harness) --- #

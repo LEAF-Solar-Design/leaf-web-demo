@@ -292,3 +292,17 @@ Risks:
 - [x] Keep a downstream `grant_required` response from deleting the separate Leaf login token.
 - [x] Prove stale JWT tenant claims cannot split mount storage from live turn routing.
 - [ ] Merge, deploy the app-only fix, and complete a real mounted turn on staging.
+
+# PostgreSQL authority contract repair
+
+- [x] Port PR #187 relation, column, constraint, index, and trigger authority checks onto current main.
+- [x] Preserve the upload-to-drawing selector dependency in the authority inventory.
+- [x] Register the static and live PostgreSQL contract tests with measured current counts.
+- [x] Run focused tests, replay, and the full hermetic gate; record the unavailable local PostgreSQL gate.
+- [x] Confirm the diff contains no release, cutover, or PR #236 functionality.
+
+Risks:
+
+- A weak catalog check can report ready for a same-name object on the wrong relation.
+- A stale test floor can hide an unregistered authority proof or fail a valid current tree.
+- Stricter startup checks must not change selector state or claim that a PostgreSQL cutover occurred.

@@ -30,6 +30,12 @@ EXPECTED_SELECTOR_DEFAULTS = {
     "LEAF_CUSTOMIZATION_R6_MODE": "off",
     "LEAF_CUSTOMIZATION_STORE": "sqlite",
 }
+EXPECTED_SELECTOR_DEPENDENCIES = [
+    {
+        "when": {"name": "LEAF_UPLOAD_STORE", "value": "postgres"},
+        "requires": {"name": "LEAF_DRAWING_STORE", "value": "postgres"},
+    },
+]
 REQUIRED_COVERAGE = {
     "jobs",
     "sessions_approvals",
@@ -177,6 +183,32 @@ def _inventory_errors(inventory: dict) -> list[str]:
             "selector coverage/default mismatch: "
             f"expected={EXPECTED_SELECTOR_DEFAULTS!r}, actual={selectors!r}"
         )
+    dependencies = inventory.get("selector_dependencies")
+    if not isinstance(dependencies, list):
+        errors.append("selector_dependencies must be a list")
+    else:
+        normalized_dependencies = []
+        for dependency in dependencies:
+            if set(dependency) != {"when", "requires", "reason"}:
+                errors.append(
+                    "selector dependency must contain when, requires, and reason")
+                continue
+            when = dependency["when"]
+            requires = dependency["requires"]
+            if set(when) != {"name", "value"} or set(requires) != {"name", "value"}:
+                errors.append("selector dependency endpoints must contain name and value")
+                continue
+            if when["name"] not in selectors or requires["name"] not in selectors:
+                errors.append("selector dependency references an unknown selector")
+            if not dependency["reason"].strip():
+                errors.append("selector dependency lacks a reason")
+            normalized_dependencies.append({"when": when, "requires": requires})
+        if normalized_dependencies != EXPECTED_SELECTOR_DEPENDENCIES:
+            errors.append(
+                "selector dependency mismatch: "
+                f"expected={EXPECTED_SELECTOR_DEPENDENCIES!r}, "
+                f"actual={normalized_dependencies!r}"
+            )
     missing_coverage = REQUIRED_COVERAGE - coverage
     if missing_coverage:
         errors.append(f"missing authority coverage {sorted(missing_coverage)}")
@@ -270,4 +302,36 @@ def test_contract_rejects_upload_inventory_without_shared_drawing_tables() -> No
         and "drawing_store_manifests" in error
         and "drawing_store_versions" in error
         for error in errors
+    )
+
+
+def test_contract_requires_postgres_drawing_authority_for_postgres_uploads() -> None:
+    inventory = _load_inventory()
+    assert inventory["selector_dependencies"] == [
+        {
+            **EXPECTED_SELECTOR_DEPENDENCIES[0],
+            "reason": (
+                "The PostgreSQL upload lifecycle creates and advances drawing "
+                "manifests and versions, so upload and drawing metadata must "
+                "share one PostgreSQL authority."
+            ),
+        }
+    ]
+
+
+def test_contract_rejects_missing_or_weakened_upload_dependency() -> None:
+    inventory = _load_inventory()
+
+    missing = deepcopy(inventory)
+    missing["selector_dependencies"] = []
+    assert any(
+        "selector dependency mismatch" in error
+        for error in _inventory_errors(missing)
+    )
+
+    weakened = deepcopy(inventory)
+    weakened["selector_dependencies"][0]["requires"]["value"] = "legacy"
+    assert any(
+        "selector dependency mismatch" in error
+        for error in _inventory_errors(weakened)
     )
