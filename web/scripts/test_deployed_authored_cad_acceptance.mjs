@@ -11,7 +11,9 @@ import {
   evaluateReadiness,
   evaluateDeploymentIdentity,
   main,
+  proveExecutedAuthorityIsolation,
   proveExecutedDrawingIsolation,
+  provePinnedWriteRejections,
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
@@ -299,6 +301,111 @@ describe('deployed authored CAD acceptance checks', () => {
     )
   })
 
+  it('proves repository, catalog, approval, job, and audit isolation', async () => {
+    const config = validateConfig(environment(), true)
+    const browser = [
+      {
+        label: 'A', executed: true, _staged_tool_name: 'cat_tool',
+        _staged_change_set_id: '11111111-1111-4111-8111-111111111111',
+        _staged_receipt: { change_set_id: '11111111-1111-4111-8111-111111111111' },
+        _job_id: 'job-a',
+        _publication_confirmation_id: 'confirmation-a',
+      },
+      {
+        label: 'B', executed: true, _staged_tool_name: 'fox_tool',
+        _staged_change_set_id: '22222222-2222-4222-8222-222222222222',
+        _staged_receipt: { change_set_id: '22222222-2222-4222-8222-222222222222' },
+        _job_id: 'job-b',
+        _publication_confirmation_id: 'confirmation-b',
+      },
+    ]
+    const fetchImpl = async (url, options) => {
+      const parsed = new URL(url)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      if (parsed.pathname === '/api/tools') {
+        return response(200, { tools: [{ name: tokenA ? 'cat_tool' : 'fox_tool' }] })
+      }
+      if (parsed.pathname === '/api/agent/audit') {
+        return response(200, { records: [{ event: tokenA ? 'audit-a' : 'audit-b' }], count: 1 })
+      }
+      if (parsed.pathname.startsWith('/api/jobs/')) return response(404, {})
+      if (parsed.pathname === '/api/author/publication-requests') return response(404, {})
+      if (parsed.pathname.startsWith('/api/agent/approvals/')) return response(404, {})
+      return response(500, {})
+    }
+    assert.deepEqual(
+      await proveExecutedAuthorityIsolation(config, browser, fetchImpl),
+      {
+        status: 'denied',
+        authorities: ['repository', 'catalog', 'approval', 'job', 'audit'],
+        tenants: ['A', 'B'],
+      },
+    )
+
+    const leakingCatalog = async (url, options) => {
+      const parsed = new URL(url)
+      if (parsed.pathname === '/api/tools') {
+        return response(200, { tools: [{ name: 'cat_tool' }, { name: 'fox_tool' }] })
+      }
+      return fetchImpl(url, options)
+    }
+    await assert.rejects(
+      () => proveExecutedAuthorityIsolation(config, browser, leakingCatalog),
+      /another tenant tool leaked/,
+    )
+  })
+
+  it('rejects stale catalog and exact write replay without changing head', async () => {
+    const config = validateConfig(environment(), true)
+    const browser = config.tenants.map((tenant) => ({
+      label: tenant.label,
+      executed: true,
+      _run_request: {
+        tool: `${tenant.label.toLowerCase()}_tool`,
+        dwg: tenant.drawingId,
+        dwg_version: 1,
+        expected_drawing_head: 1,
+        catalog_digest: `sha256:${'a'.repeat(64)}`,
+      },
+    }))
+    let acceptedRuns = 0
+    const fetchImpl = async (url, options) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/versions')) return response(200, { head: 2 })
+      if (parsed.pathname === '/api/run') {
+        acceptedRuns += 1
+        const body = JSON.parse(options.body)
+        const message = body.catalog_digest === `sha256:${'0'.repeat(64)}`
+          ? 'catalog tool changed or confirmation digest is missing; refresh tools and confirm again'
+          : 'drawing head changed after approval; refresh drawing state and confirm again'
+        return response(409, { error: { error_code: 'BAD_PARAMS', message } })
+      }
+      return response(500, {})
+    }
+    assert.deepEqual(
+      await provePinnedWriteRejections(config, browser, fetchImpl),
+      {
+        status: 'denied_without_mutation',
+        stale_head: true,
+        stale_catalog: true,
+        duplicate_exact_request: true,
+        replayed_exact_request: true,
+        expired_approval: 'requires_external_evidence',
+      },
+    )
+    assert.equal(acceptedRuns, 4)
+
+    const permissive = async (url) => {
+      const path = new URL(url).pathname
+      if (path.endsWith('/versions')) return response(200, { head: 2 })
+      return response(202, { job_id: 'unexpected' })
+    }
+    await assert.rejects(
+      () => provePinnedWriteRejections(config, browser, permissive),
+      /unexpected HTTP 202/,
+    )
+  })
+
   it('rejects a no-op camera gesture', () => {
     assert.throws(() => requireCameraMotion('1,2,3|4,5,6', '1,2,3|4,5,6'), /did not move/)
     assert.doesNotThrow(() => requireCameraMotion('1,2,3|4,5,6', '2,2,3|4,5,6'))
@@ -357,8 +464,22 @@ describe('deployed authored CAD acceptance checks', () => {
       deploymentIdentity(),
       { tenant_header_override: 'denied' },
       [
-        { label: 'A', executed: true, _workbench_id: 'secret-workbench-a' },
-        { label: 'B', executed: true, _workbench_id: 'secret-workbench-b' },
+        {
+          label: 'A', executed: true, _workbench_id: 'secret-workbench-a',
+          _staged_receipt: { tenant_id: 'acceptance-a' },
+          _run_request: { secret: TOKEN_A },
+          _run_headers: { 'x-checkout-capability': 'secret-capability-a' },
+          _job_id: 'secret-job-a',
+          _publication_confirmation_id: 'secret-confirmation-a',
+        },
+        {
+          label: 'B', executed: true, _workbench_id: 'secret-workbench-b',
+          _staged_receipt: { tenant_id: 'acceptance-b' },
+          _run_request: { secret: TOKEN_B },
+          _run_headers: { 'x-checkout-capability': 'secret-capability-b' },
+          _job_id: 'secret-job-b',
+          _publication_confirmation_id: 'secret-confirmation-b',
+        },
       ],
       '2026-07-26T00:00:00Z',
       '2026-07-26T00:01:00Z',
@@ -372,7 +493,12 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(!encoded.includes('acceptance-b'))
     assert.ok(!encoded.includes('independent-secret-value'))
     assert.ok(!encoded.includes('secret-workbench'))
+    assert.ok(!encoded.includes('secret-job'))
+    assert.ok(!encoded.includes('secret-confirmation'))
+    assert.ok(!encoded.includes('secret-capability'))
     assert.equal(receipt.images.web, DIGEST)
+    assert.equal(receipt.external_evidence.status, 'required')
+    assert.ok(receipt.external_evidence.requirements.some((item) => item.includes('restart')))
   })
 
   it('contains no route interception API in the deployed browser driver', () => {
@@ -382,6 +508,8 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(!source.includes('.route('))
     assert.ok(!source.includes('leaf-proof.invalid/api/**'))
     assert.ok(!source.includes("getByRole('button', { name: 'Approve'"))
+    assert.ok(source.includes("getByText(/Viewing v1.*read-only preview/)"))
+    assert.ok(source.includes("expired_approval: 'requires_external_evidence'"))
   })
 
   it('refuses production before requesting live identity or launching a browser', async () => {
