@@ -196,7 +196,7 @@ jobs:
           cache-to: ${{ steps.cache.outputs.to }}
 
       - name: Scan image before push
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           format: table

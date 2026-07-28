@@ -41,6 +41,8 @@ def main() -> None:
     assert "python scripts/test_instant_execution_container_contract.py" in test_body
     assert "needs: [prepare, test]" in build_body
     assert build_body.index("Scan image before push") < build_body.index("Push scanned immutable image")
+    assert "aquasecurity/trivy-action@v0.36.0" in build_body
+    assert "aquasecurity/trivy-action@0." not in build_body
     assert "push: false" in build_body
     assert 'docker push "$IMAGE_URI"' in build_body
 
