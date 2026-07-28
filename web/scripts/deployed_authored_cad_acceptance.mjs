@@ -860,13 +860,27 @@ export async function proveExecutedAuthorityIsolation(config, browserResults, fe
     )
     requireDenied(staged, `cross_tenant_repository_${tenant.label}`)
 
-    const approval = await requestJson(
+    const ownApproval = await requestJson(
       config,
       tenant,
-      `/api/agent/approvals/${encodeURIComponent(otherResult._publication_confirmation_id)}`,
-      { method: 'POST', body: { approved: true }, fetchImpl },
+      '/api/author/confirmations',
+      { method: 'POST', body: ownResult._staged_receipt, fetchImpl },
     )
-    requireDenied(approval, `cross_tenant_approval_${tenant.label}`)
+    expectStatus(ownApproval, [200], `own_publication_approval_${tenant.label}`)
+    if (ownApproval.body?.confirmation_id !== ownResult._publication_confirmation_id) {
+      throw new AcceptanceError(
+        `own_publication_approval_${tenant.label}`,
+        'the owner receipt did not resolve to its issued publication confirmation',
+      )
+    }
+
+    const crossApproval = await requestJson(
+      config,
+      tenant,
+      '/api/author/confirmations',
+      { method: 'POST', body: otherResult._staged_receipt, fetchImpl },
+    )
+    requireDenied(crossApproval, `cross_tenant_approval_${tenant.label}`)
 
     const job = await requestJson(
       config,

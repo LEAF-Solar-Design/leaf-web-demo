@@ -330,7 +330,15 @@ describe('deployed authored CAD acceptance checks', () => {
       }
       if (parsed.pathname.startsWith('/api/jobs/')) return response(404, {})
       if (parsed.pathname === '/api/author/publication-requests') return response(404, {})
-      if (parsed.pathname.startsWith('/api/agent/approvals/')) return response(404, {})
+      if (parsed.pathname === '/api/author/confirmations') {
+        const receipt = JSON.parse(options.body)
+        const ownReceipt = tokenA
+          ? receipt.change_set_id === browser[0]._staged_change_set_id
+          : receipt.change_set_id === browser[1]._staged_change_set_id
+        return ownReceipt
+          ? response(200, { confirmation_id: tokenA ? 'confirmation-a' : 'confirmation-b' })
+          : response(404, {})
+      }
       return response(500, {})
     }
     assert.deepEqual(
@@ -352,6 +360,17 @@ describe('deployed authored CAD acceptance checks', () => {
     await assert.rejects(
       () => proveExecutedAuthorityIsolation(config, browser, leakingCatalog),
       /another tenant tool leaked/,
+    )
+
+    const universallyMissingApproval = async (url, options) => {
+      if (new URL(url).pathname === '/api/author/confirmations') return response(404, {})
+      return fetchImpl(url, options)
+    }
+    await assert.rejects(
+      () => proveExecutedAuthorityIsolation(config, browser, universallyMissingApproval),
+      (error) => error instanceof AcceptanceError
+        && error.check === 'own_publication_approval_A'
+        && error.message === 'unexpected HTTP 404',
     )
   })
 
