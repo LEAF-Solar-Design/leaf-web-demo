@@ -299,7 +299,7 @@ test('an undo that landed after the restore releases the lock instead of wedging
   expect(observed.intakeReadsAfterRestore()).toBe(2)
 })
 
-test('/try neither requests deltas nor exposes restore controls', async ({ page }) => {
+test('/try skips deltas and hides recovery controls while its head is readable', async ({ page }) => {
   const state = makeCatProofState()
   const versionQueries = []
   await page.route('**/api/**', async (route) => {

@@ -366,13 +366,16 @@
 .tc-preview-note { display: flex; justify-content: space-between; background: rgba(34, 197, 94, .07); }
 .tc-panel-error { color: #fca5a5; }
 .tc-version-list { display: flex; flex-direction: column; padding: 0 8px 12px; }
-.tc-version-list > button {
+.tc-version-row { border-top: 1px solid #27272a; }
+.tc-version-row > button:first-child {
   display: grid; grid-template-columns: 34px 1fr auto; gap: 8px; align-items: center;
-  width: 100%; border: 0; border-top: 1px solid #27272a; padding: 9px 7px;
+  width: 100%; border: 0; padding: 9px 7px;
   background: transparent; color: #a1a1aa; cursor: pointer; text-align: left; font-size: 11.5px;
 }
-.tc-version-list > button:hover,
-.tc-version-list > button.active { background: rgba(34, 197, 94, .07); color: #fff; }
+.tc-version-row > button:first-child:hover,
+.tc-version-row > button:first-child.active { background: rgba(34, 197, 94, .07); color: #fff; }
+.tc-version-row > .chip-act { margin: 0 7px 8px; }
+.tc-version-recovery { display: flex; gap: 6px; padding: 0 7px 8px; }
 .tc-version-list b { color: #22c55e; font-size: 10px; font-weight: 500; }
 .tc-trust-panel { padding: 8px; }
 .tc-trust-row {

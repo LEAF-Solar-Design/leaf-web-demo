@@ -15,6 +15,7 @@ import {
   stageAuthorTool,
   publishStagedAuthor,
   recordToEnvelope,
+  restoreDrawingVersion,
   runTool,
 } from '../api.js'
 import ConversePanel from '../components/ConversePanel.jsx'
@@ -254,6 +255,9 @@ export default function ToolCast({
   const [toast, setToast] = useState(null)
   const [drawer, setDrawer] = useState(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
+  const [confirmingRecovery, setConfirmingRecovery] = useState(null)
+  const [recoveringVersion, setRecoveringVersion] = useState(null)
+  const [recoveryError, setRecoveryError] = useState(null)
   const [opsOpen, setOpsOpen] = useState(() => !PUBLIC_DEMO && new URLSearchParams(window.location.search).get('ops') === '1')
   const [quotaAt, setQuotaAt] = useState(0)
   const [tourOn, setTourOn] = useState(false)
@@ -504,6 +508,7 @@ export default function ToolCast({
     drawingId: drawing.drawingState?.drawing_id || DRAWING_ID,
     holder: checkoutHolder,
   })
+  const writeLocked = checkout.writeLocked || drawing.mutationsBlocked
   const takeCheckout = useCallback((...args) => {
     if (!sessionReady) return undefined
     return checkout.actions.take(...args)
@@ -571,8 +576,10 @@ export default function ToolCast({
     if (decision?.lane !== 'run') return decision
     const tool = tools.find((candidate) => candidate.name === decision.tool)
     if (!tool) return decision
-    if ((tool.capabilities || []).includes('drawing.write') && checkout.writeLocked) {
-      setError(checkout.lockedByOther?.holder
+    if ((tool.capabilities || []).includes('drawing.write') && writeLocked) {
+      setError(drawing.mutationsBlocked
+        ? 'Editing is locked until the committed drawing head becomes readable or you recover a historical version.'
+        : checkout.lockedByOther?.holder
         ? `Editing is locked by ${checkout.lockedByOther.holder}. Read tools still run.`
         : 'Editing is paused while Leaf checks the drawing lock. Read tools still run.')
       return undefined
@@ -593,7 +600,7 @@ export default function ToolCast({
     })
     runIntentStateRef.current = staged.state
     return { ...decision, params: staged.intent.params, runIntent: staged.intent }
-  }, [catalogRunContext, checkout.lockedByOther, checkout.writeLocked, tools])
+  }, [catalogRunContext, checkout.lockedByOther, drawing.mutationsBlocked, tools, writeLocked])
   catalogDecisionRef.current = armCatalogDecision
 
   const requestCatalogRun = useCallback((tool, params) => {
@@ -615,8 +622,10 @@ export default function ToolCast({
       catalog.actions.dismissRoute()
       return
     }
-    if ((tool.capabilities || []).includes('drawing.write') && checkout.writeLocked) {
-      setError(checkout.lockedByOther?.holder
+    if ((tool.capabilities || []).includes('drawing.write') && writeLocked) {
+      setError(drawing.mutationsBlocked
+        ? 'Editing is locked until the committed drawing head becomes readable or you recover a historical version. The write did not run.'
+        : checkout.lockedByOther?.holder
         ? `Editing is locked by ${checkout.lockedByOther.holder}. The write did not run.`
         : 'Editing is paused while Leaf checks the drawing lock. The write did not run.')
       catalog.actions.dismissRoute()
@@ -677,7 +686,35 @@ export default function ToolCast({
     catalog.actions.dismissRoute()
     if (!PUBLIC_DEMO && workspace.openProjectId) workspace.rehydrate()
     if (!PUBLIC_DEMO) checkout.actions.refresh()
-  }, [busy, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, checkout.writeLocked, drawing.shown, jobRunning, runTrackedJob, sessionReady, workspace])
+  }, [busy, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.shown, jobRunning, runTrackedJob, sessionReady, workspace, writeLocked])
+
+  const recoverHistoricalVersion = useCallback(async (versionToRecover) => {
+    const drawingId = drawing.drawingState?.drawing_id
+    const currentHead = Number(drawing.head)
+    const target = Number(versionToRecover)
+    if (
+      !sessionReady || drawingId == null || !drawing.unreadableHead ||
+      drawing.unreadableHead.pending || recoveringVersion != null ||
+      !Number.isFinite(target) || target === currentHead
+    ) return
+    setRecoveringVersion(target)
+    setRecoveryError(null)
+    try {
+      const result = await restoreDrawingVersion(
+        PUBLIC_DEMO,
+        drawingId,
+        target,
+        checkout.actions.getCapability() || undefined,
+      )
+      setConfirmingRecovery(null)
+      await drawing.actions.recordRestore(result)
+      await drawing.actions.loadHistory()
+    } catch (cause) {
+      setRecoveryError(cause?.message || `Could not recover from v${target}.`)
+    } finally {
+      setRecoveringVersion(null)
+    }
+  }, [checkout.actions, drawing.actions, drawing.drawingState?.drawing_id, drawing.head, drawing.unreadableHead, recoveringVersion, sessionReady])
 
   const retryCatalogRun = useCallback(() => {
     const last = lastConfirmedRunRef.current
@@ -1026,7 +1063,7 @@ export default function ToolCast({
               onLinkClaude={() => { setRightView('trust'); setClaudeOpen(true) }}
               onAttachJob={attachJob}
               onJobLinked={attachJob}
-              writeLocked={checkout.writeLocked}
+              writeLocked={writeLocked}
             />
           ) : (
             <div className="tc-operator-empty">
@@ -1049,7 +1086,7 @@ export default function ToolCast({
               onOpenTool={setSelectedCatalogTool}
               onRetryTools={catalog.actions.retryTools}
               writeEntitled={writeEntitled}
-              writeLocked={checkout.writeLocked}
+              writeLocked={writeLocked}
             />
           )}
           {leftView === 'workspace' && (
@@ -1234,19 +1271,51 @@ export default function ToolCast({
             )}
             {drawing.historyLoading && <div className="tc-panel-note">Loading versions</div>}
             {drawing.historyError && <div className="tc-panel-error">{drawing.historyError}</div>}
+            {recoveryError && <div className="tc-panel-error" role="alert">{recoveryError}</div>}
             <div className="tc-version-list">
-              {[...(drawing.history?.versions || [])].reverse().map((item) => (
-                <button
-                  type="button"
-                  key={item.v}
-                  className={drawing.previewing?.version === item.v ? 'active' : ''}
-                  onClick={() => drawing.actions.previewVersion(item.v)}
-                >
-                  <span>v{item.v}</span>
-                  <span>{item.tool || 'drawing'}</span>
-                  {item.v === drawing.head && <b>head</b>}
-                </button>
-              ))}
+              {[...(drawing.history?.versions || [])].reverse().map((item) => {
+                const isCurrentHead = Number(item.v) === Number(drawing.head)
+                const recoveryMode = Boolean(drawing.unreadableHead && !isCurrentHead)
+                const recoveryDisabled = Boolean(drawing.unreadableHead?.pending || recoveringVersion != null)
+                const confirming = confirmingRecovery === item.v
+                return (
+                  <div className="tc-version-row" key={item.v} data-testid={`try-version-v${item.v}`}>
+                    <button
+                      type="button"
+                      className={drawing.previewing?.version === item.v ? 'active' : ''}
+                      onClick={() => drawing.actions.previewVersion(item.v)}
+                    >
+                      <span>v{item.v}</span>
+                      <span>{item.tool || 'drawing'}</span>
+                      {isCurrentHead ? <b>head</b> : null}
+                    </button>
+                    {recoveryMode ? (
+                      confirming ? (
+                        <span className="tc-version-recovery">
+                          <button
+                            type="button"
+                            className="chip-act"
+                            disabled={recoveryDisabled}
+                            onClick={() => recoverHistoricalVersion(item.v)}
+                          >
+                            {recoveringVersion === item.v ? 'Recovering…' : `Recover from v${item.v}`}
+                          </button>
+                          <button type="button" className="chip-neutral" disabled={recoveringVersion != null} onClick={() => setConfirmingRecovery(null)}>Cancel</button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="chip-act"
+                          disabled={recoveryDisabled}
+                          onClick={() => { setRecoveryError(null); setConfirmingRecovery(item.v) }}
+                        >
+                          Recover
+                        </button>
+                      )
+                    ) : null}
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}
@@ -1370,7 +1439,7 @@ export default function ToolCast({
             tools={tools}
             running={busy || jobRunning}
             writeEntitled={writeEntitled}
-            writeLocked={checkout.writeLocked}
+            writeLocked={writeLocked}
             onConfirmIntent={runCatalogTool}
             onPickAlternative={catalog.actions.pickAlternative}
             onOpenAuthor={() => setLeftView('author')}
