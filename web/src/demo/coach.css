@@ -1,0 +1,69 @@
+/* HP-01 — first-run coach mark.
+   Uses ONLY the existing dark-emerald tokens from styles.css (--card, --border,
+   --primary, --muted, …), same convention as demo.css's tour overlay. No new
+   color system, no new fonts. */
+
+.coach-root {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 80;
+  pointer-events: none;
+}
+
+.coach-card {
+  pointer-events: auto;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-sans);
+  animation: coach-rise var(--m-enter, 220ms) var(--m-curve, ease-out) both;
+}
+
+.coach-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--foreground);
+  margin-bottom: 4px;
+}
+
+.coach-body {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 10px;
+  line-height: 1.4;
+}
+
+.coach-keys {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.coach-key-label {
+  font-size: 11px;
+  color: var(--muted-2);
+  margin-right: 8px;
+}
+
+.coach-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+@keyframes coach-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coach-card {
+    animation: none;
+  }
+}

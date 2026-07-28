@@ -60,6 +60,7 @@ import { classifyAgentError } from '../converse.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
+import FirstRunCoach from '../demo/FirstRunCoach.jsx'
 import { shouldStartTour } from '../demo/tourEntry.js'
 import * as mockVersions from '../mock/mockVersions.js'
 
@@ -1382,6 +1383,7 @@ export default function ToolCast({
           bannerSubtitle="One scene for request, approval, job, drawing, version, and trust."
         />
       )}
+      {!tourOn && <FirstRunCoach signedIn={isSignedIn()} active={!focusView} />}
     </>
   )
 }
