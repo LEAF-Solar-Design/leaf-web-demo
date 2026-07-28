@@ -162,6 +162,42 @@ test('signed-in demo URL keeps the CAD surface and uses the live conversation se
   await expect.poll(() => calls.some((call) => call.method === 'POST' && call.path === '/api/sessions/cat-session/messages')).toBe(true)
 })
 
+test('a Claude grant-required response does not expire the separate Leaf login', async ({ page }) => {
+  const state = makeCatProofState()
+  await page.addInitScript(() => localStorage.setItem('leaf.jwt', 'fixture-token'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (request.method() === 'POST' && url.pathname === '/api/sessions/cat-session/messages') {
+      await route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          grant_required: true,
+          error: { error_code: 'GRANT_REQUIRED', message: 'mount a Claude account', retryable: false },
+          degraded_mode: false,
+        }),
+      })
+      return
+    }
+    const result = catProofResponse({
+      method: request.method(),
+      path: url.pathname,
+      body: request.postDataJSON?.(),
+    }, state)
+    await route.fulfill({ status: result.status, contentType: 'application/json', body: JSON.stringify(result.body || {}) })
+  })
+
+  await page.goto('/try')
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await page.getByRole('textbox', { name: 'Command bar' }).fill('hello from a Leaf session')
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+
+  await expect(page.getByText('Chat needs a linked Claude account.')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'You are not signed in' })).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.jwt'))).toBe('fixture-token')
+})
+
 test('an Auth0 callback aimed at try does not boot the legacy app', async ({ page }) => {
   const state = makeCatProofState()
   await page.route('http://leaf-proof.invalid/api/**', async (route) => {
