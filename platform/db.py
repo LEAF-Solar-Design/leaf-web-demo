@@ -178,6 +178,9 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "drawing_authority_cutover": {
             "id", "state", "schema_version", "source_commit", "run_id",
             "run_attempt", "task_definition_arn", "source_task_definition_arn",
+            "migration_target_task_definition_arn",
+            "steady_state_task_definition_arn", "app_image_reference",
+            "broker_image_reference",
             "efs_id", "fence_path", "source_counts", "parity_digest",
             "entered_at", "updated_at", "deadline", "last_error",
         },
@@ -197,6 +200,9 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "drawing_authority_cutover": {
             "id", "state", "schema_version", "source_commit", "run_id",
             "run_attempt", "task_definition_arn", "source_task_definition_arn",
+            "migration_target_task_definition_arn",
+            "steady_state_task_definition_arn", "app_image_reference",
+            "broker_image_reference",
             "efs_id", "fence_path", "source_counts", "parity_digest",
             "entered_at", "updated_at", "deadline", "last_error",
         },

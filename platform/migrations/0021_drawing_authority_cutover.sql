@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS drawing_authority_cutover (
     run_attempt INTEGER NOT NULL,
     task_definition_arn TEXT NOT NULL,
     source_task_definition_arn TEXT NOT NULL,
+    migration_target_task_definition_arn TEXT NOT NULL,
+    steady_state_task_definition_arn TEXT NOT NULL,
+    app_image_reference TEXT NOT NULL,
+    broker_image_reference TEXT NOT NULL,
     efs_id TEXT NOT NULL,
     fence_path TEXT NOT NULL,
     source_counts JSONB NOT NULL,
@@ -36,6 +40,18 @@ CREATE TABLE IF NOT EXISTS drawing_authority_cutover (
     ),
     CONSTRAINT drawing_authority_cutover_source_task_definition_shape CHECK (
         source_task_definition_arn ~ '^arn:aws:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$'
+    ),
+    CONSTRAINT drawing_authority_cutover_migration_target_shape CHECK (
+        migration_target_task_definition_arn ~ '^arn:aws:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$'
+    ),
+    CONSTRAINT drawing_authority_cutover_steady_state_target_shape CHECK (
+        steady_state_task_definition_arn ~ '^arn:aws:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$'
+    ),
+    CONSTRAINT drawing_authority_cutover_app_image_shape CHECK (
+        app_image_reference ~ '^[^@[:space:]]+@sha256:[0-9a-f]{64}$'
+    ),
+    CONSTRAINT drawing_authority_cutover_broker_image_shape CHECK (
+        broker_image_reference ~ '^[^@[:space:]]+@sha256:[0-9a-f]{64}$'
     ),
     CONSTRAINT drawing_authority_cutover_efs_id_shape CHECK (efs_id ~ '^fs-[0-9a-f]+$'),
     CONSTRAINT drawing_authority_cutover_fence_exact
