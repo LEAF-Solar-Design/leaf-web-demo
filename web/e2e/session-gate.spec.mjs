@@ -50,17 +50,48 @@ test('Explore the demo keeps the CAD operator on try and runs without private AP
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   await expect(page.getByText('Interactive demo')).toBeVisible()
   await expect(page.getByText('Ask Claude for the cat edit')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
 
   calls.length = 0
+  await page.getByRole('textbox', { name: 'Command bar' }).fill('hello')
+  await page.getByRole('textbox', { name: 'Command bar' }).press('Enter')
+  await expect(page.getByTestId('demo-conversation')).toContainText('hello')
+  await expect(page.getByTestId('demo-conversation')).toContainText('interactive Leaf CAD demo')
+  await expect(page.getByRole('textbox', { name: 'Command bar' })).toHaveValue('')
+  await expect(page.getByRole('button', { name: 'Run count-by-layer' })).toHaveCount(0)
+  expect(calls.filter((call) => call.path.startsWith('/api/') && !call.path.startsWith('/api/site/'))).toEqual([])
+
   await page.getByRole('textbox', { name: 'Command bar' }).fill('count panels per layer')
-  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByTestId('demo-conversation')).toContainText('count-by-layer')
   await expect(page.getByRole('button', { name: 'Run count-by-layer' })).toBeVisible()
   await page.getByRole('button', { name: 'Run count-by-layer' }).click()
   await expect(page.getByRole('tab', { name: 'Execution' })).toBeVisible()
   await page.getByRole('tab', { name: 'Execution' }).click()
   await expect(page.getByTestId('catalog-run-result')).toContainText('count-by-layer', { timeout: 15_000 })
   expect(calls.filter((call) => call.path.startsWith('/api/') && !call.path.startsWith('/api/site/'))).toEqual([])
+})
+
+test('signed-in demo URL keeps the CAD surface and uses the live conversation session', async ({ page }) => {
+  const state = makeCatProofState()
+  const calls = []
+  await page.addInitScript(() => localStorage.setItem('leaf.jwt', 'fixture-token'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    calls.push({ method: request.method(), path: url.pathname })
+    const result = catProofResponse({ method: request.method(), path: url.pathname, body: request.postDataJSON?.() }, state)
+    await route.fulfill({ status: result.status, contentType: 'application/json', body: JSON.stringify(result.body || {}) })
+  })
+
+  await page.goto('/try?demo=1')
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await expect(page.getByTestId('demo-conversation')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeEnabled()
+  await page.getByRole('textbox', { name: 'Command bar' }).fill('hello from the mounted account')
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await expect.poll(() => calls.some((call) => call.method === 'POST' && call.path === '/api/sessions')).toBe(true)
+  await expect.poll(() => calls.some((call) => call.method === 'POST' && call.path === '/api/sessions/cat-session/messages')).toBe(true)
 })
 
 test('an Auth0 callback aimed at try does not boot the legacy app', async ({ page }) => {

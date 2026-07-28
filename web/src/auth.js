@@ -40,7 +40,22 @@ async function client() {
 // Kick the Authorization-Code + PKCE redirect to Auth0 Universal Login.
 export async function login() {
   const c = await client()
-  if (c) await c.loginWithRedirect()
+  if (c) {
+    const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    await c.loginWithRedirect({ appState: { returnTo } })
+  }
+}
+
+export function safeLocalReturnTo(value, fallback = '/') {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) return fallback
+  try {
+    const resolved = new URL(value, window.location.origin)
+    return resolved.origin === window.location.origin
+      ? `${resolved.pathname}${resolved.search}${resolved.hash}`
+      : fallback
+  } catch {
+    return fallback
+  }
 }
 
 // Call once on mount. If we returned from Auth0 (?code=&state=), finish the code
@@ -52,9 +67,11 @@ export async function handleRedirectCallback() {
   if (!/[?&]code=/.test(q) || !/[?&]state=/.test(q)) return false
   const c = await client()
   if (!c) return false
-  const clean = () => window.history.replaceState({}, document.title, window.location.pathname)
+  let returnTo = window.location.pathname
+  const clean = () => window.history.replaceState({}, document.title, safeLocalReturnTo(returnTo, '/'))
   try {
-    await c.handleRedirectCallback()
+    const result = await c.handleRedirectCallback()
+    returnTo = result?.appState?.returnTo || returnTo
     const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
     if (token) localStorage.setItem(JWT_KEY, token)
     clean()

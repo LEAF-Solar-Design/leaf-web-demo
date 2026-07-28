@@ -44,7 +44,7 @@ import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
 import { redactTokens } from "./redact.js";
-import { GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
+import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import { DEFAULT_TENANT } from "./ports/index.js";
 import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent } from "./ports/index.js";
@@ -391,7 +391,9 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
             const rawKind = typeof gbody.kind === "string" ? gbody.kind.trim() : "";
             const kind = rawKind === "oauth" || rawKind === "api_key" ? rawKind : undefined;
             const label = typeof gbody.label === "string" ? gbody.label : undefined;
-            const st = await ports.grantAdmin.put(tenantId, token, kind, label);
+            const rawPlan = typeof gbody.plan === "string" ? gbody.plan.trim().toLowerCase() : "";
+            const plan = rawPlan === "team" || rawPlan === "enterprise" ? rawPlan : undefined;
+            const st = await ports.grantAdmin.put(tenantId, token, kind, label, plan);
             return send(res, 200, st); // {linked, linked_at, kind} — token never echoed
           }
           if (method === "PATCH") {
@@ -532,6 +534,13 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         return send(res, 401, {
           grant_required: true,
           error: { message: err.message, code: "grant_required" },
+        });
+      }
+      if (err instanceof GrantPoolUnavailableError) {
+        return send(res, 429, {
+          errorCode: "llm_quota_exhausted",
+          message: err.message,
+          retry_after_s: err.retryAfterS,
         });
       }
       if (err instanceof AuthorLoopError) {

@@ -59,6 +59,7 @@ import { authConfigured, isSignedIn, login } from '../auth.js'
 import { classifyAgentError } from '../converse.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
+import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
 import { shouldStartTour } from '../demo/tourEntry.js'
 import * as mockVersions from '../mock/mockVersions.js'
 
@@ -67,7 +68,10 @@ const PROOF_MODE =
   import.meta.env.VITE_CAT_PROOF === '1' ||
   new URLSearchParams(window.location.search).get('proof') === '1'
 const DRAWING_SOURCE = PROOF_MODE ? 'cat' : 'rooftop_demo'
-const PUBLIC_DEMO = new URLSearchParams(window.location.search).get('demo') === '1'
+const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') === '1'
+// A signed-in user gets the live session and mounted-account path on the same
+// CAD surface. Only an anonymous demo remains fully local.
+const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
 const LIVE_TOUR_REQUESTED = new URLSearchParams(window.location.search).get('demo') === 'tour'
 const freshDrawingId = () => {
   const randomId = globalThis.crypto?.randomUUID?.()
@@ -234,10 +238,12 @@ export default function ToolCast({
   const [quotaAt, setQuotaAt] = useState(0)
   const [tourOn, setTourOn] = useState(false)
   const [tourIndex, setTourIndex] = useState(0)
+  const [demoTurns, setDemoTurns] = useState([])
   const [focusView, setFocusView] = useState(false)
   const toastSeqRef = useRef(0)
   const accountSessionObservedRef = useRef(false)
   const tourSeqRef = useRef(0)
+  const demoTurnSeqRef = useRef(0)
   const catalogDecisionRef = useRef(null)
   const openedCatalogKeyRef = useRef('')
   const runIntentSessionRef = useRef(null)
@@ -834,6 +840,19 @@ export default function ToolCast({
     setPhase('starting')
     if (text.startsWith('/')) setLeftView('catalog')
     const decision = await catalog.actions.dispatch(text)
+    if (PUBLIC_DEMO) {
+      const id = `demo-turn-${++demoTurnSeqRef.current}`
+      setDemoTurns((current) => [...current, { id, text, reply: demoReplyFor(text, decision) }])
+      setPrompt('')
+      const actionable = decision?.lane !== 'run' || (decision?.tool && Number(decision.confidence) >= 0.7)
+      if (!actionable) {
+        catalog.actions.dismissRoute()
+        setLeftView('operator')
+        setPhase('ready')
+        return decision
+      }
+      if (decision?.lane === 'run' || decision?.lane === 'solve') setLeftView('operator')
+    }
     if (decision) setPhase('proposal')
     else setPhase('failed')
     return decision
@@ -941,7 +960,9 @@ export default function ToolCast({
           <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!sessionReady} onClick={() => setLeftView('workspace')}>Project</button>
         </div>
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
-          {leftView === 'operator' && (sessionAuthRequired ? (
+          {leftView === 'operator' && (PUBLIC_DEMO ? (
+            <DemoConversationPanel turns={demoTurns} onSuggestion={dispatchRequest} canSignIn={authConfigured} onSignIn={() => login()} />
+          ) : sessionAuthRequired ? (
             <>
               {guestDrawing && (
                 <div className="tc-panel-note" role="status" data-testid="guest-view-only">
@@ -959,7 +980,7 @@ export default function ToolCast({
               sessionId={sessionId}
               userTurns={turns}
               onDismiss={() => {}}
-              onLinkClaude={() => {}}
+              onLinkClaude={() => { setRightView('trust'); setClaudeOpen(true) }}
               onAttachJob={attachJob}
               onJobLinked={attachJob}
               writeLocked={checkout.writeLocked}
@@ -1281,7 +1302,7 @@ export default function ToolCast({
             <div className="strip-decision enter" role="status">
               <span className="dot square" aria-hidden="true" />
               <span className="strip-sentence">{agentBanner.message}</span>
-              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => setRightView('trust')}>Link account</button>}
+              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => { setRightView('trust'); setClaudeOpen(true) }}>Link account</button>}
               <button type="button" className="chip-neutral" onClick={catalog.actions.clearAgentBanner}>Dismiss</button>
             </div>
           )}
@@ -1305,15 +1326,17 @@ export default function ToolCast({
               onChange={(event) => changePrompt(event.target.value)}
               onKeyDown={runOnEnter}
               aria-label="Command bar"
-              placeholder={PROOF_MODE
+              placeholder={PUBLIC_DEMO
+                ? 'Message the demo or describe a CAD task.'
+                : PROOF_MODE
                 ? `Try: ${CAT_REQUEST}`
                 : 'Describe a change to this drawing. Nothing runs until you submit it.'}
             />
-            <button type="button" className="tc-run" onClick={runRequest} disabled={platformSession.status !== 'active' || busy || jobRunning || routing || phase === 'loading'}>{routing ? 'Routing' : 'Run'}</button>
+            <button type="button" className="tc-run" onClick={runRequest} disabled={platformSession.status !== 'active' || busy || jobRunning || routing || phase === 'loading'}>{routing ? 'Routing' : PUBLIC_DEMO ? 'Send' : 'Run'}</button>
           </div>
           <div className="tc-bar-controls">
             <span className="tc-bar-chip">Scope · this drawing</span>
-            <span className="tc-bar-scopes">plan · approve · execute · version</span>
+            <span className="tc-bar-scopes">{PUBLIC_DEMO ? 'message · review · run · version' : 'plan · approve · execute · version'}</span>
             <span className="tc-bar-proj">{activeDrawingId}</span>
             <span className="key tc-bar-key">⌘K</span>
           </div>

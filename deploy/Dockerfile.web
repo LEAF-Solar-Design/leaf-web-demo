@@ -3,19 +3,25 @@
 # Leaf platform — WEB frontend (Vite + React + three.js), served static by nginx.
 #
 # LIVE build: VITE_MOCK=0 (default) bakes the app to hit the backend; the browser
-# calls VITE_API_BASE directly (default http://localhost:8130 — the app's
-# published port on the host), so this bundle is host-portable via the build arg.
+# calls VITE_API_BASE directly. The deploy default is same-origin, while local
+# docker-compose passes the app's published host port as a build arg.
 # The header Mock toggle still lets a viewer flip to client-side data at runtime.
 
 # ---- build stage: vite build (env baked at BUILD time) ----------------------
 FROM node:22-slim AS build
 WORKDIR /web
 
-ARG VITE_API_BASE=http://localhost:8130
+ARG VITE_API_BASE=
 ARG VITE_MOCK=0
+ARG VITE_AUTH0_DOMAIN=leafautomation.us.auth0.com
+ARG VITE_AUTH0_CLIENT_ID=zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
+ARG VITE_AUTH0_AUDIENCE=https://api.leafdesign.ai
 ARG LEAF_SOURCE_SHA=unknown
 ENV VITE_API_BASE=${VITE_API_BASE} \
     VITE_MOCK=${VITE_MOCK} \
+    VITE_AUTH0_DOMAIN=${VITE_AUTH0_DOMAIN} \
+    VITE_AUTH0_CLIENT_ID=${VITE_AUTH0_CLIENT_ID} \
+    VITE_AUTH0_AUDIENCE=${VITE_AUTH0_AUDIENCE} \
     LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}
 
 COPY web/package.json web/package-lock.json /web/

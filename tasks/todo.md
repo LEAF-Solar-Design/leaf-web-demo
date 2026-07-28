@@ -249,3 +249,22 @@ Risks:
   explicit allowlisted probe fails production startup.
 - The live staging services currently use images from several source commits.
 - Cloud mutation must use a named federated identity, never the root identity.
+
+# Staging Team and Enterprise subscription mounts
+
+- [x] Require the active tenant owner to mount, list, select, and remove Claude accounts.
+- [x] Route each live turn to the least-used authorized mount within the same tenant.
+- [x] Record token-free per-account usage and bounded quota cooldown state.
+- [x] Keep the anonymous CAD demo local and enable real conversation for signed-in users on the same CAD surface.
+- [x] Add account labels, status, automatic routing state, and removal to the mounted-account panel.
+- [x] Prove tenant isolation, role denial, secret redaction, routing, quota behavior, and browser behavior.
+- [ ] Deploy exact app, harness, and web commits to staging through protected GitHub workflows.
+- [ ] Verify the signed-in staging flow and record rollback evidence.
+
+Risks:
+
+- Consumer Free, Pro, and Max credentials must not enter this commercial mounting lane.
+- Routing must never pool credentials across tenants or bypass provider limits.
+- Credential material must stay server-side and must never enter logs, responses, browser storage, or usage records.
+- Concurrent turns must not lose usage updates or select disabled accounts.
+- Anonymous demo traffic must never reach a mounted private account.

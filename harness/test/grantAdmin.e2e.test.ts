@@ -131,7 +131,7 @@ describe("harness /grants admin endpoints", () => {
     expect(body.accounts).toHaveLength(1);
   });
 
-  it("GET diagnostic returns only token-free v2 storage facts", async () => {
+  it("GET diagnostic returns only token-free v3 storage facts", async () => {
     await store.put("acme", FAKE);
     const r = await fetch(`${baseUrl}/grants/acme/diagnostic`);
     expect(r.status).toBe(200);
@@ -150,7 +150,7 @@ describe("harness /grants admin endpoints", () => {
       kind: "oauth",
       backend: "file",
       path_class: "local_file",
-      record_format: "v2",
+      record_format: "v3",
       legacy_fallback_present: false,
       degraded: false,
       owner: { mode: process.platform === "win32" ? "0666" : "0600" },

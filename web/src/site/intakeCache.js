@@ -6,7 +6,7 @@
 // (the default) the app makes ZERO /api calls — the bundled capture IS the
 // canonical source, so we serve it directly instead of probing a backend
 // that doesn't exist.
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8130'
+const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 const MOCK_DEFAULT = import.meta.env.VITE_MOCK !== '0'
 
 const DEMO_SOLVE_TIMEOUT_MS = 3500

@@ -19,6 +19,10 @@ def test_status_whitelists_multi_account_fields_without_secret_material():
                 "kind": "oauth",
                 "linked_at": "2026-07-25T07:00:00Z",
                 "active": True,
+                "plan": "team",
+                "eligible": True,
+                "usage_tokens": 314,
+                "cooldown_until": "2026-07-25T07:15:00Z",
                 "token": fake_token,
                 "path": "/secret/file",
             },
@@ -34,6 +38,10 @@ def test_status_whitelists_multi_account_fields_without_secret_material():
         "kind": "oauth",
         "linked_at": "2026-07-25T07:00:00Z",
         "active": True,
+        "plan": "team",
+        "eligible": True,
+        "usage_tokens": 314,
+        "cooldown_until": "2026-07-25T07:15:00Z",
     }]
     serialized = json.dumps(body)
     assert fake_token not in serialized

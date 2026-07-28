@@ -187,16 +187,20 @@ export function createPlatformTrustController({
     }
   }
 
-  const linkClaude = async (token, kind) => {
+  const linkClaude = async (token, kind, label, plan) => {
     if (state.mock) return null
     const generation = begin('grant')
     publish({ grantBusy: true, grantLoading: false, grantErr: null })
     try {
-      const value = await services.linkClaudeGrant?.(token, kind)
+      const value = await services.linkClaudeGrant?.(token, kind, label, plan)
       if (!current('grant', generation)) return null
       recordOutcome('grant')
-      const linkedAt = value?.linked_at || new Date(now()).toISOString()
-      const grant = { linked: true, linked_at: linkedAt, kind: value?.kind || kind || null }
+      const grant = value ?? {
+        linked: true,
+        linked_at: new Date(now()).toISOString(),
+        kind: kind || null,
+        accounts: [],
+      }
       publish({ grant, grantBusy: false })
       return grant
     } catch (error) {
@@ -207,15 +211,33 @@ export function createPlatformTrustController({
     }
   }
 
-  const unlinkClaude = async () => {
+  const activateClaude = async (accountId) => {
     if (state.mock) return null
     const generation = begin('grant')
     publish({ grantBusy: true, grantLoading: false, grantErr: null })
     try {
-      await services.unlinkClaudeGrant?.()
+      const value = await services.activateClaudeGrant?.(accountId)
       if (!current('grant', generation)) return null
       recordOutcome('grant')
-      const grant = { linked: false, linked_at: null }
+      publish({ grant: value ?? state.grant, grantBusy: false })
+      return value ?? state.grant
+    } catch (error) {
+      if (!current('grant', generation)) return null
+      recordOutcome('grant', error)
+      publish({ grantBusy: false, grantErr: safeError(error) })
+      return null
+    }
+  }
+
+  const unlinkClaude = async (accountId) => {
+    if (state.mock) return null
+    const generation = begin('grant')
+    publish({ grantBusy: true, grantLoading: false, grantErr: null })
+    try {
+      const value = await services.unlinkClaudeGrant?.(accountId)
+      if (!current('grant', generation)) return null
+      recordOutcome('grant')
+      const grant = value ?? { linked: false, linked_at: null, accounts: [] }
       publish({ grant, grantBusy: false })
       return grant
     } catch (error) {
@@ -244,6 +266,7 @@ export function createPlatformTrustController({
     loadHealth,
     loadGrant,
     linkClaude,
+    activateClaude,
     unlinkClaude,
     refreshAll,
     isEntitled: (key, fallback = true) => entitlementAllowed(state.entitlements, key, fallback),

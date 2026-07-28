@@ -49,6 +49,14 @@ button.key:disabled { opacity: .6; cursor: default; }
 .ca-field.field-invalid input { border-color: var(--status-danger); }
 .field-err { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--status-danger); line-height: 1.4; }
 
+.ca-account-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.ca-account { border: 1px solid var(--border); padding: 9px; display: flex; flex-direction: column; gap: 7px; }
+.ca-account-main { display: flex; align-items: center; gap: 7px; font-size: 11.5px; }
+.ca-account-main b { flex: 1; color: var(--foreground); }
+.ca-route { color: var(--primary); }
+.ca-account-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 10.5px; }
+.ca-account-actions { display: flex; gap: 6px; align-items: center; }
+
 /* VersionHistory rows — O2 resolver anatomy (2px accent left bar + tint on the
    active/previewed row, transparent at rest, hairline separators). Overrides
    the legacy filled-button .vh-row in styles.css by specificity. */
