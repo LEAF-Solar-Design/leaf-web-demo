@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { captureStagingIdentity } from './stagingIdentity.mjs'
-import { stagingProofPath } from './stagingConfig.mjs'
+import { allowedStagingHostnames, assertPageOnAllowedOrigin, stagingProofPath } from './stagingConfig.mjs'
 import { writeProofReceipt } from '../proofReceipt.mjs'
 
 // Observed on the deployed staging surface (2026-07-27, signed-out browser
@@ -28,9 +28,11 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 const STAGING_JWT = process.env.LEAF_E2E_STAGING_JWT || ''
 
 async function primeAuthenticatedPage(page) {
-  await page.addInitScript((token) => {
-    window.localStorage.setItem('leaf.jwt', token)
-  }, STAGING_JWT)
+  await page.addInitScript(({ token, allowedHostnames }) => {
+    if (allowedHostnames.includes(location.hostname.toLowerCase())) {
+      window.localStorage.setItem('leaf.jwt', token)
+    }
+  }, { token: STAGING_JWT, allowedHostnames: [...allowedStagingHostnames()] })
 }
 
 test('ID-01 + CA-01: an authenticated staging session reaches the operator surface and a real tool catalog', async ({ page, request, baseURL }) => {
@@ -44,6 +46,7 @@ test('ID-01 + CA-01: an authenticated staging session reaches the operator surfa
     if (url.origin === stagingOrigin) observedEndpoints.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
   await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
+  assertPageOnAllowedOrigin(page)
   await expect(page.getByRole('heading', { name: 'You are not signed in' })).toHaveCount(0)
   const catalogTab = page.locator('#workspace-tab-catalog')
   await expect(catalogTab).toBeEnabled()
@@ -58,9 +61,13 @@ test('ID-01 + CA-01: an authenticated staging session reaches the operator surfa
   expect(Array.isArray(toolsBody?.tools)).toBe(true)
   const tools = toolsBody.tools
   expect(tools.length).toBeGreaterThan(0)
+  const realName = tools.find((tool) => typeof tool?.name === 'string' && tool.name)?.name
+  expect(realName).toBeTruthy()
   observedEndpoints.push(`GET /api/tools ${toolsResponse.status()}`)
   await catalogTab.click()
-  await expect(page.locator('.tool-card').first()).toBeVisible({ timeout: 15_000 })
+  // The catalog controller keeps stale mock cards across this mode change
+  // (createCatalogController.js ~257), so require a returned real tool name.
+  await expect(page.locator('.tool-card').filter({ hasText: realName })).toBeVisible({ timeout: 15_000 })
 
   const screenshotPath = stagingProofPath('auth-required', 'id-01-ca-01.png')
   await page.screenshot({ path: screenshotPath, fullPage: true })
@@ -107,6 +114,7 @@ test('VR-01: the version drawer opens with real, non-empty history for an authen
     if (url.origin === stagingOrigin) observedEndpoints.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
   await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
+  assertPageOnAllowedOrigin(page)
     const versionsTab = page.locator('#operations-tab-versions')
     await expect(versionsTab).toBeEnabled()
     await versionsTab.click()
@@ -161,6 +169,7 @@ test('authoring entry point renders for an authenticated staging session (no AU-
   test.skip(!STAGING_JWT, 'LEAF_E2E_STAGING_JWT is not set; skipping today')
   await primeAuthenticatedPage(page)
   await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
+  assertPageOnAllowedOrigin(page)
   const authorTab = page.locator('#workspace-tab-author')
   await expect(authorTab).toBeEnabled()
   await authorTab.click()

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { assertPageOnAllowedOrigin } from './stagingConfig.mjs'
 
 // Renamed from guest-run-fail-closed.spec.mjs. This is a pure security
 // regression guard, not a capability-ledger proof: it deliberately writes no
@@ -20,6 +21,7 @@ import { expect, test } from '@playwright/test'
 // intact.
 test('a signed-out visitor on staging cannot reach a mutating or protected action', async ({ page, request }) => {
   await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
+  assertPageOnAllowedOrigin(page)
 
   await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible({ timeout: 15_000 })
   const runButton = page.getByRole('button', { name: 'Run', exact: true })

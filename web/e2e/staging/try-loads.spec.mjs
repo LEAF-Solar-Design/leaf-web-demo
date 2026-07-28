@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { assertPageOnAllowedOrigin } from './stagingConfig.mjs'
 
 // Pure connectivity/regression check, deliberately without a capability
 // receipt (same shape as e2e/prod/unified-prod-readonly.spec.mjs). The
@@ -21,7 +22,8 @@ import { expect, test } from '@playwright/test'
 // stays green while the known gap persists and turns red when it is fixed.
 test('the deployed staging /try surface loads without an HTTP-level or application error', async ({ page }) => {
   await page.goto('/try', { waitUntil: 'networkidle', timeout: 30_000 })
-  await expect(page).toHaveURL(/\/try(?:\?|$)/)
+  assertPageOnAllowedOrigin(page)
+  expect(new URL(page.url()).pathname).toBe('/try')
   await expect(page.locator('body')).not.toContainText('Internal Server Error')
   await expect(page.locator('body')).not.toContainText('Application error')
 

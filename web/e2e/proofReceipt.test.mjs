@@ -1,7 +1,6 @@
 // Small validator unit test for the widened CAPABILITY_ID regex in
-// proofReceipt.mjs. No ledger allowlist here on purpose: the ledger at
-// plans/UNIFIED-SURFACE-E2E-EXECUTION.md is the authority on which IDs are
-// real; this only pins the shape the regex accepts.
+// proofReceipt.mjs. The non-staging tests below have no ledger allowlist: the
+// regex only checks shape. At the staging tier, the ledger is the allowlist.
 //
 // Run with: node --test web/e2e/proofReceipt.test.mjs
 import assert from 'node:assert/strict'
@@ -11,35 +10,42 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { makeProofReceipt, writeProofReceipt } from './proofReceipt.mjs'
 
-const baseInput = {
+const nonStagingBaseInput = {
+  evidence_tier: 'local-e2e',
+  route: '/try',
+  runtime: 'test',
+  result: { verdict: 'pass' },
+}
+
+const stagingBaseInput = {
   evidence_tier: 'staging',
   route: '/try',
   runtime: 'test',
   result: { verdict: 'pass' },
   source_commit: 'd6f548b',
-  sub_cases: { proven: ['healthy'], not_proven: [] },
+  sub_cases: { proven: ['healthy'], not_proven: ['degraded', 'retry', 'recovery'] },
 }
 
 test('accepts a plain two-letter/two-digit capability id', () => {
-  const receipt = makeProofReceipt({ ...baseInput, capability_ids: ['CA-01'] })
+  const receipt = makeProofReceipt({ ...nonStagingBaseInput, capability_ids: ['CA-01'] })
   assert.deepEqual(receipt.capability_ids, ['CA-01'])
 })
 
 test('accepts a letter-suffixed ledger id like ID-04A and ID-04B', () => {
-  const receipt = makeProofReceipt({ ...baseInput, capability_ids: ['ID-04A', 'ID-04B'] })
+  const receipt = makeProofReceipt({ ...nonStagingBaseInput, capability_ids: ['ID-04A', 'ID-04B'] })
   assert.deepEqual(receipt.capability_ids, ['ID-04A', 'ID-04B'])
 })
 
 test('rejects a lowercase capability id', () => {
   assert.throws(
-    () => makeProofReceipt({ ...baseInput, capability_ids: ['ca-01'] }),
+    () => makeProofReceipt({ ...nonStagingBaseInput, capability_ids: ['ca-01'] }),
     /invalid capability id/,
   )
 })
 
 test('rejects two or more trailing letters', () => {
   assert.throws(
-    () => makeProofReceipt({ ...baseInput, capability_ids: ['CA-01ZZ'] }),
+    () => makeProofReceipt({ ...nonStagingBaseInput, capability_ids: ['CA-01ZZ'] }),
     /invalid capability id/,
   )
 })
@@ -47,26 +53,20 @@ test('rejects two or more trailing letters', () => {
 test('rejects garbage that merely contains a valid-looking id', () => {
   for (const garbage of ['CA-01-extra', ' CA-01', 'CA-01 ', 'CA-1', 'C-01', 'CA-001', 'ZZ_99']) {
     assert.throws(
-      () => makeProofReceipt({ ...baseInput, capability_ids: [garbage] }),
+      () => makeProofReceipt({ ...nonStagingBaseInput, capability_ids: [garbage] }),
       /invalid capability id/,
       `expected "${garbage}" to be rejected`,
     )
   }
 })
 
-// The regex is deliberately permissive about WHICH two-letter/two-digit stem
-// plus optional single letter suffix it accepts (e.g. it does not reject
-// "ZZ-99Z", which is not a real ledger row). This is intentional: the shape
-// check lives here, but the ledger at plans/UNIFIED-SURFACE-E2E-EXECUTION.md
-// is the sole authority on which IDs are real. No allowlist is added here so
-// this file never goes stale against the ledger.
-test('the regex checks shape only; the ledger, not this file, is the authority on real ids', () => {
-  const receipt = makeProofReceipt({ ...baseInput, capability_ids: ['ZZ-99Z'] })
+test('the non-staging regex checks shape only', () => {
+  const receipt = makeProofReceipt({ ...nonStagingBaseInput, capability_ids: ['ZZ-99Z'] })
   assert.deepEqual(receipt.capability_ids, ['ZZ-99Z'])
 })
 
 test('rejects a staging receipt without sub-case accounting', () => {
-  const { sub_cases, ...withoutSubCases } = baseInput
+  const { sub_cases, ...withoutSubCases } = stagingBaseInput
   assert.throws(
     () => makeProofReceipt({ ...withoutSubCases, capability_ids: ['HL-01'] }),
     /requires sub_cases/,
@@ -75,13 +75,13 @@ test('rejects a staging receipt without sub-case accounting', () => {
 
 test('rejects a malformed staging source commit', () => {
   assert.throws(
-    () => makeProofReceipt({ ...baseInput, capability_ids: ['HL-01'], source_commit: 'local-worktree' }),
+    () => makeProofReceipt({ ...stagingBaseInput, capability_ids: ['HL-01'], source_commit: 'local-worktree' }),
     /well-formed source_commit/,
   )
 })
 
 test('requires an explicit staging source commit', () => {
-  const { source_commit, ...withoutSourceCommit } = baseInput
+  const { source_commit, ...withoutSourceCommit } = stagingBaseInput
   assert.throws(
     () => makeProofReceipt({ ...withoutSourceCommit, capability_ids: ['HL-01'] }),
     /well-formed source_commit/,
@@ -90,11 +90,62 @@ test('requires an explicit staging source commit', () => {
 
 test('accepts the readiness sha256 source revision form', () => {
   const receipt = makeProofReceipt({
-    ...baseInput,
+    ...stagingBaseInput,
     capability_ids: ['HL-01'],
     source_commit: `sha256:${'a'.repeat(64)}`,
   })
   assert.equal(receipt.source_commit, `sha256:${'a'.repeat(64)}`)
+})
+
+test('rejects a short sha256 staging source revision', () => {
+  assert.throws(
+    () => makeProofReceipt({ ...stagingBaseInput, capability_ids: ['HL-01'], source_commit: 'sha256:abcdef0' }),
+    /well-formed source_commit/,
+  )
+})
+
+test('staging receipts use the ledger as the sub-case authority', () => {
+  const receipt = makeProofReceipt({ ...stagingBaseInput, capability_ids: ['HL-01'] })
+  assert.deepEqual(receipt.sub_cases, {
+    proven: ['healthy'],
+    not_proven: ['degraded', 'retry', 'recovery'],
+    row_complete: false,
+  })
+})
+
+test('rejects an invented staging sub-case', () => {
+  assert.throws(
+    () => makeProofReceipt({ ...stagingBaseInput, capability_ids: ['HL-01'], sub_cases: { proven: ['healthy', 'invented'], not_proven: ['degraded', 'retry', 'recovery'] } }),
+    /must match the ledger row/,
+  )
+})
+
+test('rejects an omitted staging sub-case', () => {
+  assert.throws(
+    () => makeProofReceipt({ ...stagingBaseInput, capability_ids: ['HL-01'], sub_cases: { proven: ['healthy'], not_proven: ['degraded', 'retry'] } }),
+    /must cover every ledger sub-case/,
+  )
+})
+
+test('rejects overlapping staging sub-cases', () => {
+  assert.throws(
+    () => makeProofReceipt({ ...stagingBaseInput, capability_ids: ['HL-01'], sub_cases: { proven: ['healthy', 'degraded'], not_proven: ['degraded', 'retry', 'recovery'] } }),
+    /must be disjoint/,
+  )
+})
+
+test('rejects duplicate staging sub-cases', () => {
+  assert.throws(
+    () => makeProofReceipt({ ...stagingBaseInput, capability_ids: ['HL-01'], sub_cases: { proven: ['healthy', 'healthy'], not_proven: ['degraded', 'retry', 'recovery'] } }),
+    /must not contain duplicates/,
+  )
+})
+
+test('rejects a staging receipt with multiple capability ids', () => {
+  assert.throws(
+    () => makeProofReceipt({ ...stagingBaseInput, capability_ids: ['HL-01', 'CA-01'] }),
+    /requires exactly one capability id/,
+  )
 })
 
 test('requires every staging artifact to exist before writing the receipt', () => {
@@ -103,7 +154,7 @@ test('requires every staging artifact to exist before writing the receipt', () =
     const missingPath = join(receiptDir, 'missing.png')
     assert.throws(
       () => writeProofReceipt(join(receiptDir, 'receipt.json'), {
-        ...baseInput,
+        ...stagingBaseInput,
         capability_ids: ['HL-01'],
         artifacts: [missingPath],
       }),
@@ -113,11 +164,11 @@ test('requires every staging artifact to exist before writing the receipt', () =
     const artifactPath = join(receiptDir, 'evidence.png')
     writeFileSync(artifactPath, 'evidence')
     const receipt = writeProofReceipt(join(receiptDir, 'receipt.json'), {
-      ...baseInput,
+      ...stagingBaseInput,
       capability_ids: ['HL-01'],
       artifacts: [artifactPath],
     })
-    assert.equal(receipt.sub_cases.row_complete, true)
+    assert.equal(receipt.sub_cases.row_complete, false)
   } finally {
     rmSync(receiptDir, { recursive: true, force: true })
   }

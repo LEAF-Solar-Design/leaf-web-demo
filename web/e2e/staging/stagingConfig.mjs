@@ -27,6 +27,34 @@ export function stagingProofPath(...segments) {
   return join(STAGING_OUTPUT_ROOT, ...segments)
 }
 
+export function allowedStagingHostnames(env = process.env) {
+  const defaultHost = new URL(DEFAULT_STAGING_BASE_URL).hostname
+  const override = env[STAGING_ALLOW_HOST_ENV] || ''
+  const allowed = new Set([defaultHost])
+  if (override) {
+    if (!ALLOWED_OVERRIDE_HOST.test(override) || override.toLowerCase() === PRODUCTION_HOST) {
+      throw new StagingHostError(
+        `${STAGING_ALLOW_HOST_ENV} must be a non-production *.leafdesign.ai hostname: ${override}`,
+      )
+    }
+    allowed.add(override.toLowerCase())
+  }
+  return allowed
+}
+
+export function assertPageOnAllowedOrigin(page, env = process.env) {
+  let parsed
+  try {
+    parsed = new URL(page.url())
+  } catch {
+    throw new StagingHostError(`staging browser navigated to an invalid URL: ${page.url()}`)
+  }
+  if (parsed.protocol !== 'https:' || !allowedStagingHostnames(env).has(parsed.hostname.toLowerCase())) {
+    throw new StagingHostError(`staging browser navigated off the allowed HTTPS origin: ${page.url()}`)
+  }
+  return parsed
+}
+
 /**
  * Throws unless the resolved base URL's hostname is exactly the default
  * staging host, or exactly matches an explicit LEAF_E2E_STAGING_ALLOW_HOST
@@ -40,18 +68,9 @@ export function assertAllowedStagingHost(baseURL, env = process.env) {
     throw new StagingHostError(`LEAF_E2E_STAGING_BASE_URL is not a valid absolute URL: ${baseURL}`)
   }
   const defaultHost = new URL(DEFAULT_STAGING_BASE_URL).hostname
-  const override = env[STAGING_ALLOW_HOST_ENV] || ''
-  const allowed = new Set([defaultHost])
+  const allowed = allowedStagingHostnames(env)
   if (baseURL !== DEFAULT_STAGING_BASE_URL && parsed.protocol !== 'https:') {
     throw new StagingHostError(`LEAF_E2E_STAGING_BASE_URL must use https: ${baseURL}`)
-  }
-  if (override) {
-    if (!ALLOWED_OVERRIDE_HOST.test(override) || override.toLowerCase() === PRODUCTION_HOST) {
-      throw new StagingHostError(
-        `${STAGING_ALLOW_HOST_ENV} must be a non-production *.leafdesign.ai hostname: ${override}`,
-      )
-    }
-    allowed.add(override.toLowerCase())
   }
   if (!allowed.has(parsed.hostname.toLowerCase())) {
     throw new StagingHostError(
