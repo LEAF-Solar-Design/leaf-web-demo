@@ -28,8 +28,20 @@ def deployment_identity(env: Mapping[str, str] | None = None) -> dict[str, Any]:
         raise ValueError("deployment identity is invalid")
     if identity.get("schema") != "leaf.deployment-identity.v1":
         raise ValueError("deployment identity has an unsupported schema")
-    if identity.get("environment") != "staging":
-        raise ValueError("deployment identity is not staging")
+    runtime_environment = current.get("LEAF_RUNTIME_ENV", "").strip().lower()
+    configured_environment = current.get(
+        "LEAF_DEPLOYMENT_ENVIRONMENT", ""
+    ).strip().lower()
+    if runtime_environment == "production":
+        if configured_environment != "production":
+            raise ValueError("production deployment environment is not explicit")
+        expected_environment = "production"
+    else:
+        if configured_environment not in {"", "staging"}:
+            raise ValueError("non-production deployment environment is invalid")
+        expected_environment = "staging"
+    if identity.get("environment") != expected_environment:
+        raise ValueError("deployment identity environment does not match runtime")
     revision = identity.get("source_revision")
     if not isinstance(revision, str) or not _SOURCE_SHA.fullmatch(revision):
         raise ValueError("deployment identity lacks a full source SHA")
@@ -49,7 +61,7 @@ def deployment_identity(env: Mapping[str, str] | None = None) -> dict[str, Any]:
         sanitized[name] = {"image_digest": digest, "source_revision": revision}
     return {
         "schema": "leaf.deployment-identity.v1",
-        "environment": "staging",
+        "environment": expected_environment,
         "source_revision": revision,
         "services": sanitized,
     }

@@ -1,8 +1,8 @@
 name: Build platform images
 
 # ---------------------------------------------------------------------------
-# Builds the three leaf-platform production images (app / broker / harness)
-# in parallel from ONE commit and pushes all three to ECR at ONE tag:
+# Builds the five leaf-platform release images (app / broker / canonical-worker /
+# harness / web) in parallel from ONE commit and pushes all five to ECR at ONE tag:
 # prod-<shortsha>. Each image has its own registry-backed Buildx cache.
 # ECR tags are immutable, so cache publication uses buildcache-<shortsha> and
 # never overwrites a tag. A push imports only its immediate predecessor's cache.
@@ -11,21 +11,18 @@ name: Build platform images
 # Cache retention contract: the AWS repository must expire buildcache-* tags
 # after 14 days or retain no more than the latest 20 per repository. Production
 # prod-* tags use a separate lifecycle and are never cache inputs or outputs.
-# The deploy workflow in LEAF-Solar-Design/leaf-automation-aws-terraform
-# refuses to deploy unless all three repos carry the tag, so a partial push
-# here can never reach production.
+# A staging supply-set manifest records all five immutable digests, the full
+# source SHA, and the deterministic web artifact hash. A partial push can never
+# produce a production handoff candidate.
 #
-# Auto-build, MANUAL promote: every push to main builds and pushes images;
-# production deploys only happen when a human dispatches this workflow with
-# promote=true (or dispatches deploy-service-production.yml directly in the
-# terraform repo). Known gap, documented not skipped: leaf-platform has no
-# staging environment yet, so pre-promote validation = the merged commit's
-# gates plus the containerized smoke.
+# Auto-build, MANUAL handoff: every push to main builds and pushes images.
+# promote=true now requires an accepted staging execution receipt and emits a
+# digest-bound handoff artifact. This workflow never dispatches production.
 #
 # Auth: OIDC via leaf-github-web-demo-ecr-push-role (AWS_ECR_PUSH_ROLE repo
-# secret). That role can push to exactly the three leaf-platform-* ECR
-# repositories and nothing else; it cannot touch ECS, IAM, or secrets.
-# TERRAFORM_REPO_TOKEN (PAT with actions:write on the terraform repo) is
+# secret). That role must be limited to the five leaf-platform release ECR
+# repositories and cannot touch ECS, IAM, or secrets.
+# TERRAFORM_REPO_TOKEN (PAT with Actions read access to both repositories) is
 # only needed for the optional promote step.
 # ---------------------------------------------------------------------------
 
@@ -39,9 +36,29 @@ on:
         type: string
         required: false
       promote:
-        description: "Also trigger the production deploy in the terraform repo"
+        description: "Create a production handoff from an accepted staging execution receipt. Does not deploy."
         type: boolean
         default: false
+      staging_acceptance_workflow_run_id:
+        description: "Required with promote: successful infra-repo staging acceptance workflow run ID."
+        type: string
+        required: false
+      release_workflow_run_id:
+        description: "Required with promote: successful build workflow run that published the five-service manifest."
+        type: string
+        required: false
+      release_run_attempt:
+        description: "Required with promote: exact successful attempt of the release workflow run."
+        type: string
+        required: false
+      staging_acceptance_run_attempt:
+        description: "Required with promote: exact successful attempt of the staging acceptance workflow run."
+        type: string
+        required: false
+      staging_acceptance_artifact:
+        description: "Required with promote: exact staging-authored-execute-*-run-<id>-attempt-<attempt> artifact name."
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -65,6 +82,8 @@ jobs:
       previous_cache_tag: ${{ steps.tag.outputs.previous_cache_value }}
       source_sha: ${{ steps.source.outputs.sha }}
       source_mode: ${{ steps.source.outputs.mode }}
+      solver_revision: ${{ steps.solver.outputs.revision }}
+      solver_source_sha256: ${{ steps.solver.outputs.source_sha256 }}
 
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +98,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PROMOTE_INPUT: ${{ inputs.promote }}
           SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          STAGING_ACCEPTANCE_RUN_ID: ${{ inputs.staging_acceptance_workflow_run_id }}
+          STAGING_ACCEPTANCE_ARTIFACT: ${{ inputs.staging_acceptance_artifact }}
+          RELEASE_WORKFLOW_RUN_ID: ${{ inputs.release_workflow_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
+          STAGING_ACCEPTANCE_RUN_ATTEMPT: ${{ inputs.staging_acceptance_run_attempt }}
         run: |
           set -euo pipefail
           api_get() {
@@ -129,8 +153,49 @@ jobs:
             echo "::error::Only a source commit on main may request production promotion."
             exit 1
           fi
+          if [ "$PROMOTE_INPUT" = "true" ]; then
+            [ -n "$SOURCE_SHA_INPUT" ] || {
+              echo "::error::Production handoff requires the exact release source_sha input."
+              exit 1
+            }
+            [[ "$RELEASE_WORKFLOW_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ]] || {
+              echo "::error::Production handoff requires the successful release workflow run ID."
+              exit 1
+            }
+            [[ "$STAGING_ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ]] || {
+              echo "::error::Production handoff requires an exact staging acceptance workflow run ID."
+              exit 1
+            }
+            [[ "$RELEASE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::Production handoff requires the exact release run attempt."
+              exit 1
+            }
+            [[ "$STAGING_ACCEPTANCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::Production handoff requires the exact staging acceptance run attempt."
+              exit 1
+            }
+            [[ "$STAGING_ACCEPTANCE_ARTIFACT" =~ ^staging-authored-execute-([a-z0-9][a-z0-9-]{5,49})-run-${STAGING_ACCEPTANCE_RUN_ID}-attempt-${STAGING_ACCEPTANCE_RUN_ATTEMPT}$ ]] || {
+              echo "::error::Production handoff requires the exact attempt-specific staging execute artifact name."
+              exit 1
+            }
+          fi
           echo "sha=$CURRENT_SHA" >> "$GITHUB_OUTPUT"
           echo "mode=$SOURCE_MODE" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve canonical solver provenance
+        id: solver
+        run: |
+          set -euo pipefail
+          SOURCES=deploy/autofill-solver-sources.json
+          jq -e 'type == "object" and length == 1' "$SOURCES" >/dev/null || {
+            echo "::error::Automated release requires exactly one reviewed canonical solver source."
+            exit 1
+          }
+          revision=$(jq -er 'keys[0] | select(test("^[0-9a-f]{40}$"))' "$SOURCES")
+          source_sha256=$(jq -er --arg revision "$revision" \
+            '.[$revision] | select(test("^[0-9a-f]{64}$"))' "$SOURCES")
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "source_sha256=$source_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Validate image workflow invariants
         run: python scripts/test_build_platform_images_workflow.py
@@ -177,6 +242,7 @@ jobs:
     # cannot start until the full run-all-gates.py scoreboard is green for the
     # exact commit `prepare` resolved -- not merely for the branch tip.
     needs: prepare
+    if: ${{ !inputs.promote }}
     uses: ./.github/workflows/test-gate.yml
     permissions:
       contents: read
@@ -185,6 +251,7 @@ jobs:
 
   build:
     needs: [prepare, test]
+    if: ${{ !inputs.promote }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -194,7 +261,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [app, broker, harness]
+        image: [app, broker, canonical-worker, harness, web]
 
     env:
       AWS_REGION: us-east-1
@@ -208,6 +275,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Check out the exact canonical solver source
+        if: matrix.image == 'canonical-worker'
+        uses: actions/checkout@v4
+        with:
+          repository: LEAF-Solar-Design/autofill-solver
+          ref: ${{ needs.prepare.outputs.solver_revision }}
+          path: autofill-solver
           persist-credentials: false
 
       - name: Set up Docker Buildx
@@ -266,7 +342,10 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile.${{ matrix.image }}
-          build-args: ${{ matrix.image == 'app' && format('LEAF_SOURCE_SHA={0}', needs.prepare.outputs.source_sha) || '' }}
+          build-args: |
+            LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
+            ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
+          build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
           push: true
           tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           cache-from: ${{ steps.cache.outputs.from }}
@@ -274,6 +353,7 @@ jobs:
 
   verify:
     needs: [prepare, build]
+    if: ${{ !inputs.promote }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -286,6 +366,37 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build and hash the exact web deployment artifact
+        id: web-artifact
+        working-directory: web
+        env:
+          VITE_API_BASE: ""
+          VITE_MOCK: "0"
+          VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
+          VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
+          VITE_AUTH0_AUDIENCE: https://api.leafdesign.ai
+          LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
+            "$LEAF_SOURCE_SHA" > dist/health.json
+          artifact_sha256=$(python ../scripts/platform_release_manifest.py \
+            digest-web-dist --root dist)
+          echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
@@ -293,7 +404,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GHA-VerifyPlatformImages-${{ github.run_id }}
 
-      - name: Verify all three repositories carry the immutable tag
+      - name: Write the immutable five-service staging supply set
         run: |
           set -euo pipefail
           if [[ ! "$TAG" =~ ^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$ ]]; then
@@ -301,7 +412,7 @@ jobs:
             exit 1
           fi
           declare -A digests
-          for image in app broker harness; do
+          for image in app broker canonical-worker harness web; do
             repository="leaf-platform-$image"
             digest="$(aws ecr batch-get-image \
               --repository-name "$repository" \
@@ -314,19 +425,46 @@ jobs:
             fi
             digests["$image"]="$digest"
           done
+          python scripts/platform_release_manifest.py generate \
+            --source-revision "${{ needs.prepare.outputs.source_sha }}" \
+            --build-tag "$TAG" \
+            --solver-revision "${{ needs.prepare.outputs.solver_revision }}" \
+            --solver-source-sha256 "${{ needs.prepare.outputs.solver_source_sha256 }}" \
+            --web-artifact-sha256 "${{ steps.web-artifact.outputs.sha256 }}" \
+            --image "app=${digests[app]}" \
+            --image "broker=${digests[broker]}" \
+            --image "canonical-worker=${digests[canonical-worker]}" \
+            --image "harness=${digests[harness]}" \
+            --image "web=${digests[web]}" \
+            --output "$RUNNER_TEMP/staging-supply-set.json"
           {
-            echo "## Platform image set verified"
+            echo "## Five-service staging supply set verified"
             echo ""
-            echo "Tag: \`$TAG\` (all three of leaf-platform-app / broker / harness)"
-            for image in app broker harness; do
+            echo "Source: \`${{ needs.prepare.outputs.source_sha }}\`"
+            echo "Tag: \`$TAG\`"
+            for image in app broker canonical-worker harness web; do
               echo "- \`leaf-platform-$image@${digests[$image]}\`"
             done
-            echo ""
-            echo "Deploy via the terraform repo: deploy-service-production.yml with service=leaf-platform, image_tag=$TAG"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  promote:
-    needs: [prepare, verify]
+      - name: Upload immutable staging supply-set manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/staging-supply-set.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload deterministic web deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 30
+
+  handoff:
+    needs: [prepare]
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.promote &&
@@ -336,14 +474,108 @@ jobs:
 
     env:
       GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
-      TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}
+      RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
+      ACCEPTANCE_RUN_ID: ${{ inputs.staging_acceptance_workflow_run_id }}
+      ACCEPTANCE_RUN_ATTEMPT: ${{ inputs.staging_acceptance_run_attempt }}
+      ACCEPTANCE_ARTIFACT: ${{ inputs.staging_acceptance_artifact }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
 
     steps:
-      - name: Trigger production deploy (manual opt-in only)
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Consume the release manifest and accepted staging execution receipt
         run: |
           set -euo pipefail
-          gh workflow run deploy-service-production.yml \
-            -R LEAF-Solar-Design/leaf-automation-aws-terraform \
-            -f service=leaf-platform \
-            -f image_tag="$TAG"
-          echo "Dispatched deploy-service-production.yml for leaf-platform at $TAG"
+          RELEASE_WORKFLOW_PATH=.github/workflows/build-platform-images.yml
+          ACCEPTANCE_REPOSITORY=LEAF-Solar-Design/leaf-automation-aws-terraform
+          ACCEPTANCE_WORKFLOW_PATH=.github/workflows/accept-leaf-platform-staging-authored-cad.yml
+          RELEASE_ARTIFACT="staging-supply-set-$SOURCE_SHA-attempt-$RELEASE_RUN_ATTEMPT"
+          [[ "$ACCEPTANCE_ARTIFACT" =~ ^staging-authored-execute-([a-z0-9][a-z0-9-]{5,49})-run-${ACCEPTANCE_RUN_ID}-attempt-${ACCEPTANCE_RUN_ATTEMPT}$ ]]
+          ACCEPTANCE_RECEIPT_RUN_ID=${BASH_REMATCH[1]}
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID" \
+            > "$RUNNER_TEMP/release-workflow-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/build-platform-images.yml" \
+            > "$RUNNER_TEMP/release-workflow.json"
+          python scripts/platform_release_manifest.py verify-workflow-run \
+            --run "$RUNNER_TEMP/release-workflow-run.json" \
+            --workflow "$RUNNER_TEMP/release-workflow.json" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT" \
+            --workflow-path "$RELEASE_WORKFLOW_PATH" \
+            --event push --branch main --head-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/release-run-proof.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/release-artifacts.json"
+          python scripts/platform_release_manifest.py verify-artifact \
+            --listing "$RUNNER_TEMP/release-artifacts.json" \
+            --artifact-name "$RELEASE_ARTIFACT" \
+            --run-id "$RELEASE_RUN_ID" --head-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/release-artifact.json"
+          RELEASE_ARTIFACT_ID=$(jq -er '.id' "$RUNNER_TEMP/release-artifact.json")
+          mkdir -p "$RUNNER_TEMP/release"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RELEASE_ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/release.zip"
+          unzip -q "$RUNNER_TEMP/release.zip" -d "$RUNNER_TEMP/release"
+          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID" \
+            > "$RUNNER_TEMP/staging-acceptance-run.json"
+          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/workflows/accept-leaf-platform-staging-authored-cad.yml" \
+            > "$RUNNER_TEMP/staging-acceptance-workflow.json"
+          ACCEPTANCE_HEAD_SHA=$(jq -er '.head_sha' "$RUNNER_TEMP/staging-acceptance-run.json")
+          python scripts/platform_release_manifest.py verify-workflow-run \
+            --run "$RUNNER_TEMP/staging-acceptance-run.json" \
+            --workflow "$RUNNER_TEMP/staging-acceptance-workflow.json" \
+            --run-id "$ACCEPTANCE_RUN_ID" \
+            --run-attempt "$ACCEPTANCE_RUN_ATTEMPT" \
+            --workflow-path "$ACCEPTANCE_WORKFLOW_PATH" \
+            --event workflow_dispatch --branch main --head-sha "$ACCEPTANCE_HEAD_SHA" \
+            --output "$RUNNER_TEMP/staging-acceptance-run-proof.json"
+          gh api "repos/$ACCEPTANCE_REPOSITORY/compare/$ACCEPTANCE_HEAD_SHA...main" \
+            > "$RUNNER_TEMP/staging-acceptance-main-ancestry.json"
+          jq -e --arg head "$ACCEPTANCE_HEAD_SHA" '
+            (.merge_base_commit.sha | ascii_downcase) == $head
+            and (.status == "ahead" or .status == "identical")
+          ' "$RUNNER_TEMP/staging-acceptance-main-ancestry.json" >/dev/null
+          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/staging-acceptance-artifacts.json"
+          python scripts/platform_release_manifest.py verify-artifact \
+            --listing "$RUNNER_TEMP/staging-acceptance-artifacts.json" \
+            --artifact-name "$ACCEPTANCE_ARTIFACT" \
+            --run-id "$ACCEPTANCE_RUN_ID" --head-sha "$ACCEPTANCE_HEAD_SHA" \
+            --output "$RUNNER_TEMP/staging-acceptance-artifact.json"
+          ACCEPTANCE_ARTIFACT_ID=$(jq -er '.id' "$RUNNER_TEMP/staging-acceptance-artifact.json")
+          mkdir -p "$RUNNER_TEMP/staging-acceptance"
+          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/artifacts/$ACCEPTANCE_ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/staging-acceptance.zip"
+          unzip -q "$RUNNER_TEMP/staging-acceptance.zip" \
+            -d "$RUNNER_TEMP/staging-acceptance"
+          mapfile -t receipts < <(find "$RUNNER_TEMP/staging-acceptance" \
+            -type f -name '*.json' -print)
+          [ "${#receipts[@]}" -eq 1 ] || {
+            echo "::error::The accepted staging artifact must contain exactly one JSON receipt."
+            exit 1
+          }
+          git fetch --no-tags origin main
+          python scripts/platform_release_manifest.py verify-staging \
+            --manifest "$RUNNER_TEMP/release/staging-supply-set.json" \
+            --receipt "${receipts[0]}" \
+            --repo-root . \
+            --main-ref origin/main \
+            --release-run-proof "$RUNNER_TEMP/release-run-proof.json" \
+            --acceptance-run-proof "$RUNNER_TEMP/staging-acceptance-run-proof.json" \
+            --expected-receipt-run-id "$ACCEPTANCE_RECEIPT_RUN_ID" \
+            --output "$RUNNER_TEMP/production-handoff-candidate.json"
+          echo "Verified receipt-bound production handoff candidate. No image was rebuilt or retagged, and no deployment was dispatched." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified production handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-handoff-candidate-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/production-handoff-candidate.json
+          if-no-files-found: error
+          retention-days: 30

@@ -315,19 +315,53 @@ app with the same health checks as this compose stack, `/data` on EFS with the
 shared-mount topology preserved, secrets from AWS Secrets Manager
 (`leaf-platform/*`), and only the app container on the public ALB.
 
-THE deploy step is a two-workflow chain; nothing else deploys this platform:
+The release path is a staged, receipt-bound chain:
 
 1. **Build (this repo)**: `.github/workflows/build-platform-images.yml` runs on
-   every push to `main`, builds `deploy/Dockerfile.{app,broker,harness}` from
-   one commit, and pushes all three images to ECR at one `prod-<shortsha>` tag
-   (all builds complete before any push; a partial push can never deploy).
-2. **Deploy (terraform repo)**: dispatch `deploy-service-production.yml` in
-   `LEAF-Solar-Design/leaf-automation-aws-terraform` with
-   `service=leaf-platform image_tag=prod-<shortsha>`. It refuses any tag not
-   present in all three ECR repos, pins every container to its digest, rolls
-   the single-writer service without old/new overlap, verifies ALB health, and
-   auto-rolls back on failure. Promotion is always manual (or the opt-in
-   `promote=true` input on the build workflow).
+   every push to `main` and builds app, broker, canonical-worker, harness, and
+   web from one full application commit. The canonical-worker build also checks
+   out the exact solver commit attested by `deploy/autofill-solver-sources.json`.
+   After all five immutable ECR digests resolve, the workflow uploads one
+   `leaf.staging-supply-set.v1` manifest. It binds every digest to the full
+   application SHA, records the worker's application SHA, solver SHA, and
+   attested solver source SHA-256, and records a deterministic SHA-256 for the
+   exact web `dist/` artifact uploaded by the same run. This five-OCI document
+   describes the staging supply set. It is not final production identity.
+2. **Accept staging (terraform repo)**: run the protected staging authored-CAD
+   acceptance in `execute` mode. Its successful artifact must name the same
+   full source SHA and the same five digests as the staging supply-set manifest.
+   The producer must include its GitHub run ID and attempt in the artifact name.
+3. **Create the production handoff (this repo)**: manually run the build
+   workflow with `promote=true`, the full release `source_sha`, the successful
+   build workflow run ID and attempt, the successful acceptance workflow run ID
+   and attempt, and its exact attempt-specific
+   `staging-authored-execute-*-run-<run-id>-attempt-<attempt>` artifact name.
+   The build and push jobs are disabled on this handoff run. It accepts only the
+   canonical workflow file and workflow ID, expected event, `main` branch,
+   trusted head SHA, and supplied attempt for both upstream runs. It downloads
+   artifacts by their verified artifact IDs, verifies that the source is an
+   ancestor of `main`, binds the receipt's internal run ID to its artifact name,
+   and proves that all five accepted staging digests equal the release manifest.
+   It uploads a
+   `leaf.production-handoff-candidate.v1` receipt. It does not rebuild, retag,
+   or deploy an image.
+4. **Deploy (terraform repo, not yet receipt-enabled)**: production must consume
+   that handoff before it may change ECS or public traffic. Production app,
+   broker, harness, and canonical-worker are OCI/ECS workloads. Production web
+   is the Vercel project `leaf-platform-web`, not the staging web OCI image. The
+   final production identity must therefore use a typed v2 shape with four OCI
+   digests plus the exact Vercel deployment ID and the matching web artifact
+   SHA-256. A staging web image digest alone is never production web proof. The
+   old three-image tag-only dispatch was removed from this repository. Until
+   protected infrastructure and Vercel workflows consume and revalidate the
+   candidate, promotion stops at the artifact and fails closed.
+
+The ECR permission change is a required companion infrastructure PR. The
+`leaf-github-web-demo-ecr-push-role` must grant only the image upload and read
+actions needed for the five named `leaf-platform-*` release repositories. This
+application change does not grant, emulate, or bypass that IAM authority. The
+release build must remain blocked until the reviewed infrastructure PR supplies
+the role and immutable-tag repository policy.
 
 The historical one-shot CLI provisioning script (`apply.sh` + `taskdef.json`,
 outside this repo) is RETIRED from deploy duty; it remains provisioning

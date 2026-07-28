@@ -7,6 +7,7 @@
 FROM python:3.12-slim AS canonical-worker
 
 ARG AUTOFILL_SOLVER_REVISION
+ARG LEAF_SOURCE_SHA
 
 WORKDIR /app
 
@@ -29,11 +30,16 @@ WORKDIR /app/server
 RUN python -c \
       "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit')" \
       "$AUTOFILL_SOLVER_REVISION" \
+    && python -c \
+      "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')" \
+      "$LEAF_SOURCE_SHA" \
     && printf '%s\n' "$AUTOFILL_SOLVER_REVISION" \
-      > /opt/leaf/autofill-solver/.leaf-source-revision
+      > /opt/leaf/autofill-solver/.leaf-source-revision \
+    && printf '%s\n' "$LEAF_SOURCE_SHA" > /app/.leaf-source-revision
 
 ENV AUTOFILL_SOLVER_ROOT=/opt/leaf/autofill-solver \
     AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION} \
+    LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA} \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

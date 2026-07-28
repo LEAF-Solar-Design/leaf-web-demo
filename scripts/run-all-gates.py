@@ -531,10 +531,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_customization_store_scaling.py"), 3),
         Suite("server-deployment-source-identity",
               "server tests/test_deployment_source_identity.py", "pytest", SERVER,
-              _py_pytest("tests/test_deployment_source_identity.py"), 7),
+              _py_pytest("tests/test_deployment_source_identity.py"), 9),
         Suite("server-deployment-identity",
               "server tests/test_deployment_identity.py", "pytest", SERVER,
-              _py_pytest("tests/test_deployment_identity.py"), 5),
+              _py_pytest("tests/test_deployment_identity.py"), 12),
         Suite("server-emf-metrics-stream", "server tests/test_emf_metrics_stream.py",
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
         # Floor 11 = 4 tests + the 7 parametrized cases of the unusable-reading
@@ -609,7 +609,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
-              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 4),
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 6),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),
@@ -689,12 +689,12 @@ def build_suites() -> List[Suite]:
         # `now=` to UTC, so the signed rendering cannot disagree with the one
         # verification re-derives; pinned by
         # test_signature_verifies_when_countersigned_with_a_non_utc_now.
-        # 236 was measured both ways -- TimeZone=America/Chicago and UTC.
+        # 247 was measured both ways -- TimeZone=America/Chicago and UTC.
         # Raising this cannot red-fail CI: the suite is db_gated and the
         # test-gate workflow is hermetic, so run_suite returns SKIP with
         # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 236, db_gated=True),
+              _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
@@ -706,10 +706,9 @@ def build_suites() -> List[Suite]:
         # also explicit here so this PR cannot ship its dependency-free
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
-        # invariant to DB presence: 71 collected either way, measured on this
-        # tree 2026-07-25. The floor below is the EXECUTED count on a host with
-        # no DATABASE_URL -- 71 collected minus the 2 DB-gated skips named in
-        # allowed_skip_reasons = 69.
+        # invariant to DB presence: 82 collected either way. The floor below is
+        # the EXECUTED count on a host with no DATABASE_URL, 82 collected minus
+        # the 2 DB-gated skips named in allowed_skip_reasons = 80.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
@@ -717,7 +716,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
-                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 69,
+                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 80,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -733,6 +732,9 @@ def build_suites() -> List[Suite]:
         Suite("build-platform-images-workflow",
               "scripts test_build_platform_images_workflow.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
+        Suite("platform-release-manifest",
+              "scripts test_platform_release_manifest.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 21),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         # Floor 27: 22, plus the five duplicate-suite-id tests measured on this
         # tree 2026-07-27.

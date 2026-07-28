@@ -17,7 +17,11 @@ Env:
 from __future__ import annotations
 
 import os
+import json
+import re
 import sys
+import urllib.request
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import FastAPI
@@ -175,6 +179,46 @@ def _mount_platform_router() -> None:
 _mount_platform_router()
 
 
+def _drawing_mutation_fence_state() -> str:
+    """Report the live shared-fence state without changing liveness."""
+    configured = os.environ.get(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", ""
+    ).strip()
+    if not configured:
+        return "unconfigured"
+    try:
+        value = Path(configured).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return "unreadable"
+    return {"0": "closed", "1": "open"}.get(value, "invalid")
+
+
+def _ecs_task_definition_arn() -> str:
+    base = os.environ.get("ECS_CONTAINER_METADATA_URI_V4", "")
+    if not re.fullmatch(r"http://169\.254\.170\.2/v4/[A-Za-z0-9_-]+", base):
+        return "unconfigured"
+    try:
+        with urllib.request.urlopen(f"{base}/task", timeout=1) as response:
+            metadata = json.loads(response.read(65536))
+        task = re.fullmatch(
+            r"arn:aws:ecs:(?P<region>[a-z0-9-]+):(?P<account>[0-9]{12}):"
+            r"task/(?:(?:[A-Za-z0-9_-]+)/)?[0-9a-f-]+",
+            str(metadata.get("TaskARN", "")),
+        )
+        family = str(metadata.get("Family", ""))
+        revision = str(metadata.get("Revision", ""))
+        if task is None or not re.fullmatch(r"[A-Za-z0-9_-]+", family):
+            return "unavailable"
+        if not revision.isdigit() or int(revision) < 1:
+            return "unavailable"
+        return (
+            f"arn:aws:ecs:{task.group('region')}:{task.group('account')}:"
+            f"task-definition/{family}:{revision}"
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return "unavailable"
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     return with_envelope_fields({
@@ -186,6 +230,14 @@ def health() -> Dict[str, Any]:
         "n_tools": len(deps.all_tools()),
         "n_authored": len(deps._AUTHORED),
         "source_sha": os.environ.get("LEAF_SOURCE_SHA", "unknown"),
+        "drawing_mutation_fence_state": _drawing_mutation_fence_state(),
+        "drawing_store_authority": os.environ.get(
+            "LEAF_DRAWING_STORE", "legacy"
+        ).strip().lower(),
+        "upload_store_authority": os.environ.get(
+            "LEAF_UPLOAD_STORE", "legacy"
+        ).strip().lower(),
+        "task_definition_arn": _ecs_task_definition_arn(),
     })
 
 

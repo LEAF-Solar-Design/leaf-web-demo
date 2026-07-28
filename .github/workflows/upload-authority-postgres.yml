@@ -157,6 +157,7 @@ jobs:
           tests/test_broker_boundary.py
           tests/test_postgres_container_wiring.py
           tests/test_deployment_source_identity.py
+          tests/test_drawing_authority_cutover_marker.py
 
       - name: Run canonical drawing import gate tests
         working-directory: server

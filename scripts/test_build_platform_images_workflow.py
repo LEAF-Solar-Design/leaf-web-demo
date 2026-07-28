@@ -11,6 +11,8 @@ WORKFLOW = (
     / "workflows"
     / "build-platform-images.yml"
 )
+ROOT = WORKFLOW.parents[2]
+DEPLOY_DOC = (ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
 
 
 def main() -> None:
@@ -23,8 +25,7 @@ def main() -> None:
     assert "IMAGE_TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert "TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert (
-        "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:"
-        "${{ env.IMAGE_TAG }}"
+        "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
     ) in text
 
     # A trusted main workflow may build an exact reviewed source without
@@ -34,10 +35,10 @@ def main() -> None:
     assert "source_mode: ${{ steps.source.outputs.mode }}" in text
     assert "ref: ${{ inputs.source_sha || github.sha }}" in text
     assert "ref: ${{ needs.prepare.outputs.source_sha }}" in text
-    assert (
-        "build-args: ${{ matrix.image == 'app' && "
-        "format('LEAF_SOURCE_SHA={0}', needs.prepare.outputs.source_sha) || '' }}"
-    ) in text
+    assert "LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}" in text
+    assert "AUTOFILL_SOLVER_REVISION={0}" in text
+    assert "autofill_solver=./autofill-solver" in text
+    assert "repository: LEAF-Solar-Design/autofill-solver" in text
     assert "pull-requests: read" in text
     assert "source_sha must be a full 40-character lowercase hexadecimal commit" in text
     assert '.state == "open"' in text
@@ -56,9 +57,9 @@ def main() -> None:
     assert "uses: ./.github/workflows/test-gate.yml" in text
     assert "needs: [prepare, test]" in text
 
-    # The matrix isolates all three images and does not cancel siblings after
+    # The matrix isolates all five images and does not cancel siblings after
     # one failure. A failed matrix entry still blocks the verification job.
-    assert re.search(r"image:\s*\[app, broker, harness\]", text)
+    assert re.search(r"image:\s*\[app, broker, canonical-worker, harness, web\]", text)
     assert "fail-fast: false" in text
     assert "needs: [prepare, build]" in text
 
@@ -88,16 +89,85 @@ def main() -> None:
     assert "expire buildcache-* tags" in text
     assert "after 14 days" in text
 
-    # Promotion depends on the final all-three ECR existence check, not merely
-    # on one successful image push.
-    assert re.search(r"promote:\s*\n\s+needs: \[prepare, verify\]", text)
+    # Handoff depends on the five-image manifest and an accepted staging
+    # execution receipt. The historical tag-only production dispatch is gone.
+    assert re.search(r"handoff:\s*\n\s+needs: \[prepare\]", text)
     verify_start = text.index("  verify:")
-    verify_body = text[verify_start : text.index("  promote:", verify_start)]
-    assert "for image in app broker harness; do" in verify_body
+    verify_body = text[verify_start : text.index("  handoff:", verify_start)]
+    assert "for image in app broker canonical-worker harness web; do" in verify_body
     assert "aws ecr batch-get-image" in verify_body
     assert '--image-ids "imageTag=$TAG"' in verify_body
     assert "prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40}" in verify_body
     assert 'if [[ -z "$digest" || "$digest" == "None" ]]' in verify_body
+    assert "platform_release_manifest.py generate" in verify_body
+    assert "digest-web-dist --root dist" in verify_body
+    assert "--web-artifact-sha256" in verify_body
+    assert (
+        "staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}"
+        in verify_body
+    )
+    assert (
+        "web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}"
+        in verify_body
+    )
+
+    handoff_body = text[text.index("  handoff:") :]
+    assert "inputs.promote" in handoff_body
+    assert "RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}" in handoff_body
+    assert "RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}" in handoff_body
+    assert (
+        "ACCEPTANCE_RUN_ATTEMPT: ${{ inputs.staging_acceptance_run_attempt }}"
+        in handoff_body
+    )
+    assert "verify-workflow-run" in handoff_body
+    assert "verify-artifact" in handoff_body
+    assert '--workflow-path "$RELEASE_WORKFLOW_PATH"' in handoff_body
+    assert '--workflow-path "$ACCEPTANCE_WORKFLOW_PATH"' in handoff_body
+    assert '--event push --branch main --head-sha "$SOURCE_SHA"' in handoff_body
+    assert "--event workflow_dispatch --branch main" in handoff_body
+    assert "staging-supply-set-$SOURCE_SHA-attempt-$RELEASE_RUN_ATTEMPT" in handoff_body
+    assert "actions/artifacts/$RELEASE_ARTIFACT_ID/zip" in handoff_body
+    assert "actions/artifacts/$ACCEPTANCE_ARTIFACT_ID/zip" in handoff_body
+    assert "ACCEPTANCE_RECEIPT_RUN_ID=${BASH_REMATCH[1]}" in handoff_body
+    assert '--release-run-proof "$RUNNER_TEMP/release-run-proof.json"' in handoff_body
+    assert '--expected-receipt-run-id "$ACCEPTANCE_RECEIPT_RUN_ID"' in handoff_body
+    assert "/compare/$ACCEPTANCE_HEAD_SHA...main" in handoff_body
+    assert "staging-authored-execute-" in text
+    assert "platform_release_manifest.py verify-staging" in handoff_body
+    assert "git fetch --no-tags origin main" in handoff_body
+    assert "--main-ref origin/main" in handoff_body
+    assert "production-handoff-candidate-" in handoff_body
+    assert "-attempt-${{ github.run_attempt }}" in handoff_body
+    assert "gh workflow run deploy-service-production.yml" not in text
+    assert "aws ecr put-image" not in handoff_body
+    assert "docker/build-push-action" not in handoff_body
+    assert text.count("if: ${{ !inputs.promote }}") == 3
+    assert "Production handoff requires the exact release source_sha input" in text
+    assert "Production handoff requires the successful release workflow run ID" in text
+    assert "Production handoff requires the exact release run attempt" in text
+    assert (
+        "Production handoff requires the exact staging acceptance run attempt" in text
+    )
+    assert "leaf.staging-supply-set.v1" in DEPLOY_DOC
+    assert "leaf.production-handoff-candidate.v1" in DEPLOY_DOC
+    assert "four OCI" in DEPLOY_DOC
+    assert "Vercel deployment ID" in DEPLOY_DOC
+    assert "staging web image digest alone is never production web proof" in DEPLOY_DOC
+
+    # Every build source consumes the same full application revision. The
+    # canonical worker also seals its separate solver revision into the image.
+    for image in ("app", "broker", "canonical-worker", "harness", "web"):
+        dockerfile = (ROOT / "deploy" / f"Dockerfile.{image}").read_text(
+            encoding="utf-8"
+        )
+        assert "ARG LEAF_SOURCE_SHA" in dockerfile
+        assert "LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}" in dockerfile
+    canonical = (ROOT / "deploy" / "Dockerfile.canonical-worker").read_text(
+        encoding="utf-8"
+    )
+    assert "ARG AUTOFILL_SOLVER_REVISION" in canonical
+    assert "/opt/leaf/autofill-solver/.leaf-source-revision" in canonical
+    assert "/app/.leaf-source-revision" in canonical
 
     print("build-platform-images workflow invariants: PASS")
 
