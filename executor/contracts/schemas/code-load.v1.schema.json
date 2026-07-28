@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/instant-execution/code-load.v1.schema.json",
+  "title": "Leaf instant execution code load v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "load_id", "tenant_id", "session_id", "effective_catalog_digest", "code_digest", "artifact_digest", "runtime", "entrypoint"],
+  "properties": {
+    "contract": {"const": "leaf.instant-execution/v1"},
+    "load_id": {"type": "string", "format": "uuid"},
+    "tenant_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,127}$"},
+    "session_id": {"type": "string", "format": "uuid"},
+    "effective_catalog_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "code_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "runtime": {"const": "python-3.12"},
+    "entrypoint": {"type": "string", "pattern": "^[A-Za-z0-9_./:-]{1,256}$"}
+  }
+}

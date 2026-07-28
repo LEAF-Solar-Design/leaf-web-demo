@@ -95,6 +95,7 @@ from pydantic import BaseModel
 import deps
 import emf_metrics
 import entitlements
+import instant_execution
 import session_store
 import turn_runner
 from envelopes import (ErrorCode, err_envelope, error_obj, error_response,
@@ -390,12 +391,19 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
     if req.model is not None and not turn_runner.is_allowed_model(req.model):
         return _invalid_model_response(req.model)
     sess = session_store.get_or_create_session(str(tenant), req.drawing_id, req.model)
+    instant = instant_execution.prepare_session(
+        str(tenant), sess["session_id"], req.drawing_id,
+    )
     return deps.tenant_echo(
         with_envelope_fields({
             "session_id": sess["session_id"],
             "status": sess["status"],
             "created_at": sess["created_at"],
             "model": sess.get("model"),
+            # Safe readiness only. The executor endpoint and signed lease stay
+            # on the authenticated app-to-harness back-edge.
+            "instant_ready": bool(instant["ready"]),
+            "instant_reason": instant["reason"],
         }),
         tenant,
     )

@@ -47,12 +47,17 @@ import { redactTokens } from "./redact.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import { DEFAULT_TENANT } from "./ports/index.js";
-import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent } from "./ports/index.js";
+import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
+  InstantDrawingContext, InstantSessionAssignment } from "./ports/index.js";
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 
 export { DEFAULT_TENANT };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function tenantOf(req: IncomingMessage): string {
   const h = req.headers["x-tenant-id"];
@@ -175,7 +180,12 @@ function send(res: ServerResponse, status: number, body: unknown): void {
 // POST /turn - converse-turn route (sessions wire, leaf-backend-gaps.md §2.1).
 // --------------------------------------------------------------------------- //
 
-type ConverseTurnValidation = { ok: true; input: ConverseTurnInput } | { ok: false; message: string };
+type ConverseTurnValidation = {
+  ok: true;
+  input: ConverseTurnInput;
+  instantAssignment?: InstantSessionAssignment;
+  instantDrawingContext?: InstantDrawingContext;
+} | { ok: false; message: string };
 
 /**
  * Minimal validation of ConverseTurnInput: the four required id fields, and at
@@ -232,6 +242,24 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
   return { ok: true, input };
 }
 
+function instantTurnOptions(req: IncomingMessage, authenticated: boolean): Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> {
+  const encoded = req.headers["x-leaf-instant-assignment"];
+  if (typeof encoded !== "string" || !encoded) return {};
+  if (!authenticated) throw new AuthorLoopError("instant assignment requires harness caller authentication", 400);
+  if (encoded.length > 16_384) throw new AuthorLoopError("instant assignment header is too large", 400);
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch {
+    throw new AuthorLoopError("instant assignment header is malformed", 400);
+  }
+  if (!isRecord(value) || !isRecord(value.drawing_context)) {
+    throw new AuthorLoopError("instant assignment header is invalid", 400);
+  }
+  const instantAssignment = value as unknown as InstantSessionAssignment;
+  return { instantAssignment, instantDrawingContext: instantAssignment.drawing_context };
+}
+
 /**
  * Drive one converse turn to completion, streaming `application/x-ndjson`.
  *
@@ -262,9 +290,10 @@ async function streamTurn(
   res: ServerResponse,
   runner: ConverseRunner,
   input: ConverseTurnInput,
+  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext">,
 ): Promise<void> {
   const turnAbort = new AbortController();
-  const iterator = runner.runTurn(input, { signal: turnAbort.signal })[Symbol.asyncIterator]();
+  const iterator = runner.runTurn(input, { signal: turnAbort.signal, ...instant })[Symbol.asyncIterator]();
 
   let closed = false;
   const onClose = (): void => {
@@ -504,7 +533,7 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         // first event — is caught by THIS function's own try/catch below, not silently
         // dropped: async-function `return somePromise` does not route through a local
         // catch, only `await` does.
-        await streamTurn(req, res, ports.converseRunner, validated.input);
+        await streamTurn(req, res, ports.converseRunner, validated.input, instantTurnOptions(req, auth.enabled));
         return;
       }
 
@@ -578,6 +607,12 @@ export async function startReal(port = 8130): Promise<Server> {
   const { createTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
   const { CustomizationCoordinationClient } = await import("./ports/impl/customizationCoordinationClient.js");
+  const { SpineTurnAdapter } = await import("./agent/spineTurnAdapter.js");
+  const { HttpAppRunClient } = await import("./ports/impl/appRunClient.js");
+  const { HttpGateClient } = await import("./ports/impl/gateClient.js");
+  const { ConverseSdkRunner } = await import("./ports/impl/converseSdkRunner.js");
+  const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
+  const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
   const tenantGitDir = process.env.LEAF_TENANT_GIT_DIR ?? `${tenantsDir}/tenant-git`;
@@ -585,6 +620,17 @@ export async function startReal(port = 8130): Promise<Server> {
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
   // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
   const grantStore = createTenantGrantStore();
+  const sessionStore = appUrl && dispatchSecret ? createSessionStore() : null;
+  const converseRunner = sessionStore
+    ? new SpineTurnAdapter({
+        oauth: new OAuthGrantProviderImpl({ store: grantStore }),
+        appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
+        gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
+        store: sessionStore.store,
+        runnerFor: (grant) => new ConverseSdkRunner({ grant }),
+        instantExecutor: new HttpInstantExecutorClient(),
+      })
+    : undefined;
 
   const ports: HarnessPorts = {
     agentRunner: new AgentSdkRunner(),
@@ -599,6 +645,11 @@ export async function startReal(port = 8130): Promise<Server> {
     ...(appUrl && dispatchSecret
       ? { customizationCoordination: new CustomizationCoordinationClient({ baseUrl: appUrl, dispatchSecret }) }
       : {}),
+    ...(converseRunner ? { converseRunner } : {}),
   };
-  return createHarness(ports).listen(port);
+  const server = createHarness(ports).listen(port);
+  if (sessionStore) {
+    server.once("close", () => { void sessionStore.close(); });
+  }
+  return server;
 }

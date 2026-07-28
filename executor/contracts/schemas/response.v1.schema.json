@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/instant-execution/response.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "invocation_id", "tenant_id", "session_id", "status", "code_digest", "completed_at"],
+  "properties": {
+    "contract": {"const": "leaf.instant-execution/v1"}, "invocation_id": {"type": "string", "format": "uuid"}, "tenant_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,127}$"}, "session_id": {"type": "string", "format": "uuid"}, "status": {"enum": ["succeeded", "failed", "cancelled"]}, "code_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "completed_at": {"type": "string", "format": "date-time"}, "result": {"type": "object", "maxProperties": 256}, "error": {"$ref": "error.v1.schema.json"}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "succeeded"}}}, "then": {"required": ["result"], "not": {"required": ["error"]}}},
+    {"if": {"properties": {"status": {"enum": ["failed", "cancelled"]}}}, "then": {"required": ["error"], "not": {"required": ["result"]}}}
+  ]
+}

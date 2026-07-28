@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/instant-execution/cancellation.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "cancellation_id", "invocation_id", "tenant_id", "session_id", "requested_at", "state"],
+  "properties": {
+    "contract": {"const": "leaf.instant-execution/v1"}, "cancellation_id": {"type": "string", "format": "uuid"}, "invocation_id": {"type": "string", "format": "uuid"}, "tenant_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,127}$"}, "session_id": {"type": "string", "format": "uuid"}, "requested_at": {"type": "string", "format": "date-time"}, "state": {"enum": ["requested", "accepted", "already_terminal", "rejected"]}, "error": {"$ref": "error.v1.schema.json"}
+  }
+}

@@ -59,6 +59,34 @@ export type WireAgentGrant =
   | { kind: "api_key"; api_key: string }
   | { kind: "oauth"; oauth_token: string };
 
+/** Opaque app-issued route for one bound instant executor session. Never browser supplied. */
+export interface InstantSessionAssignment {
+  contract: "leaf.instant-execution/v1";
+  assignment_id: string;
+  tenant_id: string;
+  session_id: string;
+  executor_id: string;
+  executor_endpoint: string;
+  binding_epoch: number;
+  lease_id: string;
+  lease_token: string;
+  execution_class: "instant";
+  effective_catalog_digest: string;
+  code_digest: string;
+  artifact_digest: string;
+  drawing_context: InstantDrawingContext;
+  issued_at: string;
+  expires_at: string;
+}
+
+/** Opaque drawing snapshot reference issued by the app, never raw drawing data. */
+export interface InstantDrawingContext {
+  drawing_id: string;
+  version_id: string;
+  content_digest: string;
+  geometry_ref: string;
+}
+
 /**
  * Body of `POST /turn`. `messages` is prior turn context, bounded and
  * assembled by the turn engine (never the full unbounded transcript).
@@ -113,6 +141,9 @@ export interface ConverseTurnInput {
  */
 export interface ConverseRunOptions {
   signal?: AbortSignal;
+  /** Authenticated app-to-harness metadata, kept outside the frozen turn input. */
+  instantAssignment?: InstantSessionAssignment;
+  instantDrawingContext?: InstantDrawingContext;
 }
 
 /**

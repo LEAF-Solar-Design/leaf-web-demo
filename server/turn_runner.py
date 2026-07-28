@@ -55,6 +55,7 @@ user-message record) and, only as a last-resort backstop, a synthetic
 from __future__ import annotations
 
 import json
+import base64
 import os
 import sqlite3
 import sys
@@ -67,6 +68,7 @@ import requests
 
 import agent_ledger
 import broker_client
+import instant_execution
 import session_store
 from envelopes import ErrorCode
 
@@ -384,10 +386,17 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         payload["model"] = effective_model
     if credential_grant is not None:
         payload["credential_grant"] = credential_grant
+    instant_assignment = instant_execution.assignment_for_session(tenant_id, session_id)
+    harness_headers = broker_client.harness_headers()
+    if instant_assignment is not None:
+        # Keep the frozen turn body exact. This authenticated sidecar header is
+        # consumed before the runner starts and never enters the transcript.
+        encoded = json.dumps(instant_assignment, separators=(",", ":")).encode("utf-8")
+        harness_headers["x-leaf-instant-assignment"] = base64.urlsafe_b64encode(encoded).decode("ascii")
 
     try:
         resp = requests.post(f"{harness_url}/turn", json=payload,
-                             headers=broker_client.harness_headers(),
+                             headers=harness_headers,
                              stream=True, timeout=(5, max_s))
     except requests.exceptions.ConnectTimeout as exc:
         # The ONLY pre_harness leg here. A connect-phase timeout means the TCP

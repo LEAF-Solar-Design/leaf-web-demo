@@ -63,6 +63,44 @@
       },
       "capabilities": ["drawing.read"],
       "provenance": { "author": "agent", "created": "2026-07-22T00:00:00Z" }
+    },
+    {
+      "name": "instant-list-layers",
+      "version": "1.0.0",
+      "description": "Lists layers from the drawing context preloaded when the session opens.",
+      "kind": "script",
+      "engine_op": "instant_list_layers",
+      "entry": "list_layers.py",
+      "entrypoint": "tool:run",
+      "params": {
+        "type": "object",
+        "properties": {
+          "prefix": {"type": "string"}
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "layers": {"type": "array", "items": {"type": "string"}},
+          "count": {"type": "integer"}
+        }
+      },
+      "capabilities": ["drawing.read"],
+      "execution_class": "instant",
+      "runtime": "python-3.12",
+      "limits": {
+        "max_wall_ms": 500,
+        "max_cpu_ms": 100,
+        "max_memory_mb": 64,
+        "max_output_bytes": 65536,
+        "max_tool_calls": 0
+      },
+      "code_digest": "sha256:3b77e442801655fbc89e6bca0cf15d13bf5482d7ea28d1f856abc7a307c1fbd2",
+      "artifact_digest": "sha256:3b77e442801655fbc89e6bca0cf15d13bf5482d7ea28d1f856abc7a307c1fbd2",
+      "batch_fallback": false,
+      "provenance": {"author": "agent", "created": "2026-07-28T00:00:00Z"}
     }
   ]
 }

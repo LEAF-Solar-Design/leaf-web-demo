@@ -60,6 +60,7 @@ import type {
   OAuthGrantProvider,
   SessionStore,
   SpineConverseRunner,
+  InstantExecutorClient,
 } from "../ports/index.js";
 
 /** The 9 event types the frozen wire admits (ports/converse.ts). The loop's
@@ -85,6 +86,7 @@ export interface SpineTurnAdapterPorts {
   store: SessionStore;
   /** Per-turn LLM runner factory (real: ConverseSdkRunner with the tenant grant). */
   runnerFor: (grant: AgentGrant) => SpineConverseRunner;
+  instantExecutor?: InstantExecutorClient;
 }
 
 export interface SpineTurnAdapterOptions {
@@ -179,6 +181,7 @@ export class SpineTurnAdapter implements ConverseRunner {
             }),
         },
         store,
+        instantExecutor: this.ports.instantExecutor,
       },
       {
         // Per-session model ("mount your LLM"): the wire value wins, then the
@@ -254,6 +257,9 @@ export class SpineTurnAdapter implements ConverseRunner {
         : {}),
       contextPacket,
       priorMessages: input.messages,
+      instantAssignment: opts?.instantAssignment,
+      instantDrawingContext: opts?.instantDrawingContext,
+      authoritySessionId: input.session_id,
       onEvent,
     });
     void (async () => {

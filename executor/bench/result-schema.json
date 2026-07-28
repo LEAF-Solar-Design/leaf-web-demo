@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Executor benchmark result",
+  "type": "object",
+  "required": ["contract_version", "evidence_kind", "synthetic", "run", "scenario_results", "overall_acceptance"],
+  "properties": {
+    "contract_version": {"const": "executor-bench.v1"},
+    "evidence_kind": {"enum": ["live_measurement", "synthetic_fixture"]},
+    "synthetic": {"type": "boolean"},
+    "run": {
+      "type": "object",
+      "required": ["environment", "source_sha", "host_shape", "concurrency", "payload_bytes", "code_digest", "warm_cold_classification", "sample_count", "failures"],
+      "properties": {
+        "environment": {"type": "string", "minLength": 1},
+        "source_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
+        "host_shape": {"type": "object", "required": ["provider", "instance_type", "cpu", "memory_mib"]},
+        "concurrency": {"type": "integer", "minimum": 1},
+        "payload_bytes": {"type": "integer", "minimum": 0},
+        "code_digest": {"type": "string", "minLength": 1},
+        "warm_cold_classification": {"enum": ["warm", "cold", "mixed", "batch"]},
+        "sample_count": {"type": "integer", "minimum": 1},
+        "failures": {"type": "array"}
+      }
+    },
+    "scenario_results": {
+      "type": "array",
+      "minItems": 7,
+      "items": {"$ref": "#/$defs/scenario_result"}
+    },
+    "overall_acceptance": {
+      "type": "object",
+      "required": ["verdict"],
+      "properties": {"verdict": {"enum": ["PASS", "FAIL", "NOT_EVALUATED"]}}
+    }
+  },
+  "$defs": {
+    "scenario_result": {
+      "type": "object",
+      "required": ["scenario_id", "sample_count", "failures", "latency_samples_ms", "percentiles_ms", "acceptance", "instant_path_proof"],
+      "properties": {
+        "scenario_id": {"type": "string"},
+        "sample_count": {"type": "integer", "minimum": 1},
+        "failures": {"type": "array"},
+        "latency_samples_ms": {"type": "array", "items": {"type": "number", "minimum": 0}},
+        "percentiles_ms": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}},
+        "acceptance": {"type": "object", "required": ["verdict"], "properties": {"verdict": {"enum": ["PASS", "FAIL", "NOT_EVALUATED"]}}},
+        "instant_path_proof": {
+          "type": "object",
+          "required": ["applicable", "docker_start_delta", "dependency_operations", "sentinel_test_passed", "trace_request_id"],
+          "properties": {
+            "applicable": {"type": "boolean"},
+            "docker_start_delta": {"type": "integer", "minimum": 0},
+            "dependency_operations": {"type": "object"},
+            "sentinel_test_passed": {"type": "boolean"},
+            "trace_request_id": {"type": "string"}
+          }
+        },
+        "event_timeline": {"type": "array", "items": {"type": "object", "required": ["event", "monotonic_ms"]}},
+        "preparation_before_first_call": {"type": "boolean"},
+        "tested_concurrency_levels": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "isolation_breach": {"type": "boolean"},
+        "stale_digest_execution": {"type": "boolean"},
+        "recovery_reported": {"type": "boolean"},
+        "assignment_after_drain": {"type": "boolean"},
+        "all_sessions_terminal": {"type": "boolean"},
+        "http_status": {"type": "integer"},
+        "job_id": {"type": "string"},
+        "inline_terminal_result": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/instant-execution/readiness.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "executor_id", "execution_class", "state", "accepting_new_invocations", "observed_at"],
+  "properties": {
+    "contract": {"const": "leaf.instant-execution/v1"},
+    "executor_id": {"type": "string", "pattern": "^executor-[a-zA-Z0-9-]{3,127}$"},
+    "execution_class": {"const": "instant"},
+    "state": {"enum": ["ready", "degraded", "not_ready"]},
+    "accepting_new_invocations": {"type": "boolean"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "error": {"$ref": "error.v1.schema.json"}
+  },
+  "allOf": [
+    {"if": {"properties": {"state": {"const": "ready"}}}, "then": {"properties": {"accepting_new_invocations": {"const": true}}, "not": {"required": ["error"]}}},
+    {"if": {"properties": {"state": {"enum": ["degraded", "not_ready"]}}}, "then": {"properties": {"accepting_new_invocations": {"const": false}}, "required": ["error"]}}
+  ]
+}

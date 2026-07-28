@@ -32,6 +32,10 @@ import type {
   SpineToolName,
   SpineToolResult,
   ToolExecutor,
+  InstantDrawingContext,
+  InstantExecutorClient,
+  InstantInvocation,
+  InstantSessionAssignment,
 } from "../ports/index.js";
 
 // --------------------------------------------------------------------------- //
@@ -82,6 +86,8 @@ export interface ConversePorts {
   appRun: AppRunClient;
   gate: GateClient;
   store: SessionStore;
+  /** Optional until an operator wires the direct executor transport. */
+  instantExecutor?: InstantExecutorClient;
 }
 
 export interface ConverseLoopOptions {
@@ -104,6 +110,10 @@ export interface ConverseMessageInput {
   /** Bounded app-visible history used only when a stale SDK resume must reset. */
   priorMessages?: Array<{ role: "user" | "assistant"; text: string }>;
   classifierHint?: Record<string, unknown> | null;
+  /** Authenticated app-only instant route, never model input. */
+  instantAssignment?: InstantSessionAssignment;
+  instantDrawingContext?: InstantDrawingContext;
+  authoritySessionId?: string;
   /** Live event sink (SSE). Every event is ALSO persisted before delivery. */
   onEvent?: (ev: ConverseEvent) => void;
 }
@@ -361,7 +371,11 @@ export class ConverseLoop {
         });
       }
 
-      const tools = this.buildExecutor(session, turnId, state, emit);
+      const tools = this.buildExecutor(session, turnId, state, emit, {
+        instantAssignment: input.instantAssignment,
+        instantDrawingContext: input.instantDrawingContext,
+        authoritySessionId: input.authoritySessionId,
+      });
       const canUseTool: CanUseTool = async (toolName, toolInput) => {
         if (isSpineTool(baseToolName(toolName))) {
           return { behavior: "allow", updatedInput: toolInput };
@@ -474,6 +488,11 @@ export class ConverseLoop {
     turnId: string,
     state: TurnState,
     emit: (type: ConverseEventType, data: Record<string, unknown>) => Promise<void>,
+    instant: {
+      instantAssignment?: InstantSessionAssignment;
+      instantDrawingContext?: InstantDrawingContext;
+      authoritySessionId?: string;
+    },
   ): ToolExecutor {
     const { appRun, gate, store } = this.ports;
     const tenantId = session.tenant_id;
@@ -721,6 +740,7 @@ export class ConverseLoop {
                 state.catalogFetched = false;
                 state.catalog = null;
               },
+              ...instant,
             },
           );
         }
@@ -750,9 +770,12 @@ export class ConverseLoop {
       catalogFor: () => Promise<CapabilityEntry[]>;
       capabilityOf: (toolName: string) => Promise<"drawing.read" | "drawing.write">;
       invalidateCatalog: () => void;
+      instantAssignment?: InstantSessionAssignment;
+      instantDrawingContext?: InstantDrawingContext;
+      authoritySessionId?: string;
     },
   ): Promise<SpineToolResult> {
-    const { appRun } = this.ports;
+    const { appRun, instantExecutor } = this.ports;
     const tenantId = ctx.session.tenant_id;
 
     switch (tool) {
@@ -785,6 +808,47 @@ export class ConverseLoop {
         const catalogDigest = catalogEntry?.catalog_digest;
         if (typeof catalogDigest !== "string" || !catalogDigest) {
           return err("run_capability requires a current server-issued catalog digest");
+        }
+        if (catalogEntry?.execution_class === "instant") {
+          const instant = validateInstantRoute({
+            assignment: ctx.instantAssignment,
+            drawingContext: ctx.instantDrawingContext,
+            tenantId,
+            sessionId: ctx.authoritySessionId ?? ctx.session.session_id,
+            entry: catalogEntry,
+            params,
+            tool: target,
+            drawingId: dwg,
+          });
+          if (!instant.ok) return err(`instant execution rejected: ${instant.reason}`);
+          if (!instantExecutor) return err("instant execution rejected: executor_unavailable");
+          const invocation = buildInstantInvocation(instant.value, params, target);
+          try {
+            const response = await instantExecutor.invoke(instant.value.assignment, invocation);
+            if (response.status !== "succeeded") {
+              return err(JSON.stringify({ route: "instant", status: response.status, error: response.error ?? {} }));
+            }
+            return ok(JSON.stringify({
+              route: "instant", invocation_id: invocation.invocation_id, result: response.result ?? {},
+            }));
+          } catch (error) {
+            if (catalogEntry.batch_fallback !== true) {
+              return err(`instant execution failed: ${(error as Error).message}`);
+            }
+            const fallback = await appRun.submitRun({
+              tenantId, tool: target, params, dwg, catalogDigest,
+              wait: true, waitTimeoutS: this.readWaitS,
+            });
+            await ctx.emit("job_linked", {
+              job_id: fallback.job_id, tool: target, route: "batch_fallback",
+              reason: "instant_transport_failure",
+            });
+            return ok(JSON.stringify({
+              route: "batch_fallback", reason: "instant_transport_failure",
+              job_id: fallback.job_id, status: fallback.status,
+              ...(fallback.result !== undefined ? { result: fallback.result } : {}),
+            }));
+          }
         }
         const capability = await ctx.capabilityOf(target);
         const drawingVersion = Number(args.drawing_version);
@@ -928,6 +992,71 @@ function isSpineTool(name: string): name is SpineToolName {
 
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+type InstantRoute = {
+  assignment: InstantSessionAssignment;
+  drawingContext: InstantDrawingContext;
+  entry: CapabilityEntry;
+  tenantId: string;
+  sessionId: string;
+};
+
+function validateInstantRoute(input: {
+  assignment?: InstantSessionAssignment;
+  drawingContext?: InstantDrawingContext;
+  tenantId: string;
+  sessionId: string;
+  entry: CapabilityEntry;
+  params: Record<string, unknown>;
+  tool: string;
+  drawingId: string;
+}): { ok: true; value: InstantRoute } | { ok: false; reason: string } {
+  const { assignment, drawingContext, entry } = input;
+  if (!assignment || !drawingContext) return { ok: false, reason: "assignment_or_drawing_context_missing" };
+  if (entry.capabilities.includes("drawing.read") === false) return { ok: false, reason: "drawing_read_required" };
+  if (assignment.contract !== "leaf.instant-execution/v1" || assignment.execution_class !== "instant") return { ok: false, reason: "assignment_contract_invalid" };
+  if (assignment.tenant_id !== input.tenantId || assignment.session_id !== input.sessionId) return { ok: false, reason: "assignment_identity_mismatch" };
+  if (Date.parse(assignment.expires_at) <= Date.now()) return { ok: false, reason: "assignment_expired" };
+  if (assignment.effective_catalog_digest !== entry.effective_catalog_digest || assignment.artifact_digest !== entry.artifact_digest) return { ok: false, reason: "assignment_digest_mismatch" };
+  if (!isDigest(assignment.code_digest) || !isDigest(assignment.artifact_digest) || !isDigest(assignment.effective_catalog_digest)) return { ok: false, reason: "assignment_digest_invalid" };
+  if (!isDrawingContext(drawingContext) || drawingContext.drawing_id !== input.drawingId) return { ok: false, reason: "drawing_context_invalid" };
+  if (hasForbiddenInstantData(input.params)) return { ok: false, reason: "forbidden_secret_or_infrastructure_data" };
+  return { ok: true, value: { assignment, drawingContext, entry, tenantId: input.tenantId, sessionId: input.sessionId } };
+}
+
+function buildInstantInvocation(route: InstantRoute, params: Record<string, unknown>, tool: string): InstantInvocation {
+  const timeoutMs = clampInt(route.entry.limits?.max_wall_ms, 1, 30_000, 15_000);
+  const expiresAt = Date.parse(route.assignment.expires_at);
+  const deadline = new Date(Math.min(Date.now() + timeoutMs + 250, expiresAt)).toISOString();
+  return {
+    contract: "leaf.instant-execution/v1",
+    invocation_id: randomUUID(), tenant_id: route.tenantId, session_id: route.sessionId,
+    assignment_id: route.assignment.assignment_id, binding_epoch: route.assignment.binding_epoch,
+    lease_id: route.assignment.lease_id, effective_catalog_digest: route.assignment.effective_catalog_digest,
+    code_digest: route.assignment.code_digest, artifact_digest: route.assignment.artifact_digest,
+    deadline_at: deadline,
+    capability: { capability_id: "drawing.read", tool_id: tool, tool_version: String(route.entry.version ?? "1.0.0") },
+    params, drawing_context: route.drawingContext,
+  };
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
+}
+
+function isDrawingContext(value: InstantDrawingContext): boolean {
+  return typeof value.drawing_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$/.test(value.drawing_id)
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.version_id)
+    && isDigest(value.content_digest) && /^drawing-context:[A-Za-z0-9._:-]{8,256}$/.test(value.geometry_ref);
+}
+
+function hasForbiddenInstantData(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasForbiddenInstantData);
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value as Record<string, unknown>).some(([key, nested]) =>
+    /credential|secret|token|authorization|claude|aws|autodesk|broker|redis|postgres|database/i.test(key)
+    || hasForbiddenInstantData(nested));
 }
 
 function clampInt(v: unknown, min: number, max: number, dflt: number): number {
