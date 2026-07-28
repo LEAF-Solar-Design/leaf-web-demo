@@ -12,6 +12,9 @@ The staging deployment controller must set `LEAF_DEPLOYMENT_IDENTITY` in the
 running API task. This deployment-owned runtime evidence is not an input to the
 acceptance driver. The authenticated `/api/deployment-identity` endpoint returns
 only the validated identity below. A missing or invalid identity returns 503.
+The staging controller injects the receipt after it validates the configuration
+baseline. `LEAF_RUNTIME_ENV=staging` binds the receipt to staging; the endpoint
+also preserves the staging default for older non-production task definitions.
 
 ```json
 {
@@ -47,6 +50,13 @@ only the validated identity below. A missing or invalid identity returns 503.
 deployment controller must record the five resolved task image digests after it
 selects the live task definitions. The driver rejects a missing service, mutable
 image tag, mixed revision, or caller-authored manifest assertion.
+
+The endpoint can validate a production receipt only when the task sets both
+`LEAF_RUNTIME_ENV=production` and `LEAF_DEPLOYMENT_ENVIRONMENT=production`.
+A production runtime with a missing or staging deployment binding fails closed.
+This staging driver still rejects every production target. Production smoke
+needs its own protected driver and approval contract; do not weaken this
+driver's denylist.
 
 ## Required environment
 

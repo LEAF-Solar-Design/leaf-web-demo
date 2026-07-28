@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import app as app_module
+from deployment_identity import deployment_identity
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -114,6 +115,59 @@ def test_app_manifest_requires_durable_runtime_and_build_identity():
         "LEAF_GUEST_CAP_HMAC_SECRET",
         "LEAF_GUEST_SECRET",
     } <= set(manifest["required"]["secrets"])
+
+
+def test_baseline_manifests_exclude_later_authored_activation_config():
+    manifests = {
+        service: json.loads(
+            (ROOT / "deploy" / f"required-config.{service}.json").read_text(
+                encoding="utf-8"
+            )
+        )["required"]
+        for service in ("app", "broker", "harness")
+    }
+
+    assert {"LEAF_TOOL_SANDBOX_PROVIDER"}.isdisjoint(
+        manifests["broker"]["environment"]
+    )
+    assert {"E2B_API_KEY"}.isdisjoint(manifests["broker"]["secrets"])
+    assert {
+        "LEAF_AUTHOR_SANDBOX_PROVIDER",
+        "LEAF_TOOL_SANDBOX_PROVIDER",
+    }.isdisjoint(manifests["harness"]["environment"])
+    assert {"DATABASE_URL", "E2B_API_KEY"}.isdisjoint(
+        manifests["harness"]["secrets"]
+    )
+
+
+def test_configuration_baseline_validation_precedes_identity_injection():
+    manifest = json.loads(
+        (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
+    )["required"]
+    generated = {"LEAF_DEPLOYMENT_ENVIRONMENT", "LEAF_DEPLOYMENT_IDENTITY"}
+
+    # The controller validates these names against the existing task definition
+    # before it creates and injects the deployment receipt.
+    assert generated.isdisjoint(manifest["environment"])
+
+    receipt = {
+        "schema": "leaf.deployment-identity.v1",
+        "environment": "staging",
+        "source_revision": "a" * 40,
+        "services": {
+            name: {
+                "image_digest": "sha256:" + "b" * 64,
+                "source_revision": "a" * 40,
+            }
+            for name in ("app", "broker", "canonical-worker", "harness", "web")
+        },
+    }
+    runtime = {
+        "LEAF_RUNTIME_ENV": "staging",
+        "LEAF_DEPLOYMENT_IDENTITY": json.dumps(receipt),
+    }
+
+    assert deployment_identity(runtime) == receipt
 
 
 def test_web_image_writes_source_identity_health_file():

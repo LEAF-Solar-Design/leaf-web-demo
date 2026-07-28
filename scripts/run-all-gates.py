@@ -531,10 +531,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_customization_store_scaling.py"), 3),
         Suite("server-deployment-source-identity",
               "server tests/test_deployment_source_identity.py", "pytest", SERVER,
-              _py_pytest("tests/test_deployment_source_identity.py"), 7),
+              _py_pytest("tests/test_deployment_source_identity.py"), 9),
         Suite("server-deployment-identity",
               "server tests/test_deployment_identity.py", "pytest", SERVER,
-              _py_pytest("tests/test_deployment_identity.py"), 5),
+              _py_pytest("tests/test_deployment_identity.py"), 12),
         Suite("server-emf-metrics-stream", "server tests/test_emf_metrics_stream.py",
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
         # Floor 11 = 4 tests + the 7 parametrized cases of the unusable-reading
