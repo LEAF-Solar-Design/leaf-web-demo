@@ -145,14 +145,18 @@ then runs Undo and Redo. It opens version 1 as a read-only preview, proves that
 the write control is disabled, proves that the head stays at version 2, and
 proves that preview sends no mutating API request.
 
-The API phase then checks both directions of tenant isolation. The other
-tenant's authored tool must be absent from the catalog. For each tenant, the
-exact owner receipt must first resolve through `/api/author/confirmations` to
-the publication confirmation that the independent authority issued. The same
-lookup with the other tenant's exact receipt must return only 403 or 404.
-Direct reads of the other staged change, drawing, and job must also return only
-403 or 404. Forged tenant headers must not change the caller's audit
-projection. Every 2xx response for a cross-tenant authority probe fails.
+Before each staged change is published, the driver calls the protected
+`/internal/customization/confirm` authority with the other tenant identity and
+the exact staged change set. That call must return 403 or 404. It then calls
+the same authority with the owner identity and requires a valid confirmation.
+This proves both directions of publication approval isolation before the
+confirmation is consumed.
+
+The later API phase checks both directions of the remaining tenant isolation.
+The other tenant's authored tool must be absent from the catalog. Direct reads
+of the other staged change, drawing, and job must return only 403 or 404.
+Forged tenant headers must not change the caller's audit projection. Every 2xx
+response for a cross-tenant authority probe fails.
 
 Finally, the driver resubmits the exact version-1 write after the head advanced
 to version 2 and submits the same request with a stale catalog digest. Both

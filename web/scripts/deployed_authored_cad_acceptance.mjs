@@ -396,21 +396,22 @@ export async function runApiPreflight(config, fetchImpl = fetch) {
   }
 }
 
-export async function approveStagedPublication(
+async function requestStagedPublicationApproval(
   config,
   tenant,
   changeSetId,
-  fetchImpl = fetch,
+  fetchImpl,
+  check,
 ) {
   if (!config.execute || !config.publicationApprovalSecret) {
     throw new AcceptanceError(
-      'independent_publication_approval',
+      check,
       'execute mode requires the independent publication approval credential',
     )
   }
   if (!UUID.test(changeSetId)) {
     throw new AcceptanceError(
-      'independent_publication_approval',
+      check,
       'the staged change set id is invalid',
     )
   }
@@ -431,27 +432,71 @@ export async function approveStagedPublication(
       },
       body: JSON.stringify({ change_set_id: changeSetId }),
     })
-    const body = await parseJsonResponse(response, 'independent_publication_approval')
-    if (response.status !== 200 || typeof body.confirmation_id !== 'string') {
-      throw new AcceptanceError(
-        'independent_publication_approval',
-        `approval authority returned HTTP ${response.status}`,
-      )
-    }
-    return {
-      status: 'approved',
-      confirmation_hash: sha256(body.confirmation_id),
-      _confirmation_id: body.confirmation_id,
-    }
+    const body = await parseJsonResponse(response, check)
+    return { status: response.status, body }
   } catch (error) {
     if (error instanceof AcceptanceError) throw error
     throw new AcceptanceError(
-      'independent_publication_approval',
+      check,
       `approval authority request failed: ${error?.name || 'Error'}`,
     )
   } finally {
     clearTimeout(timer)
   }
+}
+
+export async function approveStagedPublication(
+  config,
+  tenant,
+  changeSetId,
+  fetchImpl = fetch,
+) {
+  const check = 'independent_publication_approval'
+  const result = await requestStagedPublicationApproval(
+    config, tenant, changeSetId, fetchImpl, check,
+  )
+  if (result.status !== 200 || typeof result.body.confirmation_id !== 'string') {
+    throw new AcceptanceError(check, `approval authority returned HTTP ${result.status}`)
+  }
+  return {
+    status: 'approved',
+    confirmation_hash: sha256(result.body.confirmation_id),
+    _confirmation_id: result.body.confirmation_id,
+  }
+}
+
+export async function rejectCrossTenantStagedPublication(
+  config,
+  ownerTenant,
+  otherTenant,
+  changeSetId,
+  fetchImpl = fetch,
+) {
+  const check = `cross_tenant_publication_approval_${ownerTenant.label}`
+  const result = await requestStagedPublicationApproval(
+    config, otherTenant, changeSetId, fetchImpl, check,
+  )
+  if (![403, 404].includes(result.status)) {
+    throw new AcceptanceError(
+      check,
+      `wrong-tenant approval authority returned HTTP ${result.status}`,
+      { status: result.status },
+    )
+  }
+  return { status: 'denied' }
+}
+
+export async function approveIsolatedStagedPublication(
+  config,
+  ownerTenant,
+  otherTenant,
+  changeSetId,
+  fetchImpl = fetch,
+) {
+  await rejectCrossTenantStagedPublication(
+    config, ownerTenant, otherTenant, changeSetId, fetchImpl,
+  )
+  return approveStagedPublication(config, ownerTenant, changeSetId, fetchImpl)
 }
 
 export function validateStagedAuthorResponse(body, tenant) {
@@ -601,9 +646,11 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     await page.getByText('Staged and awaiting approval.', { exact: false })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
 
-    const independentApproval = await approveStagedPublication(
+    const otherTenant = config.tenants.find((candidate) => candidate.id !== tenant.id)
+    const independentApproval = await approveIsolatedStagedPublication(
       config,
       tenant,
+      otherTenant,
       staged.changeSetId,
     )
     const publishResponsePromise = page.waitForResponse(
@@ -728,11 +775,11 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       staged_request_hash: sha256(stageRequest.description),
       _staged_tool_name: staged.toolName,
       _staged_change_set_id: staged.changeSetId,
-      _staged_receipt: stagedBody.receipt,
       _run_request: runRequest,
       _run_headers: runReplayHeaders,
       _job_id: jobId,
       _publication_confirmation_id: independentApproval._confirmation_id,
+      cross_tenant_publication_approval: 'denied',
       independent_publication_approval: independentApproval.status,
       publication_confirmation_hash: independentApproval.confirmation_hash,
       exact_write_approval: true,
@@ -860,28 +907,6 @@ export async function proveExecutedAuthorityIsolation(config, browserResults, fe
     )
     requireDenied(staged, `cross_tenant_repository_${tenant.label}`)
 
-    const ownApproval = await requestJson(
-      config,
-      tenant,
-      '/api/author/confirmations',
-      { method: 'POST', body: ownResult._staged_receipt, fetchImpl },
-    )
-    expectStatus(ownApproval, [200], `own_publication_approval_${tenant.label}`)
-    if (ownApproval.body?.confirmation_id !== ownResult._publication_confirmation_id) {
-      throw new AcceptanceError(
-        `own_publication_approval_${tenant.label}`,
-        'the owner receipt did not resolve to its issued publication confirmation',
-      )
-    }
-
-    const crossApproval = await requestJson(
-      config,
-      tenant,
-      '/api/author/confirmations',
-      { method: 'POST', body: otherResult._staged_receipt, fetchImpl },
-    )
-    requireDenied(crossApproval, `cross_tenant_approval_${tenant.label}`)
-
     const job = await requestJson(
       config,
       tenant,
@@ -909,7 +934,7 @@ export async function proveExecutedAuthorityIsolation(config, browserResults, fe
   }
   return {
     status: 'denied',
-    authorities: ['repository', 'catalog', 'approval', 'job', 'audit'],
+    authorities: ['repository', 'catalog', 'job', 'audit'],
     tenants: checks,
   }
 }
@@ -1021,7 +1046,6 @@ export function buildReceipt(
       _workbench_id,
       _staged_tool_name,
       _staged_change_set_id,
-      _staged_receipt,
       _run_request,
       _run_headers,
       _job_id,

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   AcceptanceError,
-  approveStagedPublication,
+  approveIsolatedStagedPublication,
   buildReceipt,
   evaluateReadiness,
   evaluateDeploymentIdentity,
@@ -176,34 +176,48 @@ describe('deployed authored CAD acceptance configuration', () => {
 })
 
 describe('deployed authored CAD acceptance checks', () => {
-  it('uses the independent approval route without a tenant JWT', async () => {
+  it('denies the wrong tenant before the owner uses the independent approval route', async () => {
     const config = validateConfig(environment(), true)
     const calls = []
     const fetchImpl = async (url, options) => {
       calls.push({ url: String(url), options })
-      return response(200, { confirmation_id: 'confirmation-one' })
+      return options.headers['X-Tenant-Id'] === 'acceptance-a'
+        ? response(200, { confirmation_id: 'confirmation-one' })
+        : response(404, {})
     }
-    const result = await approveStagedPublication(
-      config,
-      config.tenants[0],
-      '11111111-1111-4111-8111-111111111111',
-      fetchImpl,
+    const changeSetId = '11111111-1111-4111-8111-111111111111'
+    const result = await approveIsolatedStagedPublication(
+      config, config.tenants[0], config.tenants[1], changeSetId, fetchImpl,
     )
     assert.equal(result.status, 'approved')
-    assert.equal(calls.length, 1)
+    assert.equal(calls.length, 2)
     assert.equal(
       calls[0].url,
       'https://staging-api.leaf.test/internal/customization/confirm',
     )
-    assert.equal(calls[0].options.headers.Authorization, undefined)
-    assert.equal(calls[0].options.headers['X-Tenant-Id'], 'acceptance-a')
-    assert.equal(
-      calls[0].options.headers['X-Approval-Secret'],
-      'independent-secret-value',
+    assert.deepEqual(calls.map((call) => call.options.headers['X-Tenant-Id']), [
+      'acceptance-b', 'acceptance-a',
+    ])
+    for (const call of calls) {
+      assert.equal(call.options.headers.Authorization, undefined)
+      assert.equal(call.options.headers['X-Approval-Secret'], 'independent-secret-value')
+      assert.deepEqual(JSON.parse(call.options.body), { change_set_id: changeSetId })
+    }
+
+    const alwaysMissing = async () => response(404, {})
+    await assert.rejects(
+      () => approveIsolatedStagedPublication(
+        config, config.tenants[0], config.tenants[1], changeSetId, alwaysMissing,
+      ),
+      /approval authority returned HTTP 404/,
     )
-    assert.deepEqual(
-      JSON.parse(calls[0].options.body),
-      { change_set_id: '11111111-1111-4111-8111-111111111111' },
+
+    const alwaysPermissive = async () => response(200, { confirmation_id: 'leaked' })
+    await assert.rejects(
+      () => approveIsolatedStagedPublication(
+        config, config.tenants[0], config.tenants[1], changeSetId, alwaysPermissive,
+      ),
+      /wrong-tenant approval authority returned HTTP 200/,
     )
   })
 
@@ -301,20 +315,18 @@ describe('deployed authored CAD acceptance checks', () => {
     )
   })
 
-  it('proves repository, catalog, approval, job, and audit isolation', async () => {
+  it('proves repository, catalog, job, and audit isolation', async () => {
     const config = validateConfig(environment(), true)
     const browser = [
       {
         label: 'A', executed: true, _staged_tool_name: 'cat_tool',
         _staged_change_set_id: '11111111-1111-4111-8111-111111111111',
-        _staged_receipt: { change_set_id: '11111111-1111-4111-8111-111111111111' },
         _job_id: 'job-a',
         _publication_confirmation_id: 'confirmation-a',
       },
       {
         label: 'B', executed: true, _staged_tool_name: 'fox_tool',
         _staged_change_set_id: '22222222-2222-4222-8222-222222222222',
-        _staged_receipt: { change_set_id: '22222222-2222-4222-8222-222222222222' },
         _job_id: 'job-b',
         _publication_confirmation_id: 'confirmation-b',
       },
@@ -330,22 +342,13 @@ describe('deployed authored CAD acceptance checks', () => {
       }
       if (parsed.pathname.startsWith('/api/jobs/')) return response(404, {})
       if (parsed.pathname === '/api/author/publication-requests') return response(404, {})
-      if (parsed.pathname === '/api/author/confirmations') {
-        const receipt = JSON.parse(options.body)
-        const ownReceipt = tokenA
-          ? receipt.change_set_id === browser[0]._staged_change_set_id
-          : receipt.change_set_id === browser[1]._staged_change_set_id
-        return ownReceipt
-          ? response(200, { confirmation_id: tokenA ? 'confirmation-a' : 'confirmation-b' })
-          : response(404, {})
-      }
       return response(500, {})
     }
     assert.deepEqual(
       await proveExecutedAuthorityIsolation(config, browser, fetchImpl),
       {
         status: 'denied',
-        authorities: ['repository', 'catalog', 'approval', 'job', 'audit'],
+        authorities: ['repository', 'catalog', 'job', 'audit'],
         tenants: ['A', 'B'],
       },
     )
@@ -362,16 +365,6 @@ describe('deployed authored CAD acceptance checks', () => {
       /another tenant tool leaked/,
     )
 
-    const universallyMissingApproval = async (url, options) => {
-      if (new URL(url).pathname === '/api/author/confirmations') return response(404, {})
-      return fetchImpl(url, options)
-    }
-    await assert.rejects(
-      () => proveExecutedAuthorityIsolation(config, browser, universallyMissingApproval),
-      (error) => error instanceof AcceptanceError
-        && error.check === 'own_publication_approval_A'
-        && error.message === 'unexpected HTTP 404',
-    )
   })
 
   it('rejects stale catalog and exact write replay without changing head', async () => {
@@ -485,7 +478,6 @@ describe('deployed authored CAD acceptance checks', () => {
       [
         {
           label: 'A', executed: true, _workbench_id: 'secret-workbench-a',
-          _staged_receipt: { tenant_id: 'acceptance-a' },
           _run_request: { secret: TOKEN_A },
           _run_headers: { 'x-checkout-capability': 'secret-capability-a' },
           _job_id: 'secret-job-a',
@@ -493,7 +485,6 @@ describe('deployed authored CAD acceptance checks', () => {
         },
         {
           label: 'B', executed: true, _workbench_id: 'secret-workbench-b',
-          _staged_receipt: { tenant_id: 'acceptance-b' },
           _run_request: { secret: TOKEN_B },
           _run_headers: { 'x-checkout-capability': 'secret-capability-b' },
           _job_id: 'secret-job-b',
