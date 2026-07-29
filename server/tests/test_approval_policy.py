@@ -609,3 +609,86 @@ def test_concurrent_terminals_cannot_exceed_the_cap(monkeypatch, turn_stub):
     assert set(decided) <= set(parked), (
         f"a decided row is not tracked: decided={decided} parked={parked}")
     session_store.end_turn(sid, "orphan-conc")
+
+
+def test_policy_switched_off_drains_the_park(monkeypatch, turn_stub):
+    """Review round 6, finding 2: parked entries were never inspected again
+    once the policy was confirm_all — the drain drops them (the rows expire by
+    their own TTL) instead of finishing them, because finishing one is still an
+    auto-run the operator just switched off."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-drain", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-drain", tool="panel_count", params={},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    assert session_store.try_begin_turn(sid, "orphan-drain", 300)
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-drain": {"capability": "drawing.read"}}, None, "demo")
+    with turn_runner._pending_policy_lock:
+        assert turn_runner._pending_policy.get(sid) == ["cid-drain"]
+
+    session_policy.set_policy(sid, "tenant-p", "confirm_all")
+    session_store.end_turn(sid, "orphan-drain")
+    turn_runner._auto_confirm_reads("tenant-p", sid, {}, None, "demo")
+
+    with turn_runner._pending_policy_lock:
+        assert sid not in turn_runner._pending_policy, (
+            "policy-off left the parked entry orphaned")
+    row = session_store.get_approval("cid-drain")
+    assert row["consumed"] is False, "policy-off FINISHED a parked auto-run"
+
+
+def test_persistent_give_back_failure_is_alarmed_and_ttl_bounded(monkeypatch, turn_stub):
+    """Review round 6, finding 1: an unconsume that keeps failing leaves the
+    row consumed-by-policy (a human cannot redeem it under live auth). The
+    failure must reach the ALARMABLE channel, and the slot must free itself at
+    the row's TTL via the top check's expired branch — bounded, never silent,
+    never a permanently occupied cap."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    alarms = []
+    monkeypatch.setattr(turn_runner.emf_metrics, "emit_approval_give_back_failed",
+                        lambda reason, **kw: alarms.append((reason, kw)))
+    monkeypatch.setattr(turn_runner.session_store, "unconsume_approval",
+                        lambda *a, **k: False)
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-gbf", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-gbf", tool="panel_count", params={},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    assert session_store.try_begin_turn(sid, "orphan-gbf", 300)
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-gbf": {"capability": "drawing.read"}}, None, "demo")
+
+    assert alarms and alarms[0][0] == "policy_auto_confirm", (
+        "a destroyed approval did not reach the alarmable channel")
+    row = session_store.get_approval("cid-gbf")
+    assert row["consumed"] is True  # the stranded state, honestly present
+
+    # TTL bound: age the row past expiry; the next terminal frees the slot.
+    with session_store._lock:
+        conn = session_store._db()
+        conn.execute("UPDATE approvals SET expires_at = ? WHERE confirmation_id = ?",
+                     (1.0, "cid-gbf"))
+        conn.commit()
+    session_store.end_turn(sid, "orphan-gbf")
+    turn_runner._auto_confirm_reads("tenant-p", sid, {}, None, "demo")
+    with turn_runner._pending_policy_lock:
+        assert sid not in turn_runner._pending_policy, (
+            "the slot never freed after the row expired — a permanent cap leak")

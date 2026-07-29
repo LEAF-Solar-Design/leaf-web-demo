@@ -69,6 +69,7 @@ import requests
 import agent_gate
 import agent_ledger
 import broker_client
+import emf_metrics
 import entitlements
 import instant_execution
 import session_policy
@@ -980,25 +981,41 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
     unconsumed, eligible capability, stored dwg binding.
     """
     try:
-        if session_policy.get_policy(session_id, tenant_id) != "auto_approve_reads":
-            return
         # A decision parked by an earlier lost CAS outranks this turn's own
         # proposals: it is already decided and the user is waiting on it.
         with _pending_policy_lock:
             parked = list(_pending_policy.get(session_id) or ())
+
+        try:
+            allowed = (
+                session_policy.get_policy(session_id, tenant_id) == "auto_approve_reads"
+                and entitlements.entitlements_for(
+                    entitlement_tier).get("converse", False))
+        except Exception:  # noqa: BLE001
+            allowed = False
+        if not allowed:
+            # Policy off (or entitlement lost) means STOP AUTO-RUNNING —
+            # including decisions parked while it was on. The entries are
+            # DROPPED, not finished (finishing one is still an auto-run), and
+            # the rows themselves are time-bounded: an approval carries
+            # expires_at (SESSIONS_APPROVAL_TTL_S), so a policy-decided row
+            # nobody can consume simply expires. Without this drain a parked
+            # entry was never inspected again while the new policy was active
+            # (review round 6, finding 2).
+            if parked:
+                with _pending_policy_lock:
+                    _pending_policy.pop(session_id, None)
+                print(f"[leaf-agent] policy auto-confirm: policy off for "
+                      f"{session_id!r}; dropping {len(parked)} parked "
+                      f"decision(s) {parked!r} — the rows expire by TTL",
+                      file=sys.stderr, flush=True)
+            return
+
         candidates = parked + [
             cid for cid, data in proposals.items()
             if data.get("capability") in READONLY_AUTO_CAPABILITIES
             and cid not in parked]
         if not candidates:
-            return
-        # Entitlement gate at ACTION time, the kicker's rule: an unevaluable
-        # or denying policy leaves the chip manual.
-        try:
-            if not entitlements.entitlements_for(
-                    entitlement_tier).get("converse", False):
-                return
-        except Exception:  # noqa: BLE001
             return
 
         for cid in candidates:
@@ -1181,10 +1198,32 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # (see RESUMABLE above). The decision itself stands - it is ours,
             # and re-granting an already-granted gate would be the divergence
             # the gate-first ordering exists to prevent.
-            try:
-                session_store.unconsume_approval(cid, session_id, tenant_id)
-            except Exception:  # noqa: BLE001
-                pass
+            # The give-back gets THREE tries, and a persistent failure is
+            # reported on the ALARMABLE channel (the router's precedent for a
+            # destroyed approval): the row stays consumed-by-policy, unusable
+            # by a human under live auth, until its TTL expires — at which
+            # point the top check's `expired` branch releases the slot.
+            # Bounded and visible, never silent (review round 6, finding 1).
+            released = False
+            for _ in range(3):
+                try:
+                    released = bool(session_store.unconsume_approval(
+                        cid, session_id, tenant_id))
+                except Exception:  # noqa: BLE001
+                    released = False
+                if released:
+                    break
+            if not released:
+                try:
+                    emf_metrics.emit_approval_give_back_failed(
+                        "policy_auto_confirm", confirmation_id=cid,
+                        session_id=session_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f"[leaf-agent] policy auto-confirm give-back FAILED for "
+                      f"{cid!r} on session {session_id!r} — the row stays "
+                      f"consumed until its TTL expires",
+                      file=sys.stderr, flush=True)
             # PARK it, so a later terminal actually retries (see
             # _pending_policy). Returning the consume alone left the decision
             # with nothing to rediscover it.
