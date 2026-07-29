@@ -320,3 +320,27 @@ describe('prompt history', () => {
     assert.equal(c.handled, false)
   })
 })
+
+describe('queued-turn reconciliation: drop-before-202 (round 3)', () => {
+  it('a drop that beats the 202 suppresses the note instead of stranding it', () => {
+    let state = createQueuedTurnState()
+    const dropped = reconcileQueuedTurn(state, {
+      type: 'turn_queue_dropped', data: { queued_id: 'q-1', reason: 'entitlement_denied' },
+    })
+    assert.equal(dropped.action, 'keep')
+    state = dropped.state
+    const accepted = acceptQueuedTurn(state, { queuedId: 'q-1', text: 'late' })
+    assert.equal(accepted.action, 'drop')
+    assert.equal(accepted.state.queuedTurn, null)
+  })
+
+  it('an unrelated drop id does not suppress a later legitimate 202', () => {
+    let state = createQueuedTurnState()
+    state = reconcileQueuedTurn(state, {
+      type: 'turn_queue_dropped', data: { queued_id: 'q-other' },
+    }).state
+    const accepted = acceptQueuedTurn(state, { queuedId: 'q-2', text: 'mine' })
+    assert.equal(accepted.action, 'queue')
+    assert.equal(accepted.state.queuedTurn.queuedId, 'q-2')
+  })
+})

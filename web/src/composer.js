@@ -155,7 +155,7 @@ export function shouldRetryWithQueue(errorKind, { text, confirm, credential_gran
 export const MAX_SEEN_QUEUED_STARTS = 8
 
 export function createQueuedTurnState() {
-  return { queuedTurn: null, seenQueuedStarts: [] }
+  return { queuedTurn: null, seenQueuedStarts: [], seenQueuedDrops: [] }
 }
 
 function queuedStartFrom(event = {}) {
@@ -192,9 +192,17 @@ export function reconcileQueuedTurn(state = createQueuedTurnState(), event = {})
     }
     return { action: 'keep', state: { ...state, seenQueuedStarts } }
   }
-  if (event.type === 'turn_queue_dropped'
-    && event.data?.queued_id === state.queuedTurn?.queuedId) {
-    return { action: 'clear', state: { ...state, queuedTurn: null } }
+  if (event.type === 'turn_queue_dropped' && event.data?.queued_id) {
+    // Remember the drop even when no note exists yet: the server can drop
+    // SYNCHRONOUSLY (entitlement denied at the enqueue-time kick) so this
+    // event can beat the 202 — without the memory, the late response would
+    // install a note nothing will ever clear (review round 3).
+    const seenQueuedDrops = [...(state.seenQueuedDrops ?? []), event.data.queued_id]
+      .slice(-MAX_SEEN_QUEUED_STARTS)
+    if (event.data.queued_id === state.queuedTurn?.queuedId) {
+      return { action: 'clear', state: { ...state, queuedTurn: null, seenQueuedDrops } }
+    }
+    return { action: 'keep', state: { ...state, seenQueuedDrops } }
   }
   return { action: 'keep', state }
 }
@@ -203,6 +211,10 @@ export function reconcileQueuedTurn(state = createQueuedTurnState(), event = {})
 // that recorded event to render the bubble immediately instead of flashing a
 // stale queue note.
 export function acceptQueuedTurn(state = createQueuedTurnState(), queuedTurn) {
+  if ((state.seenQueuedDrops ?? []).includes(queuedTurn?.queuedId)) {
+    // Dropped before the 202 even landed — never install the note.
+    return { action: 'drop', state: { ...state, queuedTurn: null } }
+  }
   const started = state.seenQueuedStarts.find(
     (seen) => seen.queued_id === queuedTurn?.queuedId,
   )
