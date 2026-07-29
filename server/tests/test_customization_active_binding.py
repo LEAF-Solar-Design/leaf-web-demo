@@ -234,25 +234,26 @@ def test_the_execute_and_read_path_resolves_too():
 def test_the_tools_route_lists_under_the_resolved_tenant(
     mismatched_identity, monkeypatch,
 ):
-    """The read side of the split, driven through the real route.
+    """The read side, driven through the real route.
 
-    A source assertion alone would stay green if the resolver special-cased
-    these paths, so this records the tenant the catalog lookup actually gets.
+    Round 2 caught the first version of this patching the wrong symbol
+    (tools_router.authored_tools_for, which the route never calls) with a
+    fallback that defaulted the observed tenant to PLATFORM, so it passed
+    without observing anything. It now patches deps.all_tools, the function the
+    route actually calls, and asserts unconditionally.
     """
     from fastapi.testclient import TestClient
 
     import app as app_module
-    from routers import tools as tools_router
 
     seen = {}
 
-    def _recording_catalog(tenant_id, *args, **kwargs):
+    def _recording_all_tools(tenant_id):
         seen["tenant"] = str(tenant_id)
         return []
 
     monkeypatch.setattr(deps, "auth_live", lambda: True)
-    monkeypatch.setattr(
-        tools_router, "authored_tools_for", _recording_catalog, raising=False)
+    monkeypatch.setattr(deps, "all_tools", _recording_all_tools)
     app_module.app.dependency_overrides[deps.require_tenant] = (
         lambda: deps.TenantContext(CLAIM, org_id=CLAIM, tier="hosted_pro",
                                    subject=SUBJECT)
@@ -264,13 +265,44 @@ def test_the_tools_route_lists_under_the_resolved_tenant(
         app_module.app.dependency_overrides.clear()
 
     assert response.status_code == 200, response.text
-    if "tenant" in seen:
-        assert seen["tenant"] == PLATFORM, (
-            "/api/tools looked up the catalog under the raw claim"
-        )
-    else:
-        # the route did not reach that seam in this build; fall back to proving
-        # the echoed identity, which the tenant_echo helper fills from the
-        # resolved context
-        body = response.json()
-        assert body.get("tenant_id", PLATFORM) == PLATFORM
+    assert seen["tenant"] == PLATFORM, (
+        "/api/tools looked up the catalog under the raw claim, so a tool "
+        "published under the platform tenant would be invisible"
+    )
+
+
+def test_the_run_route_executes_under_the_resolved_tenant(
+    mismatched_identity, monkeypatch,
+):
+    """The execute side. Without this, a mutation that returns the unresolved
+    tenant only for /api/run leaves every other assertion green."""
+    from fastapi.testclient import TestClient
+
+    import app as app_module
+    from routers import jobs as jobs_router
+
+    seen = {}
+
+    # find_tool(name, tenant_id) — the tenant is the SECOND argument
+    # (routers/jobs.py). Recording the first would have watched the tool name.
+    def _recording_find_tool(name, tenant_id, *args, **kwargs):
+        seen["tenant"] = str(tenant_id)
+        return None
+
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(jobs_router.deps, "find_tool", _recording_find_tool)
+    app_module.app.dependency_overrides[deps.require_tenant] = (
+        lambda: deps.TenantContext(CLAIM, org_id=CLAIM, tier="hosted_pro",
+                                   subject=SUBJECT)
+    )
+    try:
+        client = TestClient(app_module.app, raise_server_exceptions=False)
+        client.post("/api/run", json={"tool": "no-such-tool", "params": {},
+                                      "dwg": "rooftop_demo"})
+    finally:
+        app_module.app.dependency_overrides.clear()
+
+    assert seen.get("tenant") == PLATFORM, (
+        "/api/run resolved the raw claim, so it would not find a tool "
+        f"published under the platform tenant (saw {seen.get('tenant')!r})"
+    )
