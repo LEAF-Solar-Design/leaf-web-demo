@@ -38,6 +38,8 @@ COPY platform/  /app/platform/
 COPY contract/  /app/contract/
 COPY data/      /app/data/
 COPY scripts/reconcile_customization_authority.py /app/scripts/reconcile_customization_authority.py
+COPY server/start-app.sh /app/server/start-app.sh
+RUN chmod 0500 /app/server/start-app.sh
 
 # The stdlib `platform` module is shadowed by /app/platform once /app is on
 # sys.path; app.py loads the platform package under a `leaf_platform` alias and
@@ -50,6 +52,7 @@ ENV APS_LIVE=0 \
     LEAF_JOBS_STORE=legacy \
     LEAF_SESSIONS_STORE=legacy \
     LEAF_AGENT_STORE=legacy \
+    LEAF_INSTANT_EXECUTION_ENABLED=0 \
     LEAF_GUEST_CAP_STORE=memory \
     LEAF_DRAWING_STORE=legacy \
     LEAF_UPLOAD_STORE=legacy \
@@ -65,4 +68,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
 
 # uvicorn binds 0.0.0.0 so the container is reachable on the compose network
 # (python app.py already binds 0.0.0.0, but uvicorn is the documented run form).
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8130"]
+CMD ["/app/server/start-app.sh"]

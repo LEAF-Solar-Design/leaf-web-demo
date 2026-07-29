@@ -15,6 +15,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .supervisor import ExecutorError, WarmExecutorSupervisor
+from .accounting import StructuredAccountingEmitter
+from executor.registry import ImmutableArtifactRegistry
 from .registration import HostRegistrar, HostRegistrationConfig, resolve_executor_id
 
 
@@ -270,6 +272,16 @@ def main() -> None:
     trusted_keys = load_trust_bundle()
     if not trusted_keys and (not is_loopback or os.environ.get("LEAF_INSTANT_ALLOW_EMPTY_TRUST") != "1"):
         raise SystemExit("a control-plane JWKS trust bundle is required")
+    artifact_keys = {
+        key_id: key for key_id, key in trusted_keys.items()
+        if key_id.endswith(".artifact-v1")
+    }
+    lease_keys = {
+        key_id: key for key_id, key in trusted_keys.items()
+        if not key_id.endswith(".artifact-v1")
+    }
+    if not is_loopback and (not lease_keys or not artifact_keys):
+        raise SystemExit("separate lease and artifact signing trust keys are required")
     try:
         registration_config = (
             HostRegistrationConfig.from_environment(
@@ -285,7 +297,13 @@ def main() -> None:
     # secrets in parent memory, but remove them before any restricted child is
     # created so they are absent from the child's environment and /proc image.
     scrub_child_environment()
-    supervisor = WarmExecutorSupervisor(args.executor_id, trusted_keys, args.pool_size)
+    supervisor = WarmExecutorSupervisor(
+        args.executor_id,
+        lease_keys,
+        args.pool_size,
+        artifact_registry=ImmutableArtifactRegistry((), artifact_keys),
+        accounting_emitter=StructuredAccountingEmitter(),
+    )
     try:
         registrar = configure_host_registrar(supervisor, config=registration_config)
         if not is_loopback and registrar is None:

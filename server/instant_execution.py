@@ -55,6 +55,8 @@ _now = time.time
 
 
 def _control_url() -> str:
+    if os.environ.get("LEAF_INSTANT_EXECUTION_ENABLED", "0") != "1":
+        return ""
     return os.environ.get("LEAF_INSTANT_CONTROL_URL", "").strip().rstrip("/")
 
 

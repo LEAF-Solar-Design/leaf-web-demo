@@ -15,7 +15,10 @@ from datetime import UTC, datetime
 from multiprocessing.connection import Connection
 from typing import Any
 
+from executor.registry import ArtifactReference, ArtifactRegistryError, ImmutableArtifactRegistry, SignedArtifact
+
 from .child import child_main
+from .accounting import AccountingEmissionError
 from .contracts import ContractError, validate_contract
 from .ed25519 import verify
 
@@ -74,7 +77,10 @@ class WarmExecutorSupervisor:
 
     def __init__(self, executor_id: str, public_keys: dict[str, bytes], pool_size: int = 2,
                  *, idempotency_ttl_seconds: float = DEFAULT_IDEMPOTENCY_TTL_SECONDS,
-                 idempotency_max_entries: int = DEFAULT_IDEMPOTENCY_MAX_ENTRIES) -> None:
+                 idempotency_max_entries: int = DEFAULT_IDEMPOTENCY_MAX_ENTRIES,
+                 artifact_registry: ImmutableArtifactRegistry | None = None,
+                 trusted_development_fixtures: bool = False,
+                 accounting_emitter: Any | None = None) -> None:
         if pool_size < 1:
             raise ValueError("pool_size must be positive")
         if idempotency_ttl_seconds <= 0:
@@ -88,6 +94,9 @@ class WarmExecutorSupervisor:
         self._idempotency: OrderedDict[tuple[str, str, str], tuple[float, str, dict[str, Any]]] = OrderedDict()
         self._idempotency_ttl_seconds = idempotency_ttl_seconds
         self._idempotency_max_entries = idempotency_max_entries
+        self._artifact_registry = artifact_registry
+        self._trusted_development_fixtures = trusted_development_fixtures
+        self._accounting_emitter = accounting_emitter
         self._state_lock = threading.RLock()
         for index in range(pool_size):
             self._slots.append(self._start_slot(f"slot-{index + 1}"))
@@ -133,24 +142,19 @@ class WarmExecutorSupervisor:
         ))
 
     def assign(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Validate an immutable source artifact and load it into one ready child."""
+        """Resolve one immutable artifact and load it into one ready child."""
         try:
             assignment = request["assignment"]
             load = request["code_load"]
             catalog = request["catalog"]
-            source = request["source"]
             drawing_context = request["drawing_context"]
             validate_contract("session-assignment.v1.schema.json", assignment)
             validate_contract("code-load.v1.schema.json", load)
             validate_contract("catalog-entry.v1.schema.json", catalog)
         except (KeyError, ContractError) as exc:
             raise ExecutorError("INVALID_CONTRACT", str(exc)) from exc
-        if not isinstance(source, str) or not isinstance(drawing_context, dict):
-            raise ExecutorError("INVALID_CONTRACT", "source and assignment drawing_context are required")
-        source_digest = "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
-        for document in (assignment, load, catalog):
-            if document["code_digest"] != source_digest or document["artifact_digest"] != source_digest:
-                raise ExecutorError("ARTIFACT_DIGEST_MISMATCH", "source does not match immutable code and artifact digests")
+        if not isinstance(drawing_context, dict):
+            raise ExecutorError("INVALID_CONTRACT", "assignment drawing_context is required")
         if assignment["executor_id"] != self.executor_id:
             raise ExecutorError("SESSION_BINDING_MISMATCH", "assignment names another executor")
         pairs = ("tenant_id", "session_id", "effective_catalog_digest", "code_digest", "artifact_digest")
@@ -160,6 +164,7 @@ class WarmExecutorSupervisor:
             raise ExecutorError("CODE_DIGEST_MISMATCH", "catalog does not match assignment")
         if _secret_shaped(drawing_context):
             raise ExecutorError("FORBIDDEN_PAYLOAD_FIELD", "drawing context contains a credential-shaped field")
+        source = self._resolve_source(request, assignment)
         with self._state_lock:
             existing = self._find_assignment(assignment["assignment_id"])
             if existing:
@@ -191,6 +196,53 @@ class WarmExecutorSupervisor:
             slot.loading = False
             return self._readiness(slot)
 
+    def _resolve_source(self, request: dict[str, Any], assignment: dict[str, Any]) -> str:
+        inline_source = request.get("source")
+        if self._trusted_development_fixtures:
+            if not isinstance(inline_source, str):
+                raise ExecutorError("INVALID_CONTRACT", "trusted development fixtures require source")
+            source_digest = "sha256:" + hashlib.sha256(inline_source.encode("utf-8")).hexdigest()
+            if (assignment["code_digest"] != source_digest
+                    or assignment["artifact_digest"] != source_digest):
+                raise ExecutorError("ARTIFACT_DIGEST_MISMATCH", "fixture source does not match immutable digests")
+            return inline_source
+        if inline_source is not None:
+            raise ExecutorError("UNTRUSTED_SOURCE_REJECTED", "inline source is only allowed in trusted development fixtures")
+        if self._artifact_registry is None:
+            raise ExecutorError("ARTIFACT_UNAVAILABLE", "immutable artifact registry is not configured", True)
+        reference = ArtifactReference(
+            tenant_id=assignment["tenant_id"],
+            catalog_version=assignment["effective_catalog_digest"],
+            artifact_digest=assignment["artifact_digest"],
+            code_digest=assignment["code_digest"],
+        )
+        try:
+            envelope = request.get("artifact")
+            if envelope is None:
+                return self._artifact_registry.resolve(reference).decode("utf-8")
+            if not isinstance(envelope, dict):
+                raise ExecutorError("INVALID_CONTRACT", "signed artifact envelope must be an object")
+            if set(envelope) != {"source_b64", "signing_key_id", "signature_b64"}:
+                raise ExecutorError("INVALID_CONTRACT", "signed artifact envelope has unknown or missing fields")
+            key_id = envelope["signing_key_id"]
+            if not isinstance(key_id, str) or not key_id:
+                raise ExecutorError("INVALID_CONTRACT", "artifact signing key ID is invalid")
+            signed = SignedArtifact(
+                reference=reference,
+                bytes=_b64decode(envelope["source_b64"]),
+                signing_key_id=key_id,
+                signature=_b64decode(envelope["signature_b64"]),
+            )
+            return self._artifact_registry.resolve_signed(signed).decode("utf-8")
+        except ArtifactRegistryError as exc:
+            raise ExecutorError(exc.code, str(exc)) from exc
+        except ExecutorError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutorError("INVALID_CONTRACT", "signed artifact envelope is malformed") from exc
+        except UnicodeDecodeError as exc:
+            raise ExecutorError("ARTIFACT_UNAVAILABLE", "artifact source is not valid UTF-8") from exc
+
     def release(self, assignment_id: str) -> dict[str, Any]:
         with self._state_lock:
             slot = self._find_assignment(assignment_id)
@@ -216,7 +268,8 @@ class WarmExecutorSupervisor:
             validate_contract("invocation.v1.schema.json", body)
         except ContractError as exc:
             return self._error(body, "INVALID_CONTRACT", str(exc))
-        if len(json.dumps(body, separators=(",", ":")).encode("utf-8")) > MAX_INPUT_BYTES:
+        input_bytes = len(json.dumps(body, separators=(",", ":")).encode("utf-8"))
+        if input_bytes > MAX_INPUT_BYTES:
             return self._error(body, "INVALID_CONTRACT", "invocation input exceeds one megabyte")
         if _secret_shaped({"params": body["params"], "drawing_context": body["drawing_context"]}):
             return self._error(body, "FORBIDDEN_PAYLOAD_FIELD", "credential-shaped input is forbidden")
@@ -237,6 +290,10 @@ class WarmExecutorSupervisor:
                 return prior_response
         deadline = datetime.fromisoformat(body["deadline_at"].replace("Z", "+00:00")).timestamp()
         timeout = min(max(0.001, deadline - time.time()), slot.catalog["limits"]["max_wall_ms"] / 1000)
+        wall_started = time.perf_counter_ns()
+        if not self._emit_accounting(body, "accepted") or not self._emit_accounting(body, "started"):
+            return self._error(body, "ACCOUNTING_UNAVAILABLE", "accounting event could not reach the delivery plane", True)
+        reply: dict[str, Any] = {}
         with slot.lock:
             try:
                 slot.conn.send({"action": "invoke", "assignment_id": body["assignment_id"], "params": body["params"]})
@@ -256,13 +313,52 @@ class WarmExecutorSupervisor:
                     response = {"contract": "leaf.instant-execution/v1", "invocation_id": body["invocation_id"],
                                 "tenant_id": body["tenant_id"], "session_id": body["session_id"], "status": "succeeded",
                                 "code_digest": body["code_digest"], "completed_at": _now(), **reply["payload"]}
+        wall_ms = max(0, (time.perf_counter_ns() - wall_started) // 1_000_000)
+        terminal = {
+            "outcome": "succeeded" if response["status"] == "succeeded" else "failed",
+            "cpu_ms": max(0, int(reply.get("cpu_ms", 0))),
+            "wall_ms": wall_ms,
+            "memory_peak_bytes": max(0, int(reply.get("memory_peak_bytes", 0))),
+            "input_bytes": input_bytes,
+            "output_bytes": len(json.dumps(response, separators=(",", ":")).encode("utf-8")),
+        }
+        final_response = response
+        if not self._emit_accounting(body, "terminal", **terminal):
+            final_response = self._error(
+                body, "ACCOUNTING_UNAVAILABLE",
+                "terminal accounting event could not reach the delivery plane",
+                True, "completed" if response["status"] == "succeeded" else "unknown",
+            )
         with self._state_lock:
             self._purge_idempotency()
-            self._idempotency[key] = (time.monotonic() + self._idempotency_ttl_seconds, request_hash, response)
+            self._idempotency[key] = (
+                time.monotonic() + self._idempotency_ttl_seconds,
+                request_hash,
+                final_response,
+            )
             self._idempotency.move_to_end(key)
             while len(self._idempotency) > self._idempotency_max_entries:
                 self._idempotency.popitem(last=False)
-        return response
+        return final_response
+
+    def _emit_accounting(self, body: dict[str, Any], state: str, **usage: Any) -> bool:
+        if self._accounting_emitter is None:
+            return True
+        record = {
+            "invocation_id": body["invocation_id"],
+            "tenant_id": body["tenant_id"],
+            "session_id": body["session_id"],
+            "lease_id": body["lease_id"],
+            "code_digest": body["code_digest"],
+            "state": state,
+            "occurred_at": _now(),
+            **usage,
+        }
+        try:
+            self._accounting_emitter.emit(record)
+            return True
+        except AccountingEmissionError:
+            return False
 
     def _verify_lease(self, body: dict[str, Any], authorization: str | None) -> tuple[Slot, dict[str, Any]]:
         if not authorization or not authorization.startswith("Bearer "):

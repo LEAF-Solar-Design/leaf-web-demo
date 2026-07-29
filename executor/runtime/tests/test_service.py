@@ -29,7 +29,7 @@ from executor.runtime.tests.helpers import EXECUTOR_ID, documents, keys, lease
 
 class ServiceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True)
         self.server = make_server(("127.0.0.1", 0), self.supervisor, "test-runtime-control")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -83,7 +83,9 @@ class ServiceTests(unittest.TestCase):
                 untrusted_context = ssl.create_default_context(cafile=certificates["ca_cert"])
                 untrusted_context.load_cert_chain(certificates["untrusted_client_cert"], certificates["untrusted_client_key"])
                 connection = http.client.HTTPSConnection("localhost", tls_server.server_port, context=untrusted_context)
-                with self.assertRaises(ssl.SSLError):
+                # Windows reports a rejected client certificate as a reset;
+                # OpenSSL-based platforms surface the TLS alert directly.
+                with self.assertRaises((ssl.SSLError, ConnectionResetError)):
                     connection.request("POST", "/v1/control/assign", json.dumps({}), {"Content-Type": "application/json"})
                     connection.getresponse()
                 connection.close()

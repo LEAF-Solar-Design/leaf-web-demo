@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import hashlib
 import os
 import time
 from typing import Any
@@ -51,6 +52,11 @@ class LeaseSigner:
         self._seed = seed or os.urandom(32)
         self.kid = kid
         self.public = public_key(self._seed)
+        self._artifact_seed = hashlib.sha256(
+            b"leaf.instant-execution/artifact-signing/v1\x00" + self._seed
+        ).digest()
+        self.artifact_kid = f"{kid}.artifact-v1"
+        self.artifact_public = public_key(self._artifact_seed)
 
     def sign(self, payload: dict[str, Any]) -> str:
         header = {"alg": "EdDSA", "kid": self.kid, "typ": "JWT"}
@@ -59,9 +65,32 @@ class LeaseSigner:
         signature = _b64(sign(f"{protected}.{body}".encode("ascii"), self._seed))
         return f"{protected}.{body}.{signature}"
 
+    def sign_artifact(self, *, tenant_id: str, catalog_version: str,
+                      artifact_digest: str, code_digest: str,
+                      source: bytes) -> dict[str, str]:
+        """Create a domain-bound envelope for assignment-time code loading."""
+        fields = (
+            b"leaf.instant-execution/artifact/v1",
+            tenant_id.encode("utf-8"),
+            catalog_version.encode("utf-8"),
+            artifact_digest.encode("ascii"),
+            code_digest.encode("ascii"),
+            source,
+        )
+        signature = sign(b"\n".join(fields), self._artifact_seed)
+        return {
+            "source_b64": _b64(source),
+            "signing_key_id": self.artifact_kid,
+            "signature_b64": _b64(signature),
+        }
+
     def jwks(self) -> dict[str, Any]:
-        return {"keys": [{"kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA",
-                          "kid": self.kid, "x": _b64(self.public)}]}
+        return {"keys": [
+            {"kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA",
+             "kid": self.kid, "x": _b64(self.public)},
+            {"kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA",
+             "kid": self.artifact_kid, "x": _b64(self.artifact_public)},
+        ]}
 
 
 def verify_jws(token: str, jwks: dict[str, Any], now: int | None = None) -> dict[str, Any]:

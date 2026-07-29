@@ -34,7 +34,7 @@ async function run(loop: ConverseLoop, session: SessionRecord, a?: InstantSessio
 }
 
 describe("instant run_capability", () => {
-  function setup(entry?: Partial<CapabilityEntry>) {
+  function setup(entry?: Partial<CapabilityEntry>, withExecutor = true) {
     const appRun = new FakeAppRunClient();
     appRun.catalog = [{
       name: "instant-read", description: "instant", capabilities: ["drawing.read"], catalog_digest: digest("1"),
@@ -43,7 +43,10 @@ describe("instant run_capability", () => {
     }];
     const instant = new FakeInstantExecutorClient();
     const store = new FakeSessionStore();
-    const loop = new ConverseLoop({ runner: new FakeConverseRunner(), appRun, gate: new FakeGateClient(), store, instantExecutor: instant });
+    const loop = new ConverseLoop({
+      runner: new FakeConverseRunner(), appRun, gate: new FakeGateClient(), store,
+      ...(withExecutor ? { instantExecutor: instant } : {}),
+    });
     return { appRun, instant, store, loop };
   }
 
@@ -75,5 +78,17 @@ describe("instant run_capability", () => {
     expect(appRun.submitCalls).toHaveLength(1);
     const events = await store.eventsAfter(session.session_id, 0);
     expect(events.find((event) => event.type === "job_linked")?.data).toMatchObject({ route: "batch_fallback", reason: "instant_transport_failure" });
+  });
+
+  it("uses the declared batch fallback when assignment or executor capacity is unavailable", async () => {
+    const missingAssignment = setup({ batch_fallback: true });
+    const first = await missingAssignment.loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await run(missingAssignment.loop, first);
+    expect(missingAssignment.appRun.submitCalls).toHaveLength(1);
+
+    const disabledExecutor = setup({ batch_fallback: true }, false);
+    const second = await disabledExecutor.loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await run(disabledExecutor.loop, second, assignment(second.session_id));
+    expect(disabledExecutor.appRun.submitCalls).toHaveLength(1);
   });
 });

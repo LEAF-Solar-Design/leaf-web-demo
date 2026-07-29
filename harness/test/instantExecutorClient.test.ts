@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
@@ -15,7 +16,13 @@ const assignment = (endpoint: string): InstantSessionAssignment => ({
 });
 const invocation: InstantInvocation = { contract: "leaf.instant-execution/v1", invocation_id: "44444444-4444-4444-8444-444444444444", tenant_id: "tenant-demo", session_id: "22222222-2222-4222-8222-222222222222", assignment_id: "11111111-1111-4111-8111-111111111111", binding_epoch: 1, lease_id: "77777777-7777-4777-8777-777777777777", effective_catalog_digest: digest, code_digest: digest, artifact_digest: digest, deadline_at: "2099-01-01T00:00:00Z", capability: { capability_id: "drawing.read", tool_id: "instant-read", tool_version: "1.0.0" }, params: {}, drawing_context: { drawing_id: "rooftop-demo", version_id: "55555555-5555-4555-8555-555555555555", content_digest: digest, geometry_ref: "drawing-context:rooftop-ref-001" } };
 
-type MtlsFixture = { dir: string; caFile: string; clientCertificateFile: string; clientPrivateKeyFile: string; serverCertificateFile: string; serverPrivateKeyFile: string };
+type MtlsFixture = { dir: string; caFile: string; wrongCaFile: string; clientCertificateFile: string; clientPrivateKeyFile: string; serverCertificateFile: string; serverPrivateKeyFile: string };
+type RuntimeFixture = {
+  assignment: InstantSessionAssignment;
+  invocation: InstantInvocation;
+  status(): Promise<{ invocation_count: number; warm_process_ids: Record<string, number | null>; current_process_ids: Record<string, number | null>; outbound_attempts: Record<string, number> }>;
+  close(): Promise<void>;
+};
 
 function runOpenSsl(args: string[]): void {
   execFileSync("openssl", args, { stdio: "ignore" });
@@ -32,6 +39,8 @@ function createMtlsFixture(): MtlsFixture {
   ].join("\n"));
   const caFile = join(dir, "ca.pem");
   const caKeyFile = join(dir, "ca-key.pem");
+  const wrongCaFile = join(dir, "wrong-ca.pem");
+  const wrongCaKeyFile = join(dir, "wrong-ca-key.pem");
   const serverCertificateFile = join(dir, "server.pem");
   const serverPrivateKeyFile = join(dir, "server-key.pem");
   const serverCsrFile = join(dir, "server.csr");
@@ -39,16 +48,67 @@ function createMtlsFixture(): MtlsFixture {
   const clientPrivateKeyFile = join(dir, "client-key.pem");
   const clientCsrFile = join(dir, "client.csr");
   runOpenSsl(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", caKeyFile, "-out", caFile, "-days", "1", "-config", configFile, "-extensions", "ca_extensions"]);
+  runOpenSsl(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", wrongCaKeyFile, "-out", wrongCaFile, "-days", "1", "-config", configFile, "-extensions", "ca_extensions"]);
   runOpenSsl(["req", "-newkey", "rsa:2048", "-nodes", "-keyout", serverPrivateKeyFile, "-out", serverCsrFile, "-subj", "/CN=localhost", "-config", configFile]);
   runOpenSsl(["x509", "-req", "-in", serverCsrFile, "-CA", caFile, "-CAkey", caKeyFile, "-CAcreateserial", "-out", serverCertificateFile, "-days", "1", "-extfile", configFile, "-extensions", "server_extensions"]);
   runOpenSsl(["req", "-newkey", "rsa:2048", "-nodes", "-keyout", clientPrivateKeyFile, "-out", clientCsrFile, "-subj", "/CN=leaf-harness-client", "-config", configFile]);
   runOpenSsl(["x509", "-req", "-in", clientCsrFile, "-CA", caFile, "-CAkey", caKeyFile, "-CAcreateserial", "-out", clientCertificateFile, "-days", "1", "-extfile", configFile, "-extensions", "client_extensions"]);
-  return { dir, caFile, clientCertificateFile, clientPrivateKeyFile, serverCertificateFile, serverPrivateKeyFile };
+  return { dir, caFile, wrongCaFile, clientCertificateFile, clientPrivateKeyFile, serverCertificateFile, serverPrivateKeyFile };
 }
 
-function rawHttpsRequest(url: string, ca?: Buffer): Promise<void> {
+async function startRuntimeFixture(fixture: MtlsFixture): Promise<RuntimeFixture> {
+  const repository = join(process.cwd(), "..");
+  const venvPython = join(repository, ".venv", process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python");
+  const python = process.env.PYTHON ?? (existsSync(venvPython) ? venvPython : "python");
+  const child = spawn(python, ["-u", join(process.cwd(), "test", "fixtures", "runtime-mtls-fixture.py"), fixture.caFile, fixture.serverCertificateFile, fixture.serverPrivateKeyFile], {
+    cwd: repository,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  const reader = createInterface({ input: child.stdout });
+  const lines: string[] = [];
+  let resolveLine: ((line: string) => void) | undefined;
+  reader.on("line", (line) => {
+    if (resolveLine) {
+      const resolve = resolveLine;
+      resolveLine = undefined;
+      resolve(line);
+    } else lines.push(line);
+  });
+  const next = async <T>(): Promise<T> => {
+    const line = lines.shift() ?? await new Promise<string>((resolve, reject) => {
+      resolveLine = resolve;
+      child.once("error", reject);
+      child.once("exit", (code) => reject(new Error(`runtime fixture exited before responding (${code}): ${stderr}`)));
+    });
+    return JSON.parse(line) as T;
+  };
+  const ready = await next<{ state: string; assignment: InstantSessionAssignment; invocation: InstantInvocation }>();
+  if (ready.state !== "ready") throw new Error(`runtime fixture did not become ready: ${stderr}`);
+  return {
+    assignment: ready.assignment,
+    invocation: ready.invocation,
+    async status() {
+      child.stdin.write(`${JSON.stringify({ command: "status" })}\n`);
+      return next();
+    },
+    async close() {
+      if (child.exitCode !== null) return;
+      child.stdin.write(`${JSON.stringify({ command: "stop" })}\n`);
+      await new Promise<void>((resolve, reject) => {
+        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`runtime fixture exited (${code}): ${stderr}`)));
+        child.once("error", reject);
+      });
+      reader.close();
+    },
+  };
+}
+
+function rawHttpsRequest(url: string, ca?: Buffer, servername?: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const req = httpsRequest(url, { method: "POST", ...(ca ? { ca } : {}) }, (res) => {
+    const req = httpsRequest(url, { method: "POST", ...(ca ? { ca } : {}), ...(servername ? { servername } : {}) }, (res) => {
       res.resume();
       res.on("end", resolve);
     });
@@ -123,6 +183,56 @@ describe("HttpInstantExecutorClient", () => {
     }
   });
 
+  it("uses the assigned endpoint directly against the real warm runtime mTLS listener", async () => {
+    const fixture = createMtlsFixture();
+    let runtime: RuntimeFixture | undefined;
+    let validClient: HttpInstantExecutorClient | undefined;
+    let wrongCaClient: HttpInstantExecutorClient | undefined;
+    let wrongSniClient: HttpInstantExecutorClient | undefined;
+    try {
+      runtime = await startRuntimeFixture(fixture);
+      validClient = new HttpInstantExecutorClient({
+        caFile: fixture.caFile,
+        clientCertificateFile: fixture.clientCertificateFile,
+        clientPrivateKeyFile: fixture.clientPrivateKeyFile,
+        requireTls: true,
+        tlsServerName: "localhost",
+      });
+      wrongCaClient = new HttpInstantExecutorClient({
+        caFile: fixture.wrongCaFile,
+        clientCertificateFile: fixture.clientCertificateFile,
+        clientPrivateKeyFile: fixture.clientPrivateKeyFile,
+        requireTls: true,
+        tlsServerName: "localhost",
+      });
+      wrongSniClient = new HttpInstantExecutorClient({
+        caFile: fixture.caFile,
+        clientCertificateFile: fixture.clientCertificateFile,
+        clientPrivateKeyFile: fixture.clientPrivateKeyFile,
+        requireTls: true,
+        tlsServerName: "wrong-sni.invalid",
+      });
+      expect(runtime.assignment.executor_endpoint).toMatch(/^https:\/\/127\.0\.0\.1:/);
+      await expect(rawHttpsRequest(runtime.assignment.executor_endpoint, readFileSync(fixture.caFile), "localhost")).rejects.toThrow();
+      await expect(validClient.invoke(runtime.assignment, runtime.invocation)).resolves.toMatchObject({
+        status: "succeeded", result: { warm: true, layer: "Panels" },
+      });
+      await expect(wrongCaClient.invoke(runtime.assignment, runtime.invocation)).rejects.toMatchObject({ code: "transport" });
+      expect(() => new HttpInstantExecutorClient({ caFile: fixture.caFile, requireTls: true })).toThrow(InstantExecutorClientError);
+      await expect(wrongSniClient.invoke(runtime.assignment, runtime.invocation)).rejects.toMatchObject({ code: "transport" });
+      const status = await runtime.status();
+      expect(status.invocation_count).toBe(1);
+      expect(status.current_process_ids).toEqual(status.warm_process_ids);
+      expect(status.outbound_attempts).toEqual({ dns: 0, urlopen: 0, http_client: 0 });
+    } finally {
+      validClient?.close();
+      wrongCaClient?.close();
+      wrongSniClient?.close();
+      await runtime?.close();
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed for missing, partial, unreadable, and unsafe executor transport configuration", async () => {
     expect(() => new HttpInstantExecutorClient({ requireTls: true })).toThrow(InstantExecutorClientError);
     expect(() => new HttpInstantExecutorClient({ caFile: "ca.pem" })).toThrow(InstantExecutorClientError);
@@ -191,7 +301,7 @@ describe("HttpInstantExecutorClient", () => {
     }
   });
 
-  it("keeps the harness side on a loopback proxy and out of the direct mTLS client", () => {
+  it("keeps the retired proxy client unavailable to production composition", () => {
     expect(() => new HttpInstantExecutorProxyClient({
       proxyUrl: "http://127.0.0.1:8170",
       proxySecret: "short",
@@ -207,8 +317,9 @@ describe("HttpInstantExecutorClient", () => {
     });
     privateNetworkClient.close();
     const serverSource = readFileSync(join(process.cwd(), "src/server.ts"), "utf8");
-    expect(serverSource).toContain("HttpInstantExecutorProxyClient");
-    expect(serverSource).toContain("executor mTLS files must be mounted only in the instant executor proxy");
-    expect(serverSource).not.toContain("new HttpInstantExecutorClient");
+    expect(serverSource).toContain("HttpInstantExecutorClient");
+    expect(serverSource).toContain("LEAF_INSTANT_EXECUTION_ENABLED");
+    expect(serverSource).toContain("the harness connects to the assigned executor directly");
+    expect(serverSource).not.toContain("new HttpInstantExecutorProxyClient");
   });
 });

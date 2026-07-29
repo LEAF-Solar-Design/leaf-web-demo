@@ -40,7 +40,6 @@
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
@@ -55,14 +54,6 @@ import { parseWireGrant } from "./ports/wireGrant.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 
 export { DEFAULT_TENANT };
-
-function readConfiguredSecret(name: string): string {
-  const inline = (process.env[name] ?? "").trim();
-  const filename = (process.env[`${name}_FILE`] ?? "").trim();
-  if (inline && filename) throw new Error(`configure ${name} or ${name}_FILE, not both`);
-  if (filename) return readFileSync(filename, "utf8").trim();
-  return inline;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -635,6 +626,81 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
  * @anthropic-ai/claude-agent-sdk, run the broker (BROKER_URL), and provide the
  * per-tenant grant store + repo locator. See HARNESS-CONTRACT.md.
  */
+type ProductionInstantExecutorClientOptions = {
+  requireTls: true;
+  caFile: string;
+  clientCertificateFile: string;
+  clientPrivateKeyFile: string;
+  tlsServerName: string;
+};
+
+type ProductionInstantExecutorClientFactory<T> = (options: ProductionInstantExecutorClientOptions) => T;
+
+const DIRECT_EXECUTOR_FILE_ENV = [
+  "LEAF_INSTANT_EXECUTOR_CA_FILE",
+  "LEAF_INSTANT_EXECUTOR_CERT_FILE",
+  "LEAF_INSTANT_EXECUTOR_KEY_FILE",
+] as const;
+
+const RAW_EXECUTOR_CREDENTIAL_ENV = [
+  "LEAF_INSTANT_EXECUTOR_CA",
+  "LEAF_INSTANT_EXECUTOR_CERT",
+  "LEAF_INSTANT_EXECUTOR_KEY",
+  "LEAF_INSTANT_EXECUTOR_CA_PEM",
+  "LEAF_INSTANT_EXECUTOR_CLIENT_CERT_PEM",
+  "LEAF_INSTANT_EXECUTOR_CLIENT_KEY_PEM",
+] as const;
+
+const EXECUTOR_PROXY_ENV = [
+  "LEAF_INSTANT_EXECUTOR_PROXY_URL",
+  "LEAF_INSTANT_EXECUTOR_PROXY_SECRET",
+  "LEAF_INSTANT_EXECUTOR_PROXY_SECRET_FILE",
+] as const;
+
+const EXPECTED_EXECUTOR_TLS_SERVER_NAME = "executor.instant.internal";
+
+function requiredEnvironmentFile(env: NodeJS.ProcessEnv, name: string): string {
+  const path = env[name]?.trim();
+  if (!path) throw new Error(`${name} is required and must be a mounted file path`);
+  return path;
+}
+
+/**
+ * Production uses the executor endpoint in the opaque assignment directly. The
+ * TLS material stays in the reusable HTTPS agent constructed by this client.
+ * Do not accept raw PEM, or a proxy hop, in the harness process.
+ */
+export function createProductionInstantExecutorClient<T>(
+  factory: ProductionInstantExecutorClientFactory<T>,
+  env: NodeJS.ProcessEnv = process.env,
+): T {
+  const rawCredential = RAW_EXECUTOR_CREDENTIAL_ENV.find((name) => env[name] !== undefined);
+  if (rawCredential) {
+    throw new Error(`${rawCredential} is not allowed; use mounted executor credential files`);
+  }
+  const proxySetting = EXECUTOR_PROXY_ENV.find((name) => env[name] !== undefined);
+  if (proxySetting) {
+    throw new Error(`${proxySetting} is not allowed; the harness connects to the assigned executor directly`);
+  }
+
+  const [caFile, clientCertificateFile, clientPrivateKeyFile] = DIRECT_EXECUTOR_FILE_ENV.map(
+    (name) => requiredEnvironmentFile(env, name),
+  );
+  const tlsServerName = requiredEnvironmentFile(env, "LEAF_INSTANT_EXECUTOR_TLS_SERVER_NAME");
+  if (tlsServerName !== EXPECTED_EXECUTOR_TLS_SERVER_NAME) {
+    throw new Error(
+      `LEAF_INSTANT_EXECUTOR_TLS_SERVER_NAME must be ${EXPECTED_EXECUTOR_TLS_SERVER_NAME}`,
+    );
+  }
+  return factory({
+    requireTls: true,
+    caFile,
+    clientCertificateFile,
+    clientPrivateKeyFile,
+    tlsServerName,
+  });
+}
+
 export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
@@ -646,25 +712,18 @@ export async function startReal(port = 8130): Promise<Server> {
   const { HttpGateClient } = await import("./ports/impl/gateClient.js");
   const { ConverseSdkRunner } = await import("./ports/impl/converseSdkRunner.js");
   const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
-  const { HttpInstantExecutorProxyClient, InstantExecutorClientError } = await import("./ports/impl/instantExecutorClient.js");
+  const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
   const tenantGitDir = process.env.LEAF_TENANT_GIT_DIR ?? `${tenantsDir}/tenant-git`;
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
-  const directExecutorCredentialEnv = [
-    "LEAF_INSTANT_EXECUTOR_CA_FILE",
-    "LEAF_INSTANT_EXECUTOR_CERT_FILE",
-    "LEAF_INSTANT_EXECUTOR_KEY_FILE",
-  ].filter((name) => (process.env[name] ?? "").trim());
-  if (directExecutorCredentialEnv.length) {
-    throw new InstantExecutorClientError(
-      `executor mTLS files must be mounted only in the instant executor proxy, not the harness: ${directExecutorCredentialEnv.join(",")}`,
-      "configuration",
-    );
-  }
-  const instantExecutorProxyUrl = (process.env.LEAF_INSTANT_EXECUTOR_PROXY_URL ?? "").trim();
-  const instantExecutorProxySecret = readConfiguredSecret("LEAF_INSTANT_EXECUTOR_PROXY_SECRET");
+  const instantExecutionEnabled = envFlagOn(process.env.LEAF_INSTANT_EXECUTION_ENABLED);
+  const instantExecutor = instantExecutionEnabled
+    ? createProductionInstantExecutorClient(
+        (options) => new HttpInstantExecutorClient(options),
+      )
+    : undefined;
   // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
   const grantStore = createTenantGrantStore();
   const sessionStore = appUrl && dispatchSecret ? createSessionStore() : null;
@@ -675,11 +734,7 @@ export async function startReal(port = 8130): Promise<Server> {
         gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
         store: sessionStore.store,
         runnerFor: (grant) => new ConverseSdkRunner({ grant }),
-        instantExecutor: new HttpInstantExecutorProxyClient({
-          proxyUrl: instantExecutorProxyUrl,
-          proxySecret: instantExecutorProxySecret,
-          allowNetworkProxy: true,
-        }),
+        instantExecutor,
       })
     : undefined;
 
@@ -701,6 +756,9 @@ export async function startReal(port = 8130): Promise<Server> {
   const server = createHarness(ports).listen(port);
   if (sessionStore) {
     server.once("close", () => { void sessionStore.close(); });
+  }
+  if (instantExecutor) {
+    server.once("close", () => { instantExecutor.close(); });
   }
   return server;
 }
