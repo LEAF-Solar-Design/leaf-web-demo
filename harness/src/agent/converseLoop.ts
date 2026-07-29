@@ -814,6 +814,20 @@ export class ConverseLoop {
           return err("run_capability requires a current server-issued catalog digest");
         }
         if (catalogEntry?.execution_class === "instant") {
+          const batchFallback = async (reason: string): Promise<SpineToolResult> => {
+            const fallback = await appRun.submitRun({
+              tenantId, tool: target, params, dwg, catalogDigest,
+              wait: true, waitTimeoutS: this.readWaitS,
+            });
+            await ctx.emit("job_linked", {
+              job_id: fallback.job_id, tool: target, route: "batch_fallback", reason,
+            });
+            return ok(JSON.stringify({
+              route: "batch_fallback", reason,
+              job_id: fallback.job_id, status: fallback.status,
+              ...(fallback.result !== undefined ? { result: fallback.result } : {}),
+            }));
+          };
           const instant = validateInstantRoute({
             assignment: ctx.instantAssignment,
             drawingContext: ctx.instantDrawingContext,
@@ -824,8 +838,16 @@ export class ConverseLoop {
             tool: target,
             drawingId: dwg,
           });
-          if (!instant.ok) return err(`instant execution rejected: ${instant.reason}`);
-          if (!instantExecutor) return err("instant execution rejected: executor_unavailable");
+          if (!instant.ok) {
+            return catalogEntry.batch_fallback === true
+              ? batchFallback(`instant_route_${instant.reason}`)
+              : err(`instant execution rejected: ${instant.reason}`);
+          }
+          if (!instantExecutor) {
+            return catalogEntry.batch_fallback === true
+              ? batchFallback("instant_executor_unavailable")
+              : err("instant execution rejected: executor_unavailable");
+          }
           const invocation = buildInstantInvocation(instant.value, params, target);
           try {
             const response = await instantExecutor.invoke(instant.value.assignment, invocation);
@@ -839,19 +861,7 @@ export class ConverseLoop {
             if (catalogEntry.batch_fallback !== true) {
               return err(`instant execution failed: ${(error as Error).message}`);
             }
-            const fallback = await appRun.submitRun({
-              tenantId, tool: target, params, dwg, catalogDigest,
-              wait: true, waitTimeoutS: this.readWaitS,
-            });
-            await ctx.emit("job_linked", {
-              job_id: fallback.job_id, tool: target, route: "batch_fallback",
-              reason: "instant_transport_failure",
-            });
-            return ok(JSON.stringify({
-              route: "batch_fallback", reason: "instant_transport_failure",
-              job_id: fallback.job_id, status: fallback.status,
-              ...(fallback.result !== undefined ? { result: fallback.result } : {}),
-            }));
+            return batchFallback("instant_transport_failure");
           }
         }
         const capability = await ctx.capabilityOf(target);

@@ -47,6 +47,9 @@ class ProductionSettings:
     signing_key_id: str
     reaper_interval_seconds: int
     reaper_idle_timeout_seconds: int | None
+    allowed_artifact_digests: frozenset[str] = frozenset()
+    accounting_ingest_secret: str = ""
+    accounting_stale_timeout_seconds: int = 120
 
 
 @dataclass(frozen=True)
@@ -151,15 +154,28 @@ def _executor_networks(environ: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(str(network) for network in networks)
 
 
+def _artifact_allowlist(environ: Mapping[str, str]) -> frozenset[str]:
+    raw = _required(environ, "LEAF_INSTANT_ALLOWED_ARTIFACT_DIGESTS")
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    if not values or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", item) for item in values):
+        raise ProductionConfigurationError(
+            "LEAF_INSTANT_ALLOWED_ARTIFACT_DIGESTS must contain sha256 digests"
+        )
+    if len(values) != len(set(values)):
+        raise ProductionConfigurationError("artifact allowlist contains duplicate digests")
+    return frozenset(values)
+
+
 def load_production_settings(environ: Mapping[str, str] | None = None) -> ProductionSettings:
     """Read all production inputs once, before requests or scheduler work begin."""
     source = os.environ if environ is None else environ
     database_url = _postgres_url(source)
     redis_url = _redis_url(source)
     control_api_secret = _secret(source, "LEAF_INSTANT_CONTROL_API_SECRET")
+    accounting_ingest_secret = _secret(source, "LEAF_INSTANT_ACCOUNTING_INGEST_SECRET")
     host_lifecycle_secret = _secret(source, "LEAF_INSTANT_HOST_LIFECYCLE_SECRET")
-    if host_lifecycle_secret == control_api_secret:
-        raise ProductionConfigurationError("host lifecycle and app control secrets must differ")
+    if len({host_lifecycle_secret, control_api_secret, accounting_ingest_secret}) != 3:
+        raise ProductionConfigurationError("app, host lifecycle, and accounting secrets must differ")
     runtime_control_secret = _secret(source, "LEAF_INSTANT_RUNTIME_CONTROL_SECRET")
     runtime_tls_server_name = _required(source, "LEAF_INSTANT_EXECUTOR_TLS_SERVER_NAME")
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", runtime_tls_server_name):
@@ -192,6 +208,11 @@ def load_production_settings(environ: Mapping[str, str] | None = None) -> Produc
         ),
         reaper_idle_timeout_seconds=_positive_seconds(
             source, "LEAF_INSTANT_REAPER_IDLE_TIMEOUT_SECONDS", default=None, maximum=86_400,
+        ),
+        allowed_artifact_digests=_artifact_allowlist(source),
+        accounting_ingest_secret=accounting_ingest_secret,
+        accounting_stale_timeout_seconds=_positive_seconds(
+            source, "LEAF_INSTANT_ACCOUNTING_STALE_TIMEOUT_SECONDS", default=120, maximum=3600,
         ),
     )
 
@@ -252,6 +273,7 @@ def _compose(settings: ProductionSettings) -> ControlPlane:
         coordination,
         executor_cidrs=settings.executor_cidrs,
         executor_port=settings.executor_port,
+        allowed_artifact_digests=settings.allowed_artifact_digests,
     )
 
 
@@ -282,4 +304,5 @@ def create_wsgi_application(*, environ: Mapping[str, str] | None = None,
         _compose(settings),
         app_control_secret=settings.control_api_secret,
         host_lifecycle_secret=settings.host_lifecycle_secret,
+        accounting_secret=settings.accounting_ingest_secret,
     )

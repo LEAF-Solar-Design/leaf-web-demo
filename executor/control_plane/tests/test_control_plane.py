@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 import threading
@@ -51,10 +52,12 @@ class ControlPlaneTests(unittest.TestCase):
         self.plane.readiness("executor-test-001", "slot-1", True, digest("c"), digest("r"))
 
     def request(self, session_id=None, code="a"):
+        source = f"def run(intake, params):\n return {{'version': '{code}'}}\n"
+        source_digest = "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
         reference = {"drawing_id": "drawing-demo", "version_id": str(uuid.uuid4()), "content_digest": digest("f"), "geometry_ref": "drawing-context:rooftop-ref-001"}
         return {"tenant_id": "tenant-demo", "session_id": session_id or str(uuid.uuid4()), "effective_catalog_digest": digest("d"),
                 "drawing_context": {"reference": reference, "data": {"layers": ["Panels"]}},
-                "artifact": {"source": "trusted-registry://instant/tool", "code_digest": digest(code), "artifact_digest": digest("b"), "runtime": "python-3.12", "entrypoint": "leaf_tools.tool:run", "limits": {"max_wall_ms": 5000, "max_cpu_ms": 3000, "max_memory_mb": 64, "max_output_bytes": 65536, "max_tool_calls": 0}, "tool_id": "instant-list-layers", "tool_version": "1.0.0", "capability_id": "drawing.read", "params_schema_digest": digest("p"), "catalog_commit": "a" * 40}}
+                "artifact": {"source": source, "code_digest": source_digest, "artifact_digest": source_digest, "runtime": "python-3.12", "entrypoint": "leaf_tools.tool:run", "limits": {"max_wall_ms": 5000, "max_cpu_ms": 3000, "max_memory_mb": 64, "max_output_bytes": 65536, "max_tool_calls": 0}, "tool_id": "instant-list-layers", "tool_version": "1.0.0", "capability_id": "drawing.read", "params_schema_digest": digest("p"), "catalog_commit": "a" * 40}}
 
     @staticmethod
     def call_api(app, path, body, secret=None):
@@ -76,12 +79,35 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(payload["lease_sequence"], 1)
         self.assertEqual(self.runtime.events[0][0], "assign")
         self.assertTrue(self.runtime.events[0][2]["code_load"])
+        self.assertNotIn("source", self.runtime.events[0][2])
+        self.assertEqual(
+            set(self.runtime.events[0][2]["artifact"]),
+            {"source_b64", "signing_key_id", "signature_b64"},
+        )
+        self.assertEqual(
+            self.runtime.events[0][2]["artifact"]["signing_key_id"],
+            self.plane.signer.artifact_kid,
+        )
+        self.assertNotEqual(self.plane.signer.public, self.plane.signer.artifact_public)
         self.assertNotIn("d", self.plane.signer.jwks()["keys"][0])
         protected, body, signature = assignment["lease_token"].split(".")
         replacement = "B" if signature.startswith("A") else "A"
         tampered = f"{protected}.{body}.{replacement}{signature[1:]}"
         with self.assertRaisesRegex(ValueError, "signature"):
             verify_jws(tampered, self.plane.signer.jwks(), now=int(self.clock.now.timestamp()))
+
+    def test_production_artifact_allowlist_rejects_unapproved_source_before_claim(self):
+        request = self.request()
+        plane = ControlPlane(
+            self.store, self.runtime, LeaseSigner(b"a" * 32, "test-key"),
+            self.coord, self.clock,
+            allowed_artifact_digests=frozenset({digest("f")}),
+        )
+        with self.assertRaisesRegex(ControlPlaneError, "not approved") as raised:
+            plane.assign(request)
+        self.assertEqual("ARTIFACT_NOT_ALLOWED", raised.exception.code)
+        self.assertEqual([], self.runtime.events)
+        self.assertEqual("READY", self.store.candidate().state)
 
     def test_one_winner_concurrent_capacity_claim(self):
         slot = self.store.candidate()
@@ -185,7 +211,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_rebind_invalidates_before_new_assignment(self):
         request = self.request()
         old = self.plane.assign(request)
-        request["artifact"]["code_digest"] = digest("e")
+        request["artifact"] = self.request(code="e")["artifact"]
         new = self.plane.rebind(request)
         kinds = [event[0] for event in self.runtime.events]
         self.assertEqual(kinds, ["assign", "release", "assign"])
@@ -194,7 +220,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_concurrent_rebinds_receive_unique_binding_epochs(self):
         request = self.request()
         old = self.plane.assign(request)
-        request["artifact"]["code_digest"] = digest("e")
+        request["artifact"] = self.request(code="e")["artifact"]
         barrier = threading.Barrier(2)
 
         def rebind():

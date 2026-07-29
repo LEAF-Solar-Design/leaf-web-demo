@@ -44,6 +44,7 @@ class ControlStore(Protocol):
     def release(self, session_id: str, reason: str) -> Session | None: ...
     def invalidate(self, session_id: str, reason: str, expected_epoch: int | None = None) -> Session | None: ...
     def drain(self, executor_id: str, deadline: datetime) -> list[Session]: ...
+    def recover_stale_invocations(self, stale_before: datetime, limit: int = 100) -> list[str]: ...
 
 
 class InMemoryStore:
@@ -65,6 +66,11 @@ class InMemoryStore:
     def _require(self) -> None:
         if not self.available:
             raise StoreUnavailable("PostgreSQL durable authority is unavailable")
+
+    def recover_stale_invocations(self, stale_before: datetime, limit: int = 100) -> list[str]:
+        """The hermetic control store has no accounting tables to reconcile."""
+        self._require()
+        return []
 
     def register_host(self, executor_id: str, endpoint: str, slot_ids: list[str]) -> list[Slot]:
         with self._lock:
@@ -291,6 +297,20 @@ class PostgresStore:
 
         def operation(cur):
             cur.execute(
+                """SELECT 1
+                     FROM executor_leases l
+                     JOIN instant_sessions s ON s.session_id=l.session_id
+                    WHERE l.lease_id=%s AND l.session_id=%s
+                      AND s.tenant_id=%s AND s.code_digest=%s
+                      AND l.not_before <= %s AND l.expires_at >= %s
+                      AND (l.revoked_at IS NULL OR l.revoked_at >= %s)""",
+                (record["lease_id"], record["session_id"], record["tenant_id"],
+                 record["code_digest"], record["occurred_at"], record["occurred_at"],
+                 record["occurred_at"]),
+            )
+            if cur.fetchone() is None:
+                raise StaleFence("accounting identity is not backed by a valid durable lease")
+            cur.execute(
                 """INSERT INTO instant_invocations
                      (invocation_id, tenant_id, session_id, lease_id, code_digest, state, accepted_at)
                    VALUES (%s, %s, %s, %s, %s, 'accepted', %s)
@@ -335,7 +355,7 @@ class PostgresStore:
             if not charged:
                 cur.execute(
                     """SELECT tenant_id, session_id, lease_id, code_digest, outcome, recorded_at, cpu_ms,
-                              wall_ms, memory_peak_bytes, input_bytes, output_bytes
+                              wall_ms, memory_peak_bytes, input_bytes, output_bytes, recovery_reason
                        FROM instant_accounting WHERE invocation_id=%s""",
                     (record["invocation_id"],),
                 )
@@ -343,7 +363,9 @@ class PostgresStore:
                 expected = (record["tenant_id"], record["session_id"], record["lease_id"], record["code_digest"],
                             record["outcome"], record["occurred_at"], record["cpu_ms"], record["wall_ms"],
                             record["memory_peak_bytes"], record["input_bytes"], record["output_bytes"])
-                existing_values = tuple(str(value) for value in existing or ())
+                if existing and existing[11] == "executor_lost":
+                    return {"invocation_id": record["invocation_id"], "state": "failed", "charged": False}
+                existing_values = tuple(str(value) for value in (existing or ())[:11])
                 expected_values = tuple(str(value) for value in expected)
                 if existing_values != expected_values:
                     raise StaleFence("conflicting terminal accounting retry")
@@ -359,6 +381,57 @@ class PostgresStore:
                     (str(uuid.uuid4()), record["invocation_id"]),
                 )
             return {"invocation_id": record["invocation_id"], "state": record["outcome"], "charged": charged}
+
+        return self._transaction(operation)
+
+    def recover_stale_invocations(self, stale_before: datetime, limit: int = 100) -> list[str]:
+        """Close abandoned instant calls once, without charging unproven usage.
+
+        A late real terminal event becomes an idempotent no-op. This favors the
+        tenant when executor loss prevents trustworthy resource measurement.
+        """
+        if limit < 1 or limit > 1000:
+            raise ValueError("limit must be between 1 and 1000")
+
+        def operation(cur):
+            cur.execute(
+                """SELECT invocation_id, tenant_id, session_id, lease_id, code_digest
+                     FROM instant_invocations
+                    WHERE state IN ('accepted', 'started') AND updated_at <= %s
+                    ORDER BY updated_at, invocation_id
+                    FOR UPDATE SKIP LOCKED LIMIT %s""",
+                (stale_before, limit),
+            )
+            rows = cur.fetchall()
+            recovered: list[str] = []
+            for invocation_id, tenant_id, session_id, lease_id, code_digest in rows:
+                cur.execute(
+                    """INSERT INTO instant_accounting
+                         (accounting_id, invocation_id, tenant_id, session_id, lease_id, code_digest,
+                          outcome, recorded_at, cpu_ms, wall_ms, memory_peak_bytes, input_bytes,
+                          output_bytes, recovery_reason)
+                       VALUES (%s, %s, %s, %s, %s, %s, 'failed', now(), 0, 0, 0, 0, 0,
+                               'executor_lost')
+                       ON CONFLICT (invocation_id) DO NOTHING
+                       RETURNING invocation_id""",
+                    (str(uuid.uuid4()), invocation_id, tenant_id, session_id, lease_id, code_digest),
+                )
+                if cur.fetchone() is None:
+                    continue
+                cur.execute(
+                    """UPDATE instant_invocations
+                          SET state='failed', started_at=COALESCE(started_at, accepted_at),
+                              terminal_at=now(), updated_at=now(), version=version+1
+                        WHERE invocation_id=%s""",
+                    (invocation_id,),
+                )
+                cur.execute(
+                    """INSERT INTO control_outbox (event_id, kind, entity_id, entity_version)
+                       VALUES (%s, 'instant.accounting.recorded', %s, 1)""",
+                    (str(uuid.uuid4()), invocation_id),
+                )
+                recovered.append(str(invocation_id))
+            return recovered
 
         return self._transaction(operation)
 

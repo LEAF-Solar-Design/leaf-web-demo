@@ -79,7 +79,10 @@ python -m executor.control_plane.reaper_main
 300. `LEAF_INSTANT_REAPER_IDLE_TIMEOUT_SECONDS` is optional and, when set,
 reclaims idle bindings after that many seconds. The worker retries a failed
 pass after one interval. Its durable outbox makes a repeated executor release
-safe.
+safe. `LEAF_INSTANT_ACCOUNTING_STALE_TIMEOUT_SECONDS` defaults to 120. A call
+that remains accepted or started past that bound is closed once as failed with
+zero usage. A later terminal log is a no-charge no-op, so executor loss cannot
+double-charge the tenant.
 
 ## Remaining production gaps
 

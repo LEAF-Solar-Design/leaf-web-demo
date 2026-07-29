@@ -26,6 +26,7 @@ CONTROL_FILES = {
     "LEAF_INSTANT_CONTROL_DATABASE_URL": ("control-database-url.txt", "text"),
     "LEAF_INSTANT_CONTROL_REDIS_URL": ("control-redis-url.txt", "text"),
     "LEAF_INSTANT_CONTROL_API_SECRET": ("control-api-secret.txt", "text"),
+    "LEAF_INSTANT_ACCOUNTING_INGEST_SECRET": ("accounting-ingest-secret.txt", "text"),
     "LEAF_INSTANT_HOST_LIFECYCLE_SECRET": ("host-lifecycle-secret.txt", "text"),
     "LEAF_INSTANT_RUNTIME_CONTROL_SECRET": ("runtime-control-secret.txt", "text"),
     "LEAF_INSTANT_LEASE_SIGNING_SEED_B64": ("lease-signing-seed.bin", "seed"),

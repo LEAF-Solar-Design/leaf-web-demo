@@ -27,6 +27,7 @@ def main() -> None:
         "executor/control_plane/*.py",
         "executor/control_plane/migrations/",
         "executor/runtime/*.py",
+        "executor/registry/*.py",
         "executor/contracts/*.py",
         "executor/contracts/schemas/",
     ):

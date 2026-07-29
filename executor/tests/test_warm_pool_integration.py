@@ -18,6 +18,7 @@ from executor.control_plane.service import ControlPlane
 from executor.control_plane.store import InMemoryStore
 from executor.runtime.supervisor import WarmExecutorSupervisor
 from executor.runtime.service import make_server
+from executor.registry import ImmutableArtifactRegistry
 
 
 EXECUTOR_ID = "executor-local-001"
@@ -49,6 +50,9 @@ class WarmPoolIntegrationTests(unittest.TestCase):
         self.signer = LeaseSigner(self.seed, "integration-key")
         self.supervisor = WarmExecutorSupervisor(
             EXECUTOR_ID, {self.signer.kid: self.signer.public}, pool_size=1,
+            artifact_registry=ImmutableArtifactRegistry(
+                (), {self.signer.artifact_kid: self.signer.artifact_public},
+            ),
         )
         self.server = make_server(("127.0.0.1", 0), self.supervisor, "runtime-control")
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)

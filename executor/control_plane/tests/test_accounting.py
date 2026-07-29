@@ -74,6 +74,9 @@ class ScriptedCursor:
         self.executed.append((sql, args))
         if self.fail_outbox and "instant.accounting.recorded" in sql: raise RuntimeError("outbox failed")
     def fetchone(self): return self.rows.pop(0) if self.rows else None
+    def fetchall(self):
+        rows, self.rows = self.rows, []
+        return rows
 
 
 class ScriptedConnection:
@@ -121,20 +124,24 @@ class AccountingTests(unittest.TestCase):
 
     def test_api_requires_app_secret_and_only_ingests(self):
         store = MemoryAccountingStore()
-        app = application(DummyPlane(), app_control_secret="app-control", host_lifecycle_secret="host-control", accounting=AccountingService(store))
+        app = application(
+            DummyPlane(), app_control_secret="app-control", host_lifecycle_secret="host-control",
+            accounting_secret="accounting-control", accounting=AccountingService(store),
+        )
         body = json.dumps(record(state="accepted")).encode()
         def call(secret):
             captured = []
             result = app({"REQUEST_METHOD": "POST", "PATH_INFO": "/v1/accounting", "CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body), "HTTP_X_INSTANT_CONTROL_SECRET": secret}, lambda status, headers: captured.append(status))
             return captured[0], json.loads(b"".join(result))
         self.assertEqual(call("host-control")[0], "401 Unauthorized")
-        status, payload = call("app-control")
+        self.assertEqual(call("app-control")[0], "401 Unauthorized")
+        status, payload = call("accounting-control")
         self.assertEqual((status, payload["state"]), ("202 Accepted", "accepted"))
 
     def test_postgres_terminal_write_includes_one_outbox_in_same_transaction(self):
         item = validate_record(record())
         identity_row = (item["invocation_id"], item["tenant_id"], item["session_id"], item["lease_id"], item["code_digest"], "started")
-        cursor = ScriptedCursor([None, identity_row, (item["invocation_id"],)])
+        cursor = ScriptedCursor([(1,), None, identity_row, (item["invocation_id"],)])
         connection = ScriptedConnection(cursor)
         result = PostgresStore(lambda: connection).record_invocation(item)
         self.assertTrue(result["charged"])
@@ -147,12 +154,70 @@ class AccountingTests(unittest.TestCase):
     def test_postgres_outbox_failure_rolls_back_charge_transaction(self):
         item = validate_record(record())
         identity_row = (item["invocation_id"], item["tenant_id"], item["session_id"], item["lease_id"], item["code_digest"], "started")
-        cursor = ScriptedCursor([None, identity_row, (item["invocation_id"],)], fail_outbox=True)
+        cursor = ScriptedCursor([(1,), None, identity_row, (item["invocation_id"],)], fail_outbox=True)
         connection = ScriptedConnection(cursor)
         with self.assertRaisesRegex(RuntimeError, "outbox failed"):
             PostgresStore(lambda: connection).record_invocation(item)
         self.assertIs(connection.exit_error, RuntimeError)
         self.assertTrue(connection.closed)
+
+    def test_late_terminal_after_executor_loss_is_a_no_charge_no_op(self):
+        item = validate_record(record())
+        identity_row = (item["invocation_id"], item["tenant_id"], item["session_id"],
+                        item["lease_id"], item["code_digest"], "failed")
+        recovered = (item["tenant_id"], item["session_id"], item["lease_id"],
+                     item["code_digest"], "failed", item["occurred_at"], 0, 0, 0, 0, 0,
+                     "executor_lost")
+        cursor = ScriptedCursor([(1,), None, identity_row, None, recovered])
+
+        result = PostgresStore(lambda: ScriptedConnection(cursor)).record_invocation(item)
+
+        self.assertEqual(result, {"invocation_id": item["invocation_id"],
+                                  "state": "failed", "charged": False})
+
+    def test_fabricated_or_mismatched_lease_identity_is_rejected_before_insert(self):
+        item = validate_record(record(state="accepted"))
+        cursor = ScriptedCursor([None])
+        with self.assertRaisesRegex(StaleFence, "valid durable lease"):
+            PostgresStore(lambda: ScriptedConnection(cursor)).record_invocation(item)
+        statements = "\n".join(sql for sql, _ in cursor.executed)
+        self.assertIn("JOIN instant_sessions", statements)
+        self.assertIn("s.tenant_id=%s", statements)
+        self.assertIn("s.code_digest=%s", statements)
+        self.assertNotIn("INSERT INTO instant_invocations", statements)
+
+    def test_stale_recovery_creates_one_zero_usage_terminal_and_outbox(self):
+        item = validate_record(record(state="started"))
+
+        class RecoveryCursor(ScriptedCursor):
+            def __init__(self):
+                super().__init__([])
+                self._candidates = [(item["invocation_id"], item["tenant_id"],
+                                     item["session_id"], item["lease_id"], item["code_digest"])]
+                self._inserted = True
+            def fetchall(self):
+                rows, self._candidates = self._candidates, []
+                return rows
+            def fetchone(self):
+                if self._inserted:
+                    self._inserted = False
+                    return (item["invocation_id"],)
+                return None
+
+        cursor = RecoveryCursor()
+        store = PostgresStore(lambda: ScriptedConnection(cursor))
+        recovered = store.recover_stale_invocations(datetime.now(timezone.utc))
+        repeated = store.recover_stale_invocations(datetime.now(timezone.utc))
+
+        self.assertEqual(recovered, [item["invocation_id"]])
+        self.assertEqual(repeated, [])
+        statements = "\n".join(sql for sql, _ in cursor.executed)
+        self.assertIn("FOR UPDATE SKIP LOCKED", statements)
+        self.assertIn("state IN ('accepted', 'started')", statements)
+        self.assertIn("'executor_lost'", statements)
+        self.assertIn("COALESCE(started_at, accepted_at)", statements)
+        self.assertEqual(statements.count("instant.accounting.recorded"), 1)
+        self.assertNotIn("payload", statements.lower())
 
 
 if __name__ == "__main__": unittest.main()

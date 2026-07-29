@@ -8,6 +8,7 @@ from __future__ import annotations
 import builtins
 import json
 import os
+import time
 import signal
 import traceback
 from multiprocessing.connection import Connection
@@ -149,6 +150,7 @@ def child_main(conn: Connection) -> None:
                     raise RuntimeError("tool call count exceeds configured limit")
 
             timer = _start_cpu_timer(limits["max_cpu_ms"])
+            cpu_started = time.process_time_ns()
             try:
                 intake = {"drawing_context": drawing_context, "tool_call": tool_call}
                 returned = runner(intake, command["params"])
@@ -162,13 +164,19 @@ def child_main(conn: Connection) -> None:
                 if len(encoded) > limits["max_output_bytes"]:
                     conn.send({"ok": False, "error": "tool output exceeds configured limit"})
                     continue
-                conn.send({"ok": True, "payload": payload, "bytes": len(encoded), "loads": loads})
+                conn.send({"ok": True, "payload": payload, "bytes": len(encoded), "loads": loads,
+                           "cpu_ms": max(0, (time.process_time_ns() - cpu_started) // 1_000_000),
+                           # Process high-water RSS is not per-invocation usage.
+                           # Keep memory nonbillable until a trusted per-call meter exists.
+                           "memory_peak_bytes": 0, "tool_calls": tool_calls})
             except MemoryError:
                 # A memory-limit failure leaves the child unreliable.  Exit so
                 # the supervisor replaces this slot only.
                 os._exit(76)
             except Exception as exc:
-                conn.send({"ok": False, "error": f"tool failed: {type(exc).__name__}: {exc}"})
+                conn.send({"ok": False, "error": f"tool failed: {type(exc).__name__}: {exc}",
+                           "cpu_ms": max(0, (time.process_time_ns() - cpu_started) // 1_000_000),
+                           "memory_peak_bytes": 0, "tool_calls": tool_calls})
             finally:
                 _stop_cpu_timer(timer)
             continue
