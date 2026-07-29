@@ -349,6 +349,14 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
         { type: "local", path: root, skipMcpDiscovery: true },
       ]);
       expect(enabled.queries[0]!.options.skills).toEqual(["drawing-help"]);
+      // THE SECURITY LINE OF THIS PORT (review round 1 BLOCKER). The SDK
+      // compiles `skills: [name]` into `--allowedTools Skill(name)`, and
+      // allowlisted tools run WITHOUT consulting canUseTool — so canUseTool is
+      // NOT the containment here. Inline shell execution inside a skill would
+      // therefore be execution outside submitRun and outside the gate. It is
+      // on by DEFAULT, so the option must be present and true; removing the
+      // line must fail this assertion.
+      expect(enabled.queries[0]!.options.disableSkillShellExecution).toBe(true);
 
       vi.stubEnv("LEAF_SKILLS_TIER", "operator");
       const mismatched = makeMockSdk([resultSuccess()]);
@@ -362,6 +370,8 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
       await collect(runnerWith(disabled), makeInput());
       expect("plugins" in disabled.queries[0]!.options).toBe(false);
       expect("skills" in disabled.queries[0]!.options).toBe(false);
+      // Unconditional: no bundle mounted still means no skill may shell out.
+      expect(disabled.queries[0]!.options.disableSkillShellExecution).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -352,6 +352,11 @@ describe("ConverseLoop — read auto-dispatch", () => {
       { question: "x".repeat(501), options: [{ label: "One" }, { label: "Two" }] },
       { question: "Untrimmed", options: [{ label: " One" }, { label: "Two" }] },
       { question: "Long description", options: [{ label: "One", description: "x".repeat(301) }, { label: "Two" }] },
+      // Review round 1: well-typed is not enough. An empty question renders a
+      // card asking nothing; an empty label renders a blank disabled button in
+      // the live web card. The pre-port implementation rejected both.
+      { question: "   ", options: [{ label: "One" }, { label: "Two" }] },
+      { question: "Blank label", options: [{ label: "" }, { label: "Two" }] },
     ];
     const runner: SpineConverseRunner = {
       async *run(input: ConverseRunInput) {

@@ -819,8 +819,12 @@ export class ConverseLoop {
         if (ctx.turnState.questionAsked) return err("ask_user permits only one question per turn");
         const question = args.question;
         const options = args.options;
-        if (typeof question !== "string" || question.length > 500) {
-          return err("ask_user question must be a string of at most 500 characters");
+        // NON-EMPTY, not merely well-typed: an empty question renders a card
+        // asking nothing, and an empty label renders a blank disabled button
+        // (review round 1). The earlier implementation rejected these; the port
+        // dropped the check.
+        if (typeof question !== "string" || !question.trim() || question.length > 500) {
+          return err("ask_user question must be a non-empty string of at most 500 characters");
         }
         if (!Array.isArray(options) || options.length < 2 || options.length > 6) {
           return err("ask_user requires 2 to 6 options");
@@ -831,8 +835,8 @@ export class ConverseLoop {
             return err("ask_user options must be objects");
           }
           const { label, description } = option as Record<string, unknown>;
-          if (typeof label !== "string" || label !== label.trim() || label.length > 120) {
-            return err("ask_user option labels must be trimmed strings of at most 120 characters");
+          if (typeof label !== "string" || !label.trim() || label !== label.trim() || label.length > 120) {
+            return err("ask_user option labels must be non-empty trimmed strings of at most 120 characters");
           }
           if (description !== undefined && (typeof description !== "string" || description.length > 300)) {
             return err("ask_user option descriptions must be strings of at most 300 characters");
