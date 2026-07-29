@@ -8,10 +8,11 @@
 //      bundle's actual contents;
 //   3. an empty/absent bundle attaches NOTHING, rather than enabling the Skill
 //      tool with nothing behind it.
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, linkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, linkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import esbuild from "esbuild";
 
 import {
   MAX_SKILL_FILE_BYTES,
@@ -435,20 +436,16 @@ describe("live converse runner wiring", () => {
   // declaration can also be swallowed by a comment block and still compile —
   // that exact bug shipped in App.jsx earlier in this program. esbuild strips
   // comments, so surviving the transform is evidence the wiring is live code.
-  it("passes the bundle's plugin and skills into the SDK query", async () => {
-    const esbuild = await import("esbuild");
-    const { readFileSync } = await import("node:fs");
+  it("is NOT wired into the live runner yet, deliberately", () => {
+    // Skills are unmounted on the live spine path pending digest-verified
+    // mounting (see converseSdkRunner). This guard is the inverse of the usual
+    // wiring assertion: it fails if someone re-adds the mount without the
+    // verification, which is exactly the regression four review rounds were
+    // spent finding holes in.
     const source = readFileSync(
       new URL("../src/ports/impl/converseSdkRunner.ts", import.meta.url), "utf8");
     const stripped = esbuild.transformSync(source, { loader: "ts" }).code;
-
-    expect(stripped).toMatch(/skillBundleAttachment\s*\(/);
-    // The options spread must carry BOTH: plugins alone would mount the bundle
-    // without enabling anything, skills alone would name skills with no source.
-    expect(stripped).toMatch(/plugins:\s*\[\s*\w+\.plugin\s*\]/);
-    expect(stripped).toMatch(/skills:\s*\w+\.skills/);
-    // settingSources must stay empty — it is what keeps ~/.claude out, and it
-    // cannot name a curated directory anyway.
-    expect(stripped).toMatch(/settingSources:\s*\[\s*\]/);
+    expect(stripped).not.toContain("skillBundleAttachment");
+    expect(stripped).not.toMatch(/plugins:\s*\[/);
   });
 });

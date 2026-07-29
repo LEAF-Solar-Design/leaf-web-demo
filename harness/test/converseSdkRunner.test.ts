@@ -18,9 +18,6 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import {
   ConverseSdkRunner,
@@ -334,61 +331,25 @@ describe("ConverseSdkRunner — a throw never carries the grant out", () => {
 // --------------------------------------------------------------------------- //
 
 describe("ConverseSdkRunner — SDK options wiring", () => {
-  it("mounts a matching curated skill bundle and otherwise omits its SDK options", async () => {
-    const root = mkdtempSync(join(tmpdir(), "leaf-converse-skills-"));
-    try {
-      mkdirSync(join(root, ".claude-plugin"), { recursive: true });
-      mkdirSync(join(root, "skills", "drawing-help"), { recursive: true });
-      writeFileSync(join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ leafTier: "tenant-safe" }));
-      writeFileSync(join(root, "skills", "drawing-help", "SKILL.md"), "---\nname: drawing-help\ndescription: help\n---\n");
-      vi.stubEnv("LEAF_SKILLS_BUNDLE_PATH", root);
-      vi.stubEnv("LEAF_SKILLS_TIER", "tenant-safe");
-      const enabled = makeMockSdk([resultSuccess()]);
-      await collect(runnerWith(enabled), makeInput());
-      expect(enabled.queries[0]!.options.plugins).toEqual([
-        { type: "local", path: root, skipMcpDiscovery: true },
-      ]);
-      expect(enabled.queries[0]!.options.skills).toEqual(["drawing-help"]);
-      // THE SECURITY LINE OF THIS PORT (review round 1 BLOCKER). The SDK
-      // compiles `skills: [name]` into `--allowedTools Skill(name)`, and
-      // allowlisted tools run WITHOUT consulting canUseTool — so canUseTool is
-      // NOT the containment here. Inline shell execution inside a skill would
-      // therefore be execution outside submitRun and outside the gate. It is
-      // on by DEFAULT, so the option must be present and true; removing the
-      // line must fail this assertion.
-      expect(enabled.queries[0]!.options.settings).toMatchObject({
-        disableSkillShellExecution: true,
-        disableAllHooks: true,
-      });
-      // NEGATIVE, and it is the point: these are SETTINGS fields. Passed at the
-      // top level they are silently ignored — the SDK's arg builder reads
-      // `this.options.settings` and never a top-level flag, so the CLI receives
-      // `--allowedTools Skill(...)` with no `--settings` and skills keep their
-      // shell. That is exactly the bug this assertion prevents recurring; an
-      // object-shape test alone let it pass once already.
-      expect("disableSkillShellExecution" in enabled.queries[0]!.options).toBe(false);
-      expect("disableAllHooks" in enabled.queries[0]!.options).toBe(false);
-
-      vi.stubEnv("LEAF_SKILLS_TIER", "operator");
-      const mismatched = makeMockSdk([resultSuccess()]);
-      await collect(runnerWith(mismatched), makeInput());
-      expect("plugins" in mismatched.queries[0]!.options).toBe(false);
-      expect("skills" in mismatched.queries[0]!.options).toBe(false);
-
-      vi.stubEnv("LEAF_SKILLS_BUNDLE_PATH", "");
-      vi.stubEnv("LEAF_SKILLS_TIER", "");
-      const disabled = makeMockSdk([resultSuccess()]);
-      await collect(runnerWith(disabled), makeInput());
-      expect("plugins" in disabled.queries[0]!.options).toBe(false);
-      expect("skills" in disabled.queries[0]!.options).toBe(false);
-      // Unconditional: no bundle mounted still means no skill may shell out.
-      expect(disabled.queries[0]!.options.settings).toMatchObject({
-        disableSkillShellExecution: true,
-        disableAllHooks: true,
-      });
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+  it("hardens the session and does NOT mount a skill bundle yet", async () => {
+    // Skills are deliberately unmounted on the live path (see the comment in
+    // converseSdkRunner): handing the SDK a plugin DIRECTORY kept reaching
+    // execution outside canUseTool and the gate, and the correct fix is
+    // digest-verified mounting, shipping as its own chip.
+    const mock = makeMockSdk([resultSuccess()]);
+    await collect(runnerWith(mock), makeInput());
+    const options = mock.queries[0]!.options;
+    expect("skills" in options).toBe(false);
+    expect("plugins" in options).toBe(false);
+    // The hardening stays regardless: SETTINGS layer, not top-level — the
+    // SDK's arg builder reads options.settings and never a top-level flag, so
+    // the broken form silently does nothing.
+    expect(options.settings).toMatchObject({
+      disableSkillShellExecution: true,
+      disableAllHooks: true,
+    });
+    expect("disableSkillShellExecution" in options).toBe(false);
+    expect("disableAllHooks" in options).toBe(false);
   });
 
   it("passes resume when resumeSdkSessionId is present, omits it when absent", async () => {

@@ -81,7 +81,6 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
-import { skillBundleAttachment } from "./skillBundle.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
 
 // --------------------------------------------------------------------------- //
@@ -276,7 +275,6 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     const model = input.model ?? this.model;
     // Curated skills are opt-in and fail closed when their bundle/tier is invalid.
     // `settingSources` remains empty, so this never discovers ~/.claude.
-    const bundle = skillBundleAttachment();
     const query = (prompt: string, resume?: string): AsyncIterable<unknown> =>
       sdk.query({
         prompt,
@@ -313,7 +311,27 @@ export class ConverseSdkRunner implements SpineConverseRunner {
             disableSkillShellExecution: true,
             disableAllHooks: true,
           },
-          ...(bundle ? { plugins: [bundle.plugin], skills: bundle.skills } : {}),
+          // SKILLS ARE DELIBERATELY NOT MOUNTED HERE YET. Mounting a bundle
+          // means handing the SDK a whole PLUGIN DIRECTORY, and four review
+          // rounds each found a fresh way for that to reach execution outside
+          // canUseTool and the app gate: inline skill shell commands, plugin
+          // and skill hooks, `context: fork` spawning subagents, plugin
+          // MONITORS declared in plugin.json, and nested payloads. Each patch
+          // closed one hole and the next round found another, which is the
+          // signal that inspect-and-denylist is the wrong model for this
+          // surface.
+          //
+          // The right model is allowlist-by-verification, and the pipeline
+          // already produces what it needs: tools/skills-bundle emits
+          // manifest.json with a sha256 per file and an overall digest. The
+          // loader should refuse to mount unless it re-verifies that manifest
+          // — every file hashed, the tree exactly as declared, and plugin.json
+          // carrying only permitted keys. That is a real change, not a patch,
+          // so it ships as its own chip rather than riding this one.
+          //
+          // The two settings below stay regardless: they are cheap, they only
+          // narrow, and they are correct for a spine session whatever else
+          // lands later.
           ...(resume ? { resume } : {}),
           canUseTool: async (toolName: string, inp: Record<string, unknown>) =>
             // Bridge to the loop's hook (allow spine tools / deny everything else).
