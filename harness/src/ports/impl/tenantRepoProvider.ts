@@ -14,9 +14,9 @@ import { randomUUID } from "node:crypto";
 import { scrubSecrets } from "./envScrub.js";
 import { gitWorkerAvailable, workerCommit } from "./gitWorker.js";
 import { redactTokens } from "../../redact.js";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Pool } from "pg";
 import type { PoolClient, PoolConfig } from "pg";
 import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
@@ -265,14 +265,34 @@ export class PgTenantRepoLeaseCoordinator {
   }
 }
 
+const trustedGitDirectories = new Set<string>();
+
+/**
+ * Git accepts safe.directory only from protected configuration. Tenant repos
+ * can be owned by the EFS access-point UID rather than the container UID, so
+ * add only the exact resolved worktree and git-dir paths to this task's
+ * ephemeral global config. Local clone/upload-pack children inherit the same
+ * protected config. No wildcard trust is permitted.
+ */
+function trustSharedRepo(dir: string): void {
+  const root = (existsSync(dir) ? realpathSync(dir) : resolve(dir)).replaceAll("\\", "/");
+  const configScope = process.env.GIT_CONFIG_GLOBAL ?? "<default>";
+  for (const candidate of [root, join(root, ".git")].map((path) => path.replaceAll("\\", "/"))) {
+    const cacheKey = `${configScope}\0${candidate}`;
+    if (trustedGitDirectories.has(cacheKey)) continue;
+    execFileSync("git", ["config", "--global", "--add", "safe.directory", candidate], {
+      cwd: tmpdir(),
+      encoding: "utf8",
+      env: scrubSecrets(process.env),
+    });
+    trustedGitDirectories.add(cacheKey);
+  }
+}
+
 function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
-  // Tenant repositories can live on a volume owned by a different container UID.
-  // Trust only this resolved working directory and only for this git invocation.
-  const cfg = [
-    "-c",
-    `safe.directory=${cwd}`,
-    ...(identity ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`] : []),
-  ];
+  const cfg = identity
+    ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`]
+    : [];
   try {
     // Scrubbed env (sol-critic R5, same rule as the git worker): git and anything
     // it runs (filters, hooks) must never inherit a credential or hop secret.
@@ -366,7 +386,7 @@ function resetWorkingTree(dir: string): void {
 }
 
 export class TenantRepoProviderImpl implements TenantRepoProvider {
-  private readonly bareRepos = new Map<string, TenantBareRepo>();
+  private readonly bareRepos = new Map<string, TenantBareRepo & { sourceRef?: string }>();
   private readonly lease?: PgTenantRepoLeaseCoordinator;
   private readonly leaseContext = new AsyncLocalStorage<RepoLease>();
   private readonly authoringMode: "disabled" | "singleton" | "fleet";
@@ -464,6 +484,7 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     const fixture = this.opts.autoProvisionFrom!;
     const identity = this.opts.seedIdentity ?? HARNESS_IDENTITY;
     mkdirSync(dir, { recursive: true });
+    trustSharedRepo(dir);
     cpSync(fixture, dir, { recursive: true });
     // ensure the __pycache__ .gitignore exists (keeps the tenant mushy repo pyc-free,
     // matching the broker's sys.dont_write_bytecode discipline).
@@ -472,7 +493,7 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     if (!current.split(/\r?\n/).some((l) => l.trim() === "__pycache__/")) {
       writeFileSync(gitignore, current + (current && !current.endsWith("\n") ? "\n" : "") + GITIGNORE_PYCACHE, "utf8");
     }
-    git(dir, ["init", "-q"], identity);
+    git(dir, ["init", "-q", "-b", "main"], identity);
     git(dir, ["add", "-A"], identity);
     git(
       dir,
@@ -488,6 +509,8 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     }
     const ref = await this.opts.locator.repoRef(tenantId);
     if (this.opts.inPlace) {
+      // This also covers a partially provisioned repo left by a prior task.
+      trustSharedRepo(ref);
       // ref IS the local working dir; operate on it directly (no temp clone).
       // Wave 4: auto-provision a brand-new tenant's repo from the fixture on first use.
       if (this.opts.autoProvisionFrom && !repoExists(ref)) {
@@ -515,6 +538,8 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     }
     const base = this.opts.workBase ?? tmpdir();
     const dir = mkdtempSync(join(base, `mushy-${tenantId}-`));
+    trustSharedRepo(dir);
+    if (existsSync(ref)) trustSharedRepo(ref);
     git(dir, ["clone", "--depth", "1", ref, "."]);
     if (this.lease && lease) lease.repoDirs.add(dir);
     const fence =
@@ -538,10 +563,13 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     if (existing) {
       // Refresh branch heads without ever reusing a mutable checkout. Private
       // refs remain local so a later publish sees the exact staged receipt.
+      trustSharedRepo(existing.dir);
+      if (existing.sourceRef && existsSync(existing.sourceRef)) trustSharedRepo(existing.sourceRef);
       git(existing.dir, ["fetch", "--prune", "origin"]);
       return existing;
     }
     const ref = await this.opts.locator.repoRef(tenantId);
+    if (existsSync(ref)) trustSharedRepo(ref);
     if (this.opts.inPlace && this.opts.autoProvisionFrom && !repoExists(ref)) {
       this.provision(ref);
     }
@@ -552,6 +580,7 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     if (this.opts.bareBase) {
       mkdirSync(this.opts.bareBase, { recursive: true });
       dir = join(this.opts.bareBase, `${tenantId}.git`);
+      trustSharedRepo(dir);
       const alreadyExists = existsSync(join(dir, "HEAD"));
       if (!alreadyExists) {
         git(this.opts.bareBase, ["clone", "--bare", ref, dir]);
@@ -562,9 +591,10 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
       const base = this.opts.workBase ?? tmpdir();
       mkdirSync(base, { recursive: true });
       dir = mkdtempSync(join(base, `mushy-bare-${tenantId}-`));
+      trustSharedRepo(dir);
       git(dir, ["clone", "--bare", ref, "."]);
     }
-    const repo = { dir };
+    const repo = { dir, sourceRef: ref };
     this.bareRepos.set(tenantId, repo);
     return repo;
   }

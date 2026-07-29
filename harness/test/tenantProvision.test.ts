@@ -34,11 +34,16 @@ function provider(base: string) {
 
 describe("TenantRepoProviderImpl auto-provision", () => {
   let base: string;
+  let previousGlobalConfig: string | undefined;
 
   beforeEach(() => {
     base = mkdtempSync(join(tmpdir(), "leaf-tenants-"));
+    previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = join(base, "test.gitconfig");
   });
   afterEach(() => {
+    if (previousGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
     rmSync(base, { recursive: true, force: true });
   });
 
@@ -61,15 +66,37 @@ describe("TenantRepoProviderImpl auto-provision", () => {
   });
 
   it("provisions when Git treats the tenant directory as owned by another user", async () => {
-    const previous = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    const previousOwnerTest = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
     process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
     try {
-      const repo = await provider(base).checkout("different-owner");
+      const p = provider(base);
+      const repo = await p.checkout("different-owner");
       expect(repo.dir).toBe(join(base, "different-owner"));
       expect(existsSync(join(repo.dir, ".git"))).toBe(true);
+      const bare = await p.bare("different-owner");
+      expect(git(bare.dir, ["show-ref", "--verify", "refs/heads/main"]).trim()).toContain("refs/heads/main");
     } finally {
-      if (previous === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
-      else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previous;
+      if (previousOwnerTest === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+      else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previousOwnerTest;
+    }
+  });
+
+  it("opens a bare clone from an existing foreign-owned tenant repo", async () => {
+    const dir = join(base, "partial");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "registry.json"), JSON.stringify({ tools: [] }), "utf8");
+    git(dir, ["init", "-q", "-b", "main"]);
+    git(dir, ["-c", "user.name=Leaf Harness", "-c", "user.email=harness@leaf.local", "add", "registry.json"]);
+    git(dir, ["-c", "user.name=Leaf Harness", "-c", "user.email=harness@leaf.local", "commit", "-q", "-m", "seed"]);
+
+    const previousOwnerTest = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+    try {
+      const bare = await provider(base).bare("partial");
+      expect(git(bare.dir, ["show-ref", "--verify", "refs/heads/main"]).trim()).toContain("refs/heads/main");
+    } finally {
+      if (previousOwnerTest === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+      else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previousOwnerTest;
     }
   });
 

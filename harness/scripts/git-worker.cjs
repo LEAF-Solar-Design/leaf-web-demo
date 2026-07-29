@@ -8,15 +8,32 @@
  * {id, ok, commit?, error?}. Never logs repo contents or secrets. */
 "use strict";
 const { execFileSync } = require("node:child_process");
+const { existsSync, realpathSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join, resolve } = require("node:path");
 const readline = require("node:readline");
 
+const trustedGitDirectories = new Set();
+
+function trustSharedRepo(dir) {
+  const root = (existsSync(dir) ? realpathSync(dir) : resolve(dir)).replaceAll("\\", "/");
+  const configScope = process.env.GIT_CONFIG_GLOBAL || "<default>";
+  for (const candidate of [root, join(root, ".git")].map((path) => path.replaceAll("\\", "/"))) {
+    const cacheKey = `${configScope}\0${candidate}`;
+    if (trustedGitDirectories.has(cacheKey)) continue;
+    execFileSync("git", ["config", "--global", "--add", "safe.directory", candidate], {
+      cwd: tmpdir(),
+      encoding: "utf8",
+    });
+    trustedGitDirectories.add(cacheKey);
+  }
+}
+
 function git(cwd, args, identity) {
-  // Match the in-process path: trust only this tenant directory for this call.
-  const cfg = [
-    "-c",
-    `safe.directory=${cwd}`,
-    ...(identity ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`] : []),
-  ];
+  trustSharedRepo(cwd);
+  const cfg = identity
+    ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`]
+    : [];
   return execFileSync("git", [...cfg, ...args], { cwd, encoding: "utf8" });
 }
 
