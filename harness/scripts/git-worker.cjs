@@ -11,9 +11,12 @@ const { execFileSync } = require("node:child_process");
 const readline = require("node:readline");
 
 function git(cwd, args, identity) {
-  const cfg = identity
-    ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`]
-    : [];
+  // Match the in-process path: trust only this tenant directory for this call.
+  const cfg = [
+    "-c",
+    `safe.directory=${cwd}`,
+    ...(identity ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`] : []),
+  ];
   return execFileSync("git", [...cfg, ...args], { cwd, encoding: "utf8" });
 }
 

@@ -266,9 +266,13 @@ export class PgTenantRepoLeaseCoordinator {
 }
 
 function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
-  const cfg = identity
-    ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`]
-    : [];
+  // Tenant repositories can live on a volume owned by a different container UID.
+  // Trust only this resolved working directory and only for this git invocation.
+  const cfg = [
+    "-c",
+    `safe.directory=${cwd}`,
+    ...(identity ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`] : []),
+  ];
   try {
     // Scrubbed env (sol-critic R5, same rule as the git worker): git and anything
     // it runs (filters, hooks) must never inherit a credential or hop secret.

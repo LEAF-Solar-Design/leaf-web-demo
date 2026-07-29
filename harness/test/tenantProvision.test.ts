@@ -60,6 +60,19 @@ describe("TenantRepoProviderImpl auto-provision", () => {
     expect(git(dir, ["log", "-1", "--format=%s"]).trim()).toBe("seed: provision tenant repo");
   });
 
+  it("provisions when Git treats the tenant directory as owned by another user", async () => {
+    const previous = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+    try {
+      const repo = await provider(base).checkout("different-owner");
+      expect(repo.dir).toBe(join(base, "different-owner"));
+      expect(existsSync(join(repo.dir, ".git"))).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+      else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previous;
+    }
+  });
+
   it("does not re-provision an existing repo on later checkout, and commit() works", async () => {
     const p = provider(base);
     const repo1 = await p.checkout("t1");
