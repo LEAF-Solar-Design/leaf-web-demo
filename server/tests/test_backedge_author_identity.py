@@ -31,7 +31,7 @@ def session(tmp_path, monkeypatch):
 
 def backedge(tenant_id="tenant-a"):
     """The identity a verified back-edge call resolves to: no subject."""
-    return deps.TenantContext(tenant_id, tier="hosted_pro")
+    return deps.TenantContext(tenant_id, tier="hosted_pro", backedge=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +150,8 @@ def test_a_confirm_once_grant_does_not_cross_users():
     mallory = agent_gate.grant_target({"description": "b"}, MALLORY)
 
     assert alice != mallory
-    # And without a resolvable subject the old shared key is unchanged.
+    # The unbound key still exists for the auth-off demo, but once auth is live
+    # a call that cannot resolve a subject must refuse to use it.
     assert agent_gate.grant_target({"description": "a"}) == ["none"]
 
 
@@ -287,13 +288,60 @@ def test_postgres_terminal_event_releases_the_subject():
 
 
 # --------------------------------------------------------------------------- #
-# the raw claim is not the identity
+# origin
 # --------------------------------------------------------------------------- #
 def test_the_active_resolver_leaves_a_backedge_identity_alone(monkeypatch):
-    """The harness path must survive the swap: no subject and no org means the
-    resolver returns the context untouched, so it never tries to look up a
-    platform binding for a caller that has no user."""
+    """No subject and no org means the resolver returns the context untouched,
+    so it never looks up a platform binding for a caller that has no user."""
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     context = deps.TenantContext("tenant-a", tier="hosted_pro")
 
     assert deps.resolve_active_tenant_context(context) is context
+
+
+def test_a_subjectless_jwt_cannot_borrow_the_turns_author(session):
+    """Origin must be marked, never inferred from a missing subject.
+
+    JWT validation does not require a `sub` claim, so require_tenant can return
+    an authenticated context whose subject is None. Inferring "no subject means
+    back edge" would let such a caller supply authority headers and author as
+    whoever opened the turn.
+
+    The turn below is REAL and resolvable, so this only passes because the
+    caller is not marked as a back edge.
+    """
+    session_id = session["session_id"]
+    session_store.try_begin_turn(session_id, "turn-1", 60, subject=ALICE)
+    # The same tuple does elevate a genuine back edge, so the tuple is not why
+    # this is refused.
+    assert deps.backedge_author_identity(
+        backedge(), session_id, "turn-1").subject == ALICE
+
+    jwt_like = deps.TenantContext("tenant-a", org_id="tenant-a",
+                                  tier="hosted_pro", workspace="/w")
+    assert getattr(jwt_like, "backedge", False) is False
+    assert deps.backedge_author_identity(
+        jwt_like, session_id, "turn-1").subject is None
+
+
+def test_only_the_dispatch_backedge_is_marked(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    assert deps.backedge_tenant("tenant-a").backedge is True
+    assert deps.TenantContext("tenant-a").backedge is False
+
+
+# --------------------------------------------------------------------------- #
+# an unresolvable subject must not ride a shared grant
+# --------------------------------------------------------------------------- #
+def test_live_auth_refuses_unbound_grants(monkeypatch):
+    """A stale, foreign, or pre-migration turn resolves no subject. The only key
+    then available is the legacy unbound one, which any pre-existing shared
+    grant matches, so it must be refused rather than reused."""
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    assert agent_gate._subject_bound_grants_required(None) is True
+    assert agent_gate._subject_bound_grants_required(ALICE) is False
+
+
+def test_auth_off_keeps_the_open_demo_behaviour(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    assert agent_gate._subject_bound_grants_required(None) is False

@@ -435,6 +435,25 @@ def _load_grants() -> Dict[str, str]:
     return dict(grants)
 
 
+def _subject_bound_grants_required(subject: Optional[str]) -> bool:
+    """Whether this call must refuse to use or create an UNBOUND session grant.
+
+    A confirm-once grant that does not name a person is shared by everyone in
+    the tenant's session. Once auth is live that is never acceptable, so a call
+    whose subject could not be resolved (a stale, foreign, or pre-migration
+    turn) asks for its own confirmation rather than matching a legacy key. With
+    auth off there is no subject to bind to and the open demo keeps its
+    existing behaviour.
+    """
+    if subject:
+        return False
+    try:
+        import deps  # noqa: PLC0415 - lazy, mirrors the rest of this module
+        return bool(deps.auth_live())
+    except Exception:  # noqa: BLE001 - an import failure must fail closed
+        return True
+
+
 def grant_target(args: Optional[Dict[str, Any]],
                  subject: Optional[str] = None) -> List[str]:
     """The target a grant authorizes, as a two-element form so an action with NO
@@ -894,7 +913,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                 audit_event=allow_event,
                 session_grant_target=(
                     grant_target(args, subject)
-                    if act.policy == "confirm-once" else None),
+                    if act.policy == "confirm-once"
+                    and not _subject_bound_grants_required(subject) else None),
                 rate_category=rate_category,
                 rate_limit=rate_limit,
                 rate_rejected_event=_rate_rejected_event(),
@@ -960,7 +980,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             # on the chip (repeats ride the grant, not the record);
             # always-confirm NEVER persists — the next call files a fresh
             # approval.
-            if act.policy == "confirm-once":
+            if (act.policy == "confirm-once"
+                    and not _subject_bound_grants_required(subject)):
                 record_session_grant(tenant_id, session_id, act.name,
                                      grant_target(args, subject))
             return _allow("allow_via_approval", confirmation_id=str(confirmation_id))
@@ -970,6 +991,11 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         return _allow("allow")
 
     if act.policy == "confirm-once":
+        # With auth live and no resolvable subject the only key available is the
+        # legacy unbound one, which any pre-existing shared grant matches. Ask
+        # for a fresh confirmation instead of riding it.
+        if _subject_bound_grants_required(subject):
+            return _create_and_await()
         if has_session_grant(tenant_id, session_id, act.name,
                              grant_target(args, subject)):
             return _allow("allow_via_session_grant")

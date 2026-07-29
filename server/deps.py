@@ -389,13 +389,19 @@ class TenantContext(str):
 
     def __new__(cls, tenant_id: str, org_id: Optional[str] = None,
                 tier: Optional[str] = None, workspace: Optional[str] = None,
-                subject: Optional[str] = None) -> "TenantContext":
+                subject: Optional[str] = None,
+                backedge: bool = False) -> "TenantContext":
         obj = super().__new__(cls, tenant_id)
         obj.tenant_id = str(tenant_id)
         obj.org_id = org_id
         obj.tier = tier
         obj.workspace = workspace
         obj.subject = subject
+        # True ONLY for a verified dispatch-secret back edge. Origin must be
+        # marked, never inferred from a missing subject: a JWT that carries no
+        # `sub` also resolves to subject=None, and inferring would let such a
+        # caller borrow the active turn's identity.
+        obj.backedge = backedge
         return obj
 
 
@@ -547,7 +553,7 @@ def backedge_tenant(tenant_id: str) -> Any:
     (fail CLOSED: an unresolvable tier must never authorize as demo)."""
     if not auth_live():
         return tenant_id
-    return TenantContext(tenant_id, tier=backedge_tier(tenant_id))
+    return TenantContext(tenant_id, tier=backedge_tier(tenant_id), backedge=True)
 
 
 import re as _re
@@ -592,6 +598,10 @@ def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
     """
     if not isinstance(tenant, TenantContext) or tenant.subject:
         return tenant
+    if not getattr(tenant, "backedge", False):
+        # Only a verified dispatch-secret back edge may borrow a turn's author.
+        # A JWT without a `sub` claim is also subjectless, and it must not.
+        return tenant
     if not authority_session_id or not authority_turn_id:
         return tenant
     try:
@@ -605,7 +615,8 @@ def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
     if not subject:
         return tenant
     return TenantContext(str(tenant), org_id=tenant.org_id, tier=tenant.tier,
-                         workspace=tenant.workspace, subject=subject)
+                         workspace=tenant.workspace, subject=subject,
+                         backedge=True)
 
 
 def require_tenant(
