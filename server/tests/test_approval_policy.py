@@ -509,3 +509,45 @@ def test_two_overlapping_strands_are_both_retried(monkeypatch, turn_stub):
     assert _wait_until(
         lambda: session_store.get_approval("cid-two-b")["consumed"] is True), (
         "the second stranded decision was never retried")
+
+
+def test_at_capacity_the_policy_stops_deciding_instead_of_evicting(monkeypatch, turn_stub):
+    """Review round 4 HIGH: a cap enforced by EVICTION strands whichever end it
+    drops — the oldest decided-unconsumed row becomes unreachable, and dropping
+    the newest strands the row just decided. Capacity is reserved BEFORE any
+    decision, so at the cap the policy simply leaves chips manual."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    monkeypatch.setattr(turn_runner, "MAX_PENDING_POLICY", 2)
+
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    ids = ["cid-cap-a", "cid-cap-b", "cid-cap-c"]
+    for cid in ids:
+        session_store.create_approval(
+            confirmation_id=cid, session_id=sid, tenant_id="tenant-p",
+            turn_id=f"t-{cid}", tool="panel_count", params={},
+            capability="drawing.read", rationale="r", kind="run_capability",
+            payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    assert session_store.try_begin_turn(sid, "orphan-cap", 300)
+    for cid in ids:
+        turn_runner._auto_confirm_reads(
+            "tenant-p", sid, {cid: {"capability": "drawing.read"}}, None, "demo")
+
+    with turn_runner._pending_policy_lock:
+        parked = list(turn_runner._pending_policy.get(sid) or ())
+    assert parked == ["cid-cap-a", "cid-cap-b"], f"cap not honoured: {parked}"
+    # the third was never DECIDED, so it is an ordinary manual chip — not a
+    # decided row nobody can reach.
+    third = session_store.get_approval("cid-cap-c")
+    assert third["decided"] is False, (
+        "a row was decided with no capacity to track it — it is stranded")
+    # and both parked rows are still decided-and-recoverable
+    for cid in ("cid-cap-a", "cid-cap-b"):
+        assert session_store.get_approval(cid)["decided"] is True
+    session_store.end_turn(sid, "orphan-cap")

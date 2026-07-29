@@ -302,7 +302,11 @@ _pending_policy: Dict[str, List[str]] = {}
 # before auto-confirm runs), so two of them can each park a different id, and a
 # single slot let the second overwrite the first — the displaced row stayed
 # policy-decided and unconsumed with nothing able to rediscover it (review
-# round 3). Bounded: a session cannot accumulate unbounded stranded decisions.
+# round 3).
+#
+# The cap is enforced BEFORE a row is decided, never by evicting one after:
+# an eviction would strand whichever end it dropped. At the cap the policy
+# simply stops deciding and the chips stay manual.
 MAX_PENDING_POLICY = 16
 
 
@@ -1047,6 +1051,20 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             return False  # the router's rule: no dwg binding, no confirm
 
         if not approval.get("decided"):
+            # CAPACITY FIRST, so an eviction can never strand a decision.
+            # Deciding a row we have no room to track would recreate the exact
+            # defect the park exists to fix: dropping the oldest loses a
+            # decided-unconsumed row, and dropping the newest loses the one we
+            # just decided (review round 4). An undecided row left alone is
+            # simply a normal manual chip — the fail-closed outcome.
+            with _pending_policy_lock:
+                tracked = _pending_policy.get(session_id) or []
+                if cid not in tracked and len(tracked) >= MAX_PENDING_POLICY:
+                    print(f"[leaf-agent] policy auto-confirm: {session_id!r} "
+                          f"already has {len(tracked)} unfinished policy "
+                          f"decisions; leaving {cid!r} for a human",
+                          file=sys.stderr, flush=True)
+                    return False
             # GATE FIRST (routers/agent.py's load-bearing ordering). A gate
             # record that is corrupt/unreadable, or that refuses the grant,
             # means this chip stays manual - never decide the mirror against a
@@ -1132,8 +1150,10 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             with _pending_policy_lock:
                 slot = _pending_policy.setdefault(session_id, [])
                 if cid not in slot:
+                    # No truncation: capacity was reserved before this row was
+                    # ever decided, so the cap cannot be exceeded here and no
+                    # decided row is ever evicted.
                     slot.append(cid)
-                    del slot[:-MAX_PENDING_POLICY]
             print(f"[leaf-agent] policy auto-confirm lost the CAS on "
                   f"session {session_id!r}; approval {cid!r} parked for the "
                   f"next terminal", file=sys.stderr, flush=True)
