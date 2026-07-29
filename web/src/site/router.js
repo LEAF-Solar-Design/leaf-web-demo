@@ -1,7 +1,8 @@
 // Minimal pushState router for the Website One Surface layer.
 // Views: '/' (site cover) · '/try' (tool scene pre-set) · '/sheets' and
 // '/sheets/<code>' (sheet pages; <code> normalized by consumers) · '/app'
-// (the untouched console). location.search is ALWAYS preserved by navigate()
+// (the untouched console) · '/ty' (an alias for that same console).
+// location.search is ALWAYS preserved by navigate()
 // so the console's boot params (?demo= ?fixture= ?ops= ?dev= ?drawing= and the
 // Auth0 ?code=&state= callback) survive every in-site navigation.
 //

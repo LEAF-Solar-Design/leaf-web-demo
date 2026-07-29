@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from customization_flags import enabled
 from tenant_id_validator import is_valid_tenant_id  # F13: the ONE shared reject-don't-collapse rule
 
 DEFAULT_TENANT = "demo-tenant"
@@ -73,13 +74,15 @@ def resolve_tenant_repo_dir(tenant_id: Optional[str]) -> Optional[Path]:
         return None
     tid = comp
 
-    # An effective pin, when present, is the only runtime authority. The
-    # import is lazy to avoid a dependency cycle during startup. No pin keeps
-    # the legacy mutable-checkout behavior exactly as before.
-    from customization_service import effective_catalog_dir
-    pinned = effective_catalog_dir(tid)
-    if pinned is not None:
-        return pinned
+    # An effective pin, when present, is the only runtime authority. Imports
+    # are lazy to avoid a dependency cycle during startup. Once customization
+    # rollout is enabled, a tenant without a first published pin receives only
+    # the shared catalog. It must never fall through to a mutable checkout.
+    from customization_service import effective_catalog_dir, effective_catalog_pin
+    if effective_catalog_pin(tid) is not None:
+        return effective_catalog_dir(tid)
+    if enabled(5, tid) or enabled(6, tid):
+        return None
 
     single = os.environ.get("LEAF_TENANT_REPO", "").strip()
     base = os.environ.get("LEAF_TENANTS_DIR", "").strip()

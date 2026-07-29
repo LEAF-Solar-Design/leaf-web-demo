@@ -8,14 +8,26 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header
+from fastapi.responses import JSONResponse
 
 import catalog
 import customization_service
 import deps
-from envelopes import with_envelope_fields
+from envelopes import ErrorCode, error_obj, with_envelope_fields
 from routers import ops as ops_router
 
 router = APIRouter()
+
+
+def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
+        "error": error_obj(
+            ErrorCode.INTERNAL,
+            "The catalog authority is temporarily unavailable.",
+            retryable=exc.status_code >= 500,
+        ),
+        "reason_code": exc.code,
+    }))
 
 
 @router.get("/api/capabilities")
@@ -29,11 +41,14 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         denial = ops_router._require_ops(x_ops_secret)
         if denial is not None:
             return denial
-    raw_tools = deps.all_tools(str(tenant))
-    pin = (
-        customization_service.effective_catalog_pin(str(tenant))
-        or deps.base_catalog_pin(raw_tools)
-    )
+    try:
+        raw_tools = deps.all_tools(str(tenant))
+        pin = (
+            customization_service.effective_catalog_pin(str(tenant))
+            or deps.base_catalog_pin(raw_tools)
+        )
+    except customization_service.CustomizationServiceError as exc:
+        return _catalog_error(exc)
     tools = []
     for tool in raw_tools:
         view = deps.catalog_tool_view(tool)

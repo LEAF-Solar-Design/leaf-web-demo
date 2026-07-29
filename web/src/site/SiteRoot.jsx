@@ -9,6 +9,7 @@
 
 import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useRoute, navigate } from './router.js'
+import { sceneForPath } from './routeScene.js'
 import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
@@ -37,13 +38,6 @@ function bootWantsApp(search, path = window.location.pathname) {
     if (q.has('code') && q.has('state') && path !== '/try') return true
   } catch { /* malformed search — fall through to path routing */ }
   return false
-}
-
-function sceneForPath(path) {
-  if (path === '/app' || path.startsWith('/app/')) return 'app'
-  if (path === '/sheets' || path.startsWith('/sheets/')) return 'sheets'
-  if (path === '/try') return 'tool'
-  return 'site'
 }
 
 const isEditable = (el) =>

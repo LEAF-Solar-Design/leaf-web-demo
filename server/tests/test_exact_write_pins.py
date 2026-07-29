@@ -74,7 +74,7 @@ def test_capability_projection_issues_base_generation_for_fresh_tenant(monkeypat
     assert entry["effective_catalog_digest"] == expected["effective_catalog_digest"]
 
 
-def test_fresh_enabled_tenant_without_effective_catalog_fails_closed(
+def test_fresh_enabled_tenant_without_effective_catalog_gets_base_generation(
     tmp_path, monkeypatch
 ):
     database = tmp_path / "customization.db"
@@ -86,11 +86,25 @@ def test_fresh_enabled_tenant_without_effective_catalog_fails_closed(
     monkeypatch.delenv("LEAF_TENANT_REPO", raising=False)
     capabilities_router.customization_service.reset_configured_services()
 
-    with pytest.raises(CustomizationServiceError) as exc:
-        capabilities_router.capabilities(
-            x_internal_role=None, x_ops_secret=None, tenant="fresh-tenant"
-        )
-    assert exc.value.code == "effective_catalog_unavailable"
+    body = capabilities_router.capabilities(
+        x_internal_role=None, x_ops_secret=None, tenant="fresh-tenant"
+    )
+    expected = capabilities_router.deps.base_catalog_pin(
+        capabilities_router.deps.shared_tools()
+    )
+    entries = [
+        entry
+        for family in body["families"]
+        for entry in family["capabilities"]
+    ]
+    assert entries
+    assert {entry["catalog_commit"] for entry in entries} == {
+        expected["catalog_commit"]
+    }
+    assert {
+        entry["effective_catalog_digest"].removeprefix("sha256:")
+        for entry in entries
+    } == {expected["effective_catalog_digest"]}
 
 
 def _request(**changes):
