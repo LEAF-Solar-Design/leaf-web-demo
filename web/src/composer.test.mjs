@@ -27,6 +27,11 @@ import {
   LINE_PX,
   MAX_ROWS,
   MAX_SEEN_QUEUED_STARTS,
+  MAX_IMAGES_PER_MESSAGE,
+  MAX_IMAGE_BASE64_BYTES,
+  base64SizeForBytes,
+  clipboardImagesToAttachments,
+  thumbnailImages,
 } from './composer.js'
 
 const names = (entries) => entries.map((e) => e.name)
@@ -55,6 +60,35 @@ describe('autoGrowHeight', () => {
   it('caps growth so a pasted wall of text scrolls instead of eating the viewport', () => {
     const many = Array.from({ length: MAX_ROWS + 40 }, (_, i) => `line ${i}`).join('\n')
     assert.equal(autoGrowHeight(many), `${MAX_ROWS * LINE_PX}px`)
+  })
+})
+
+describe('image attachments', () => {
+  const item = (type = 'image/png', size = 12) => ({ kind: 'file', type, getAsFile: () => ({ type, size }) })
+
+  it('extracts supported clipboard images and leaves non-images alone', () => {
+    const result = clipboardImagesToAttachments([item(), { kind: 'string', type: 'text/plain' }])
+    assert.equal(result.error, null)
+    assert.deepEqual(result.attachments.map((image) => image.media_type), ['image/png'])
+  })
+
+  it('refuses image count and byte caps instead of silently truncating', () => {
+    assert.match(clipboardImagesToAttachments(Array.from({ length: MAX_IMAGES_PER_MESSAGE + 1 }, () => item())).error, /At most/)
+    const over = Math.floor(MAX_IMAGE_BASE64_BYTES * 3 / 4) + 1
+    assert.match(clipboardImagesToAttachments([item('image/jpeg', over)]).error, /2MB/)
+    assert.equal(base64SizeForBytes(3), 4)
+  })
+
+  it('folds validated image data into capped thumbnail URLs', () => {
+    const images = Array.from({ length: MAX_IMAGES_PER_MESSAGE + 1 }, () => ({ media_type: 'image/png', data: 'aGVsbG8=' }))
+    assert.deepEqual(thumbnailImages(images), Array.from({ length: MAX_IMAGES_PER_MESSAGE }, () => 'data:image/png;base64,aGVsbG8='))
+  })
+
+  it('wires paste handling and clear-after-send attachment state into the composers', () => {
+    assert.match(promptBoxStripped, /onPaste,/)
+    const panel = readFileSync(new URL('./components/ConversePanel.jsx', import.meta.url), 'utf8')
+    assert.match(panel, /setAttachments\(\[\]\)/)
+    assert.match(panel, /images\.length \? \{ images \}/)
   })
 })
 
@@ -223,6 +257,9 @@ describe('busy queue retry', () => {
     assert.equal(shouldRetryWithQueue('busy', { confirm: { confirmationId: 'c1' } }), false)
     assert.equal(shouldRetryWithQueue('busy', {
       text: 'continue', credential_grant: { kind: 'api_key' },
+    }), false)
+    assert.equal(shouldRetryWithQueue('busy', {
+      text: 'continue', images: [{ media_type: 'image/png' }],
     }), false)
   })
 })

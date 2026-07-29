@@ -208,7 +208,11 @@ def test_messages_text_success_202_calls_start_turn(client, monkeypatch):
     captured = {}
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         captured.update(tenant_id=tenant_id, session_id=session_id, text=text,
                         confirm=confirm, classifier_hint=classifier_hint,
                         model=model, credential_grant=credential_grant)
@@ -382,7 +386,11 @@ def test_messages_confirm_valid_builds_frozen_proposal_shape_from_approval_row(c
     captured = {}
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         captured["confirm"] = confirm
         return "turn-resume-1"
 
@@ -441,7 +449,11 @@ def test_messages_confirm_reverse_a_rejection_stored_approved_false_wins(client,
     captured = {}
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         captured["confirm"] = confirm
         return "turn-resume-reversed"
 
@@ -487,7 +499,11 @@ def test_messages_confirm_replay_second_confirm_409_bad_params(client, monkeypat
     calls = []
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         calls.append(confirm)
         return f"turn-resume-{len(calls)}"
 
@@ -552,7 +568,11 @@ def test_messages_confirm_busy_gives_the_approval_back(client, monkeypatch):
     calls = []
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         calls.append(confirm)
         return f"turn-after-busy-{len(calls)}"
 
@@ -746,7 +766,11 @@ def test_messages_confirm_pre_harness_rejection_gives_the_approval_back(client, 
     calls = []
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         calls.append(confirm)
         return "turn-after-pre-harness"
 

@@ -429,6 +429,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                classifier_hint: Optional[Dict[str, Any]] = None,
                model: Optional[str] = None,
                credential_grant: Optional[Dict[str, Any]] = None,
+               images: Optional[List[Dict[str, str]]] = None,
                tier: Optional[str] = None,
                subject: Optional[str] = None,
                queued_id: Optional[str] = None) -> str:
@@ -471,6 +472,9 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # this is the only chance to strip it (see _scrub_tree).
         if classifier_hint is not None:
             classifier_hint = _scrub_tree(classifier_hint, _secret)
+        # Image base64 is deliberately NOT scrubbed. Literal secret scanning is
+        # O(n) for each secret and binary image data is not a realistic secret
+        # sink. Images are bounded and validated at the HTTP boundary.
         # `confirm` is deliberately NOT scrubbed. Its proposal is built
         # server-side from the STORED approval row (routers/sessions.py builds
         # {tool, params, capability} from `approval`, never from the client), so
@@ -498,6 +502,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     user_data: Dict[str, Any] = {}
     if text is not None:
         user_data["text"] = text
+    if images:
+        user_data["images"] = images
     if queued_id is not None:
         # The promoted-from-queue identity, TRANSCRIPT-ONLY (additive event
         # field; the frozen harness wire payload below never carries it). The
@@ -560,6 +566,11 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         payload["text"] = text
     if confirm is not None:
         payload["confirm"] = confirm
+    # The current harness validator accepts and ignores unknown fields. Forward
+    # this additive field now so its image-content-block lane can consume it
+    # without another server release.
+    if images:
+        payload["images"] = images
 
     # "Mount your LLM" (additive wire fields, only present when in play):
     #   - model: the per-turn override wins, else the session's stored model; an

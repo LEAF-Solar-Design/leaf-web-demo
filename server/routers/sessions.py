@@ -82,11 +82,13 @@ says so rather than advertising a retry that could only fail — see
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import os
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -238,6 +240,10 @@ class CreateSessionRequest(BaseModel):
 class MessageRequest(BaseModel):
     text: Optional[str] = None
     confirm: Optional[Dict[str, Any]] = None
+    # Inline image attachments are bounded before the entitlement and approval
+    # gates. They are recorded in the transcript and sent to the harness, but
+    # never enter the busy-turn queue (which is in-memory).
+    images: Optional[List[Dict[str, Any]]] = None
     classifier_hint: Optional[Dict[str, Any]] = None
     # Per-turn model override (validated); falls back to the session's stored model.
     model: Optional[str] = None
@@ -250,6 +256,46 @@ class MessageRequest(BaseModel):
     # default), a busy session answers exactly the 409 it always has. Text-only:
     # a confirm or a credential_grant with queue=true is a 400, never queued.
     queue: Optional[bool] = False
+
+
+_IMAGE_MEDIA_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+_MAX_IMAGES_PER_MESSAGE = 3
+_MAX_IMAGE_BASE64_BYTES = 2 * 1024 * 1024
+_MAX_IMAGES_BASE64_BYTES = 5 * 1024 * 1024
+
+
+def _validate_images(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, str]]]:
+    """Validate bounded image blocks without rewriting their base64 payloads."""
+    if images is None:
+        return None
+    if len(images) > _MAX_IMAGES_PER_MESSAGE:
+        raise ValueError(f"at most {_MAX_IMAGES_PER_MESSAGE} images are allowed per message")
+
+    total_size = 0
+    validated: List[Dict[str, str]] = []
+    for index, image in enumerate(images, start=1):
+        media_type = image.get("media_type")
+        data = image.get("data")
+        if media_type not in _IMAGE_MEDIA_TYPES:
+            allowed = ", ".join(sorted(_IMAGE_MEDIA_TYPES))
+            raise ValueError(f"image {index} media_type must be one of: {allowed}")
+        if not isinstance(data, str) or not data:
+            raise ValueError(f"image {index} data must be non-empty base64")
+        # Valid base64 is ASCII, so character count is its wire-byte count.
+        # Count before decoding so an oversized invalid input still receives
+        # the useful cap error rather than spending CPU on decode work.
+        size = len(data)
+        if size > _MAX_IMAGE_BASE64_BYTES:
+            raise ValueError("each image must be at most 2MB of base64 data")
+        total_size += size
+        if total_size > _MAX_IMAGES_BASE64_BYTES:
+            raise ValueError("images must total at most 5MB of base64 data")
+        try:
+            base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError, TypeError) as exc:
+            raise ValueError(f"image {index} data must be valid base64") from exc
+        validated.append({"media_type": media_type, "data": data})
+    return validated
 
 
 def _session_not_found(session_id: str) -> JSONResponse:
@@ -440,12 +486,51 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     if _require_owned_session(session_id, tenant) is None:
         return _session_not_found(session_id)
 
-    # 2. exactly one of {text}|{confirm}.
+    # 2. Validate images before entitlement evaluation or approval consumption.
+    # This is deliberately refuse-not-truncate: a caller must choose a bounded
+    # attachment set instead of silently losing part of it.
+    try:
+        images = _validate_images(req.images)
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
+
+    # A message is text, images, or a confirmation. Confirmations cannot carry
+    # images because an approval resumes only its server-stored proposal.
     has_text = req.text is not None
     has_confirm = req.confirm is not None
-    if has_text == has_confirm:  # neither set, or both set
+    has_images = bool(images)
+    if has_confirm and has_images:
+        return error_response(
+            ErrorCode.BAD_PARAMS, "confirm turns cannot include images",
+            retryable=False, status_code=400,
+        )
+    if has_confirm and has_text:
         return error_response(
             ErrorCode.BAD_PARAMS, "exactly one of `text` or `confirm` is required",
+            retryable=False, status_code=409,
+        )
+    if has_images and not has_text:
+        # An image-only message would break TWICE downstream today: the harness
+        # validator requires text-or-confirm (src/server.ts
+        # validateConverseTurnInput), so it 400s; and even if it accepted the
+        # turn, the runner does not yet fold images into the prompt, so the
+        # model would receive an EMPTY prompt — a silent no-op, worse than a
+        # refusal. Images therefore ride ALONGSIDE text until the harness half
+        # renders them (the named follow-up). Verified by reading the harness
+        # validator, not assumed.
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            "images must accompany `text` for now: the harness does not yet "
+            "render an image-only turn",
+            retryable=False, status_code=400,
+        )
+    if not has_confirm and not has_text and not has_images:
+        # 409, not 400: this is the SAME "neither" refusal deployed clients
+        # already classify (web/src/converse.js classifyAgentError keys on the
+        # 409+BAD_PARAMS pair). Adding `images` widened WHAT satisfies the rule;
+        # it must not change the answer when nothing does.
+        return error_response(
+            ErrorCode.BAD_PARAMS, "one of `text`, `images`, or `confirm` is required",
             retryable=False, status_code=409,
         )
 
@@ -464,6 +549,14 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         if req.credential_grant is not None:
             return error_response(
                 ErrorCode.BAD_PARAMS, "credential_grant turns cannot be queued",
+                retryable=False, status_code=400,
+            )
+        if has_images:
+            # Queue entries live in this process. Retaining up to 5MB per
+            # session turns a small bounded request into an unbounded memory
+            # hazard, so image messages are direct-only.
+            return error_response(
+                ErrorCode.BAD_PARAMS, "image turns cannot be queued",
                 retryable=False, status_code=400,
             )
 
@@ -601,7 +694,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         turn_id = turn_runner.start_turn(
             tenant, session_id,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
-            model=req.model, credential_grant=validated_grant,
+            model=req.model, credential_grant=validated_grant, images=images,
         )
     except turn_runner.TurnBusy:
         # OPT-IN queue: a text prompt with queue=true parks (cap 1) instead of

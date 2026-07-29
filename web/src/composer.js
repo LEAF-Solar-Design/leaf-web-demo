@@ -8,6 +8,49 @@
 // that the textarea scrolls, so a pasted wall of text never eats the viewport).
 export const LINE_PX = 20
 export const MAX_ROWS = 8
+export const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+export const MAX_IMAGES_PER_MESSAGE = 3
+export const MAX_IMAGE_BASE64_BYTES = 2 * 1024 * 1024
+export const MAX_IMAGES_BASE64_BYTES = 5 * 1024 * 1024
+
+export function base64SizeForBytes(bytes) {
+  const size = Number(bytes)
+  return Number.isFinite(size) && size > 0 ? 4 * Math.ceil(size / 3) : 0
+}
+
+// Clipboard parsing stays DOM-free. The component owns object URLs and the
+// asynchronous FileReader step; this pure gate mirrors the server's caps.
+export function clipboardImagesToAttachments(items, existing = []) {
+  const candidates = []
+  for (const item of items || []) {
+    if (!item || item.kind !== 'file' || !IMAGE_MEDIA_TYPES.has(item.type)) continue
+    const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null
+    if (!file || !IMAGE_MEDIA_TYPES.has(file.type || item.type)) continue
+    candidates.push({ file, media_type: file.type || item.type, bytes: Number(file.size) || 0 })
+  }
+  if (!candidates.length) return { attachments: [], error: null }
+  if ((existing?.length || 0) + candidates.length > MAX_IMAGES_PER_MESSAGE) {
+    return { attachments: [], error: `At most ${MAX_IMAGES_PER_MESSAGE} images per message.` }
+  }
+  let total = (existing || []).reduce((sum, image) => sum + base64SizeForBytes(image.bytes), 0)
+  for (const image of candidates) {
+    const size = base64SizeForBytes(image.bytes)
+    if (size > MAX_IMAGE_BASE64_BYTES) return { attachments: [], error: 'Each image must be 2MB or smaller.' }
+    total += size
+    if (total > MAX_IMAGES_BASE64_BYTES) return { attachments: [], error: 'Images must total 5MB or smaller.' }
+  }
+  return { attachments: candidates, error: null }
+}
+
+export function imageDataUrl(image) {
+  if (!image || !IMAGE_MEDIA_TYPES.has(image.media_type) || typeof image.data !== 'string') return null
+  if (!image.data || image.data.length > MAX_IMAGE_BASE64_BYTES) return null
+  return `data:${image.media_type};base64,${image.data}`
+}
+
+export function thumbnailImages(images, max = MAX_IMAGES_PER_MESSAGE) {
+  return (images || []).slice(0, max).map(imageDataUrl).filter(Boolean)
+}
 
 export function autoGrowHeight(value, { linePx = LINE_PX, maxRows = MAX_ROWS } = {}) {
   const lines = String(value ?? '').split('\n').length
@@ -197,12 +240,13 @@ export function replacePickerTrigger(value, trigger, insertion) {
 
 // A busy text turn may be parked once. Confirmations and ephemeral credential
 // grants cannot be queued by the server, so keep that gate pure and explicit.
-export function shouldRetryWithQueue(errorKind, { text, confirm, credential_grant } = {}) {
+export function shouldRetryWithQueue(errorKind, { text, confirm, credential_grant, images } = {}) {
   return errorKind === 'busy'
     && typeof text === 'string'
     && text.trim().length > 0
     && confirm == null
     && credential_grant == null
+    && (!Array.isArray(images) || images.length === 0)
 }
 
 // THE FIRST subsequent user turn resolves a question — never a later one.
