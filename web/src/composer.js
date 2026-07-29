@@ -221,13 +221,23 @@ export function questionChoiceState(events, questionId) {
   const labels = new Set((events[questionAt].data?.options || [])
     .map((option) => typeof option?.label === 'string' ? option.label.trim() : '')
     .filter(Boolean))
+  // A prompt QUEUED before the question was authored before the user ever saw
+  // it — its later turn_started (correlated by queued_id) is not a reply and
+  // must not resolve the card either way (review round 3).
+  const preQuestionQueued = new Set((events || []).slice(0, questionAt)
+    .filter((event) => event?.type === 'turn_queued' && event.data?.queued_id)
+    .map((event) => event.data.queued_id))
   const firstReply = (events || []).slice(questionAt + 1).find(
     (event) => event?.type === 'turn_started'
-      && typeof event.data?.text === 'string' && event.data.text.trim(),
+      && !(event.data?.queued_id && preQuestionQueued.has(event.data.queued_id)),
   )
   if (!firstReply) return { answered: false, selectedLabel: null, dismissed: false }
-  const replyText = firstReply.data.text.trim()
-  if (labels.has(replyText)) {
+  // The first subsequent turn OF ANY KIND resolves. A confirm-only turn (no
+  // text) is still the user acting past the question — it DISMISSES; skipping
+  // it let a later ordinary message retro-answer (review round 3).
+  const replyText = typeof firstReply.data?.text === 'string'
+    ? firstReply.data.text.trim() : ''
+  if (replyText && labels.has(replyText)) {
     return { answered: true, selectedLabel: replyText, dismissed: false }
   }
   return { answered: false, selectedLabel: null, dismissed: true }

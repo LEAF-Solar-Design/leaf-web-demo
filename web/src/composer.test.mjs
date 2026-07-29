@@ -256,6 +256,39 @@ describe('structured question choices', () => {
     ], 'question-1', 'Premium').action, 'ignore')
   })
 
+  it('a confirm-only turn DISMISSES; a later matching message cannot retro-answer', () => {
+    // Review round 3: confirm turns carry `confirm`, not `text`. Skipping
+    // them let `confirm -> later "Standard"` invent a selection.
+    const state = questionChoiceState([question,
+      { type: 'turn_started', turn_id: 'turn-confirm', data: { confirm: { confirmation_id: 'c1', approved: true } } },
+      { type: 'turn_started', turn_id: 'turn-later', data: { text: 'Standard' } },
+    ], 'question-1')
+    assert.deepEqual(state, { answered: false, selectedLabel: null, dismissed: true })
+  })
+
+  it('a prompt QUEUED before the question neither answers nor dismisses it', () => {
+    // Review round 3: the queued prompt was authored before the user saw the
+    // question — its promoted turn (correlated by queued_id) is not a reply.
+    const events = [
+      { type: 'turn_queued', turn_id: null, data: { queued_id: 'q-early', text: 'earlier ask' } },
+      question,
+      { type: 'turn_started', turn_id: 'turn-promoted', data: { text: 'earlier ask', queued_id: 'q-early' } },
+      { type: 'turn_started', turn_id: 'turn-real', data: { text: 'Premium' } },
+    ]
+    assert.deepEqual(questionChoiceState(events, 'question-1'),
+      { answered: true, selectedLabel: 'Premium', dismissed: false })
+  })
+
+  it('a prompt queued AFTER the question resolves it normally', () => {
+    const events = [
+      question,
+      { type: 'turn_queued', turn_id: null, data: { queued_id: 'q-late', text: 'Standard' } },
+      { type: 'turn_started', turn_id: 'turn-late', data: { text: 'Standard', queued_id: 'q-late' } },
+    ]
+    assert.deepEqual(questionChoiceState(events, 'question-1'),
+      { answered: true, selectedLabel: 'Standard', dismissed: false })
+  })
+
   it('sends the option label once and then makes a repeat click inert', () => {
     const first = chooseQuestionOption(undefined, [question], 'question-1', 'Premium')
     assert.equal(first.action, 'send')
