@@ -3,7 +3,8 @@
  * ---------------------------------------------------------------------------
  * Concern 1 (Leaf PLATFORM identity). Runs in the Login flow AFTER credentials
  * are verified. It reads the subscription metadata leaf_website already stores
- * at `event.user.app_metadata.leaf.{organization_id, plan}` (see
+ * at `event.user.app_metadata.leaf.{organization_id, plan}` plus the
+ * server-provisioned root sibling `app_metadata.leaf_platform_tenant_id` (see
  * leaf_website/lib/auth0.ts `SubscriptionMetadata`) and stamps three NAMESPACED
  * custom claims onto the ACCESS token so the server (server/auth.py) can resolve
  * a tenant WITHOUT a Management-API round-trip:
@@ -18,8 +19,8 @@
  * describes WHO the tenant is.
  *
  * DERIVATION:
- *   tenant_id = app_metadata.leaf.organization_id  (else the Auth0 sub — a
- *               single-user tenant until they create/join an org)
+ *   tenant_id = app_metadata.leaf_platform_tenant_id (else the legacy
+ *               organization_id, else the Auth0 sub)
  *   org_id    = app_metadata.leaf.organization_id  (null for a solo user)
  *   tier      = PLAN_TIER[plan]  (DeploymentTier enum; default hosted_starter).
  *               Surface-only — the server does NOT enforce entitlement here.
@@ -46,10 +47,11 @@
  *   to take effect on real logins.
  *
  * SAMPLE INPUT  (event.user.app_metadata):
- *   { "leaf": { "organization_id": "org_acme_solar", "plan": "pro" } }
+ *   { "leaf_platform_tenant_id": "bccb0d64-04c9-4108-bcc1-f27b8bb3924d",
+ *     "leaf": { "organization_id": "website_org_cuid", "plan": "pro" } }
  * EXPECTED ACCESS-TOKEN CLAIMS (dry-run output below):
- *   { "https://leafdesign.ai/tenant_id": "org_acme_solar",
- *     "https://leafdesign.ai/org_id":    "org_acme_solar",
+ *   { "https://leafdesign.ai/tenant_id": "bccb0d64-04c9-4108-bcc1-f27b8bb3924d",
+ *     "https://leafdesign.ai/org_id":    "website_org_cuid",
  *     "https://leafdesign.ai/tier":      "hosted_pro" }
  *
  * Run the dry-run locally:  node server/auth0-actions/post-login-add-tenant-claim.js
@@ -92,10 +94,14 @@ const LAPSED_STATUSES = new Set(['canceled', 'unpaid', 'incomplete_expired']);
  */
 function deriveClaims(event) {
   const user = (event && event.user) || {};
-  const leaf = (user.app_metadata && user.app_metadata.leaf) || {};
+  const appMetadata = user.app_metadata || {};
+  const leaf = appMetadata.leaf || {};
   const orgId = leaf.organization_id || null;
+  // Kept at app_metadata root so leaf_website subscription PATCHes can replace
+  // app_metadata.leaf without erasing the platform identity binding.
+  const platformTenantId = appMetadata.leaf_platform_tenant_id || null;
   const sub = user.user_id || user.sub || null;
-  const tenantId = orgId || sub;
+  const tenantId = platformTenantId || orgId || sub;
   const plan = (leaf.plan || '').toString().toLowerCase();
   let tier = PLAN_TIER[plan] || DEFAULT_TIER;
 
@@ -136,6 +142,11 @@ exports.PLAN_TIER = PLAN_TIER;
 // --------------------------------------------------------------------------- //
 if (require.main === module) {
   const samples = [
+    { name: 'canonical platform tenant + website org',
+      event: { user: { app_metadata: {
+        leaf_platform_tenant_id: 'bccb0d64-04c9-4108-bcc1-f27b8bb3924d',
+        leaf: { organization_id: 'website_org_cuid', plan: 'pro' },
+      } } } },
     { name: 'org + pro plan',
       event: { user: { app_metadata: { leaf: { organization_id: 'org_acme_solar', plan: 'pro' } } } } },
     { name: 'solo user, no org, free',

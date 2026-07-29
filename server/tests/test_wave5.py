@@ -85,7 +85,8 @@ _JWKS_FILE.write_text(json.dumps({"keys": [_jwk]}), encoding="utf-8")
 def mint(tier: str, tenant_id: str = "org_wave5") -> str:
     now = int(time.time())
     payload = {
-        "iss": ISS, "aud": AUD, "iat": now, "exp": now + 3600, "sub": "auth0|wave5",
+        "iss": ISS, "aud": AUD, "iat": now, "exp": now + 3600,
+        "sub": f"auth0|wave5|{tier}",
         NS + "tenant_id": tenant_id, NS + "org_id": tenant_id, NS + "tier": tier,
     }
     return jwt.encode(payload, _priv_pem, algorithm="RS256", headers={"kid": KID})
@@ -113,7 +114,12 @@ def live_auth(monkeypatch):
     monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", NS)
     monkeypatch.setenv("LEAF_AUTH0_JWKS_FILE", str(_JWKS_FILE))
     monkeypatch.setenv("LEAF_TENANTS_FILE", str(TENANTS_FILE))
+    import deps
     import tenancy
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        lambda subject: ("org_wave5", str(subject).rsplit("|", 1)[-1]),
+    )
     tenancy.reset_store()
     yield
 

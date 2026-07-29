@@ -390,7 +390,8 @@ class TenantContext(str):
     def __new__(cls, tenant_id: str, org_id: Optional[str] = None,
                 tier: Optional[str] = None, workspace: Optional[str] = None,
                 subject: Optional[str] = None,
-                backedge: bool = False) -> "TenantContext":
+                backedge: bool = False,
+                authority_resolved: bool = False) -> "TenantContext":
         obj = super().__new__(cls, tenant_id)
         obj.tenant_id = str(tenant_id)
         obj.org_id = org_id
@@ -402,6 +403,10 @@ class TenantContext(str):
         # `sub` also resolves to subject=None, and inferring would let such a
         # caller borrow the active turn's identity.
         obj.backedge = backedge
+        # True only when this request already resolved the current server-owned
+        # identity binding. This avoids a second authority lookup in
+        # require_active_tenant and keeps one request on one tenant snapshot.
+        obj.authority_resolved = authority_resolved
         return obj
 
 
@@ -451,6 +456,18 @@ def resolve_active_platform_tenant_authority(subject: Optional[str]) -> tuple[st
 def resolve_active_platform_tenant_id(subject: Optional[str]) -> str:
     """Compatibility wrapper for callers that need only current tenant identity."""
     return resolve_active_platform_tenant_authority(subject)[0]
+
+
+def require_matching_platform_tenant_claim(
+    claims: Dict[str, Any], platform_tenant_id: str,
+) -> None:
+    """Fail closed when a signed tenant hint disagrees with current authority."""
+    if claims.get("tenant_id") != str(platform_tenant_id):
+        from fastapi import HTTPException  # noqa: PLC0415
+        raise HTTPException(
+            status_code=409,
+            detail="verified tenant claim conflicts with the active platform binding",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -672,20 +689,29 @@ def require_tenant(
                            "everything else")
             return TenantContext(guest_tid, tier="guest")
 
-    # LEAF_AUTH_LIVE=1: verified JWT claims win over the header stub.
+    # LEAF_AUTH_LIVE=1: verify the JWT and require its Leaf tenant claim, but
+    # derive the authorization and storage namespace from the current
+    # server-owned subject binding. Claims can outlive an account move and are
+    # hints, not authority. Rollback is an immutable image rollback, never a
+    # request-time split that sends some routes to claims and others to the
+    # active binding.
     # Imported lazily so PyJWT is only needed when auth is actually live.
     import auth  # noqa: PLC0415
     import tenancy  # noqa: PLC0415
 
     payload = auth.verify_platform_token(authorization)   # -> 401 on bad/absent token
     claims = auth.extract_tenant_claims(payload)           # -> 403 if tenant claim absent
-    ws = tenancy.get_store().resolve_workspace(claims["tenant_id"])
+    subject = payload.get("sub") if isinstance(payload.get("sub"), str) else None
+    platform_tenant_id, platform_tier = resolve_active_platform_tenant_authority(subject)
+    require_matching_platform_tenant_claim(claims, platform_tenant_id)
+    ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
     return TenantContext(
-        claims["tenant_id"],
-        org_id=claims.get("org_id"),
-        tier=claims.get("tier"),
+        platform_tenant_id,
+        org_id=platform_tenant_id,
+        tier=platform_tier,
         workspace=ws.workspace_dir if ws is not None else None,
-        subject=payload.get("sub") if isinstance(payload.get("sub"), str) else None,
+        subject=subject,
+        authority_resolved=True,
     )
 
 
@@ -699,6 +725,8 @@ def resolve_active_tenant_context(tenant: Any) -> Any:
     identities.
     """
     if not auth_live() or not isinstance(tenant, TenantContext):
+        return tenant
+    if getattr(tenant, "authority_resolved", False):
         return tenant
     if tenant.subject is None and tenant.org_id is None:
         return tenant
@@ -714,6 +742,7 @@ def resolve_active_tenant_context(tenant: Any) -> Any:
         tier=platform_tier,
         workspace=ws.workspace_dir if ws is not None else None,
         subject=tenant.subject,
+        authority_resolved=True,
     )
 
 
