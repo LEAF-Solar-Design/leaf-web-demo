@@ -1162,7 +1162,7 @@ Every number below is labeled **measured** (with the receipt or file:line that p
 | Live APS write | 2.68–3.19 s engine (measured); wall tens of seconds (**estimated** — receipt records no wall-clock field) | measured / estimated | `data/write_loop_receipt.json` (`engine_seconds` per work item) |
 | Job hard timeout | 540 s | measured | `server/jobs.py:44-45` (`job_max_s()`, env `JOB_MAX_S` default 540 — env-tunable, not a hard constant) |
 | Full author flow | 36.0 s, 5 turns (7 model requests), $0.1582 | measured | `data/nl_author_receipt.json` (`author_ms=36012`, `turns=5`, 7 `per_turn_usage` entries, `total_cost_usd=0.1582`) |
-| Sandbox micro-VM cold boot | 906 ms; 2.0–3.6 s wall | measured | `docs/e2b-author-runner-receipt.json` (`coldBootMs=906`); `docs/e2b-tool-exec-microvm-receipt.json` (`wall_ms` 2042–3592) |
+| Sandbox micro-VM cold boot | 866 to 906 ms; 22.5 to 24.9 s no-egress tool wall | measured | `docs/e2b-author-runner-receipt.json` (`coldBootMs=906`); `docs/e2b-tool-exec-microvm-receipt.json` (`coldBootMs=866`, `wall_ms` 22512 to 24893) |
 | Standing session context | ~30–36K tokens | measured | `data/nl_author_receipt.json` turn 1: `cache_read=27,089` + `cache_creation=4,621` |
 | Model TTFT (haiku / sonnet) | ~0.3–0.7 s / ~0.7–1.5 s, plus a 0.5–3 s hidden thinking pause on Sonnet 5 adaptive thinking | **estimated** (provider-typical; not yet measured in this repo) |
 | SDK session cold start | ~1–3 s (`sdk.query` spawns a subprocess per run, `agentSdkRunner.ts:322`) | **estimated**; amortized to ~0 by the persistent-session model (§4) |
