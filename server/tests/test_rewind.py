@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import types
 from contextlib import nullcontext
 from pathlib import Path
@@ -346,21 +347,43 @@ def test_restore_refuses_the_postgres_authority_explicitly(client, drawing, monk
 
 
 def test_a_restore_reservation_is_not_stealable_at_the_turn_timeout(client, drawing):
-    """Review round 3, blocker 2: the reservation was taken with turn_max_s
-    (300s), and try_begin_turn lets ANY caller steal a slot older than the
-    window it was taken with — so a restore delayed past five minutes could be
-    overrun by a real turn mid-write. Reservations carry their own window."""
-    assert checkpoints_router.RESERVATION_STALE_S > 300.0
+    """Review round 4, blocker 1: the CAS judged the HOLDER by the INCOMING
+    caller's window, so an ordinary 300s turn could steal a 301-second-old
+    reservation no matter what window the restore declared. The CAS now judges
+    a reservation holder by session_store.RESERVATION_STALE_S. This test AGES
+    the reservation past the turn window (the interleaving round 3's test never
+    exercised) and confirms a normal turn still cannot take the slot — while a
+    reservation aged past ITS OWN window becomes reclaimable (wedged restores
+    must not wedge the session forever)."""
+    assert checkpoints_router.RESERVATION_STALE_S is session_store.RESERVATION_STALE_S
     session = _session()
     sid = session["session_id"]
     reservation = "restore-stale-probe"
-    assert session_store.try_begin_turn(
-        sid, reservation, checkpoints_router.RESERVATION_STALE_S)
+    assert session_store.try_begin_turn(sid, reservation, session_store.RESERVATION_STALE_S)
     try:
-        # A turn arriving with the ORDINARY window must not take the slot: the
-        # CAS compares against the window the HOLDER declared.
+        # Age the reservation to 400s — past a turn's 300s window, inside its own.
+        aged = time.time() - 400.0
+        with session_store._lock:
+            conn = session_store._db()
+            conn.execute(
+                "UPDATE sessions SET turn_started_at = ? WHERE session_id = ?",
+                (aged, sid))
+            conn.commit()
         assert session_store.try_begin_turn(sid, "real-turn", 300.0) is False, (
-            "a real turn stole a live restore reservation")
+            "a 300s turn stole a 400s-old reservation — the CAS is still "
+            "judging the holder by the caller's window")
         assert session_store.get_session(sid)["active_turn_id"] == reservation
+
+        # ...but past the RESERVATION'S OWN window it is reclaimable.
+        wedged = time.time() - (session_store.RESERVATION_STALE_S + 60.0)
+        with session_store._lock:
+            conn = session_store._db()
+            conn.execute(
+                "UPDATE sessions SET turn_started_at = ? WHERE session_id = ?",
+                (wedged, sid))
+            conn.commit()
+        assert session_store.try_begin_turn(sid, "reclaim-turn", 300.0) is True, (
+            "a genuinely wedged reservation could never be reclaimed")
     finally:
+        session_store.end_turn(sid, "reclaim-turn")
         session_store.end_turn(sid, reservation)

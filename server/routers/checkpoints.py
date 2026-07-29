@@ -43,14 +43,12 @@ def _require_owned_session(session_id: str, tenant: Any):
     return session
 
 
-# The reservation's stale window. NOT turn_max_s: that is an LLM turn's budget
-# (300s), and try_begin_turn lets ANY caller steal a slot older than the window
-# it was taken with — so a restore delayed past five minutes could be overrun
-# by a real turn while still writing (review round 3, blocker 2). A restore is
-# bounded by one drawing copy, so this is generous by orders of magnitude; a
-# restore that outlives it is genuinely wedged and SHOULD become reclaimable
-# rather than wedging the session forever.
-RESERVATION_STALE_S = 3600.0
+# The reservation's stale window lives in session_store (RESERVATION_STALE_S),
+# because the CAS itself must judge the HOLDER by the holder's window — a
+# route-local constant could not stop an ordinary 300s turn from stealing a
+# 301-second-old reservation (review round 4, blocker 1). Re-exported for the
+# tests and any future caller.
+RESERVATION_STALE_S = session_store.RESERVATION_STALE_S
 
 
 def store_authority_mode() -> str:
