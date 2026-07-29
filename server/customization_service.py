@@ -32,6 +32,8 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 from uuid import uuid4
 
+from psycopg import Error as PostgresError
+
 import deps
 import entitlements
 import platform_link
@@ -1307,6 +1309,10 @@ def effective_catalog_pin(tenant_id: str) -> dict[str, str] | None:
             "customization_shared_sqlite_unsupported", 503
         )
     if not postgres and not path.exists():
+        if enabled(5, tenant_id) or enabled(6, tenant_id):
+            raise CustomizationServiceError(
+                "effective_catalog_authority_unavailable", 503
+            )
         return None
     try:
         pin = CustomizationService.configured().store.get_effective_catalog(
@@ -1314,6 +1320,10 @@ def effective_catalog_pin(tenant_id: str) -> dict[str, str] | None:
         )
     except ChangeSetNotFoundError:
         return None
+    except CustomizationServiceError:
+        raise
+    except (OSError, sqlite3.DatabaseError, PostgresError, RuntimeError) as exc:
+        raise _unavailable(f"{type(exc).__name__}: {exc}") from exc
     return {
         "catalog_commit": pin.catalog_commit,
         "effective_catalog_digest": pin.catalog_digest,

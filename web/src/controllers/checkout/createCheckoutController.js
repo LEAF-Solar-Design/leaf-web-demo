@@ -1,5 +1,16 @@
 import { lockState } from '../../checkoutIdentity.js'
 
+export function storeDrawingIdForSource(drawingSource) {
+  return drawingSource === 'rooftop_demo' ? 'demo' : drawingSource
+}
+
+export function resolveCheckoutDrawingId({
+  drawingState = null,
+  requestedDrawingId = null,
+} = {}) {
+  return drawingState?.drawing_id || requestedDrawingId || null
+}
+
 export function deriveCheckout(
   checkout,
   holder,

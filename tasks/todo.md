@@ -340,3 +340,21 @@ Risks:
 - Authoring approval arguments and idempotency keys must bind the requested mode.
 - Disabled authored execution must remain fail closed until the E2B and independent-approval gates pass.
 - Error details must explain operator state without exposing tenant data or credentials.
+
+# Recovered FINISH HIM (2) staging completion
+
+- [x] Reconcile the recovered source, current main, live task definitions, and concurrent workflows.
+- [x] Deploy one coherent five-service staging release and prove its source and image digests.
+- [x] Activate protected authored execution and pass readiness plus two-tenant preflight.
+- [x] Verify a signed-in mounted Claude account can answer through the real `/app` assistant route.
+- [ ] Restore the signed-in capability catalog for tenants without an effective catalog pin.
+- [ ] Bind checkout reads to the active drawing and handle a not-yet-versioned drawing honestly.
+- [ ] Obtain an independent exact approval and run the protected authored-CAD execute acceptance.
+- [ ] Repeat the signed-in browser proof and complete the requirement-by-requirement audit.
+
+Risks:
+
+- Catalog fallback must not weaken tenant isolation or R5/R6 publication approval.
+- A missing version chain must not mask authentication, authority, or corruption failures.
+- The execute acceptance must retain its independent-approver requirement.
+- Staging changes must use protected GitHub OIDC workflows, never the local root AWS identity.

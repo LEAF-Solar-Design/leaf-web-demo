@@ -10,23 +10,40 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
+import customization_service
 import deps
 import entitlements
-from envelopes import with_envelope_fields
+from envelopes import ErrorCode, error_obj, with_envelope_fields
 
 router = APIRouter()
 
 
+def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
+        "error": error_obj(
+            ErrorCode.INTERNAL,
+            "The catalog authority is temporarily unavailable.",
+            retryable=exc.status_code >= 500,
+        ),
+        "reason_code": exc.code,
+    }))
+
+
 @router.get("/api/tools")
-def tools(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def tools(tenant=Depends(deps.require_tenant)) -> Any:
     """Flat tool list, TENANT-SCOPED for the folded portion (wave 4): the engine
     registry + write seed + authored globals are visible to everyone; only the
     requesting tenant's OWN repo tools are folded in (tenant A's authored tools are
     invisible to tenant B). Auth OFF -> tenant is the X-Tenant-Id stub (default
     demo-tenant); with no tenant repo configured this is byte-identical to before."""
+    try:
+        catalog_tools = deps.all_tools(str(tenant))
+    except customization_service.CustomizationServiceError as exc:
+        return _catalog_error(exc)
     return with_envelope_fields({
-        "tools": [deps.catalog_tool_view(tool) for tool in deps.all_tools(str(tenant))]
+        "tools": [deps.catalog_tool_view(tool) for tool in catalog_tools]
     })
 
 

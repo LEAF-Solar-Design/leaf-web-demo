@@ -53,6 +53,10 @@ import useDrawingVersionController from './controllers/useDrawingVersionControll
 import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
+import {
+  resolveCheckoutDrawingId,
+  storeDrawingIdForSource,
+} from './controllers/checkout/createCheckoutController.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -131,12 +135,12 @@ const agentBannerFor = (e) => {
   return { kind: 'unreachable', message: 'AI assistant unavailable — routed deterministically.' }
 }
 
-// The versioned-store drawing id the /versions + checkout reads key on. The
-// write loop bootstraps the well-known `demo` drawing (write runs target it),
-// so checkout/version reads default to `demo`. `?drawing=<id>` overrides it to
-// drive a scratch drawing's checkout state through the real fetch path.
-const CHECKOUT_DRAWING_ID =
-  new URLSearchParams(window.location.search).get('drawing') || 'demo'
+// The bundled rooftop is an intake source named `rooftop_demo`, while default
+// writes and checkout state use the server's well-known `demo` store drawing.
+// Uploaded drawings retain their own id across both surfaces.
+const DRAWING_SOURCE =
+  new URLSearchParams(window.location.search).get('drawing') || DEFAULT_DRAWING_ID
+const REQUESTED_DRAWING_ID = storeDrawingIdForSource(DRAWING_SOURCE)
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path).
@@ -536,7 +540,7 @@ export default function App() {
       seat(editFixture) // synchronous local fixture — no backend
       return () => { alive = false }
     }
-    getSession(mock)
+    getSession(mock, DRAWING_SOURCE)
       .then(({ intake: d, tenant: t, tier: ti, org: o }) => {
         if (!alive) return
         seat(d); setTenant(t); setTier(ti); setOrg(o)
@@ -591,7 +595,10 @@ export default function App() {
       setCheckoutReadFailed(false)
       return
     }
-    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    const did = resolveCheckoutDrawingId({
+      drawingState,
+      requestedDrawingId: REQUESTED_DRAWING_ID,
+    })
     const seq = ++checkoutSeqRef.current
     setCheckoutUnknown(true)
     try {
@@ -616,7 +623,10 @@ export default function App() {
   // means the refetched manifest shows the truth. Live only.
   const onTakeCheckout = useCallback(async () => {
     if (mock) return
-    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    const did = resolveCheckoutDrawingId({
+      drawingState,
+      requestedDrawingId: REQUESTED_DRAWING_ID,
+    })
     setCheckoutBusy(true)
     try {
       const result = await takeCheckout(did, ownHolder, undefined, capabilityRef.current)
@@ -636,7 +646,10 @@ export default function App() {
 
   const onReleaseCheckout = useCallback(async () => {
     if (mock) return
-    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    const did = resolveCheckoutDrawingId({
+      drawingState,
+      requestedDrawingId: REQUESTED_DRAWING_ID,
+    })
     setCheckoutBusy(true)
     try {
       await releaseCheckout(did, capabilityRef.current)
@@ -648,7 +661,7 @@ export default function App() {
       await loadCheckout()
       setCheckoutBusy(false)
     }
-  }, [mock, drawingState, ownHolder, loadCheckout])
+  }, [mock, drawingState, loadCheckout])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the

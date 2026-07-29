@@ -271,6 +271,23 @@ def test_enabled_rollout_pin_rejects_existing_unsupported_shared_sqlite(
         customization_service.effective_catalog_pin("tenant-a")
 
 
+def test_enabled_rollout_pin_rejects_missing_sqlite_authority(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "missing-customization.db"
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STORE", "sqlite")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    monkeypatch.setattr(customization_service, "database_path", lambda: database)
+    monkeypatch.setattr(customization_service, "_shared_sqlite_path", lambda path: False)
+
+    with pytest.raises(
+        CustomizationServiceError,
+        match="effective_catalog_authority_unavailable",
+    ):
+        customization_service.effective_catalog_pin("tenant-a")
+
+
 @pytest.mark.parametrize(
     "database",
     (

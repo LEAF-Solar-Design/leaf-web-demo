@@ -1,5 +1,23 @@
 import { expect, test } from '@playwright/test'
-import { createCheckoutController, deriveCheckout } from '../../../src/controllers/checkout/createCheckoutController.js'
+import {
+  createCheckoutController,
+  deriveCheckout,
+  resolveCheckoutDrawingId,
+  storeDrawingIdForSource,
+} from '../../../src/controllers/checkout/createCheckoutController.js'
+
+test('resolves checkout reads against the active drawing identity', () => {
+  expect(storeDrawingIdForSource('rooftop_demo')).toBe('demo')
+  expect(storeDrawingIdForSource('uploaded-drawing')).toBe('uploaded-drawing')
+  expect(resolveCheckoutDrawingId({
+    drawingState: { drawing_id: 'versioned-drawing' },
+    requestedDrawingId: 'requested-drawing',
+  })).toBe('versioned-drawing')
+  expect(resolveCheckoutDrawingId({
+    drawingState: null,
+    requestedDrawingId: 'requested-drawing',
+  })).toBe('requested-drawing')
+})
 
 test('derives free, owned, other, unknown, and clock-skew-safe checkout states', () => {
   expect(deriveCheckout(null, 'ours')).toMatchObject({ heldByUs: false, writeLocked: false })
