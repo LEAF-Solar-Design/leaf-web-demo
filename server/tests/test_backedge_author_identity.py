@@ -50,6 +50,47 @@ def test_backedge_authors_as_the_subject_that_opened_the_turn(session):
     assert elevated.tier == "hosted_pro"
 
 
+def test_backedge_restores_the_verified_active_turn_tier(session):
+    """A stale broker tenant row must not downgrade an authenticated turn.
+
+    The browser snapshots the active platform tier when it opens the turn.
+    Protected authoring comes back through the subjectless harness back edge,
+    whose broker provisioning can lag that binding. The same app-owned turn
+    that restores the subject must restore its verified tier too.
+    """
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-tier", 60, tier="hosted_pro", subject=ALICE,
+    )
+    restricted_backedge = deps.TenantContext(
+        "tenant-a", tier="restricted", backedge=True,
+    )
+
+    elevated = deps.backedge_author_identity(
+        restricted_backedge, session_id, "turn-tier",
+    )
+
+    assert elevated.subject == ALICE
+    assert elevated.tier == "hosted_pro"
+    assert elevated.backedge is True
+
+
+def test_backedge_keeps_the_broker_tier_for_an_older_turn_without_a_snapshot(
+    session,
+):
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-legacy", 60, subject=ALICE,
+    )
+
+    elevated = deps.backedge_author_identity(
+        backedge(), session_id, "turn-legacy",
+    )
+
+    assert elevated.subject == ALICE
+    assert elevated.tier == "hosted_pro"
+
+
 def test_a_direct_user_call_keeps_its_own_subject(session):
     session_id = session["session_id"]
     session_store.try_begin_turn(session_id, "turn-1", 60, subject=ALICE)
@@ -124,6 +165,22 @@ def test_an_authority_outage_never_elevates(session, monkeypatch):
     monkeypatch.setattr(session_store, "active_turn_subject", explode)
     assert deps.backedge_author_identity(
         backedge(), session_id, "turn-1").subject is None
+
+
+def test_a_turn_tier_authority_outage_never_elevates(session, monkeypatch):
+    session_id = session["session_id"]
+    session_store.try_begin_turn(
+        session_id, "turn-1", 60, tier="hosted_pro", subject=ALICE,
+    )
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("tier authority down")
+
+    monkeypatch.setattr(session_store, "active_turn_tier", explode)
+    unchanged = deps.backedge_author_identity(
+        backedge(), session_id, "turn-1",
+    )
+    assert unchanged.subject is None
 
 
 def test_the_subject_is_not_exposed_through_the_session_projection(session):

@@ -627,11 +627,23 @@ def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
         subject = session_store.active_turn_subject(
             str(authority_session_id), str(authority_turn_id), str(tenant),
             turn_runner.turn_max_s())
+        turn_tier = session_store.active_turn_tier(
+            str(authority_session_id), str(authority_turn_id), str(tenant))
     except Exception:  # noqa: BLE001 - an authority outage must not elevate
         return tenant
     if not subject:
         return tenant
-    return TenantContext(str(tenant), org_id=tenant.org_id, tier=tenant.tier,
+    # The harness back edge resolves its initial tier from broker provisioning.
+    # That record can lag the active platform binding, while the turn already
+    # carries the verified tier captured when the user opened it. Restore both
+    # pieces of the app-owned turn authority together. If an older turn has no
+    # tier snapshot, retain the broker-trusted tier rather than inventing one.
+    tier = (
+        turn_tier
+        if isinstance(turn_tier, str) and turn_tier.strip()
+        else tenant.tier
+    )
+    return TenantContext(str(tenant), org_id=tenant.org_id, tier=tier,
                          workspace=tenant.workspace, subject=subject,
                          backedge=True)
 
