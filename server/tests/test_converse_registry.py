@@ -62,7 +62,6 @@ def test_tools_are_projected_not_copied():
         "description": "count them",
         "catalog_digest": "sha256:secretish",
         "repo_path": "/srv/tenant-a/tools/count_panels.py",
-        "internal": True,
     }])
     assert entries == [{
         "kind": "tool",
@@ -134,3 +133,63 @@ def test_route_degrades_to_commands_when_the_catalog_fails(client, monkeypatch):
     body = res.json()
     assert body["counts"]["tool"] == 0
     assert "stop" in [e["name"] for e in body["entries"]]
+
+
+def test_internal_and_qa_tools_never_reach_the_picker(client, monkeypatch):
+    """The capability catalog has always withheld internal/QA tools
+    server-side. The registry must inherit that, or the picker becomes a way
+    to discover (and complete) tools the tenant was never meant to see.
+    """
+    import catalog
+    import deps
+
+    rules = catalog._load_config().get("filter_rules", {})
+    internal_flag = rules.get("internal_flag", "internal")
+    qa_prefixes = rules.get("qa_prefixes", []) or []
+
+    tools = [
+        {"name": "count_panels", "description": "public"},
+        {"name": "secret_probe", "description": "internal", internal_flag: True},
+    ]
+    if qa_prefixes:
+        tools.append({"name": f"{qa_prefixes[0]}sniff", "description": "qa"})
+
+    monkeypatch.setattr(deps, "all_tools", lambda tenant: list(tools))
+    res = client.get("/api/converse/registry")
+    assert res.status_code == 200, res.text
+    names = [e["name"] for e in res.json()["entries"]]
+
+    assert "count_panels" in names
+    assert "secret_probe" not in names, f"internal tool leaked into the picker: {names}"
+    for prefix in qa_prefixes:
+        assert not any(n.startswith(prefix) for n in names), \
+            f"QA-prefixed tool leaked into the picker: {names}"
+
+
+def test_registry_is_scoped_to_the_calling_tenant(monkeypatch, client):
+    """The tenant argument must actually reach the catalog — a registry that
+    ignored it would show every tenant the same tools."""
+    seen = {}
+
+    import deps
+
+    def _all_tools(tenant):
+        seen["tenant"] = tenant
+        return []
+
+    monkeypatch.setattr(deps, "all_tools", _all_tools)
+    assert client.get("/api/converse/registry").status_code == 200
+    assert seen.get("tenant"), "deps.all_tools was never called with a tenant"
+
+
+def test_filter_internal_matches_the_catalog_predicate():
+    """One predicate, one config — not a second copy that can drift."""
+    import catalog
+
+    rules = catalog._load_config().get("filter_rules", {})
+    flag = rules.get("internal_flag", "internal")
+    tools = [{"name": "public"}, {"name": "hidden", flag: True}]
+    kept = catalog.filter_internal(tools)
+    assert [t["name"] for t in kept] == ["public"]
+    # include_internal=True is the ops projection /api/capabilities offers.
+    assert len(catalog.filter_internal(tools, include_internal=True)) == 2

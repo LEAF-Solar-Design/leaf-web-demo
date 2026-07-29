@@ -489,6 +489,25 @@ export default function App() {
   // gates — authoring stays byte-identical to today (template path unaffected).
   const claudeNotLinked = !mock && !!grant && grant.linked === false
 
+  // Handlers for registry entries of kind "command". This map IS the gate:
+  // composer.js filterRunnable drops any command whose action is missing here,
+  // so the picker cannot list something that would do nothing. A command
+  // becomes visible the moment its handler lands — `/stop` stays hidden until
+  // the composer can reach the converse panel's interrupt, which is the next
+  // chip rather than a promise made in a menu.
+  //
+  // Placed after the catalog-controller destructuring that binds
+  // `onPromptChange` (the canonical way to set the well's text — it also
+  // invalidates a stale route) and before the JSX that reads this map.
+  const slashCommandActions = useMemo(() => ({
+    help: () => {
+      // The menu IS the help: reopen it on a bare slash and put the caret back
+      // in the well so the next keystroke filters.
+      onPromptChange('/')
+      barInputRef.current?.focus()
+    },
+  }), [onPromptChange])
+
   // --- single-writer checkout (item 3) ---
   // The holder is a per-session display identity, never the tenant. A copied tab
   // initially inherits sessionStorage, so the claim channel remints the duplicate.
@@ -1376,25 +1395,6 @@ export default function App() {
     setRoute((r) => (r ? null : r))
     setRouteErr((e) => (e ? null : e))
   }, [])
-
-  // Handlers for registry entries of kind "command". This map IS the gate:
-  // composer.js filterRunnable drops any command whose action is missing here,
-  // so the picker cannot list something that would do nothing. A command
-  // becomes visible the moment its handler lands — `/stop` stays hidden until
-  // the composer can reach the converse panel's interrupt, which is the next
-  // chip rather than a promise made in a menu.
-  //
-  // Declared here, below `onPromptChange`: it is the canonical way to set the
-  // well's text (it also invalidates a stale route), and reading it earlier
-  // would be a temporal-dead-zone crash at first render.
-  const slashCommandActions = useMemo(() => ({
-    help: () => {
-      // The menu IS the help: reopen it on a bare slash and put the caret back
-      // in the well so the next keystroke filters.
-      onPromptChange('/')
-      barInputRef.current?.focus()
-    },
-  }), [onPromptChange])
 
   // Pick an alternative from a low-confidence / live-only route -> a user-picked
   // (high-confidence) run route for that capability.

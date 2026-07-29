@@ -5,6 +5,7 @@ requests the projection, but the existing X-Ops-Secret credential authorizes it.
 """
 from __future__ import annotations
 
+import sys
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header
@@ -73,10 +74,19 @@ def converse_registry_route(tenant=Depends(deps.require_tenant)) -> Any:
     working when the catalog is down.
     """
     try:
-        tools = deps.all_tools(str(tenant))
+        # SAME internal/QA filtering /api/capabilities applies. deps.all_tools
+        # is unfiltered; without this the picker would offer internal and QA
+        # tools to ordinary tenants, which the capability catalog has always
+        # withheld server-side.
+        tools = catalog.filter_internal(deps.all_tools(str(tenant)))
     except customization_service.CustomizationServiceError:
         tools = []
-    except Exception:  # noqa: BLE001 — the picker is not worth a 500
+    except Exception as exc:  # noqa: BLE001 — the picker is not worth a 500
+        # Degrade to commands-only, but never SILENTLY: an unexpected failure
+        # here is a defect, and a quiet empty catalog looks identical to a
+        # tenant who simply has no tools.
+        print(f"[leaf-registry] tool catalog unavailable: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
         tools = []
     # Skills stay empty until the curated per-tier bundle ships (build plan
     # Wave 0); the shape is already correct so the client needs no change then.
