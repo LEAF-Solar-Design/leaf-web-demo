@@ -25,6 +25,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
+import { autoGrowHeight, rankEntries } from '../composer.js'
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
@@ -69,15 +70,7 @@ export default function PromptBox({
   // name/description substring matches — case-insensitive, like Claude's picker.
   const matches = useMemo(() => {
     if (!completing) return []
-    const q = afterSlash.toLowerCase()
-    const pre = []
-    const sub = []
-    for (const t of tools) {
-      const name = (t.name || '').toLowerCase()
-      if (name.startsWith(q)) pre.push(t)
-      else if (name.includes(q) || (t.description || '').toLowerCase().includes(q)) sub.push(t)
-    }
-    return [...pre, ...sub]
+    return rankEntries(tools, afterSlash)
   }, [completing, afterSlash, tools])
 
   // While ANOTHER resolver is showing — a route decision, or the scope menu —
@@ -120,11 +113,33 @@ export default function PromptBox({
         e.preventDefault(); pick(matches[idx]); return
       }
     }
+    // Ctrl+J is the terminal client's newline-in-any-terminal escape hatch;
+    // honoured here so the same muscle memory works in the browser well.
+    if (e.key === 'j' && e.ctrlKey && !e.isComposing) {
+      e.preventDefault()
+      insertNewline(e.target)
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { // isComposing: IME confirm-Enter must not dispatch
       if (routeActive || scopeOpen) return // the resolver / decision strip owns Enter
       e.preventDefault()
       onDispatch()
     }
+    // Shift+Enter deliberately falls through: the textarea inserts the newline
+    // itself, so the caret lands where the user expects without us rebuilding
+    // the value (which would strand the cursor at the end).
+  }
+
+  // Ctrl+J has no native newline behavior to fall through to, so splice one in
+  // at the caret and restore the selection on the next frame.
+  const insertNewline = (el) => {
+    if (!el || typeof el.selectionStart !== 'number') { onChange(`${value}\n`); return }
+    const start = el.selectionStart
+    const end = el.selectionEnd
+    onChange(`${value.slice(0, start)}\n${value.slice(end)}`)
+    requestAnimationFrame(() => {
+      try { el.setSelectionRange(start + 1, start + 1) } catch { /* detached */ }
+    })
   }
 
   const openScope = (idx) => { setScopeIdx(idx); setScopeOpen(true) }
@@ -233,8 +248,14 @@ export default function PromptBox({
         )}
         <div className="bar-input">
           <span className="bar-caret" aria-hidden="true">›</span>
-          <input
+          {/* A textarea, not an input: Shift+Enter (and Ctrl+J) must be able to
+              put a real newline in the buffer — an <input> silently cannot hold
+              one, so the existing `!e.shiftKey` dispatch guard was only ever
+              half the feature. rows=1 plus the autogrow below keeps the 40 px
+              single-line well until the text actually needs a second row. */}
+          <textarea
             ref={inputRef}
+            rows={1}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
@@ -248,6 +269,7 @@ export default function PromptBox({
             aria-expanded={menuOpen}
             aria-controls={menuOpen ? 'slash-menu-listbox' : undefined}
             aria-activedescendant={menuOpen && matches[idx] ? `slash-opt-${idx}` : undefined}
+            style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />
         </div>
         <div className="bar-controls">

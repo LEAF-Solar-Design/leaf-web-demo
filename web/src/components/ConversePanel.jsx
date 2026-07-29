@@ -10,6 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { openStream, postMessage, approve, classifyAgentError } from '../converse.js'
+import Markdown from './Markdown.jsx'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -28,6 +29,34 @@ function fmtUsage(u) {
   if (Number.isFinite(Number(u.cost_tokens))) parts.push(`${Number(u.cost_tokens).toLocaleString()} tokens`)
   if (Number.isFinite(Number(u.total_cost_usd))) parts.push(`~$${Number(u.total_cost_usd).toFixed(3)} est`)
   return parts.join(' · ')
+}
+
+// Full tool args/result for an expanded chip. Objects pretty-print; strings
+// pass through. Bounded because a tool result can be large and the transcript
+// must stay scrollable — the drawer, not the chip, is the place for everything.
+const DETAIL_MAX_CHARS = 2000
+function fmtDetail(value) {
+  let text
+  if (typeof value === 'string') text = value
+  else {
+    try {
+      text = JSON.stringify(value, null, 2)
+    } catch {
+      text = String(value)
+    }
+  }
+  if (text.length <= DETAIL_MAX_CHARS) return text
+  return `${text.slice(0, DETAIL_MAX_CHARS)}\n… ${text.length - DETAIL_MAX_CHARS} more characters`
+}
+
+// The status strip's context reading. The fields are OPTIONAL on turn_usage:
+// a backend that has not shipped them yet renders "—" rather than NaN, so the
+// strip degrades to what is actually known instead of inventing a number.
+function contextPct(usage) {
+  const used = Number(usage?.context_used_tokens)
+  const window = Number(usage?.context_window_tokens)
+  if (!Number.isFinite(used) || !Number.isFinite(window) || window <= 0) return null
+  return Math.max(0, Math.min(100, Math.round((used / window) * 100)))
 }
 
 // Honest, calm stop-reason notes (turn_complete). end_turn renders nothing;
@@ -69,6 +98,7 @@ export default function ConversePanel({
   const [sendErr, setSendErr] = useState(null)     // {kind, message} from a failed send/approve
   const [decidedLocal, setDecidedLocal] = useState({}) // confirmation_id -> approved (optimistic; the confirmation_resolved event reconciles)
   const [deciding, setDeciding] = useState(null)   // confirmation_id with an approve/deny in flight
+  const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
 
@@ -134,14 +164,16 @@ export default function ConversePanel({
         if (last && last.kind === 'text') last.text += data.text || ''
         else t.feed.push({ kind: 'text', text: data.text || '' })
       } else if (type === 'tool_call') {
-        const chip = { tool: data.tool, summary: data.args_summary || '', ok: null, result: null }
+        // `args` is OPTIONAL on the wire: when the backend sends it the chip
+        // becomes expandable, otherwise the chip is exactly what it is today.
+        const chip = { tool: data.tool, summary: data.args_summary || '', ok: null, result: null, args: data.args }
         t.openCalls.push(chip)
         t.feed.push({ kind: 'tool', chip })
       } else if (type === 'tool_result') {
         // Pair with the earliest still-open call for the same tool.
         const open = t.openCalls.find((c) => c.tool === data.tool && c.ok === null)
-        if (open) { open.ok = data.ok !== false; open.result = data.summary || '' }
-        else t.feed.push({ kind: 'tool', chip: { tool: data.tool, summary: '', ok: data.ok !== false, result: data.summary || '' } })
+        if (open) { open.ok = data.ok !== false; open.result = data.summary || ''; open.fullResult = data.result }
+        else t.feed.push({ kind: 'tool', chip: { tool: data.tool, summary: '', ok: data.ok !== false, result: data.summary || '', fullResult: data.result } })
       } else if (type === 'job_linked') {
         t.feed.push({ kind: 'job', jobId: data.job_id, tool: data.tool || null })
       } else if (type === 'proposed_run') {
@@ -166,7 +198,11 @@ export default function ConversePanel({
       }
     }
     const active = turns.some((t) => t.started && !t.stopReason)
-    return { turns, decisions, completed, quota, grant, active }
+    // Latest usage tick wins the status strip: context% is a running session
+    // reading, not a per-turn one, so the newest turn_usage is the truth.
+    let latestUsage = null
+    for (const t of turns) if (t.usage) latestUsage = t.usage
+    return { turns, decisions, completed, quota, grant, active, latestUsage }
   }, [events])
 
   // User bubbles come from the dispatching side (§3 has no user-message event):
@@ -243,15 +279,47 @@ export default function ConversePanel({
 
   const renderFeedItem = (item, i) => {
     if (item.kind === 'text') {
-      return item.text ? <div key={i} className="converse-msg assistant">{item.text}</div> : null
+      // Assistant prose renders through the element-only markdown path
+      // (Markdown.jsx / markdown.js): fenced code, lists and links become
+      // real elements, and anything HTML-shaped stays literal text.
+      return item.text ? <div key={i} className="converse-msg assistant"><Markdown text={item.text} /></div> : null
     }
     if (item.kind === 'tool') {
       const c = item.chip
+      // A chip expands only when the event actually carried the full call —
+      // args/result are OPTIONAL on the wire, so a backend that sends only
+      // args_summary keeps exactly today's one-line chip (no dead affordance).
+      const detail = c.args ?? c.fullResult
+      const expandable = detail !== undefined && detail !== null
+      const key = `${i}:${c.tool}`
+      const open = !!expandedTools[key]
       return (
         <span key={i} className="converse-tool-chip">
           <span className={c.ok === null ? 'dot live pulse' : (c.ok ? 'dot' : 'dot red')} aria-hidden="true" />
-          <span className="route-tool">{c.tool}</span>
+          {expandable ? (
+            <button
+              type="button"
+              className="converse-tool-toggle"
+              aria-expanded={open}
+              onClick={() => setExpandedTools((prev) => ({ ...prev, [key]: !prev[key] }))}
+            >
+              <span className="route-tool">{c.tool}</span>
+              <span className="dim"> {open ? '▾' : '▸'}</span>
+            </button>
+          ) : (
+            <span className="route-tool">{c.tool}</span>
+          )}
           {(c.result || c.summary) && <span className="dim"> · {c.result || c.summary}</span>}
+          {open && (
+            <span className="converse-tool-detail">
+              {c.args !== undefined && c.args !== null && (
+                <pre className="converse-md-pre"><code>{fmtDetail(c.args)}</code></pre>
+              )}
+              {c.fullResult !== undefined && c.fullResult !== null && (
+                <pre className="converse-md-pre"><code>{fmtDetail(c.fullResult)}</code></pre>
+              )}
+            </span>
+          )}
         </span>
       )
     }
@@ -347,6 +415,23 @@ export default function ConversePanel({
         <span className="converse-title">Assistant</span>
         <span className="dim">plans and explains — deterministic tools do the work</span>
         <span className="converse-spacer" />
+        {/* Status strip — the terminal client's persistent model/context/cost
+            reading, as a component rather than a shell script. Every field is
+            optional: an unknown value shows "—", never a fabricated number. */}
+        <span className="converse-status" aria-label="session status">
+          <span className="dim">model</span>{' '}
+          <span className="route-tool">{model.latestUsage?.model || '—'}</span>
+          <span className="dim"> · context </span>
+          <span className="route-tool">
+            {contextPct(model.latestUsage) === null ? '—' : `${contextPct(model.latestUsage)}%`}
+          </span>
+          <span className="dim"> · </span>
+          <span className="route-tool">
+            {Number.isFinite(Number(model.latestUsage?.session_cost_usd))
+              ? `~$${Number(model.latestUsage.session_cost_usd).toFixed(3)}`
+              : '—'}
+          </span>
+        </span>
         <button type="button" className="chip-neutral" onClick={onDismiss}>Hide</button>
       </div>
 
