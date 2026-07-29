@@ -418,3 +418,50 @@ def test_a_humans_decision_is_never_resumed_by_the_policy(monkeypatch, turn_stub
     time.sleep(0.15)
     assert session_store.get_approval("cid-human")["consumed"] is False, (
         "the policy consumed a decision a HUMAN made")
+
+
+def test_a_lost_cas_is_retried_at_the_next_terminal(monkeypatch, turn_stub):
+    """Review round 2, finding 1: the resume path had NO reachable trigger —
+    each relay owns a fresh proposals map, so a later terminal could not
+    rediscover the stranded id. A lost CAS now PARKS the id, and the next
+    terminal (any turn, unrelated) retries it."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-park", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-park", tool="panel_count", params={}, capability="drawing.read",
+        rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    # Force the CAS loss: hold the session with an orphan turn.
+    assert session_store.try_begin_turn(sid, "orphan-park", 300)
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-park": {"capability": "drawing.read"}}, None, "demo")
+
+    with turn_runner._pending_policy_lock:
+        assert turn_runner._pending_policy.get(sid) == "cid-park", (
+            "a lost CAS did not park the decision — nothing will retry it")
+    assert session_store.get_approval("cid-park")["consumed"] is False
+
+    # A LATER terminal with completely unrelated proposals must still finish it.
+    session_store.end_turn(sid, "orphan-park")
+    turn_runner._auto_confirm_reads("tenant-p", sid, {}, None, "demo")
+
+    assert _wait_until(
+        lambda: session_store.get_approval("cid-park")["consumed"] is True), (
+        "the parked decision was never retried at a later terminal")
+    with turn_runner._pending_policy_lock:
+        assert sid not in turn_runner._pending_policy
+
+
+@pytest.fixture(autouse=True)
+def _clean_parked():
+    yield
+    with turn_runner._pending_policy_lock:
+        turn_runner._pending_policy.clear()
