@@ -20,6 +20,9 @@ import {
   reconcileQueuedTurn,
   replacePickerTrigger,
   shouldRetryWithQueue,
+  chooseQuestionOption,
+  clearSendingQuestion,
+  questionChoiceState,
   setPromptHistoryValue,
   LINE_PX,
   MAX_ROWS,
@@ -221,6 +224,84 @@ describe('busy queue retry', () => {
     assert.equal(shouldRetryWithQueue('busy', {
       text: 'continue', credential_grant: { kind: 'api_key' },
     }), false)
+  })
+})
+
+describe('structured question choices', () => {
+  const question = {
+    type: 'question_required', turn_id: 'turn-question',
+    data: { question_id: 'question-1', question: 'Which plan?', options: [{ label: 'Standard' }, { label: 'Premium' }] },
+  }
+
+  it('resolves by the FIRST subsequent turn and remembers WHICH label', () => {
+    assert.deepEqual(questionChoiceState([question], 'question-1'),
+      { answered: false, selectedLabel: null, dismissed: false })
+    assert.deepEqual(questionChoiceState([question, {
+      type: 'turn_started', turn_id: 'turn-answer', data: { text: 'Standard' },
+    }], 'question-1'), { answered: true, selectedLabel: 'Standard', dismissed: false })
+  })
+
+  it('a LATER unrelated message matching a label cannot retro-answer the card', () => {
+    // Review round 2: scanning every later turn let an ordinary "Premium"
+    // typed much later invent a historical selection on replay. Only the
+    // first subsequent turn resolves.
+    const state = questionChoiceState([question,
+      { type: 'turn_started', turn_id: 'turn-next', data: { text: 'unrelated question about panels' } },
+      { type: 'turn_started', turn_id: 'turn-later', data: { text: 'Premium' } },
+    ], 'question-1')
+    assert.deepEqual(state, { answered: false, selectedLabel: null, dismissed: true })
+    // dismissed cards are inert to clicks
+    assert.equal(chooseQuestionOption(undefined, [question,
+      { type: 'turn_started', turn_id: 'turn-next', data: { text: 'moved on' } },
+    ], 'question-1', 'Premium').action, 'ignore')
+  })
+
+  it('a confirm-only turn DISMISSES; a later matching message cannot retro-answer', () => {
+    // Review round 3: confirm turns carry `confirm`, not `text`. Skipping
+    // them let `confirm -> later "Standard"` invent a selection.
+    const state = questionChoiceState([question,
+      { type: 'turn_started', turn_id: 'turn-confirm', data: { confirm: { confirmation_id: 'c1', approved: true } } },
+      { type: 'turn_started', turn_id: 'turn-later', data: { text: 'Standard' } },
+    ], 'question-1')
+    assert.deepEqual(state, { answered: false, selectedLabel: null, dismissed: true })
+  })
+
+  it('a prompt QUEUED before the question neither answers nor dismisses it', () => {
+    // Review round 3: the queued prompt was authored before the user saw the
+    // question — its promoted turn (correlated by queued_id) is not a reply.
+    const events = [
+      { type: 'turn_queued', turn_id: null, data: { queued_id: 'q-early', text: 'earlier ask' } },
+      question,
+      { type: 'turn_started', turn_id: 'turn-promoted', data: { text: 'earlier ask', queued_id: 'q-early' } },
+      { type: 'turn_started', turn_id: 'turn-real', data: { text: 'Premium' } },
+    ]
+    assert.deepEqual(questionChoiceState(events, 'question-1'),
+      { answered: true, selectedLabel: 'Premium', dismissed: false })
+  })
+
+  it('a prompt queued AFTER the question resolves it normally', () => {
+    const events = [
+      question,
+      { type: 'turn_queued', turn_id: null, data: { queued_id: 'q-late', text: 'Standard' } },
+      { type: 'turn_started', turn_id: 'turn-late', data: { text: 'Standard', queued_id: 'q-late' } },
+    ]
+    assert.deepEqual(questionChoiceState(events, 'question-1'),
+      { answered: true, selectedLabel: 'Standard', dismissed: false })
+  })
+
+  it('sends the option label once and then makes a repeat click inert', () => {
+    const first = chooseQuestionOption(undefined, [question], 'question-1', 'Premium')
+    assert.equal(first.action, 'send')
+    assert.equal(first.text, 'Premium')
+    assert.deepEqual(chooseQuestionOption(first.state, [question], 'question-1', 'Premium'), {
+      action: 'ignore', state: first.state,
+    })
+  })
+
+  it('releases a failed answer POST so the question can be retried', () => {
+    assert.deepEqual(clearSendingQuestion({ sendingQuestionIds: ['question-1', 'question-2'] }, 'question-1'), {
+      sendingQuestionIds: ['question-2'],
+    })
   })
 })
 

@@ -205,6 +205,64 @@ export function shouldRetryWithQueue(errorKind, { text, confirm, credential_gran
     && credential_grant == null
 }
 
+// THE FIRST subsequent user turn resolves a question — never a later one.
+// Scanning every later turn let an unrelated message that happened to say
+// "Yes" retro-answer an old card on replay, and the renderer then invented a
+// historical selection (review round 2). The rule: the turn the user sends
+// right after the question IS the answer moment. If its text matches an
+// option (trimmed), that option — and only that option — is selected; if it
+// does not match, the user moved on and the card is dismissed-inert. Replay
+// is authoritative either way.
+export function questionChoiceState(events, questionId) {
+  const questionAt = (events || []).findIndex((event) => (
+    event?.type === 'question_required' && event.data?.question_id === questionId
+  ))
+  if (questionAt === -1) return { answered: false, selectedLabel: null, dismissed: false }
+  const labels = new Set((events[questionAt].data?.options || [])
+    .map((option) => typeof option?.label === 'string' ? option.label.trim() : '')
+    .filter(Boolean))
+  // A prompt QUEUED before the question was authored before the user ever saw
+  // it — its later turn_started (correlated by queued_id) is not a reply and
+  // must not resolve the card either way (review round 3).
+  const preQuestionQueued = new Set((events || []).slice(0, questionAt)
+    .filter((event) => event?.type === 'turn_queued' && event.data?.queued_id)
+    .map((event) => event.data.queued_id))
+  const firstReply = (events || []).slice(questionAt + 1).find(
+    (event) => event?.type === 'turn_started'
+      && !(event.data?.queued_id && preQuestionQueued.has(event.data.queued_id)),
+  )
+  if (!firstReply) return { answered: false, selectedLabel: null, dismissed: false }
+  // The first subsequent turn OF ANY KIND resolves. A confirm-only turn (no
+  // text) is still the user acting past the question — it DISMISSES; skipping
+  // it let a later ordinary message retro-answer (review round 3).
+  const replyText = typeof firstReply.data?.text === 'string'
+    ? firstReply.data.text.trim() : ''
+  if (replyText && labels.has(replyText)) {
+    return { answered: true, selectedLabel: replyText, dismissed: false }
+  }
+  return { answered: false, selectedLabel: null, dismissed: true }
+}
+
+// A click has one normal send action. The caller keeps this small state only
+// while the post is in flight; durable turn_started data decides the final state.
+export function chooseQuestionOption(state = { sendingQuestionIds: [] }, events, questionId, optionLabel) {
+  const resolved = questionChoiceState(events, questionId)
+  if (resolved.answered || resolved.dismissed
+    || state.sendingQuestionIds.includes(questionId)) return { action: 'ignore', state }
+  return {
+    action: 'send',
+    text: optionLabel,
+    state: { ...state, sendingQuestionIds: [...state.sendingQuestionIds, questionId] },
+  }
+}
+
+export function clearSendingQuestion(state = { sendingQuestionIds: [] }, questionId) {
+  return {
+    ...state,
+    sendingQuestionIds: state.sendingQuestionIds.filter((id) => id !== questionId),
+  }
+}
+
 // A queued prompt is identified by the server's queued_id, never by its text.
 // Streams can win the race against the 202 response, so retain recent starts
 // until the matching response arrives. This is plain data so ConversePanel only

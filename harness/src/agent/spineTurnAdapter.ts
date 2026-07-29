@@ -73,6 +73,7 @@ const WIRE_EVENT_TYPES = new Set<HarnessTurnEvent["type"]>([
   "job_linked",
   "proposed_run",
   "confirmation_required",
+  "question_required",
   "turn_usage",
   "turn_complete",
   "error",

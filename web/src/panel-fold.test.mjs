@@ -31,4 +31,21 @@ describe('ConversePanel transcript fold', () => {
         'protect turnOf')
     })
   }
+
+  it('folds question_required into the emitting turn feed', () => {
+    const questionAt = stripped.indexOf('"question_required"')
+    const feedAt = stripped.indexOf('kind: "question"')
+    assert.ok(questionAt !== -1 && feedAt > questionAt,
+      'question_required must create an in-turn question feed item')
+  })
+
+  it('wires a choice click through the normal send path with the exact label', () => {
+    assert.match(stripped, /send\(choice\.text\)/)
+    assert.match(stripped, /answerQuestion\(item\.id, label\)/)
+  })
+
+  it('releases a failed question send so the card can retry', () => {
+    assert.match(stripped,
+      /if\s*\(!await send\(choice\.text\)\)\s*\{\s*setQuestionChoices\(\(state\) => clearSendingQuestion\(state, questionId\)\)/)
+  })
 })

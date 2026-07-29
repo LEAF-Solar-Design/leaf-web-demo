@@ -11,7 +11,7 @@
  * Ownership split (see shared contract): the turn engine emits
  * `turn_started` + `session_state` and relays everything below; THIS port
  * emits `text_delta` / `tool_call` / `tool_result` / `job_linked` /
- * `proposed_run` / `confirmation_required` / `turn_usage` / `turn_complete`
+ * `proposed_run` / `confirmation_required` / `question_required` / `turn_usage` / `turn_complete`
  * / `error` — the 9 event types listed in `HarnessTurnEvent.type`.
  */
 
@@ -43,6 +43,7 @@ export interface HarnessTurnEvent {
     | "job_linked"
     | "proposed_run"
     | "confirmation_required"
+    | "question_required"
     | "turn_usage"
     | "turn_complete"
     | "error";

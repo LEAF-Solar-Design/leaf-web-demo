@@ -12,7 +12,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { openStream, postMessage, approve, cancelTurn, classifyAgentError } from '../converse.js'
 import {
   acceptQueuedTurn,
+  clearSendingQuestion,
+  chooseQuestionOption,
   createQueuedTurnState,
+  questionChoiceState,
   reconcileQueuedTurn,
   shouldRetryWithQueue,
 } from '../composer.js'
@@ -84,6 +87,7 @@ export default function ConversePanel({
   const [sendErr, setSendErr] = useState(null)     // {kind, message} from a failed send/approve
   const [decidedLocal, setDecidedLocal] = useState({}) // confirmation_id -> approved (optimistic; the confirmation_resolved event reconciles)
   const [deciding, setDeciding] = useState(null)   // confirmation_id with an approve/deny in flight
+  const [questionChoices, setQuestionChoices] = useState({ sendingQuestionIds: [] })
   const [stopping, setStopping] = useState(false)  // an interrupt is in flight
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const logRef = useRef(null)
@@ -100,6 +104,7 @@ export default function ConversePanel({
     if (!sessionId) return undefined
     setEvents([]); setLocalTurns([]); setSendErr(null)
     setDecidedLocal({}); setDeciding(null)
+    setQuestionChoices({ sendingQuestionIds: [] })
     jobSeenRef.current = new Set()
     setQueueState(createQueuedTurnState())
     const stream = openStream(sessionId, 0, {
@@ -186,6 +191,8 @@ export default function ConversePanel({
         })
       } else if (type === 'confirmation_required') {
         t.feed.push({ kind: 'confirm', id: data.confirmation_id, confirmKind: data.kind || null, payload: data.payload || null })
+      } else if (type === 'question_required') {
+        t.feed.push({ kind: 'question', id: data.question_id, question: data.question || '', options: data.options || [] })
       } else if (type === 'turn_usage') {
         t.usage = data
       } else if (type === 'turn_complete') {
@@ -283,9 +290,10 @@ export default function ConversePanel({
     return () => document.removeEventListener('keydown', onEsc)
   }, [busy, stoppableTurnId, stopping]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const send = async () => {
-    const text = input.trim()
-    if (!text || busy) return
+  const send = async (nextText = input) => {
+    const text = String(nextText).trim()
+    if (!text || busy) return false
+    let delivered = false
     setSending(true); setSendErr(null)
     const accept = (res) => {
       if (res.status === 'queued') {
@@ -309,10 +317,21 @@ export default function ConversePanel({
         if (!shouldRetryWithQueue(classifyAgentError(e), { text })) throw e
         accept(await postMessage(sessionId, { text, queue: true }))
       }
+      delivered = true
     } catch (e) {
       setSendErr(bannerFor(e))
     } finally {
       setSending(false)
+    }
+    return delivered
+  }
+
+  const answerQuestion = async (questionId, optionLabel) => {
+    const choice = chooseQuestionOption(questionChoices, events, questionId, optionLabel)
+    if (choice.action !== 'send') return
+    setQuestionChoices(choice.state)
+    if (!await send(choice.text)) {
+      setQuestionChoices((state) => clearSendingQuestion(state, questionId))
     }
   }
 
@@ -472,6 +491,39 @@ export default function ConversePanel({
               </button>
             </>
           )}
+        </div>
+      )
+    }
+    if (item.kind === 'question') {
+      return (
+        <div key={i} className="strip-decision converse-question">
+          <span className="dot square" aria-hidden="true" />
+          <span className="strip-sentence">{item.question}</span>
+          <span className="converse-question-options">
+            {item.options.map((option, optionIndex) => {
+              const label = typeof option?.label === 'string' ? option.label : ''
+              // Resolution is FIRST-subsequent-turn (composer.js): only the
+              // option the user actually sent reads "selected"; a card the
+              // user moved past (dismissed) simply inerts — the renderer must
+              // never invent a historical selection (review round 2).
+              const resolved = questionChoiceState(events, item.id)
+              const inert = resolved.answered || resolved.dismissed
+              const isSelected = resolved.selectedLabel === label.trim()
+              const sendingChoice = questionChoices.sendingQuestionIds.includes(item.id)
+              return (
+                <button
+                  key={`${item.id}-${optionIndex}`}
+                  type="button"
+                  className="chip-act"
+                  disabled={!label || inert || sendingChoice || busy}
+                  onClick={() => answerQuestion(item.id, label)}
+                  title={option?.description || undefined}
+                >
+                  {isSelected ? `${label} selected` : label}
+                </button>
+              )
+            })}
+          </span>
         </div>
       )
     }
