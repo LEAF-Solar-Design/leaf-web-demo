@@ -10,6 +10,16 @@ Two values, and the DEFAULT is the whole safety story:
 
     confirm_all        (default) every proposal confirms — today's behavior,
                        byte-identical when nothing ever sets a policy.
+    plan_first         EVERYTHING confirms, including the tool the harness
+                       normally auto-approves via its allowlist: the server
+                       sends the `x-leaf-approval-policy: plan_first` sidecar
+                       header (the instant-assignment precedent — consumed
+                       before the runner starts, never in the transcript) and
+                       the harness empties its per-turn auto-approval so every
+                       execution rides the proposal/confirmation lifecycle.
+                       Until the harness half ships, the header is emitted and
+                       ignored — behavior degrades to confirm_all, the SAFE
+                       direction.
     auto_approve_reads proposals whose capability is EXACTLY `run_read` are
                        auto-decided and auto-confirmed at the turn's terminal
                        (turn_runner._auto_confirm_reads). Everything else —
@@ -31,7 +41,7 @@ SERVER_DIR = Path(__file__).resolve().parent
 # covers this table too (read at import time, matching that module's posture).
 DB_PATH = Path(os.environ.get("SESSIONS_DB", str(SERVER_DIR / "sessions.db")))
 
-POLICIES = frozenset({"confirm_all", "auto_approve_reads"})
+POLICIES = frozenset({"confirm_all", "auto_approve_reads", "plan_first"})
 DEFAULT_POLICY = "confirm_all"
 
 _lock = threading.Lock()
