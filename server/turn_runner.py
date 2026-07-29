@@ -573,6 +573,16 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         payload["credential_grant"] = credential_grant
     instant_assignment = instant_execution.assignment_for_session(tenant_id, session_id)
     harness_headers = broker_client.harness_headers()
+    # Plan-first rides the SIDECAR, not the frozen turn body (the
+    # instant-assignment precedent): consumed by the harness before the runner
+    # starts, never in the transcript. Reading the policy can never sink a
+    # turn — an unreadable policy simply omits the header, which the harness
+    # treats as confirm_all: the SAFE direction (nothing widens).
+    try:
+        if session_policy.get_policy(session_id, tenant_id) == "plan_first":
+            harness_headers["x-leaf-approval-policy"] = "plan_first"
+    except Exception:  # noqa: BLE001
+        pass
     if instant_assignment is not None:
         # Keep the frozen turn body exact. This authenticated sidecar header is
         # consumed before the runner starts and never enters the transcript.
