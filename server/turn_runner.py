@@ -68,6 +68,7 @@ import requests
 
 import agent_ledger
 import broker_client
+import entitlements
 import instant_execution
 import session_store
 from envelopes import ErrorCode
@@ -230,8 +231,26 @@ def _drop_canceller(turn_id: str) -> None:
 # enqueue time; the START is in-process best-effort, exactly like the relay it
 # hands the prompt to. A process restart drops the start (the transcript still
 # shows `turn_queued`), which matches how a restart orphans active relays.
+#
+# The slot has TWO states, and that is load-bearing (review round 1, findings
+# 1 and 3): `payload["starting"]` is False while parked and True while a kicker
+# is attempting the start. The slot is NOT emptied during that attempt — a
+# concurrent enqueue still sees the key and answers "full" — so a second
+# prompt can never be accepted into the gap where the first one's start might
+# fail (which is how a 202'd prompt could otherwise be stranded on a free
+# session, or an accepted prompt silently superseded). The slot empties only
+# on a stable outcome: started, rejected (transcript closed), or dropped.
 _queued_lock = threading.Lock()
 _queued: Dict[str, Dict[str, Any]] = {}
+
+# The kicker's TurnBusy-retry bound. Each retry requires a DISTINCT foreign
+# turn to have acquired AND terminalized the session's CAS inside the window
+# between one pop-check and one start attempt, with that turn's own terminal
+# kick ALSO having lost the interleaving — each extra lap is another full
+# foreign turn lifecycle squeezed into microseconds. Exhausting this bound is
+# not a realistic schedule; if it ever happens the prompt stays parked and a
+# LOUD stderr line says so (the next enqueue-time kick is the backstop).
+_KICK_MAX_ATTEMPTS = 64
 
 
 class TurnBusy(Exception):
@@ -657,16 +676,23 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
     check and the append here surfaces as TurnRejected(404).
     """
     tier = getattr(tenant_id, "tier", None)
+    # The entitlement tier is snapshotted too, so the KICKER can re-run the
+    # router's converse-entitlement check at start time (review round 1,
+    # finding 4): a revocation landing during the wait must gate the queued
+    # start exactly as it would gate a direct request.
+    entitlement_tier = entitlements.resolve_tier(tenant_id)
     tenant_id = str(tenant_id)
     queued_id = str(uuid.uuid4())
     payload = {
         "queued_id": queued_id,
         "tenant_id": tenant_id,
         "tier": tier,
+        "entitlement_tier": entitlement_tier,
         "text": text,
         "classifier_hint": classifier_hint,
         "model": model,
         "created_at": time.time(),
+        "starting": False,
     }
     with _queued_lock:
         if session_id in _queued:
@@ -698,50 +724,75 @@ def _kick_queued(session_id: str) -> None:
     turned out to be free. NEVER raises — it runs on relay threads whose
     cleanup must complete.
 
-    Pop-BEFORE-start: the slot is emptied while the prompt is in hand, so a
-    turn that starts and terminalizes instantly cannot re-kick the same prompt
-    into a second start. The TurnBusy leg re-inserts (a foreign turn won the
-    CAS; its own terminal will kick) — and then re-checks the fence once, in
-    case that foreign turn terminalized while the slot was momentarily empty
-    and its kicker saw nothing. The loop is bounded: each retry means a whole
-    turn started AND finished within the window.
+    CLAIM, don't pop: the slot is marked `starting` and stays registered for
+    the whole attempt, so a concurrent enqueue answers "full" and no second
+    prompt can be accepted while this one's outcome is undecided (review
+    round 1, findings 1 and 3 — popping opened a gap where a newly-202'd
+    prompt could be stranded on a free session, and where an accepted prompt
+    could be silently superseded). A concurrent kick that sees `starting`
+    stands down; the claim-holder owns the outcome.
+
+    Exit states, exhaustively: STARTED (slot emptied) · REJECTED (transcript
+    closed with a terminal error for the turn_started it opened, slot
+    emptied, then one more lap in case a prompt arrived mid-attempt — it
+    cannot have, see above, but the lap is free) · ENTITLEMENT-DENIED (slot
+    emptied, durable turn_queue_dropped) · BUSY (slot reverted to parked;
+    the foreign turn's own terminal kick starts it — unless that turn ended
+    inside our window, which the free-session re-check catches by retrying)
+    · CRASH (slot emptied, loud stderr).
     """
-    for _ in range(4):
+    attempts = 0
+    while attempts < _KICK_MAX_ATTEMPTS:
+        attempts += 1
         with _queued_lock:
-            payload = _queued.pop(session_id, None)
-        if payload is None:
+            payload = _queued.get(session_id)
+            if payload is None or payload["starting"]:
+                return  # nothing to do, or another kicker owns the attempt
+            payload["starting"] = True
+
+        def _release(*, keep: bool) -> None:
+            """Drop the claim: keep=True reverts to parked, else empties."""
+            with _queued_lock:
+                current = _queued.get(session_id)
+                if current is not None and current["queued_id"] == payload["queued_id"]:
+                    if keep:
+                        current["starting"] = False
+                    else:
+                        del _queued[session_id]
+
+        # The router's entitlement gate, re-run at START time: a revocation
+        # during the wait must not be laundered through the queue. Deny AND
+        # policy-unavailable both fail closed — a paid turn never starts
+        # without a current policy yes — with a durable drop record.
+        try:
+            allowed = entitlements.entitlements_for(
+                payload["entitlement_tier"]).get("converse", False)
+        except entitlements.EntitlementsError:
+            allowed = False
+        if not allowed:
+            _release(keep=False)
+            try:
+                session_store.append_event(
+                    session_id, None, "turn_queue_dropped",
+                    {"queued_id": payload["queued_id"],
+                     "reason": "entitlement_denied"})
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"[leaf-agent] queued prompt {payload['queued_id']!r} dropped: "
+                  f"converse entitlement no longer granted "
+                  f"(session {session_id!r})", file=sys.stderr, flush=True)
             return
+
         try:
             start_turn(payload["tenant_id"], session_id,
                        text=payload["text"],
                        classifier_hint=payload["classifier_hint"],
                        model=payload["model"],
                        tier=payload["tier"])
+            _release(keep=False)
             return
         except TurnBusy:
-            with _queued_lock:
-                if session_id in _queued:
-                    # A newer prompt claimed the slot while this one was in
-                    # hand. Cap 1 means one promise: keep the newer one (its
-                    # 202 is the fresher contract) and record the drop durably
-                    # rather than silently losing a prompt the client was told
-                    # was queued.
-                    newer = True
-                else:
-                    _queued[session_id] = payload
-                    newer = False
-            if newer:
-                try:
-                    session_store.append_event(
-                        session_id, None, "turn_queue_dropped",
-                        {"queued_id": payload["queued_id"],
-                         "reason": "superseded"})
-                except Exception:  # noqa: BLE001
-                    pass
-                print(f"[leaf-agent] queued prompt {payload['queued_id']!r} "
-                      f"superseded on session {session_id!r}",
-                      file=sys.stderr, flush=True)
-                return
+            _release(keep=True)
             sess = session_store.get_session(session_id)
             if sess is None or sess.get("active_turn_id"):
                 return  # genuinely busy — that turn's terminal will kick
@@ -749,8 +800,9 @@ def _kick_queued(session_id: str) -> None:
         except TurnRejected as exc:
             # No HTTP caller to answer: close the transcript the failed start
             # opened (turn_started with no terminal would dangle forever), and
-            # say so on stderr. The prompt is consumed — retrying a start that
-            # the harness just rejected would loop against a down harness.
+            # say so on stderr. The prompt is consumed — retrying a start the
+            # harness just rejected would loop against a down harness.
+            _release(keep=False)
             if exc.turn_id is not None:
                 try:
                     session_store.append_event(
@@ -763,12 +815,21 @@ def _kick_queued(session_id: str) -> None:
             print(f"[leaf-agent] queued turn start FAILED "
                   f"({exc.error_code}) session={session_id!r}: {exc.message}",
                   file=sys.stderr, flush=True)
-            return
+            # One more lap: the claim held the slot for the whole attempt, so
+            # nothing can have been accepted meanwhile — but the check is one
+            # dict read, and belt-and-braces beats reasoning alone here.
+            continue
         except Exception as exc:  # noqa: BLE001
+            _release(keep=False)
             print(f"[leaf-agent] queued turn start CRASHED "
                   f"({type(exc).__name__}) session={session_id!r}",
                   file=sys.stderr, flush=True)
             return
+    print(f"[leaf-agent] QUEUE KICK EXHAUSTED after {_KICK_MAX_ATTEMPTS} "
+          f"busy-races on session {session_id!r} — the prompt stays parked; "
+          f"the next enqueue-time kick is the backstop. This schedule should "
+          f"be impossible; investigate if it appears.",
+          file=sys.stderr, flush=True)
 
 
 def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
