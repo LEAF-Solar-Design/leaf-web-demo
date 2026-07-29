@@ -1046,3 +1046,133 @@ def test_turn_rejected_defaults_to_not_pre_harness():
     treated as 'the harness may have acted'."""
     exc = turn_runner.TurnRejected(502, ErrorCode.BROKER_UNREACHABLE, "x")
     assert exc.pre_harness is False
+
+
+# =========================================================================== #
+# (h) cancellation — POST /turns/{id}/cancel's engine half
+#
+# The user pressing Esc must end the turn PROMPTLY and release the CAS, so the
+# session is immediately usable again. The two paths that matter are the live
+# relay (a canceller is registered in this process) and the orphan (no relay
+# here — a restarted process would otherwise leave the session wedged until
+# the stale-turn window expired).
+# =========================================================================== #
+def test_cancel_terminalizes_a_live_turn_as_interrupted(monkeypatch, turn_stub):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    # Deliberately far from the deadline: if this turn ends, the CANCEL ended
+    # it — the watchdog cannot be the explanation.
+    monkeypatch.setenv("TURN_MAX_S", "60")
+
+    stub.SCRIPT = [
+        {"type": "text_delta", "data": {"text": "thinking"}},
+        {"type": "text_delta", "data": {"text": " hard"}},
+    ]
+    stub.CHUNK_DELAY_S = 0.02
+    stub.SEND_TERMINATOR = False  # stream stays open until we cancel it
+
+    sess = _new_session("tenant-cancel")
+    session_id = sess["session_id"]
+    turn_id = turn_runner.start_turn("tenant-cancel", session_id, text="think for a while")
+
+    # Wait until the relay is actually streaming, so we cancel a LIVE turn
+    # rather than racing the spawn.
+    assert _wait_until(
+        lambda: any(e["type"] == "text_delta"
+                    for e in session_store.recent_events(session_id, 100)),
+        timeout_s=5.0,
+    ), "relay never started streaming"
+
+    assert turn_runner.request_cancel("tenant-cancel", session_id, turn_id) == "cancelled"
+
+    ok = _wait_until(
+        lambda: session_store.get_session(session_id)["active_turn_id"] is None,
+        timeout_s=5.0)
+    assert ok, "cancel did not release the CAS"
+
+    events = session_store.recent_events(session_id, 100)
+    terminal = events[-1]
+    assert terminal["type"] == "turn_complete", [e["type"] for e in events]
+    assert terminal["data"].get("stop_reason") == "interrupted", terminal["data"]
+    # Exactly one terminal event: _end_once is one-shot across every thread.
+    assert sum(1 for e in events if e["type"] == "turn_complete") == 1
+
+
+def test_cancel_of_an_orphaned_turn_still_releases_the_cas(monkeypatch):
+    """No relay in this process (its thread/process died) — the durable row is
+    terminalized directly, otherwise the session stays wedged."""
+    sess = _new_session("tenant-orphan")
+    session_id = sess["session_id"]
+    turn_id = "orphan-turn-id"
+
+    assert session_store.try_begin_turn(session_id, turn_id, 300.0)
+    assert session_store.get_session(session_id)["active_turn_id"] == turn_id
+    # Nothing registered a canceller for it.
+    with turn_runner._cancellers_lock:
+        assert turn_id not in turn_runner._cancellers
+
+    assert turn_runner.request_cancel("tenant-orphan", session_id, turn_id) == "cancelled"
+
+    assert session_store.get_session(session_id)["active_turn_id"] is None
+    events = session_store.recent_events(session_id, 100)
+    assert events[-1]["type"] == "turn_complete"
+    assert events[-1]["data"].get("stop_reason") == "interrupted"
+
+
+def test_cancel_refuses_a_turn_that_is_not_the_active_one(monkeypatch):
+    """A client holding a STALE turn_id must not be able to terminalize the
+    turn that replaced it."""
+    sess = _new_session("tenant-stale")
+    session_id = sess["session_id"]
+    live_turn = "the-live-turn"
+    assert session_store.try_begin_turn(session_id, live_turn, 300.0)
+
+    before = len(session_store.recent_events(session_id, 100))
+    assert turn_runner.request_cancel("tenant-stale", session_id, "some-older-turn") == "not_active"
+
+    # The live turn is untouched and nothing was appended.
+    assert session_store.get_session(session_id)["active_turn_id"] == live_turn
+    assert len(session_store.recent_events(session_id, 100)) == before
+
+
+def test_cancel_with_no_active_turn_is_not_active(monkeypatch):
+    sess = _new_session("tenant-idle")
+    session_id = sess["session_id"]
+    assert session_store.get_session(session_id)["active_turn_id"] is None
+    assert turn_runner.request_cancel("tenant-idle", session_id, "anything") == "not_active"
+
+
+def test_cancel_is_idempotent(monkeypatch):
+    """A double-tap on Esc must not append a second terminal event."""
+    sess = _new_session("tenant-twice")
+    session_id = sess["session_id"]
+    turn_id = "twice-turn"
+    assert session_store.try_begin_turn(session_id, turn_id, 300.0)
+
+    assert turn_runner.request_cancel("tenant-twice", session_id, turn_id) == "cancelled"
+    # The CAS is released, so the second call sees no active turn.
+    assert turn_runner.request_cancel("tenant-twice", session_id, turn_id) == "not_active"
+    events = session_store.recent_events(session_id, 100)
+    assert sum(1 for e in events if e["type"] == "turn_complete") == 1
+
+
+def test_cancel_unknown_session_maps_to_session_not_found(monkeypatch):
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.request_cancel("tenant-a", "no-such-session", "t1")
+    assert ei.value.status_code == 404
+    assert ei.value.error_code == ErrorCode.SESSION_NOT_FOUND
+
+
+def test_cancel_foreign_tenant_session_also_maps_to_session_not_found(monkeypatch):
+    """404-not-403: a real session owned by someone else is indistinguishable
+    from one that does not exist."""
+    sess = _new_session("tenant-owner")
+    session_id = sess["session_id"]
+    assert session_store.try_begin_turn(session_id, "t-owned", 300.0)
+
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.request_cancel("tenant-intruder", session_id, "t-owned")
+    assert ei.value.status_code == 404
+    assert ei.value.error_code == ErrorCode.SESSION_NOT_FOUND
+    # and the owner's turn is untouched
+    assert session_store.get_session(session_id)["active_turn_id"] == "t-owned"

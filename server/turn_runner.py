@@ -184,6 +184,28 @@ MAX_PRIOR_MESSAGES = 20
 # --------------------------------------------------------------------------- #
 # exceptions (FROZEN shape — routers/agent.py, S4, catches these)
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# in-flight turn cancellation
+# --------------------------------------------------------------------------- #
+# turn_id -> a callable that terminalizes THIS process's relay for that turn.
+# Registered by _spawn_relay, dropped when the relay finishes. A turn whose
+# relay lives in another process (or whose process restarted) is simply absent
+# here, and request_cancel() falls back to terminalizing the durable row —
+# so a cancel ALWAYS releases the session's CAS, never only sometimes.
+_cancellers_lock = threading.Lock()
+_cancellers: Dict[str, Any] = {}
+
+
+def _register_canceller(turn_id: str, fn: Any) -> None:
+    with _cancellers_lock:
+        _cancellers[turn_id] = fn
+
+
+def _drop_canceller(turn_id: str) -> None:
+    with _cancellers_lock:
+        _cancellers.pop(turn_id, None)
+
+
 class TurnBusy(Exception):
     """try_begin_turn lost the CAS — a turn is already active for this session."""
 
@@ -507,6 +529,48 @@ def _eof_terminal(deadline: float) -> tuple:
     return None, None
 
 
+def request_cancel(tenant_id: str, session_id: str, turn_id: str) -> str:
+    """Interrupt an in-flight turn. Returns "cancelled" or "not_active".
+
+    Two paths, and the fallback is the point:
+
+    * The relay is in THIS process -> its registered canceller terminalizes the
+      turn as `turn_complete{stop_reason:"interrupted"}` and closes the harness
+      response, which unblocks the drain thread at once.
+    * No canceller is registered (the relay's process restarted, or the row
+      outlived its thread) -> terminalize the durable row directly, so the
+      session's CAS is released either way. Without this branch a cancel would
+      silently no-op on an orphaned turn and the session would stay wedged
+      until the stale-turn window expired.
+
+    Ownership is enforced by `_require_session` (404-not-403, same posture as
+    start_turn). Cancelling anything other than the session's CURRENT active
+    turn is refused rather than silently accepted, so a stale client cannot
+    terminalize the turn that replaced the one it was looking at.
+    """
+    tenant_id = str(tenant_id)
+    sess = _require_session(tenant_id, session_id)
+
+    if str(sess.get("active_turn_id") or "") != str(turn_id):
+        return "not_active"
+
+    with _cancellers_lock:
+        canceller = _cancellers.get(turn_id)
+
+    if canceller is not None:
+        canceller()  # idempotent: _end_once is one-shot across every thread
+        return "cancelled"
+
+    # Orphaned row: no relay here to terminalize it, so do it directly.
+    try:
+        session_store.append_event(
+            session_id, turn_id, "turn_complete", {"stop_reason": "interrupted"})
+    except Exception:  # noqa: BLE001  best-effort; releasing the CAS is what matters
+        pass
+    session_store.end_turn(session_id, turn_id)
+    return "cancelled"
+
+
 def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                  resp: "requests.Response", max_s: float) -> None:
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
@@ -587,6 +651,24 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
         except Exception:  # noqa: BLE001
             pass
 
+    def _cancel() -> None:
+        """Terminalize this turn as user-interrupted, then unblock the drain.
+
+        Same two moves the watchdog makes on timeout: `_end_once` appends the
+        terminal event and releases the CAS (idempotent across threads), and
+        closing the response unblocks `iter_lines()` immediately instead of
+        leaving the thread parked on the socket for up to another TURN_MAX_S.
+        Closing also drops the HTTP connection to the harness, which is the
+        signal that the client is gone.
+        """
+        _end_once("turn_complete", {"stop_reason": "interrupted"})
+        try:
+            resp.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    _register_canceller(turn_id, _cancel)
+
     def _drain() -> None:
         try:
             for raw_line in resp.iter_lines(decode_unicode=True):
@@ -664,7 +746,22 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
 
                 # relay the harness's own event verbatim — the ONLY place besides
                 # `turn_started` that this module appends to the transcript.
-                session_store.append_event(session_id, turn_id, ev_type, data)
+                #
+                # Under `terminal_lock`, and re-checking the flag: publishing a
+                # relayed event and CLAIMING the terminal must be mutually
+                # exclusive, or an event lands AFTER the terminal one. The
+                # loop-top check is not enough — another thread can terminalize
+                # between that check and this append, which is exactly what an
+                # arbitrary-moment cancel does (the watchdog shares the race,
+                # it just needs the deadline to land in the same gap). The
+                # client stops at `turn_complete`, so a later event would be
+                # invisible in the UI but present in the durable transcript.
+                # `_end_once` appends OUTSIDE this lock, so there is no nesting
+                # and no deadlock; it only ever sets the flag while holding it.
+                with terminal_lock:
+                    if terminal_flag.is_set():
+                        break
+                    session_store.append_event(session_id, turn_id, ev_type, data)
 
                 if ev_type in ("turn_complete", "error"):
                     terminal_data = (
@@ -687,6 +784,7 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
             # `turn_complete{timeout}` when the watchdog wins — leaving the CAS
             # released but the client still showing the turn in flight.
             _end_once(resolve=lambda: _eof_terminal(deadline))
+            _drop_canceller(turn_id)
             try:
                 resp.close()
             except Exception:  # noqa: BLE001

@@ -9,7 +9,7 @@
 // that starts the resume turn — the deterministic dispatch happens server-side.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { openStream, postMessage, approve, classifyAgentError } from '../converse.js'
+import { openStream, postMessage, approve, cancelTurn, classifyAgentError } from '../converse.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
 
@@ -77,6 +77,7 @@ export default function ConversePanel({
   const [sendErr, setSendErr] = useState(null)     // {kind, message} from a failed send/approve
   const [decidedLocal, setDecidedLocal] = useState({}) // confirmation_id -> approved (optimistic; the confirmation_resolved event reconciles)
   const [deciding, setDeciding] = useState(null)   // confirmation_id with an approve/deny in flight
+  const [stopping, setStopping] = useState(false)  // an interrupt is in flight
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
@@ -176,12 +177,17 @@ export default function ConversePanel({
         else t.feed.push({ kind: 'error', code, message: data.error?.message || 'turn error' })
       }
     }
-    const active = turns.some((t) => t.started && !t.stopReason)
+    // The turn an interrupt would end: started, not yet terminal. Held as the
+    // turn ITSELF (not just a boolean) so Stop/Esc can name the exact turn_id
+    // — the server refuses a stale one rather than ending its replacement.
+    const activeTurn = turns.find((t) => t.started && !t.stopReason) || null
+    const active = !!activeTurn
     // Latest usage tick wins the status strip: context% is a running session
     // reading, not a per-turn one, so the newest turn_usage is the truth.
     let latestUsage = null
     for (const t of turns) if (t.usage) latestUsage = t.usage
-    return { turns, decisions, completed, quota, grant, active, latestUsage }
+    return { turns, decisions, completed, quota, grant, active, latestUsage,
+             activeTurnId: activeTurn ? activeTurn.turnId : null }
   }, [events])
 
   // User bubbles come from the dispatching side (§3 has no user-message event):
@@ -201,6 +207,44 @@ export default function ConversePanel({
   const lastUser = allUserTurns[allUserTurns.length - 1] || null
   const awaitingTurn = !!(lastUser && lastUser.turnId && !model.completed.has(lastUser.turnId))
   const busy = sending || model.active || awaitingTurn
+
+  // The turn Stop/Esc would end. `model.activeTurnId` is the streaming turn;
+  // before its first event lands there is still a dispatched turn to
+  // interrupt, which is what the awaiting fallback covers.
+  const stoppableTurnId = model.activeTurnId
+    || (awaitingTurn && lastUser ? lastUser.turnId : null)
+
+  const stop = async () => {
+    if (!stoppableTurnId || stopping) return
+    setStopping(true); setSendErr(null)
+    try {
+      await cancelTurn(sessionId, stoppableTurnId)
+      // No optimistic local state: the server appends
+      // turn_complete{stop_reason:'interrupted'} and the stream reconciles,
+      // so the panel shows the turn ending for the SAME reason a spontaneous
+      // completion would — one code path, not two.
+    } catch (e) {
+      setSendErr(bannerFor(e))
+    } finally {
+      setStopping(false)
+    }
+  }
+
+  // Esc interrupts, matching the terminal client. Document-level because the
+  // reply input is disabled while a turn runs (a disabled control receives no
+  // keys), but it DEFERS to anything that already handled the key: the slash
+  // menu and the scope/route resolvers call preventDefault to close
+  // themselves first, and stealing Esc from them would break that ladder.
+  useEffect(() => {
+    if (!busy || !stoppableTurnId) return undefined
+    const onEsc = (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      e.preventDefault()
+      stop()
+    }
+    document.addEventListener('keydown', onEsc)
+    return () => document.removeEventListener('keydown', onEsc)
+  }, [busy, stoppableTurnId, stopping]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const send = async () => {
     const text = input.trim()
@@ -467,9 +511,25 @@ export default function ConversePanel({
           spellCheck={false}
           aria-label="Reply to the assistant"
         />
-        <button type="button" className="chip-act" onClick={send} disabled={busy || !input.trim()}>
-          {sending ? 'Sending…' : 'Send'}
-        </button>
+        {busy && stoppableTurnId ? (
+          // While a turn runs, Send has nothing to do (the input is disabled),
+          // so the primary control becomes Stop — the terminal client's Esc,
+          // given a visible affordance because a browser has no status line to
+          // advertise the shortcut.
+          <button
+            type="button"
+            className="chip-neutral"
+            onClick={stop}
+            disabled={stopping}
+            title="Interrupt this turn (Esc)"
+          >
+            {stopping ? 'Stopping…' : 'Stop'}
+          </button>
+        ) : (
+          <button type="button" className="chip-act" onClick={send} disabled={busy || !input.trim()}>
+            {sending ? 'Sending…' : 'Send'}
+          </button>
+        )}
       </div>
     </div>
   )
