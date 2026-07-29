@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bundleDigest, fail, readCuration, sha256, validateBundleStructure } from "./common.mjs";
+import { bundleDigest, fail, MAX_MANIFEST_BYTES, MAX_SKILLS, readCuration, sha256, validateBundleStructure } from "./common.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_SOURCE = "C:/Users/ehaug/.claude/skills";
@@ -29,6 +29,9 @@ export async function build(options) {
   const skills = await readCuration(curationPath, sourceRoot);
   const selected = skills.filter((skill) => skill.tier === options.tier);
   if (selected.length === 0) fail(`no curated skills for tier ${options.tier}`);
+  if (selected.length > MAX_SKILLS) {
+    fail(`curated ${options.tier} bundle exceeds ${MAX_SKILLS} skills`);
+  }
   try {
     await fs.mkdir(outputPath, { recursive: false });
   } catch (error) {
@@ -39,7 +42,11 @@ export async function build(options) {
     await fs.mkdir(path.join(outputPath, ".claude-plugin"));
     await fs.mkdir(path.join(outputPath, "skills"));
     const plugin = { name: `leaf-curated-skills-${options.tier}`, version: "1.0.0", leafTier: options.tier };
-    await fs.writeFile(path.join(outputPath, ".claude-plugin", "plugin.json"), `${JSON.stringify(plugin, null, 2)}\n`, { flag: "wx" });
+    const pluginContent = `${JSON.stringify(plugin, null, 2)}\n`;
+    if (Buffer.byteLength(pluginContent) > MAX_MANIFEST_BYTES) {
+      fail(`plugin.json exceeds ${MAX_MANIFEST_BYTES} bytes`);
+    }
+    await fs.writeFile(path.join(outputPath, ".claude-plugin", "plugin.json"), pluginContent, { flag: "wx" });
     for (const skill of selected) {
       const targetDir = path.join(outputPath, "skills", skill.name);
       await fs.mkdir(targetDir);

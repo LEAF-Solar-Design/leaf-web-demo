@@ -1,11 +1,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bundleDigest, fail, readJsonFile, sha256, validateBundleStructure } from "./common.mjs";
+import { bundleDigest, fail, MAX_SKILLS, readJsonFile, sha256, validateBundleStructure } from "./common.mjs";
 
 export async function verify(bundlePath) {
   const root = path.resolve(bundlePath);
   const structure = await validateBundleStructure(root);
+  if (structure.names.length > MAX_SKILLS) {
+    fail(`bundle exceeds ${MAX_SKILLS} skills`);
+  }
   const manifest = await readJsonFile(path.join(root, "manifest.json"), "manifest.json");
   const plugin = await readJsonFile(structure.pluginPath, "plugin.json");
   if (!manifest || manifest.version !== 1 || (manifest.tier !== "tenant-safe" && manifest.tier !== "operator")) {

@@ -3,6 +3,9 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 export const MAX_SKILL_FILE_BYTES = 256 * 1024;
+// Mirrors harness/src/ports/impl/skillBundle.ts, the loader source of truth.
+export const MAX_SKILLS = 250;
+export const MAX_MANIFEST_BYTES = 64 * 1024;
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 const RESERVED_NAMES = new Set([
   "con", "prn", "aux", "nul",
@@ -108,11 +111,22 @@ export async function readCuration(curationPath, sourceRoot) {
   const sourceEntries = await fs.readdir(sourceRoot, { withFileTypes: true });
   const sourceNames = [];
   for (const entry of sourceEntries) {
+    const skillFile = path.join(sourceRoot, entry.name, "SKILL.md");
+    if (entry.isSymbolicLink()) {
+      try {
+        const fileStat = await fs.lstat(skillFile);
+        if (fileStat.isFile()) fail(`source skill directory must not be a symlink: ${entry.name}`);
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("source skill directory")) throw error;
+        // A symlink without a SKILL.md is repository metadata, not a skill.
+      }
+      continue;
+    }
     if (!entry.isDirectory()) continue;
     // The source root can carry repository metadata directories. A skill is a
     // direct child directory with a SKILL.md, not every directory in the root.
     try {
-      const fileStat = await fs.lstat(path.join(sourceRoot, entry.name, "SKILL.md"));
+      const fileStat = await fs.lstat(skillFile);
       if (fileStat.isSymbolicLink()) fail(`source SKILL.md must not be a symlink: ${entry.name}`);
       if (fileStat.isFile()) sourceNames.push(entry.name);
     } catch (error) {
@@ -162,7 +176,7 @@ export async function validateBundleStructure(bundlePath) {
   if (!sortedEqual((await fs.readdir(pluginDir)).sort(), ["plugin.json"])) {
     fail(".claude-plugin must contain only plugin.json");
   }
-  await assertPlainFile(pluginPath, "plugin.json");
+  await assertPlainFile(pluginPath, "plugin.json", MAX_MANIFEST_BYTES);
   await assertPlainFile(path.join(bundlePath, "manifest.json"), "manifest.json");
 
   const names = (await fs.readdir(skillsDir)).sort();
