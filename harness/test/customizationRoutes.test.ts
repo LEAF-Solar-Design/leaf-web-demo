@@ -87,6 +87,28 @@ describe("customization routes", () => {
     expect(git(bareDir, ["rev-parse", "refs/heads/main"])).toBe(main);
   });
 
+  it("provisions and reports the canonical repository before staging", async () => {
+    const response = await fetch(`${baseUrl}/author/repository`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": SECRET },
+      body: JSON.stringify({ tenant_id: TENANT }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      tenant_id: TENANT,
+      base_commit: git(bareDir, ["rev-parse", "refs/heads/main"]),
+    });
+  });
+
+  it("requires harness caller auth before provisioning a repository", async () => {
+    const response = await fetch(`${baseUrl}/author/repository`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenant_id: TENANT }),
+    });
+    expect(response.status).toBe(401);
+  });
+
   it("stops staging before any repository or coordination mutation when authored execution is off", async () => {
     const main = git(bareDir, ["rev-parse", "refs/heads/main"]);
     const previous = process.env.LEAF_AUTHORED_EXECUTION;

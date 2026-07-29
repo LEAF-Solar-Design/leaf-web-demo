@@ -249,6 +249,25 @@ export class AuthorLoop {
     return { bare, coordination };
   }
 
+  /**
+   * Materialize the canonical bare repository for a first-time tenant without
+   * opening a change set or running the author model. The app calls this before
+   * it mints the lifecycle base commit, then verifies the same ref from the
+   * shared repository mount.
+   */
+  async ensureRepository(tenantId: string): Promise<{ tenant_id: string; base_commit: string }> {
+    return this.withTenantRepoLease(tenantId, async (runFenced) => {
+      const { bare } = this.lifecyclePorts();
+      const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, tenantId));
+      const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
+      const baseCommit = changes.readRef("refs/heads/main");
+      if (!baseCommit || !/^[0-9a-f]{40}$/i.test(baseCommit)) {
+        throw new AuthorLoopError("tenant repository main ref is unavailable", 503);
+      }
+      return { tenant_id: tenantId, base_commit: baseCommit.toLowerCase() };
+    });
+  }
+
   /** Legacy auth-off compatibility: author + register + direct commit. */
   async buildLegacyAuthOff(tenantId: string, description: string): Promise<AuthorResponse> {
     return this.withTenantRepoLease(tenantId, async () => {
