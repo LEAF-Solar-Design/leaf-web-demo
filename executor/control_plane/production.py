@@ -23,6 +23,9 @@ from .service import ControlPlane
 from .store import PostgresStore
 
 
+_DEFAULT_RDS_ROOT_CERT = "/etc/ssl/certs/aws-rds-global-bundle.pem"
+
+
 class ProductionConfigurationError(RuntimeError):
     """Raised when production composition cannot be made safe."""
 
@@ -95,7 +98,7 @@ def _postgres_url(environ: Mapping[str, str]) -> str:
         )
     if "sslrootcert" not in query:
         separator = "&" if parsed.query else "?"
-        return f"{value}{separator}sslrootcert=system"
+        return f"{value}{separator}sslrootcert={_DEFAULT_RDS_ROOT_CERT}"
     return value
 
 

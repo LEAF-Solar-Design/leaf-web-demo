@@ -59,7 +59,7 @@ def production_environment(seed_file: Path) -> dict[str, str]:
 
 
 class ProductionCompositionTests(unittest.TestCase):
-    def test_database_url_uses_system_trust_roots_by_default(self):
+    def test_database_url_uses_rds_ca_bundle_by_default(self):
         with tempfile.TemporaryDirectory() as temporary:
             seed_file = Path(temporary) / "seed"
             seed_file.write_bytes(b"x" * 32)
@@ -69,7 +69,8 @@ class ProductionCompositionTests(unittest.TestCase):
 
         self.assertEqual(
             settings.database_url,
-            "postgresql://control-db.internal/control_plane?sslmode=verify-full&sslrootcert=system",
+            "postgresql://control-db.internal/control_plane"
+            "?sslmode=verify-full&sslrootcert=/etc/ssl/certs/aws-rds-global-bundle.pem",
         )
 
     def test_database_url_preserves_explicit_root_certificate(self):
