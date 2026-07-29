@@ -41,7 +41,8 @@ SITE_TENANT = "site-demo"
 # Bump only after a reviewed operator recovery invalidates a terminal demo
 # admission. The broker keeps the old denial and ledger evidence under its
 # original key, while this generation receives a fresh idempotency identity.
-SITE_RUN_GENERATION = "r2"
+# r3 follows the reviewed staging E2B substrate recovery on 2026-07-29.
+SITE_RUN_GENERATION = "r3"
 SITE_DWG = "rooftop_demo"
 
 # Inline §2 tool package. Entry resolves via tool_loader.resolve_local_file
