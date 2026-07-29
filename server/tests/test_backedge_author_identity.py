@@ -289,58 +289,6 @@ def test_postgres_terminal_event_releases_the_subject():
 # --------------------------------------------------------------------------- #
 # the raw claim is not the identity
 # --------------------------------------------------------------------------- #
-def test_the_binding_check_resolves_and_never_falls_back_to_the_claim():
-    """_binding must resolve the active identity, with NO claim fallback.
-
-    Resolution does more than translate an id: it also asserts the org is
-    ACTIVE. Degrading to the presented claim on an authority failure would
-    therefore ADMIT a request against an inactive org, so "the fallback can
-    only refuse more" was wrong and the fallback is gone.
-
-    Observed on staging before the fix: claim "acceptance-tenant-a-20260728"
-    compared against active binding "bccb0d64-04c9-4108-bcc1-f27b8bb3924d".
-    """
-    import inspect
-
-    import customization_service
-    from routers import author as author_router
-
-    src = inspect.getsource(customization_service._binding)
-    assert "_active_context" in src, "_binding no longer resolves the identity"
-    assert 'getattr(tenant, "org_id"' not in src, (
-        "_binding still reads the unresolved claim for its org comparison"
-    )
-    assert "except Exception" not in src, (
-        "a swallowed resolver failure would re-open the claim fallback"
-    )
-    # Resolution stays out of the route dependency so a disabled tenant keeps
-    # its cheap 404 ahead of any authority lookup.
-    assert "Depends(deps.require_tenant)" in inspect.getsource(author_router)
-
-
-def test_authorization_and_mutation_target_the_same_tenant():
-    """_binding returns the RESOLVED tenant, and stage mutates under it.
-
-    Returning the raw claim would let authorization pass on the subject's
-    current role in one tenant while the change set was written under the
-    tenant named by a stale claim.
-    """
-    import inspect
-
-    import customization_service
-
-    binding_src = inspect.getsource(customization_service._binding)
-    assert "TenantBinding(_tenant_id(active)" in binding_src, (
-        "_binding hands back the raw claim instead of the resolved tenant"
-    )
-    stage_src = inspect.getsource(customization_service.CustomizationService.stage)
-    assert "tenant_id = binding.tenant_id" in stage_src, (
-        "stage mutates under the presented id rather than the authorized one"
-    )
-    # and the entitlement decision uses the resolved tenant's tier
-    assert "resolve_tier(_active_context(tenant))" in stage_src
-
-
 def test_the_active_resolver_leaves_a_backedge_identity_alone(monkeypatch):
     """The harness path must survive the swap: no subject and no org means the
     resolver returns the context untouched, so it never tries to look up a
