@@ -37,7 +37,7 @@ class PromptRequest(BaseModel):
 
 
 @router.post("/api/nl-prompt")
-def nl_prompt(req: PromptRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def nl_prompt(req: PromptRequest, tenant=Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     text = (req.text or "").strip()
     if not text:
         return error_response(

@@ -259,7 +259,7 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
 
 
 @router.get("/api/agent/audit")
-def own_audit(limit: int = 100, tenant=Depends(deps.require_tenant)) -> Any:
+def own_audit(limit: int = 100, tenant=Depends(deps.require_active_tenant)) -> Any:
     # Records are audit_extra-projected at WRITE time (agent_gate), so this
     # read never has raw args to leak — it only filters by tenant.
     limit = max(1, min(int(limit), 1000))

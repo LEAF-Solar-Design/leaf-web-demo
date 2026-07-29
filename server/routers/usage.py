@@ -76,7 +76,7 @@ def _aggregate_usage(tenant_id: str, um: Any) -> Dict[str, Any]:
 
 
 @router.get("/api/usage")
-def usage(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def usage(tenant=Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     tenant_id = str(tenant)
     um = _usage_mod()
     agg = _aggregate_usage(tenant_id, um)

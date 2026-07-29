@@ -648,7 +648,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
 # POST /api/sessions/{id}/turns/{turn_id}/cancel
 # --------------------------------------------------------------------------- #
 @router.post("/api/sessions/{session_id}/turns/{turn_id}/cancel")
-def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_tenant)):
+def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_active_tenant)):
     """Interrupt the session's active turn (the composer's Esc / Stop).
 
     Terminal state is `turn_complete{stop_reason:"interrupted"}` — the SAME
