@@ -31,6 +31,7 @@ import {
   createPromptHistoryState,
   filterRunnable,
   historyKeydown,
+  mergeSkillEntries,
   rankEntries,
   setPromptHistorySession,
   setPromptHistoryValue,
@@ -57,7 +58,7 @@ function laneDotClass(lane, hit) {
 
 export default function PromptBox({
   value, onChange, onDispatch, routing, hintLane, projectName, inputRef, routeActive,
-  onOpenAuthor, tools = [], sessionId = null,
+  onOpenAuthor, tools = [], skills = [], sessionId = null,
   // action name -> handler, for registry entries of kind "command". An entry
   // whose action has no handler here is filtered out of the menu entirely
   // (composer.js filterRunnable), so the picker can never offer something this
@@ -85,12 +86,14 @@ export default function PromptBox({
   const afterSlash = value.startsWith('/') ? value.slice(1) : null
   const completing = afterSlash != null && !/\s/.test(afterSlash)
 
+  const entrySource = useMemo(() => mergeSkillEntries(tools, skills), [tools, skills])
+
   // Name-prefix matches rank first (the Tab target reads left-to-right), then
   // name/description substring matches — case-insensitive, like Claude's picker.
   const matches = useMemo(() => {
     if (!completing) return []
-    return rankEntries(filterRunnable(tools, commandActions), afterSlash)
-  }, [completing, afterSlash, tools, commandActions])
+    return rankEntries(filterRunnable(entrySource, commandActions), afterSlash)
+  }, [completing, afterSlash, entrySource, commandActions])
 
   // While ANOTHER resolver is showing — a route decision, or the scope menu —
   // that resolver owns the surface AND the keys, so this menu stands down

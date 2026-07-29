@@ -46,7 +46,7 @@ import { shouldStartTour } from './demo/tourEntry.js'
 import DemoTour from './demo/DemoTour.jsx'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
-import { THRESHOLDS, classifyAgentError, fetchRegistry } from './converse.js'
+import { THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import useJobController from './controllers/useJobController.js'
 import useDrawingVersionController from './controllers/useDrawingVersionController.js'
@@ -261,9 +261,11 @@ export default function App() {
   // picker falls back to the catalog lane's runnable tools — today's
   // behaviour exactly, so a registry outage costs the menu nothing.
   const [registryEntries, setRegistryEntries] = useState([])
+  const [catalogSkills, setCatalogSkills] = useState([])
   useEffect(() => {
     let live = true
     fetchRegistry().then((r) => { if (live) setRegistryEntries(r.entries || []) })
+    fetchSkills().then((r) => { if (live) setCatalogSkills(r.skills || []) })
     return () => { live = false }
   }, [])
 
@@ -2312,7 +2314,9 @@ export default function App() {
             // entries carry `kind`, which is what groups the picker); a failed
             // fetch falls back to exactly today's list.
             tools={registryEntries.length ? registryEntries : slashTools}
+            skills={catalogSkills}
             commandActions={slashCommandActions}
+            sessionId={agentSessionId}
           />
         </div>
 

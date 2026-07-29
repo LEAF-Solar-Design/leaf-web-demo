@@ -122,6 +122,115 @@ export const REGISTRY_GROUPS = [
   { kind: 'tool', label: 'Tools' },
 ]
 
+// The registry is the richer source when it knows about a skill. The skills
+// endpoint fills gaps while its registry projection catches up, without
+// changing the source's existing command and tool order.
+export function mergeSkillEntries(registryEntries, skills) {
+  const merged = Array.isArray(registryEntries) ? [...registryEntries] : []
+  const names = new Set(merged
+    .filter((entry) => entry && typeof entry.name === 'string' && entry.name)
+    .map((entry) => entry.name))
+  for (const skill of skills || []) {
+    if (!skill || typeof skill.name !== 'string' || !skill.name || names.has(skill.name)) continue
+    names.add(skill.name)
+    merged.push({ ...skill, kind: 'skill' })
+  }
+  return merged
+}
+
+// A busy text turn may be parked once. Confirmations and ephemeral credential
+// grants cannot be queued by the server, so keep that gate pure and explicit.
+export function shouldRetryWithQueue(errorKind, { text, confirm, credential_grant } = {}) {
+  return errorKind === 'busy'
+    && typeof text === 'string'
+    && text.trim().length > 0
+    && confirm == null
+    && credential_grant == null
+}
+
+// A queued prompt is identified by the server's queued_id, never by its text.
+// Streams can win the race against the 202 response, so retain recent starts
+// until the matching response arrives. This is plain data so ConversePanel only
+// has to apply the decision and render it.
+export const MAX_SEEN_QUEUED_STARTS = 8
+
+export function createQueuedTurnState() {
+  return { queuedTurn: null, seenQueuedStarts: [], seenQueuedDrops: [] }
+}
+
+function queuedStartFrom(event = {}) {
+  if (event.type !== 'turn_started' || !event.turn_id || !event.data?.queued_id) return null
+  return {
+    queued_id: event.data.queued_id,
+    turn_id: event.turn_id,
+    text: String(event.data.text ?? ''),
+  }
+}
+
+function rememberQueuedStart(seenQueuedStarts, start) {
+  if (!start) return seenQueuedStarts
+  return [...seenQueuedStarts.filter((seen) => seen.queued_id !== start.queued_id), start]
+    .slice(-MAX_SEEN_QUEUED_STARTS)
+}
+
+function turnFromQueuedStart(start) {
+  return { turnId: start.turn_id, text: start.text }
+}
+
+// Apply a stream event to queue state. A started turn with no queued_id is
+// unrelated to this queue even when its text happens to be identical.
+export function reconcileQueuedTurn(state = createQueuedTurnState(), event = {}) {
+  const start = queuedStartFrom(event)
+  if (start) {
+    const seenQueuedStarts = rememberQueuedStart(state.seenQueuedStarts, start)
+    if (state.queuedTurn?.queuedId === start.queued_id) {
+      return {
+        action: 'promote',
+        turn: turnFromQueuedStart(start),
+        state: { queuedTurn: null, seenQueuedStarts },
+      }
+    }
+    return { action: 'keep', state: { ...state, seenQueuedStarts } }
+  }
+  if (event.type === 'turn_queue_dropped' && event.data?.queued_id) {
+    // Remember the drop even when no note exists yet: the server can drop
+    // SYNCHRONOUSLY (entitlement denied at the enqueue-time kick) so this
+    // event can beat the 202 — without the memory, the late response would
+    // install a note nothing will ever clear (review round 3).
+    const seenQueuedDrops = [...(state.seenQueuedDrops ?? []), event.data.queued_id]
+      .slice(-MAX_SEEN_QUEUED_STARTS)
+    if (event.data.queued_id === state.queuedTurn?.queuedId) {
+      return { action: 'clear', state: { ...state, queuedTurn: null, seenQueuedDrops } }
+    }
+    return { action: 'keep', state: { ...state, seenQueuedDrops } }
+  }
+  return { action: 'keep', state }
+}
+
+// Apply the queued 202 response. If its turn_started event arrived first, use
+// that recorded event to render the bubble immediately instead of flashing a
+// stale queue note.
+export function acceptQueuedTurn(state = createQueuedTurnState(), queuedTurn) {
+  if ((state.seenQueuedDrops ?? []).includes(queuedTurn?.queuedId)) {
+    // Dropped before the 202 even landed — never install the note.
+    return { action: 'drop', state: { ...state, queuedTurn: null } }
+  }
+  const started = state.seenQueuedStarts.find(
+    (seen) => seen.queued_id === queuedTurn?.queuedId,
+  )
+  if (started) {
+    return {
+      action: 'promote',
+      turn: turnFromQueuedStart(started),
+      state: { ...state, queuedTurn: null },
+    }
+  }
+  return {
+    action: 'queue',
+    state: { ...state, queuedTurn },
+  }
+}
+
 // Prefix matches rank ahead of substring matches, then the group order above
 // decides ties. Entries with no `kind` (today's tools-only payload, which has
 // no registry grouping yet) all share one rank, so a stable sort leaves them

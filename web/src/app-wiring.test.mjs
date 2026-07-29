@@ -19,12 +19,16 @@ import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+const promptBoxSessionBinding = /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
+const conversePanelSessionBinding = /React\.createElement\(\s*ConversePanel,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 
 // Bindings App declares AND passes into JSX. Add a row whenever a new one is
 // introduced; the cost is one line and the failure it catches is a white screen.
 const DECLARED_AND_USED = [
   { name: 'slashCommandActions', usedAs: 'commandActions' },
   { name: 'registryEntries', usedAs: 'registryEntries' },
+  { name: 'catalogSkills', usedAs: 'skills: catalogSkills' },
+  { name: 'agentSessionId', usedAs: 'sessionId: agentSessionId' },
 ]
 
 describe('App.jsx wiring', () => {
@@ -34,6 +38,8 @@ describe('App.jsx wiring', () => {
       // (`const [x, setX] =`), which is how useState results are bound.
       const declared = new RegExp(
         `(const|let|var)\\s+(\\[\\s*)?${name}\\s*[,\\]=]`).test(stripped)
+        || new RegExp(
+          `(const|let|var)\\s+\\{[^}]*\\b(?:\\w+\\s*:\\s*)?${name}\\s*[,}]`).test(stripped)
       assert.ok(declared,
         `${name} does not survive comment-stripping — its declaration is inside a ` +
         'comment block, so any render that reads it throws ReferenceError')
@@ -44,4 +50,21 @@ describe('App.jsx wiring', () => {
         `${usedAs} is not referenced in the compiled output — the wiring is dead`)
     })
   }
+
+  it('passes sessionId into the PromptBox element itself', () => {
+    // Limit the match to the PromptBox props object, not another component
+    // receiving the same session binding.
+    assert.match(stripped, promptBoxSessionBinding)
+  })
+
+  it('rejects PromptBox sessionId={null} even while ConversePanel keeps its binding', () => {
+    const mutated = appSource.replace(
+      /(<PromptBox[\s\S]*?\bsessionId=\{)agentSessionId(\})/,
+      '$1null$2',
+    )
+    assert.notEqual(mutated, appSource, 'the falsification mutation must target PromptBox')
+    const mutatedStripped = esbuild.transformSync(mutated, { loader: 'jsx' }).code
+    assert.match(mutatedStripped, conversePanelSessionBinding)
+    assert.doesNotMatch(mutatedStripped, promptBoxSessionBinding)
+  })
 })

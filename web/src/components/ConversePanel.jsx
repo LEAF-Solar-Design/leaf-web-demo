@@ -10,6 +10,12 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { openStream, postMessage, approve, cancelTurn, classifyAgentError } from '../converse.js'
+import {
+  acceptQueuedTurn,
+  createQueuedTurnState,
+  reconcileQueuedTurn,
+  shouldRetryWithQueue,
+} from '../composer.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
 
@@ -74,6 +80,7 @@ export default function ConversePanel({
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [localTurns, setLocalTurns] = useState([]) // panel-sent follow-ups [{turnId, text}]
+  const [queuedTurn, setQueuedTurn] = useState(null) // {queuedId, text}, parked behind the active turn
   const [sendErr, setSendErr] = useState(null)     // {kind, message} from a failed send/approve
   const [decidedLocal, setDecidedLocal] = useState({}) // confirmation_id -> approved (optimistic; the confirmation_resolved event reconciles)
   const [deciding, setDeciding] = useState(null)   // confirmation_id with an approve/deny in flight
@@ -81,6 +88,11 @@ export default function ConversePanel({
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
+  const queueStateRef = useRef(createQueuedTurnState())
+  const setQueueState = (next) => {
+    queueStateRef.current = next
+    setQueuedTurn(next.queuedTurn)
+  }
 
   // Stream lifecycle: one open stream per session, replay from seq 0 (the
   // transcript is durable — a remount recovers the whole conversation).
@@ -89,8 +101,14 @@ export default function ConversePanel({
     setEvents([]); setLocalTurns([]); setSendErr(null)
     setDecidedLocal({}); setDeciding(null)
     jobSeenRef.current = new Set()
+    setQueueState(createQueuedTurnState())
     const stream = openStream(sessionId, 0, {
       onEvent: (env) => {
+        const queued = reconcileQueuedTurn(queueStateRef.current, env)
+        setQueueState(queued.state)
+        if (queued.action === 'promote') {
+          setLocalTurns((prev) => [...prev, queued.turn])
+        }
         if (env.type === 'job_linked' && env.data?.job_id && !jobSeenRef.current.has(env.data.job_id)) {
           jobSeenRef.current.add(env.data.job_id)
           if (onJobLinked) onJobLinked(env.data.job_id, env.data.tool) // the rail shows the agent-dispatched job
@@ -269,10 +287,28 @@ export default function ConversePanel({
     const text = input.trim()
     if (!text || busy) return
     setSending(true); setSendErr(null)
-    try {
-      const res = await postMessage(sessionId, { text })
-      setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text }])
+    const accept = (res) => {
+      if (res.status === 'queued') {
+        const queued = acceptQueuedTurn(queueStateRef.current, {
+          queuedId: res.queued_id || null,
+          text,
+        })
+        setQueueState(queued.state)
+        if (queued.action === 'promote') {
+          setLocalTurns((prev) => [...prev, queued.turn])
+        }
+      } else {
+        setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text }])
+      }
       setInput('')
+    }
+    try {
+      try {
+        accept(await postMessage(sessionId, { text }))
+      } catch (e) {
+        if (!shouldRetryWithQueue(classifyAgentError(e), { text })) throw e
+        accept(await postMessage(sessionId, { text, queue: true }))
+      }
     } catch (e) {
       setSendErr(bannerFor(e))
     } finally {
@@ -507,6 +543,12 @@ export default function ConversePanel({
             )}
           </div>
         ))}
+        {queuedTurn && (
+          <div className="converse-note">
+            <span className="dot square" aria-hidden="true" />
+            <span className="dim">Queued — will run when the current turn finishes</span>
+          </div>
+        )}
         {pendingUserTurns.map((u) => (
           <div key={u.turnId} className="converse-turn">
             <div className="converse-msg user">{u.text}</div>

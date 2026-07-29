@@ -2,16 +2,22 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  acceptQueuedTurn,
   appendPromptHistory,
   autoGrowHeight,
   createPromptHistoryState,
+  createQueuedTurnState,
   filterRunnable,
   historyKeydown,
+  mergeSkillEntries,
   promptHistoryFor,
   rankEntries,
+  reconcileQueuedTurn,
+  shouldRetryWithQueue,
   setPromptHistoryValue,
   LINE_PX,
   MAX_ROWS,
+  MAX_SEEN_QUEUED_STARTS,
 } from './composer.js'
 
 const names = (entries) => entries.map((e) => e.name)
@@ -140,6 +146,112 @@ describe('filterRunnable', () => {
   })
 })
 
+describe('skill entry sources', () => {
+  it('merges fetched skills while preserving registry skills as the source of truth', () => {
+    const registry = [
+      { kind: 'command', name: 'help', description: 'registry command' },
+      { kind: 'skill', name: 'orwell-writing', description: 'registry description' },
+    ]
+    const fetched = [
+      { name: 'orwell-writing', description: 'stale fetched description' },
+      { name: 'roof-analysis', description: 'analyse roof geometry' },
+    ]
+
+    assert.deepEqual(mergeSkillEntries(registry, fetched), [
+      ...registry,
+      { kind: 'skill', name: 'roof-analysis', description: 'analyse roof geometry' },
+    ])
+  })
+})
+
+describe('busy queue retry', () => {
+  it('retries only a busy plain-text send without a credential grant or confirmation', () => {
+    assert.equal(shouldRetryWithQueue('busy', { text: 'continue' }), true)
+    assert.equal(shouldRetryWithQueue('rate_limited', { text: 'continue' }), false)
+    assert.equal(shouldRetryWithQueue('busy', { confirm: { confirmationId: 'c1' } }), false)
+    assert.equal(shouldRetryWithQueue('busy', {
+      text: 'continue', credential_grant: { kind: 'api_key' },
+    }), false)
+  })
+})
+
+describe('queued turn reconciliation', () => {
+  const queuedTurn = { queuedId: 'queued-1', text: 'continue with the panel count' }
+
+  it('shows the queue first, then promotes only its matching queued_id', () => {
+    const queued = acceptQueuedTurn(createQueuedTurnState(), queuedTurn)
+    assert.equal(queued.action, 'queue')
+    const promoted = reconcileQueuedTurn(queued.state, {
+      type: 'turn_started',
+      turn_id: 'turn-9',
+      data: { queued_id: 'queued-1', text: 'server-normalized text' },
+    })
+    assert.equal(promoted.action, 'promote')
+    assert.deepEqual(promoted.turn, { turnId: 'turn-9', text: 'server-normalized text' })
+    assert.equal(promoted.state.queuedTurn, null)
+  })
+
+  it('promotes immediately when turn_started arrives before its queued 202', () => {
+    const started = reconcileQueuedTurn(createQueuedTurnState(), {
+      type: 'turn_started',
+      turn_id: 'turn-early',
+      data: { queued_id: 'queued-1', text: 'continue with the panel count' },
+    })
+    assert.equal(started.action, 'keep')
+    const accepted = acceptQueuedTurn(started.state, queuedTurn)
+    assert.equal(accepted.action, 'promote')
+    assert.deepEqual(accepted.turn, { turnId: 'turn-early', text: queuedTurn.text })
+    assert.equal(accepted.state.queuedTurn, null)
+  })
+
+  it('never promotes an identical-text turn without the queued_id', () => {
+    const queued = acceptQueuedTurn(createQueuedTurnState(), queuedTurn)
+    const unrelated = reconcileQueuedTurn(queued.state, {
+      type: 'turn_started',
+      turn_id: 'turn-other',
+      data: { text: queuedTurn.text },
+    })
+    assert.equal(unrelated.action, 'keep')
+    assert.deepEqual(unrelated.state, queued.state)
+  })
+
+  it('keeps the queue when a different queued_id starts with identical text', () => {
+    const queued = acceptQueuedTurn(createQueuedTurnState(), queuedTurn)
+    const unrelated = reconcileQueuedTurn(queued.state, {
+      type: 'turn_started',
+      turn_id: 'turn-other',
+      data: { queued_id: 'queued-other', text: queuedTurn.text },
+    })
+    assert.equal(unrelated.action, 'keep')
+    assert.deepEqual(unrelated.state.queuedTurn, queuedTurn)
+  })
+
+  it('clears only the matching dropped queue record', () => {
+    const queued = acceptQueuedTurn(createQueuedTurnState(), queuedTurn)
+    assert.equal(reconcileQueuedTurn(queued.state, {
+      type: 'turn_queue_dropped',
+      data: { queued_id: 'queued-1' },
+    }).action, 'clear')
+    assert.equal(reconcileQueuedTurn(queued.state, {
+      type: 'turn_queue_dropped',
+      data: { queued_id: 'queued-other' },
+    }).action, 'keep')
+  })
+
+  it('bounds remembered queued starts to the most recent eight', () => {
+    let state = createQueuedTurnState()
+    for (let i = 0; i <= MAX_SEEN_QUEUED_STARTS; i += 1) {
+      state = reconcileQueuedTurn(state, {
+        type: 'turn_started',
+        turn_id: `turn-${i}`,
+        data: { queued_id: `queued-${i}`, text: `prompt ${i}` },
+      }).state
+    }
+    assert.equal(state.seenQueuedStarts.length, MAX_SEEN_QUEUED_STARTS)
+    assert.equal(state.seenQueuedStarts[0].queued_id, 'queued-1')
+  })
+})
+
 describe('prompt history', () => {
   const send = (state, text, sessionId = state.sessionId) => appendPromptHistory(state, text, sessionId)
   const key = (state, keyName, value, selectionStart, sessionId = state.sessionId) => historyKeydown(state, {
@@ -206,5 +318,29 @@ describe('prompt history', () => {
     assert.equal(b.value, 'only in b')
     const c = key(b.state, 'ArrowUp', '', 0, 'session-c')
     assert.equal(c.handled, false)
+  })
+})
+
+describe('queued-turn reconciliation: drop-before-202 (round 3)', () => {
+  it('a drop that beats the 202 suppresses the note instead of stranding it', () => {
+    let state = createQueuedTurnState()
+    const dropped = reconcileQueuedTurn(state, {
+      type: 'turn_queue_dropped', data: { queued_id: 'q-1', reason: 'entitlement_denied' },
+    })
+    assert.equal(dropped.action, 'keep')
+    state = dropped.state
+    const accepted = acceptQueuedTurn(state, { queuedId: 'q-1', text: 'late' })
+    assert.equal(accepted.action, 'drop')
+    assert.equal(accepted.state.queuedTurn, null)
+  })
+
+  it('an unrelated drop id does not suppress a later legitimate 202', () => {
+    let state = createQueuedTurnState()
+    state = reconcileQueuedTurn(state, {
+      type: 'turn_queue_dropped', data: { queued_id: 'q-other' },
+    }).state
+    const accepted = acceptQueuedTurn(state, { queuedId: 'q-2', text: 'mine' })
+    assert.equal(accepted.action, 'queue')
+    assert.equal(accepted.state.queuedTurn.queuedId, 'q-2')
   })
 })
