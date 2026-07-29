@@ -526,6 +526,17 @@ export function requireCameraMotion(before, after) {
   }
 }
 
+export async function openAuthorWorkspace(page) {
+  await page.getByRole('tab', { name: 'Author', exact: true }).click()
+  const authorSection = page.locator('.author-section')
+  await authorSection.waitFor({ state: 'visible' })
+  const authorToggle = authorSection.getByRole('button', { name: /Author a tool/ })
+  if (await authorToggle.getAttribute('aria-expanded') !== 'true') {
+    await authorToggle.click()
+  }
+  return authorSection
+}
+
 export function requireDistinctStagedResults(results, tenants) {
   if (
     results.length !== 2 ||
@@ -622,10 +633,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     if (!execute) return result
 
-    const authorSection = page.locator('.author-section')
-    if (await authorSection.getByRole('button', { name: /Author a tool/ }).getAttribute('aria-expanded') !== 'true') {
-      await authorSection.getByRole('button', { name: /Author a tool/ }).click()
-    }
+    await openAuthorWorkspace(page)
     const authorRequest = page.getByLabel('What should the tool do?')
     await authorRequest.fill(tenant.request)
     const stageResponsePromise = page.waitForResponse(

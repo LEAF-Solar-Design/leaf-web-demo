@@ -12,6 +12,7 @@ import {
   evaluateDeploymentIdentity,
   main,
   isMutatingApiRequest,
+  openAuthorWorkspace,
   proveExecutedAuthorityIsolation,
   proveExecutedDrawingIsolation,
   provePinnedWriteRejections,
@@ -177,6 +178,46 @@ describe('deployed authored CAD acceptance configuration', () => {
 })
 
 describe('deployed authored CAD acceptance checks', () => {
+  it('opens the Author workspace before reading its conditionally mounted controls', async () => {
+    const calls = []
+    const authorToggle = {
+      getAttribute: async (name) => {
+        calls.push(`read-${name}`)
+        return 'false'
+      },
+      click: async () => calls.push('expand-author-tool'),
+    }
+    const authorSection = {
+      waitFor: async (options) => calls.push(`wait-${options.state}`),
+      getByRole: (role, options) => {
+        assert.equal(role, 'button')
+        assert.match('Author a tool', options.name)
+        return authorToggle
+      },
+    }
+    const page = {
+      getByRole: (role, options) => {
+        assert.equal(role, 'tab')
+        assert.deepEqual(options, { name: 'Author', exact: true })
+        return { click: async () => calls.push('open-author-tab') }
+      },
+      locator: (selector) => {
+        assert.equal(selector, '.author-section')
+        calls.push('locate-author-section')
+        return authorSection
+      },
+    }
+
+    assert.equal(await openAuthorWorkspace(page), authorSection)
+    assert.deepEqual(calls, [
+      'open-author-tab',
+      'locate-author-section',
+      'wait-visible',
+      'read-aria-expanded',
+      'expand-author-tool',
+    ])
+  })
+
   it('denies the wrong tenant before the owner uses the independent approval route', async () => {
     const config = validateConfig(environment(), true)
     const calls = []
