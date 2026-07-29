@@ -24,6 +24,8 @@ Run:  cd server && python -m pytest tests/test_wave5.py -q
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 # Cache the STDLIB `platform` module BEFORE PROJECT_ROOT lands on sys.path (mirrors wave4).
 import platform as _stdlib_platform  # noqa: E402
 _stdlib_platform.python_implementation()
@@ -113,8 +115,28 @@ def live_auth(monkeypatch):
     monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", NS)
     monkeypatch.setenv("LEAF_AUTH0_JWKS_FILE", str(_JWKS_FILE))
     monkeypatch.setenv("LEAF_TENANTS_FILE", str(TENANTS_FILE))
-    import tenancy
-    tenancy.reset_store()
+    # Surfaces that resolve the ACTIVE platform binding (drawings, sessions,
+    # and now the customization routes, issue #304) need an authority to
+    # resolve against. Bind each subject to a tenant named after its claim so
+    # every existing assertion in this module keeps addressing the same tenant,
+    # while the request now travels the resolved path rather than the raw one.
+    import deps
+    import tenancy as _tenancy
+    def _resolve_authority(subject):
+        return (str(subject).split("|")[-1], "hosted_pro")
+
+    # the real function is lru_cache-wrapped and callers reset it
+    _resolve_authority.cache_clear = lambda: None
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority", _resolve_authority)
+    _tenancy.reset_store()
+
+    def _get_store():
+        return SimpleNamespace(resolve_workspace=lambda tenant_id: None)
+
+    # tenancy.reset_store() calls get_store.cache_clear(); the stub must offer it
+    _get_store.cache_clear = lambda: None
+    monkeypatch.setattr(_tenancy, "get_store", _get_store)
     yield
 
 

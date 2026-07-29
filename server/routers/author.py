@@ -31,6 +31,27 @@ from tool_validate import static_scan
 
 router = APIRouter()
 
+# IDENTITY ON THIS SURFACE IS THE ACTIVE PLATFORM BINDING, NOT THE JWT CLAIM.
+#
+# A platform tenant id is always a server-minted UUID (platform/store.py
+# create_org_with_identity), and identity_bindings maps an external Auth0
+# subject onto it, so a claim NEVER equals a platform id and is not supposed
+# to. deps.resolve_active_tenant_context says why: "JWT tenant and org claims
+# can outlive an account move", and account-owned resources are written under
+# the active binding. Drawings, sessions and tenant already resolve; this
+# surface did not, so customization_service._binding compared the resolved
+# binding against the presented claim and refused every authenticated author
+# call (issue #304).
+#
+# Resolution happens in the dependency, BEFORE the R5/R6 rollout gate, on
+# purpose. customization_flags.enabled() matches the exact tenant string, so
+# gating on one id while mutating under another would both bypass the rollout
+# for an unenabled tenant and falsely deny an enabled one. The cost is that an
+# author call answers 503 rather than 404 when the platform authority is
+# unavailable, which is the honest answer: without the authority we cannot know
+# which tenant this is, so "R5 is disabled for you" would be a claim we cannot
+# support.
+
 SERVER_DIR = Path(__file__).resolve().parent.parent
 AUTHORED_DIR = SERVER_DIR / "authored"
 
@@ -395,7 +416,7 @@ def _customization_gate(wave: int, tenant: Any) -> JSONResponse | None:
 
 
 @router.post("/api/author")
-def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
+def author(req: AuthorRequest, tenant=Depends(deps.require_active_tenant),
            idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
            authority_session_id: str | None = Header(
                default=None, alias="X-Authority-Session-Id"),
@@ -430,7 +451,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
 
 
 @router.post("/api/author/stage")
-def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def stage(req: StageRequest, tenant=Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
@@ -447,7 +468,7 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
 
 
 @router.post("/api/author/register")
-def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def register(req: RegisterRequest, tenant=Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     denied = _customization_gate(6, tenant)
     if denied is not None:
         return denied
@@ -469,7 +490,7 @@ def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[
 @router.post("/api/author/publication-requests")
 def request_publication(
     req: PublicationRequest,
-    tenant=Depends(deps.require_tenant),
+    tenant=Depends(deps.require_active_tenant),
 ) -> Dict[str, Any]:
     """Request continuation only. Independent approval stays off this route."""
     denied = _customization_gate(6, tenant)
@@ -498,7 +519,7 @@ def request_publication(
 @router.post("/api/author/confirmations")
 def confirmation_lookup(
     req: ConfirmationLookupRequest,
-    tenant=Depends(deps.require_tenant),
+    tenant=Depends(deps.require_active_tenant),
 ) -> Dict[str, Any]:
     """Return only an approval that an independent trusted actor already issued."""
     denied = _customization_gate(6, tenant)
@@ -517,7 +538,7 @@ def confirmation_lookup(
 
 
 @router.post("/api/author/rollback")
-def rollback(req: RollbackRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def rollback(req: RollbackRequest, tenant=Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     denied = _customization_gate(6, tenant)
     if denied is not None:
         return denied
