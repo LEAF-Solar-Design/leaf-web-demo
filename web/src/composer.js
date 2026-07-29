@@ -205,15 +205,18 @@ export function shouldRetryWithQueue(errorKind, { text, confirm, credential_gran
     && credential_grant == null
 }
 
-// A question is answered only when the choice has become the next durable user
-// turn. This keeps the card live through the POST and makes replay authoritative.
-export function questionChoiceState(events, questionId, optionLabel) {
-  const questionAt = (events || []).findIndex(
-    (event) => event?.type === 'question_required' && event.data?.question_id === questionId,
-  )
+// A question is answered only when any of its labels becomes a later durable user
+// turn. This keeps the whole card live through the POST and makes replay authoritative.
+export function questionChoiceState(events, questionId) {
+  const questionAt = (events || []).findIndex((event) => (
+    event?.type === 'question_required' && event.data?.question_id === questionId
+  ))
   if (questionAt === -1) return { answered: false }
+  const labels = new Set((events[questionAt].data?.options || [])
+    .map((option) => typeof option?.label === 'string' ? option.label.trim() : '')
+    .filter(Boolean))
   const answered = (events || []).slice(questionAt + 1).some(
-    (event) => event?.type === 'turn_started' && event.data?.text === optionLabel,
+    (event) => event?.type === 'turn_started' && labels.has(String(event.data?.text ?? '').trim()),
   )
   return { answered }
 }
@@ -221,12 +224,19 @@ export function questionChoiceState(events, questionId, optionLabel) {
 // A click has one normal send action. The caller keeps this small state only
 // while the post is in flight; durable turn_started data decides the final state.
 export function chooseQuestionOption(state = { sendingQuestionIds: [] }, events, questionId, optionLabel) {
-  if (questionChoiceState(events, questionId, optionLabel).answered
+  if (questionChoiceState(events, questionId).answered
     || state.sendingQuestionIds.includes(questionId)) return { action: 'ignore', state }
   return {
     action: 'send',
     text: optionLabel,
     state: { ...state, sendingQuestionIds: [...state.sendingQuestionIds, questionId] },
+  }
+}
+
+export function clearSendingQuestion(state = { sendingQuestionIds: [] }, questionId) {
+  return {
+    ...state,
+    sendingQuestionIds: state.sendingQuestionIds.filter((id) => id !== questionId),
   }
 }
 

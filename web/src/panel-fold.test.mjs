@@ -43,4 +43,9 @@ describe('ConversePanel transcript fold', () => {
     assert.match(stripped, /send\(choice\.text\)/)
     assert.match(stripped, /answerQuestion\(item\.id, label\)/)
   })
+
+  it('releases a failed question send so the card can retry', () => {
+    assert.match(stripped,
+      /if\s*\(!await send\(choice\.text\)\)\s*\{\s*setQuestionChoices\(\(state\) => clearSendingQuestion\(state, questionId\)\)/)
+  })
 })

@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { openStream, postMessage, approve, cancelTurn, classifyAgentError } from '../converse.js'
 import {
   acceptQueuedTurn,
+  clearSendingQuestion,
   chooseQuestionOption,
   createQueuedTurnState,
   questionChoiceState,
@@ -291,7 +292,8 @@ export default function ConversePanel({
 
   const send = async (nextText = input) => {
     const text = String(nextText).trim()
-    if (!text || busy) return
+    if (!text || busy) return false
+    let delivered = false
     setSending(true); setSendErr(null)
     const accept = (res) => {
       if (res.status === 'queued') {
@@ -315,18 +317,22 @@ export default function ConversePanel({
         if (!shouldRetryWithQueue(classifyAgentError(e), { text })) throw e
         accept(await postMessage(sessionId, { text, queue: true }))
       }
+      delivered = true
     } catch (e) {
       setSendErr(bannerFor(e))
     } finally {
       setSending(false)
     }
+    return delivered
   }
 
-  const answerQuestion = (questionId, optionLabel) => {
+  const answerQuestion = async (questionId, optionLabel) => {
     const choice = chooseQuestionOption(questionChoices, events, questionId, optionLabel)
     if (choice.action !== 'send') return
     setQuestionChoices(choice.state)
-    send(choice.text)
+    if (!await send(choice.text)) {
+      setQuestionChoices((state) => clearSendingQuestion(state, questionId))
+    }
   }
 
   // §7 split-turn decision: (a) record the approval, (b) post the confirm
@@ -496,7 +502,7 @@ export default function ConversePanel({
           <span className="converse-question-options">
             {item.options.map((option, optionIndex) => {
               const label = typeof option?.label === 'string' ? option.label : ''
-              const answered = questionChoiceState(events, item.id, label).answered
+              const answered = questionChoiceState(events, item.id).answered
               const sendingChoice = questionChoices.sendingQuestionIds.includes(item.id)
               return (
                 <button

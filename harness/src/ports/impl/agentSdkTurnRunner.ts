@@ -400,18 +400,46 @@ export function resolveWrapperTarget(
 
 type AskUserOption = { label: string; description?: string };
 
+const MAX_QUESTION_CHARS = 500;
+const MAX_OPTION_LABEL_CHARS = 120;
+const MAX_OPTION_DESCRIPTION_CHARS = 300;
+const INVALID_QUESTION_MESSAGE = "Questions must have a non-empty prompt of at most 500 characters, with 2 to 6 unpadded labels of at most 120 characters and optional descriptions of at most 300 characters.";
+const ONE_QUESTION_PER_TURN_MESSAGE = "one question per turn; end your turn and wait for the answer";
+
 /** Validate the bounded, display-only payload before it reaches the transcript. */
 export function askUserEvent(args: Record<string, unknown>, questionId: string = randomUUID()): HarnessTurnEvent | null {
-  if (typeof args.question !== "string" || !args.question.trim() || !Array.isArray(args.options)
+  if (typeof args.question !== "string" || !args.question.trim() || args.question.length > MAX_QUESTION_CHARS || !Array.isArray(args.options)
     || args.options.length < 2 || args.options.length > 6) return null;
   const options: AskUserOption[] = [];
   for (const raw of args.options) {
     const option = raw as Record<string, unknown> | null;
     if (!option || typeof option.label !== "string" || !option.label.trim()
-      || (option.description !== undefined && typeof option.description !== "string")) return null;
+      || option.label !== option.label.trim() || option.label.length > MAX_OPTION_LABEL_CHARS
+      || (option.description !== undefined && (typeof option.description !== "string"
+        || option.description.length > MAX_OPTION_DESCRIPTION_CHARS))) return null;
     options.push({ label: option.label, ...(typeof option.description === "string" ? { description: option.description } : {}) });
   }
   return { type: "question_required", data: { question_id: questionId, question: args.question, options } };
+}
+
+/** Build the per-turn ask_user handler. Its closure keeps successful questions to one per turn. */
+export function createAskUserHandler(
+  pending: HarnessTurnEvent[],
+  questionId: () => string = randomUUID,
+): (args: Record<string, unknown>) => Promise<CallToolResult> {
+  let asked = false;
+  return async (args): Promise<CallToolResult> => {
+    if (asked) {
+      return { content: [{ type: "text", text: ONE_QUESTION_PER_TURN_MESSAGE }], isError: true };
+    }
+    const event = askUserEvent(args, questionId());
+    if (!event) {
+      return { content: [{ type: "text", text: INVALID_QUESTION_MESSAGE }], isError: true };
+    }
+    asked = true;
+    pending.push(event);
+    return { content: [{ type: "text", text: "The question was presented. End your turn. The user's choice arrives as their next message." }] };
+  };
 }
 
 /** Rewrite an event's `data.tool` from the wire-prefixed MCP name to the bare tool
@@ -608,14 +636,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
           description: z.string().optional(),
         })).min(2).max(6),
       },
-      async (a): Promise<CallToolResult> => {
-        const event = askUserEvent(a);
-        if (!event) {
-          return { content: [{ type: "text", text: "Questions must have a non-empty prompt and 2 to 6 labelled options." }], isError: true };
-        }
-        pending.push(event);
-        return { content: [{ type: "text", text: "The question was presented. End your turn. The user's choice arrives as their next message." }] };
-      },
+      createAskUserHandler(pending),
     );
 
     const server = sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, version: "1.0.0", tools: [apsTestRunTool, askUserTool] });

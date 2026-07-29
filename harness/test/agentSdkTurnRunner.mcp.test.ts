@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { HarnessTurnEvent } from "../src/ports/index.js";
 
 import {
   buildTenantMcpOptions,
   buildTurnOptions,
   askUserEvent,
+  createAskUserHandler,
   requiresToolConfirmation,
   resolveEnvMcpAttachment,
   resolveMcpAttachmentSafely,
@@ -109,12 +111,38 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
     expect(turnOptions(null).allowedTools).toEqual(["mcp__converse__aps_test_run"]);
   });
 
-  it("emits a bounded question_required event and refuses seven options", () => {
+  it("emits a bounded question_required event and refuses invalid or oversized payloads", async () => {
     const options = ["One", "Two"].map((label) => ({ label, description: `${label} detail` }));
     expect(askUserEvent({ question: "Which plan?", options }, "question-1")).toEqual({
       type: "question_required",
       data: { question_id: "question-1", question: "Which plan?", options },
     });
     expect(askUserEvent({ question: "Too many?", options: Array.from({ length: 7 }, (_, i) => ({ label: String(i) })) }, "question-2")).toBeNull();
+    expect(askUserEvent({ question: "x".repeat(501), options }, "question-3")).toBeNull();
+    expect(askUserEvent({ question: "Which?", options: [{ label: "x".repeat(121) }, { label: "Two" }] }, "question-4")).toBeNull();
+    expect(askUserEvent({ question: "Which?", options: [{ label: "One", description: "x".repeat(301) }, { label: "Two" }] }, "question-5")).toBeNull();
+    expect(askUserEvent({ question: "Which?", options: [{ label: " One " }, { label: "Two" }] }, "question-6")).toBeNull();
+
+    const pending: HarnessTurnEvent[] = [];
+    const askUser = createAskUserHandler(pending, () => "question-7");
+    await expect(askUser({ question: "x".repeat(501), options })).resolves.toMatchObject({ isError: true });
+    expect(pending).toEqual([]);
+  });
+
+  it("emits one question per scripted turn and returns the second tool error to the model", async () => {
+    const pending: HarnessTurnEvent[] = [];
+    const askUser = createAskUserHandler(pending, () => "question-1");
+    const first = await askUser({ question: "Which plan?", options: [{ label: "Standard" }, { label: "Premium" }] });
+    const second = await askUser({ question: "And which region?", options: [{ label: "US" }, { label: "EU" }] });
+
+    expect(first.isError).toBeUndefined();
+    expect(second).toEqual({
+      content: [{ type: "text", text: "one question per turn; end your turn and wait for the answer" }],
+      isError: true,
+    });
+    expect(pending).toEqual([{
+      type: "question_required",
+      data: { question_id: "question-1", question: "Which plan?", options: [{ label: "Standard" }, { label: "Premium" }] },
+    }]);
   });
 });

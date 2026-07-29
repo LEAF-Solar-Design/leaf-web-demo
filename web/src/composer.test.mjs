@@ -21,6 +21,7 @@ import {
   replacePickerTrigger,
   shouldRetryWithQueue,
   chooseQuestionOption,
+  clearSendingQuestion,
   questionChoiceState,
   setPromptHistoryValue,
   LINE_PX,
@@ -232,11 +233,14 @@ describe('structured question choices', () => {
     data: { question_id: 'question-1', question: 'Which plan?', options: [{ label: 'Standard' }, { label: 'Premium' }] },
   }
 
-  it('keeps a card live until the selected label starts the next normal turn', () => {
-    assert.deepEqual(questionChoiceState([question], 'question-1', 'Standard'), { answered: false })
+  it('keeps a card live until an option starts the next normal turn, then inerts every option', () => {
+    assert.deepEqual(questionChoiceState([question], 'question-1'), { answered: false })
     assert.deepEqual(questionChoiceState([question, {
       type: 'turn_started', turn_id: 'turn-answer', data: { text: 'Standard' },
-    }], 'question-1', 'Standard'), { answered: true })
+    }], 'question-1'), { answered: true })
+    assert.deepEqual(questionChoiceState([question, {
+      type: 'turn_started', turn_id: 'turn-answer', data: { text: 'Standard' },
+    }], 'question-1', 'Premium'), { answered: true })
   })
 
   it('sends the option label once and then makes a repeat click inert', () => {
@@ -245,6 +249,12 @@ describe('structured question choices', () => {
     assert.equal(first.text, 'Premium')
     assert.deepEqual(chooseQuestionOption(first.state, [question], 'question-1', 'Premium'), {
       action: 'ignore', state: first.state,
+    })
+  })
+
+  it('releases a failed answer POST so the question can be retried', () => {
+    assert.deepEqual(clearSendingQuestion({ sendingQuestionIds: ['question-1', 'question-2'] }, 'question-1'), {
+      sendingQuestionIds: ['question-2'],
     })
   })
 })
