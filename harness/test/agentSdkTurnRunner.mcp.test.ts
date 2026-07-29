@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import type { HarnessTurnEvent } from "../src/ports/index.js";
 
@@ -7,8 +6,10 @@ import {
   buildTenantMcpOptions,
   buildTurnOptions,
   askUserEvent,
+  apsTestRunMcpTargetDenial,
   createAskUserHandler,
   executeTenantMcpTool,
+  hasFreshTenantMcpResolution,
   requiresToolConfirmation,
   resolveTenantMcpTool,
   resolveEnvMcpAttachment,
@@ -37,19 +38,8 @@ function turnOptions(mcpAttachment: Record<string, unknown> | null) {
   });
 }
 
-async function withMcpServer(
-  handler: (request: IncomingMessage, response: ServerResponse) => void,
-  run: (url: string) => Promise<void>,
-): Promise<void> {
-  const server = createServer(handler);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("test MCP server did not bind a TCP port");
-  try {
-    await run(`http://127.0.0.1:${address.port}/mcp`);
-  } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  }
+function storeWith(configs: Array<{ name: string; url: string; authToken?: string }>): McpBridgeStore {
+  return { set: async () => undefined, get: async () => configs, delete: async () => undefined };
 }
 
 describe("AgentSdkTurnRunner tenant MCP bridge", () => {
@@ -67,6 +57,8 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
     expect(stripped).toMatch(/const tenantTool = resolveTenantMcpTool\(toolName, mcpAttachment\);/);
     expect(stripped).toMatch(/tenantMcpApprovalEvents\(toolName, inp,/);
     expect(stripped).toMatch(/executeTenantMcpTool\(store, input\.tenant_id, proposal\.tool, proposal\.params \?\? \{\}\)/);
+    expect(stripped).toMatch(/apsTestRunMcpTargetDenial\(proposalTool\)/);
+    expect(stripped).toMatch(/hasFreshTenantMcpResolution\(store, input\.tenant_id, proposal\)/);
   });
 
   it("is off by default and adds no tenant mcpServers option", async () => {
@@ -133,80 +125,84 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
     expect(turnOptions(null).allowedTools).toEqual(["mcp__converse__aps_test_run"]);
   });
 
-  it("creates the APS-shaped approval events for a mounted tenant tool without executing it", () => {
+  it("creates an approval event that names only the MCP host, never its path, query, or bearer", () => {
     const params = { layer: "Walls" };
-    const events = tenantMcpApprovalEvents("mcp__tenant_a__edit_layer", params, "confirm-1", "drawing-1");
+    const events = tenantMcpApprovalEvents("mcp__tenant_a__edit_layer", params, "confirm-1", "drawing-1", "tenant.example.test:8443");
     expect(events).toEqual([
       expect.objectContaining({
         type: "proposed_run",
         data: expect.objectContaining({
           confirmation_id: "confirm-1",
           tool: "mcp__tenant_a__edit_layer",
-          params,
+          params: { ...params, _leaf_mcp_host: "tenant.example.test:8443" },
           capability: TENANT_MCP_EXECUTE_CAPABILITY,
           dwg: "drawing-1",
         }),
       }),
       expect.objectContaining({ type: "confirmation_required", data: expect.objectContaining({ confirmation_id: "confirm-1" }) }),
     ]);
-    expect(JSON.stringify(events)).not.toContain(SENTINEL_A);
+    const rendered = JSON.stringify(events);
+    expect(rendered).toContain("tenant.example.test:8443");
+    expect(rendered).not.toContain(SENTINEL_A);
+    expect(rendered).not.toContain("/mcp");
+    expect(rendered).not.toContain("secret=");
   });
 
-  it("executes an approved tenant MCP proposal as one stateless tools/call request", async () => {
-    const store = new InMemoryMcpBridgeStore();
-    await withMcpServer((request, response) => {
-      const chunks: Buffer[] = [];
-      request.on("data", (chunk: Buffer) => chunks.push(chunk));
-      request.on("end", () => {
-        const requestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
-        expect(request.method).toBe("POST");
-        expect(request.headers.authorization).toBe(`Bearer ${SENTINEL_A}`);
-        expect(request.headers["mcp-protocol-version"]).toBe("2026-07-28");
-        expect(request.headers["mcp-method"]).toBe("tools/call");
-        expect(request.headers["mcp-name"]).toBe("edit_layer");
-        expect(requestBody).toMatchObject({
-          jsonrpc: "2.0",
-          method: "tools/call",
-          params: {
-            name: "edit_layer",
-            arguments: { layer: "Walls" },
-            _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
-          },
-        });
-        response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ jsonrpc: "2.0", id: requestBody.id, result: { content: [{ type: "text", text: `${SENTINEL_A} ${"x".repeat(700)}` }] } }));
-      });
-    }, async (url) => {
-      await store.set("tenant-a", [{ name: "alpha", url, authToken: SENTINEL_A }]);
-      const outcome = await executeTenantMcpTool(store, "tenant-a", "mcp__alpha__edit_layer", { layer: "Walls" });
-      expect(outcome.ok).toBe(true);
-      expect(outcome.summary).toContain("(truncated)");
-      expect(outcome.summary.length).toBeLessThan(550);
-      expect(JSON.stringify(outcome)).not.toContain(SENTINEL_A);
-    });
-  });
-
-  it("refuses oversized MCP responses and re-resolves deleted server configuration at confirm time", async () => {
-    const store = new InMemoryMcpBridgeStore();
+  it("executes an approved public tenant MCP proposal once, redacts before truncation, and keeps approval-only host data out of tool args", async () => {
+    const store = storeWith([{ name: "alpha", url: "https://tenant.example.test/mcp?secret=not-for-logs", authToken: SENTINEL_A }]);
     let calls = 0;
-    await withMcpServer((_request, response) => {
-      calls += 1;
-      response.writeHead(200, { "content-type": "application/json", "content-length": String(256 * 1024 + 1) });
-      response.end("{}");
-    }, async (url) => {
-      await store.set("tenant-a", [{ name: "alpha", url, authToken: SENTINEL_A }]);
-      const oversized = await executeTenantMcpTool(store, "tenant-a", "mcp__alpha__edit_layer", {});
-      expect(oversized).toEqual(expect.objectContaining({ ok: false, summary: expect.stringContaining("exceeds 256 KB") }));
-      expect(JSON.stringify(oversized)).not.toContain(SENTINEL_A);
-      expect(calls).toBe(1);
-
-      await store.delete("tenant-a");
-      const deleted = await executeTenantMcpTool(store, "tenant-a", "mcp__alpha__edit_layer", {});
-      expect(deleted).toEqual(expect.objectContaining({ ok: false, summary: expect.stringContaining('server "alpha"') }));
-      expect(deleted.summary).toContain("no longer attached");
-      expect(JSON.stringify(deleted)).not.toContain(SENTINEL_A);
-      expect(calls).toBe(1);
+    const outcome = await executeTenantMcpTool(store, "tenant-a", "mcp__alpha__edit_layer", { layer: "Walls", _leaf_mcp_host: "tenant.example.test" }, {
+      resolver: async () => "203.0.113.8",
+      fetchImpl: async (_url, init) => {
+        calls += 1;
+        expect(init?.redirect).toBe("manual");
+        const body = JSON.parse(String(init?.body)) as Record<string, any>;
+        expect(body.params.arguments).toEqual({ layer: "Walls" });
+        return new Response(JSON.stringify({ result: { content: [{ type: "text", text: `${"x".repeat(495)}${SENTINEL_A}${"y".repeat(30)}` }] } }));
+      },
     });
+    expect(calls).toBe(1);
+    expect(outcome.ok).toBe(true);
+    expect(outcome.summary).toContain("(truncated)");
+    expect(outcome.summary).not.toContain(SENTINEL_A.slice(0, 12));
+  });
+
+  it("refuses execute-time private DNS answers before fetch and rejects redirects without a second request", async () => {
+    const store = storeWith([{ name: "alpha", url: "https://tenant.example.test/mcp", authToken: SENTINEL_A }]);
+    let calls = 0;
+    const privateOutcome = await executeTenantMcpTool(store, "tenant-a", "mcp__alpha__edit_layer", {}, {
+      resolver: async () => "169.254.169.254",
+      fetchImpl: async () => { calls += 1; return new Response("unexpected"); },
+    });
+    expect(privateOutcome.summary).toContain("host is not allowed");
+    expect(calls).toBe(0);
+
+    const redirectOutcome = await executeTenantMcpTool(store, "tenant-a", "mcp__alpha__edit_layer", {}, {
+      resolver: async () => "203.0.113.8",
+      fetchImpl: async () => { calls += 1; return new Response("", { status: 302, headers: { location: "http://127.0.0.1/" } }); },
+    });
+    expect(redirectOutcome.summary).toContain("redirected");
+    expect(calls).toBe(1);
+  });
+
+  it("cancels an over-cap response body before returning the refusal", async () => {
+    const store = storeWith([{ name: "alpha", url: "https://tenant.example.test/mcp" }]);
+    let cancelled = false;
+    const body = new ReadableStream({ cancel: () => { cancelled = true; } });
+    const outcome = await executeTenantMcpTool(store, "tenant-a", "mcp__alpha__edit_layer", {}, {
+      resolver: async () => "203.0.113.8",
+      fetchImpl: async () => new Response(body, { headers: { "content-length": String(256 * 1024 + 1) } }),
+    });
+    expect(outcome.summary).toContain("exceeds 256 KB");
+    expect(cancelled).toBe(true);
+  });
+
+  it("rejects MCP targets in the APS wrapper and requires capability plus a fresh mounted server at confirm time", async () => {
+    expect(apsTestRunMcpTargetDenial("mcp__missing__x")).toContain("must be approved");
+    const store = storeWith([{ name: "alpha", url: "https://tenant.example.test/mcp" }]);
+    await expect(hasFreshTenantMcpResolution(store, "tenant-a", { tool: "mcp__alpha__x", capability: "drawing.write" })).resolves.toBe(false);
+    await expect(hasFreshTenantMcpResolution(store, "tenant-a", { tool: "mcp__missing__x", capability: "mcp.execute" })).resolves.toBe(false);
+    await expect(hasFreshTenantMcpResolution(store, "tenant-a", { tool: "mcp__alpha__x", capability: "mcp.execute" })).resolves.toBe(true);
   });
 
   it("emits a bounded question_required event and refuses invalid or oversized payloads", async () => {

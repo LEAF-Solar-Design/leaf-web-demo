@@ -7,6 +7,8 @@ import {
   describeConfig,
   FileMcpBridgeStore,
   InMemoryMcpBridgeStore,
+  isAllowedMcpHost,
+  resolveAllowedMcpHost,
   resolveMcpAttachment,
 } from "../src/ports/impl/mcpBridge.js";
 
@@ -50,6 +52,23 @@ describe("MCP bridge tenant isolation and redaction", () => {
 });
 
 describe("MCP bridge validation", () => {
+  it.each([
+    "127.0.0.1", "localhost", "10.2.3.4", "172.16.2.3", "192.168.2.3",
+    "169.254.169.254", "::1", "[fc00::1]", "0.0.0.0",
+  ])("refuses forbidden host %s at set-time", async (host) => {
+    const store = new InMemoryMcpBridgeStore();
+    const url = host.includes(":") && !host.startsWith("[") ? `http://[${host}]/mcp` : `http://${host}/mcp`;
+    expect(isAllowedMcpHost(host)).toBe(false);
+    await expect(store.set("tenant", [{ name: "unsafe-host", url }])).rejects.toThrow("mcp_bridge_invalid_config");
+  });
+
+  it("allows a dotted public host at set-time and checks its resolved address again at execute-time", async () => {
+    expect(isAllowedMcpHost("public.example.test")).toBe(true);
+    await expect(new InMemoryMcpBridgeStore().set("tenant", [{ name: "public", url: "https://public.example.test/mcp" }])).resolves.toBeUndefined();
+    await expect(resolveAllowedMcpHost("public.example.test", async () => "203.0.113.8")).resolves.toBe(true);
+    await expect(resolveAllowedMcpHost("public.example.test", async () => "10.0.0.8")).resolves.toBe(false);
+  });
+
   it.each(["evil),Bash", "../../x", "trailing.", "converse", "CONVERSE", "converse__evil", "CONVERSE__X"])("refuses hostile server name %s", async (name) => {
     const store = new InMemoryMcpBridgeStore();
     await expect(store.set("tenant", [config(name)])).rejects.toThrow("mcp_bridge_invalid_config");

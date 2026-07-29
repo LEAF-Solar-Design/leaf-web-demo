@@ -9,6 +9,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import {
   closeSync,
   existsSync,
@@ -21,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { isIP } from "node:net";
 import type { McpServerConfig as AgentSdkMcpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 
 export type McpServerConfig = {
@@ -28,6 +30,8 @@ export type McpServerConfig = {
   url: string;
   authToken?: string;
 };
+
+export type McpHostResolver = (host: string) => Promise<string | { address: string } | Array<string | { address: string }>>;
 
 export interface McpBridgeStore {
   set(tenantId: string, configs: McpServerConfig[]): Promise<void>;
@@ -67,6 +71,55 @@ function hostForDescription(url: unknown): string {
   }
 }
 
+function unbracketHost(host: string): string {
+  return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+}
+
+/** True when an IP address is not safe for a tenant-controlled MCP endpoint. */
+export function isForbiddenMcpAddress(address: string): boolean {
+  const normalized = unbracketHost(address).toLowerCase();
+  if (isIP(normalized) === 4) {
+    const [a, b] = normalized.split(".").map(Number);
+    return a === 0
+      || a === 10
+      || a === 127
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 169 && b === 254);
+  }
+  if (isIP(normalized) === 6) {
+    if (normalized === "::" || normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) return true;
+    const mappedV4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    return mappedV4 ? isForbiddenMcpAddress(mappedV4[1]) : false;
+  }
+  return true;
+}
+
+/** Set-time policy. A DNS name must be dotted, and literals must be public. */
+export function isAllowedMcpHost(host: string): boolean {
+  const normalized = unbracketHost(host).trim();
+  if (!normalized) return false;
+  return isIP(normalized) ? !isForbiddenMcpAddress(normalized) : normalized.includes(".");
+}
+
+/** Execute-time DNS policy. Every resolved address must remain public. */
+export async function resolveAllowedMcpHost(
+  host: string,
+  resolver: McpHostResolver = async (name) => dnsLookup(name, { all: true, verbatim: true }),
+): Promise<boolean> {
+  if (!isAllowedMcpHost(host)) return false;
+  try {
+    const resolved = await resolver(unbracketHost(host));
+    const answers = Array.isArray(resolved) ? resolved : [resolved];
+    return answers.length > 0 && answers.every((answer) => {
+      const address = typeof answer === "string" ? answer : answer.address;
+      return typeof address === "string" && !isForbiddenMcpAddress(address);
+    });
+  } catch {
+    return false;
+  }
+}
+
 /** Safe to use in every diagnostic. It deliberately omits URL path/query and token. */
 export function describeConfig(config: Pick<McpServerConfig, "name" | "url" | "authToken">): string {
   return `MCP server name=${JSON.stringify(config.name)} host=${JSON.stringify(hostForDescription(config.url))} authToken="<redacted>"`;
@@ -98,7 +151,7 @@ function validateConfigs(configs: McpServerConfig[], allowReservedServerNames = 
     }
     try {
       const parsed = new URL(config.url);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported protocol");
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !isAllowedMcpHost(parsed.hostname)) throw new Error("unsafe host or protocol");
     } catch {
       throw validationError(config);
     }

@@ -84,9 +84,11 @@ import { skillBundleAttachment } from "./skillBundle.js";
 import {
   describeConfig,
   FileMcpBridgeStore,
+  resolveAllowedMcpHost,
   resolveMcpAttachment,
   type McpAttachment,
   type McpBridgeStore,
+  type McpHostResolver,
   type McpServerConfig,
 } from "./mcpBridge.js";
 import { findTool } from "../../registry/registerTool.js";
@@ -323,6 +325,7 @@ const LOCAL_MCP_TOOL_ALLOWLIST = new Set([APS_TEST_RUN_MCP_NAME, ASK_USER_MCP_NA
 export const TENANT_MCP_EXECUTE_CAPABILITY = "mcp.execute";
 const MCP_PROTOCOL_VERSION = "2026-07-28";
 const MCP_RESULT_MAX_BYTES = 256 * 1024;
+const MCP_APPROVAL_HOST_PARAM = "_leaf_mcp_host";
 
 /** Tools that mutate/spend real resources and therefore require operator approval
  *  before they run (leaf-backend-gaps.md §2.1: "aps_test_run / anything mutating"). */
@@ -375,14 +378,16 @@ export function tenantMcpApprovalEvents(
   params: Record<string, unknown>,
   confirmationId: string,
   drawingId: string,
+  mcpHost: string,
 ): HarnessTurnEvent[] {
+  const approvalParams = { ...params, [MCP_APPROVAL_HOST_PARAM]: mcpHost };
   return [
     {
       type: "proposed_run",
       data: {
         confirmation_id: confirmationId,
         tool,
-        params,
+        params: approvalParams,
         capability: TENANT_MCP_EXECUTE_CAPABILITY,
         dwg: drawingId,
         rationale: `The assistant wants to run tenant MCP tool "${tool}". This requires your approval.`,
@@ -390,9 +395,43 @@ export function tenantMcpApprovalEvents(
     },
     {
       type: "confirmation_required",
-      data: { confirmation_id: confirmationId, kind: "tool_run", payload: { tool, params } },
+      data: { confirmation_id: confirmationId, kind: "tool_run", payload: { tool, params: approvalParams } },
     },
   ];
+}
+
+/** Do not let the APS wrapper create a second, ungated route to tenant MCP tools. */
+export function apsTestRunMcpTargetDenial(tool: string): string | null {
+  return tool.startsWith("mcp__") ? "tenant MCP tools must be approved through their mounted MCP server" : null;
+}
+
+/** Confirm-time defense. Stored proposals must retain the MCP capability and still
+ * resolve to a mounted server before the transport is even considered. */
+export async function hasFreshTenantMcpResolution(
+  store: McpBridgeStore,
+  tenantId: string,
+  proposal: Pick<ConfirmProposal, "tool" | "capability">,
+): Promise<boolean> {
+  if (proposal.capability !== TENANT_MCP_EXECUTE_CAPABILITY || !proposal.tool.startsWith("mcp__")) return false;
+  try {
+    const configs = await store.get(tenantId);
+    return Boolean(configs?.some((config) => {
+      const prefix = `mcp__${config.name}__`;
+      return proposal.tool.startsWith(prefix) && proposal.tool.length > prefix.length;
+    }));
+  } catch {
+    return false;
+  }
+}
+
+function approvalHost(attachment: McpAttachment, serverName: string): string | null {
+  const url = (attachment[serverName] as unknown as { url?: unknown } | undefined)?.url;
+  if (typeof url !== "string") return null;
+  try {
+    return new URL(url).host || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve a tenant attachment without exposing bridge failures to the chat turn. */
@@ -602,7 +641,10 @@ function serverNameFromFullToolName(fullToolName: string): string {
 
 async function readMcpResponse(response: Response): Promise<string | null> {
   const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MCP_RESULT_MAX_BYTES) return null;
+  if (Number.isFinite(declared) && declared > MCP_RESULT_MAX_BYTES) {
+    await response.body?.cancel();
+    return null;
+  }
   if (!response.body) return "";
 
   const reader = response.body.getReader();
@@ -631,7 +673,7 @@ async function readMcpResponse(response: Response): Promise<string | null> {
   return new TextDecoder().decode(bytes);
 }
 
-function summarizeMcpResultContent(content: unknown): string {
+function summarizeMcpResultContent(content: unknown, authToken: string | undefined): string {
   const text = Array.isArray(content)
     ? content
       .map((item) => item as Record<string, unknown>)
@@ -639,9 +681,12 @@ function summarizeMcpResultContent(content: unknown): string {
       .map((item) => item.text as string)
       .join("\n")
     : "";
-  return text.length > RESULT_SUMMARY_MAX_CHARS
-    ? `${text.slice(0, RESULT_SUMMARY_MAX_CHARS)}… (truncated)`
-    : text;
+  // Redact the complete joined source before cutting it. A bearer can straddle
+  // the 500-character boundary, and redacting after truncation leaks its prefix.
+  const redacted = redactMcpBearer(text, authToken);
+  return redacted.length > RESULT_SUMMARY_MAX_CHARS
+    ? `${redacted.slice(0, RESULT_SUMMARY_MAX_CHARS)}… (truncated)`
+    : redacted;
 }
 
 function redactMcpBearer(text: string, authToken: string | undefined): string {
@@ -658,6 +703,7 @@ export async function executeTenantMcpTool(
   tenantId: string,
   fullToolName: string,
   params: Record<string, unknown>,
+  options: { resolver?: McpHostResolver; fetchImpl?: typeof fetch } = {},
 ): Promise<{ ok: boolean; summary: string }> {
   let configs: McpServerConfig[] | null;
   try {
@@ -673,6 +719,17 @@ export async function executeTenantMcpTool(
   if (!config) return tenantMcpFailure(serverNameFromFullToolName(fullToolName), "the approved server is no longer attached");
   const bareName = fullToolName.slice(`mcp__${config.name}__`.length);
   if (!bareName) return tenantMcpFailure(config.name, "the approved tool name is invalid");
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(config.url);
+  } catch {
+    return tenantMcpFailure(config.name, "the server configuration is invalid");
+  }
+  if (!await resolveAllowedMcpHost(parsedUrl.hostname, options.resolver)) {
+    return tenantMcpFailure(config.name, "the server host is not allowed");
+  }
+  const requestParams = { ...params };
+  delete requestParams[MCP_APPROVAL_HOST_PARAM];
 
   const payload = {
     jsonrpc: "2.0",
@@ -680,7 +737,7 @@ export async function executeTenantMcpTool(
     method: "tools/call",
     params: {
       name: bareName,
-      arguments: params,
+      arguments: requestParams,
       _meta: {
         "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
         "io.modelcontextprotocol/clientInfo": { name: "leaf-tenant-harness", version: "1.0.0" },
@@ -691,7 +748,8 @@ export async function executeTenantMcpTool(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
-    const response = await fetch(config.url, {
+    const response = await (options.fetchImpl ?? fetch)(config.url, {
+      redirect: "manual",
       method: "POST",
       signal: controller.signal,
       headers: {
@@ -704,6 +762,7 @@ export async function executeTenantMcpTool(
       },
       body: JSON.stringify(payload),
     });
+    if (response.status >= 300 && response.status < 400) return tenantMcpFailure(config.name, "the server redirected the request");
     if (!response.ok) return tenantMcpFailure(config.name, "the server rejected the request");
     const text = await readMcpResponse(response);
     if (text === null) return tenantMcpFailure(config.name, "the server response exceeds 256 KB");
@@ -715,7 +774,7 @@ export async function executeTenantMcpTool(
     }
     const result = body.result as Record<string, unknown> | undefined;
     if (!result || body.error) return tenantMcpFailure(config.name, "the server reported a tool error");
-    const summary = redactMcpBearer(summarizeMcpResultContent(result.content), config.authToken);
+    const summary = summarizeMcpResultContent(result.content, config.authToken);
     return { ok: result.isError !== true, summary };
   } catch {
     return tenantMcpFailure(config.name, "the request failed");
@@ -830,6 +889,8 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         // (canUseTool below denies it before the SDK ever calls this handler); kept so
         // a future non-gated tool sharing this shape has a correct handler to reuse.
         const toolName = String(a.tool ?? "");
+        const denial = apsTestRunMcpTargetDenial(toolName);
+        if (denial) return { content: [{ type: "text", text: denial }], isError: true };
         const params = parseWrapperParams(a.params_json);
         const outcome = await this.executeProposal(input, { tool: toolName, params });
         return outcome.ok
@@ -861,8 +922,10 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       const tenantMcpDenial = tenantMcpToolDenial(toolName, mcpAttachment);
       if (tenantMcpDenial) return tenantMcpDenial;
       if (tenantTool) {
+        const mcpHost = approvalHost(mcpAttachment!, tenantTool.serverName);
+        if (!mcpHost) return { behavior: "deny", message: TENANT_MCP_TOOL_DENIAL };
         const confirmationId = randomUUID();
-        pending.push(...tenantMcpApprovalEvents(toolName, inp, confirmationId, input.drawing_id));
+        pending.push(...tenantMcpApprovalEvents(toolName, inp, confirmationId, input.drawing_id, mcpHost));
         awaitingApproval = true;
         abort.abort();
         return { behavior: "deny", message: "tenant MCP tool requires operator approval before it can run.", interrupt: true };
@@ -877,6 +940,8 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       // the tenant registry instead of e.g. "count-by-layer" and fails to find it.
       const confirmationId = randomUUID();
       const { tool: proposalTool, params: targetParams } = resolveWrapperTarget(bare, inp);
+      const targetDenial = apsTestRunMcpTargetDenial(proposalTool);
+      if (targetDenial) return { behavior: "deny", message: targetDenial, interrupt: true };
       const capability = await this.capabilityFor(input.tenant_id, proposalTool === bare ? undefined : proposalTool);
       pending.push({
         type: "proposed_run",
@@ -984,6 +1049,9 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     if (proposal.tool.startsWith("mcp__")) {
       const store = this.bridgeStore();
       if (!store) return tenantMcpFailure("<unavailable>", "the approved server is no longer attached");
+      if (!await hasFreshTenantMcpResolution(store, input.tenant_id, proposal)) {
+        return tenantMcpFailure(serverNameFromFullToolName(proposal.tool), "the approved server is no longer attached");
+      }
       return executeTenantMcpTool(store, input.tenant_id, proposal.tool, proposal.params ?? {});
     }
     const repo = await this.ports.tenantRepo.checkout(input.tenant_id);
