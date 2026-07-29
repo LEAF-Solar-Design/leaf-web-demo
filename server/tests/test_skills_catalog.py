@@ -192,3 +192,25 @@ def test_missing_env_returns_200_empty(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"skills": []}
+
+
+def test_non_ascii_ops_secret_header_is_denied_not_500(monkeypatch, tmp_path):
+    """Review round 2 MAJOR: hmac.compare_digest raises TypeError on non-ASCII
+    str, and the header is caller-controlled latin-1 — a stray accent was an
+    unauthenticated 500. Bytes comparison makes it a plain deny."""
+    tenant = _bundle(tmp_path / "tenant", "tenant-safe", {"tenant-card": "T"})
+    operator = _bundle(tmp_path / "operator", "operator", {"ops-card": "O"})
+    monkeypatch.setenv("LEAF_SKILLS_BUNDLE_PATH", str(tenant))
+    monkeypatch.setenv("LEAF_SKILLS_OPERATOR_BUNDLE_PATH", str(operator))
+    monkeypatch.setenv("LEAF_OPS_SECRET", "ops-secret")
+
+    # httpx refuses non-ASCII str header values client-side, but a raw ASGI
+    # caller delivers latin-1 BYTES — which decode into the non-ASCII str that
+    # reached compare_digest. Send bytes to reproduce the real wire shape.
+    response = _client().get(
+        "/api/skills",
+        headers={b"X-Ops-Secret": "sécrét".encode("latin-1")})
+
+    assert response.status_code == 200
+    assert {s_["id"] for s_ in response.json()["skills"]} == {"tenant-card"}, (
+        "a non-ASCII header either 500'd or authorized operator access")
