@@ -10,9 +10,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // @ts-expect-error — hermetic subject-under-test is a plain .mjs script (no type decls);
 // runtime resolution works fine under vitest's esbuild/vite transform.
-import { canonicalJsonBytes, runJob } from "../scripts/e2b-tool-exec.mjs";
+import { canonicalJsonBytes, probeScript, runJob } from "../scripts/e2b-tool-exec.mjs";
 
-type NetworkInfo = { allowOut: string[]; denyOut: string[]; allowPublicTraffic: boolean };
+type NetworkInfo = { allowOut?: string[]; denyOut: string[]; allowPublicTraffic: boolean };
 type RunCall = { cmd: string; opts: any };
 type WriteCall = { path: string; data: string };
 
@@ -42,7 +42,32 @@ function allBlockedProbeStdout(overrides?: Record<string, { blocked: boolean; er
     "https://1.1.1.1/": { blocked: true, error_type: "URLError" },
     ...overrides,
   };
-  return JSON.stringify({ blocked, broker_ok: null });
+  const metadataTarget = "http://169.254.169.254/latest/meta-data/";
+  return JSON.stringify({
+    blocked,
+    platform_metadata: {
+      target: metadataTarget,
+      credential_material_present: false,
+      attempts: Object.fromEntries([
+        "no_auth_get",
+        "aws_token_put",
+        "aws_invalid_token_get",
+        "gcp_flavor_get",
+        "e2b_invalid_access_token_get",
+        "invalid_bearer_get",
+      ].map((label) => [label, { blocked: false, status: 401 }])),
+    },
+    tenant_network_namespace: {
+      command_ok: true,
+      blocked: {
+        ...Object.fromEntries(Object.keys(blocked).map((target) => [
+          target, { blocked: true, error_type: "URLError" },
+        ])),
+        [metadataTarget]: { blocked: true, error_type: "URLError" },
+      },
+    },
+    broker_ok: null,
+  });
 }
 
 function defaultExecStdout(): string {
@@ -60,6 +85,8 @@ class FakeSandbox {
   private readonly execStdout: string;
   private readonly execExitCode: number;
   private readonly execThrows: Error | null;
+  private readonly templateId: string;
+  private readonly templateName: string;
 
   constructor(cfg: {
     sandboxId?: string;
@@ -68,6 +95,8 @@ class FakeSandbox {
     execStdout?: string;
     execExitCode?: number;
     execThrows?: Error | null;
+    templateId?: string;
+    templateName?: string;
   }) {
     this.sandboxId = cfg.sandboxId ?? "sbx-fake-e2b-001";
     this.network = cfg.network ?? GOOD_NETWORK;
@@ -75,10 +104,16 @@ class FakeSandbox {
     this.execStdout = cfg.execStdout ?? defaultExecStdout();
     this.execExitCode = cfg.execExitCode ?? 0;
     this.execThrows = cfg.execThrows ?? null;
+    this.templateId = cfg.templateId ?? "r0kto3ypd1sgylx4tkz4";
+    this.templateName = cfg.templateName ?? "leaf-python-2026-07-29-v2";
   }
 
   async getInfo() {
-    return { network: this.network };
+    return {
+      network: this.network,
+      templateId: this.templateId,
+      name: this.templateName,
+    };
   }
 
   files = {
@@ -135,6 +170,28 @@ afterEach(() => {
 });
 
 describe("e2b-tool-exec.mjs runJob — hermetic (fake sandbox factory)", () => {
+  it("treats an HTTP response as reachable, not blocked", () => {
+    const script = probeScript("httpbingo.org", ["https://example.com/"], false);
+    expect(script).toContain("except HTTPError as exc");
+    expect(script).toContain('{"blocked": False, "status": exc.code}');
+  });
+
+  it("requires transport blocking in the tenant network namespace", async () => {
+    const envelope = baseJob();
+    const unsafeProbeBody = JSON.parse(allBlockedProbeStdout());
+    unsafeProbeBody.tenant_network_namespace.blocked[
+      "http://169.254.169.254/latest/meta-data/"
+    ] = { blocked: false, status: 401 };
+    const unsafeProbe = JSON.stringify(unsafeProbeBody);
+    const { factory } = makeFactory({ probeStdout: unsafeProbe });
+
+    const result: any = await runJob(envelope, factory);
+
+    expect(result.receipt?.platformMetadataSafe).toBe(false);
+    expect(result.receipt?.passed).toBe(false);
+    expect(result.result).toBeNull();
+  });
+
   it("uses the cross-language canonical UTF-8 JSON representation", () => {
     const first = { z: "雪", tiny: 1e-5, a: { β: 1, a: "é" }, n: 1.0 };
     const reordered = { n: 1, a: { a: "é", β: 1 }, tiny: 1e-5, z: "雪" };
@@ -169,7 +226,7 @@ describe("e2b-tool-exec.mjs runJob — hermetic (fake sandbox factory)", () => {
     // The 1MB intake NEVER touches an argv / command string.
     expect(sandbox.runs.length).toBeGreaterThan(0);
     for (const run of sandbox.runs) {
-      expect(run.cmd.length).toBeLessThan(2048);
+      expect(run.cmd.length).toBeLessThan(8192);
       expect(run.cmd).not.toContain(filler);
       expect(run.cmd).not.toContain("Q".repeat(200));
     }
@@ -209,6 +266,20 @@ describe("e2b-tool-exec.mjs runJob — hermetic (fake sandbox factory)", () => {
 
     const result: any = await runJob(envelope, factory);
 
+    expect(result.receipt?.passed).toBe(false);
+    expect(result.result).toBeNull();
+    expect(result.helper_error?.type).toBe("EgressLockFailed");
+  });
+
+  it("refuses to relay when public traffic is reported enabled", async () => {
+    const envelope = baseJob();
+    const { factory } = makeFactory({
+      network: { allowOut: ["httpbingo.org"], denyOut: ["0.0.0.0/0"], allowPublicTraffic: true },
+    });
+
+    const result: any = await runJob(envelope, factory);
+
+    expect(result.receipt?.configuredNoPublicTraffic).toBe(false);
     expect(result.receipt?.passed).toBe(false);
     expect(result.result).toBeNull();
     expect(result.helper_error?.type).toBe("EgressLockFailed");
@@ -284,7 +355,10 @@ describe("e2b-tool-exec.mjs runJob — hermetic (fake sandbox factory)", () => {
       tenant_hash: "tenant-hash",
       source_hash: "source-hash",
       input_hash: "input-hash",
-      template_version: "leaf-python-2026-07-23",
+      job_hash: "job-hash",
+      template_version: "leaf-python-2026-07-29-v2",
+      template_id: "r0kto3ypd1sgylx4tkz4",
+      template_build_id: "273367ae-6a5b-47da-ba46-7782c2fa5d6b",
       policy_version: "leaf.sandbox-policy.v1",
       limits: {
         source_bytes: 524288,
@@ -293,25 +367,39 @@ describe("e2b-tool-exec.mjs runJob — hermetic (fake sandbox factory)", () => {
         output_bytes: 1048576,
       },
     };
+    const probeStdout = allBlockedProbeStdout({
+      "https://httpbingo.org/": { blocked: true, error_type: "URLError" },
+    });
     const { factory, captured } = makeFactory({
-      network: { allowOut: [], denyOut: ["0.0.0.0/0"], allowPublicTraffic: false },
+      // E2B omits allowOut from getInfo() when the configured allowlist is empty.
+      network: { denyOut: ["0.0.0.0/0"], allowPublicTraffic: false },
+      probeStdout,
     });
 
     const result: any = await runJob(envelope, factory);
 
     expect(captured.opts?.network.allowOut).toEqual([]);
-    expect(captured.opts?.template).toBe("leaf-python-2026-07-23");
+    expect(captured.opts?.template).toBe("leaf-python-2026-07-29-v2");
+    expect(captured.opts?.timeoutMs).toBe(112_000);
+    expect(captured.sandbox?.runs[0]?.opts?.timeoutMs).toBe(45_000);
     expect(result.helper_error).toBeNull();
     expect(result.receipt).toMatchObject({
       passed: true,
       boundary: "tool",
+      configuredNoPublicTraffic: true,
       tenantHash: "tenant-hash",
       sourceHash: "source-hash",
-      templateVersion: "leaf-python-2026-07-23",
+      inputHash: "input-hash",
+      configuredTemplate: true,
+      tenantNetworkNamespaceIsolated: true,
+      templateVersion: "leaf-python-2026-07-29-v2",
+      templateId: "r0kto3ypd1sgylx4tkz4",
+      templateBuildId: "273367ae-6a5b-47da-ba46-7782c2fa5d6b",
       policyVersion: "leaf.sandbox-policy.v1",
       stopReason: "completed",
     });
     expect(result.receipt.resultHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.receipt.jobHash).toMatch(/^[a-f0-9]{64}$/);
     expect(result.receipt.resourceUse.outputBytes).toBeGreaterThan(0);
   });
 });

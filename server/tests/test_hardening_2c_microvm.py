@@ -32,11 +32,44 @@ from pathlib import Path
 import pytest
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
+ROOT = SERVER_DIR.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import tool_loader  # noqa: E402
 import tool_validate  # noqa: E402
+
+
+def test_pinned_e2b_template_has_a_reproducible_nonroot_python_base():
+    dockerfile = (ROOT / "e2b.Dockerfile").read_text(encoding="utf-8")
+    assert (
+        "FROM python:3.12-slim@"
+        "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+    ) in dockerfile
+    assert "useradd --create-home --uid 1000 --gid 1000" in dockerfile
+    assert 'test "$(id -u user)" = "1000"' in dockerfile
+    assert "\nUSER user\n" in dockerfile
+    assert "\nWORKDIR /home/user\n" in dockerfile
+    assert tool_loader._SANDBOX_TEMPLATE_VERSION == "leaf-python-2026-07-29-v2"
+    assert tool_loader._SANDBOX_TEMPLATE_ID == "r0kto3ypd1sgylx4tkz4"
+    assert tool_loader._SANDBOX_TEMPLATE_BUILD_ID == (
+        "273367ae-6a5b-47da-ba46-7782c2fa5d6b"
+    )
+
+
+def test_microvm_runner_irreversibly_caps_limits_without_raising_platform_hard_limits():
+    runner = tool_loader._SANDBOX_RUNNER
+    assert "soft, hard = resource.getrlimit(kind)" in runner
+    assert "if soft != resource.RLIM_INFINITY" in runner
+    assert "target = min(bounds)" in runner
+    assert "resource.setrlimit(kind, (target, target))" in runner
+    assert "resource.setrlimit(resource.RLIMIT_CPU, (30, 30))" not in runner
+    wrapper = tool_loader._SANDBOX_WRAPPER
+    assert "soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)" in wrapper
+    assert "resource.setrlimit(resource.RLIMIT_FSIZE, (target, target))" in wrapper
+    assert "resource.setrlimit(resource.RLIMIT_FSIZE, (_LIMIT, _LIMIT))" not in wrapper
+    assert "if os.name == \"posix\" and require_network_namespace:" in wrapper
+    assert 'child_cmd = ["unshare", "-Urn", "--", *child_cmd]' in wrapper
 
 
 # --------------------------------------------------------------------------- #
@@ -79,7 +112,7 @@ def tenant_repo(tmp_path, monkeypatch):
 # stdin-job / stdout-result protocol `_run_in_sandbox_e2b` sends/expects. THE monkeypatch
 # seam is `tool_loader._microvm_cmd` -> [sys.executable, str(this script)]. ----
 _FAKE_HELPER_PREAMBLE = '''
-import sys, json, os
+import sys, json, os, hashlib
 
 def _read_job():
     raw = sys.stdin.buffer.read()
@@ -124,6 +157,70 @@ def _canonical_bytes(value):
         raise TypeError(type(item).__name__)
     return encode(value).encode("utf-8")
 
+def _strict_receipt(blob, result):
+    audit = blob.get("audit") or {}
+    broker_host = blob.get("broker_host", "httpbingo.org")
+    denied = [
+        *(blob.get("denied_targets") or []),
+        "https://" + broker_host + "/",
+    ]
+    return {
+        "passed": True,
+        "configuredDenyAll": True,
+        "configuredTemplate": True,
+        "configuredBrokerOnly": True,
+        "configuredNoPublicTraffic": True,
+        "everyDeniedProbeBlocked": True,
+        "deniedProbes": {target: {"blocked": True} for target in denied},
+        "platformMetadata": {
+            "target": blob.get("platform_metadata_target"),
+            "credential_material_present": False,
+            "attempts": {
+                label: {"blocked": False, "status": 401}
+                for label in (
+                    "no_auth_get",
+                    "aws_token_put",
+                    "aws_invalid_token_get",
+                    "gcp_flavor_get",
+                    "e2b_invalid_access_token_get",
+                    "invalid_bearer_get",
+                )
+            },
+        },
+        "platformMetadataSafe": True,
+        "tenantNetworkNamespace": {
+            "command_ok": True,
+            "blocked": {
+                target: {"blocked": True}
+                for target in [
+                    *(blob.get("denied_targets") or []),
+                    "https://" + broker_host + "/",
+                    blob.get("platform_metadata_target"),
+                ]
+            },
+        },
+        "tenantNetworkNamespaceIsolated": True,
+        "brokerReached": None,
+        "boundary": "tool",
+        "network": {
+            "allowOut": None,
+            "denyOut": ["0.0.0.0/0"],
+            "allowPublicTraffic": False,
+        },
+        "tenantHash": audit.get("tenant_hash"),
+        "sourceHash": audit.get("source_hash"),
+        "inputHash": audit.get("input_hash"),
+        "jobHash": hashlib.sha256(_canonical_bytes(blob.get("job"))).hexdigest(),
+        "templateVersion": audit.get("template_version"),
+        "templateId": audit.get("template_id"),
+        "templateBuildId": audit.get("template_build_id"),
+        "policyVersion": audit.get("policy_version"),
+        "startedAt": "2026-07-23T00:00:00Z",
+        "stoppedAt": "2026-07-23T00:00:01Z",
+        "resourceUse": {"wallMs": 1000},
+        "resultHash": hashlib.sha256(_canonical_bytes(result)).hexdigest(),
+    }
+
 '''
 
 _FAKE_HELPER_BODIES = {
@@ -136,10 +233,11 @@ job = blob.get("job") or {}
 ns = {"__name__": "leaf_fake_helper_tool"}
 exec(compile(job.get("source") or "", job.get("filename") or "<fake>", "exec"), ns)
 ret = ns["run"](job.get("intake"), job.get("params"))
+result = {"ok": True, "ret": _encode_ret(ret)}
 _emit({
     "schema": "leaf.e2b.tool-exec-result.v1",
-    "receipt": {"passed": True},
-    "result": {"ok": True, "ret": _encode_ret(ret)},
+    "receipt": _strict_receipt(blob, result),
+    "result": result,
     "helper_error": None,
 })
 ''',
@@ -154,10 +252,28 @@ ret = ns["run"](job.get("intake"), job.get("params"))
 result = {"ok": True, "ret": _encode_ret(ret)}
 _emit({
     "schema": "leaf.e2b.tool-exec-result.v1",
+    "receipt": _strict_receipt(blob, result),
+    "result": result,
+    "helper_error": None,
+})
+''',
+    "strict_missing_no_egress": '''
+blob = _read_job()
+job = blob.get("job") or {}
+audit = blob.get("audit") or {}
+import hashlib
+ns = {"__name__": "leaf_fake_helper_tool"}
+exec(compile(job.get("source") or "", job.get("filename") or "<fake>", "exec"), ns)
+ret = ns["run"](job.get("intake"), job.get("params"))
+result = {"ok": True, "ret": _encode_ret(ret)}
+_emit({
+    "schema": "leaf.e2b.tool-exec-result.v1",
     "receipt": {
         "passed": True,
         "tenantHash": audit.get("tenant_hash"),
         "sourceHash": audit.get("source_hash"),
+        "inputHash": audit.get("input_hash"),
+        "jobHash": hashlib.sha256(_canonical_bytes(job)).hexdigest(),
         "templateVersion": audit.get("template_version"),
         "policyVersion": audit.get("policy_version"),
         "startedAt": "2026-07-23T00:00:00Z",
@@ -182,11 +298,12 @@ _emit({
 ''',
     # receipt passed, but the tenant body raised inside the VM.
     "tool_error": '''
-_read_job()
+blob = _read_job()
+result = {"error": {"type": "RuntimeError", "msg": "boom from tenant tool"}}
 _emit({
     "schema": "leaf.e2b.tool-exec-result.v1",
-    "receipt": {"passed": True},
-    "result": {"error": {"type": "RuntimeError", "msg": "boom from tenant tool"}},
+    "receipt": _strict_receipt(blob, result),
+    "result": result,
     "helper_error": None,
 })
 ''',
@@ -205,13 +322,14 @@ time.sleep(5)
     # ignores the tenant source; reports back its OWN env for the 4 probe keys (proves
     # _microvm_env scrubs the broker secrets but passes the E2B key through to the helper).
     "echo_env": '''
-_read_job()
+blob = _read_job()
 seen = {k: os.environ.get(k) for k in
         ("APS_CREDENTIALS_JSON", "LEAF_BROKER_SECRET", "E2B_API_KEY", "SOME_TOKEN")}
+result = {"ok": True, "ret": {"form": "dict", "obj": {"env_seen": seen}}}
 _emit({
     "schema": "leaf.e2b.tool-exec-result.v1",
-    "receipt": {"passed": True},
-    "result": {"ok": True, "ret": {"form": "dict", "obj": {"env_seen": seen}}},
+    "receipt": _strict_receipt(blob, result),
+    "result": result,
     "helper_error": None,
 })
 ''',
@@ -230,12 +348,14 @@ def fake_helper(tmp_path):
 
 
 def _run_microvm(tool, params, *, fake_helper_path, monkeypatch, intake=None,
-                  timeout_s=None, boot_budget_s=None):
+                  timeout_s=None, boot_budget_s=None, probe_budget_s=None):
     monkeypatch.setenv("LEAF_SANDBOX", "e2b-microvm")
     if timeout_s is not None:
         monkeypatch.setenv("LEAF_SANDBOX_TIMEOUT_S", str(timeout_s))
     if boot_budget_s is not None:
         monkeypatch.setenv("LEAF_SANDBOX_MICROVM_BOOT_BUDGET_S", str(boot_budget_s))
+    if probe_budget_s is not None:
+        monkeypatch.setenv("LEAF_SANDBOX_MICROVM_PROBE_BUDGET_S", str(probe_budget_s))
     monkeypatch.setattr(tool_loader, "_microvm_cmd",
                          lambda: [sys.executable, str(fake_helper_path)])
     return tool_loader.run_tool_dynamic(
@@ -320,13 +440,92 @@ def test_tool_provider_requires_complete_matching_audit_receipt(
 
     monkeypatch.setattr(
         tool_loader, "_microvm_cmd",
-        lambda: [sys.executable, str(fake_helper("ok"))],
+        lambda: [sys.executable, str(fake_helper("strict_missing_no_egress"))],
     )
-    refused = tool_loader.run_tool_dynamic(
+    refused_no_egress = tool_loader.run_tool_dynamic(
         tool, {"layers": ["A"]}, {}, aps_live=False, da=None,
         tenant_id="tenant-a")
-    assert refused["ok"] is False
-    assert "audit receipt incomplete" in refused["error"]["message"]
+    assert refused_no_egress["ok"] is False
+    assert "audit receipt incomplete" in refused_no_egress["error"]["message"]
+
+    bad_public_helper = fake_helper("strict_ok")
+    bad_public_helper.write_text(
+        bad_public_helper.read_text(encoding="utf-8").replace(
+            '"configuredNoPublicTraffic": True',
+            '"configuredNoPublicTraffic": False',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        tool_loader, "_microvm_cmd",
+        lambda: [sys.executable, str(bad_public_helper)],
+    )
+    refused_public = tool_loader.run_tool_dynamic(
+        tool, {"layers": ["A"]}, {}, aps_live=False, da=None,
+        tenant_id="tenant-a")
+    assert refused_public["ok"] is False
+    assert "no-egress receipt incomplete" in refused_public["error"]["message"]
+
+
+def test_microvm_refuses_input_job_and_result_replay_tampering(
+        tenant_repo, fake_helper, monkeypatch):
+    tool = tenant_repo("counter", BENIGN_SRC)
+    monkeypatch.setenv("LEAF_SANDBOX", "e2b-microvm")
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+
+    input_tamper = fake_helper("strict_ok")
+    input_tamper.write_text(
+        input_tamper.read_text(encoding="utf-8").replace(
+            '"inputHash": audit.get("input_hash")',
+            '"inputHash": "0" * 64',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        tool_loader, "_microvm_cmd",
+        lambda: [sys.executable, str(input_tamper)],
+    )
+    refused_input = tool_loader.run_tool_dynamic(
+        tool, {"layers": ["A"]}, {}, aps_live=False, da=None,
+        tenant_id="tenant-a")
+    assert refused_input["ok"] is False
+    assert "audit receipt mismatch" in refused_input["error"]["message"]
+
+    job_tamper = fake_helper("strict_ok")
+    job_tamper.write_text(
+        job_tamper.read_text(encoding="utf-8").replace(
+            '"jobHash": hashlib.sha256(_canonical_bytes(blob.get("job"))).hexdigest()',
+            '"jobHash": "0" * 64',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        tool_loader, "_microvm_cmd",
+        lambda: [sys.executable, str(job_tamper)],
+    )
+    refused_job = tool_loader.run_tool_dynamic(
+        tool, {"layers": ["A"]}, {}, aps_live=False, da=None,
+        tenant_id="tenant-a")
+    assert refused_job["ok"] is False
+    assert "audit receipt mismatch" in refused_job["error"]["message"]
+
+    result_tamper = fake_helper("strict_ok")
+    result_tamper.write_text(
+        result_tamper.read_text(encoding="utf-8").replace(
+            '"resultHash": hashlib.sha256(_canonical_bytes(result)).hexdigest()',
+            '"resultHash": "0" * 64',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        tool_loader, "_microvm_cmd",
+        lambda: [sys.executable, str(result_tamper)],
+    )
+    refused_result = tool_loader.run_tool_dynamic(
+        tool, {"layers": ["A"]}, {}, aps_live=False, da=None,
+        tenant_id="tenant-a")
+    assert refused_result["ok"] is False
+    assert "result hash mismatch" in refused_result["error"]["message"]
 
 # --------------------------------------------------------------------------- #
 # (2) microvm ON + fake(ok) -> valid §3 envelope, parity with in-process
@@ -473,7 +672,7 @@ def test_microvm_timeout_maps_to_internal(tenant_repo, fake_helper, monkeypatch)
     tool = tenant_repo("counter", BENIGN_SRC)
     helper = fake_helper("sleep")
     env = _run_microvm(tool, {}, fake_helper_path=helper, monkeypatch=monkeypatch,
-                        timeout_s=1, boot_budget_s=1)
+                        timeout_s=1, boot_budget_s=1, probe_budget_s=1)
     assert env["ok"] is False
     assert env["error"]["error_code"] == "INTERNAL"
     assert "timed out" in env["error"]["message"].lower()

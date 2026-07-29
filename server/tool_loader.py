@@ -201,16 +201,16 @@ def _sandbox_env() -> Dict[str, str]:
 # silently downgrades to a weaker one.
 # --------------------------------------------------------------------------- #
 
-# Denied-egress probe targets the helper verifies from INSIDE the VM on every run
-# (the same three the proven vendor eval uses).
+# Denied-egress probe targets the helper verifies from INSIDE the VM on every run.
+# The helper also adds the configured broker host to this list for no-egress tool jobs.
 _MICROVM_DENIED_TARGETS = [
-    "http://169.254.169.254/latest/meta-data/",
     "http://127.0.0.1:8130/",
     "http://10.0.0.1/",
     "http://172.16.0.1/",
     "http://192.168.0.1/",
     "https://example.com/", "https://api.github.com/", "https://1.1.1.1/",
 ]
+_MICROVM_METADATA_TARGET = "http://169.254.169.254/latest/meta-data/"
 _SANDBOX_POLICY_VERSION = "leaf.sandbox-policy.v1"
 
 
@@ -220,7 +220,9 @@ class _MicrovmSuccess:
     def __init__(self, ret: Any, provenance: Dict[str, Any]) -> None:
         self.ret = ret
         self.provenance = provenance
-_SANDBOX_TEMPLATE_VERSION = "leaf-python-2026-07-23"
+_SANDBOX_TEMPLATE_VERSION = "leaf-python-2026-07-29-v2"
+_SANDBOX_TEMPLATE_ID = "r0kto3ypd1sgylx4tkz4"
+_SANDBOX_TEMPLATE_BUILD_ID = "273367ae-6a5b-47da-ba46-7782c2fa5d6b"
 _SANDBOX_LIMITS = {
     "cpu_seconds": 30,
     "memory_bytes": 512 * 1024 * 1024,
@@ -273,6 +275,14 @@ def _microvm_boot_budget_s() -> float:
         return float(os.environ.get("LEAF_SANDBOX_MICROVM_BOOT_BUDGET_S", "60"))
     except (TypeError, ValueError):
         return 60.0
+
+
+def _microvm_probe_budget_s() -> float:
+    """Outer-timeout budget reserved for the helper's in-VM egress proof."""
+    try:
+        return float(os.environ.get("LEAF_SANDBOX_MICROVM_PROBE_BUDGET_S", "45"))
+    except (TypeError, ValueError):
+        return 45.0
 
 
 def _microvm_env() -> Dict[str, str]:
@@ -358,11 +368,22 @@ def main():
     if job.get("require_limits"):
         try:
             import resource
-            resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
-            resource.setrlimit(resource.RLIMIT_AS, (536870912, 536870912))
-            resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
-            resource.setrlimit(resource.RLIMIT_FSIZE, (134217728, 134217728))
-            resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
+
+            def _cap_limit(kind, requested):
+                soft, hard = resource.getrlimit(kind)
+                bounds = [requested]
+                if soft != resource.RLIM_INFINITY:
+                    bounds.append(soft)
+                if hard != resource.RLIM_INFINITY:
+                    bounds.append(hard)
+                target = min(bounds)
+                resource.setrlimit(kind, (target, target))
+
+            _cap_limit(resource.RLIMIT_CPU, 30)
+            _cap_limit(resource.RLIMIT_AS, 536870912)
+            _cap_limit(resource.RLIMIT_NPROC, 32)
+            _cap_limit(resource.RLIMIT_FSIZE, 134217728)
+            _cap_limit(resource.RLIMIT_NOFILE, 128)
         except (ImportError, ValueError, OSError) as exc:
             _emit({"error": {"type": "SandboxLimits", "msg": type(exc).__name__}})
             return
@@ -464,19 +485,37 @@ def _fixed_error():
 def _child_limits():
     try:
         import resource
-        resource.setrlimit(resource.RLIMIT_FSIZE, (_LIMIT, _LIMIT))
+        soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        bounds = [_LIMIT]
+        if soft != resource.RLIM_INFINITY:
+            bounds.append(soft)
+        if hard != resource.RLIM_INFINITY:
+            bounds.append(hard)
+        target = min(bounds)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (target, target))
     except ImportError:
         pass
 
 def main():
     job = sys.stdin.buffer.read()
+    try:
+        require_network_namespace = (
+            json.loads(job.decode("utf-8")).get("require_network_namespace") is True
+        )
+    except Exception:
+        require_network_namespace = False
     stdout_path = os.path.abspath(".leaf-sandbox-stdout")
     stderr_path = os.path.abspath(".leaf-sandbox-stderr")
     preexec = _child_limits if os.name == "posix" else None
+    child_cmd = [sys.executable, "-I", "-B", "-c", _CHILD]
+    if os.name == "posix" and require_network_namespace:
+        # The tenant process gets a fresh user and network namespace. It has no
+        # interfaces or routes, including to E2B's link-local controller.
+        child_cmd = ["unshare", "-Urn", "--", *child_cmd]
     with open(stdout_path, "w+b", buffering=0) as child_out, \
          open(stderr_path, "w+b", buffering=0) as child_err:
         proc = subprocess.Popen(
-            [sys.executable, "-I", "-B", "-c", _CHILD],
+            child_cmd,
             stdin=subprocess.PIPE,
             stdout=child_out,
             stderr=child_err,
@@ -616,15 +655,19 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
     if params_bytes > _SANDBOX_LIMITS["params_bytes"]:
         return ("infra_error", "tool params exceed fixed sandbox limit")
     timeout = min(_sandbox_timeout_s(), float(_SANDBOX_LIMITS["wall_seconds"]))
+    broker_host = (os.environ.get("LEAF_SANDBOX_BROKER_HOST", "").strip()
+                   or "httpbingo.org")
+    sandbox_job = {"source": source, "intake": intake, "params": params,
+                   "filename": local.name, "require_limits": True,
+                   "require_network_namespace": True}
     blob = json.dumps({
         "schema": "leaf.e2b.tool-exec-job.v1",
-        "job": {"source": source, "intake": intake, "params": params,
-                "filename": local.name, "require_limits": True},
+        "job": sandbox_job,
         "runner_py": _SANDBOX_WRAPPER,
         "timeout_s": timeout,
-        "broker_host": (os.environ.get("LEAF_SANDBOX_BROKER_HOST", "").strip()
-                        or "httpbingo.org"),
+        "broker_host": broker_host,
         "denied_targets": _MICROVM_DENIED_TARGETS,
+        "platform_metadata_target": _MICROVM_METADATA_TARGET,
         "probe_broker": False,
         "audit": {
             "tenant_hash": hashlib.sha256(
@@ -633,12 +676,15 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
             "input_hash": hashlib.sha256(json.dumps(
                 {"intake": intake, "params": params}, sort_keys=True,
                 separators=(",", ":")).encode("utf-8")).hexdigest(),
+            "job_hash": hashlib.sha256(canonical_json_bytes(sandbox_job)).hexdigest(),
             "template_version": _SANDBOX_TEMPLATE_VERSION,
+            "template_id": _SANDBOX_TEMPLATE_ID,
+            "template_build_id": _SANDBOX_TEMPLATE_BUILD_ID,
             "policy_version": _SANDBOX_POLICY_VERSION,
             "limits": _SANDBOX_LIMITS,
         },
     }).encode("utf-8")
-    outer = timeout + _microvm_boot_budget_s()
+    outer = timeout + _microvm_probe_budget_s() + _microvm_boot_budget_s()
     try:
         with tempfile.TemporaryDirectory(prefix="leaf-mvm-") as jail:
             proc = subprocess.run(
@@ -673,27 +719,103 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
         # The security boundary: an unproven egress lock means the sandbox result is refused
         # by the HELPER (result:null) -- and re-refused here even if a result slipped through.
         return ("infra_error", "e2b-microvm egress receipt not passed; sandbox result refused")
-    if os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER", "").strip().lower() == "e2b":
+    audit = json.loads(blob.decode("utf-8"))["audit"]
+    if audit:
         required = (
-            "tenantHash", "sourceHash", "templateVersion", "policyVersion",
+            "tenantHash", "sourceHash", "inputHash", "jobHash",
+            "templateVersion", "templateId", "templateBuildId", "policyVersion",
             "startedAt", "stoppedAt", "resourceUse", "resultHash",
+            "configuredDenyAll", "configuredBrokerOnly",
+            "configuredNoPublicTraffic", "configuredTemplate",
+            "everyDeniedProbeBlocked",
+            "deniedProbes", "brokerReached", "boundary", "network",
+            "platformMetadata", "platformMetadataSafe",
+            "tenantNetworkNamespace", "tenantNetworkNamespaceIsolated",
         )
         if any(key not in receipt for key in required):
             return ("infra_error", "e2b-microvm audit receipt incomplete; result refused")
-        audit = json.loads(blob.decode("utf-8"))["audit"]
+        network = receipt.get("network")
+        denied_probes = receipt.get("deniedProbes")
+        expected_denied_targets = set(_MICROVM_DENIED_TARGETS)
+        expected_denied_targets.add(f"https://{broker_host}/")
+        platform_metadata = receipt.get("platformMetadata")
+        expected_metadata_attempts = {
+            "no_auth_get", "aws_token_put", "aws_invalid_token_get",
+            "gcp_flavor_get", "e2b_invalid_access_token_get",
+            "invalid_bearer_get",
+        }
+        metadata_attempts = (
+            platform_metadata.get("attempts")
+            if isinstance(platform_metadata, dict) else None
+        )
+        tenant_network_namespace = receipt.get("tenantNetworkNamespace")
+        namespace_probes = (
+            tenant_network_namespace.get("blocked")
+            if isinstance(tenant_network_namespace, dict) else None
+        )
+        expected_namespace_targets = {
+            *expected_denied_targets, _MICROVM_METADATA_TARGET,
+        }
+        no_egress_proven = (
+            receipt.get("configuredDenyAll") is True
+            and receipt.get("configuredTemplate") is True
+            and receipt.get("configuredBrokerOnly") is True
+            and receipt.get("configuredNoPublicTraffic") is True
+            and receipt.get("everyDeniedProbeBlocked") is True
+            and isinstance(denied_probes, dict)
+            and set(denied_probes) == expected_denied_targets
+            and all(isinstance(probe, dict) and probe.get("blocked") is True
+                    for probe in denied_probes.values())
+            and receipt.get("platformMetadataSafe") is True
+            and receipt.get("tenantNetworkNamespaceIsolated") is True
+            and isinstance(platform_metadata, dict)
+            and platform_metadata.get("target") == _MICROVM_METADATA_TARGET
+            and platform_metadata.get("credential_material_present") is False
+            and isinstance(metadata_attempts, dict)
+            and set(metadata_attempts) == expected_metadata_attempts
+            and all(
+                isinstance(attempt, dict)
+                and (
+                    attempt.get("blocked") is True
+                    or (
+                        attempt.get("blocked") is False
+                        and isinstance(attempt.get("status"), int)
+                    )
+                )
+                for attempt in metadata_attempts.values()
+            )
+            and isinstance(tenant_network_namespace, dict)
+            and tenant_network_namespace.get("command_ok") is True
+            and isinstance(namespace_probes, dict)
+            and set(namespace_probes) == expected_namespace_targets
+            and all(
+                isinstance(probe, dict) and probe.get("blocked") is True
+                for probe in namespace_probes.values()
+            )
+            and receipt.get("brokerReached") is None
+            and receipt.get("boundary") == "tool"
+            and isinstance(network, dict)
+            and network.get("allowOut") in (None, [])
+            and network.get("allowPublicTraffic") is False
+            and "0.0.0.0/0" in (network.get("denyOut") or [])
+        )
+        if not no_egress_proven:
+            return ("infra_error", "e2b-microvm no-egress receipt incomplete; result refused")
         if (receipt.get("tenantHash") != audit["tenant_hash"]
                 or receipt.get("sourceHash") != audit["source_hash"]
+                or receipt.get("inputHash") != audit["input_hash"]
+                or receipt.get("jobHash") != audit["job_hash"]
                 or receipt.get("templateVersion") != audit["template_version"]
+                or receipt.get("templateId") != audit["template_id"]
+                or receipt.get("templateBuildId") != audit["template_build_id"]
                 or receipt.get("policyVersion") != audit["policy_version"]):
             return ("infra_error", "e2b-microvm audit receipt mismatch; result refused")
     result = parsed.get("result")
     if not isinstance(result, dict):
         return ("infra_error", "e2b-microvm helper returned no result")
-    if os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER", "").strip().lower() == "e2b":
-        computed_result_hash = hashlib.sha256(
-            canonical_json_bytes(result)).hexdigest()
-        if receipt.get("resultHash") != computed_result_hash:
-            return ("infra_error", "e2b-microvm result hash mismatch; result refused")
+    computed_result_hash = hashlib.sha256(canonical_json_bytes(result)).hexdigest()
+    if receipt.get("resultHash") != computed_result_hash:
+        return ("infra_error", "e2b-microvm result hash mismatch; result refused")
     if result.get("error"):
         e = result["error"]
         return ("tool_error", f"{e.get('type', 'Error')}: {e.get('msg', '')}")
@@ -710,6 +832,8 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
         "input_sha256": audit["input_hash"],
         "result_sha256": receipt.get("resultHash"),
         "template_version": receipt.get("templateVersion"),
+        "template_id": receipt.get("templateId"),
+        "template_build_id": receipt.get("templateBuildId"),
         "policy_version": receipt.get("policyVersion"),
         "started_at": receipt.get("startedAt"),
         "stopped_at": receipt.get("stoppedAt"),

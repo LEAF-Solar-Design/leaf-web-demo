@@ -52,17 +52,48 @@ documented `LEAF_SANDBOX=e2b` author fallback. An explicit new selector always
 wins. The legacy value never satisfies the production startup gate.
 
 Source pins sandbox policy `leaf.sandbox-policy.v1` and E2B template
-`leaf-python-2026-07-23`. Production activation remains blocked until the
+`leaf-python-2026-07-29-v2` (template ID `r0kto3ypd1sgylx4tkz4`, build ID
+`273367ae-6a5b-47da-ba46-7782c2fa5d6b`). Production activation remains blocked until the
 operator creates and approves that template, its region and retention, the
 E2B account and budget, and the explicit author broker gateway.
+
+The template definition is tracked at repository root in `e2b.Dockerfile`.
+Build the pinned alias from an authenticated E2B operator session:
+
+```bash
+npx -y @e2b/cli@2.16.0 template create leaf-python-2026-07-29-v2 \
+  --dockerfile e2b.Dockerfile
+```
+
+After the build succeeds, run `harness/scripts/e2b-tool-exec.mjs` with the
+same egress-lock policy used by the broker. Do not enable the broker selector
+until the receipt reports `passed: true`.
+
+E2B's platform-local controller can answer the trusted helper with HTTP 401.
+It also answers the AWS token-acquisition shape with HTTP 200, so the receipt
+does not treat controller status codes as isolation. The trusted wrapper starts
+the tenant interpreter with `unshare -Urn`, which gives it a new user and
+network namespace with no interfaces or routes. Before execution, the helper
+uses the same command to prove transport-level blocking for every denied target
+and the link-local controller. The receipt also requires no controller
+credential in the sandbox environment. The separate red-team boot proves that
+untrusted tenant code cannot connect to the controller and cannot restore the
+fixed resource hard limits.
 
 Result hashes use one canonical byte contract in Python and JavaScript:
 sort object keys by their UTF-8 bytes, preserve array order, emit compact JSON
 with raw Unicode encoded as UTF-8, and render every finite IEEE-754 number in
 scientific notation with 17 significant digits and a normalized exponent.
 Non-finite numbers and non-JSON values are rejected. The receipt stores SHA-256
-of those bytes. Fixed Unicode, reordered-key, and exponent vectors gate both
-implementations.
+of those bytes. It also binds the complete execution job, intake, template ID,
+template build ID, tenant, source, and policy. The broker revalidates every hash
+for both micro-VM selectors. Fixed Unicode, reordered-key, exponent, replay, and
+tamper vectors gate both implementations.
+
+The runner lowers both the soft and hard CPU, address-space, process, file-size,
+and file-count limits without raising a stricter platform limit. Tenant code
+cannot restore any cap. The live red-team receipt also proves memory exhaustion
+at 600 MiB and file-descriptor exhaustion before 256 opens.
 
 Tenant stdout and stderr terminate in files owned by a trusted wrapper, not in
 the broker or E2B SDK capture stream. The wrapper applies a 1 MiB `RLIMIT_FSIZE`

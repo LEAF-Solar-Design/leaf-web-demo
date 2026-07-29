@@ -40,6 +40,8 @@ import { createHash } from "node:crypto";
 const SCHEMA_RESULT = "leaf.e2b.tool-exec-result.v1";
 const DEFAULT_KEY_FILE = "C:\\tmp\\leaf-grants\\e2b-api-key.txt";
 const JOB_DIR = "/home/user/leaf-job";
+const PROBE_TIMEOUT_MS = 45_000;
+const BOOT_BUDGET_MS = 60_000;
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 function canonicalText(value) {
@@ -87,17 +89,91 @@ function b64Py(script) {
 }
 
 /** The tiny fixed-size in-VM egress probe (safe to inline-b64, unlike the job). */
-function probeScript(brokerHost, deniedTargets, probeBroker) {
+export function probeScript(
+  brokerHost,
+  deniedTargets,
+  probeBroker,
+  platformMetadataTarget = "http://169.254.169.254/latest/meta-data/",
+) {
   return `
-import json, urllib.request
+import json, os, subprocess, sys, urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from urllib.error import HTTPError
+from urllib.parse import urljoin
 denied = json.loads(${JSON.stringify(JSON.stringify(deniedTargets))})
-blocked = {}
-for target in denied:
+metadata_target = ${JSON.stringify(platformMetadataTarget)}
+def check_blocked(target):
     try:
         with urllib.request.urlopen(target, timeout=5) as r:
-            blocked[target] = {"blocked": False, "status": r.status}
+            return target, {"blocked": False, "status": r.status}
+    except HTTPError as exc:
+        return target, {"blocked": False, "status": exc.code}
+    except Exception as exc:
+        return target, {"blocked": True, "error_type": type(exc).__name__}
+with ThreadPoolExecutor(max_workers=min(8, len(denied))) as pool:
+    blocked = dict(pool.map(check_blocked, denied))
+
+def check_metadata(label, target, method="GET", headers=None):
+    try:
+        req = urllib.request.Request(target, headers=headers or {}, method=method)
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return label, {"blocked": False, "status": r.status}
+    except HTTPError as exc:
+        return label, {"blocked": False, "status": exc.code}
+    except Exception as exc:
+        return label, {"blocked": True, "error_type": type(exc).__name__}
+
+metadata_root = urljoin(metadata_target, "/")
+metadata_attempt_specs = [
+    ("no_auth_get", metadata_target, "GET", {}),
+    ("aws_token_put", urljoin(metadata_root, "latest/api/token"), "PUT",
+     {"X-aws-ec2-metadata-token-ttl-seconds": "21600"}),
+    ("aws_invalid_token_get", metadata_target, "GET",
+     {"X-aws-ec2-metadata-token": "leaf-invalid"}),
+    ("gcp_flavor_get", metadata_target, "GET", {"Metadata-Flavor": "Google"}),
+    ("e2b_invalid_access_token_get", metadata_target, "GET",
+     {"X-Access-Token": "leaf-invalid"}),
+    ("invalid_bearer_get", metadata_target, "GET",
+     {"Authorization": "Bearer leaf-invalid"}),
+]
+with ThreadPoolExecutor(max_workers=len(metadata_attempt_specs)) as pool:
+    metadata_attempts = dict(pool.map(lambda spec: check_metadata(*spec),
+                                      metadata_attempt_specs))
+known_credential_names = (
+    "E2B_API_KEY", "E2B_ACCESS_TOKEN", "E2B_ENVD_ACCESS_TOKEN",
+    "ENVD_ACCESS_TOKEN", "TRAFFIC_ACCESS_TOKEN", "X_ACCESS_TOKEN",
+)
+credential_material_present = any(os.environ.get(name) for name in known_credential_names)
+
+namespace_script = r"""
+import json, sys, urllib.request
+from urllib.error import HTTPError
+targets = json.loads(sys.argv[1])
+blocked = {}
+for target in targets:
+    try:
+        with urllib.request.urlopen(target, timeout=3) as response:
+            blocked[target] = {"blocked": False, "status": response.status}
+    except HTTPError as exc:
+        blocked[target] = {"blocked": False, "status": exc.code}
     except Exception as exc:
         blocked[target] = {"blocked": True, "error_type": type(exc).__name__}
+print(json.dumps(blocked))
+"""
+namespace_targets = list(dict.fromkeys([*denied, metadata_target]))
+namespace_proc = subprocess.run(
+    ["unshare", "-Urn", "--", sys.executable, "-c", namespace_script,
+     json.dumps(namespace_targets)],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20,
+)
+try:
+    namespace_blocked = json.loads(namespace_proc.stdout.strip())
+except Exception:
+    namespace_blocked = {}
+tenant_network_namespace = {
+    "command_ok": namespace_proc.returncode == 0,
+    "blocked": namespace_blocked,
+}
 broker_ok = None
 if ${probeBroker ? "True" : "False"}:
     try:
@@ -108,7 +184,16 @@ if ${probeBroker ? "True" : "False"}:
             broker_ok = r.status == 200
     except Exception:
         broker_ok = False
-print(json.dumps({"blocked": blocked, "broker_ok": broker_ok}))
+print(json.dumps({
+    "blocked": blocked,
+    "platform_metadata": {
+        "target": metadata_target,
+        "credential_material_present": credential_material_present,
+        "attempts": metadata_attempts,
+    },
+    "tenant_network_namespace": tenant_network_namespace,
+    "broker_ok": broker_ok,
+}))
 `;
 }
 
@@ -131,7 +216,14 @@ export async function runJob(envelope, factory = defaultSandboxFactory) {
       ? envelope.denied_targets
       : ["https://example.com/", "https://api.github.com/", "https://1.1.1.1/"];
   const probeBroker = envelope.probe_broker === true;
+  const platformMetadataTarget = (
+    envelope.platform_metadata_target ||
+    "http://169.254.169.254/latest/meta-data/"
+  ).trim();
   const audit = envelope.audit && typeof envelope.audit === "object" ? envelope.audit : null;
+  const effectiveDeniedTargets = audit && !probeBroker
+    ? [...new Set([...deniedTargets, `https://${brokerHost}/`])]
+    : deniedTargets;
   const limits = audit?.limits ?? {};
   const outputLimit = Number(limits.output_bytes) > 0 ? Number(limits.output_bytes) : 1024 * 1024;
   const payloadBytes = Buffer.byteLength(JSON.stringify(job), "utf8");
@@ -154,7 +246,7 @@ export async function runJob(envelope, factory = defaultSandboxFactory) {
     try {
       sandbox = await factory({
         apiKey,
-        timeoutMs: Math.round((timeoutS + 60) * 1000),
+        timeoutMs: Math.round(timeoutS * 1000 + PROBE_TIMEOUT_MS + BOOT_BUDGET_MS),
         secure: true,
         template: audit?.template_version ?? "base",
         metadata: {
@@ -186,40 +278,79 @@ export async function runJob(envelope, factory = defaultSandboxFactory) {
     try {
       info = await sandbox.getInfo();
       const probeRes = await sandbox.commands.run(
-        b64Py(probeScript(brokerHost, deniedTargets, probeBroker)),
-        { timeoutMs: 30_000 });
+        b64Py(probeScript(
+          brokerHost,
+          effectiveDeniedTargets,
+          probeBroker,
+          platformMetadataTarget,
+        )),
+        { timeoutMs: PROBE_TIMEOUT_MS });
       probe = JSON.parse((probeRes?.stdout ?? "").trim());
     } catch (e) {
       return fail("probe", e?.name ?? "ProbeError", e?.message ?? e);
     }
     const configuredDenyAll = info?.network?.denyOut?.includes("0.0.0.0/0") === true;
+    const configuredTemplate =
+      (!audit || (
+        info?.templateId === audit?.template_id &&
+        info?.name === audit?.template_version
+      ));
     const configuredBrokerOnly = audit && !probeBroker
-      ? info?.network?.allowOut?.length === 0
+      ? (info?.network?.allowOut ?? []).length === 0
       : info?.network?.allowOut?.length === 1 && info.network.allowOut[0] === brokerHost;
+    const configuredNoPublicTraffic = info?.network?.allowPublicTraffic === false;
     const everyDeniedProbeBlocked =
-      deniedTargets.length > 0 &&
-      deniedTargets.every((target) => probe?.blocked?.[target]?.blocked === true);
+      effectiveDeniedTargets.length > 0 &&
+      effectiveDeniedTargets.every((target) => probe?.blocked?.[target]?.blocked === true);
+    const platformMetadata = probe?.platform_metadata ?? null;
+    const tenantNetworkNamespace = probe?.tenant_network_namespace ?? null;
+    const expectedNamespaceTargets =
+      [...new Set([...effectiveDeniedTargets, platformMetadataTarget])];
+    const tenantNetworkNamespaceIsolated =
+      tenantNetworkNamespace?.command_ok === true &&
+      Object.keys(tenantNetworkNamespace?.blocked ?? {}).length ===
+        expectedNamespaceTargets.length &&
+      expectedNamespaceTargets.every(
+        (target) => tenantNetworkNamespace?.blocked?.[target]?.blocked === true,
+      );
+    const platformMetadataSafe =
+      platformMetadata?.target === platformMetadataTarget &&
+      platformMetadata?.credential_material_present === false &&
+      tenantNetworkNamespaceIsolated;
     const brokerReached = probeBroker ? probe?.broker_ok === true : null;
     const passed =
-      configuredDenyAll && configuredBrokerOnly && everyDeniedProbeBlocked &&
+      configuredTemplate && configuredDenyAll && configuredBrokerOnly && configuredNoPublicTraffic &&
+      everyDeniedProbeBlocked && platformMetadataSafe &&
       (probeBroker ? brokerReached === true : true);
 
     out.receipt = {
       sandboxId: sandbox.sandboxId ?? null,
       coldBootMs,
       network: {
-        allowOut: info?.network?.allowOut ?? [],
+        allowOut: info?.network?.allowOut ?? null,
+        allowOutReported: Array.isArray(info?.network?.allowOut),
         denyOut: info?.network?.denyOut ?? [],
         allowPublicTraffic: info?.network?.allowPublicTraffic ?? null,
       },
       configuredDenyAll,
+      configuredTemplate,
       configuredBrokerOnly,
+      configuredNoPublicTraffic,
       everyDeniedProbeBlocked,
+      deniedProbes: probe?.blocked ?? {},
+      tenantNetworkNamespace,
+      tenantNetworkNamespaceIsolated,
+      platformMetadata,
+      platformMetadataSafe,
       brokerReached,
       boundary: "tool",
       tenantHash: audit?.tenant_hash ?? null,
       sourceHash: audit?.source_hash ?? null,
+      inputHash: audit?.input_hash ?? null,
+      jobHash: sha256(canonicalJsonBytes(job)),
       templateVersion: audit?.template_version ?? null,
+      templateId: info?.templateId ?? null,
+      templateBuildId: audit?.template_build_id ?? null,
       policyVersion: audit?.policy_version ?? null,
       startedAt: new Date(Date.now() - coldBootMs).toISOString(),
       passed,

@@ -1,16 +1,16 @@
 {
   "schema": "leaf.e2b.tool-exec-microvm.v1",
   "tier": "e2b-microvm",
-  "startedAt": "2026-07-20T00:25:23.578749+00:00",
-  "completedAt": "2026-07-20T00:25:31.693146+00:00",
-  "note": "boots 1-2 run the REAL production path (tool_loader e2b-microvm tier, probe_broker=false by design); boot 3 invokes the helper directly with probe_broker=true to prove the brokerReached leg",
+  "startedAt": "2026-07-29T10:36:39.552422+00:00",
+  "completedAt": "2026-07-29T10:37:49.508416+00:00",
+  "note": "all boots use the production no-egress tool policy with the pinned template; boots 1-2 run through tool_loader and boot 3 records the direct helper receipt for the same boundary",
   "panels_count": 2345,
   "boots": {
     "oracle": {
       "ok": true,
       "panels_count": 2345,
       "intake_bytes": 478315,
-      "wall_ms": 3592,
+      "wall_ms": 24893,
       "error": null
     },
     "redteam": {
@@ -19,30 +19,185 @@
       "blocked_by": "PermissionError",
       "egress": false,
       "net_blocked_by": "URLError",
-      "wall_ms": 2460
+      "metadata_reached": false,
+      "metadata_blocked_by": "URLError",
+      "limit_restore": {
+        "cpu": false,
+        "memory": false,
+        "processes": false,
+        "filesize": false,
+        "nofile": false
+      },
+      "memory_cap_hit": true,
+      "nofile_cap_hit": true,
+      "wall_ms": 22512
     },
     "receipt": {
       "ok": true,
       "helper_receipt": {
-        "sandboxId": "i0ntcaie8d9bws386v0i6",
-        "coldBootMs": 620,
+        "sandboxId": "in1q0r4ve3gnz1fmelz1g",
+        "coldBootMs": 866,
         "network": {
-          "allowOut": [
-            "httpbingo.org"
-          ],
+          "allowOut": null,
+          "allowOutReported": false,
           "denyOut": [
             "0.0.0.0/0"
           ],
           "allowPublicTraffic": false
         },
         "configuredDenyAll": true,
+        "configuredTemplate": true,
         "configuredBrokerOnly": true,
+        "configuredNoPublicTraffic": true,
         "everyDeniedProbeBlocked": true,
-        "brokerReached": true,
-        "passed": true
+        "deniedProbes": {
+          "http://127.0.0.1:8130/": {
+            "blocked": true,
+            "error_type": "URLError"
+          },
+          "http://10.0.0.1/": {
+            "blocked": true,
+            "error_type": "URLError"
+          },
+          "http://172.16.0.1/": {
+            "blocked": true,
+            "error_type": "URLError"
+          },
+          "http://192.168.0.1/": {
+            "blocked": true,
+            "error_type": "URLError"
+          },
+          "https://example.com/": {
+            "blocked": true,
+            "error_type": "URLError"
+          },
+          "https://api.github.com/": {
+            "blocked": true,
+            "error_type": "URLError"
+          },
+          "https://1.1.1.1/": {
+            "blocked": true,
+            "error_type": "URLError"
+          },
+          "https://httpbingo.org/": {
+            "blocked": true,
+            "error_type": "URLError"
+          }
+        },
+        "tenantNetworkNamespace": {
+          "command_ok": true,
+          "blocked": {
+            "http://127.0.0.1:8130/": {
+              "blocked": true,
+              "error_type": "URLError"
+            },
+            "http://10.0.0.1/": {
+              "blocked": true,
+              "error_type": "URLError"
+            },
+            "http://172.16.0.1/": {
+              "blocked": true,
+              "error_type": "URLError"
+            },
+            "http://192.168.0.1/": {
+              "blocked": true,
+              "error_type": "URLError"
+            },
+            "https://example.com/": {
+              "blocked": true,
+              "error_type": "URLError"
+            },
+            "https://api.github.com/": {
+              "blocked": true,
+              "error_type": "URLError"
+            },
+            "https://1.1.1.1/": {
+              "blocked": true,
+              "error_type": "URLError"
+            },
+            "https://httpbingo.org/": {
+              "blocked": true,
+              "error_type": "URLError"
+            },
+            "http://169.254.169.254/latest/meta-data/": {
+              "blocked": true,
+              "error_type": "URLError"
+            }
+          }
+        },
+        "tenantNetworkNamespaceIsolated": true,
+        "platformMetadata": {
+          "target": "http://169.254.169.254/latest/meta-data/",
+          "credential_material_present": false,
+          "attempts": {
+            "no_auth_get": {
+              "blocked": false,
+              "status": 401
+            },
+            "aws_token_put": {
+              "blocked": false,
+              "status": 200
+            },
+            "aws_invalid_token_get": {
+              "blocked": false,
+              "status": 401
+            },
+            "gcp_flavor_get": {
+              "blocked": false,
+              "status": 401
+            },
+            "e2b_invalid_access_token_get": {
+              "blocked": false,
+              "status": 401
+            },
+            "invalid_bearer_get": {
+              "blocked": false,
+              "status": 401
+            }
+          }
+        },
+        "platformMetadataSafe": true,
+        "brokerReached": null,
+        "boundary": "tool",
+        "tenantHash": "9e0209cbd2f10d40c30bbad5c863338d5cda6d125500bd47b76065dc1b529920",
+        "sourceHash": "4d5fda7a84e8e2eba9f6d70d580bbe6aec02ad1bc23268a4462376a80af1a092",
+        "inputHash": "4c356f07d643c8c00100d87404500df0e075eca89f38fbc07a701b2947a728bc",
+        "jobHash": "982056bfa96819e95c40726d4c0de0e9479c4622a15dc0675b99094def199b8e",
+        "templateVersion": "leaf-python-2026-07-29-v2",
+        "templateId": "r0kto3ypd1sgylx4tkz4",
+        "templateBuildId": "273367ae-6a5b-47da-ba46-7782c2fa5d6b",
+        "policyVersion": "leaf.sandbox-policy.v1",
+        "startedAt": "2026-07-29T10:37:48.409Z",
+        "passed": true,
+        "stoppedAt": "2026-07-29T10:37:49.419Z",
+        "stopReason": "completed",
+        "resourceUse": {
+          "wallMs": 1010,
+          "inputBytes": 164,
+          "outputBytes": 71,
+          "limits": {
+            "cpu_seconds": 30,
+            "memory_bytes": 536870912,
+            "processes": 32,
+            "disk_bytes": 134217728,
+            "files": 128,
+            "source_bytes": 524288,
+            "input_bytes": 8388608,
+            "params_bytes": 262144,
+            "output_bytes": 1048576,
+            "wall_seconds": 45
+          },
+          "cpuSeconds": null,
+          "peakMemoryBytes": null,
+          "processes": null,
+          "diskBytes": null,
+          "files": null
+        },
+        "resultHash": "3f9a975758558b1a4a0db9a19ce342873ac7811aa4cdd106a0484ae36a71d09b",
+        "teardownAt": "2026-07-29T10:37:49.494Z"
       },
       "helper_error": null,
-      "wall_ms": 2042
+      "wall_ms": 22529
     }
   },
   "passed": true
