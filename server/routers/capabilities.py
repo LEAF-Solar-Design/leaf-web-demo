@@ -44,7 +44,7 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         if denial is not None:
             return denial
     try:
-        raw_tools = deps.all_tools(str(tenant))
+        raw_tools = deps.all_tools(deps.customization_tenant(tenant))
         pin = (
             customization_service.effective_catalog_pin(str(tenant))
             or deps.base_catalog_pin(raw_tools)
@@ -78,7 +78,8 @@ def converse_registry_route(tenant=Depends(deps.require_tenant)) -> Any:
         # is unfiltered; without this the picker would offer internal and QA
         # tools to ordinary tenants, which the capability catalog has always
         # withheld server-side.
-        tools = catalog.filter_internal(deps.all_tools(str(tenant)))
+        tools = catalog.filter_internal(
+            deps.all_tools(deps.customization_tenant(tenant)))
     except customization_service.CustomizationServiceError:
         tools = []
     except Exception as exc:  # noqa: BLE001 — the picker is not worth a 500

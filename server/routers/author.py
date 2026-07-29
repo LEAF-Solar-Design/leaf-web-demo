@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Literal
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -343,6 +343,35 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
 }
 
 
+def _customization_identity(tenant: Any) -> Any:
+    """The identity every customization entry point must agree on (#304).
+
+    customization_service verifies the caller's active binding against the org
+    the caller presents and keys its change sets, bare repos and catalogs by the
+    same value, so the whole surface has to use the resolved platform identity or
+    it disagrees with itself: an earlier attempt resolved only `stage`, and
+    `register` then searched a namespace the staged change was not in.
+
+    Resolved BEFORE the rollout gate on purpose. customization_flags matches the
+    exact tenant string, so gating on one id while mutating under another both
+    lets an unenabled tenant through and refuses an enabled one. The cost is a
+    503 rather than a 404 when the platform authority is down, which is the
+    honest answer: without the authority we cannot say whether R5 is enabled for
+    a tenant we cannot name.
+
+    Deliberately NOT a dependency swap. `require_tenant` still supplies the
+    request identity, so the JWT `tier` claim keeps driving entitlement
+    enforcement exactly as contract/AUTH.md §11 (frozen) specifies.
+    """
+    try:
+        return deps.resolve_active_tenant_context(tenant)
+    except HTTPException as exc:
+        raise CustomizationServiceError(
+            "tenant_identity_binding_unavailable",
+            exc.status_code if exc.status_code in (403, 503) else 503,
+        ) from exc
+
+
 def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
     """Bind an authoring idempotency key to the subject that requested it.
 
@@ -409,6 +438,10 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     # it; a direct user call is returned unchanged and keeps its own subject.
     tenant = deps.backedge_author_identity(
         tenant, authority_session_id, authority_turn_id)
+    try:
+        tenant = _customization_identity(tenant)
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
@@ -431,6 +464,10 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
 
 @router.post("/api/author/stage")
 def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    try:
+        tenant = _customization_identity(tenant)
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
@@ -448,6 +485,10 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
 
 @router.post("/api/author/register")
 def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    try:
+        tenant = _customization_identity(tenant)
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
     denied = _customization_gate(6, tenant)
     if denied is not None:
         return denied
@@ -472,6 +513,10 @@ def request_publication(
     tenant=Depends(deps.require_tenant),
 ) -> Dict[str, Any]:
     """Request continuation only. Independent approval stays off this route."""
+    try:
+        tenant = _customization_identity(tenant)
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
     denied = _customization_gate(6, tenant)
     if denied is not None:
         return denied
@@ -501,6 +546,10 @@ def confirmation_lookup(
     tenant=Depends(deps.require_tenant),
 ) -> Dict[str, Any]:
     """Return only an approval that an independent trusted actor already issued."""
+    try:
+        tenant = _customization_identity(tenant)
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
     denied = _customization_gate(6, tenant)
     if denied is not None:
         return denied
@@ -518,6 +567,10 @@ def confirmation_lookup(
 
 @router.post("/api/author/rollback")
 def rollback(req: RollbackRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    try:
+        tenant = _customization_identity(tenant)
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
     denied = _customization_gate(6, tenant)
     if denied is not None:
         return denied

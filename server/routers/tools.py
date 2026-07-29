@@ -39,7 +39,9 @@ def tools(tenant=Depends(deps.require_tenant)) -> Any:
     invisible to tenant B). Auth OFF -> tenant is the X-Tenant-Id stub (default
     demo-tenant); with no tenant repo configured this is byte-identical to before."""
     try:
-        catalog_tools = deps.all_tools(str(tenant))
+        # Authored tools are keyed by the customization identity (#304);
+        # the request identity still governs entitlements and billing.
+        catalog_tools = deps.all_tools(deps.customization_tenant(tenant))
     except customization_service.CustomizationServiceError as exc:
         return _catalog_error(exc)
     return with_envelope_fields({

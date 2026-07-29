@@ -49,5 +49,5 @@ def nl_prompt(req: PromptRequest, tenant=Depends(deps.require_tenant)) -> Dict[s
     # would classify against, and reveal the existence of, that tenant's authored
     # tools to every caller. Pass the tenant so each caller sees only the shared
     # globals plus their own authored/repo tools.
-    result = classify(text, deps.all_tools(str(tenant)))
+    result = classify(text, deps.all_tools(deps.customization_tenant(tenant)))
     return with_envelope_fields(result)

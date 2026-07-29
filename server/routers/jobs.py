@@ -361,7 +361,12 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     # tenant is not in this tenant's catalog -> UNKNOWN_TOOL, so it can never be run
     # cross-tenant. The tenant_id then threads jobs -> broker -> tool_loader so entry
     # resolution + execution read the same tenant's repo.
-    tool = deps.find_tool(req.tool, str(tenant_id))
+    # The tool is looked up under the CUSTOMIZATION identity, because that is
+    # where authored tools live (#304). Everything below — the job row, the
+    # broker admission, the spend cap, the ledger — stays on the request
+    # identity, so billing and entitlements are untouched.
+    source_tenant_id = deps.customization_tenant(tenant_id)
+    tool = deps.find_tool(req.tool, source_tenant_id)
     if tool is None:
         return error_response(ErrorCode.UNKNOWN_TOOL, f"unknown tool: {req.tool}",
                               retryable=False, tool=req.tool)
@@ -464,7 +469,8 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                         "tool manifest changed after approval; refresh tools and confirm again")
                 current_pin = (
                     customization_service.effective_catalog_pin(str(tenant_id))
-                    or deps.base_catalog_pin(deps.all_tools(str(tenant_id)))
+                    or deps.base_catalog_pin(
+                        deps.all_tools(deps.customization_tenant(tenant_id)))
                 )
                 if not (
                     hmac.compare_digest(

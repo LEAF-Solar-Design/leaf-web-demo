@@ -754,6 +754,36 @@ def resolve_active_tenant_context(tenant: Any) -> Any:
     )
 
 
+def customization_tenant(tenant: Any) -> str:
+    """The tenant id that AUTHORED-TOOL state is keyed by: the active platform id.
+
+    Issue #304. Two identities exist on a request and conflating them caused the
+    original defect:
+
+      request identity   the verified JWT claim. Jobs, broker policy, spend caps,
+                         usage and billing are keyed by it, and its `tier` claim
+                         drives entitlement enforcement (contract/AUTH.md §11,
+                         FROZEN). Nothing here changes that.
+      customization id   the active platform binding. customization_service
+                         verifies the caller's binding against it, so authored
+                         change sets, catalogs, tenant Git and tool-source lookup
+                         must use it.
+
+    A platform tenant id is a server-minted UUID with the external subject bound
+    to it through identity_bindings, so for any tenant provisioned through
+    POST /api/orgs the two differ and the claim can never satisfy the binding
+    check. Resolving here rather than swapping the route dependency keeps the
+    request identity, and therefore the tier authority, exactly as the contract
+    specifies.
+
+    Callers with no user (the harness back edge) and auth-off callers get their
+    own identity back unchanged, which is what resolve_active_tenant_context
+    already guarantees for a context with no subject and no org.
+    """
+    resolved = resolve_active_tenant_context(tenant)
+    return str(resolved)
+
+
 def require_active_tenant(tenant: Any = Depends(require_tenant)) -> Any:
     """FastAPI dependency for resources stored under platform authority."""
     return resolve_active_tenant_context(tenant)
