@@ -25,17 +25,26 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
+import { authHeaders, config, noteUnauthorized } from '../api.js'
 import {
   appendPromptHistory,
   autoGrowHeight,
   createPromptHistoryState,
   filterRunnable,
   historyKeydown,
-  mergeSkillEntries,
+  mergePickerEntries,
+  pickerTrigger,
   rankEntries,
   setPromptHistorySession,
   setPromptHistoryValue,
 } from '../composer.js'
+
+const MCP_COMMAND = {
+  kind: 'command',
+  name: 'mcp',
+  description: 'show mounted MCP servers',
+  client_action: 'mcp',
+}
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
@@ -75,25 +84,55 @@ export default function PromptBox({
   const scopeMenu = useExit(scopeOpen) // 180 ms M1 exit fade
   const [menuIdx, setMenuIdx] = useState(0)
   const [menuDismissed, setMenuDismissed] = useState(false)
+  const [caret, setCaret] = useState(() => String(value ?? '').length)
+  const [mcpOpen, setMcpOpen] = useState(false)
+  const [mcpServers, setMcpServers] = useState([])
   const historyRef = useRef(createPromptHistoryState(sessionId))
 
   // A PromptBox instance survives session switches, so retain histories in the
   // ref but reset only navigation state when its active session changes.
   historyRef.current = setPromptHistorySession(historyRef.current, sessionId)
 
-  // "/..." with no space yet = completing a tool name; a space after the name
-  // means the user moved on to args, so the menu stands down.
-  const afterSlash = value.startsWith('/') ? value.slice(1) : null
-  const completing = afterSlash != null && !/\s/.test(afterSlash)
+  // Both picker surfaces get the tenant-scoped, redacted list. Full resource
+  // enumeration is a follow-up because it needs a harness proxy endpoint.
+  useEffect(() => {
+    let live = true
+    const loadMcp = async () => {
+      try {
+        const response = await fetch(`${config.apiBase}/api/converse/mcp`, {
+          headers: { 'X-Tenant-Id': config.tenant, ...authHeaders() },
+        })
+        noteUnauthorized(response, '/api/converse/mcp')
+        const body = response.ok ? await response.json().catch(() => null) : null
+        if (live) setMcpServers(Array.isArray(body?.servers) ? body.servers : [])
+      } catch {
+        if (live) setMcpServers([])
+      }
+    }
+    loadMcp()
+    return () => { live = false }
+  }, [])
 
-  const entrySource = useMemo(() => mergeSkillEntries(tools, skills), [tools, skills])
+  const trigger = pickerTrigger(value, caret)
+  const afterSlash = trigger?.kind === 'slash' ? trigger.query : null
+  const entrySource = useMemo(
+    () => mergePickerEntries(tools, skills, mcpServers, [MCP_COMMAND]),
+    [tools, skills, mcpServers],
+  )
+  const localCommandActions = useMemo(() => ({
+    ...commandActions,
+    mcp: () => setMcpOpen(true),
+  }), [commandActions])
 
   // Name-prefix matches rank first (the Tab target reads left-to-right), then
   // name/description substring matches — case-insensitive, like Claude's picker.
   const matches = useMemo(() => {
-    if (!completing) return []
-    return rankEntries(filterRunnable(entrySource, commandActions), afterSlash)
-  }, [completing, afterSlash, entrySource, commandActions])
+    if (!trigger) return []
+    const source = trigger.kind === 'resource'
+      ? entrySource.filter((entry) => entry.kind === 'resource')
+      : entrySource.filter((entry) => entry.kind !== 'resource')
+    return rankEntries(filterRunnable(source, localCommandActions), trigger.query)
+  }, [trigger, entrySource, localCommandActions])
 
   // While ANOTHER resolver is showing — a route decision, or the scope menu —
   // that resolver owns the surface AND the keys, so this menu stands down
@@ -102,7 +141,7 @@ export default function PromptBox({
   // mounted for its 180 ms exit fade after scopeOpen flips false, so gating on
   // scopeOpen reopens this menu mid-fade and puts two listboxes on screen at
   // once. scopeMenu.shown covers both the open and the fading state.
-  const menuOpen = completing && !menuDismissed && !routeActive && !scopeMenu.shown
+  const menuOpen = !!trigger && !menuDismissed && !routeActive && !scopeMenu.shown
 
   // Any edit re-arms a dismissed menu and re-anchors the highlight.
   useEffect(() => { setMenuDismissed(false); setMenuIdx(0) }, [value])
@@ -110,8 +149,9 @@ export default function PromptBox({
 
   // Tab: complete the name into the input (trailing space closes the menu and
   // starts args mode). Enter: complete and hand off to dispatch in one act.
-  const changePrompt = (nextValue) => {
+  const changePrompt = (nextValue, nextCaret = String(nextValue ?? '').length) => {
     historyRef.current = setPromptHistoryValue(historyRef.current, nextValue)
+    setCaret(nextCaret)
     onChange(nextValue)
   }
   const dispatchPrompt = (override) => {
@@ -121,15 +161,29 @@ export default function PromptBox({
     }
     return onDispatch(override)
   }
-  const complete = (t) => changePrompt(`/${t.name} `)
+  const complete = (t) => {
+    if (t.kind === 'resource' && trigger) {
+      const next = `${value.slice(0, trigger.start)}${t.insertionText}${value.slice(caret)}`
+      setMenuDismissed(true)
+      changePrompt(next, trigger.start + t.insertionText.length)
+      return
+    }
+    changePrompt(`/${t.name} `)
+  }
   const pick = (t) => {
     // A command runs its own handler — it is not a tool, so routing it through
     // onDispatch would send "/stop" to the prompt router as if the tenant had
     // a tool by that name. filterRunnable guarantees the handler exists.
     if (t.kind === 'command') {
       changePrompt('')
-      const run = commandActions[t.client_action]
+      const run = localCommandActions[t.client_action]
       if (typeof run === 'function') run(t)
+      return
+    }
+    if (t.kind === 'resource' && trigger) {
+      const next = `${value.slice(0, trigger.start)}${t.insertionText}${value.slice(caret)}`
+      setMenuDismissed(true)
+      changePrompt(next, trigger.start + t.insertionText.length)
       return
     }
     changePrompt(`/${t.name} `)
@@ -281,8 +335,8 @@ export default function PromptBox({
           <div className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
             <div className="resolver-header">
               {matches.length > 0
-                ? <>Tools · Tab completes · Enter picks — you still confirm before it runs</>
-                : <>No tool matches “/{afterSlash}” — keep typing, or Esc to close</>}
+                ? <>{trigger.kind === 'resource' ? 'MCP servers · Tab inserts · Enter picks' : 'Tools · Tab completes · Enter picks — you still confirm before it runs'}</>
+                : <>{trigger.kind === 'resource' ? 'No MCP servers mounted.' : <>No tool matches “/{afterSlash}” — keep typing, or Esc to close</>}</>}
             </div>
             {matches.map((t, i) => {
               const isWrite = (t.capabilities || []).includes('drawing.write')
@@ -300,7 +354,7 @@ export default function PromptBox({
                   <span className="lbar" aria-hidden="true" />
                   <span className={isWrite ? 'dot square' : 'dot'} aria-hidden="true" />
                   <span className="label">
-                    <span className="route-tool">/{t.name}</span>
+                    <span className="route-tool">{t.kind === 'resource' ? `@${t.name}:` : `/${t.name}`}</span>
                     {t.description && <span className="dim"> · {t.description}</span>}
                   </span>
                   {/* Kind first when the registry supplied one: a picker that
@@ -308,12 +362,25 @@ export default function PromptBox({
                       which. Tools keep their read/write reading, which is the
                       money-relevant distinction. */}
                   <span className="count">
-                    {t.kind && t.kind !== 'tool' ? t.kind : (isWrite ? 'write' : 'read')}
+                    {t.kind === 'resource' ? 'resource' : (t.kind && t.kind !== 'tool' ? t.kind : (isWrite ? 'write' : 'read'))}
                   </span>
                   {i === idx && <span className="key hot">Tab</span>}
                 </div>
               )
             })}
+          </div>
+        )}
+        {mcpOpen && (
+          <div className="resolver mcp-panel" role="status" aria-label="Mounted MCP servers">
+            <div className="resolver-header">Mounted MCP servers <button type="button" className="chip-neutral" onClick={() => setMcpOpen(false)}>Close</button></div>
+            {mcpServers.length > 0 ? mcpServers.map((server) => (
+              <div className="resolver-row" key={server.name}>
+                <span className="lbar" aria-hidden="true" />
+                <span className="dot hollow" aria-hidden="true" />
+                <span className="label"><span className="route-tool">{server.name}</span><span className="dim"> · {server.host}</span></span>
+              </div>
+            )) : <div className="resolver-row"><span className="label">No MCP servers mounted.</span></div>}
+            <div className="resolver-header">Tools are approval-gated.</div>
           </div>
         )}
         <div className="bar-input">
@@ -333,7 +400,8 @@ export default function PromptBox({
             // `.bar-field` alternate for exactly this swap.
             className="bar-field"
             value={value}
-            onChange={(e) => changePrompt(e.target.value)}
+            onChange={(e) => changePrompt(e.target.value, e.target.selectionStart)}
+            onSelect={(e) => setCaret(e.target.selectionStart)}
             onKeyDown={onKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}

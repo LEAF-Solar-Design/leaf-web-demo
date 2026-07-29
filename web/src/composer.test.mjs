@@ -9,7 +9,9 @@ import {
   createQueuedTurnState,
   filterRunnable,
   historyKeydown,
+  mergePickerEntries,
   mergeSkillEntries,
+  pickerTrigger,
   promptHistoryFor,
   rankEntries,
   reconcileQueuedTurn,
@@ -161,6 +163,32 @@ describe('skill entry sources', () => {
       ...registry,
       { kind: 'skill', name: 'roof-analysis', description: 'analyse roof geometry' },
     ])
+  })
+})
+
+describe('MCP picker sources', () => {
+  it('merges resource roots and preserves their exact mention insertion text', () => {
+    assert.deepEqual(mergePickerEntries(
+      [{ kind: 'command', name: 'help' }], [], [{ name: 'roof-mcp', host: 'mcp.example.test' }],
+      [{ kind: 'command', name: 'mcp', client_action: 'mcp' }],
+    ), [
+      { kind: 'command', name: 'help' },
+      { kind: 'command', name: 'mcp', client_action: 'mcp' },
+      { kind: 'resource', name: 'roof-mcp', description: 'mcp.example.test', insertionText: '@roof-mcp:' },
+    ])
+  })
+})
+
+describe('pickerTrigger', () => {
+  it('opens a resource picker only at a word boundary and ignores email interiors', () => {
+    assert.deepEqual(pickerTrigger('@roof'), { kind: 'resource', query: 'roof', start: 0 })
+    assert.deepEqual(pickerTrigger('use @roof'), { kind: 'resource', query: 'roof', start: 4 })
+    assert.equal(pickerTrigger('a@b'), null)
+  })
+
+  it('uses the caret and stays inert while an IME composes', () => {
+    assert.deepEqual(pickerTrigger('@roof later', 5), { kind: 'resource', query: 'roof', start: 0 })
+    assert.equal(pickerTrigger('@roof', 5, true), null)
   })
 })
 

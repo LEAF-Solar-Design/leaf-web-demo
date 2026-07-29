@@ -44,6 +44,7 @@ from routers import (
     demand,
     drawings,
     jobs as jobs_router,
+    mcp_status,
     ops,
     ops_metrics,
     prompt,
@@ -119,6 +120,7 @@ app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_
 app.include_router(tools.router)
 app.include_router(jobs_router.router)
 app.include_router(capabilities.router)
+app.include_router(mcp_status.router)
 app.include_router(deployment_identity.router)
 app.include_router(demand.router)  # public waitlist capture, no auth required
 app.include_router(author.router)
