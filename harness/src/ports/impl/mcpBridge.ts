@@ -2,10 +2,24 @@
  * Per-tenant MCP attachment storage. Tokens remain in the stored configuration
  * and the SDK attachment only. Diagnostics use describeConfig(), which never
  * renders a token or a URL path.
+ *
+ * File-backed records hold bearer tokens in plaintext at rest. The deployment
+ * must protect the store directory because it is the security boundary for
+ * those files.
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { McpServerConfig as AgentSdkMcpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 
@@ -159,8 +173,18 @@ export class FileMcpBridgeStore implements McpBridgeStore {
 
   private writeAtomic(path: string, content: string): void {
     const temp = join(dirname(path), `.${randomUUID()}.tmp`);
-    writeFileSync(temp, content, "utf8");
-    renameSync(temp, path);
+    let fd: number | null = null;
+    try {
+      fd = openSync(temp, "wx", 0o600);
+      writeFileSync(fd, content, "utf8");
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
+      renameSync(temp, path);
+    } finally {
+      if (fd !== null) closeSync(fd);
+      rmSync(temp, { force: true });
+    }
   }
 }
 

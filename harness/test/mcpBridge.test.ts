@@ -67,6 +67,11 @@ describe("MCP bridge validation", () => {
       "mcp_bridge_config_too_large",
     );
   });
+
+  it.each(["javascript:evil()", "file:///etc/passwd"])("refuses unsafe MCP URL %s at set-time", async (url) => {
+    const store = new InMemoryMcpBridgeStore();
+    await expect(store.set("tenant", [{ name: "unsafe-url", url }])).rejects.toThrow("mcp_bridge_invalid_config");
+  });
 });
 
 describe("file-backed MCP bridge store", () => {
@@ -80,5 +85,20 @@ describe("file-backed MCP bridge store", () => {
     expect(readdirSync(dir).some((filename) => filename.includes(tenantId))).toBe(false);
     await store.delete(tenantId);
     expect(await store.get(tenantId)).toBeNull();
+  });
+
+  it("keeps each re-opened tenant attachment limited to its own bearer", async () => {
+    const dir = scratch();
+    const store = new FileMcpBridgeStore({ dir });
+    await store.set("tenant-a", [config("alpha", "BEARER_FOR_A")]);
+    await store.set("tenant-b", [config("bravo", "BEARER_FOR_B")]);
+
+    const reopened = new FileMcpBridgeStore({ dir });
+    const attachmentA = JSON.stringify(await resolveMcpAttachment(reopened, "tenant-a"));
+    const attachmentB = JSON.stringify(await resolveMcpAttachment(reopened, "tenant-b"));
+    expect(attachmentA).toContain("BEARER_FOR_A");
+    expect(attachmentA).not.toContain("BEARER_FOR_B");
+    expect(attachmentB).toContain("BEARER_FOR_B");
+    expect(attachmentB).not.toContain("BEARER_FOR_A");
   });
 });
