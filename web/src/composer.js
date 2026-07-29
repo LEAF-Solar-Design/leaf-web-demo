@@ -148,24 +148,75 @@ export function shouldRetryWithQueue(errorKind, { text, confirm, credential_gran
     && credential_grant == null
 }
 
-// A queued prompt becomes a normal transcript turn only when the server starts
-// the same text. A different turn may belong to another client, so it must not
-// consume this client's queue note. A dropped queue record clears only itself.
-export function reconcileQueuedTurn(queuedTurn, event = {}) {
-  if (!queuedTurn) return { action: 'keep' }
-  if (event.type === 'turn_started'
-    && event.turn_id
-    && event.data?.text === queuedTurn.text) {
-    return {
-      action: 'promote',
-      turn: { turnId: event.turn_id, text: queuedTurn.text },
+// A queued prompt is identified by the server's queued_id, never by its text.
+// Streams can win the race against the 202 response, so retain recent starts
+// until the matching response arrives. This is plain data so ConversePanel only
+// has to apply the decision and render it.
+export const MAX_SEEN_QUEUED_STARTS = 8
+
+export function createQueuedTurnState() {
+  return { queuedTurn: null, seenQueuedStarts: [] }
+}
+
+function queuedStartFrom(event = {}) {
+  if (event.type !== 'turn_started' || !event.turn_id || !event.data?.queued_id) return null
+  return {
+    queued_id: event.data.queued_id,
+    turn_id: event.turn_id,
+    text: String(event.data.text ?? ''),
+  }
+}
+
+function rememberQueuedStart(seenQueuedStarts, start) {
+  if (!start) return seenQueuedStarts
+  return [...seenQueuedStarts.filter((seen) => seen.queued_id !== start.queued_id), start]
+    .slice(-MAX_SEEN_QUEUED_STARTS)
+}
+
+function turnFromQueuedStart(start) {
+  return { turnId: start.turn_id, text: start.text }
+}
+
+// Apply a stream event to queue state. A started turn with no queued_id is
+// unrelated to this queue even when its text happens to be identical.
+export function reconcileQueuedTurn(state = createQueuedTurnState(), event = {}) {
+  const start = queuedStartFrom(event)
+  if (start) {
+    const seenQueuedStarts = rememberQueuedStart(state.seenQueuedStarts, start)
+    if (state.queuedTurn?.queuedId === start.queued_id) {
+      return {
+        action: 'promote',
+        turn: turnFromQueuedStart(start),
+        state: { queuedTurn: null, seenQueuedStarts },
+      }
     }
+    return { action: 'keep', state: { ...state, seenQueuedStarts } }
   }
   if (event.type === 'turn_queue_dropped'
-    && event.data?.queued_id === queuedTurn.queuedId) {
-    return { action: 'clear' }
+    && event.data?.queued_id === state.queuedTurn?.queuedId) {
+    return { action: 'clear', state: { ...state, queuedTurn: null } }
   }
-  return { action: 'keep' }
+  return { action: 'keep', state }
+}
+
+// Apply the queued 202 response. If its turn_started event arrived first, use
+// that recorded event to render the bubble immediately instead of flashing a
+// stale queue note.
+export function acceptQueuedTurn(state = createQueuedTurnState(), queuedTurn) {
+  const started = state.seenQueuedStarts.find(
+    (seen) => seen.queued_id === queuedTurn?.queuedId,
+  )
+  if (started) {
+    return {
+      action: 'promote',
+      turn: turnFromQueuedStart(started),
+      state: { ...state, queuedTurn: null },
+    }
+  }
+  return {
+    action: 'queue',
+    state: { ...state, queuedTurn },
+  }
 }
 
 // Prefix matches rank ahead of substring matches, then the group order above

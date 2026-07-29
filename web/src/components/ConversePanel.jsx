@@ -10,7 +10,12 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { openStream, postMessage, approve, cancelTurn, classifyAgentError } from '../converse.js'
-import { reconcileQueuedTurn, shouldRetryWithQueue } from '../composer.js'
+import {
+  acceptQueuedTurn,
+  createQueuedTurnState,
+  reconcileQueuedTurn,
+  shouldRetryWithQueue,
+} from '../composer.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
 
@@ -83,27 +88,26 @@ export default function ConversePanel({
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
-  const queuedTurnRef = useRef(null)
-  const setQueued = (next) => {
-    queuedTurnRef.current = next
-    setQueuedTurn(next)
+  const queueStateRef = useRef(createQueuedTurnState())
+  const setQueueState = (next) => {
+    queueStateRef.current = next
+    setQueuedTurn(next.queuedTurn)
   }
 
   // Stream lifecycle: one open stream per session, replay from seq 0 (the
   // transcript is durable — a remount recovers the whole conversation).
   useEffect(() => {
     if (!sessionId) return undefined
-    setEvents([]); setLocalTurns([]); setQueued(null); setSendErr(null)
+    setEvents([]); setLocalTurns([]); setSendErr(null)
     setDecidedLocal({}); setDeciding(null)
     jobSeenRef.current = new Set()
+    setQueueState(createQueuedTurnState())
     const stream = openStream(sessionId, 0, {
       onEvent: (env) => {
-        const queued = reconcileQueuedTurn(queuedTurnRef.current, env)
+        const queued = reconcileQueuedTurn(queueStateRef.current, env)
+        setQueueState(queued.state)
         if (queued.action === 'promote') {
           setLocalTurns((prev) => [...prev, queued.turn])
-          setQueued(null)
-        } else if (queued.action === 'clear') {
-          setQueued(null)
         }
         if (env.type === 'job_linked' && env.data?.job_id && !jobSeenRef.current.has(env.data.job_id)) {
           jobSeenRef.current.add(env.data.job_id)
@@ -285,7 +289,14 @@ export default function ConversePanel({
     setSending(true); setSendErr(null)
     const accept = (res) => {
       if (res.status === 'queued') {
-        setQueued({ queuedId: res.queued_id || null, text })
+        const queued = acceptQueuedTurn(queueStateRef.current, {
+          queuedId: res.queued_id || null,
+          text,
+        })
+        setQueueState(queued.state)
+        if (queued.action === 'promote') {
+          setLocalTurns((prev) => [...prev, queued.turn])
+        }
       } else {
         setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text }])
       }

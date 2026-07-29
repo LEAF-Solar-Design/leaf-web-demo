@@ -449,6 +449,34 @@ def test_entitlement_evaluator_crash_neither_raises_nor_leaks_the_claim(monkeypa
                    and e["data"].get("text") == "crash-eval" for e in events)
 
 
+def test_promoted_turns_started_event_carries_the_queued_id(monkeypatch, turn_stub):
+    """The client reconciles its "Queued" note by IDENTITY: the promoted
+    turn's turn_started must carry the queued_id the 202 returned. Text
+    matching was race-prone with identical texts (PR #305 round 2)."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    sess = _new_session()
+    sid = sess["session_id"]
+    assert session_store.try_begin_turn(sid, "orphan-qid", 300)
+    status, queued_id = turn_runner.try_enqueue_turn("tenant-q", sid, text="identified")
+    assert status == "queued"
+    assert turn_runner.request_cancel("tenant-q", sid, "orphan-qid") == "cancelled"
+
+    started = [e for e in session_store.recent_events(sid, 100)
+               if e["type"] == "turn_started" and e["data"].get("text") == "identified"]
+    assert started, "queued prompt never started"
+    assert started[0]["data"].get("queued_id") == queued_id, (
+        "the promoted turn_started does not carry the queued_id — the client "
+        "cannot reconcile by identity")
+    # a DIRECT turn's turn_started must NOT carry the field
+    assert _wait_until(lambda: session_store.get_session(sid)["active_turn_id"] is None)
+    turn_runner.start_turn("tenant-q", sid, text="direct")
+    direct = [e for e in session_store.recent_events(sid, 100)
+              if e["type"] == "turn_started" and e["data"].get("text") == "direct"]
+    assert direct and "queued_id" not in direct[0]["data"]
+
+
 # =========================================================================== #
 # route level
 # =========================================================================== #

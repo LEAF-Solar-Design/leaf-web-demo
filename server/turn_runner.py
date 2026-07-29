@@ -371,7 +371,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                classifier_hint: Optional[Dict[str, Any]] = None,
                model: Optional[str] = None,
                credential_grant: Optional[Dict[str, Any]] = None,
-               tier: Optional[str] = None) -> str:
+               tier: Optional[str] = None,
+               queued_id: Optional[str] = None) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
     # string tenant_id used on the harness wire. Off-auth callers are plain
@@ -428,6 +429,13 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     user_data: Dict[str, Any] = {}
     if text is not None:
         user_data["text"] = text
+    if queued_id is not None:
+        # The promoted-from-queue identity, TRANSCRIPT-ONLY (additive event
+        # field; the frozen harness wire payload below never carries it). The
+        # client's queued-note reconciliation keys on this id — text matching
+        # was race-prone when two prompts shared identical text (PR #305
+        # review round 2).
+        user_data["queued_id"] = queued_id
     if confirm is not None:
         user_data["confirm"] = confirm
     if classifier_hint is not None:
@@ -812,7 +820,8 @@ def _kick_queued(session_id: str) -> None:
                            text=payload["text"],
                            classifier_hint=payload["classifier_hint"],
                            model=payload["model"],
-                           tier=payload["tier"])
+                           tier=payload["tier"],
+                           queued_id=payload["queued_id"])
                 _release(keep=False)
                 return
             except TurnBusy:

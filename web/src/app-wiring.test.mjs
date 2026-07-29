@@ -19,6 +19,8 @@ import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+const promptBoxSessionBinding = /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
+const conversePanelSessionBinding = /React\.createElement\(\s*ConversePanel,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 
 // Bindings App declares AND passes into JSX. Add a row whenever a new one is
 // introduced; the cost is one line and the failure it catches is a white screen.
@@ -50,9 +52,19 @@ describe('App.jsx wiring', () => {
   }
 
   it('passes sessionId into the PromptBox element itself', () => {
-    // esbuild emits this JSX element as React.createElement(PromptBox, {...}).
-    // Limit the match to that first props object, not another component call.
-    assert.match(stripped,
-      /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId\s*:/)
+    // Limit the match to the PromptBox props object, not another component
+    // receiving the same session binding.
+    assert.match(stripped, promptBoxSessionBinding)
+  })
+
+  it('rejects PromptBox sessionId={null} even while ConversePanel keeps its binding', () => {
+    const mutated = appSource.replace(
+      /(<PromptBox[\s\S]*?\bsessionId=\{)agentSessionId(\})/,
+      '$1null$2',
+    )
+    assert.notEqual(mutated, appSource, 'the falsification mutation must target PromptBox')
+    const mutatedStripped = esbuild.transformSync(mutated, { loader: 'jsx' }).code
+    assert.match(mutatedStripped, conversePanelSessionBinding)
+    assert.doesNotMatch(mutatedStripped, promptBoxSessionBinding)
   })
 })

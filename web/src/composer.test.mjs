@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  acceptQueuedTurn,
   appendPromptHistory,
   autoGrowHeight,
   createPromptHistoryState,
+  createQueuedTurnState,
   filterRunnable,
   historyKeydown,
   mergeSkillEntries,
@@ -15,6 +17,7 @@ import {
   setPromptHistoryValue,
   LINE_PX,
   MAX_ROWS,
+  MAX_SEEN_QUEUED_STARTS,
 } from './composer.js'
 
 const names = (entries) => entries.map((e) => e.name)
@@ -175,41 +178,77 @@ describe('busy queue retry', () => {
 describe('queued turn reconciliation', () => {
   const queuedTurn = { queuedId: 'queued-1', text: 'continue with the panel count' }
 
-  it('promotes the matching started turn with its real transcript id', () => {
-    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+  it('shows the queue first, then promotes only its matching queued_id', () => {
+    const queued = acceptQueuedTurn(createQueuedTurnState(), queuedTurn)
+    assert.equal(queued.action, 'queue')
+    const promoted = reconcileQueuedTurn(queued.state, {
       type: 'turn_started',
       turn_id: 'turn-9',
-      data: { text: 'continue with the panel count' },
-    }), {
-      action: 'promote',
-      turn: { turnId: 'turn-9', text: 'continue with the panel count' },
+      data: { queued_id: 'queued-1', text: 'server-normalized text' },
     })
+    assert.equal(promoted.action, 'promote')
+    assert.deepEqual(promoted.turn, { turnId: 'turn-9', text: 'server-normalized text' })
+    assert.equal(promoted.state.queuedTurn, null)
   })
 
-  it('keeps the queue when another client starts a different prompt first', () => {
-    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+  it('promotes immediately when turn_started arrives before its queued 202', () => {
+    const started = reconcileQueuedTurn(createQueuedTurnState(), {
+      type: 'turn_started',
+      turn_id: 'turn-early',
+      data: { queued_id: 'queued-1', text: 'continue with the panel count' },
+    })
+    assert.equal(started.action, 'keep')
+    const accepted = acceptQueuedTurn(started.state, queuedTurn)
+    assert.equal(accepted.action, 'promote')
+    assert.deepEqual(accepted.turn, { turnId: 'turn-early', text: queuedTurn.text })
+    assert.equal(accepted.state.queuedTurn, null)
+  })
+
+  it('never promotes an identical-text turn without the queued_id', () => {
+    const queued = acceptQueuedTurn(createQueuedTurnState(), queuedTurn)
+    const unrelated = reconcileQueuedTurn(queued.state, {
       type: 'turn_started',
       turn_id: 'turn-other',
-      data: { text: 'summarise the roofline' },
-    }), { action: 'keep' })
+      data: { text: queuedTurn.text },
+    })
+    assert.equal(unrelated.action, 'keep')
+    assert.deepEqual(unrelated.state, queued.state)
+  })
+
+  it('keeps the queue when a different queued_id starts with identical text', () => {
+    const queued = acceptQueuedTurn(createQueuedTurnState(), queuedTurn)
+    const unrelated = reconcileQueuedTurn(queued.state, {
+      type: 'turn_started',
+      turn_id: 'turn-other',
+      data: { queued_id: 'queued-other', text: queuedTurn.text },
+    })
+    assert.equal(unrelated.action, 'keep')
+    assert.deepEqual(unrelated.state.queuedTurn, queuedTurn)
   })
 
   it('clears only the matching dropped queue record', () => {
-    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+    const queued = acceptQueuedTurn(createQueuedTurnState(), queuedTurn)
+    assert.equal(reconcileQueuedTurn(queued.state, {
       type: 'turn_queue_dropped',
       data: { queued_id: 'queued-1' },
-    }), { action: 'clear' })
-    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+    }).action, 'clear')
+    assert.equal(reconcileQueuedTurn(queued.state, {
       type: 'turn_queue_dropped',
       data: { queued_id: 'queued-other' },
-    }), { action: 'keep' })
+    }).action, 'keep')
   })
 
-  it('does not promote a turn that has no real turn id', () => {
-    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
-      type: 'turn_started',
-      data: { text: 'continue with the panel count' },
-    }), { action: 'keep' })
+  it('bounds remembered queued starts to the most recent eight', () => {
+    let state = createQueuedTurnState()
+    for (let i = 0; i <= MAX_SEEN_QUEUED_STARTS; i += 1) {
+      state = reconcileQueuedTurn(state, {
+        type: 'turn_started',
+        turn_id: `turn-${i}`,
+        data: { queued_id: `queued-${i}`, text: `prompt ${i}` },
+      }).state
+    }
+    assert.equal(state.seenQueuedStarts.length, MAX_SEEN_QUEUED_STARTS)
+    assert.equal(state.seenQueuedStarts[0].queued_id, 'queued-1')
   })
 })
 
