@@ -372,6 +372,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                model: Optional[str] = None,
                credential_grant: Optional[Dict[str, Any]] = None,
                tier: Optional[str] = None,
+               subject: Optional[str] = None,
                queued_id: Optional[str] = None) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
@@ -384,7 +385,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     # The verified subject that opened this turn, snapshotted with the tier.
     # The harness back-edge authenticates as a tenant and cannot assert a user,
     # so protected authoring resolves the author from this record instead.
-    subject = getattr(tenant_id, "subject", None)
+    if subject is None:
+        subject = getattr(tenant_id, "subject", None)
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
@@ -682,7 +684,11 @@ def queued_prompt(session_id: str) -> Optional[Dict[str, Any]]:
     and status surfaces."""
     with _queued_lock:
         payload = _queued.get(session_id)
-        return dict(payload) if payload else None
+        if not payload:
+            return None
+        safe = dict(payload)
+        safe.pop("subject", None)
+        return safe
 
 
 def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
@@ -702,6 +708,7 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
     check and the append here surfaces as TurnRejected(404).
     """
     tier = getattr(tenant_id, "tier", None)
+    subject = getattr(tenant_id, "subject", None)
     # The entitlement tier is snapshotted too, so the KICKER can re-run the
     # router's converse-entitlement check at start time (review round 1,
     # finding 4): a revocation landing during the wait must gate the queued
@@ -713,6 +720,7 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
         "queued_id": queued_id,
         "tenant_id": tenant_id,
         "tier": tier,
+        "subject": subject,
         "entitlement_tier": entitlement_tier,
         "text": text,
         "classifier_hint": classifier_hint,
@@ -826,6 +834,7 @@ def _kick_queued(session_id: str) -> None:
                            classifier_hint=payload["classifier_hint"],
                            model=payload["model"],
                            tier=payload["tier"],
+                           subject=payload["subject"],
                            queued_id=payload["queued_id"])
                 _release(keep=False)
                 return

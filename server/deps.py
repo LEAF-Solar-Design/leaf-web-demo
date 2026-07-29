@@ -627,11 +627,19 @@ def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
         subject = session_store.active_turn_subject(
             str(authority_session_id), str(authority_turn_id), str(tenant),
             turn_runner.turn_max_s())
+        platform_tenant_id, platform_tier = (
+            resolve_active_platform_tenant_authority(subject)
+        )
     except Exception:  # noqa: BLE001 - an authority outage must not elevate
         return tenant
-    if not subject:
+    if not subject or platform_tenant_id != str(tenant):
         return tenant
-    return TenantContext(str(tenant), org_id=tenant.org_id, tier=tenant.tier,
+    # The broker provisioning record can lag the active platform binding.
+    # Resolve the CURRENT server-owned tier from the turn's stored subject
+    # instead of authorizing from either the stale broker tier or the
+    # turn-start snapshot. A downgrade or account move during the turn then
+    # takes effect before protected authoring.
+    return TenantContext(str(tenant), org_id=tenant.org_id, tier=platform_tier,
                          workspace=tenant.workspace, subject=subject,
                          backedge=True)
 
