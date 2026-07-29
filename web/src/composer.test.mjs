@@ -7,8 +7,10 @@ import {
   createPromptHistoryState,
   filterRunnable,
   historyKeydown,
+  mergeSkillEntries,
   promptHistoryFor,
   rankEntries,
+  shouldRetryWithQueue,
   setPromptHistoryValue,
   LINE_PX,
   MAX_ROWS,
@@ -137,6 +139,35 @@ describe('filterRunnable', () => {
   it('rejects a non-function handler (a truthy value is not dispatchable)', () => {
     assert.deepEqual(names(filterRunnable(entries, { help: 'yes' })),
       ['orwell-writing', 'count_panels'])
+  })
+})
+
+describe('skill entry sources', () => {
+  it('merges fetched skills while preserving registry skills as the source of truth', () => {
+    const registry = [
+      { kind: 'command', name: 'help', description: 'registry command' },
+      { kind: 'skill', name: 'orwell-writing', description: 'registry description' },
+    ]
+    const fetched = [
+      { name: 'orwell-writing', description: 'stale fetched description' },
+      { name: 'roof-analysis', description: 'analyse roof geometry' },
+    ]
+
+    assert.deepEqual(mergeSkillEntries(registry, fetched), [
+      ...registry,
+      { kind: 'skill', name: 'roof-analysis', description: 'analyse roof geometry' },
+    ])
+  })
+})
+
+describe('busy queue retry', () => {
+  it('retries only a busy plain-text send without a credential grant or confirmation', () => {
+    assert.equal(shouldRetryWithQueue('busy', { text: 'continue' }), true)
+    assert.equal(shouldRetryWithQueue('rate_limited', { text: 'continue' }), false)
+    assert.equal(shouldRetryWithQueue('busy', { confirm: { confirmationId: 'c1' } }), false)
+    assert.equal(shouldRetryWithQueue('busy', {
+      text: 'continue', credential_grant: { kind: 'api_key' },
+    }), false)
   })
 })
 

@@ -25,6 +25,8 @@ const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
 const DECLARED_AND_USED = [
   { name: 'slashCommandActions', usedAs: 'commandActions' },
   { name: 'registryEntries', usedAs: 'registryEntries' },
+  { name: 'catalogSkills', usedAs: 'skills: catalogSkills' },
+  { name: 'agentSessionId', usedAs: 'sessionId: agentSessionId' },
 ]
 
 describe('App.jsx wiring', () => {
@@ -34,6 +36,8 @@ describe('App.jsx wiring', () => {
       // (`const [x, setX] =`), which is how useState results are bound.
       const declared = new RegExp(
         `(const|let|var)\\s+(\\[\\s*)?${name}\\s*[,\\]=]`).test(stripped)
+        || new RegExp(
+          `(const|let|var)\\s+\\{[^}]*\\b(?:\\w+\\s*:\\s*)?${name}\\s*[,}]`).test(stripped)
       assert.ok(declared,
         `${name} does not survive comment-stripping — its declaration is inside a ` +
         'comment block, so any render that reads it throws ReferenceError')

@@ -110,15 +110,19 @@ export function resetSession(drawingId) {
 // 202 {turn_id, status:"started"}; everything else throws tagged (409
 // turn_in_progress · 401 grant_required · 429 llm_quota_exhausted /
 // llm_rate_limited · 404 session_not_found).
-export async function postMessage(sessionId, { text, confirm, classifier_hint } = {}) {
+export async function postMessage(sessionId, {
+  text, confirm, classifier_hint, credential_grant, queue,
+} = {}) {
   const payload = {}
   if (text != null) payload.text = text
   if (confirm != null) payload.confirm = confirm
   if (classifier_hint != null) payload.classifier_hint = classifier_hint
+  if (credential_grant != null) payload.credential_grant = credential_grant
+  if (queue === true) payload.queue = true
   const { res, body } = await post(
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload,
   )
-  if (res.status === 202 && body && body.turn_id) return body
+  if (res.status === 202 && body && (body.turn_id || body.status === 'queued')) return body
   throw tagged(res, body, `POST /api/sessions/${sessionId}/messages -> ${res.status}`)
 }
 
@@ -143,6 +147,22 @@ export async function fetchRegistry() {
     return { entries, counts: body?.counts || {} }
   } catch {
     return { entries: [], counts: {} }
+  }
+}
+
+// The standalone skills catalog is a fallback source for the slash picker.
+// It must never make the composer fail when an older deployment lacks it.
+export async function fetchSkills() {
+  try {
+    const res = await fetch(`${API_BASE}/api/skills`, {
+      headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+    })
+    noteUnauthorized(res, '/api/skills')
+    if (!res.ok) return { skills: [] }
+    const body = await res.json().catch(() => null)
+    return { skills: Array.isArray(body?.skills) ? body.skills : [] }
+  } catch {
+    return { skills: [] }
   }
 }
 

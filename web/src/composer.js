@@ -122,6 +122,32 @@ export const REGISTRY_GROUPS = [
   { kind: 'tool', label: 'Tools' },
 ]
 
+// The registry is the richer source when it knows about a skill. The skills
+// endpoint fills gaps while its registry projection catches up, without
+// changing the source's existing command and tool order.
+export function mergeSkillEntries(registryEntries, skills) {
+  const merged = Array.isArray(registryEntries) ? [...registryEntries] : []
+  const names = new Set(merged
+    .filter((entry) => entry && typeof entry.name === 'string' && entry.name)
+    .map((entry) => entry.name))
+  for (const skill of skills || []) {
+    if (!skill || typeof skill.name !== 'string' || !skill.name || names.has(skill.name)) continue
+    names.add(skill.name)
+    merged.push({ ...skill, kind: 'skill' })
+  }
+  return merged
+}
+
+// A busy text turn may be parked once. Confirmations and ephemeral credential
+// grants cannot be queued by the server, so keep that gate pure and explicit.
+export function shouldRetryWithQueue(errorKind, { text, confirm, credential_grant } = {}) {
+  return errorKind === 'busy'
+    && typeof text === 'string'
+    && text.trim().length > 0
+    && confirm == null
+    && credential_grant == null
+}
+
 // Prefix matches rank ahead of substring matches, then the group order above
 // decides ties. Entries with no `kind` (today's tools-only payload, which has
 // no registry grouping yet) all share one rank, so a stable sort leaves them
