@@ -234,18 +234,19 @@ export default function ConversePanel({
   // reply input is disabled while a turn runs (a disabled control receives no
   // keys).
   //
-  // It sits BETWEEN the two existing Esc consumers, which is why both calls
-  // below are load-bearing:
+  // It sits BETWEEN the existing Esc consumers, which is why both calls below
+  // are load-bearing:
   //   * `defaultPrevented` DEFERS to anything nearer the target that already
-  //     handled the key — the slash menu and the scope/route resolvers in
-  //     PromptBox call preventDefault to close themselves, and stealing Esc
-  //     from them would break that ladder.
+  //     handled the key — PromptBox's slash menu closes itself with
+  //     preventDefault (its scope resolver never reaches us at all, stopping
+  //     the key in the capture phase) — so that ladder is unchanged.
   //   * `stopPropagation` keeps the key from ALSO reaching App's window-level
-  //     ladder (App.jsx: `window.addEventListener('keydown', …)`), which does
-  //     NOT check defaultPrevented — without this, one Esc would interrupt the
-  //     turn AND dismiss the route/drawer behind it. Document listeners fire
-  //     before window ones in the bubble phase, so stopping here is what makes
-  //     "interrupt the running turn" the single effect of that keypress.
+  //     ladder (App.jsx: `window.addEventListener('keydown', …)`), which
+  //     dismisses the drawer/route and does NOT check defaultPrevented.
+  //     Without it, one Esc would interrupt the turn AND dismiss whatever was
+  //     behind it. Document listeners fire before window ones in the bubble
+  //     phase, so stopping here is what makes "interrupt the running turn"
+  //     the single effect of that keypress.
   // Both only happen when there is actually a turn to stop; otherwise the key
   // is left entirely alone.
   useEffect(() => {
