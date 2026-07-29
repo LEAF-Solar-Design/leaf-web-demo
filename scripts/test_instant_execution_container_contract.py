@@ -25,6 +25,7 @@ def main() -> None:
     for required_copy in (
         "executor/bootstrap.py",
         "executor/control_plane/*.py",
+        "executor/control_plane/migrations/",
         "executor/runtime/*.py",
         "executor/contracts/*.py",
         "executor/contracts/schemas/",
@@ -44,6 +45,7 @@ def main() -> None:
 
     assert "gunicorn" in text
     assert "executor.control_plane.production:create_wsgi_application()" in text
+    assert "executor/control_plane/migrations/" in text
     assert "python -m executor.control_plane.reaper_main" in documentation
     assert "python -m executor.runtime.service" in documentation
     assert "python -m executor.bootstrap control" in documentation
