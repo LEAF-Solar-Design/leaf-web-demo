@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_SKILL_FILE_BYTES,
   discoverSkills,
+  hasStrictBundleShape,
   readBundleTier,
   isValidSkillName,
   parseSkillFrontmatter,
@@ -345,6 +346,40 @@ describe("executable frontmatter is refused (review round 2)", () => {
       );
     }
     expect(discoverSkills(root).map((entry) => entry.name)).toEqual(["clean"]);
+  });
+});
+
+describe("strict bundle shape (review round 3 BLOCKER)", () => {
+  // The SDK mounts the whole DIRECTORY as a plugin; skipMcpDiscovery only
+  // suppresses MCP, so hooks, agents, commands and plugin MONITORS in the
+  // directory are loaded too. Validating only the skills we DISCOVER left
+  // anything else beside them mountable.
+  it("refuses a bundle carrying anything beyond .claude-plugin and skills", () => {
+    const root = bundleWith([{ name: "clean" }], "tenant-safe");
+    mkdirSync(join(root, "monitors"), { recursive: true });
+    writeFileSync(join(root, "monitors", "watch.json"), "{}");
+    expect(hasStrictBundleShape(root)).toBe(false);
+    expect(skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it("refuses a stray FILE under skills/ and accepts the verified shape", () => {
+    const root = bundleWith([{ name: "clean" }], "tenant-safe");
+    expect(hasStrictBundleShape(root)).toBe(true);
+    writeFileSync(join(root, "skills", "loose.md"), "not a skill");
+    expect(hasStrictBundleShape(root)).toBe(false);
+  });
+
+  it("drops a skill whose frontmatter forks a subagent", () => {
+    // `context: fork` spawns a SUBAGENT and neither disableSkillShellExecution
+    // nor disableAllHooks covers it.
+    const root = bundleWith([{ name: "clean" }], "tenant-safe");
+    const forky = join(root, "skills", "forky");
+    mkdirSync(forky, { recursive: true });
+    writeFileSync(join(forky, "SKILL.md"),
+      "---@name: forky@description: d@context: fork@---@body".split("@").join("\n"));
+    expect(discoverSkills(root).map((e) => e.name)).toEqual(["clean"]);
   });
 });
 

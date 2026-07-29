@@ -34,7 +34,7 @@
  * OFF unless configured. No bundle, no attachment, and the session runs
  * exactly as it does today.
  */
-import { closeSync, existsSync, opendirSync, openSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, opendirSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
 export type SkillTier = "tenant-safe" | "operator";
@@ -53,6 +53,14 @@ export type BundledSkill = { name: string; description: string };
 
 const SKILLS_DIR = "skills";
 const MANIFEST = join(".claude-plugin", "plugin.json");
+// Frontmatter keys that make a skill EXECUTABLE or spawn something, rather
+// than instruct. Refused outright at the artifact boundary — the runtime flags
+// (disableSkillShellExecution, disableAllHooks) do not cover all of these:
+// `context: fork` spawns a SUBAGENT and is disabled by neither (review round
+// 3). A curated skill is prose; anything here means the bundle is wrong.
+const EXECUTABLE_FRONTMATTER =
+  /^\s*(hooks|allowed-tools|allowedtools|context|agent|agents|background|monitor|monitors|command|commands|mcp|mcpServers)\s*:/i;
+
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
 
 /**
@@ -177,7 +185,7 @@ export function parseSkillFrontmatter(source: string): BundledSkill | null {
     // we build should not CONTAIN a skill that wants to execute, and silently
     // accepting one would rest the whole guarantee on a single runtime flag
     // (review round 2).
-    if (/^\s*(hooks|allowed-tools|allowedtools)\s*:/i.test(line)) return null;
+    if (EXECUTABLE_FRONTMATTER.test(line)) return null;
     const kv = /^(name|description)\s*:\s*(.*)$/.exec(line.trim());
     if (!kv) continue;
     const value = kv[2].trim().replace(/^["']|["']$/g, "");
@@ -294,6 +302,41 @@ export function discoverSkills(bundlePath: string): BundledSkill[] {
  * AND the bundle must declare the same tier. That is the fail-closed check:
  * a tenant-tier process pointed at the operator bundle mounts NOTHING.
  */
+/** The only entries a curated bundle may contain at its root, and under
+ * skills/. Anything else means the artifact was not produced by the verified
+ * pipeline, and mounting it would hand the SDK whatever else is in there. */
+const ALLOWED_ROOT_ENTRIES = new Set([".claude-plugin", "skills"]);
+
+export function hasStrictBundleShape(bundlePath: string): boolean {
+  try {
+    for (const entry of readdirSync(bundlePath, { withFileTypes: true })) {
+      if (!ALLOWED_ROOT_ENTRIES.has(entry.name)) {
+        console.error(
+          `[leaf-skills] refusing to mount ${bundlePath}: unexpected entry ` +
+          `${entry.name} at the bundle root`);
+        return false;
+      }
+      if (!entry.isDirectory()) return false;
+    }
+    const manifestDir = join(bundlePath, ".claude-plugin");
+    for (const entry of readdirSync(manifestDir, { withFileTypes: true })) {
+      if (entry.name !== "plugin.json" || !entry.isFile()) return false;
+    }
+    const skillsDir = join(bundlePath, SKILLS_DIR);
+    if (existsSync(skillsDir)) {
+      for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
+        // Directories only: a stray file under skills/ is not a skill and has
+        // no business being mounted.
+        if (!entry.isDirectory()) return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
 export function skillBundleAttachment(
   env: NodeJS.ProcessEnv = process.env,
 ): SkillBundleAttachment | null {
@@ -307,6 +350,17 @@ export function skillBundleAttachment(
   } catch {
     return null;
   }
+
+  // STRICT TREE. The SDK mounts the whole DIRECTORY as a plugin, and
+  // `skipMcpDiscovery` only suppresses MCP: it still loads skills, hooks,
+  // agents, commands and plugin MONITORS (unsandboxed tasks armed at session
+  // start, which disableAllHooks does not cover). Validating only the skills we
+  // happen to DISCOVER is therefore not enough — anything else sitting in the
+  // directory is mounted too. So the loader now enforces the same shape the
+  // offline verifier does: exactly `.claude-plugin/` and `skills/`, nothing
+  // else, and under skills/ only directories. A bundle with one valid skill
+  // and a monitor beside it is refused (review round 3 BLOCKER).
+  if (!hasStrictBundleShape(path)) return null;
 
   const bundleTier = readBundleTier(path);
   if (bundleTier === null || bundleTier !== declaredTier) {
