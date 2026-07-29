@@ -306,3 +306,40 @@ def test_the_run_route_executes_under_the_resolved_tenant(
         "/api/run resolved the raw claim, so it would not find a tool "
         f"published under the platform tenant (saw {seen.get('tenant')!r})"
     )
+
+
+def test_cancel_turn_resolves_the_session_owner(mismatched_identity, monkeypatch):
+    """Round 3 showed reverting ONLY cancel_turn left the suite green.
+
+    Sessions are created through require_active_tenant, so a cancel that
+    resolved the raw claim could never find the session it was asked to stop.
+    The active-session dependency census covers create, message, stream and
+    transcript but not cancel, so this drives the route.
+    """
+    from fastapi.testclient import TestClient
+
+    import app as app_module
+    from routers import sessions as sessions_router
+
+    seen = {}
+
+    def _recording_owned(session_id, tenant):
+        seen["tenant"] = str(tenant)
+        return None  # 404 path; identity is what is under test
+
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(sessions_router, "_require_owned_session", _recording_owned)
+    app_module.app.dependency_overrides[deps.require_tenant] = (
+        lambda: deps.TenantContext(CLAIM, org_id=CLAIM, tier="hosted_pro",
+                                   subject=SUBJECT)
+    )
+    try:
+        client = TestClient(app_module.app, raise_server_exceptions=False)
+        client.post("/api/sessions/session-1/turns/turn-1/cancel")
+    finally:
+        app_module.app.dependency_overrides.clear()
+
+    assert seen.get("tenant") == PLATFORM, (
+        "cancel_turn looked up the session under the raw claim, so it could "
+        f"never stop a turn it owns (saw {seen.get('tenant')!r})"
+    )

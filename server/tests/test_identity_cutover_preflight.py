@@ -113,3 +113,65 @@ def test_an_unreadable_broker_file_blocks(tmp_path, monkeypatch):
     monkeypatch.setenv("BROKER_TENANTS", str(path))
 
     assert preflight.check_broker_records_rekeyed()["ready"] is False
+
+
+# --------------------------------------------------------------------------- #
+# the gate must check the authority the broker ACTUALLY reads
+# --------------------------------------------------------------------------- #
+def test_postgres_mode_is_not_ready_just_because_the_json_is_absent(monkeypatch):
+    """The regression that made this gate worse than useless.
+
+    With LEAF_BROKER_STORE=postgres the broker reads disables and tiers from the
+    broker_tenants TABLE. An earlier version reported READY for that
+    configuration purely because the JSON file was missing, so a claim-keyed
+    disable or restricted tier would have survived the cutover behind a green
+    gate.
+    """
+    preflight = _load()
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    monkeypatch.delenv("BROKER_TENANTS", raising=False)
+
+    result = preflight.check_broker_records_rekeyed()
+
+    assert result["ready"] is False
+    assert "postgres" in result["name"]
+
+
+def test_an_unrecognised_broker_store_blocks(monkeypatch):
+    preflight = _load()
+    monkeypatch.setenv("LEAF_BROKER_STORE", "something-new")
+
+    assert preflight.check_broker_records_rekeyed()["ready"] is False
+
+
+def test_legacy_mode_with_no_file_is_still_ready(monkeypatch, tmp_path):
+    preflight = _load()
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    monkeypatch.setenv("BROKER_TENANTS", str(tmp_path / "absent.json"))
+
+    assert preflight.check_broker_records_rekeyed()["ready"] is True
+
+
+# --------------------------------------------------------------------------- #
+# a drained snapshot is not a drained queue
+# --------------------------------------------------------------------------- #
+def test_producers_must_be_stopped_before_a_drain_means_anything(monkeypatch):
+    """One listing proves the queue was empty at an instant. /api/run can commit
+    a new raw-claim job immediately after, and an active turn can submit one
+    too, so the gate refuses to imply a guarantee it never checked."""
+    preflight = _load()
+    monkeypatch.delenv("LEAF_CUTOVER_PRODUCERS_STOPPED", raising=False)
+
+    assert preflight.check_producers_stopped()["ready"] is False
+
+    monkeypatch.setenv("LEAF_CUTOVER_PRODUCERS_STOPPED", "1")
+    assert preflight.check_producers_stopped()["ready"] is True
+
+
+def test_the_verdict_is_blocked_by_any_single_check(monkeypatch):
+    preflight = _load()
+    monkeypatch.delenv("LEAF_CUTOVER_PRODUCERS_STOPPED", raising=False)
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    monkeypatch.setattr("sys.argv", ["preflight"])
+
+    assert preflight.main() == 1

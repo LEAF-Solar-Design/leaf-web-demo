@@ -87,14 +87,68 @@ def check_jobs_drained() -> Dict[str, Any]:
     }
 
 
+def _broker_mode() -> str:
+    return os.environ.get("LEAF_BROKER_STORE", "legacy").strip().lower()
+
+
+def _check_broker_postgres() -> Dict[str, Any]:
+    """Every row in the broker_tenants TABLE must be keyed by a platform id.
+
+    The JSON file is only one of two authorities. With LEAF_BROKER_STORE
+    =postgres the broker reads disables and tiers from broker_tenants
+    (server/broker_pg_store.py), and an earlier version of this gate reported
+    READY for that configuration purely because the JSON file was absent. A
+    claim-keyed disable or restricted tier would have survived the cutover while
+    the gate said it was safe, which is worse than having no gate.
+    """
+    sys.path.insert(0, str(_server_dir()))
+    try:
+        import broker_pg_store  # noqa: PLC0415
+        import platform_link  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return {"name": "broker records re-keyed (postgres)", "ready": False,
+                "detail": f"postgres broker authority is selected but "
+                          f"unreadable, so it cannot be proven re-keyed: {exc}"}
+    try:
+        store = broker_pg_store.store(platform_link.platform_db())
+        rows = store.tenant_ids()
+    except AttributeError:
+        return {"name": "broker records re-keyed (postgres)", "ready": False,
+                "detail": "cannot enumerate broker_tenants from this build; "
+                          "check it by hand before cutting over rather than "
+                          "treating unknown as safe"}
+    except Exception as exc:  # noqa: BLE001 - unreadable is NOT re-keyed
+        return {"name": "broker records re-keyed (postgres)", "ready": False,
+                "detail": f"could not read broker_tenants: {exc}"}
+    stale = [key for key in rows if not _UUID.match(str(key).strip())]
+    return {
+        "name": "broker records re-keyed (postgres)",
+        "ready": not stale,
+        "detail": ("every broker_tenants row is keyed by a platform id"
+                   if not stale else
+                   f"{len(stale)} broker_tenants row(s) still keyed by a claim"),
+        "stale_keys": stale[:20],
+    }
+
+
 def check_broker_records_rekeyed() -> Dict[str, Any]:
-    """Every broker tenant record must already be keyed by a platform id."""
+    """Every broker tenant record must already be keyed by a platform id.
+
+    Checks the authority the broker ACTUALLY reads. Under postgres the JSON file
+    is irrelevant and its absence proves nothing.
+    """
+    if _broker_mode() == "postgres":
+        return _check_broker_postgres()
+    if _broker_mode() != "legacy":
+        return {"name": "broker records re-keyed", "ready": False,
+                "detail": f"unrecognised LEAF_BROKER_STORE={_broker_mode()!r}; "
+                          "refusing to guess which authority to check"}
     raw = os.environ.get("BROKER_TENANTS", "").strip()
     path = Path(raw) if raw else _server_dir() / "broker_tenants.json"
     if not path.is_file():
         return {"name": "broker records re-keyed", "ready": True,
-                "detail": f"no broker tenants file at {path}; nothing is keyed "
-                          "by a claim"}
+                "detail": f"legacy mode and no broker tenants file at {path}; "
+                          "nothing is keyed by a claim"}
     try:
         records = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
@@ -115,12 +169,36 @@ def check_broker_records_rekeyed() -> Dict[str, Any]:
     }
 
 
+def check_producers_stopped() -> Dict[str, Any]:
+    """Draining is only meaningful once nothing can submit.
+
+    A single listing proves the queue was empty at one instant, not that it
+    stays empty: /api/run can commit a new raw-claim job immediately afterwards,
+    and an active turn can submit one too. This gate cannot verify that traffic
+    is stopped, so it refuses to certify it and says so, rather than letting a
+    READY line imply a guarantee it never checked.
+    """
+    acknowledged = os.environ.get(
+        "LEAF_CUTOVER_PRODUCERS_STOPPED", "").strip() == "1"
+    return {
+        "name": "producers stopped",
+        "ready": acknowledged,
+        "detail": ("operator asserts submission is stopped "
+                   "(LEAF_CUTOVER_PRODUCERS_STOPPED=1)" if acknowledged else
+                   "not asserted. Stop /api/run traffic and session turns FIRST, "
+                   "then re-run: a drained snapshot is not a drained queue, "
+                   "because a job submitted after the check is in flight with "
+                   "the pre-cutover identity"),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="machine output only")
     args = parser.parse_args()
 
-    checks = [check_jobs_drained(), check_broker_records_rekeyed()]
+    checks = [check_producers_stopped(), check_jobs_drained(),
+              check_broker_records_rekeyed()]
     ready = all(check["ready"] for check in checks)
     report = {"ready": ready, "verdict": "READY" if ready else "NOT-READY",
               "checks": checks}
