@@ -387,6 +387,68 @@ def test_entitlement_revoked_during_wait_drops_the_prompt(monkeypatch):
     assert turn_runner.queued_prompt(sid) is None
 
 
+def test_direct_turns_sync_rejection_kicks_the_parked_prompt(monkeypatch):
+    """Review round 2, finding 1: a DIRECT turn that wins the CAS and then
+    rejects synchronously (401/429/conn-refused/no-URL) releases the CAS
+    outside the relay's terminal path — without a kick there, a parked prompt
+    is stranded on a free session forever. Every synchronous rejection site
+    now kicks (_release_cas)."""
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL",
+                       f"http://127.0.0.1:{_free_closed_port()}")
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    sess = _new_session()
+    sid = sess["session_id"]
+    # Park a prompt (behind an orphan turn), then release that turn RAW —
+    # simulating the kicker having stood down on "genuinely busy" while the
+    # foreign turn's terminal kick never fires on the synchronous path.
+    assert session_store.try_begin_turn(sid, "orphan-d1", 300)
+    assert turn_runner.try_enqueue_turn("tenant-q", sid, text="parked-behind")[0] == "queued"
+    session_store.end_turn(sid, "orphan-d1")
+    assert turn_runner.queued_prompt(sid) is not None  # stranded state, pre-kick
+
+    with pytest.raises(turn_runner.TurnRejected):
+        turn_runner.start_turn("tenant-q", sid, text="direct turn")
+
+    # The direct turn's rejection must have kicked: the parked prompt was
+    # attempted (and, harness-down, closed with a terminal error) — not left.
+    assert turn_runner.queued_prompt(sid) is None, (
+        "a synchronous rejection released the CAS without kicking — the "
+        "parked prompt is stranded")
+    events = session_store.recent_events(sid, 100)
+    started = [e for e in events if e["type"] == "turn_started"
+               and e["data"].get("text") == "parked-behind"]
+    assert started and any(
+        e["type"] == "error" and e["turn_id"] == started[0]["turn_id"]
+        for e in events)
+    assert session_store.get_session(sid)["active_turn_id"] is None
+
+
+def test_entitlement_evaluator_crash_neither_raises_nor_leaks_the_claim(monkeypatch):
+    """Review round 2, finding 2: an UNEXPECTED evaluator exception (not just
+    EntitlementsError) previously escaped _kick_queued with `starting` still
+    True. It must fail closed: no raise, slot emptied, durable drop."""
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://127.0.0.1:9")
+    sess = _new_session()
+    sid = sess["session_id"]
+    assert session_store.try_begin_turn(sid, "orphan-d2", 300)
+    assert turn_runner.try_enqueue_turn("tenant-q", sid, text="crash-eval")[0] == "queued"
+
+    def _boom(tier):
+        raise RuntimeError("evaluator crashed")
+    monkeypatch.setattr(turn_runner.entitlements, "entitlements_for", _boom)
+
+    # must not raise (request_cancel runs the kick on this thread)
+    assert turn_runner.request_cancel("tenant-q", sid, "orphan-d2") == "cancelled"
+
+    assert turn_runner.queued_prompt(sid) is None, (
+        "the claim leaked: the slot still exists after an evaluator crash")
+    events = session_store.recent_events(sid, 100)
+    assert any(e["type"] == "turn_queue_dropped"
+               and e["data"].get("reason") == "entitlement_denied" for e in events)
+    assert not any(e["type"] == "turn_started"
+                   and e["data"].get("text") == "crash-eval" for e in events)
+
+
 # =========================================================================== #
 # route level
 # =========================================================================== #

@@ -434,6 +434,19 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         user_data["classifier_hint"] = classifier_hint
     session_store.append_event(session_id, turn_id, "turn_started", user_data)
 
+    def _release_cas() -> None:
+        # Synchronous rejections release the CAS HERE, not through the relay's
+        # _finalize_terminal — so without this kick, a DIRECT turn that wins
+        # the CAS while a kicker has the queue claimed and then rejects
+        # synchronously leaves the parked prompt stranded on a free session
+        # (review round 2, finding 1: the kicker saw "genuinely busy" and
+        # trusted a terminal kick that never comes on this path). Re-entrancy
+        # is safe: when THIS start_turn was itself invoked by a kicker, the
+        # slot's `starting` claim is still held, so the nested kick returns
+        # immediately.
+        session_store.end_turn(session_id, turn_id)
+        _kick_queued(session_id)
+
     def _rejected(*args: Any, **kwargs: Any) -> TurnRejected:
         # Every rejection BELOW this point happens after `turn_started` was
         # appended — tag the turn_id so a queued start's kicker can close the
@@ -444,7 +457,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
 
     harness_url = _harness_url()
     if not harness_url:
-        session_store.end_turn(session_id, turn_id)
+        _release_cas()
         # pre_harness: there is no URL, so no POST is even attempted — the
         # harness cannot have redeemed a confirm's approval.
         raise _rejected(502, ErrorCode.BROKER_UNREACHABLE,
@@ -494,7 +507,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # ConnectTimeout subclasses BOTH ConnectionError and Timeout, and
         # Python takes the FIRST matching handler — so this clause must stay
         # ABOVE both clauses below. Order is load-bearing.
-        session_store.end_turn(session_id, turn_id)
+        _release_cas()
         raise _rejected(502, ErrorCode.BROKER_UNREACHABLE,
                         f"harness at {harness_url} unreachable: {exc}",
                         pre_harness=True) from exc
@@ -511,16 +524,16 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # and leave the approval spent. Un-spending an approval whose tool call
         # might already be running is exactly the double-execution consume-once
         # exists to prevent. (sol-critic round 2, blocker 1.)
-        session_store.end_turn(session_id, turn_id)
+        _release_cas()
         raise _rejected(502, ErrorCode.BROKER_UNREACHABLE,
                         f"harness at {harness_url} unreachable: {exc}") from exc
     except requests.exceptions.RequestException as exc:  # noqa: BLE001
-        session_store.end_turn(session_id, turn_id)
+        _release_cas()
         raise _rejected(502, ErrorCode.BROKER_UNREACHABLE,
                         f"harness request failed: {exc}") from exc
 
     if resp.status_code == 401:
-        session_store.end_turn(session_id, turn_id)
+        _release_cas()
         body = _safe_json(resp) or {}
         msg = (body.get("message") or (body.get("error") or {}).get("message")
               or f"tenant {tenant_id!r} has no linked Claude grant")
@@ -528,7 +541,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         raise _rejected(401, ErrorCode.GRANT_REQUIRED, msg, extra={"grant_required": True})
 
     if resp.status_code == 429:
-        session_store.end_turn(session_id, turn_id)
+        _release_cas()
         body = _safe_json(resp) or {}
         code = body.get("errorCode") or body.get("error_code")
         if code not in (ErrorCode.LLM_QUOTA_EXHAUSTED, ErrorCode.LLM_RATE_LIMITED):
@@ -538,7 +551,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         raise _rejected(429, code, msg)
 
     if resp.status_code >= 400:
-        session_store.end_turn(session_id, turn_id)
+        _release_cas()
         body = _safe_json(resp) or {}
         msg = body.get("message") or f"harness returned HTTP {resp.status_code}"
         resp.close()
@@ -760,70 +773,90 @@ def _kick_queued(session_id: str) -> None:
                     else:
                         del _queued[session_id]
 
-        # The router's entitlement gate, re-run at START time: a revocation
-        # during the wait must not be laundered through the queue. Deny AND
-        # policy-unavailable both fail closed — a paid turn never starts
-        # without a current policy yes — with a durable drop record.
+        # OUTER exception boundary: _kick_queued runs on relay threads and
+        # promises never-raises / never-leaks-the-claim. The inner handlers
+        # cover start_turn; this covers everything else after the claim
+        # (the entitlement drop branch, the release bookkeeping, even a
+        # failing stderr print) — an escape here previously left `starting`
+        # True forever (review round 2, finding 2).
         try:
-            allowed = entitlements.entitlements_for(
-                payload["entitlement_tier"]).get("converse", False)
-        except entitlements.EntitlementsError:
-            allowed = False
-        if not allowed:
-            _release(keep=False)
+            # The router's entitlement gate, re-run at START time: a revocation
+            # during the wait must not be laundered through the queue. Deny AND
+            # policy-unavailable both fail closed — a paid turn never starts
+            # without a current policy yes — with a durable drop record. The catch
+            # is Exception, not just EntitlementsError: _kick_queued's contract is
+            # never-raises and never-leaks-the-claim, and an unexpected evaluator
+            # crash here previously escaped with `starting` still True (review
+            # round 2, finding 2). An unevaluable policy is a NO either way.
             try:
-                session_store.append_event(
-                    session_id, None, "turn_queue_dropped",
-                    {"queued_id": payload["queued_id"],
-                     "reason": "entitlement_denied"})
+                allowed = entitlements.entitlements_for(
+                    payload["entitlement_tier"]).get("converse", False)
             except Exception:  # noqa: BLE001
-                pass
-            print(f"[leaf-agent] queued prompt {payload['queued_id']!r} dropped: "
-                  f"converse entitlement no longer granted "
-                  f"(session {session_id!r})", file=sys.stderr, flush=True)
-            return
-
-        try:
-            start_turn(payload["tenant_id"], session_id,
-                       text=payload["text"],
-                       classifier_hint=payload["classifier_hint"],
-                       model=payload["model"],
-                       tier=payload["tier"])
-            _release(keep=False)
-            return
-        except TurnBusy:
-            _release(keep=True)
-            sess = session_store.get_session(session_id)
-            if sess is None or sess.get("active_turn_id"):
-                return  # genuinely busy — that turn's terminal will kick
-            continue  # the busy turn ended inside the window; try again
-        except TurnRejected as exc:
-            # No HTTP caller to answer: close the transcript the failed start
-            # opened (turn_started with no terminal would dangle forever), and
-            # say so on stderr. The prompt is consumed — retrying a start the
-            # harness just rejected would loop against a down harness.
-            _release(keep=False)
-            if exc.turn_id is not None:
+                allowed = False
+            if not allowed:
+                _release(keep=False)
                 try:
                     session_store.append_event(
-                        session_id, exc.turn_id, "error",
-                        {"error": {"error_code": exc.error_code,
-                                   "message": exc.message},
-                         "stop_reason": "error"})
+                        session_id, None, "turn_queue_dropped",
+                        {"queued_id": payload["queued_id"],
+                         "reason": "entitlement_denied"})
                 except Exception:  # noqa: BLE001
                     pass
-            print(f"[leaf-agent] queued turn start FAILED "
-                  f"({exc.error_code}) session={session_id!r}: {exc.message}",
-                  file=sys.stderr, flush=True)
-            # One more lap: the claim held the slot for the whole attempt, so
-            # nothing can have been accepted meanwhile — but the check is one
-            # dict read, and belt-and-braces beats reasoning alone here.
-            continue
+                print(f"[leaf-agent] queued prompt {payload['queued_id']!r} dropped: "
+                      f"converse entitlement no longer granted "
+                      f"(session {session_id!r})", file=sys.stderr, flush=True)
+                return
+
+            try:
+                start_turn(payload["tenant_id"], session_id,
+                           text=payload["text"],
+                           classifier_hint=payload["classifier_hint"],
+                           model=payload["model"],
+                           tier=payload["tier"])
+                _release(keep=False)
+                return
+            except TurnBusy:
+                _release(keep=True)
+                sess = session_store.get_session(session_id)
+                if sess is None or sess.get("active_turn_id"):
+                    return  # genuinely busy — that turn's terminal will kick
+                continue  # the busy turn ended inside the window; try again
+            except TurnRejected as exc:
+                # No HTTP caller to answer: close the transcript the failed start
+                # opened (turn_started with no terminal would dangle forever), and
+                # say so on stderr. The prompt is consumed — retrying a start the
+                # harness just rejected would loop against a down harness.
+                _release(keep=False)
+                if exc.turn_id is not None:
+                    try:
+                        session_store.append_event(
+                            session_id, exc.turn_id, "error",
+                            {"error": {"error_code": exc.error_code,
+                                       "message": exc.message},
+                             "stop_reason": "error"})
+                    except Exception:  # noqa: BLE001
+                        pass
+                print(f"[leaf-agent] queued turn start FAILED "
+                      f"({exc.error_code}) session={session_id!r}: {exc.message}",
+                      file=sys.stderr, flush=True)
+                # One more lap: the claim held the slot for the whole attempt, so
+                # nothing can have been accepted meanwhile — but the check is one
+                # dict read, and belt-and-braces beats reasoning alone here.
+                continue
+            except Exception as exc:  # noqa: BLE001
+                _release(keep=False)
+                print(f"[leaf-agent] queued turn start CRASHED "
+                      f"({type(exc).__name__}) session={session_id!r}",
+                      file=sys.stderr, flush=True)
+                return
         except Exception as exc:  # noqa: BLE001
             _release(keep=False)
-            print(f"[leaf-agent] queued turn start CRASHED "
-                  f"({type(exc).__name__}) session={session_id!r}",
-                  file=sys.stderr, flush=True)
+            try:
+                print(f"[leaf-agent] queue kick internals CRASHED "
+                      f"({type(exc).__name__}) session={session_id!r}",
+                      file=sys.stderr, flush=True)
+            except Exception:  # noqa: BLE001
+                pass
             return
     print(f"[leaf-agent] QUEUE KICK EXHAUSTED after {_KICK_MAX_ATTEMPTS} "
           f"busy-races on session {session_id!r} — the prompt stays parked; "
