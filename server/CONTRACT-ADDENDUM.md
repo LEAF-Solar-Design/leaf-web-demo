@@ -1086,7 +1086,7 @@ Verified shipped + pinned by test (census #12 chip 2):
 |---|---|---|---|---|---|
 | `LLM_QUOTA_EXHAUSTED` | `llm_quota_exhausted` | 429 | true | true | LLM supply exhausted on a long horizon (subscription window / hard cap). Product drops to the §12 floor until it resets. |
 | `LLM_RATE_LIMITED` | `llm_rate_limited` | 429 | true | false | Short-horizon rate limit; callers may auto-retry. |
-| `TURN_IN_PROGRESS` | `turn_in_progress` | 409 | true | false | One in-flight turn per session (reject-not-queue lock, §2.3); the client retries after observing `turn_complete` on the stream. |
+| `TURN_IN_PROGRESS` | `turn_in_progress` | 409 | true | false | One in-flight turn per session (reject-not-queue lock, §2.3); the client retries after observing `turn_complete` on the stream. Additive opt-in: a TEXT message carrying `queue: true` parks instead (cap 1, `202 {status:"queued"}`, durable `turn_queued` event) and starts at the active turn's terminal event; a second parked prompt, and every confirm/credential_grant message, still gets this 409 / a 400 respectively. Absent the flag, behavior is byte-identical to reject-not-queue. |
 | `SESSION_NOT_FOUND` | `session_not_found` | 404 | false | false | Unknown session **or** other tenant's session (no existence oracle). |
 
 The 429 pair is disambiguated by reset horizon, not by a distinct upstream error class

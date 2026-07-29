@@ -239,6 +239,12 @@ class MessageRequest(BaseModel):
     # Optional bring-your-own Agent SDK credential for THIS turn only. Ephemeral:
     # validated for shape, forwarded over TLS, never persisted, never logged.
     credential_grant: Optional[Dict[str, Any]] = None
+    # OPT-IN busy-turn queue (cap 1): when the session is mid-turn, park this
+    # text prompt and start it at the active turn's terminal event instead of
+    # answering 409. Opt-in keeps deployed clients byte-identical: absent (the
+    # default), a busy session answers exactly the 409 it always has. Text-only:
+    # a confirm or a credential_grant with queue=true is a 400, never queued.
+    queue: Optional[bool] = False
 
 
 def _session_not_found(session_id: str) -> JSONResponse:
@@ -428,6 +434,24 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             retryable=False, status_code=409,
         )
 
+    # 2a. queue eligibility — decided BEFORE the confirm consume below, so an
+    # ineligible queue request never burns an approval. Text-only by design:
+    # a queued confirm would hold a consumed approval across an unbounded wait
+    # (everything the give-back machinery exists to prevent), and a queued
+    # credential_grant would persist a value whose whole contract is
+    # "never persisted, never logged".
+    if req.queue:
+        if has_confirm:
+            return error_response(
+                ErrorCode.BAD_PARAMS, "confirm turns cannot be queued",
+                retryable=False, status_code=400,
+            )
+        if req.credential_grant is not None:
+            return error_response(
+                ErrorCode.BAD_PARAMS, "credential_grant turns cannot be queued",
+                retryable=False, status_code=400,
+            )
+
     # 2b. "Mount your LLM" input hygiene — validated BEFORE the confirm consume,
     # so a bad model or credential never burns an approval. Model:
     # allowlist-checked. Credential: TLS-gated (a BYO token may only ride an
@@ -562,6 +586,28 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             model=req.model, credential_grant=validated_grant,
         )
     except turn_runner.TurnBusy:
+        # OPT-IN queue: a text prompt with queue=true parks (cap 1) instead of
+        # bouncing. Step 2a already refused confirm/grant shapes, so this
+        # branch never holds an approval (confirmation_id is None on the text
+        # path) and never persists a credential.
+        if req.queue and has_text:
+            try:
+                q_status, queued_id = turn_runner.try_enqueue_turn(
+                    tenant, session_id, text=req.text,
+                    classifier_hint=req.classifier_hint, model=req.model)
+            except turn_runner.TurnRejected as exc:
+                return _turn_rejected_response(exc)
+            if q_status == "queued":
+                return JSONResponse(
+                    status_code=202,
+                    content=deps.tenant_echo(
+                        with_envelope_fields(
+                            {"status": "queued", "queued_id": queued_id}),
+                        tenant,
+                    ),
+                )
+            # q_status == "full": one prompt is already parked — fall through
+            # to the byte-identical busy 409 ("a second is refused").
         # The approval (if any) was consumed at step 4 but NOTHING redeemed it:
         # TurnBusy means try_begin_turn lost the CAS, which happens before
         # start_turn appends `turn_started` or calls the harness. Give it back

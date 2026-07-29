@@ -135,6 +135,10 @@ export default function ConversePanel({
         continue
       }
       if (type === 'session_state') continue
+      // Queue bookkeeping events carry NO turn_id — letting them fall through
+      // to turnOf() would mint an empty synthetic turn per event (an `_N` key)
+      // and render a blank bubble. They are transcript-only records.
+      if (type === 'turn_queued' || type === 'turn_queue_dropped') continue
       const t = turnOf(env.turn_id)
       if (type === 'turn_started') {
         t.started = true
