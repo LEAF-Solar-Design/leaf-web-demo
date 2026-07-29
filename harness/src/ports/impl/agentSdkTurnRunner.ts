@@ -3,6 +3,8 @@
  * (leaf-backend-gaps.md §2.1, ports/converse.ts FROZEN). This is the riskiest lane in
  * the sessions build: everything else (turn engine, store, approvals router) runs
  * against a scripted fake; this file is what eventually talks to the real SDK.
+ * Tenant MCP servers mount read-only in this release: their tools, resources, and
+ * prompts are listable, but tenant tool execution approval ships separately.
  *
  * === SDK reality, read from node_modules/@anthropic-ai/claude-agent-sdk/*.d.ts
  * (v0.3.214) before writing a line of mapping code below - not assumed ===
@@ -303,7 +305,7 @@ export function mapSdkMessage(raw: unknown, toolUseNames: Map<string, string> = 
 // fixture-tested, and (b) the live smoke gate the lane brief calls out separately.
 // =========================================================================== //
 
-const MCP_SERVER_NAME = "converse";
+export const MCP_SERVER_NAME = "converse";
 const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 const APS_TEST_RUN_TOOL = "aps_test_run";
 const APS_TEST_RUN_MCP_NAME = `${MCP_TOOL_PREFIX}${APS_TEST_RUN_TOOL}`;
@@ -322,6 +324,15 @@ export function requiresToolConfirmation(toolName: string, approvalTools: Set<st
   return approvalTools.has(bareToolName(toolName)) || toolName.startsWith("mcp__");
 }
 
+const TENANT_MCP_TOOL_DENIAL = "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately";
+
+/** Tenant MCP servers expose listable data only until their approval flow exists. */
+export function tenantMcpToolDenial(toolName: string): { behavior: "deny"; message: string } | null {
+  return toolName.startsWith("mcp__") && !toolName.startsWith(MCP_TOOL_PREFIX)
+    ? { behavior: "deny", message: TENANT_MCP_TOOL_DENIAL }
+    : null;
+}
+
 /** Resolve a tenant attachment without exposing bridge failures to the chat turn. */
 export async function resolveMcpAttachmentSafely(
   store: McpBridgeStore,
@@ -329,7 +340,7 @@ export async function resolveMcpAttachmentSafely(
   report: (message: string) => void = console.error,
 ): Promise<McpAttachment | null> {
   try {
-    return await resolveMcpAttachment(store, tenantId);
+    return await resolveMcpAttachment(store, tenantId, report);
   } catch {
     // The store error can include arbitrary corrupted input. Keep diagnostics tied to
     // the bridge's redacted formatter rather than rendering the error or configuration.
@@ -429,8 +440,8 @@ export interface BuildTurnOptionsInput {
   canUseTool: CanUseTool;
 }
 
-/** Assemble SDK options in one testable place. The local converse MCP server remains
- * present exactly as before. Tenant bridge servers are an optional additive spread. */
+/** Assemble SDK options in one testable place. Tenant bridge servers are optional;
+ * the local converse server remains authoritative if a key collides. */
 export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, unknown> {
   const { skillBundle } = input;
   const tenantMcp = buildTenantMcpOptions(input.mcpAttachment);
@@ -441,7 +452,8 @@ export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, u
     settingSources: [],
     permissionMode: "default",
     abortController: input.abortController,
-    mcpServers: { [MCP_SERVER_NAME]: input.server, ...(tenantMcp.mcpServers ?? {}) },
+    // Load-bearing order: the local money-gated server wins any tenant key collision.
+    mcpServers: { ...(tenantMcp.mcpServers ?? {}), [MCP_SERVER_NAME]: input.server },
     // Skills reach the model through the SDK's own `skills` option, which enables the
     // Skill tool itself. This allowlist remains the existing APS MCP tool only.
     allowedTools: [APS_TEST_RUN_MCP_NAME],
@@ -568,6 +580,8 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       toolName: string,
       inp: Record<string, unknown>,
     ): Promise<{ behavior: string; message?: string; interrupt?: boolean; updatedInput?: Record<string, unknown> }> => {
+      const tenantMcpDenial = tenantMcpToolDenial(toolName);
+      if (tenantMcpDenial) return tenantMcpDenial;
       const bare = bareToolName(toolName);
       if (!requiresToolConfirmation(toolName, approvalTools)) return { behavior: "allow", updatedInput: inp };
 

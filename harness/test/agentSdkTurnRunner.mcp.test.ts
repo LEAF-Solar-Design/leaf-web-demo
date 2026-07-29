@@ -7,6 +7,7 @@ import {
   requiresToolConfirmation,
   resolveEnvMcpAttachment,
   resolveMcpAttachmentSafely,
+  tenantMcpToolDenial,
 } from "../src/ports/impl/agentSdkTurnRunner.js";
 import { InMemoryMcpBridgeStore, type McpBridgeStore } from "../src/ports/impl/mcpBridge.js";
 
@@ -38,7 +39,8 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
 
     expect(stripped).toMatch(/resolveEnvMcpAttachment\(process\.env\.LEAF_MCP_BRIDGE_DIR, input\.tenant_id\)/);
     expect(stripped).toMatch(/return attachment \? \{ mcpServers: attachment \} : \{\}/);
-    expect(stripped).toMatch(/mcpServers: \{ \[MCP_SERVER_NAME\]: input\.server, \.\.\.tenantMcp\.mcpServers \?\? \{\} \}/);
+    expect(stripped).toMatch(/mcpServers: \{ \.\.\.tenantMcp\.mcpServers \?\? \{\}, \[MCP_SERVER_NAME\]: input\.server \}/);
+    expect(stripped).toMatch(/const tenantMcpDenial = tenantMcpToolDenial\(toolName\);\s*if \(tenantMcpDenial\) return tenantMcpDenial;\s*const bare/);
   });
 
   it("is off by default and adds no tenant mcpServers option", async () => {
@@ -66,6 +68,10 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
     expect(renderedB).not.toContain(SENTINEL_A);
   });
 
+  it("keeps the local server when a tenant attachment collides with converse", () => {
+    expect(turnOptions({ converse: { tenant: true } }).mcpServers).toEqual({ converse: LOCAL_SERVER });
+  });
+
   it("skips a broken bridge and leaves the local turn options usable without leaking its bearer", async () => {
     const diagnostics: string[] = [];
     const brokenStore: McpBridgeStore = {
@@ -80,9 +86,13 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
     expect(diagnostics.join("\n")).not.toContain(SENTINEL_A);
   });
 
-  it("routes every MCP tool name through confirmation without adding it to allowedTools", () => {
+  it("denies tenant MCP tool execution while preserving local approval behavior", () => {
     const approvals = new Set(["aps_test_run"]);
-    expect(requiresToolConfirmation("mcp__tenant_a__dangerous_write", approvals)).toBe(true);
+    expect(tenantMcpToolDenial("mcp__tenant_a__dangerous_write")).toEqual({
+      behavior: "deny",
+      message: "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately",
+    });
+    expect(tenantMcpToolDenial("mcp__converse__aps_test_run")).toBeNull();
     expect(requiresToolConfirmation("mcp__converse__aps_test_run", approvals)).toBe(true);
     expect(requiresToolConfirmation("Read", approvals)).toBe(false);
     expect(turnOptions(null).allowedTools).toEqual(["mcp__converse__aps_test_run"]);
