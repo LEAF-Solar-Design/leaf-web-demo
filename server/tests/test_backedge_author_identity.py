@@ -25,6 +25,11 @@ MALLORY = "auth0|mallory"
 def session(tmp_path, monkeypatch):
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "sessions.db")
     monkeypatch.setattr(session_store, "_conn", None)
+    monkeypatch.setattr(
+        deps,
+        "resolve_active_platform_tenant_authority",
+        lambda subject: ("tenant-a", "hosted_pro"),
+    )
     session_store.ensure_started()
     return session_store.get_or_create_session("tenant-a", "drawing-a")
 
@@ -50,13 +55,12 @@ def test_backedge_authors_as_the_subject_that_opened_the_turn(session):
     assert elevated.tier == "hosted_pro"
 
 
-def test_backedge_restores_the_verified_active_turn_tier(session):
-    """A stale broker tenant row must not downgrade an authenticated turn.
+def test_backedge_restores_the_current_platform_tier(session):
+    """A stale broker tenant row must not downgrade current authority.
 
-    The browser snapshots the active platform tier when it opens the turn.
-    Protected authoring comes back through the subjectless harness back edge,
-    whose broker provisioning can lag that binding. The same app-owned turn
-    that restores the subject must restore its verified tier too.
+    Protected authoring comes back through the subjectless harness back edge.
+    The app-owned turn supplies the subject, then the current platform binding
+    supplies the tier that is authoritative at the moment of authoring.
     """
     session_id = session["session_id"]
     assert session_store.try_begin_turn(
@@ -75,20 +79,48 @@ def test_backedge_restores_the_verified_active_turn_tier(session):
     assert elevated.backedge is True
 
 
-def test_backedge_keeps_the_broker_tier_for_an_older_turn_without_a_snapshot(
-    session,
+def test_a_mid_turn_platform_downgrade_takes_effect(
+    session, monkeypatch,
 ):
     session_id = session["session_id"]
     assert session_store.try_begin_turn(
-        session_id, "turn-legacy", 60, subject=ALICE,
+        session_id, "turn-downgraded", 60,
+        tier="hosted_pro", subject=ALICE,
+    )
+    monkeypatch.setattr(
+        deps,
+        "resolve_active_platform_tenant_authority",
+        lambda subject: ("tenant-a", "restricted"),
     )
 
     elevated = deps.backedge_author_identity(
-        backedge(), session_id, "turn-legacy",
+        backedge(), session_id, "turn-downgraded",
     )
 
     assert elevated.subject == ALICE
-    assert elevated.tier == "hosted_pro"
+    assert elevated.tier == "restricted"
+
+
+def test_an_account_move_cannot_elevate_the_old_tenant(
+    session, monkeypatch,
+):
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-moved", 60,
+        tier="hosted_pro", subject=ALICE,
+    )
+    monkeypatch.setattr(
+        deps,
+        "resolve_active_platform_tenant_authority",
+        lambda subject: ("tenant-b", "hosted_pro"),
+    )
+
+    unchanged = deps.backedge_author_identity(
+        backedge(), session_id, "turn-moved",
+    )
+
+    assert unchanged.subject is None
+    assert unchanged.tier == "hosted_pro"
 
 
 def test_a_direct_user_call_keeps_its_own_subject(session):
@@ -167,7 +199,7 @@ def test_an_authority_outage_never_elevates(session, monkeypatch):
         backedge(), session_id, "turn-1").subject is None
 
 
-def test_a_turn_tier_authority_outage_never_elevates(session, monkeypatch):
+def test_current_platform_authority_outage_never_elevates(session, monkeypatch):
     session_id = session["session_id"]
     session_store.try_begin_turn(
         session_id, "turn-1", 60, tier="hosted_pro", subject=ALICE,
@@ -176,7 +208,9 @@ def test_a_turn_tier_authority_outage_never_elevates(session, monkeypatch):
     def explode(*_args, **_kwargs):
         raise RuntimeError("tier authority down")
 
-    monkeypatch.setattr(session_store, "active_turn_tier", explode)
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority", explode,
+    )
     unchanged = deps.backedge_author_identity(
         backedge(), session_id, "turn-1",
     )
@@ -304,6 +338,64 @@ def test_the_elevation_helper_applies_the_staleness_bound(session, monkeypatch):
 
     assert deps.backedge_author_identity(
         backedge(), session_id, "turn-1").subject is None
+
+
+def test_real_author_route_uses_current_platform_tier(
+    session, monkeypatch,
+):
+    """Drive the live failure shape through the actual POST route."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import customization_flags
+    import customization_service
+    from routers import author as author_router
+
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-route", 60,
+        tier="hosted_pro", subject=ALICE,
+    )
+    seen = {}
+
+    class _RecordingService:
+        def stage(self, *, tenant, description, mode, idempotency_key):
+            seen["tenant"] = str(tenant)
+            seen["tier"] = tenant.tier
+            seen["subject"] = tenant.subject
+            return {"change_set_id": "cs-route", "state": "staged"}
+
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(customization_flags, "enabled", lambda wave, tenant: True)
+    monkeypatch.setattr(author_router, "customization_enabled",
+                        lambda wave, tenant: True)
+    monkeypatch.setattr(
+        customization_service.CustomizationService,
+        "configured",
+        classmethod(lambda cls: _RecordingService()),
+    )
+
+    app = FastAPI()
+    app.include_router(author_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="restricted", backedge=True,
+    )
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/author",
+        json={"description": "build a deterministic sphere drape", "mode": "build"},
+        headers={
+            "Idempotency-Key": "author:route-tier",
+            "X-Authority-Session-Id": session_id,
+            "X-Authority-Turn-Id": "turn-route",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert seen == {
+        "tenant": "tenant-a",
+        "tier": "hosted_pro",
+        "subject": ALICE,
+    }
 
 
 # --------------------------------------------------------------------------- #

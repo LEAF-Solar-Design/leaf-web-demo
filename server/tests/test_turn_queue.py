@@ -53,6 +53,7 @@ os.environ.setdefault(
     str(Path(tempfile.mkdtemp(prefix="turnqueue-sessions-")) / "sessions.db"))
 os.environ.setdefault("LEAF_AUTH_LIVE", "0")
 
+import deps  # noqa: E402
 import entitlements  # noqa: E402
 import requests  # noqa: E402
 import session_store  # noqa: E402
@@ -475,6 +476,45 @@ def test_promoted_turns_started_event_carries_the_queued_id(monkeypatch, turn_st
     direct = [e for e in session_store.recent_events(sid, 100)
               if e["type"] == "turn_started" and e["data"].get("text") == "direct"]
     assert direct and "queued_id" not in direct[0]["data"]
+
+
+def test_promoted_queue_preserves_the_authenticated_subject(monkeypatch):
+    """A queued author request must still bind to the user who submitted it."""
+    sess = _new_session()
+    sid = sess["session_id"]
+    assert session_store.try_begin_turn(sid, "orphan-subject", 300)
+    tenant = deps.TenantContext(
+        "tenant-q", tier="hosted_pro", subject="auth0|queued-author",
+    )
+    status, queued_id = turn_runner.try_enqueue_turn(
+        tenant, sid, text="author after the active turn",
+    )
+    assert status == "queued"
+    assert "subject" not in turn_runner.queued_prompt(sid)
+    captured = {}
+
+    def capture_start(tenant_id, session_id, **kwargs):
+        captured.update(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            subject=kwargs.get("subject"),
+            tier=kwargs.get("tier"),
+            queued_id=kwargs.get("queued_id"),
+        )
+        return "queued-turn"
+
+    monkeypatch.setattr(turn_runner, "start_turn", capture_start)
+    assert turn_runner.request_cancel(
+        "tenant-q", sid, "orphan-subject",
+    ) == "cancelled"
+
+    assert captured == {
+        "tenant_id": "tenant-q",
+        "session_id": sid,
+        "subject": "auth0|queued-author",
+        "tier": "hosted_pro",
+        "queued_id": queued_id,
+    }
 
 
 # =========================================================================== #
