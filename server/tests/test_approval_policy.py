@@ -692,3 +692,42 @@ def test_persistent_give_back_failure_is_alarmed_and_ttl_bounded(monkeypatch, tu
     with turn_runner._pending_policy_lock:
         assert sid not in turn_runner._pending_policy, (
             "the slot never freed after the row expired — a permanent cap leak")
+
+
+def test_a_reservation_release_retries_the_parked_decision(monkeypatch, turn_stub):
+    """PR #311 round 8: a checkpoint-restore RESERVATION can win the slot just
+    as the terminal's auto-confirm runs — the decision parks, and the restore's
+    release used to kick only the queue, so nothing retried the park until an
+    unrelated terminal or expiry. Every slot releaser now runs BOTH follow-ups
+    (drain_session_followups), in the relay's order."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-resv", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-resv", tool="panel_count", params={},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    # The reservation wins the slot; the terminal's auto-confirm loses and parks.
+    assert session_store.try_begin_turn(
+        sid, "restore-conflict-probe", session_store.RESERVATION_STALE_S)
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-resv": {"capability": "drawing.read"}}, None, "demo")
+    with turn_runner._pending_policy_lock:
+        assert turn_runner._pending_policy.get(sid) == ["cid-resv"]
+
+    # The restore finishes: its release must retry the park, not just the queue.
+    session_store.end_turn(sid, "restore-conflict-probe")
+    turn_runner.drain_session_followups("tenant-p", sid)
+
+    assert _wait_until(
+        lambda: session_store.get_approval("cid-resv")["consumed"] is True), (
+        "the reservation's release never retried the parked policy decision")
+    with turn_runner._pending_policy_lock:
+        assert sid not in turn_runner._pending_policy

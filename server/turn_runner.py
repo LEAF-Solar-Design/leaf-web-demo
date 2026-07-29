@@ -819,6 +819,24 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
     return ("queued", queued_id)
 
 
+def drain_session_followups(tenant_id: Any, session_id: str) -> None:
+    """The terminal-time follow-ups, for a slot released OUTSIDE a relay.
+
+    A relay's _finalize_terminal runs the policy park drain/retry and then the
+    queue kick. A NON-turn releaser — the checkpoint restore's reservation —
+    used to call only _kick_queued, so a policy decision parked while the
+    reservation held the slot had nothing to retry it until an unrelated later
+    terminal or expiry (PR #311 round 8: the round-2 unreachable-resume,
+    recreated by new main content). Every slot releaser runs BOTH follow-ups,
+    in the relay's order. Accepts the live principal so tier and entitlement
+    resolve exactly as start_turn would.
+    """
+    tier = getattr(tenant_id, "tier", None)
+    entitlement_tier = entitlements.resolve_tier(tenant_id)
+    _auto_confirm_reads(str(tenant_id), session_id, {}, tier, entitlement_tier)
+    _kick_queued(session_id)
+
+
 def _kick_queued(session_id: str) -> None:
     """Start the session's queued prompt, if any. Runs at every terminal site
     (relay finalization, orphan cancel) and at enqueue time when the session

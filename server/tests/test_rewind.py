@@ -309,17 +309,20 @@ def test_a_restore_reservation_cannot_be_cancelled_as_a_turn(client, drawing):
         session_store.end_turn(sid, reservation)
 
 
-def test_releasing_a_restore_reservation_kicks_a_queued_prompt(client, drawing, monkeypatch):
-    """Review round 2, finding 2: a prompt parked behind the reservation had no
-    other event coming — every real terminal kicks the queue, so this must too."""
+def test_releasing_a_restore_reservation_runs_both_followups(client, drawing, monkeypatch):
+    """PR #310 round 2 (queued prompt) + PR #311 round 8 (parked policy
+    decision): a slot released by the restore has no other event coming for
+    EITHER, so the route must run the full drain — the policy retry and the
+    queue kick, in the relay's order — not the queue alone."""
     session = _session()
     sid = session["session_id"]
-    kicked = []
-    monkeypatch.setattr(turn_runner, "_kick_queued", lambda s: kicked.append(s))
+    drained = []
+    monkeypatch.setattr(turn_runner, "drain_session_followups",
+                        lambda tenant, s: drained.append((str(tenant), s)))
     checkpoint = _checkpoint(client, session)
     _restore(client, session, checkpoint)
-    assert kicked == [sid], (
-        "releasing the restore reservation did not kick the queue")
+    assert drained == [(session["tenant_id"], sid)], (
+        "the restore release did not run the full follow-up drain")
 
 
 def test_restore_refuses_the_postgres_authority_explicitly(client, drawing, monkeypatch):
