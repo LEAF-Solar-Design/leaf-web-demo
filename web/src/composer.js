@@ -148,6 +148,26 @@ export function shouldRetryWithQueue(errorKind, { text, confirm, credential_gran
     && credential_grant == null
 }
 
+// A queued prompt becomes a normal transcript turn only when the server starts
+// the same text. A different turn may belong to another client, so it must not
+// consume this client's queue note. A dropped queue record clears only itself.
+export function reconcileQueuedTurn(queuedTurn, event = {}) {
+  if (!queuedTurn) return { action: 'keep' }
+  if (event.type === 'turn_started'
+    && event.turn_id
+    && event.data?.text === queuedTurn.text) {
+    return {
+      action: 'promote',
+      turn: { turnId: event.turn_id, text: queuedTurn.text },
+    }
+  }
+  if (event.type === 'turn_queue_dropped'
+    && event.data?.queued_id === queuedTurn.queuedId) {
+    return { action: 'clear' }
+  }
+  return { action: 'keep' }
+}
+
 // Prefix matches rank ahead of substring matches, then the group order above
 // decides ties. Entries with no `kind` (today's tools-only payload, which has
 // no registry grouping yet) all share one rank, so a stable sort leaves them

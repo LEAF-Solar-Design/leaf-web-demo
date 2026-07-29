@@ -10,6 +10,7 @@ import {
   mergeSkillEntries,
   promptHistoryFor,
   rankEntries,
+  reconcileQueuedTurn,
   shouldRetryWithQueue,
   setPromptHistoryValue,
   LINE_PX,
@@ -168,6 +169,47 @@ describe('busy queue retry', () => {
     assert.equal(shouldRetryWithQueue('busy', {
       text: 'continue', credential_grant: { kind: 'api_key' },
     }), false)
+  })
+})
+
+describe('queued turn reconciliation', () => {
+  const queuedTurn = { queuedId: 'queued-1', text: 'continue with the panel count' }
+
+  it('promotes the matching started turn with its real transcript id', () => {
+    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+      type: 'turn_started',
+      turn_id: 'turn-9',
+      data: { text: 'continue with the panel count' },
+    }), {
+      action: 'promote',
+      turn: { turnId: 'turn-9', text: 'continue with the panel count' },
+    })
+  })
+
+  it('keeps the queue when another client starts a different prompt first', () => {
+    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+      type: 'turn_started',
+      turn_id: 'turn-other',
+      data: { text: 'summarise the roofline' },
+    }), { action: 'keep' })
+  })
+
+  it('clears only the matching dropped queue record', () => {
+    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+      type: 'turn_queue_dropped',
+      data: { queued_id: 'queued-1' },
+    }), { action: 'clear' })
+    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+      type: 'turn_queue_dropped',
+      data: { queued_id: 'queued-other' },
+    }), { action: 'keep' })
+  })
+
+  it('does not promote a turn that has no real turn id', () => {
+    assert.deepEqual(reconcileQueuedTurn(queuedTurn, {
+      type: 'turn_started',
+      data: { text: 'continue with the panel count' },
+    }), { action: 'keep' })
   })
 })
 

@@ -10,7 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { openStream, postMessage, approve, cancelTurn, classifyAgentError } from '../converse.js'
-import { shouldRetryWithQueue } from '../composer.js'
+import { reconcileQueuedTurn, shouldRetryWithQueue } from '../composer.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
 
@@ -83,16 +83,28 @@ export default function ConversePanel({
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
+  const queuedTurnRef = useRef(null)
+  const setQueued = (next) => {
+    queuedTurnRef.current = next
+    setQueuedTurn(next)
+  }
 
   // Stream lifecycle: one open stream per session, replay from seq 0 (the
   // transcript is durable — a remount recovers the whole conversation).
   useEffect(() => {
     if (!sessionId) return undefined
-    setEvents([]); setLocalTurns([]); setQueuedTurn(null); setSendErr(null)
+    setEvents([]); setLocalTurns([]); setQueued(null); setSendErr(null)
     setDecidedLocal({}); setDeciding(null)
     jobSeenRef.current = new Set()
     const stream = openStream(sessionId, 0, {
       onEvent: (env) => {
+        const queued = reconcileQueuedTurn(queuedTurnRef.current, env)
+        if (queued.action === 'promote') {
+          setLocalTurns((prev) => [...prev, queued.turn])
+          setQueued(null)
+        } else if (queued.action === 'clear') {
+          setQueued(null)
+        }
         if (env.type === 'job_linked' && env.data?.job_id && !jobSeenRef.current.has(env.data.job_id)) {
           jobSeenRef.current.add(env.data.job_id)
           if (onJobLinked) onJobLinked(env.data.job_id, env.data.tool) // the rail shows the agent-dispatched job
@@ -273,7 +285,7 @@ export default function ConversePanel({
     setSending(true); setSendErr(null)
     const accept = (res) => {
       if (res.status === 'queued') {
-        setQueuedTurn({ queuedId: res.queued_id || null, text })
+        setQueued({ queuedId: res.queued_id || null, text })
       } else {
         setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text }])
       }

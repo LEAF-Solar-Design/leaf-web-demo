@@ -48,4 +48,11 @@ describe('App.jsx wiring', () => {
         `${usedAs} is not referenced in the compiled output — the wiring is dead`)
     })
   }
+
+  it('passes sessionId into the PromptBox element itself', () => {
+    // esbuild emits this JSX element as React.createElement(PromptBox, {...}).
+    // Limit the match to that first props object, not another component call.
+    assert.match(stripped,
+      /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId\s*:/)
+  })
 })
