@@ -93,6 +93,9 @@ def _postgres_url(environ: Mapping[str, str]) -> str:
         raise ProductionConfigurationError(
             "LEAF_INSTANT_CONTROL_DATABASE_URL must be a PostgreSQL URL with sslmode=verify-full"
         )
+    if "sslrootcert" not in query:
+        separator = "&" if parsed.query else "?"
+        return f"{value}{separator}sslrootcert=system"
     return value
 
 

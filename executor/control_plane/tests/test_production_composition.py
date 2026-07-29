@@ -59,6 +59,34 @@ def production_environment(seed_file: Path) -> dict[str, str]:
 
 
 class ProductionCompositionTests(unittest.TestCase):
+    def test_database_url_uses_system_trust_roots_by_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            seed_file = Path(temporary) / "seed"
+            seed_file.write_bytes(b"x" * 32)
+            seed_file.chmod(0o600)
+
+            settings = production.load_production_settings(production_environment(seed_file))
+
+        self.assertEqual(
+            settings.database_url,
+            "postgresql://control-db.internal/control_plane?sslmode=verify-full&sslrootcert=system",
+        )
+
+    def test_database_url_preserves_explicit_root_certificate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            seed_file = Path(temporary) / "seed"
+            seed_file.write_bytes(b"x" * 32)
+            seed_file.chmod(0o600)
+            environment = production_environment(seed_file)
+            environment["LEAF_INSTANT_CONTROL_DATABASE_URL"] = (
+                "postgresql://control-db.internal/control_plane"
+                "?sslmode=verify-full&sslrootcert=/run/leaf/secrets/rds-ca.pem"
+            )
+
+            settings = production.load_production_settings(environment)
+
+        self.assertEqual(settings.database_url, environment["LEAF_INSTANT_CONTROL_DATABASE_URL"])
+
     def test_missing_and_unsafe_configuration_fail_closed(self):
         with self.assertRaisesRegex(production.ProductionConfigurationError, "DATABASE_URL"):
             production.load_production_settings({})
