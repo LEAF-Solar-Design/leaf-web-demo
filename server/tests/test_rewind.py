@@ -337,3 +337,30 @@ def test_restore_refuses_the_postgres_authority_explicitly(client, drawing, monk
     assert "not yet supported" in restored.json()["error"]["message"]
     assert drawing["blobs"] == before
     assert session_store.events_after(session["session_id"], 0) == []
+    # ...and the refusal must not LEAK the reservation. It used to return from
+    # inside the reserved span but before the releasing finally, wedging the
+    # session: busy forever, uncancellable (the guard refuses reservations),
+    # and never kicking the queue (review round 3, blocker 1).
+    assert session_store.get_session(session["session_id"])["active_turn_id"] is None, (
+        "the PostgreSQL refusal leaked the restore reservation")
+
+
+def test_a_restore_reservation_is_not_stealable_at_the_turn_timeout(client, drawing):
+    """Review round 3, blocker 2: the reservation was taken with turn_max_s
+    (300s), and try_begin_turn lets ANY caller steal a slot older than the
+    window it was taken with — so a restore delayed past five minutes could be
+    overrun by a real turn mid-write. Reservations carry their own window."""
+    assert checkpoints_router.RESERVATION_STALE_S > 300.0
+    session = _session()
+    sid = session["session_id"]
+    reservation = "restore-stale-probe"
+    assert session_store.try_begin_turn(
+        sid, reservation, checkpoints_router.RESERVATION_STALE_S)
+    try:
+        # A turn arriving with the ORDINARY window must not take the slot: the
+        # CAS compares against the window the HOLDER declared.
+        assert session_store.try_begin_turn(sid, "real-turn", 300.0) is False, (
+            "a real turn stole a live restore reservation")
+        assert session_store.get_session(sid)["active_turn_id"] == reservation
+    finally:
+        session_store.end_turn(sid, reservation)

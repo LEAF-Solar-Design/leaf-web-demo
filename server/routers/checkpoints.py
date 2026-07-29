@@ -43,6 +43,16 @@ def _require_owned_session(session_id: str, tenant: Any):
     return session
 
 
+# The reservation's stale window. NOT turn_max_s: that is an LLM turn's budget
+# (300s), and try_begin_turn lets ANY caller steal a slot older than the window
+# it was taken with — so a restore delayed past five minutes could be overrun
+# by a real turn while still writing (review round 3, blocker 2). A restore is
+# bounded by one drawing copy, so this is generous by orders of magnitude; a
+# restore that outlives it is genuinely wedged and SHOULD become reclaimable
+# rather than wedging the session forever.
+RESERVATION_STALE_S = 3600.0
+
+
 def store_authority_mode() -> str:
     """The mutable-drawing authority (da/store.py authority_mode). Imported
     lazily for the same reason _drawing_version does: the store package is not
@@ -133,21 +143,6 @@ def restore_checkpoint(session_id: str, checkpoint_id: str,
     checkpoint = checkpoints.get_checkpoint(session_id, str(tenant), checkpoint_id)
     if checkpoint is None:
         return _session_not_found(session_id)
-    restore_turn_id = f"restore-{checkpoint_id}"
-    # A restore occupies the turn slot so a turn cannot begin between this
-    # route's validation and its drawing commit. It is not a turn, so it emits
-    # no turn_started or turn_complete events.
-    if not session_store.try_begin_turn(session_id, restore_turn_id,
-                                        turn_runner.turn_max_s()):
-        active = session_store.get_session(session_id)
-        active_turn_id = active.get("active_turn_id") if active is not None else None
-        return error_response(
-            ErrorCode.TURN_IN_PROGRESS,
-            f"cannot restore while turn {active_turn_id!r} is in progress; cancel it first",
-            retryable=False,
-            status_code=409,
-        )
-
     # The PostgreSQL drawing authority requires an ACTIVE CHECKOUT to publish a
     # version and explicitly refuses an anonymous holder (da/store.py: "a writer
     # that names no session may not ..."). A checkpoint restore names no
@@ -166,6 +161,21 @@ def restore_checkpoint(session_id: str, checkpoint_id: str,
             "checkout, and a restore holds none. Restore the drawing through "
             "the drawings API with a checkout instead.",
             retryable=False, status_code=409,
+        )
+
+    restore_turn_id = f"restore-{checkpoint_id}"
+    # A restore occupies the turn slot so a turn cannot begin between this
+    # route's validation and its drawing commit. It is not a turn, so it emits
+    # no turn_started or turn_complete events.
+    if not session_store.try_begin_turn(session_id, restore_turn_id,
+                                        RESERVATION_STALE_S):
+        active = session_store.get_session(session_id)
+        active_turn_id = active.get("active_turn_id") if active is not None else None
+        return error_response(
+            ErrorCode.TURN_IN_PROGRESS,
+            f"cannot restore while turn {active_turn_id!r} is in progress; cancel it first",
+            retryable=False,
+            status_code=409,
         )
 
     try:
