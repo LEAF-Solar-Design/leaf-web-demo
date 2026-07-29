@@ -66,6 +66,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+import agent_gate
 import agent_ledger
 import broker_client
 import entitlements
@@ -264,12 +265,24 @@ _queued: Dict[str, Dict[str, Any]] = {}
 # LOUD stderr line says so (the next enqueue-time kick is the backstop).
 _KICK_MAX_ATTEMPTS = 64
 
-# Capabilities eligible for policy auto-approval. EXACT membership, and the
-# set is deliberately tiny: `run_read` is the platform's read capability;
-# run_write / drawing.write / deploy / build / a MISSING capability are all
-# ineligible — fail closed, unknown means confirm. Widening this set is a
-# money-safety decision, never a convenience edit.
-READONLY_AUTO_CAPABILITIES = frozenset({"run_read"})
+# Capabilities eligible for policy auto-approval. EXACT membership against the
+# vocabulary the HARNESS actually mints - `Capability = "drawing.read" |
+# "drawing.write"` (harness/src/ports/index.ts). `drawing.write` and a MISSING
+# capability are ineligible: fail closed, unknown means confirm.
+#
+# The first cut of this set said `run_read`, which is an ENTITLEMENT key
+# (entitlements.py: run_read/run_write/build), NOT a proposal capability - so
+# it matched nothing in production while its tests fabricated the value and
+# passed (review round 1, blocker 1). Widening this set is a money-safety
+# decision, never a convenience edit, and any new member must be quoted from
+# the harness Capability union.
+READONLY_AUTO_CAPABILITIES = frozenset({"drawing.read"})
+
+# The decided_by stamp for a policy decision. It is also the RESUME KEY: a
+# decision carrying this actor and still unconsumed is one THIS policy made and
+# may finish, which is what makes a lost CAS retryable instead of a permanent
+# strand (review round 1, finding 3).
+POLICY_DECIDER = "policy:auto_approve_reads"
 
 
 class TurnBusy(Exception):
@@ -921,23 +934,25 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
                         tier: Optional[str],
                         entitlement_tier: Optional[str]) -> None:
     """Policy auto-approval: under `auto_approve_reads`, decide and confirm the
-    turn's FIRST `run_read` proposal at its terminal. NEVER raises — it runs on
-    relay threads whose cleanup must complete.
+    turn's FIRST `drawing.read` proposal at its terminal. NEVER raises - it
+    runs on relay threads whose cleanup must complete.
 
-    Every gate the human path enforces is re-enforced here, fail closed:
-    the session policy is read per-terminal (a policy change applies to the
-    next terminal, never retroactively); the entitlement re-check mirrors the
-    queue kicker's; the approval row must belong to this session+tenant, be
-    undecided, unexpired, unconsumed, carry an ELIGIBLE capability, and hold a
-    stored dwg binding (the router refuses confirms without one — so does
-    this). The confirm payload is built from the STORED row exactly as the
-    router builds it — never from the relay's in-memory copy.
+    GATE-FIRST, exactly like the human path (routers/agent.py): the section 18
+    gate record is the AUTHORITY the resume turn consults, and the session row
+    is the mirror. Deciding only the mirror leaves the gate pending, so the
+    resumed tool never dispatches (review round 1, blocker 2). So this grants
+    the gate first, then the session row - same order, same failure posture: a
+    gate that will not grant means no confirm turn and no session decision.
 
-    Only the first eligible proposal auto-confirms; any further chips from the
-    same turn stay manual (rare, and the human path remains fully able to
-    decide them). Ineligible capabilities — run_write, drawing.write, a
-    missing capability — are untouched by construction: the candidate filter
-    is exact membership in READONLY_AUTO_CAPABILITIES.
+    RESUMABLE, so a lost race cannot strand the user's approval: a row already
+    decided by THIS policy and not yet consumed is finished on a later
+    terminal. Without that, a TurnBusy left the row decided-by-policy forever -
+    a human could not re-decide it (already decided) and under live auth could
+    not consume it either (consume binds decided_by to the acting subject).
+
+    Every other gate the human path enforces is re-enforced from the STORED
+    row, never the relay's in-memory copy: session+tenant match, unexpired,
+    unconsumed, eligible capability, stored dwg binding.
     """
     try:
         if session_policy.get_policy(session_id, tenant_id) != "auto_approve_reads":
@@ -960,10 +975,13 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
         if (approval is None
                 or str(approval.get("session_id")) != str(session_id)
                 or str(approval.get("tenant_id")) != str(tenant_id)
-                or approval.get("decided")
                 or approval.get("consumed")
                 or approval.get("expired")
                 or approval.get("capability") not in READONLY_AUTO_CAPABILITIES):
+            return
+        if approval.get("decided") and approval.get("decided_by") != POLICY_DECIDER:
+            # Only OUR OWN unfinished decision may be resumed; a human's
+            # decision is theirs to redeem.
             return
         stored_payload = approval.get("payload")
         stored_dwg = (stored_payload.get("dwg")
@@ -971,16 +989,45 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
         if not (isinstance(stored_dwg, str) and stored_dwg):
             return  # the router's rule: no stored drawing binding, no confirm
 
-        outcome = session_store.decide_approval(
-            cid, True, by="policy:auto_approve_reads")
-        if outcome != "recorded":
-            # 'already_decided' / 'not_found': a human (or another thread) got
-            # here first — stand down, theirs wins.
-            return
+        if not approval.get("decided"):
+            # GATE FIRST (routers/agent.py's load-bearing ordering). A gate
+            # record that is corrupt/unreadable, or that refuses the grant,
+            # means this chip stays manual - never decide the mirror against a
+            # gate we could not grant.
+            _gate_rec, gate_status = agent_gate.read_pending_strict(cid)
+            if gate_status == "ok":
+                try:
+                    granted, _rec, reason = agent_gate.grant_approval(
+                        cid, by=POLICY_DECIDER)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[leaf-agent] policy auto-confirm: gate write failed "
+                          f"({type(exc).__name__}) session={session_id!r}",
+                          file=sys.stderr, flush=True)
+                    return
+                if not granted:
+                    print(f"[leaf-agent] policy auto-confirm: gate refused "
+                          f"({reason}) session={session_id!r}",
+                          file=sys.stderr, flush=True)
+                    return
+            elif gate_status != "absent":
+                # corrupt / io_error: fail closed, leave it to a human.
+                print(f"[leaf-agent] policy auto-confirm: gate unreadable "
+                      f"({gate_status}) session={session_id!r}",
+                      file=sys.stderr, flush=True)
+                return
+            # `absent` = the legacy pair flow with no gate record; the session
+            # row is the whole story there, as on the human path.
+
+            outcome = session_store.decide_approval(cid, True, by=POLICY_DECIDER)
+            if outcome != "recorded":
+                # 'already_decided' / 'not_found': a human (or another thread)
+                # got here first - stand down, theirs wins.
+                return
+
         try:
             consumed = session_store.consume_approval(cid, session_id, tenant_id)
         except session_store.ApprovalConsumeError:
-            return  # raced a human confirm — theirs wins
+            return  # raced a human confirm - theirs wins
         confirm_payload = {
             "confirmation_id": cid,
             "approved": bool(consumed.get("approved")),
@@ -994,16 +1041,18 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
         try:
             start_turn(tenant_id, session_id, confirm=confirm_payload, tier=tier)
         except TurnBusy:
-            # Provably unredeemed (the CAS is start_turn's first act): give the
-            # approval back so the human path can redeem it, same rule as the
-            # router's TurnBusy handler.
+            # Provably unredeemed (the CAS is start_turn's first act): return
+            # the consume so a LATER terminal can finish this same decision
+            # (see RESUMABLE above). The decision itself stands - it is ours,
+            # and re-granting an already-granted gate would be the divergence
+            # the gate-first ordering exists to prevent.
             try:
                 session_store.unconsume_approval(cid, session_id, tenant_id)
             except Exception:  # noqa: BLE001
                 pass
             print(f"[leaf-agent] policy auto-confirm lost the CAS on "
-                  f"session {session_id!r}; approval {cid!r} returned",
-                  file=sys.stderr, flush=True)
+                  f"session {session_id!r}; approval {cid!r} returned for a "
+                  f"later terminal", file=sys.stderr, flush=True)
         except TurnRejected as exc:
             if exc.pre_harness:
                 try:

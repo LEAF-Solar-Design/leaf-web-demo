@@ -3,12 +3,13 @@ Approval policy (chip: "Read-only auto-runs only in auto_approve_reads;
 paid/write always confirms").
 
 The safety property is the DEFAULT and the FILTER:
-  (a) with no policy set, nothing changes — a run_read proposal still waits
-      for a human (regression pin for every deployed client);
-  (b) under auto_approve_reads, a run_read proposal is auto-decided
+  (a) with no policy set, nothing changes — a drawing.read proposal still
+      waits for a human (regression pin for every deployed client);
+  (b) under auto_approve_reads, a drawing.read proposal is auto-decided
       (decided_by records the policy) and a confirm turn auto-starts at the
       proposing turn's terminal, built from the STORED row;
-  (c) run_write / drawing.write / MISSING capability NEVER auto-confirm, even
+  (c) drawing.write / a bogus value / "" / MISSING capability NEVER
+      auto-confirm, even
       under the policy (falsification-checked: widening the capability set
       fails this);
   (d) a proposal with no stored dwg binding stays manual (the router's rule);
@@ -130,7 +131,7 @@ def _proposal_script(cid: str, capability: Optional[str], dwg: Optional[str]):
 
 
 def _run_proposing_turn(stub, tenant: str, sid: str, dwg: str, cid: str,
-                        capability: Optional[str] = "run_read",
+                        capability: Optional[str] = "drawing.read",
                         with_dwg: bool = True):
     stub.SCRIPTS.append(_proposal_script(cid, capability, dwg if with_dwg else None))
     turn_runner.start_turn(tenant, sid, text="count my panels")
@@ -165,9 +166,9 @@ def test_default_policy_leaves_the_chip_for_a_human(monkeypatch, turn_stub):
 
 
 # =========================================================================== #
-# (b) auto_approve_reads: run_read auto-decides and auto-confirms
+# (b) auto_approve_reads: drawing.read auto-decides and auto-confirms
 # =========================================================================== #
-def test_auto_approve_reads_confirms_a_run_read_proposal(monkeypatch, turn_stub):
+def test_auto_approve_reads_confirms_a_drawing_read_proposal(monkeypatch, turn_stub):
     url, stub = turn_stub
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
     monkeypatch.setenv("TURN_MAX_S", "30")
@@ -197,7 +198,7 @@ def test_auto_approve_reads_confirms_a_run_read_proposal(monkeypatch, turn_stub)
 # =========================================================================== #
 # (c) write/paid/missing capabilities never auto-confirm
 # =========================================================================== #
-@pytest.mark.parametrize("capability", ["run_write", "drawing.write", None])
+@pytest.mark.parametrize("capability", ["drawing.write", "run_read", "", None])
 def test_non_read_capabilities_stay_manual(monkeypatch, turn_stub, capability):
     url, stub = turn_stub
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
@@ -279,3 +280,141 @@ def test_policy_store_is_tenant_scoped():
     assert session_policy.get_policy(sess["session_id"], "tenant-scope-a") == "auto_approve_reads"
     assert session_policy.get_policy(sess["session_id"], "tenant-scope-b") == "confirm_all", (
         "a foreign tenant read another tenant's policy")
+
+
+# =========================================================================== #
+# round 2: the gate is the AUTHORITY, and a lost race must be resumable
+# =========================================================================== #
+def test_gate_is_granted_before_the_session_row(monkeypatch, turn_stub):
+    """Review round 1, blocker 2: the human path lands the decision in the
+    section-18 gate FIRST (routers/agent.py) because the resume turn consults
+    THAT record. Deciding only the session mirror leaves the gate pending and
+    the resumed tool never dispatches."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    order: List[str] = []
+
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: ({"confirmation_id": cid}, "ok"))
+
+    def _grant(cid, *, by="tenant"):
+        order.append(f"gate:{by}")
+        return (True, {"confirmation_id": cid}, "granted")
+    monkeypatch.setattr(turn_runner.agent_gate, "grant_approval", _grant)
+
+    real_decide = turn_runner.session_store.decide_approval
+
+    def _decide(cid, approved, by=None):
+        order.append(f"session:{by}")
+        return real_decide(cid, approved, by=by)
+    monkeypatch.setattr(turn_runner.session_store, "decide_approval", _decide)
+
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], "cid-gate")
+
+    assert _wait_until(lambda: len(order) >= 2), f"order={order}"
+    assert order[0].startswith("gate:"), f"the session row was decided BEFORE the gate: {order}"
+    assert order[0] == f"gate:{turn_runner.POLICY_DECIDER}"
+    assert order[1] == f"session:{turn_runner.POLICY_DECIDER}"
+
+
+def test_a_refusing_gate_leaves_the_chip_manual(monkeypatch, turn_stub):
+    """A gate that will not grant (already decided, expired) must NOT produce a
+    session decision — the two stores may never record opposite outcomes."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: ({"confirmation_id": cid}, "ok"))
+    monkeypatch.setattr(turn_runner.agent_gate, "grant_approval",
+                        lambda cid, *, by="tenant": (False, None, "already_decided"))
+
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], "cid-refused")
+
+    time.sleep(0.2)
+    approval = session_store.get_approval("cid-refused")
+    assert approval["decided"] is False, (
+        "the session row was decided even though the gate refused")
+    assert len(stub.BODIES) == 1
+
+
+def test_an_unreadable_gate_fails_closed(monkeypatch, turn_stub):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "io_error"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], "cid-ioerr")
+
+    time.sleep(0.2)
+    assert session_store.get_approval("cid-ioerr")["decided"] is False
+    assert len(stub.BODIES) == 1
+
+
+def test_a_policy_decision_left_unconsumed_is_resumable(monkeypatch, turn_stub):
+    """Review round 1, finding 3: a lost CAS used to strand the approval —
+    decided-by-policy forever, so a human could neither re-decide nor (under
+    live auth) consume it. Our own unconsumed decision must be finishable at a
+    later terminal."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+
+    # Simulate the stranded state the old code produced: our decision recorded,
+    # nothing consumed, no confirm turn started.
+    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], "cid-resume",
+                        capability="drawing.write")  # ineligible -> no auto path
+    session_store.create_approval(
+        confirmation_id="cid-resume-2", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-old", tool="panel_count", params={"layer": "roof"},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+    session_store.decide_approval("cid-resume-2", True,
+                                  by=turn_runner.POLICY_DECIDER)
+
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid,
+        {"cid-resume-2": {"capability": "drawing.read"}}, None, "demo")
+
+    assert _wait_until(
+        lambda: session_store.get_approval("cid-resume-2")["consumed"] is True), (
+        "our own unconsumed policy decision was not resumed — it is stranded")
+
+
+def test_a_humans_decision_is_never_resumed_by_the_policy(monkeypatch, turn_stub):
+    """The resume key is decided_by == POLICY_DECIDER. A human's decision
+    belongs to that human to redeem."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-human", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-h", tool="panel_count", params={}, capability="drawing.read",
+        rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+    session_store.decide_approval("cid-human", True, by="auth0|alice")
+
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-human": {"capability": "drawing.read"}}, None, "demo")
+
+    time.sleep(0.15)
+    assert session_store.get_approval("cid-human")["consumed"] is False, (
+        "the policy consumed a decision a HUMAN made")
