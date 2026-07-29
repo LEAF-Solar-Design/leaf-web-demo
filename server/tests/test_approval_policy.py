@@ -1,0 +1,281 @@
+"""
+Approval policy (chip: "Read-only auto-runs only in auto_approve_reads;
+paid/write always confirms").
+
+The safety property is the DEFAULT and the FILTER:
+  (a) with no policy set, nothing changes — a run_read proposal still waits
+      for a human (regression pin for every deployed client);
+  (b) under auto_approve_reads, a run_read proposal is auto-decided
+      (decided_by records the policy) and a confirm turn auto-starts at the
+      proposing turn's terminal, built from the STORED row;
+  (c) run_write / drawing.write / MISSING capability NEVER auto-confirm, even
+      under the policy (falsification-checked: widening the capability set
+      fails this);
+  (d) a proposal with no stored dwg binding stays manual (the router's rule);
+  (e) route level: POST /api/sessions validates and persists `policy`,
+      idempotent re-POST without the field keeps it, and the policy store is
+      tenant-scoped at the storage boundary.
+
+Run:  cd server && python -m pytest tests/test_approval_policy.py -q
+"""
+from __future__ import annotations
+
+import http.server
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pytest
+
+SERVER_DIR = Path(__file__).resolve().parent.parent
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
+
+os.environ.setdefault(
+    "SESSIONS_DB",
+    str(Path(tempfile.mkdtemp(prefix="policy-sessions-")) / "sessions.db"))
+os.environ.setdefault("LEAF_AUTH_LIVE", "0")
+
+import session_policy  # noqa: E402
+import session_store  # noqa: E402
+import turn_runner  # noqa: E402
+from routers import sessions as sessions_router  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# scripted harness stub: first turn proposes; the confirm turn completes.
+# --------------------------------------------------------------------------- #
+class _TurnStub(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    SCRIPTS: List[List[Dict[str, Any]]] = []   # consumed one per POST
+    BODIES: List[Dict[str, Any]] = []
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("content-length", 0) or 0)
+        body = self.rfile.read(length)
+        cls = type(self)
+        try:
+            cls.BODIES.append(json.loads(body or b"{}"))
+        except Exception:
+            cls.BODIES.append({})
+        script = cls.SCRIPTS.pop(0) if cls.SCRIPTS else [
+            {"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for ev in script:
+            raw = (json.dumps(ev) + "\n").encode("utf-8")
+            self.wfile.write(f"{len(raw):x}\r\n".encode("ascii") + raw + b"\r\n")
+            self.wfile.flush()
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+    def log_message(self, *a):
+        return
+
+
+@pytest.fixture
+def turn_stub():
+    _TurnStub.SCRIPTS = []
+    _TurnStub.BODIES = []
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TurnStub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}", _TurnStub
+    finally:
+        srv.shutdown()
+
+
+_counter = [0]
+
+
+def _new_session(tenant_id: str = "tenant-p") -> Dict[str, Any]:
+    _counter[0] += 1
+    return session_store.get_or_create_session(
+        tenant_id, f"dwg-policy-{_counter[0]}-{time.time()}")
+
+
+def _wait_until(predicate, timeout_s: float = 5.0, poll_s: float = 0.02):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(poll_s)
+    return predicate()
+
+
+def _proposal_script(cid: str, capability: Optional[str], dwg: Optional[str]):
+    data: Dict[str, Any] = {
+        "confirmation_id": cid,
+        "tool": "panel_count",
+        "params": {"layer": "roof"},
+        "rationale": "counts panels",
+    }
+    if capability is not None:
+        data["capability"] = capability
+    if dwg is not None:
+        data["dwg"] = dwg
+    return [
+        {"type": "proposed_run", "data": data},
+        {"type": "confirmation_required",
+         "data": {"confirmation_id": cid, "kind": "run_capability"}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_confirmation"}},
+    ]
+
+
+def _run_proposing_turn(stub, tenant: str, sid: str, dwg: str, cid: str,
+                        capability: Optional[str] = "run_read",
+                        with_dwg: bool = True):
+    stub.SCRIPTS.append(_proposal_script(cid, capability, dwg if with_dwg else None))
+    turn_runner.start_turn(tenant, sid, text="count my panels")
+    assert _wait_until(
+        lambda: session_store.get_session(sid)["active_turn_id"] is None
+        and not turn_runner._cancellers)
+
+
+@pytest.fixture(autouse=True)
+def _fast_settle():
+    yield
+    # let any auto-started confirm turn finish before the stub tears down
+    time.sleep(0.05)
+
+
+# =========================================================================== #
+# (a) default: byte-identical, nothing auto-runs
+# =========================================================================== #
+def test_default_policy_leaves_the_chip_for_a_human(monkeypatch, turn_stub):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    sess = _new_session()
+    sid = sess["session_id"]
+    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], "cid-default")
+
+    approval = session_store.get_approval("cid-default")
+    assert approval is not None
+    assert approval["decided"] is False, "the DEFAULT policy auto-decided an approval"
+    assert approval["consumed"] is False
+    assert len(stub.BODIES) == 1, "a confirm turn was auto-started under the default policy"
+
+
+# =========================================================================== #
+# (b) auto_approve_reads: run_read auto-decides and auto-confirms
+# =========================================================================== #
+def test_auto_approve_reads_confirms_a_run_read_proposal(monkeypatch, turn_stub):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+
+    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], "cid-auto")
+
+    ok = _wait_until(lambda: len(stub.BODIES) >= 2)
+    assert ok, "no confirm turn auto-started under auto_approve_reads"
+    confirm_body = stub.BODIES[1]
+    confirm = confirm_body.get("confirm")
+    assert confirm and confirm["confirmation_id"] == "cid-auto"
+    assert confirm["approved"] is True
+    assert confirm["proposal"]["tool"] == "panel_count"
+    assert confirm["proposal"]["dwg"] == sess["drawing_id"]
+
+    approval = session_store.get_approval("cid-auto")
+    assert approval["decided"] is True and approval["approved"] is True
+    assert approval["decided_by"] == "policy:auto_approve_reads", (
+        "the audit trail must name the policy, not a human")
+    assert approval["consumed"] is True
+    assert _wait_until(lambda: session_store.get_session(sid)["active_turn_id"] is None)
+
+
+# =========================================================================== #
+# (c) write/paid/missing capabilities never auto-confirm
+# =========================================================================== #
+@pytest.mark.parametrize("capability", ["run_write", "drawing.write", None])
+def test_non_read_capabilities_stay_manual(monkeypatch, turn_stub, capability):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    cid = f"cid-{capability or 'missing'}-{_counter[0]}"
+
+    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], cid,
+                        capability=capability)
+
+    time.sleep(0.2)  # give a wrong implementation the chance to fire
+    approval = session_store.get_approval(cid)
+    assert approval["decided"] is False, (
+        f"capability {capability!r} was auto-decided — paid/write must always confirm")
+    assert len(stub.BODIES) == 1
+
+
+# =========================================================================== #
+# (d) no stored dwg binding -> manual (the router's own confirm rule)
+# =========================================================================== #
+def test_missing_dwg_binding_stays_manual(monkeypatch, turn_stub):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+
+    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], "cid-nodwg",
+                        with_dwg=False)
+
+    time.sleep(0.2)
+    approval = session_store.get_approval("cid-nodwg")
+    assert approval["decided"] is False
+    assert len(stub.BODIES) == 1
+
+
+# =========================================================================== #
+# (e) route + storage boundary
+# =========================================================================== #
+@pytest.fixture()
+def client():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from envelopes import install_error_handlers
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(sessions_router.router)
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _h(tenant: str) -> dict:
+    return {"X-Tenant-Id": tenant}
+
+
+def test_route_validates_persists_and_keeps_policy(client):
+    _counter[0] += 1
+    dwg = f"dwg-rp-{_counter[0]}"
+    bad = client.post("/api/sessions", json={"drawing_id": dwg, "policy": "yolo"},
+                      headers=_h("tenant-rp"))
+    assert bad.status_code == 400
+
+    r = client.post("/api/sessions",
+                    json={"drawing_id": dwg, "policy": "auto_approve_reads"},
+                    headers=_h("tenant-rp"))
+    assert r.status_code < 300, r.text
+    assert r.json()["policy"] == "auto_approve_reads"
+
+    again = client.post("/api/sessions", json={"drawing_id": dwg}, headers=_h("tenant-rp"))
+    assert again.json()["policy"] == "auto_approve_reads", (
+        "an idempotent re-POST without the field reset the stored policy")
+
+
+def test_policy_store_is_tenant_scoped():
+    sess = _new_session("tenant-scope-a")
+    session_policy.set_policy(sess["session_id"], "tenant-scope-a", "auto_approve_reads")
+    assert session_policy.get_policy(sess["session_id"], "tenant-scope-a") == "auto_approve_reads"
+    assert session_policy.get_policy(sess["session_id"], "tenant-scope-b") == "confirm_all", (
+        "a foreign tenant read another tenant's policy")

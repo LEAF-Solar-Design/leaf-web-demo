@@ -103,7 +103,14 @@ def _require_ops(presented: Optional[str]) -> Optional[JSONResponse]:
                 "ops surface unavailable: LEAF_OPS_SECRET is not configured",
                 retryable=False, status_code=503)
         return None  # local demo, unguarded like the rest of the off-auth surface
-    if hmac.compare_digest(presented or "", secret):
+    # BYTES, not str: compare_digest raises TypeError on non-ASCII str, and an
+    # ASGI header legally carries latin-1 — a stray accent was an
+    # unauthenticated 500 (same defect fixed in routers/skills.py, PR #302).
+    try:
+        provided = (presented or "").encode("utf-8")
+    except UnicodeEncodeError:  # lone surrogates from a hostile raw header
+        provided = b""
+    if hmac.compare_digest(provided, secret.encode("utf-8")):
         return None
     return error_response(ErrorCode.BAD_PARAMS,
                           "valid X-Ops-Secret required for the ops surface",

@@ -70,6 +70,7 @@ import agent_ledger
 import broker_client
 import entitlements
 import instant_execution
+import session_policy
 import session_store
 from envelopes import ErrorCode
 
@@ -263,6 +264,13 @@ _queued: Dict[str, Dict[str, Any]] = {}
 # LOUD stderr line says so (the next enqueue-time kick is the backstop).
 _KICK_MAX_ATTEMPTS = 64
 
+# Capabilities eligible for policy auto-approval. EXACT membership, and the
+# set is deliberately tiny: `run_read` is the platform's read capability;
+# run_write / drawing.write / deploy / build / a MISSING capability are all
+# ineligible — fail closed, unknown means confirm. Widening this set is a
+# money-safety decision, never a convenience edit.
+READONLY_AUTO_CAPABILITIES = frozenset({"run_read"})
+
 
 class TurnBusy(Exception):
     """try_begin_turn lost the CAS — a turn is already active for this session."""
@@ -398,6 +406,10 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     # so protected authoring resolves the author from this record instead.
     if subject is None:
         subject = getattr(tenant_id, "subject", None)
+    # For the terminal-time policy auto-confirm (same posture as the queue
+    # kicker's enqueue-time snapshot): resolve while the principal object is
+    # still in hand, before it is flattened to a plain string.
+    entitlement_tier = entitlements.resolve_tier(tenant_id)
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
@@ -583,7 +595,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         resp.close()
         raise _rejected(502, ErrorCode.BROKER_UNREACHABLE, msg)
 
-    _spawn_relay(tenant_id, session_id, turn_id, resp, max_s)
+    _spawn_relay(tenant_id, session_id, turn_id, resp, max_s,
+                 tier=tier, entitlement_tier=entitlement_tier)
     return turn_id
 
 
@@ -903,8 +916,127 @@ def _kick_queued(session_id: str) -> None:
           file=sys.stderr, flush=True)
 
 
+def _auto_confirm_reads(tenant_id: str, session_id: str,
+                        proposals: Dict[str, Dict[str, Any]],
+                        tier: Optional[str],
+                        entitlement_tier: Optional[str]) -> None:
+    """Policy auto-approval: under `auto_approve_reads`, decide and confirm the
+    turn's FIRST `run_read` proposal at its terminal. NEVER raises — it runs on
+    relay threads whose cleanup must complete.
+
+    Every gate the human path enforces is re-enforced here, fail closed:
+    the session policy is read per-terminal (a policy change applies to the
+    next terminal, never retroactively); the entitlement re-check mirrors the
+    queue kicker's; the approval row must belong to this session+tenant, be
+    undecided, unexpired, unconsumed, carry an ELIGIBLE capability, and hold a
+    stored dwg binding (the router refuses confirms without one — so does
+    this). The confirm payload is built from the STORED row exactly as the
+    router builds it — never from the relay's in-memory copy.
+
+    Only the first eligible proposal auto-confirms; any further chips from the
+    same turn stay manual (rare, and the human path remains fully able to
+    decide them). Ineligible capabilities — run_write, drawing.write, a
+    missing capability — are untouched by construction: the candidate filter
+    is exact membership in READONLY_AUTO_CAPABILITIES.
+    """
+    try:
+        if session_policy.get_policy(session_id, tenant_id) != "auto_approve_reads":
+            return
+        candidates = [cid for cid, data in proposals.items()
+                      if data.get("capability") in READONLY_AUTO_CAPABILITIES]
+        if not candidates:
+            return
+        # Entitlement gate at ACTION time, the kicker's rule: an unevaluable
+        # or denying policy leaves the chip manual.
+        try:
+            if not entitlements.entitlements_for(
+                    entitlement_tier).get("converse", False):
+                return
+        except Exception:  # noqa: BLE001
+            return
+
+        cid = candidates[0]
+        approval = session_store.get_approval(cid)
+        if (approval is None
+                or str(approval.get("session_id")) != str(session_id)
+                or str(approval.get("tenant_id")) != str(tenant_id)
+                or approval.get("decided")
+                or approval.get("consumed")
+                or approval.get("expired")
+                or approval.get("capability") not in READONLY_AUTO_CAPABILITIES):
+            return
+        stored_payload = approval.get("payload")
+        stored_dwg = (stored_payload.get("dwg")
+                      if isinstance(stored_payload, dict) else None)
+        if not (isinstance(stored_dwg, str) and stored_dwg):
+            return  # the router's rule: no stored drawing binding, no confirm
+
+        outcome = session_store.decide_approval(
+            cid, True, by="policy:auto_approve_reads")
+        if outcome != "recorded":
+            # 'already_decided' / 'not_found': a human (or another thread) got
+            # here first — stand down, theirs wins.
+            return
+        try:
+            consumed = session_store.consume_approval(cid, session_id, tenant_id)
+        except session_store.ApprovalConsumeError:
+            return  # raced a human confirm — theirs wins
+        confirm_payload = {
+            "confirmation_id": cid,
+            "approved": bool(consumed.get("approved")),
+            "proposal": {
+                "tool": consumed.get("tool"),
+                "params": consumed.get("params"),
+                "capability": consumed.get("capability"),
+                "dwg": stored_dwg,
+            },
+        }
+        try:
+            start_turn(tenant_id, session_id, confirm=confirm_payload, tier=tier)
+        except TurnBusy:
+            # Provably unredeemed (the CAS is start_turn's first act): give the
+            # approval back so the human path can redeem it, same rule as the
+            # router's TurnBusy handler.
+            try:
+                session_store.unconsume_approval(cid, session_id, tenant_id)
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"[leaf-agent] policy auto-confirm lost the CAS on "
+                  f"session {session_id!r}; approval {cid!r} returned",
+                  file=sys.stderr, flush=True)
+        except TurnRejected as exc:
+            if exc.pre_harness:
+                try:
+                    session_store.unconsume_approval(cid, session_id, tenant_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            if exc.turn_id is not None:
+                # No HTTP caller to answer: close the transcript the failed
+                # start opened, the queue kicker's rule.
+                try:
+                    session_store.append_event(
+                        session_id, exc.turn_id, "error",
+                        {"error": {"error_code": exc.error_code,
+                                   "message": exc.message},
+                         "stop_reason": "error"})
+                except Exception:  # noqa: BLE001
+                    pass
+            print(f"[leaf-agent] policy auto-confirm start FAILED "
+                  f"({exc.error_code}) session={session_id!r}",
+                  file=sys.stderr, flush=True)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            print(f"[leaf-agent] policy auto-confirm CRASHED "
+                  f"({type(exc).__name__}) session={session_id!r}",
+                  file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
-                 resp: "requests.Response", max_s: float) -> None:
+                 resp: "requests.Response", max_s: float,
+                 tier: Optional[str] = None,
+                 entitlement_tier: Optional[str] = None) -> None:
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
     # watchdog's own wait is anchored here too, so neither path can drift from
     # the other.
@@ -996,6 +1128,11 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
             session_store.end_turn(session_id, turn_id)
         except Exception:  # noqa: BLE001
             pass
+        # Policy auto-confirm runs FIRST (it continues the interaction the
+        # user is already in); if it starts a confirm turn, the queue kicker
+        # below sees busy and parks correctly. Both never raise.
+        _auto_confirm_reads(tenant_id, session_id, proposals,
+                            tier, entitlement_tier)
         # The session is free — hand it to the queued prompt, if one is
         # waiting. Runs on the terminalizing thread (drain, watchdog, or a
         # cancel); _kick_queued never raises, and start_turn's blocking span
