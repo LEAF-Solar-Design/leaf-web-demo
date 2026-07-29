@@ -698,10 +698,32 @@ def _result(decision: str, *, reason: str, policy: Optional[str] = None,
     return out
 
 
+def _plan_first_session(tenant_id: str, session_id: str) -> bool:
+    """True when this session's approval policy is plan_first.
+
+    `session_id` MUST be the AUTHORITY (app-owned) session — the one the
+    client created and stored its policy against. The harness passes its own
+    private session id on the gate call, and looking the policy up under THAT
+    id finds nothing, silently allowing everything: plan-first was inert on the
+    live path until a review caught it (round 1, finding 1).
+
+    A read failure means we cannot tell whether the user asked for plan-first,
+    and this is a CONSENT feature: it degrades toward ASKING. The cost is extra
+    chips during a storage blip; the alternative silently executes against an
+    explicit user choice. (Review round 1, finding 2 — I had it the other way.)
+    """
+    try:
+        import session_policy
+        return session_policy.get_policy(str(session_id), str(tenant_id)) == "plan_first"
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
          args: Optional[Dict[str, Any]], tier_caps: Dict[str, bool], *,
          tier: Optional[str] = None,
-         subject: Optional[str] = None) -> Dict[str, Any]:
+         subject: Optional[str] = None,
+         policy_session_id: Optional[str] = None) -> Dict[str, Any]:
     """Run the full gate chain for one proposed agent action.
 
     `tier_caps` is the caller-resolved entitlement map for the tenant's tier
@@ -1003,6 +1025,21 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             return _allow("allow_via_approval", confirmation_id=str(confirmation_id))
         return _awaiting(record)
 
+    # PLAN-FIRST: the session policy can force an otherwise-auto action to
+    # confirm. Resolved HERE, in the gate, for two load-bearing reasons: only
+    # the app may mint an approvable confirmation_id (a locally minted one
+    # renders a chip that POST /api/agent/approvals/{id} answers 404), and the
+    # gate already holds the session identity it needs. The harness therefore
+    # needs NO new field and cannot assert the policy — otherwise a
+    # tenant-controlled turn body could weaken its own gating.
+    #
+    # It only ever NARROWS: an `auto` action becomes a confirmation; deny stays
+    # deny; an action already requiring approval is unchanged. An unreadable
+    # policy leaves today's behavior, which is right for a TIGHTENING feature —
+    # failing it closed would block every read on a storage blip.
+    if act.policy == "auto" and _plan_first_session(
+            tenant_id, policy_session_id or session_id):
+        return _create_and_await()
     if act.policy == "auto":
         return _allow("allow")
 
