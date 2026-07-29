@@ -373,7 +373,7 @@ describe("hardlink containment — round-3 review finding", () => {
   });
 });
 
-describe("converse runner wiring", () => {
+describe("live converse runner wiring", () => {
   // The failure this catches: the helper is perfect and nothing calls it. A
   // declaration can also be swallowed by a comment block and still compile —
   // that exact bug shipped in App.jsx earlier in this program. esbuild strips
@@ -382,7 +382,7 @@ describe("converse runner wiring", () => {
     const esbuild = await import("esbuild");
     const { readFileSync } = await import("node:fs");
     const source = readFileSync(
-      new URL("../src/ports/impl/agentSdkTurnRunner.ts", import.meta.url), "utf8");
+      new URL("../src/ports/impl/converseSdkRunner.ts", import.meta.url), "utf8");
     const stripped = esbuild.transformSync(source, { loader: "ts" }).code;
 
     expect(stripped).toMatch(/skillBundleAttachment\s*\(/);

@@ -81,6 +81,7 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { skillBundleAttachment } from "./skillBundle.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
 
 // --------------------------------------------------------------------------- //
@@ -107,6 +108,8 @@ interface ZodModule {
     unknown(): Z;
     enum(v: string[]): Z;
     record(inner: Z): Z;
+    array(inner: Z): Z;
+    object(shape: Record<string, Z>): Z;
     [k: string]: unknown;
   };
 }
@@ -148,6 +151,8 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
     "Search the platform's registered tool catalog. Args {query, k?}. Returns matching tools; the top match includes its params_schema.",
   drawing_state:
     "Read the current drawing's state. Args {what: 'summary'|'versions'|'checkout'}.",
+  ask_user:
+    "Ask the user one focused question with 2 to 6 choices. After the question is presented, end your turn and wait for the reply.",
   run_capability:
     "Dispatch ONE registered catalog tool as a platform job. Args {tool, params?, dwg?}. Read tools may return their result inline; write tools return a proposal requiring user approval (re-invoke with confirmation_id after approval).",
   job_status: "Check a previously dispatched job. Args {job_id}.",
@@ -234,6 +239,10 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     const schemas: Record<SpineToolName, Record<string, unknown>> = {
       catalog_search: { query: z.string(), k: z.number().optional() },
       drawing_state: { what: z.enum(["summary", "versions", "checkout"]) },
+      ask_user: {
+        question: z.string(),
+        options: z.array(z.object({ label: z.string(), description: z.string().optional() })),
+      },
       run_capability: {
         tool: z.string(),
         params: z.record(z.unknown()).optional(),
@@ -265,6 +274,9 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     }, this.turnTimeoutS * 1000);
 
     const model = input.model ?? this.model;
+    // Curated skills are opt-in and fail closed when their bundle/tier is invalid.
+    // `settingSources` remains empty, so this never discovers ~/.claude.
+    const bundle = skillBundleAttachment();
     const query = (prompt: string, resume?: string): AsyncIterable<unknown> =>
       sdk.query({
         prompt,
@@ -279,6 +291,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           includePartialMessages: true,
           tools: [], // no built-in tools: the spine MCP server is the whole surface
           mcpServers: { spine: server },
+          ...(bundle ? { plugins: [bundle.plugin], skills: bundle.skills } : {}),
           ...(resume ? { resume } : {}),
           canUseTool: async (toolName: string, inp: Record<string, unknown>) =>
             // Bridge to the loop's hook (allow spine tools / deny everything else).

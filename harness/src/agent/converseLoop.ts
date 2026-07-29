@@ -128,6 +128,7 @@ export interface HandleMessageResult {
 /** Per-turn mutable state the executor and the completion mapping share. */
 interface TurnState {
   proposalMade: boolean;
+  questionAsked: boolean;
   catalog: CapabilityEntry[] | null;
   catalogFetched: boolean;
 }
@@ -354,7 +355,12 @@ export class ConverseLoop {
       }
     };
 
-    const state: TurnState = { proposalMade: false, catalog: null, catalogFetched: false };
+    const state: TurnState = {
+      proposalMade: false,
+      questionAsked: false,
+      catalog: null,
+      catalogFetched: false,
+    };
     let stopReason: ConverseStopReason = "error";
     let sdkSessionId: string | null = null;
 
@@ -535,6 +541,10 @@ export class ConverseLoop {
           return { action: "read_platform_state", args: { what: "capabilities" } };
         case "drawing_state":
           return { action: "read_platform_state", args: { what: String(args.what ?? "summary") } };
+        case "ask_user":
+          // A question has no execution side effect. Consult the established
+          // read-only action so the gate records it but never proposes it.
+          return { action: "read_platform_state", args: { what: "capabilities" } };
         case "job_status":
           return { action: "read_platform_state", args: { what: "jobs" } };
         case "run_capability": {
@@ -743,6 +753,7 @@ export class ConverseLoop {
                 state.catalogFetched = false;
                 state.catalog = null;
               },
+              turnState: state,
               ...instant,
             },
           );
@@ -773,6 +784,7 @@ export class ConverseLoop {
       catalogFor: () => Promise<CapabilityEntry[]>;
       capabilityOf: (toolName: string) => Promise<"drawing.read" | "drawing.write">;
       invalidateCatalog: () => void;
+      turnState: TurnState;
       instantAssignment?: InstantSessionAssignment;
       instantDrawingContext?: InstantDrawingContext;
       authoritySessionId?: string;
@@ -801,6 +813,39 @@ export class ConverseLoop {
         const what = args.what === "versions" || args.what === "checkout" ? args.what : "summary";
         const fragment = await appRun.getDrawingState(tenantId, ctx.session.drawing_id, what);
         return ok(JSON.stringify(fragment));
+      }
+
+      case "ask_user": {
+        if (ctx.turnState.questionAsked) return err("ask_user permits only one question per turn");
+        const question = args.question;
+        const options = args.options;
+        if (typeof question !== "string" || question.length > 500) {
+          return err("ask_user question must be a string of at most 500 characters");
+        }
+        if (!Array.isArray(options) || options.length < 2 || options.length > 6) {
+          return err("ask_user requires 2 to 6 options");
+        }
+        const normalized: Array<{ label: string; description?: string }> = [];
+        for (const option of options) {
+          if (!option || typeof option !== "object" || Array.isArray(option)) {
+            return err("ask_user options must be objects");
+          }
+          const { label, description } = option as Record<string, unknown>;
+          if (typeof label !== "string" || label !== label.trim() || label.length > 120) {
+            return err("ask_user option labels must be trimmed strings of at most 120 characters");
+          }
+          if (description !== undefined && (typeof description !== "string" || description.length > 300)) {
+            return err("ask_user option descriptions must be strings of at most 300 characters");
+          }
+          normalized.push({ label, ...(typeof description === "string" ? { description } : {}) });
+        }
+        ctx.turnState.questionAsked = true;
+        await ctx.emit("question_required", {
+          question_id: randomUUID(),
+          question,
+          options: normalized,
+        });
+        return ok(JSON.stringify({ presented: true, message: "Question presented. End your turn and wait for the user reply." }));
       }
 
       case "run_capability": {
@@ -1084,6 +1129,8 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `query="${truncate(String(args.query ?? ""), 60)}"`;
     case "drawing_state":
       return `what=${String(args.what ?? "summary")}`;
+    case "ask_user":
+      return "question requested";
     case "run_capability":
       return `tool=${String(args.tool ?? "?")}${args.confirmation_id ? " (confirmed)" : ""}`;
     case "job_status":

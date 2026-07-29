@@ -18,6 +18,9 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   ConverseSdkRunner,
@@ -100,7 +103,7 @@ function makeMockSdk(script: ScriptEntry[] | ScriptEntry[][]) {
   // A zod stand-in: every factory returns a chainable token with .optional().
   const zt = (): AnyRec => ({ optional: zt });
   const zodModule = {
-    z: { string: zt, number: zt, unknown: zt, boolean: zt, enum: zt, record: zt },
+    z: { string: zt, number: zt, unknown: zt, boolean: zt, enum: zt, record: zt, array: zt, object: zt },
   };
 
   return {
@@ -331,6 +334,39 @@ describe("ConverseSdkRunner — a throw never carries the grant out", () => {
 // --------------------------------------------------------------------------- //
 
 describe("ConverseSdkRunner — SDK options wiring", () => {
+  it("mounts a matching curated skill bundle and otherwise omits its SDK options", async () => {
+    const root = mkdtempSync(join(tmpdir(), "leaf-converse-skills-"));
+    try {
+      mkdirSync(join(root, ".claude-plugin"), { recursive: true });
+      mkdirSync(join(root, "skills", "drawing-help"), { recursive: true });
+      writeFileSync(join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ leafTier: "tenant-safe" }));
+      writeFileSync(join(root, "skills", "drawing-help", "SKILL.md"), "---\nname: drawing-help\ndescription: help\n---\n");
+      vi.stubEnv("LEAF_SKILLS_BUNDLE_PATH", root);
+      vi.stubEnv("LEAF_SKILLS_TIER", "tenant-safe");
+      const enabled = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(enabled), makeInput());
+      expect(enabled.queries[0]!.options.plugins).toEqual([
+        { type: "local", path: root, skipMcpDiscovery: true },
+      ]);
+      expect(enabled.queries[0]!.options.skills).toEqual(["drawing-help"]);
+
+      vi.stubEnv("LEAF_SKILLS_TIER", "operator");
+      const mismatched = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(mismatched), makeInput());
+      expect("plugins" in mismatched.queries[0]!.options).toBe(false);
+      expect("skills" in mismatched.queries[0]!.options).toBe(false);
+
+      vi.stubEnv("LEAF_SKILLS_BUNDLE_PATH", "");
+      vi.stubEnv("LEAF_SKILLS_TIER", "");
+      const disabled = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(disabled), makeInput());
+      expect("plugins" in disabled.queries[0]!.options).toBe(false);
+      expect("skills" in disabled.queries[0]!.options).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("passes resume when resumeSdkSessionId is present, omits it when absent", async () => {
     const withResume = makeMockSdk([resultSuccess()]);
     await collect(runnerWith(withResume), makeInput({ resumeSdkSessionId: "prior-session-42" }));
@@ -470,7 +506,7 @@ describe("ConverseSdkRunner — bridging to the loop", () => {
     const seen: Array<{ tool: string; input: AnyRec }> = [];
     const canUseTool: ConverseRunInput["canUseTool"] = async (tool, input) => {
       seen.push({ tool, input });
-      return tool.includes("run_capability")
+      return tool === "Skill" || tool.includes("run_capability")
         ? { behavior: "deny", message: "not now" }
         : { behavior: "allow", updatedInput: input };
     };
@@ -486,9 +522,12 @@ describe("ConverseSdkRunner — bridging to the loop", () => {
     expect(allow).toEqual({ behavior: "allow", updatedInput: { what: "summary" } });
     const deny = await hook("mcp__spine__run_capability", { tool: "add-panel" });
     expect(deny).toEqual({ behavior: "deny", message: "not now" });
+    const skill = await hook("Skill", { skill: "drawing-help" });
+    expect(skill).toEqual({ behavior: "deny", message: "not now" });
     expect(seen.map((s) => s.tool)).toEqual([
       "mcp__spine__drawing_state",
       "mcp__spine__run_capability",
+      "Skill",
     ]);
   });
 });
