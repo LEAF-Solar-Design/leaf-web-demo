@@ -34,6 +34,7 @@ import platform  # noqa: F401  (import-order guard, intentional)
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -57,6 +58,7 @@ from jwt.algorithms import RSAAlgorithm
 ISS = "https://leaf-test.example/"
 AUD = "https://api.leaf-test.example"
 NS = "https://leafdesign.ai/"
+PLATFORM_TENANT_ID = "bccb0d64-04c9-4108-bcc1-f27b8bb3924d"
 KID = "leaf-test-key-1"
 
 _priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -97,7 +99,7 @@ import tenancy  # noqa: E402
 
 def _active_test_tenant(subject):
     assert subject == "auth0|tester"
-    return "org_acme_solar", "hosted_pro"
+    return PLATFORM_TENANT_ID, "hosted_pro"
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -117,12 +119,13 @@ def _auth_env():
 
 
 def mint(*, key=_priv_pem, kid=KID, aud=AUD, iss=ISS, exp_delta=3600,
-         include_tenant=True, tenant_id="org_acme_solar") -> str:
+         include_tenant=True, tenant_id="org_acme_solar",
+         org_id=None) -> str:
     now = int(time.time())
     payload = {"iss": iss, "aud": aud, "iat": now, "exp": now + exp_delta, "sub": "auth0|tester"}
     if include_tenant:
         payload[NS + "tenant_id"] = tenant_id
-        payload[NS + "org_id"] = tenant_id
+        payload[NS + "org_id"] = tenant_id if org_id is None else org_id
         payload[NS + "tier"] = "hosted_pro"
     return jwt.encode(payload, key, algorithm="RS256", headers={"kid": kid})
 
@@ -210,12 +213,74 @@ def test_http_session_no_token_401():
 
 
 def test_http_session_valid_token_200_echoes_tenant():
-    r = _client().get("/api/session", headers={"Authorization": bearer(mint())})
+    r = _client().get(
+        "/api/session",
+        headers={"Authorization": bearer(mint(
+            tenant_id=PLATFORM_TENANT_ID, org_id="website_org_cuid"))},
+    )
     assert r.status_code == 200
     body = r.json()
-    assert body["tenant_id"] == "org_acme_solar"
-    assert body["org_id"] == "org_acme_solar"
+    assert body["tenant_id"] == PLATFORM_TENANT_ID
+    assert body["org_id"] == PLATFORM_TENANT_ID
     assert isinstance(body["intake"], dict) and "polylines" in body["intake"]
+
+
+def _raw_tenant_client():
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+
+    @app.get("/tenant")
+    def tenant(tenant_id=Depends(deps.require_tenant)):
+        return deps.tenant_echo({}, tenant_id)
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_live_tenant_namespace_comes_from_the_active_binding():
+    r = _raw_tenant_client().get(
+        "/tenant",
+        headers={"Authorization": bearer(mint(
+            tenant_id=PLATFORM_TENANT_ID, org_id="website_org_cuid"))},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tenant_id"] == PLATFORM_TENANT_ID
+    assert body["org_id"] == PLATFORM_TENANT_ID
+    assert body["tier"] == "hosted_pro"
+
+
+def test_a_stale_tenant_claim_fails_closed_instead_of_rerouting():
+    r = _raw_tenant_client().get(
+        "/tenant", headers={"Authorization": bearer(mint())})
+    assert r.status_code == 409
+    assert r.json()["detail"] == (
+        "verified tenant claim conflicts with the active platform binding")
+
+
+def test_post_login_action_prefers_the_root_platform_tenant_id():
+    action = (
+        Path(__file__).resolve().parent
+        / "auth0-actions"
+        / "post-login-add-tenant-claim.js"
+    )
+    script = (
+        "const a=require(process.argv[1]);"
+        "const c=a.deriveClaims({user:{app_metadata:{"
+        "leaf_platform_tenant_id:'" + PLATFORM_TENANT_ID + "',"
+        "leaf:{organization_id:'website_org_cuid',plan:'pro'}}}});"
+        "process.stdout.write(JSON.stringify(c));"
+    )
+    result = subprocess.run(
+        ["node", "-e", script, str(action)],
+        check=True, capture_output=True, text=True,
+    )
+    assert json.loads(result.stdout) == {
+        "tenant_id": PLATFORM_TENANT_ID,
+        "org_id": "website_org_cuid",
+        "tier": "hosted_pro",
+    }
 
 
 def test_http_session_missing_claim_403():

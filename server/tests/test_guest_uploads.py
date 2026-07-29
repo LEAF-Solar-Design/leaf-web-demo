@@ -65,7 +65,7 @@ def _upload(client, data=DXF_BYTES, name="mine.dxf", headers=None):
                        headers=headers or {})
 
 
-def test_live_account_upload_uses_active_binding_not_stale_claims(monkeypatch):
+def test_live_account_upload_uses_active_binding_not_stale_org_claim(monkeypatch):
     import auth
     import tenancy
 
@@ -75,7 +75,7 @@ def test_live_account_upload_uses_active_binding_not_stale_claims(monkeypatch):
         auth, "verify_platform_token", lambda authorization: {"sub": "auth0|bound"})
     monkeypatch.setattr(
         auth, "extract_tenant_claims", lambda payload: {
-            "tenant_id": "stale-claim-tenant",
+            "tenant_id": canonical,
             "org_id": "stale-claim-org",
             "tier": "demo",
         })
@@ -108,7 +108,7 @@ def test_live_account_upload_status_uses_active_binding_not_stale_claims(
         auth, "verify_platform_token", lambda authorization: {"sub": "auth0|bound"})
     monkeypatch.setattr(
         auth, "extract_tenant_claims", lambda payload: {
-            "tenant_id": stale,
+            "tenant_id": canonical,
             "org_id": "stale-claim-org",
             "tier": "demo",
         })
@@ -145,6 +145,31 @@ def test_live_account_upload_status_uses_active_binding_not_stale_claims(
     assert body["tier"] == "hosted_pro"
 
 
+def test_live_account_upload_rejects_a_stale_tenant_claim(
+        client, monkeypatch):
+    import auth
+
+    canonical = "f49766b5-1e5a-4e67-a10f-4e3a9b576266"
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(
+        auth, "verify_platform_token", lambda authorization: {"sub": "auth0|bound"})
+    monkeypatch.setattr(
+        auth, "extract_tenant_claims", lambda payload: {
+            "tenant_id": "stale-claim-tenant",
+            "org_id": "website-org-cuid",
+            "tier": "demo",
+        })
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        lambda subject: (canonical, "hosted_pro"))
+
+    upload = _upload(client, headers={"Authorization": "Bearer verified"})
+
+    assert upload.status_code == 409
+    assert upload.json()["error"]["message"] == (
+        "verified tenant claim conflicts with the active platform binding")
+
+
 def test_live_account_intake_uses_active_binding_not_stale_claims(
         client, monkeypatch):
     """The intake route must read the same tenant key the upload wrote."""
@@ -158,7 +183,7 @@ def test_live_account_intake_uses_active_binding_not_stale_claims(
         auth, "verify_platform_token", lambda authorization: {"sub": "auth0|bound"})
     monkeypatch.setattr(
         auth, "extract_tenant_claims", lambda payload: {
-            "tenant_id": stale,
+            "tenant_id": canonical,
             "org_id": "stale-claim-org",
             "tier": "demo",
         })
@@ -689,7 +714,15 @@ def test_guest_disable_keeps_signed_account_lane_open(client, monkeypatch):
         "verify_platform_token",
         lambda authorization: {"sub": "auth0|signed-account"},
     )
-    monkeypatch.setattr(auth, "extract_tenant_claims", lambda payload: {})
+    monkeypatch.setattr(
+        auth,
+        "extract_tenant_claims",
+        lambda payload: {
+            "tenant_id": canonical,
+            "org_id": "website-org-cuid",
+            "tier": "demo",
+        },
+    )
     monkeypatch.setattr(
         deps,
         "resolve_active_platform_tenant_authority",
