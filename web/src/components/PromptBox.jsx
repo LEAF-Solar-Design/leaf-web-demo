@@ -25,7 +25,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
-import { autoGrowHeight, rankEntries } from '../composer.js'
+import { autoGrowHeight, filterRunnable, rankEntries } from '../composer.js'
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
@@ -49,6 +49,11 @@ function laneDotClass(lane, hit) {
 export default function PromptBox({
   value, onChange, onDispatch, routing, hintLane, projectName, inputRef, routeActive,
   onOpenAuthor, tools = [],
+  // action name -> handler, for registry entries of kind "command". An entry
+  // whose action has no handler here is filtered out of the menu entirely
+  // (composer.js filterRunnable), so the picker can never offer something this
+  // client would silently ignore.
+  commandActions = {},
 }) {
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
@@ -70,8 +75,8 @@ export default function PromptBox({
   // name/description substring matches — case-insensitive, like Claude's picker.
   const matches = useMemo(() => {
     if (!completing) return []
-    return rankEntries(tools, afterSlash)
-  }, [completing, afterSlash, tools])
+    return rankEntries(filterRunnable(tools, commandActions), afterSlash)
+  }, [completing, afterSlash, tools, commandActions])
 
   // While ANOTHER resolver is showing — a route decision, or the scope menu —
   // that resolver owns the surface AND the keys, so this menu stands down
@@ -90,6 +95,15 @@ export default function PromptBox({
   // starts args mode). Enter: complete and hand off to dispatch in one act.
   const complete = (t) => onChange(`/${t.name} `)
   const pick = (t) => {
+    // A command runs its own handler — it is not a tool, so routing it through
+    // onDispatch would send "/stop" to the prompt router as if the tenant had
+    // a tool by that name. filterRunnable guarantees the handler exists.
+    if (t.kind === 'command') {
+      onChange('')
+      const run = commandActions[t.client_action]
+      if (typeof run === 'function') run(t)
+      return
+    }
     onChange(`/${t.name} `)
     onDispatch(`/${t.name}`)
   }
@@ -244,7 +258,13 @@ export default function PromptBox({
                     <span className="route-tool">/{t.name}</span>
                     {t.description && <span className="dim"> · {t.description}</span>}
                   </span>
-                  <span className="count">{isWrite ? 'write' : 'read'}</span>
+                  {/* Kind first when the registry supplied one: a picker that
+                      mixes commands, skills and tools has to say which is
+                      which. Tools keep their read/write reading, which is the
+                      money-relevant distinction. */}
+                  <span className="count">
+                    {t.kind && t.kind !== 'tool' ? t.kind : (isWrite ? 'write' : 'read')}
+                  </span>
                   {i === idx && <span className="key hot">Tab</span>}
                 </div>
               )

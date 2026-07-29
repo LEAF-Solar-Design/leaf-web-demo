@@ -45,3 +45,26 @@ export function rankEntries(entries, query) {
   const byGroup = (a, b) => groupRank(a) - groupRank(b)
   return [...pre.sort(byGroup), ...sub.sort(byGroup)]
 }
+
+// A registry entry is only offered when the client can actually run it.
+//
+// The server DECLARES what exists (commands, skills, tools); the client knows
+// which of those it can dispatch. A command whose `client_action` has no
+// handler here would be a dead affordance in a menu the user is trusting, so
+// it is filtered out rather than listed and then silently ignored. Tools and
+// skills go through the existing dispatch path, so they need no handler to be
+// runnable.
+//
+// Wiring a new command is therefore exactly one change: add its handler.
+export function filterRunnable(entries, commandActions = {}) {
+  const runnable = []
+  for (const entry of entries || []) {
+    if (!entry || typeof entry.name !== 'string' || !entry.name) continue
+    if (entry.kind === 'command') {
+      const action = entry.client_action
+      if (!action || typeof commandActions[action] !== 'function') continue
+    }
+    runnable.push(entry)
+  }
+  return runnable
+}

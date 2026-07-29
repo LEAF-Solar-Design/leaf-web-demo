@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { autoGrowHeight, rankEntries, LINE_PX, MAX_ROWS } from './composer.js'
+import { autoGrowHeight, filterRunnable, rankEntries, LINE_PX, MAX_ROWS } from './composer.js'
 
 const names = (entries) => entries.map((e) => e.name)
 
@@ -90,5 +90,41 @@ describe('rankEntries', () => {
     assert.deepEqual(rankEntries(undefined, 'x'), [])
     assert.deepEqual(rankEntries([], 'x'), [])
     assert.deepEqual(names(rankEntries([{ name: 'a' }], undefined)), ['a'])
+  })
+})
+
+describe('filterRunnable', () => {
+  const actions = { help: () => {} }
+  const entries = [
+    { kind: 'command', name: 'help', client_action: 'help' },
+    { kind: 'command', name: 'stop', client_action: 'cancel_turn' },
+    { kind: 'command', name: 'broken', client_action: 'nope' },
+    { kind: 'command', name: 'actionless' },
+    { kind: 'skill', name: 'orwell-writing' },
+    { kind: 'tool', name: 'count_panels' },
+  ]
+
+  it('drops commands the client cannot dispatch — no dead affordances', () => {
+    assert.deepEqual(names(filterRunnable(entries, actions)),
+      ['help', 'orwell-writing', 'count_panels'])
+  })
+
+  it('keeps a command as soon as its handler exists', () => {
+    const withStop = { ...actions, cancel_turn: () => {} }
+    assert.ok(names(filterRunnable(entries, withStop)).includes('stop'))
+  })
+
+  it('never filters tools or skills — they use the existing dispatch path', () => {
+    assert.deepEqual(names(filterRunnable(entries, {})), ['orwell-writing', 'count_panels'])
+  })
+
+  it('is safe on absent or malformed input', () => {
+    assert.deepEqual(filterRunnable(undefined, actions), [])
+    assert.deepEqual(filterRunnable([null, {}, { name: '' }], actions), [])
+  })
+
+  it('rejects a non-function handler (a truthy value is not dispatchable)', () => {
+    assert.deepEqual(names(filterRunnable(entries, { help: 'yes' })),
+      ['orwell-writing', 'count_panels'])
   })
 })
