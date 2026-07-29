@@ -1176,3 +1176,128 @@ def test_cancel_foreign_tenant_session_also_maps_to_session_not_found(monkeypatc
     assert ei.value.error_code == ErrorCode.SESSION_NOT_FOUND
     # and the owner's turn is untouched
     assert session_store.get_session(session_id)["active_turn_id"] == "t-owned"
+
+
+def test_relayed_publish_holds_the_one_shot_lock(monkeypatch):
+    """Publishing a relayed event and CLAIMING the terminal must be mutually
+    exclusive, or an event lands after the terminal one.
+
+    `_drain` checks `terminal_flag` at the top of its loop but publishes much
+    later, so anything terminalizing in that gap — an arbitrary-moment cancel
+    here, the watchdog when its deadline falls there — used to produce
+    `[turn_started, turn_complete, text_delta]`. The client stops rendering at
+    `turn_complete`, so the straggler was invisible in the UI and permanent in
+    the durable transcript.
+
+    The observable difference, with no sleep and no thread racing: while the
+    drain is inside `append_event` for a relayed line, a concurrent cancel must
+    BLOCK on the one-shot lock. `_ObservableLock` records exactly that. Publish
+    outside the lock and the cancel walks straight through, `lock_contended`
+    is never set, and this test fails — which is what makes it a guard rather
+    than a description.
+
+    The watchdog is captured and never started, so the cancel is the only other
+    thread that can touch the lock.
+    """
+    harness = _RelayHarness()
+    monkeypatch.setattr(turn_runner, "threading", harness)
+
+    sess = _new_session("tenant-publish-lock")
+    session_id = sess["session_id"]
+    turn_id = "turn-publish-lock"
+    assert session_store.try_begin_turn(session_id, turn_id, 60.0)
+
+    resp = _FakeStream(lines=[
+        json.dumps({"type": "text_delta", "data": {"text": "straggler"}}),
+    ])
+    turn_runner._spawn_relay("tenant-publish-lock", session_id, turn_id, resp, 60.0)
+
+    real_append = session_store.append_event
+    fired = threading.Event()
+    cancel_thread: Dict[str, Any] = {}
+
+    def _append_and_race(sid, tid, ev_type, data):
+        # Only for the relayed line — not for `turn_started` or the terminal
+        # event the cancel itself appends.
+        if ev_type == "text_delta" and not fired.is_set():
+            fired.set()
+            t = threading.Thread(
+                target=lambda: turn_runner.request_cancel(
+                    "tenant-publish-lock", session_id, turn_id),
+                name="test-canceller", daemon=True)
+            cancel_thread["t"] = t
+            t.start()
+            # Wait for that thread to actually reach the lock. With the publish
+            # inside the critical section it blocks and this resolves; without
+            # it, the cancel sails past and this times out.
+            harness.lock_contended.wait(timeout=10.0)
+        return real_append(sid, tid, ev_type, data)
+
+    monkeypatch.setattr(session_store, "append_event", _append_and_race)
+
+    drain = harness.launch("turn-drain")
+    drain.join(timeout=20.0)
+    assert not drain.is_alive()
+    if cancel_thread.get("t"):
+        cancel_thread["t"].join(timeout=20.0)
+        assert not cancel_thread["t"].is_alive()
+
+    assert fired.is_set(), "the relayed line was never published"
+    assert harness.lock_contended.is_set(), (
+        "a concurrent cancel did NOT block while the drain was publishing a "
+        "relayed event — publishing and claiming the terminal are not mutually "
+        "exclusive, so an event can land after the terminal one"
+    )
+
+    monkeypatch.setattr(session_store, "append_event", real_append)
+    events = session_store.recent_events(session_id, 100)
+    types = [e["type"] for e in events]
+    # At most one terminal event, and nothing after it. (A clean EOF before the
+    # turn's deadline legitimately terminalizes with NO event at all — see
+    # test_clean_eof_before_the_deadline_appends_no_terminal_event — so the
+    # count is 0-or-1 here; the ORDERING is the invariant under test.)
+    terminal_idx = [i for i, t in enumerate(types) if t in ("turn_complete", "error")]
+    assert len(terminal_idx) <= 1, f"more than one terminal event: {types}"
+    if terminal_idx:
+        assert terminal_idx[0] == len(types) - 1, (
+            f"an event was appended AFTER the terminal event. events={types}")
+    assert session_store.get_session(session_id)["active_turn_id"] is None
+
+
+def test_concurrent_orphan_cancels_append_exactly_one_terminal_event(monkeypatch):
+    """Two cancels arriving at once must not both terminalize the same turn.
+
+    The orphan path's active-turn check happens outside any lock, so both
+    callers could read `active_turn_id == turn_id` and both append. The check
+    is re-read under `_orphan_cancel_lock`, so exactly one wins and the other
+    reports `not_active`.
+    """
+    sess = _new_session("tenant-double-cancel")
+    session_id = sess["session_id"]
+    turn_id = "turn-double-cancel"
+    assert session_store.try_begin_turn(session_id, turn_id, 300.0)
+    with turn_runner._cancellers_lock:
+        assert turn_id not in turn_runner._cancellers  # orphan path
+
+    start = threading.Barrier(2)
+    outcomes: List[str] = []
+    outcomes_lock = threading.Lock()
+
+    def _cancel_once():
+        start.wait(timeout=10)
+        result = turn_runner.request_cancel("tenant-double-cancel", session_id, turn_id)
+        with outcomes_lock:
+            outcomes.append(result)
+
+    threads = [threading.Thread(target=_cancel_once, daemon=True) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15.0)
+        assert not t.is_alive()
+
+    assert sorted(outcomes) == ["cancelled", "not_active"], outcomes
+    events = session_store.recent_events(session_id, 100)
+    assert sum(1 for e in events if e["type"] == "turn_complete") == 1, \
+        [e["type"] for e in events]
+    assert session_store.get_session(session_id)["active_turn_id"] is None

@@ -232,14 +232,28 @@ export default function ConversePanel({
 
   // Esc interrupts, matching the terminal client. Document-level because the
   // reply input is disabled while a turn runs (a disabled control receives no
-  // keys), but it DEFERS to anything that already handled the key: the slash
-  // menu and the scope/route resolvers call preventDefault to close
-  // themselves first, and stealing Esc from them would break that ladder.
+  // keys).
+  //
+  // It sits BETWEEN the two existing Esc consumers, which is why both calls
+  // below are load-bearing:
+  //   * `defaultPrevented` DEFERS to anything nearer the target that already
+  //     handled the key — the slash menu and the scope/route resolvers in
+  //     PromptBox call preventDefault to close themselves, and stealing Esc
+  //     from them would break that ladder.
+  //   * `stopPropagation` keeps the key from ALSO reaching App's window-level
+  //     ladder (App.jsx: `window.addEventListener('keydown', …)`), which does
+  //     NOT check defaultPrevented — without this, one Esc would interrupt the
+  //     turn AND dismiss the route/drawer behind it. Document listeners fire
+  //     before window ones in the bubble phase, so stopping here is what makes
+  //     "interrupt the running turn" the single effect of that keypress.
+  // Both only happen when there is actually a turn to stop; otherwise the key
+  // is left entirely alone.
   useEffect(() => {
     if (!busy || !stoppableTurnId) return undefined
     const onEsc = (e) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
       e.preventDefault()
+      e.stopPropagation()
       stop()
     }
     document.addEventListener('keydown', onEsc)
