@@ -526,17 +526,6 @@ export function requireCameraMotion(before, after) {
   }
 }
 
-export async function openAuthorWorkspace(page) {
-  await page.getByRole('tab', { name: 'Author', exact: true }).click()
-  const authorSection = page.locator('.author-section')
-  await authorSection.waitFor({ state: 'visible' })
-  const authorToggle = authorSection.getByRole('button', { name: /Author a tool/ })
-  if (await authorToggle.getAttribute('aria-expanded') !== 'true') {
-    await authorToggle.click()
-  }
-  return authorSection
-}
-
 export function requireDistinctStagedResults(results, tenants) {
   if (
     results.length !== 2 ||
@@ -556,6 +545,29 @@ export function isMutatingApiRequest(requestUrl, method, allowedOrigins) {
   return allowedOrigins.has(url.origin)
     && url.pathname.startsWith('/api/')
     && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+}
+
+export async function openTryAuthorSurface(page) {
+  try {
+    const authorTab = page.getByRole('tab', { name: 'Author', exact: true })
+    await authorTab.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
+    if (!await authorTab.isEnabled()) {
+      throw new AcceptanceError(
+        'author_surface',
+        'the /try Author tab is disabled after backend readiness',
+      )
+    }
+    await authorTab.click()
+    const authorRequest = page.getByLabel('What should the tool do?')
+    await authorRequest.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
+    return authorRequest
+  } catch (error) {
+    if (error instanceof AcceptanceError) throw error
+    throw new AcceptanceError(
+      'author_surface',
+      `could not open the /try Author tab: ${error?.name || 'Error'}`,
+    )
+  }
 }
 
 async function runBrowserTenant(config, tenant, browser, execute) {
@@ -633,8 +645,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     if (!execute) return result
 
-    await openAuthorWorkspace(page)
-    const authorRequest = page.getByLabel('What should the tool do?')
+    const authorRequest = await openTryAuthorSurface(page)
     await authorRequest.fill(tenant.request)
     const stageResponsePromise = page.waitForResponse(
       (response) => response.url() === `${config.apiUrl}/api/author/stage`

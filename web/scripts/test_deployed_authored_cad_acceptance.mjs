@@ -12,7 +12,7 @@ import {
   evaluateDeploymentIdentity,
   main,
   isMutatingApiRequest,
-  openAuthorWorkspace,
+  openTryAuthorSurface,
   proveExecutedAuthorityIsolation,
   proveExecutedDrawingIsolation,
   provePinnedWriteRejections,
@@ -178,44 +178,69 @@ describe('deployed authored CAD acceptance configuration', () => {
 })
 
 describe('deployed authored CAD acceptance checks', () => {
-  it('opens the Author workspace before reading its conditionally mounted controls', async () => {
+  it('opens authoring through the /try Author tab, not the /app section', async () => {
     const calls = []
-    const authorToggle = {
-      getAttribute: async (name) => {
-        calls.push(`read-${name}`)
-        return 'false'
-      },
-      click: async () => calls.push('expand-author-tool'),
+    const authorRequest = {
+      waitFor: async (options) => calls.push(['field.waitFor', options]),
     }
-    const authorSection = {
-      waitFor: async (options) => calls.push(`wait-${options.state}`),
-      getByRole: (role, options) => {
-        assert.equal(role, 'button')
-        assert.match('Author a tool', options.name)
-        return authorToggle
-      },
+    const authorTab = {
+      waitFor: async (options) => calls.push(['tab.waitFor', options]),
+      isEnabled: async () => true,
+      click: async () => calls.push(['tab.click']),
     }
     const page = {
       getByRole: (role, options) => {
-        assert.equal(role, 'tab')
-        assert.deepEqual(options, { name: 'Author', exact: true })
-        return { click: async () => calls.push('open-author-tab') }
+        calls.push(['getByRole', role, options])
+        return authorTab
+      },
+      getByLabel: (label) => {
+        calls.push(['getByLabel', label])
+        return authorRequest
       },
       locator: (selector) => {
-        assert.equal(selector, '.author-section')
-        calls.push('locate-author-section')
-        return authorSection
+        throw new Error(`unexpected locator: ${selector}`)
       },
     }
 
-    assert.equal(await openAuthorWorkspace(page), authorSection)
+    assert.equal(await openTryAuthorSurface(page), authorRequest)
     assert.deepEqual(calls, [
-      'open-author-tab',
-      'locate-author-section',
-      'wait-visible',
-      'read-aria-expanded',
-      'expand-author-tool',
+      ['getByRole', 'tab', { name: 'Author', exact: true }],
+      ['tab.waitFor', { state: 'visible', timeout: 30_000 }],
+      ['tab.click'],
+      ['getByLabel', 'What should the tool do?'],
+      ['field.waitFor', { state: 'visible', timeout: 30_000 }],
     ])
+  })
+
+  it('reports a disabled or missing /try author surface by acceptance stage', async () => {
+    const disabledPage = {
+      getByRole: () => ({
+        waitFor: async () => {},
+        isEnabled: async () => false,
+      }),
+    }
+    await assert.rejects(
+      () => openTryAuthorSurface(disabledPage),
+      (error) => error instanceof AcceptanceError
+        && error.check === 'author_surface'
+        && /disabled/.test(error.message),
+    )
+
+    const missingPage = {
+      getByRole: () => ({
+        waitFor: async () => {
+          const error = new Error('missing')
+          error.name = 'TimeoutError'
+          throw error
+        },
+      }),
+    }
+    await assert.rejects(
+      () => openTryAuthorSurface(missingPage),
+      (error) => error instanceof AcceptanceError
+        && error.check === 'author_surface'
+        && /TimeoutError/.test(error.message),
+    )
   })
 
   it('denies the wrong tenant before the owner uses the independent approval route', async () => {
