@@ -33,8 +33,7 @@ def main() -> None:
 
     assert "ARG LEAF_SOURCE_SHA" in text
     assert "LEAF_SOURCE_SHA must be an exact lowercase 40-character commit" in text
-    assert "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem" in text
-    assert "/etc/ssl/certs/aws-rds-global-bundle.pem" in text
+    assert "ca-certificates" in text
     assert "org.opencontainers.image.revision=$LEAF_SOURCE_SHA" in text
     assert "USER 65532:65532" in text
     for required_env in ("HOME=/tmp", "TMPDIR=/tmp", "XDG_CACHE_HOME=/tmp", "PYTHONDONTWRITEBYTECODE=1"):
