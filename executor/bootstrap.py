@@ -93,14 +93,15 @@ def materialize(
                     stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
-                os.chmod(temporary, 0o600)
+                _harden_file(temporary)
                 os.replace(temporary, target)
                 written[variable] = target
             finally:
                 if temporary.exists():
                     temporary.unlink()
     except OSError as exc:
-        raise BootstrapError("instant execution secret materialization failed") from exc
+        detail = exc.strerror or exc.__class__.__name__
+        raise BootstrapError(f"instant execution secret materialization failed: {detail}") from exc
     finally:
         for variable in PROFILES[profile]:
             source.pop(variable, None)
@@ -110,6 +111,14 @@ def materialize(
 def _harden_directory(root: Path) -> None:
     try:
         os.chmod(root, 0o700)
+    except PermissionError as exc:
+        if exc.errno != errno.EPERM:
+            raise
+
+
+def _harden_file(target: Path) -> None:
+    try:
+        os.chmod(target, 0o600)
     except PermissionError as exc:
         if exc.errno != errno.EPERM:
             raise
