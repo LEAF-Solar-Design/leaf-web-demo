@@ -18,8 +18,11 @@ Pinned here:
   (b) without the policy, an `auto` action still allows — byte-identical;
   (c) plan_first only NARROWS: it never turns a deny into an allow, and it
       leaves an already-confirming action unchanged;
-  (d) an unreadable policy leaves today's behavior (this is a tightening
-      feature; failing closed would block every read on a storage blip).
+  (d) an unreadable policy degrades toward ASKING — we cannot tell whether the
+      user chose plan_first, and silently executing against an explicit choice
+      is the worse failure (review round 1);
+  (e) the policy is read from the AUTHORITY session, not the harness-private
+      one the gate is called with.
 
 Run:  cd server && python -m pytest tests/test_plan_first_gate.py -q
 """
@@ -103,7 +106,33 @@ def test_plan_first_is_narrowing_only_and_never_flips_a_deny():
     assert denied["decision"] == "deny", denied
 
 
-def test_an_unreadable_policy_leaves_todays_behavior(monkeypatch):
+def test_the_policy_is_read_from_the_AUTHORITY_session_not_the_harness_one():
+    """Review round 1, finding 1 — the defect my first test could not see.
+
+    The harness calls the gate with ITS OWN private session id; the client
+    stored the policy against the APP-owned authority session. Looking the
+    policy up under the harness id finds nothing and silently allows
+    everything. The two ids must be DIFFERENT in this test or it proves
+    nothing (the original test used one id for both)."""
+    authority = _session()
+    authority_sid = authority["session_id"]
+    harness_sid = f"harness-private-{uuid.uuid4()}"
+    assert harness_sid != authority_sid
+    session_policy.set_policy(authority_sid, "tenant-pfg", "plan_first")
+
+    # The gate is called the way the live handler calls it: the harness session
+    # positionally, the authority session as the policy source.
+    result = agent_gate.gate(
+        "tenant-pfg", harness_sid, f"turn-{uuid.uuid4()}",
+        _auto_action(), {}, _caps(), tier="demo",
+        policy_session_id=authority_sid)
+
+    assert result["decision"] == "awaiting_approval", (
+        "the policy was looked up under the harness session — plan-first is "
+        f"inert on the live path: {result}")
+
+
+def test_an_unreadable_policy_degrades_toward_asking(monkeypatch):
     sess = _session()
     sid = sess["session_id"]
     session_policy.set_policy(sid, "tenant-pfg", "plan_first")
@@ -113,6 +142,6 @@ def test_an_unreadable_policy_leaves_todays_behavior(monkeypatch):
     monkeypatch.setattr(session_policy, "get_policy", _boom)
 
     result = _gate("tenant-pfg", sid, _auto_action())
-    assert result["decision"] == "allow", (
-        "a policy-store failure changed gating; a TIGHTENING feature must fail "
-        "toward today's behavior, not block every read")
+    assert result["decision"] == "awaiting_approval", (
+        "a policy-store failure silently EXECUTED against an explicit user "
+        "choice; a consent feature must degrade toward asking")
