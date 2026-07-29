@@ -574,6 +574,38 @@ def _dispatch_secret_ok(presented: Optional[str]) -> bool:
     return hmac.compare_digest(presented, secret)
 
 
+def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
+                             authority_turn_id: Optional[str]) -> Any:
+    """Attach the turn's authenticated subject to a back-edge tenant identity.
+
+    The harness back-edge authenticates as a TENANT and can never assert a
+    user, so a route that requires a verified owner/editor binding would always
+    fail closed. This does NOT let the harness name an identity: it names the
+    app-owned session and turn that authenticated it (the same authority tuple
+    the gate already takes, routers/agent.py), and the subject is read from the
+    app's own record of who opened that turn. A completed, superseded, or
+    foreign turn yields nothing and the caller keeps failing closed.
+
+    Deliberately narrow: only for the authoring route, only when the identity
+    is a back-edge context that has no subject of its own. A caller that
+    already authenticated as a user is returned untouched.
+    """
+    if not isinstance(tenant, TenantContext) or tenant.subject:
+        return tenant
+    if not authority_session_id or not authority_turn_id:
+        return tenant
+    try:
+        import session_store
+        subject = session_store.active_turn_subject(
+            str(authority_session_id), str(authority_turn_id), str(tenant))
+    except Exception:  # noqa: BLE001 - an authority outage must not elevate
+        return tenant
+    if not subject:
+        return tenant
+    return TenantContext(str(tenant), org_id=tenant.org_id, tier=tenant.tier,
+                         workspace=tenant.workspace, subject=subject)
+
+
 def require_tenant(
     request: Request,
     x_tenant_id: Optional[str] = Header(default=None),

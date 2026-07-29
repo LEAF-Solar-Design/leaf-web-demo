@@ -124,8 +124,14 @@ def internal_gate(req: GateRequest,
         tier_caps = entitlements.entitlements_for(tier)
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("converse", tier)
+    # Bind a confirm-once grant to the person who answered the chip. Same
+    # authority tuple the tier lookup above uses, so the gate never trusts a
+    # subject asserted over the wire.
+    turn_subject = session_store.active_turn_subject(
+        authority_session_id, authority_turn_id, req.tenant_id)
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
-                             req.action, req.args, tier_caps, tier=tier)
+                             req.action, req.args, tier_caps, tier=tier,
+                             subject=turn_subject)
     return with_envelope_fields(result)
 
 

@@ -260,6 +260,7 @@ export class SpineTurnAdapter implements ConverseRunner {
       instantAssignment: opts?.instantAssignment,
       instantDrawingContext: opts?.instantDrawingContext,
       authoritySessionId: input.session_id,
+      authorityTurnId: input.turn_id,
       onEvent,
     });
     void (async () => {

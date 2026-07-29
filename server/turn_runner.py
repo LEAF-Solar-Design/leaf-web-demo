@@ -380,12 +380,17 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     # tenant_id, so it passes the tier it snapshotted at enqueue time.
     if tier is None:
         tier = getattr(tenant_id, "tier", None)
+    # The verified subject that opened this turn, snapshotted with the tier.
+    # The harness back-edge authenticates as a tenant and cannot assert a user,
+    # so protected authoring resolves the author from this record instead.
+    subject = getattr(tenant_id, "subject", None)
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
     turn_id = str(uuid.uuid4())
     max_s = turn_max_s()
-    if not session_store.try_begin_turn(session_id, turn_id, max_s, tier=tier):
+    if not session_store.try_begin_turn(session_id, turn_id, max_s, tier=tier,
+                                        subject=subject):
         raise TurnBusy(f"session {session_id!r} already has an active turn")
 
     # The durable transcript source: whatever drove this turn (a fresh user

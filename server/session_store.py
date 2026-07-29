@@ -47,6 +47,7 @@ DDL:
       active_turn_id   TEXT,
       turn_started_at  REAL,
       active_turn_tier TEXT,
+      active_turn_subject TEXT,
       UNIQUE(tenant_id, drawing_id)
     )
 
@@ -127,6 +128,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   active_turn_id  TEXT,
   turn_started_at REAL,
   active_turn_tier TEXT,
+  active_turn_subject TEXT,
   model           TEXT,
   UNIQUE(tenant_id, drawing_id)
 );
@@ -185,6 +187,12 @@ def _db() -> sqlite3.Connection:
         }
         if "active_turn_tier" not in session_cols:
             _conn.execute("ALTER TABLE sessions ADD COLUMN active_turn_tier TEXT")
+        # The authenticated subject that opened the active turn, written in the
+        # same CAS as the tier. It exists so a back-edge call can be attributed
+        # to the human who started the turn WITHOUT the harness asserting an
+        # identity. Same additive, idempotent posture as active_turn_tier.
+        if "active_turn_subject" not in session_cols:
+            _conn.execute("ALTER TABLE sessions ADD COLUMN active_turn_subject TEXT")
         # `model` (per-session "mount your LLM" choice) landed after the first cut
         # of this table; CREATE TABLE IF NOT EXISTS never retrofits it. Migrate
         # additively and idempotently, same posture as active_turn_tier above.
@@ -367,7 +375,8 @@ def append_event(session_id: str, turn_id: Optional[str], type: str,
             # later metering work.
             conn.execute(
                 "UPDATE sessions SET active_turn_id = NULL,"
-                " turn_started_at = NULL, active_turn_tier = NULL"
+                " turn_started_at = NULL, active_turn_tier = NULL,"
+                " active_turn_subject = NULL"
                 " WHERE session_id = ? AND active_turn_id = ?",
                 (session_id, turn_id),
             )
@@ -401,7 +410,8 @@ def recent_events(session_id: str, limit: int) -> List[Dict[str, Any]]:
 # turn CAS
 # --------------------------------------------------------------------------- #
 def try_begin_turn(session_id: str, turn_id: str, stale_after_s: float,
-                   tier: Optional[str] = None) -> bool:
+                   tier: Optional[str] = None,
+                   subject: Optional[str] = None) -> bool:
     """Atomic compare-and-swap: sets active_turn_id/turn_started_at ONLY when
     the session is unknown-free of an active turn (active_turn_id IS NULL) OR
     the existing active turn is staler than stale_after_s. Returns True iff
@@ -427,8 +437,9 @@ def try_begin_turn(session_id: str, turn_id: str, stale_after_s: float,
             return False
         conn.execute(
             "UPDATE sessions SET active_turn_id = ?, turn_started_at = ?,"
-            " active_turn_tier = ?, updated_at = ? WHERE session_id = ?",
-            (turn_id, now, tier, now, session_id),
+            " active_turn_tier = ?, active_turn_subject = ?, updated_at = ?"
+            " WHERE session_id = ?",
+            (turn_id, now, tier, subject, now, session_id),
         )
         conn.commit()
         return True
@@ -452,13 +463,33 @@ def active_turn_tier(session_id: str, turn_id: str,
     return str(value) if value is not None else None
 
 
+def active_turn_subject(session_id: str, turn_id: str,
+                        tenant_id: str) -> Optional[str]:
+    """Return the authenticated subject bound to this exact active turn.
+
+    Same guard as active_turn_tier: session, active turn, and tenant must all
+    match, so a completed or superseded turn yields None and the caller fails
+    closed. Deliberately NOT exposed through the session projections — this is
+    identity data, not session state.
+    """
+    rows = _query(
+        "SELECT active_turn_subject FROM sessions"
+        " WHERE session_id = ? AND active_turn_id = ? AND tenant_id = ?",
+        (session_id, turn_id, tenant_id),
+    )
+    if not rows:
+        return None
+    value = rows[0]["active_turn_subject"]
+    return str(value) if value is not None else None
+
+
 def end_turn(session_id: str, turn_id: str) -> None:
     """Clear active_turn_id/turn_started_at iff they still match turn_id (a
     stale or already-superseded turn_id is a harmless no-op — it never clobbers
     a newer turn that has since taken over via try_begin_turn's stale path)."""
     _exec(
         "UPDATE sessions SET active_turn_id = NULL, turn_started_at = NULL,"
-        " active_turn_tier = NULL, updated_at = ?"
+        " active_turn_tier = NULL, active_turn_subject = NULL, updated_at = ?"
         " WHERE session_id = ? AND active_turn_id = ?",
         (time.time(), session_id, turn_id),
     )
@@ -667,6 +698,7 @@ _legacy_events_after = events_after
 _legacy_recent_events = recent_events
 _legacy_try_begin_turn = try_begin_turn
 _legacy_active_turn_tier = active_turn_tier
+_legacy_active_turn_subject = active_turn_subject
 _legacy_end_turn = end_turn
 _legacy_create_approval = create_approval
 _legacy_get_approval = get_approval
@@ -829,8 +861,8 @@ def _pg_get_session(session_id: str) -> Optional[Dict[str, Any]]:
 
 def _legacy_turn_fence(session_id: str) -> Optional[tuple]:
     rows = _query(
-        "SELECT active_turn_id, turn_started_at, active_turn_tier"
-        " FROM sessions WHERE session_id = ?",
+        "SELECT active_turn_id, turn_started_at, active_turn_tier,"
+        " active_turn_subject FROM sessions WHERE session_id = ?",
         (session_id,),
     )
     if not rows:
@@ -838,6 +870,7 @@ def _legacy_turn_fence(session_id: str) -> Optional[tuple]:
     row = rows[0]
     return (
         row["active_turn_id"], row["turn_started_at"], row["active_turn_tier"],
+        row["active_turn_subject"],
     )
 
 
@@ -845,8 +878,8 @@ def _pg_turn_fence(session_id: str) -> Optional[tuple]:
     db = _platform_db()
     with db.cursor() as cur:
         cur.execute(
-            "SELECT active_turn_id, turn_started_at, active_turn_tier"
-            " FROM app_sessions WHERE session_id = %s",
+            "SELECT active_turn_id, turn_started_at, active_turn_tier,"
+            " active_turn_subject FROM app_sessions WHERE session_id = %s",
             (session_id,),
         )
         row = cur.fetchone()
@@ -854,6 +887,7 @@ def _pg_turn_fence(session_id: str) -> Optional[tuple]:
         return None
     return (
         row["active_turn_id"], row["turn_started_at"], row["active_turn_tier"],
+        row["active_turn_subject"],
     )
 
 
@@ -923,7 +957,8 @@ def _pg_recent_events(session_id: str, limit: int) -> List[Dict[str, Any]]:
 
 def _pg_try_begin_turn(
     session_id: str, turn_id: str, stale_after_s: float,
-    tier: Optional[str] = None, *, started_at: Optional[float] = None,
+    tier: Optional[str] = None, subject: Optional[str] = None,
+    *, started_at: Optional[float] = None,
 ) -> bool:
     now = started_at if started_at is not None else time.time()
     stale_before = now - stale_after_s
@@ -931,11 +966,11 @@ def _pg_try_begin_turn(
     with db.transaction() as conn:
         row = conn.execute(
             "UPDATE app_sessions SET active_turn_id = %s, turn_started_at = %s,"
-            " active_turn_tier = %s, updated_at = %s"
+            " active_turn_tier = %s, active_turn_subject = %s, updated_at = %s"
             " WHERE session_id = %s AND (active_turn_id IS NULL"
             " OR turn_started_at IS NULL OR turn_started_at < %s)"
             " RETURNING session_id",
-            (turn_id, now, tier, now, session_id, stale_before),
+            (turn_id, now, tier, subject, now, session_id, stale_before),
         ).fetchone()
     return row is not None
 
@@ -957,6 +992,23 @@ def _pg_active_turn_tier(
     return str(value) if value is not None else None
 
 
+def _pg_active_turn_subject(
+    session_id: str, turn_id: str, tenant_id: str,
+) -> Optional[str]:
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT active_turn_subject FROM app_sessions"
+            " WHERE session_id = %s AND active_turn_id = %s AND tenant_id = %s",
+            (session_id, turn_id, tenant_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    value = row["active_turn_subject"]
+    return str(value) if value is not None else None
+
+
 def _pg_end_turn(
     session_id: str, turn_id: str, *, updated_at: Optional[float] = None,
 ) -> bool:
@@ -964,7 +1016,7 @@ def _pg_end_turn(
     with db.cursor() as cur:
         cur.execute(
             "UPDATE app_sessions SET active_turn_id = NULL, turn_started_at = NULL,"
-            " active_turn_tier = NULL, updated_at = %s"
+            " active_turn_tier = NULL, active_turn_subject = NULL, updated_at = %s"
             " WHERE session_id = %s AND active_turn_id = %s"
             " RETURNING session_id",
             (updated_at if updated_at is not None else time.time(), session_id, turn_id),
@@ -1169,25 +1221,25 @@ def recent_events(session_id: str, limit: int) -> List[Dict[str, Any]]:
 
 def try_begin_turn(
     session_id: str, turn_id: str, stale_after_s: float,
-    tier: Optional[str] = None,
+    tier: Optional[str] = None, subject: Optional[str] = None,
 ) -> bool:
     mode = _store_mode()
     if mode == "postgres":
-        return _pg_try_begin_turn(session_id, turn_id, stale_after_s, tier)
+        return _pg_try_begin_turn(session_id, turn_id, stale_after_s, tier, subject)
     if mode in _DUAL_WRITE_MODES or mode == "shadow":
         # Cross-store turn mirroring is a migration aid for the single-task
         # phase only. No transaction can atomically fence SQLite and Postgres.
         legacy_before = _legacy_turn_fence(session_id)
         postgres_before = _pg_turn_fence(session_id)
         _shadow_equal("turn fence before acquisition", legacy_before, postgres_before)
-    legacy = _legacy_try_begin_turn(session_id, turn_id, stale_after_s, tier)
+    legacy = _legacy_try_begin_turn(session_id, turn_id, stale_after_s, tier, subject)
     if mode in _DUAL_WRITE_MODES:
         legacy_after = _legacy_turn_fence(session_id)
         if legacy:
             if legacy_after is None:
                 raise RuntimeError("legacy turn fence disappeared after acquisition")
             postgres = _pg_try_begin_turn(
-                session_id, turn_id, stale_after_s, tier,
+                session_id, turn_id, stale_after_s, tier, subject,
                 started_at=legacy_after[1],
             )
             if not postgres:
@@ -1214,6 +1266,21 @@ def active_turn_tier(
         _shadow_equal(
             "active turn tier", legacy,
             _pg_active_turn_tier(session_id, turn_id, tenant_id),
+        )
+    return legacy
+
+
+def active_turn_subject(
+    session_id: str, turn_id: str, tenant_id: str,
+) -> Optional[str]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_active_turn_subject(session_id, turn_id, tenant_id)
+    legacy = _legacy_active_turn_subject(session_id, turn_id, tenant_id)
+    if mode in _SHADOW_READ_MODES:
+        _shadow_equal(
+            "active turn subject", legacy,
+            _pg_active_turn_subject(session_id, turn_id, tenant_id),
         )
     return legacy
 

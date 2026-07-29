@@ -114,6 +114,7 @@ export interface ConverseMessageInput {
   instantAssignment?: InstantSessionAssignment;
   instantDrawingContext?: InstantDrawingContext;
   authoritySessionId?: string;
+  authorityTurnId?: string;
   /** Live event sink (SSE). Every event is ALSO persisted before delivery. */
   onEvent?: (ev: ConverseEvent) => void;
 }
@@ -375,6 +376,7 @@ export class ConverseLoop {
         instantAssignment: input.instantAssignment,
         instantDrawingContext: input.instantDrawingContext,
         authoritySessionId: input.authoritySessionId,
+        authorityTurnId: input.authorityTurnId,
       });
       const canUseTool: CanUseTool = async (toolName, toolInput) => {
         if (isSpineTool(baseToolName(toolName))) {
@@ -492,6 +494,7 @@ export class ConverseLoop {
       instantAssignment?: InstantSessionAssignment;
       instantDrawingContext?: InstantDrawingContext;
       authoritySessionId?: string;
+      authorityTurnId?: string;
     },
   ): ToolExecutor {
     const { appRun, gate, store } = this.ports;
@@ -773,6 +776,7 @@ export class ConverseLoop {
       instantAssignment?: InstantSessionAssignment;
       instantDrawingContext?: InstantDrawingContext;
       authoritySessionId?: string;
+      authorityTurnId?: string;
     },
   ): Promise<SpineToolResult> {
     const { appRun, instantExecutor } = this.ports;
@@ -917,6 +921,10 @@ export class ConverseLoop {
           normalizedDescription,
           mode,
           idempotencyKey,
+          {
+            sessionId: ctx.authoritySessionId,
+            turnId: ctx.authorityTurnId,
+          },
         );
         return ok(JSON.stringify(authored));
       }

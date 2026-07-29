@@ -118,7 +118,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "app_sessions": {
             "session_id", "tenant_id", "drawing_id", "status", "created_at",
             "updated_at", "last_seq", "active_turn_id", "turn_started_at",
-            "active_turn_tier", "model",
+            "active_turn_tier", "active_turn_subject", "model",
         },
         "app_session_events": {
             "session_id", "seq", "turn_id", "type", "data_json", "created_at",

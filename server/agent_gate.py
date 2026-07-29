@@ -435,13 +435,27 @@ def _load_grants() -> Dict[str, str]:
     return dict(grants)
 
 
-def grant_target(args: Optional[Dict[str, Any]]) -> List[str]:
-    """The target tool a grant authorizes, as a two-element form so an action
-    with NO target tool can never share a key with one whose tool is literally
-    named "none"."""
-    if args and "tool" in args:
-        return ["tool", str(args["tool"])]
-    return ["none"]
+def grant_target(args: Optional[Dict[str, Any]],
+                 subject: Optional[str] = None) -> List[str]:
+    """The target a grant authorizes, as a two-element form so an action with NO
+    target tool can never share a key with one whose tool is literally named
+    "none".
+
+    A session is shared by every member of a tenant working the same drawing
+    (sessions are UNIQUE(tenant_id, drawing_id)), so a grant that does not name
+    the responsible person lets one member's approval authorize another
+    member's later call. That is total for an action whose target does not
+    distinguish the request: author_tool takes no `tool` argument, so its target
+    is always ["none"]. Appending the subject binds the grant to the person who
+    answered the chip. It rides `target`, which both the file and Postgres grant
+    stores already carry end to end, so neither backend can bind while the other
+    does not. A caller that cannot resolve a subject keeps the old shared key,
+    and a key that stops matching costs one extra confirmation, never access.
+    """
+    target = ["tool", str(args["tool"])] if args and "tool" in args else ["none"]
+    if subject:
+        target = target + ["subject", str(subject)]
+    return target
 
 
 def _grant_key(tenant_id: str, session_id: str, action_name: str,
@@ -667,7 +681,8 @@ def _result(decision: str, *, reason: str, policy: Optional[str] = None,
 
 def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
          args: Optional[Dict[str, Any]], tier_caps: Dict[str, bool], *,
-         tier: Optional[str] = None) -> Dict[str, Any]:
+         tier: Optional[str] = None,
+         subject: Optional[str] = None) -> Dict[str, Any]:
     """Run the full gate chain for one proposed agent action.
 
     `tier_caps` is the caller-resolved entitlement map for the tenant's tier
@@ -946,7 +961,7 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             # approval.
             if act.policy == "confirm-once":
                 record_session_grant(tenant_id, session_id, act.name,
-                                     grant_target(args))
+                                     grant_target(args, subject))
             return _allow("allow_via_approval", confirmation_id=str(confirmation_id))
         return _awaiting(record)
 
@@ -954,7 +969,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         return _allow("allow")
 
     if act.policy == "confirm-once":
-        if has_session_grant(tenant_id, session_id, act.name, grant_target(args)):
+        if has_session_grant(tenant_id, session_id, act.name,
+                             grant_target(args, subject)):
             return _allow("allow_via_session_grant")
         return _create_and_await()
 

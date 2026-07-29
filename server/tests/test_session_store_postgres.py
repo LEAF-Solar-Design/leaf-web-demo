@@ -57,12 +57,12 @@ def test_shadow_read_fails_closed_on_mismatch(monkeypatch):
 
 def test_dual_write_false_turn_result_never_mutates_postgres(monkeypatch):
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
-    fence = ("live-turn", 123.0, "hosted_pro")
+    fence = ("live-turn", 123.0, "hosted_pro", "auth0|alice")
     monkeypatch.setattr(session_store, "_legacy_turn_fence", lambda _sid: fence)
     monkeypatch.setattr(session_store, "_pg_turn_fence", lambda _sid: fence)
     monkeypatch.setattr(
         session_store, "_legacy_try_begin_turn",
-        lambda _sid, _turn, _stale, _tier=None: False,
+        lambda _sid, _turn, _stale, _tier=None, _subject=None: False,
     )
     monkeypatch.setattr(
         session_store, "_pg_try_begin_turn",
@@ -100,18 +100,18 @@ def test_dual_write_turn_pre_fence_mismatch_blocks_legacy_mutation(monkeypatch):
 def test_dual_write_turn_acquisition_compares_full_post_fence(monkeypatch):
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
     fences = iter([
-        (None, None, None),
-        ("turn-1", 456.0, "hosted_pro"),
+        (None, None, None, None),
+        ("turn-1", 456.0, "hosted_pro", "auth0|alice"),
     ])
     monkeypatch.setattr(session_store, "_legacy_turn_fence", lambda _sid: next(fences))
     pg_fences = iter([
-        (None, None, None),
-        ("other-turn", 456.0, "hosted_pro"),
+        (None, None, None, None),
+        ("other-turn", 456.0, "hosted_pro", "auth0|alice"),
     ])
     monkeypatch.setattr(session_store, "_pg_turn_fence", lambda _sid: next(pg_fences))
     monkeypatch.setattr(
         session_store, "_legacy_try_begin_turn",
-        lambda _sid, _turn, _stale, _tier=None: True,
+        lambda _sid, _turn, _stale, _tier=None, _subject=None: True,
     )
     monkeypatch.setattr(
         session_store, "_pg_try_begin_turn",
@@ -124,7 +124,7 @@ def test_dual_write_turn_acquisition_compares_full_post_fence(monkeypatch):
 
 def test_dual_write_noop_end_turn_never_mutates_postgres(monkeypatch):
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
-    fence = ("newer-turn", 123.0, "hosted_pro")
+    fence = ("newer-turn", 123.0, "hosted_pro", "auth0|alice")
     monkeypatch.setattr(session_store, "_legacy_turn_fence", lambda _sid: fence)
     monkeypatch.setattr(session_store, "_pg_turn_fence", lambda _sid: fence)
     monkeypatch.setattr(session_store, "_legacy_end_turn", lambda _sid, _turn: None)
@@ -140,7 +140,7 @@ def test_dual_write_noop_end_turn_never_mutates_postgres(monkeypatch):
 
 def test_dual_write_end_turn_requires_postgres_row(monkeypatch):
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
-    fence = ("turn-1", 123.0, "hosted_pro")
+    fence = ("turn-1", 123.0, "hosted_pro", "auth0|alice")
     monkeypatch.setattr(session_store, "_legacy_turn_fence", lambda _sid: fence)
     monkeypatch.setattr(session_store, "_pg_turn_fence", lambda _sid: fence)
     monkeypatch.setattr(session_store, "_legacy_end_turn", lambda _sid, _turn: None)
@@ -379,3 +379,25 @@ def test_two_database_writers_redeem_approval_once(postgres_session_schema):
         thread.join(timeout=30)
 
     assert sorted(outcomes) == ["already_consumed", "consumed"]
+
+
+def test_dual_write_turn_fence_compares_the_subject(monkeypatch):
+    """A fence differing only in active_turn_subject must fail the comparison.
+
+    The subject decides who a back-edge authoring call is attributed to, so a
+    shadow compare that ignored it would let the two authorities disagree about
+    authorship without anyone noticing.
+    """
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
+    monkeypatch.setattr(
+        session_store, "_legacy_turn_fence",
+        lambda _sid: ("turn-1", 123.0, "hosted_pro", "auth0|alice"),
+    )
+    monkeypatch.setattr(
+        session_store, "_pg_turn_fence",
+        lambda _sid: ("turn-1", 123.0, "hosted_pro", "auth0|mallory"),
+    )
+
+    with pytest.raises(RuntimeError, match="turn fence before acquisition shadow mismatch"):
+        session_store.try_begin_turn("session-1", "turn-1", 60, "hosted_pro",
+                                     "auth0|alice")
