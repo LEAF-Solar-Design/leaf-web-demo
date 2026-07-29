@@ -151,8 +151,10 @@ def test_internal_and_qa_tools_never_reach_the_picker(client, monkeypatch):
         {"name": "count_panels", "description": "public"},
         {"name": "secret_probe", "description": "internal", internal_flag: True},
     ]
-    if qa_prefixes:
-        tools.append({"name": f"{qa_prefixes[0]}sniff", "description": "qa"})
+    # EVERY configured prefix, not just the first — a filter that handled one
+    # and missed the rest would otherwise pass.
+    for i, prefix in enumerate(qa_prefixes):
+        tools.append({"name": f"{prefix}sniff{i}", "description": "qa"})
 
     monkeypatch.setattr(deps, "all_tools", lambda tenant: list(tools))
     res = client.get("/api/converse/registry")
@@ -178,8 +180,17 @@ def test_registry_is_scoped_to_the_calling_tenant(monkeypatch, client):
         return []
 
     monkeypatch.setattr(deps, "all_tools", _all_tools)
-    assert client.get("/api/converse/registry").status_code == 200
-    assert seen.get("tenant"), "deps.all_tools was never called with a tenant"
+    # Two different callers must resolve to two different catalog lookups; a
+    # route that ignored the tenant would pass a truthy constant either way.
+    assert client.get("/api/converse/registry",
+                      headers={"X-Tenant-Id": "tenant-alpha"}).status_code == 200
+    alpha = seen.get("tenant")
+    assert client.get("/api/converse/registry",
+                      headers={"X-Tenant-Id": "tenant-beta"}).status_code == 200
+    beta = seen.get("tenant")
+    assert alpha and beta, "deps.all_tools was never called with a tenant"
+    assert alpha != beta, (
+        f"the registry ignored the caller's tenant: both resolved to {alpha!r}")
 
 
 def test_filter_internal_matches_the_catalog_predicate():
@@ -193,3 +204,21 @@ def test_filter_internal_matches_the_catalog_predicate():
     assert [t["name"] for t in kept] == ["public"]
     # include_internal=True is the ops projection /api/capabilities offers.
     assert len(catalog.filter_internal(tools, include_internal=True)) == 2
+
+    # The claim is "one predicate, no drift", so compare against what
+    # build_catalog ACTUALLY emits rather than trusting they agree.
+    def _catalog_names(include_internal):
+        names = set()
+        for family in catalog.build_catalog(tools, include_internal=include_internal):
+            for cap in family.get("capabilities", []):
+                if cap.get("name"):
+                    names.add(cap["name"])
+        return names
+
+    for include_internal in (False, True):
+        filtered = {t["name"] for t in catalog.filter_internal(
+            tools, include_internal=include_internal)}
+        via_catalog = _catalog_names(include_internal) & {"public", "hidden"}
+        assert filtered == via_catalog, (
+            f"filter_internal and build_catalog disagree at "
+            f"include_internal={include_internal}: {filtered} vs {via_catalog}")
