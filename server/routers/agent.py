@@ -59,6 +59,7 @@ import agent_gate
 import deps
 import entitlements
 import session_store
+import turn_runner
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
@@ -124,8 +125,15 @@ def internal_gate(req: GateRequest,
         tier_caps = entitlements.entitlements_for(tier)
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("converse", tier)
+    # Bind a confirm-once grant to the person who answered the chip. Same
+    # authority tuple the tier lookup above uses, so the gate never trusts a
+    # subject asserted over the wire.
+    turn_subject = session_store.active_turn_subject(
+        authority_session_id, authority_turn_id, req.tenant_id,
+        turn_runner.turn_max_s())
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
-                             req.action, req.args, tier_caps, tier=tier)
+                             req.action, req.args, tier_caps, tier=tier,
+                             subject=turn_subject)
     return with_envelope_fields(result)
 
 
@@ -155,6 +163,11 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
         # existence leak to a caller who isn't the owning tenant.
         return _not_found(confirmation_id)
 
+    decision_subject = getattr(tenant, "subject", None)
+    decision_actor = (decision_subject
+                      if isinstance(decision_subject, str) and decision_subject
+                      else str(tenant))
+
     # Spine unification (census #12 chip 1): land the decision in the §18 gate
     # store FIRST — the resume turn's gate consult redeems THAT args-bound
     # record before any dispatch. Gate-first ordering is load-bearing: the
@@ -174,9 +187,11 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
     if gate_status == "ok":
         try:
             if req.approved:
-                ok, rec, reason = agent_gate.grant_approval(confirmation_id, by=str(tenant))
+                ok, rec, reason = agent_gate.grant_approval(
+                    confirmation_id, by=decision_actor)
             else:
-                ok, rec, reason = agent_gate.deny_approval(confirmation_id, by=str(tenant))
+                ok, rec, reason = agent_gate.deny_approval(
+                    confirmation_id, by=decision_actor)
         except Exception as exc:  # noqa: BLE001
             return error_response(
                 ErrorCode.INTERNAL,
@@ -219,7 +234,8 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
     # that record at resume regardless (malformed reads as absent -> deny),
     # so the session-side record stays fail-safe.
 
-    outcome = session_store.decide_approval(confirmation_id, req.approved, by=str(tenant))
+    outcome = session_store.decide_approval(
+        confirmation_id, req.approved, by=decision_actor)
     if outcome == "not_found":
         return _not_found(confirmation_id)
     if outcome == "already_decided":
@@ -233,7 +249,8 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
     # outcome == "recorded"
     session_store.append_event(
         approval["session_id"], approval["turn_id"], "confirmation_resolved",
-        {"confirmation_id": confirmation_id, "approved": bool(req.approved), "by": str(tenant)},
+        {"confirmation_id": confirmation_id, "approved": bool(req.approved),
+         "by": decision_actor},
     )
     return deps.tenant_echo(
         with_envelope_fields({"resolved": True, "approved": bool(req.approved)}),

@@ -481,20 +481,25 @@ def test_turn_cas_snapshots_the_verified_tenant_tier(monkeypatch):
     sess = _new_session("tenant-tier-snapshot")
     captured = {}
 
-    def reject_after_capture(session_id, turn_id, stale_after_s, tier=None):
+    def reject_after_capture(session_id, turn_id, stale_after_s, tier=None,
+                             subject=None):
         captured.update(
             session_id=session_id, turn_id=turn_id,
-            stale_after_s=stale_after_s, tier=tier,
+            stale_after_s=stale_after_s, tier=tier, subject=subject,
         )
         return False
 
     monkeypatch.setattr(session_store, "try_begin_turn", reject_after_capture)
-    tenant = deps.TenantContext("tenant-tier-snapshot", tier="hosted_pro")
+    tenant = deps.TenantContext("tenant-tier-snapshot", tier="hosted_pro",
+                                subject="auth0|tier-snapshot")
     with pytest.raises(turn_runner.TurnBusy):
         turn_runner.start_turn(tenant, sess["session_id"], text="hi")
 
     assert captured["session_id"] == sess["session_id"]
     assert captured["tier"] == "hosted_pro"
+    # The verified subject is snapshotted with the tier, so a back-edge call
+    # made during this turn can be attributed without the harness asserting it.
+    assert captured["subject"] == "auth0|tier-snapshot"
 
 
 # =========================================================================== #

@@ -435,13 +435,46 @@ def _load_grants() -> Dict[str, str]:
     return dict(grants)
 
 
-def grant_target(args: Optional[Dict[str, Any]]) -> List[str]:
-    """The target tool a grant authorizes, as a two-element form so an action
-    with NO target tool can never share a key with one whose tool is literally
-    named "none"."""
-    if args and "tool" in args:
-        return ["tool", str(args["tool"])]
-    return ["none"]
+def _subject_bound_grants_required(subject: Optional[str]) -> bool:
+    """Whether this call must refuse to use or create an UNBOUND session grant.
+
+    A confirm-once grant that does not name a person is shared by everyone in
+    the tenant's session. Once auth is live that is never acceptable, so a call
+    whose subject could not be resolved (a stale, foreign, or pre-migration
+    turn) asks for its own confirmation rather than matching a legacy key. With
+    auth off there is no subject to bind to and the open demo keeps its
+    existing behaviour.
+    """
+    if subject:
+        return False
+    try:
+        import deps  # noqa: PLC0415 - lazy, mirrors the rest of this module
+        return bool(deps.auth_live())
+    except Exception:  # noqa: BLE001 - an import failure must fail closed
+        return True
+
+
+def grant_target(args: Optional[Dict[str, Any]],
+                 subject: Optional[str] = None) -> List[str]:
+    """The target a grant authorizes, as a two-element form so an action with NO
+    target tool can never share a key with one whose tool is literally named
+    "none".
+
+    A session is shared by every member of a tenant working the same drawing
+    (sessions are UNIQUE(tenant_id, drawing_id)), so a grant that does not name
+    the responsible person lets one member's approval authorize another
+    member's later call. That is total for an action whose target does not
+    distinguish the request: author_tool takes no `tool` argument, so its target
+    is always ["none"]. Appending the subject binds the grant to the person who
+    answered the chip. It rides `target`, which both the file and Postgres grant
+    stores already carry end to end, so neither backend can bind while the other
+    does not. A caller that cannot resolve a subject keeps the old shared key,
+    and a key that stops matching costs one extra confirmation, never access.
+    """
+    target = ["tool", str(args["tool"])] if args and "tool" in args else ["none"]
+    if subject:
+        target = target + ["subject", str(subject)]
+    return target
 
 
 def _grant_key(tenant_id: str, session_id: str, action_name: str,
@@ -667,7 +700,8 @@ def _result(decision: str, *, reason: str, policy: Optional[str] = None,
 
 def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
          args: Optional[Dict[str, Any]], tier_caps: Dict[str, bool], *,
-         tier: Optional[str] = None) -> Dict[str, Any]:
+         tier: Optional[str] = None,
+         subject: Optional[str] = None) -> Dict[str, Any]:
     """Run the full gate chain for one proposed agent action.
 
     `tier_caps` is the caller-resolved entitlement map for the tenant's tier
@@ -850,6 +884,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
     # 7a. re-invoke path: the resumed call carries confirmation_id inside args.
     confirmation_id = args.get("confirmation_id")
     if confirmation_id:
+        subject_match_required = (
+            subject is not None or _subject_bound_grants_required(subject))
         if postgres_store:
             allow_event = _decision_event(
                 "allowed",
@@ -863,6 +899,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                     "denied", reason="args_mismatch", gate="policy"),
                 "approval_denied": _decision_event(
                     "denied", reason="approval_denied", gate="policy"),
+                "approval_subject_mismatch": _decision_event(
+                    "denied", reason="approval_subject_mismatch", gate="policy"),
                 "approval_expired": _decision_event(
                     "denied", reason="approval_expired", gate="policy"),
                 "approval_consumed": _decision_event(
@@ -876,9 +914,13 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                 session_id=session_id,
                 action=act.name,
                 args_hash=canonical_args_hash(args),
+                subject=subject,
+                subject_match_required=subject_match_required,
                 audit_event=allow_event,
                 session_grant_target=(
-                    grant_target(args) if act.policy == "confirm-once" else None),
+                    grant_target(args, subject)
+                    if act.policy == "confirm-once"
+                    and not _subject_bound_grants_required(subject) else None),
                 rate_category=rate_category,
                 rate_limit=rate_limit,
                 rate_rejected_event=_rate_rejected_event(),
@@ -908,6 +950,10 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             # `is not False` (not truthiness): read_pending guarantees a real
             # bool, and anything but an explicit False is a denial or corruption.
             return _deny("approval_denied", act=act, extra={"gate": "policy"})
+        if subject_match_required and (
+                subject is None or record.get("decided_by") != str(subject)):
+            return _deny(
+                "approval_subject_mismatch", act=act, extra={"gate": "policy"})
         if _is_expired(record):
             _decide(record, granted=False, by="system", reason="expired")
             return _deny("approval_expired", act=act, extra={"gate": "policy"})
@@ -936,6 +982,12 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                 # the decision could have flipped between the two reads
                 if record.get("granted") is not True or record.get("denied") is not False:
                     return _deny("approval_denied", act=act, extra={"gate": "policy"})
+                if subject_match_required and (
+                        subject is None
+                        or record.get("decided_by") != str(subject)):
+                    return _deny(
+                        "approval_subject_mismatch", act=act,
+                        extra={"gate": "policy"})
                 if _is_expired(record):
                     return _deny("approval_expired", act=act, extra={"gate": "policy"})
                 record["consumed_at"] = _iso(_now())
@@ -944,9 +996,10 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             # on the chip (repeats ride the grant, not the record);
             # always-confirm NEVER persists — the next call files a fresh
             # approval.
-            if act.policy == "confirm-once":
+            if (act.policy == "confirm-once"
+                    and not _subject_bound_grants_required(subject)):
                 record_session_grant(tenant_id, session_id, act.name,
-                                     grant_target(args))
+                                     grant_target(args, subject))
             return _allow("allow_via_approval", confirmation_id=str(confirmation_id))
         return _awaiting(record)
 
@@ -954,7 +1007,13 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         return _allow("allow")
 
     if act.policy == "confirm-once":
-        if has_session_grant(tenant_id, session_id, act.name, grant_target(args)):
+        # With auth live and no resolvable subject the only key available is the
+        # legacy unbound one, which any pre-existing shared grant matches. Ask
+        # for a fresh confirmation instead of riding it.
+        if _subject_bound_grants_required(subject):
+            return _create_and_await()
+        if has_session_grant(tenant_id, session_id, act.name,
+                             grant_target(args, subject)):
             return _allow("allow_via_session_grant")
         return _create_and_await()
 

@@ -118,13 +118,25 @@ export class HttpAppRunClient implements AppRunClient {
     description: string,
     mode: "build" | "one_off",
     idempotencyKey: string,
+    authority?: { sessionId?: string; turnId?: string },
   ): Promise<Record<string, unknown>> {
+    // The back edge authenticates as a tenant and cannot assert a user. Naming
+    // the app-owned session/turn that authenticated this turn lets the app read
+    // the author from its OWN record — the same authority tuple the gate takes.
     return this.request(
       tenantId,
       "POST",
       "/api/author",
       { description, mode },
-      { "idempotency-key": idempotencyKey },
+      {
+        "idempotency-key": idempotencyKey,
+        ...(authority?.sessionId
+          ? { "x-authority-session-id": authority.sessionId }
+          : {}),
+        ...(authority?.turnId
+          ? { "x-authority-turn-id": authority.turnId }
+          : {}),
+      },
     );
   }
 

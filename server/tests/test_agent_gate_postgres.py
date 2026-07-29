@@ -581,6 +581,40 @@ def test_two_writers_cannot_redeem_one_approval_twice(postgres_agent_store):
         "allow_via_approval", "approval_consumed"}
 
 
+def test_postgres_redeem_requires_the_approving_subject(postgres_agent_store):
+    _db, prefix = postgres_agent_store
+    record = _record(prefix)
+    agent_pg_store.create_pending(record)
+    ok, _decided, status = agent_pg_store.decide(
+        record["confirmation_id"], granted=True,
+        by="auth0|alice", reason="approved")
+    assert ok is True and status == "granted"
+
+    refused = agent_pg_store.redeem(
+        record["confirmation_id"],
+        tenant_id=prefix,
+        session_id="session",
+        action="run_write_tool",
+        args_hash=record["args_hash"],
+        subject="auth0|bob",
+        subject_match_required=True,
+    )
+    assert refused[0] is False
+    assert refused[2] == "approval_subject_mismatch"
+
+    accepted = agent_pg_store.redeem(
+        record["confirmation_id"],
+        tenant_id=prefix,
+        session_id="session",
+        action="run_write_tool",
+        args_hash=record["args_hash"],
+        subject="auth0|alice",
+        subject_match_required=True,
+    )
+    assert accepted[0] is True
+    assert accepted[2] == "allow_via_approval"
+
+
 def test_two_writers_share_one_rate_limit(postgres_agent_store):
     _db, prefix = postgres_agent_store
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -611,3 +645,54 @@ def test_two_readers_see_the_same_fleet_kill_state(postgres_agent_store):
         {"active": True, "reason": "fleet test"},
         {"active": True, "reason": "fleet test"},
     ]
+
+
+def test_postgres_redemption_records_the_subject_bound_grant(monkeypatch, tmp_path):
+    """The Postgres redemption must store the SAME target the lookup asks for.
+
+    has_session_grant always queries the subject-bound target, and the Postgres
+    store compares the serialized target exactly. If redemption recorded the
+    unbound one, every confirm-once approval would silently become single-use
+    instead of a durable grant.
+    """
+    recorded = {}
+
+    class RedeemedStore:
+        @staticmethod
+        def tenant_state(_tenant):
+            return {"agent_disabled": False, "overlay": {}, "revision": 0}
+
+        @staticmethod
+        def kill_switch_details():
+            return {"active": False, "reason": ""}
+
+        @staticmethod
+        def consume_rate(_tenant, category, limit):
+            return True, {
+                "category": category, "count": 1, "limit": limit,
+                "reason": f"rate_limit_ok: {category} (1/{limit})",
+            }
+
+        @staticmethod
+        def redeem(*_args, **kwargs):
+            recorded["target"] = kwargs["session_grant_target"]
+            return True, {"consumed_at": "now"}, "allow_via_approval"
+
+    monkeypatch.setenv("LEAF_AGENT_STORE", "postgres")
+    monkeypatch.setenv(
+        "LEAF_AGENT_TENANTS_FILE", str(tmp_path / "missing-tenants.json"))
+    monkeypatch.delenv("LEAF_AGENT_POLICY_FILE", raising=False)
+    monkeypatch.setattr(agent_gate, "_pg_store", lambda: RedeemedStore)
+    monkeypatch.setattr(agent_gate, "_audit_append", lambda _event: None)
+
+    result = agent_gate.gate(
+        "atomic-tenant", "atomic-session", "atomic-turn", "submit_live_solve",
+        {"tool": "add-panel", "confirmation_id": "atomic-approval"},
+        {"run_write": True},
+        subject="auth0|alice",
+    )
+
+    assert result["decision"] == "allow"
+    assert recorded["target"] == agent_gate.grant_target(
+        {"tool": "add-panel"}, "auth0|alice")
+    assert "auth0|alice" in recorded["target"]

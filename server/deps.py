@@ -389,13 +389,19 @@ class TenantContext(str):
 
     def __new__(cls, tenant_id: str, org_id: Optional[str] = None,
                 tier: Optional[str] = None, workspace: Optional[str] = None,
-                subject: Optional[str] = None) -> "TenantContext":
+                subject: Optional[str] = None,
+                backedge: bool = False) -> "TenantContext":
         obj = super().__new__(cls, tenant_id)
         obj.tenant_id = str(tenant_id)
         obj.org_id = org_id
         obj.tier = tier
         obj.workspace = workspace
         obj.subject = subject
+        # True ONLY for a verified dispatch-secret back edge. Origin must be
+        # marked, never inferred from a missing subject: a JWT that carries no
+        # `sub` also resolves to subject=None, and inferring would let such a
+        # caller borrow the active turn's identity.
+        obj.backedge = backedge
         return obj
 
 
@@ -547,7 +553,7 @@ def backedge_tenant(tenant_id: str) -> Any:
     (fail CLOSED: an unresolvable tier must never authorize as demo)."""
     if not auth_live():
         return tenant_id
-    return TenantContext(tenant_id, tier=backedge_tier(tenant_id))
+    return TenantContext(tenant_id, tier=backedge_tier(tenant_id), backedge=True)
 
 
 import re as _re
@@ -572,6 +578,45 @@ def _dispatch_secret_ok(presented: Optional[str]) -> bool:
     if not secret or not presented:
         return False
     return hmac.compare_digest(presented, secret)
+
+
+def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
+                             authority_turn_id: Optional[str]) -> Any:
+    """Attach the turn's authenticated subject to a back-edge tenant identity.
+
+    The harness back-edge authenticates as a TENANT and can never assert a
+    user, so a route that requires a verified owner/editor binding would always
+    fail closed. This does NOT let the harness name an identity: it names the
+    app-owned session and turn that authenticated it (the same authority tuple
+    the gate already takes, routers/agent.py), and the subject is read from the
+    app's own record of who opened that turn. A completed, superseded, or
+    foreign turn yields nothing and the caller keeps failing closed.
+
+    Deliberately narrow: only for the authoring route, only when the identity
+    is a back-edge context that has no subject of its own. A caller that
+    already authenticated as a user is returned untouched.
+    """
+    if not isinstance(tenant, TenantContext) or tenant.subject:
+        return tenant
+    if not getattr(tenant, "backedge", False):
+        # Only a verified dispatch-secret back edge may borrow a turn's author.
+        # A JWT without a `sub` claim is also subjectless, and it must not.
+        return tenant
+    if not authority_session_id or not authority_turn_id:
+        return tenant
+    try:
+        import session_store
+        import turn_runner
+        subject = session_store.active_turn_subject(
+            str(authority_session_id), str(authority_turn_id), str(tenant),
+            turn_runner.turn_max_s())
+    except Exception:  # noqa: BLE001 - an authority outage must not elevate
+        return tenant
+    if not subject:
+        return tenant
+    return TenantContext(str(tenant), org_id=tenant.org_id, tier=tenant.tier,
+                         workspace=tenant.workspace, subject=subject,
+                         backedge=True)
 
 
 def require_tenant(

@@ -358,3 +358,18 @@ Risks:
 - A missing version chain must not mask authentication, authority, or corruption failures.
 - The execute acceptance must retain its independent-approver requirement.
 - Staging changes must use protected GitHub OIDC workflows, never the local root AWS identity.
+
+# Back-edge author identity recovery on current main
+
+- [x] Rebase the subject-propagation change on the current green main without reviving the reverted tenant-namespace cutover.
+- [x] Resolve turn-queue conflicts so the authenticated subject and snapshotted tier remain bound to the same active turn.
+- [x] Update migration and authority contracts for the additive active-turn subject column.
+- [ ] Run focused server, PostgreSQL-static, harness, and type checks, then the full gate.
+- [ ] Self-review the security boundary and merge only after protected CI is green.
+
+Risks:
+
+- The harness must send only the app-owned session and turn authority tuple.
+- A stale, completed, foreign-tenant, or absent turn must never resolve an author.
+- Confirm-once grants and idempotency keys must remain subject-bound.
+- The change must not split the presented tenant namespace from the platform UUID namespace.

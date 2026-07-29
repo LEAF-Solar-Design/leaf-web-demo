@@ -714,6 +714,9 @@ export interface AppRunClient {
     description: string,
     mode: "build" | "one_off",
     idempotencyKey: string,
+    /** App-owned session/turn that authenticated this turn. The app resolves the
+     * author from its own record of that turn; the harness asserts no identity. */
+    authority?: { sessionId?: string; turnId?: string },
   ): Promise<Record<string, unknown>>;
   /** Request or resume publication of one durable staged change set. */
   requestPublication(

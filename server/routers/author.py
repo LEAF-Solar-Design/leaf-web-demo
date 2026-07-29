@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Literal
@@ -335,7 +336,30 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
     "idempotency_key_required": (
         "Tool authoring requires a request identity. The approved request was not executed."
     ),
+    "tenant_identity_binding_unavailable": (
+        "Tool authoring requires a verified workspace identity for the requester. "
+        "The approved request was not executed."
+    ),
 }
+
+
+def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
+    """Bind an authoring idempotency key to the subject that requested it.
+
+    The harness derives its key from tenant, session, description and mode
+    (converseLoop.ts) — never the user, because it cannot know one. Two members
+    of a tenant sharing a session and asking for the same tool would therefore
+    present the same key, and the store rejects a second author_subject under
+    one key as a replay conflict (customization_store.py). Scoping the key here
+    gives each subject its own change set instead of a collision.
+    """
+    subject = getattr(tenant, "subject", None)
+    if not subject:
+        return idempotency_key
+    digest = hashlib.sha256(
+        json.dumps([idempotency_key, str(subject)], separators=(",", ":")).encode()
+    ).hexdigest()
+    return f"{idempotency_key}:{digest[:32]}"
 
 
 def _customization_error(exc: CustomizationServiceError) -> JSONResponse:
@@ -372,10 +396,19 @@ def _customization_gate(wave: int, tenant: Any) -> JSONResponse | None:
 
 @router.post("/api/author")
 def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
-           idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> Dict[str, Any]:
+           idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+           authority_session_id: str | None = Header(
+               default=None, alias="X-Authority-Session-Id"),
+           authority_turn_id: str | None = Header(
+               default=None, alias="X-Authority-Turn-Id")) -> Dict[str, Any]:
     """Use the controlled R5 path only after that tenant's rollout is enabled."""
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
         return _legacy_author(req, tenant)
+    # A harness back-edge call authenticates as a tenant and carries no user.
+    # Resolve the author from the app's own record of the turn that authorized
+    # it; a direct user call is returned unchanged and keeps its own subject.
+    tenant = deps.backedge_author_identity(
+        tenant, authority_session_id, authority_turn_id)
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
@@ -386,7 +419,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     try:
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode=req.mode,
-            idempotency_key=idempotency_key.strip(),
+            idempotency_key=_subject_scoped_key(idempotency_key.strip(), tenant),
         )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
