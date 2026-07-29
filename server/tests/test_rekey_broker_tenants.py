@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from types import SimpleNamespace
+
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "rekey_broker_tenants.py"
 
@@ -158,15 +160,183 @@ def test_a_platform_keyed_ledger_row_is_left_alone(tmp_path):
     assert report["rows_rekeyed"] == 0
 
 
-def test_postgres_mode_is_reported_as_out_of_reach(monkeypatch):
-    """Omission would read as clean, so the unreachable stores are named."""
+def test_postgres_mode_is_never_passed_over(monkeypatch):
+    """Omission would read as clean.
+
+    The tool now attempts the postgres re-key rather than only describing it, so
+    the contract is: in postgres mode it is never ready without having actually
+    inspected the tables, and in legacy mode it is a clean no-op.
+    """
     rekey = _load()
     monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
 
     report = rekey.postgres_stores_report()
 
     assert report["ready"] is False
-    assert "broker_usage_ledger" in report["detail"]
+    assert report["detail"], "a refusal must say why"
 
     monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
     assert rekey.postgres_stores_report()["ready"] is True
+
+
+# --------------------------------------------------------------------------- #
+# postgres: both tables move together or neither does
+# --------------------------------------------------------------------------- #
+class _FakeCursorResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    """Records every statement so a test can prove what did or did not run."""
+
+    def __init__(self, tables, fail_on_update=False):
+        self.tables = tables
+        self.statements = []
+        self.fail_on_update = fail_on_update
+        self.committed = False
+
+    def execute(self, sql, params=None):
+        self.statements.append((sql, params))
+        if sql.strip().upper().startswith("UPDATE"):
+            if self.fail_on_update:
+                raise RuntimeError("update exploded")
+            return _FakeCursorResult([])
+        for table, rows in self.tables.items():
+            if table in sql:
+                return _FakeCursorResult([(row,) for row in rows])
+        return _FakeCursorResult([])
+
+    def transaction(self):
+        conn = self
+
+        class _Txn:
+            def __enter__(self):
+                return conn
+
+            def __exit__(self, exc_type, exc, tb):
+                if exc_type is None:
+                    conn.committed = True
+                return False
+
+        return _Txn()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+def _fake_db(conn):
+    pool = SimpleNamespace(connection=lambda: conn)
+    return SimpleNamespace(get_pool=lambda: pool)
+
+
+def _with_pg(monkeypatch, rekey, conn, mapping):
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    monkeypatch.setitem(
+        __import__("sys").modules, "platform_link",
+        SimpleNamespace(platform_db=lambda: _fake_db(conn),
+                        platform_store=lambda: None))
+    monkeypatch.setattr(rekey, "resolve_platform_id",
+                        lambda claim: mapping.get(claim))
+
+
+def test_postgres_moves_both_tables_in_one_transaction(monkeypatch):
+    rekey = _load()
+    conn = _FakeConn({"broker_tenants": [CLAIM],
+                      "broker_usage_ledger": [CLAIM]})
+    _with_pg(monkeypatch, rekey, conn, {CLAIM: PLATFORM})
+
+    report = rekey.postgres_stores_report(apply=True)
+
+    assert report["ready"] is True
+    assert report["applied"] is True
+    assert conn.committed is True
+    updated = [sql for sql, _ in conn.statements if sql.startswith("UPDATE")]
+    assert any("broker_tenants" in sql for sql in updated)
+    assert any("broker_usage_ledger" in sql for sql in updated)
+
+
+def test_postgres_refuses_an_unmapped_key_and_updates_nothing(monkeypatch):
+    rekey = _load()
+    conn = _FakeConn({"broker_tenants": ["stranger"],
+                      "broker_usage_ledger": []})
+    _with_pg(monkeypatch, rekey, conn, {})
+
+    report = rekey.postgres_stores_report(apply=True)
+
+    assert report["ready"] is False
+    assert report["unmapped"] == ["stranger"]
+    assert not [sql for sql, _ in conn.statements if sql.startswith("UPDATE")]
+
+
+def test_postgres_refuses_a_collision_rather_than_merging(monkeypatch):
+    """Two tenants' broker records must never be merged into one."""
+    rekey = _load()
+    conn = _FakeConn({"broker_tenants": [CLAIM, PLATFORM],
+                      "broker_usage_ledger": []})
+    _with_pg(monkeypatch, rekey, conn, {CLAIM: PLATFORM})
+
+    report = rekey.postgres_stores_report(apply=True)
+
+    assert report["ready"] is False
+    assert report["collisions"] == [{"from": CLAIM, "to": PLATFORM}]
+    assert not [sql for sql, _ in conn.statements if sql.startswith("UPDATE")]
+
+
+def test_postgres_rolls_back_and_reports_nothing_moved(monkeypatch):
+    rekey = _load()
+    conn = _FakeConn({"broker_tenants": [CLAIM],
+                      "broker_usage_ledger": [CLAIM]}, fail_on_update=True)
+    _with_pg(monkeypatch, rekey, conn, {CLAIM: PLATFORM})
+
+    report = rekey.postgres_stores_report(apply=True)
+
+    assert report["ready"] is False
+    assert report["applied"] is False
+    assert conn.committed is False
+    assert "rolled back" in report["detail"]
+
+
+def test_postgres_already_rekeyed_is_ready_without_touching_anything(monkeypatch):
+    rekey = _load()
+    conn = _FakeConn({"broker_tenants": [PLATFORM],
+                      "broker_usage_ledger": [PLATFORM]})
+    _with_pg(monkeypatch, rekey, conn, {})
+
+    report = rekey.postgres_stores_report(apply=True)
+
+    assert report["ready"] is True
+    assert not [sql for sql, _ in conn.statements if sql.startswith("UPDATE")]
+
+
+def test_a_dry_run_never_updates(monkeypatch):
+    rekey = _load()
+    conn = _FakeConn({"broker_tenants": [CLAIM],
+                      "broker_usage_ledger": [CLAIM]})
+    _with_pg(monkeypatch, rekey, conn, {CLAIM: PLATFORM})
+
+    report = rekey.postgres_stores_report(apply=False)
+
+    assert report["ready"] is True
+    assert report["applied"] is False
+    assert not [sql for sql, _ in conn.statements if sql.startswith("UPDATE")]
+
+
+def test_an_unreachable_postgres_authority_is_not_ready(monkeypatch):
+    rekey = _load()
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+
+    def _explode():
+        raise RuntimeError("no DATABASE_URL")
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "platform_link",
+        SimpleNamespace(platform_db=_explode, platform_store=lambda: None))
+
+    assert rekey.postgres_stores_report(apply=True)["ready"] is False

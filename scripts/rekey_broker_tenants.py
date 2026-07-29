@@ -158,20 +158,98 @@ def rekey_ledger(path: Path, mapping: Dict[str, str], apply: bool) -> Dict[str, 
     return report
 
 
-def postgres_stores_report() -> Dict[str, Any]:
-    """Name the Postgres stores this script cannot reach, rather than implying
-    they are clean by omission."""
-    import os as _os
-    if _os.environ.get("LEAF_BROKER_STORE", "legacy").strip().lower() != "postgres":
+def _postgres_tenant_keys(conn) -> Dict[str, list]:
+    """Distinct tenant strings in each identity-keyed broker table."""
+    keys: Dict[str, list] = {}
+    for table in ("broker_tenants", "broker_usage_ledger"):
+        rows = conn.execute(
+            f"SELECT DISTINCT tenant_id FROM {table} ORDER BY tenant_id"
+        ).fetchall()
+        keys[table] = [str(row[0] if not isinstance(row, dict)
+                           else row["tenant_id"]) for row in rows]
+    return keys
+
+
+def rekey_postgres(apply: bool) -> Dict[str, Any]:
+    """Re-key broker_tenants and broker_usage_ledger in ONE transaction.
+
+    Both tables move together or neither does. A partial move is the outcome to
+    avoid: a tenant whose broker_tenants row moved but whose ledger rows did not
+    would keep its tier while its prior spend read as zero, which resets the
+    daily quota.
+
+    Refuses on any unmapped key, and on any collision where the target id is
+    already present, rather than merging two tenants' records.
+    """
+    report: Dict[str, Any] = {"store": "postgres broker stores", "applied": False}
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+    try:
+        import platform_link  # noqa: PLC0415
+        db = platform_link.platform_db()
+    except Exception as exc:  # noqa: BLE001 - unreachable is NOT clean
+        report.update(ready=False,
+                      detail=f"postgres authority unreachable: {exc}")
+        return report
+
+    try:
+        with db.get_pool().connection() as conn:
+            keys = _postgres_tenant_keys(conn)
+    except Exception as exc:  # noqa: BLE001
+        report.update(ready=False, detail=f"could not enumerate: {exc}")
+        return report
+
+    claims = sorted({key for table_keys in keys.values() for key in table_keys
+                     if not looks_like_platform_id(key)})
+    report["tables"] = {table: len(table_keys) for table, table_keys in keys.items()}
+    if not claims:
+        report.update(ready=True,
+                      detail="every row in both tables is keyed by a platform id")
+        return report
+
+    mapping: Dict[str, str] = {}
+    unmapped = []
+    for claim in claims:
+        target = resolve_platform_id(claim)
+        if not target:
+            unmapped.append(claim)
+        else:
+            mapping[claim] = target
+    collisions = [{"from": claim, "to": target} for claim, target in mapping.items()
+                  if target in keys["broker_tenants"]]
+
+    report.update(mapped=mapping, unmapped=unmapped, collisions=collisions,
+                  ready=not unmapped and not collisions)
+    if not apply or not report["ready"]:
+        if not report["ready"]:
+            report["detail"] = ("refusing to move: every key must map and no "
+                                "target may already exist")
+        return report
+
+    try:
+        with db.get_pool().connection() as conn:
+            with conn.transaction():
+                for claim, target in mapping.items():
+                    for table in ("broker_tenants", "broker_usage_ledger"):
+                        conn.execute(
+                            f"UPDATE {table} SET tenant_id = %(target)s "
+                            "WHERE tenant_id = %(claim)s",
+                            {"target": target, "claim": claim},
+                        )
+    except Exception as exc:  # noqa: BLE001
+        report.update(ready=False,
+                      detail=f"transaction rolled back, nothing moved: {exc}")
+        return report
+    report["applied"] = True
+    report["detail"] = f"moved {len(mapping)} tenant(s) across both tables"
+    return report
+
+
+def postgres_stores_report(apply: bool = False) -> Dict[str, Any]:
+    """Handle, or explicitly refuse to ignore, the postgres broker stores."""
+    if os.environ.get("LEAF_BROKER_STORE", "legacy").strip().lower() != "postgres":
         return {"store": "postgres broker stores", "ready": True,
                 "detail": "LEAF_BROKER_STORE is not postgres; not in use"}
-    return {
-        "store": "postgres broker stores", "ready": False,
-        "detail": ("broker_tenants and broker_usage_ledger are claim-keyed in "
-                   "postgres mode and this script only rewrites files. Re-key "
-                   "them with SQL inside one transaction, using the same "
-                   "identity_bindings mapping, before cutting over."),
-    }
+    return rekey_postgres(apply)
 
 
 def main() -> int:
@@ -226,7 +304,7 @@ def main() -> int:
 
     # 3. the postgres stores this script cannot reach, named rather than
     #    implied clean by omission.
-    stores.append(postgres_stores_report())
+    stores.append(postgres_stores_report(args.apply))
 
     ok = all(store.get("ready") for store in stores)
     result = {"ok": ok, "applied": args.apply, "stores": stores}
