@@ -215,6 +215,8 @@ def decide(
 def redeem(
     confirmation_id: str, *, tenant_id: str, session_id: str,
     action: str, args_hash: str, audit_event: Optional[Dict[str, Any]] = None,
+    subject: Optional[str] = None,
+    subject_match_required: bool = False,
     session_grant_target: Optional[List[str]] = None,
     rate_category: Optional[str] = None, rate_limit: Optional[int] = None,
     rate_rejected_event: Optional[Dict[str, Any]] = None,
@@ -277,6 +279,9 @@ def redeem(
             return reject(record, "args_mismatch")
         if row["denied"] is not False:
             return reject(record, "approval_denied")
+        if subject_match_required and (
+                subject is None or row["decided_by"] != str(subject)):
+            return reject(record, "approval_subject_mismatch")
         if row["is_expired"] is True:
             conn.execute(
                 """

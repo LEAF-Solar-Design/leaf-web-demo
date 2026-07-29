@@ -581,6 +581,40 @@ def test_two_writers_cannot_redeem_one_approval_twice(postgres_agent_store):
         "allow_via_approval", "approval_consumed"}
 
 
+def test_postgres_redeem_requires_the_approving_subject(postgres_agent_store):
+    _db, prefix = postgres_agent_store
+    record = _record(prefix)
+    agent_pg_store.create_pending(record)
+    ok, _decided, status = agent_pg_store.decide(
+        record["confirmation_id"], granted=True,
+        by="auth0|alice", reason="approved")
+    assert ok is True and status == "granted"
+
+    refused = agent_pg_store.redeem(
+        record["confirmation_id"],
+        tenant_id=prefix,
+        session_id="session",
+        action="run_write_tool",
+        args_hash=record["args_hash"],
+        subject="auth0|bob",
+        subject_match_required=True,
+    )
+    assert refused[0] is False
+    assert refused[2] == "approval_subject_mismatch"
+
+    accepted = agent_pg_store.redeem(
+        record["confirmation_id"],
+        tenant_id=prefix,
+        session_id="session",
+        action="run_write_tool",
+        args_hash=record["args_hash"],
+        subject="auth0|alice",
+        subject_match_required=True,
+    )
+    assert accepted[0] is True
+    assert accepted[2] == "allow_via_approval"
+
+
 def test_two_writers_share_one_rate_limit(postgres_agent_store):
     _db, prefix = postgres_agent_store
     with ThreadPoolExecutor(max_workers=2) as pool:

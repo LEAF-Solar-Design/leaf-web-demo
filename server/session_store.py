@@ -609,7 +609,10 @@ class ApprovalConsumeError(Exception):
         self.reason = reason
 
 
-def consume_approval(confirmation_id: str, session_id: str, tenant_id: str) -> Dict[str, Any]:
+def consume_approval(
+    confirmation_id: str, session_id: str, tenant_id: str, *,
+    decided_by: Optional[str] = None,
+) -> Dict[str, Any]:
     """Verify-and-consume an approval for the messages{confirm} resume path,
     in ONE atomic locked transaction (SELECT -> validate -> UPDATE consumed=1
     -> commit) so two concurrent callers racing the SAME confirmation_id can
@@ -654,6 +657,10 @@ def consume_approval(confirmation_id: str, session_id: str, tenant_id: str) -> D
             raise ApprovalConsumeError("not_found")
         if not row["decided"]:
             raise ApprovalConsumeError("undecided")
+        if decided_by is not None and row["decided_by"] != decided_by:
+            # Collapse a different tenant member with the unknown-row case.
+            # The member who resumes must be the member who clicked the chip.
+            raise ApprovalConsumeError("not_found")
         if row["consumed"]:
             raise ApprovalConsumeError("already_consumed")
         expires_at = row["expires_at"]
@@ -1110,7 +1117,8 @@ def _pg_decide_approval(
 
 
 def _pg_consume_approval(
-    confirmation_id: str, session_id: str, tenant_id: str,
+    confirmation_id: str, session_id: str, tenant_id: str, *,
+    decided_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     now = time.time()
     db = _platform_db()
@@ -1125,6 +1133,8 @@ def _pg_consume_approval(
             raise ApprovalConsumeError("not_found")
         if not row["decided"]:
             raise ApprovalConsumeError("undecided")
+        if decided_by is not None and row["decided_by"] != decided_by:
+            raise ApprovalConsumeError("not_found")
         if row["consumed"]:
             raise ApprovalConsumeError("already_consumed")
         expires_at = row["expires_at"]
@@ -1419,11 +1429,13 @@ def decide_approval(
 
 
 def consume_approval(
-    confirmation_id: str, session_id: str, tenant_id: str,
+    confirmation_id: str, session_id: str, tenant_id: str, *,
+    decided_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     mode = _store_mode()
     if mode == "postgres":
-        return _pg_consume_approval(confirmation_id, session_id, tenant_id)
+        return _pg_consume_approval(
+            confirmation_id, session_id, tenant_id, decided_by=decided_by)
     if mode in _DUAL_WRITE_MODES:
         postgres_before = _pg_get_approval(confirmation_id)
         legacy_before = _legacy_get_approval(confirmation_id)
@@ -1431,9 +1443,11 @@ def consume_approval(
             "approval presence",
             legacy_before is not None, postgres_before is not None,
         )
-    legacy = _legacy_consume_approval(confirmation_id, session_id, tenant_id)
+    legacy = _legacy_consume_approval(
+        confirmation_id, session_id, tenant_id, decided_by=decided_by)
     if mode in _DUAL_WRITE_MODES:
-        postgres = _pg_consume_approval(confirmation_id, session_id, tenant_id)
+        postgres = _pg_consume_approval(
+            confirmation_id, session_id, tenant_id, decided_by=decided_by)
         left, right = dict(legacy), dict(postgres)
         left.pop("expired", None)
         right.pop("expired", None)

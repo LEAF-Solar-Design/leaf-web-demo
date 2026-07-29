@@ -511,7 +511,10 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 retryable=False, status_code=400,
             )
         try:
-            approval = session_store.consume_approval(confirmation_id, session_id, str(tenant))
+            approval = session_store.consume_approval(
+                confirmation_id, session_id, str(tenant),
+                decided_by=getattr(tenant, "subject", None),
+            )
         except session_store.ApprovalConsumeError as exc:
             if exc.reason == "not_found":
                 # unknown / cross-session / cross-tenant collapse to the SAME

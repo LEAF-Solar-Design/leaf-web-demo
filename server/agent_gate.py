@@ -884,6 +884,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
     # 7a. re-invoke path: the resumed call carries confirmation_id inside args.
     confirmation_id = args.get("confirmation_id")
     if confirmation_id:
+        subject_match_required = (
+            subject is not None or _subject_bound_grants_required(subject))
         if postgres_store:
             allow_event = _decision_event(
                 "allowed",
@@ -897,6 +899,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                     "denied", reason="args_mismatch", gate="policy"),
                 "approval_denied": _decision_event(
                     "denied", reason="approval_denied", gate="policy"),
+                "approval_subject_mismatch": _decision_event(
+                    "denied", reason="approval_subject_mismatch", gate="policy"),
                 "approval_expired": _decision_event(
                     "denied", reason="approval_expired", gate="policy"),
                 "approval_consumed": _decision_event(
@@ -910,6 +914,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                 session_id=session_id,
                 action=act.name,
                 args_hash=canonical_args_hash(args),
+                subject=subject,
+                subject_match_required=subject_match_required,
                 audit_event=allow_event,
                 session_grant_target=(
                     grant_target(args, subject)
@@ -944,6 +950,10 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             # `is not False` (not truthiness): read_pending guarantees a real
             # bool, and anything but an explicit False is a denial or corruption.
             return _deny("approval_denied", act=act, extra={"gate": "policy"})
+        if subject_match_required and (
+                subject is None or record.get("decided_by") != str(subject)):
+            return _deny(
+                "approval_subject_mismatch", act=act, extra={"gate": "policy"})
         if _is_expired(record):
             _decide(record, granted=False, by="system", reason="expired")
             return _deny("approval_expired", act=act, extra={"gate": "policy"})
@@ -972,6 +982,12 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                 # the decision could have flipped between the two reads
                 if record.get("granted") is not True or record.get("denied") is not False:
                     return _deny("approval_denied", act=act, extra={"gate": "policy"})
+                if subject_match_required and (
+                        subject is None
+                        or record.get("decided_by") != str(subject)):
+                    return _deny(
+                        "approval_subject_mismatch", act=act,
+                        extra={"gate": "policy"})
                 if _is_expired(record):
                     return _deny("approval_expired", act=act, extra={"gate": "policy"})
                 record["consumed_at"] = _iso(_now())

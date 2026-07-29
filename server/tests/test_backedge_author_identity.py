@@ -180,6 +180,27 @@ def test_idempotency_keys_do_not_collide_across_users():
     assert _subject_scoped_key(shared, deps.TenantContext("t")) == shared
 
 
+def test_shared_session_approval_can_only_be_consumed_by_its_decider(session):
+    session_id = session["session_id"]
+    session_store.create_approval(
+        "confirm-subject", session_id, "tenant-a", "turn-1",
+        "author_tool", {}, "platform_customize", "review", "tool", {},
+        300,
+    )
+    assert session_store.decide_approval(
+        "confirm-subject", True, by=ALICE) == "recorded"
+
+    with pytest.raises(session_store.ApprovalConsumeError) as exc:
+        session_store.consume_approval(
+            "confirm-subject", session_id, "tenant-a", decided_by=MALLORY)
+    assert exc.value.reason == "not_found"
+
+    consumed = session_store.consume_approval(
+        "confirm-subject", session_id, "tenant-a", decided_by=ALICE)
+    assert consumed["approved"] is True
+    assert consumed["decided_by"] == ALICE
+
+
 # --------------------------------------------------------------------------- #
 # staleness
 # --------------------------------------------------------------------------- #

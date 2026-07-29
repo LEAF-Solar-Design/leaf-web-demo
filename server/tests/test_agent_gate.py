@@ -56,8 +56,10 @@ def agent_env(tmp_path, monkeypatch):
 
 
 def _gate(action: str, args=None, *, tenant="t-gate", session="s-1", turn="turn-1",
-          caps=FULL_CAPS, tier=None):
-    return agent_gate.gate(tenant, session, turn, action, args or {}, caps, tier=tier)
+          caps=FULL_CAPS, tier=None, subject=None):
+    return agent_gate.gate(
+        tenant, session, turn, action, args or {}, caps,
+        tier=tier, subject=subject)
 
 
 def _custom_policy(tmp_path, monkeypatch, mutate):
@@ -165,6 +167,63 @@ def test_split_turn_confirmed_write_consumes_exactly_two_budget_units(tmp_path, 
     third = _gate("run_write_tool", args, session="s-budget")
     assert third["decision"] == "deny"
     assert third["reason"] == "rate_limit_exceeded: medium (2/2)"
+
+
+def test_only_the_member_who_approved_can_redeem():
+    args = {"tool": "add-panel"}
+    first = _gate(
+        "run_write_tool", args, session="s-shared", subject="auth0|alice")
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid, by="auth0|alice")
+
+    other = _gate(
+        "run_write_tool", dict(args, confirmation_id=cid),
+        session="s-shared", subject="auth0|bob")
+    assert other["decision"] == "deny"
+    assert other["reason"] == "approval_subject_mismatch"
+
+    owner = _gate(
+        "run_write_tool", dict(args, confirmation_id=cid),
+        session="s-shared", subject="auth0|alice")
+    assert owner["decision"] == "allow"
+    assert owner["reason"] == "allow_via_approval"
+
+
+def test_live_auth_subjectless_resume_cannot_redeem(monkeypatch):
+    args = {"tool": "add-panel"}
+    first = _gate(
+        "run_write_tool", args, session="s-subjectless",
+        subject="auth0|alice")
+    cid = first["confirmation_id"]
+    agent_gate.grant_approval(cid, by="auth0|alice")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+
+    resumed = _gate(
+        "run_write_tool", dict(args, confirmation_id=cid),
+        session="s-subjectless")
+    assert resumed["decision"] == "deny"
+    assert resumed["reason"] == "approval_subject_mismatch"
+
+
+def test_a_bound_user_never_reads_a_legacy_unbound_grant():
+    args = {"tool": "add-panel"}
+    agent_gate.record_session_grant(
+        "t-gate", "s-subject", "submit_live_solve",
+        agent_gate.grant_target(args),
+    )
+
+    refused = _gate(
+        "submit_live_solve", args, session="s-subject", subject="auth0|alice")
+    assert refused["decision"] == "awaiting_approval"
+
+    agent_gate.record_session_grant(
+        "t-gate", "s-subject", "submit_live_solve",
+        agent_gate.grant_target(args, "auth0|alice"),
+    )
+    accepted = _gate(
+        "submit_live_solve", args, session="s-subject", subject="auth0|alice")
+    assert accepted["decision"] == "allow"
+    assert accepted["reason"] == "allow_via_session_grant"
 
 
 def test_rate_limit_is_per_tenant(tmp_path, monkeypatch):
