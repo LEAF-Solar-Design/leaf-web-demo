@@ -309,6 +309,10 @@ export const MCP_SERVER_NAME = "converse";
 const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 const APS_TEST_RUN_TOOL = "aps_test_run";
 const APS_TEST_RUN_MCP_NAME = `${MCP_TOOL_PREFIX}${APS_TEST_RUN_TOOL}`;
+// Exact local MCP tool names that may bypass the tenant read-only denial. The
+// local server currently registers only aps_test_run, so no other MCP name is
+// exempted here.
+const LOCAL_MCP_TOOL_ALLOWLIST = new Set([APS_TEST_RUN_MCP_NAME]);
 
 /** Tools that mutate/spend real resources and therefore require operator approval
  *  before they run (leaf-backend-gaps.md §2.1: "aps_test_run / anything mutating"). */
@@ -328,7 +332,7 @@ const TENANT_MCP_TOOL_DENIAL = "tenant MCP tools are mounted read-only in this r
 
 /** Tenant MCP servers expose listable data only until their approval flow exists. */
 export function tenantMcpToolDenial(toolName: string): { behavior: "deny"; message: string } | null {
-  return toolName.startsWith("mcp__") && !toolName.startsWith(MCP_TOOL_PREFIX)
+  return toolName.startsWith("mcp__") && !LOCAL_MCP_TOOL_ALLOWLIST.has(toolName)
     ? { behavior: "deny", message: TENANT_MCP_TOOL_DENIAL }
     : null;
 }

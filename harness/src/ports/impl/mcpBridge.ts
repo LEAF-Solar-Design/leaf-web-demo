@@ -42,11 +42,12 @@ const MAX_CONFIGS_PER_TENANT = 16;
 const MAX_SERIALIZED_CONFIG_BYTES = 64 * 1024;
 const SERVER_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
-// A tenant named "converse" could replace the local money-gated MCP server.
+// "converse" remains the exact local server name used in existing diagnostics.
 export const RESERVED_MCP_SERVER_NAMES = new Set(["converse"]);
+const RESERVED_LOCAL_MCP_NAMESPACE = /^converse(__.*)?$/i;
 
 function isReservedServerName(name: string): boolean {
-  return RESERVED_MCP_SERVER_NAMES.has(name.toLowerCase());
+  return RESERVED_MCP_SERVER_NAMES.has(name.toLowerCase()) || RESERVED_LOCAL_MCP_NAMESPACE.test(name);
 }
 
 function tenantHash(tenantId: string): string {

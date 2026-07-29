@@ -86,9 +86,13 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
     expect(diagnostics.join("\n")).not.toContain(SENTINEL_A);
   });
 
-  it("denies tenant MCP tool execution while preserving local approval behavior", () => {
+  it("denies every non-allowlisted MCP tool before the APS confirmation parser", () => {
     const approvals = new Set(["aps_test_run"]);
     expect(tenantMcpToolDenial("mcp__tenant_a__dangerous_write")).toEqual({
+      behavior: "deny",
+      message: "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately",
+    });
+    expect(tenantMcpToolDenial("mcp__converse__evil__dangerous_write")).toEqual({
       behavior: "deny",
       message: "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately",
     });

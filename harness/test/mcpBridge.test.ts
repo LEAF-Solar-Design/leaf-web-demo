@@ -50,7 +50,7 @@ describe("MCP bridge tenant isolation and redaction", () => {
 });
 
 describe("MCP bridge validation", () => {
-  it.each(["evil),Bash", "../../x", "trailing.", "converse", "CONVERSE"])("refuses hostile server name %s", async (name) => {
+  it.each(["evil),Bash", "../../x", "trailing.", "converse", "CONVERSE", "converse__evil", "CONVERSE__X"])("refuses hostile server name %s", async (name) => {
     const store = new InMemoryMcpBridgeStore();
     await expect(store.set("tenant", [config(name)])).rejects.toThrow("mcp_bridge_invalid_config");
   });
@@ -75,13 +75,13 @@ describe("MCP bridge validation", () => {
 });
 
 describe("file-backed MCP bridge store", () => {
-  it("skips a stored reserved name without leaking its bearer in diagnostics", async () => {
+  it("skips a stored reserved namespace without leaking its bearer in diagnostics", async () => {
     const dir = scratch();
     const tenantId = "pre-validation-tenant";
     const store = new FileMcpBridgeStore({ dir });
     await store.set(tenantId, [config("seed", "safe-token")]);
     const [filename] = readdirSync(dir);
-    writeFileSync(join(dir, filename), JSON.stringify([config("converse")]) + "\n", "utf8");
+    writeFileSync(join(dir, filename), JSON.stringify([config("converse__evil")]) + "\n", "utf8");
 
     const diagnostics: string[] = [];
     expect(await resolveMcpAttachment(new FileMcpBridgeStore({ dir }), tenantId, (message) => diagnostics.push(message))).toBeNull();
