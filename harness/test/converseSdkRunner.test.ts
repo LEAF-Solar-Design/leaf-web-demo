@@ -356,7 +356,18 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
       // therefore be execution outside submitRun and outside the gate. It is
       // on by DEFAULT, so the option must be present and true; removing the
       // line must fail this assertion.
-      expect(enabled.queries[0]!.options.disableSkillShellExecution).toBe(true);
+      expect(enabled.queries[0]!.options.settings).toMatchObject({
+        disableSkillShellExecution: true,
+        disableAllHooks: true,
+      });
+      // NEGATIVE, and it is the point: these are SETTINGS fields. Passed at the
+      // top level they are silently ignored — the SDK's arg builder reads
+      // `this.options.settings` and never a top-level flag, so the CLI receives
+      // `--allowedTools Skill(...)` with no `--settings` and skills keep their
+      // shell. That is exactly the bug this assertion prevents recurring; an
+      // object-shape test alone let it pass once already.
+      expect("disableSkillShellExecution" in enabled.queries[0]!.options).toBe(false);
+      expect("disableAllHooks" in enabled.queries[0]!.options).toBe(false);
 
       vi.stubEnv("LEAF_SKILLS_TIER", "operator");
       const mismatched = makeMockSdk([resultSuccess()]);
@@ -371,7 +382,10 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
       expect("plugins" in disabled.queries[0]!.options).toBe(false);
       expect("skills" in disabled.queries[0]!.options).toBe(false);
       // Unconditional: no bundle mounted still means no skill may shell out.
-      expect(disabled.queries[0]!.options.disableSkillShellExecution).toBe(true);
+      expect(disabled.queries[0]!.options.settings).toMatchObject({
+        disableSkillShellExecution: true,
+        disableAllHooks: true,
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

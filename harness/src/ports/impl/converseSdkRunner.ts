@@ -291,17 +291,28 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           includePartialMessages: true,
           tools: [], // no built-in tools: the spine MCP server is the whole surface
           mcpServers: { spine: server },
-          // Inline shell execution inside skills is EXECUTION OUTSIDE THE GATE,
-          // and it is on by default. The SDK compiles `skills: [name]` into
-          // `--allowedTools Skill(name)`, and allowlisted tools run WITHOUT
-          // consulting canUseTool (sdk.d.ts: allowed tools are automatically
-          // executable) — so canUseTool was never the containment here, whatever
-          // the first version of this port claimed. Disabling shell execution is:
-          // commands inside a skill are replaced with a placeholder instead of
-          // being run, leaving skills as INSTRUCTIONS ONLY, which is the whole
-          // point of a curated bundle. Set unconditionally, not just when a
-          // bundle is mounted: a spine session must never shell out.
-          disableSkillShellExecution: true,
+          // SETTINGS, not top-level options — the distinction is the whole
+          // fix. Both flags below are Settings fields (sdk.d.ts) delivered
+          // through Options.settings, which the SDK renders as `--settings`.
+          // Passing them at the top level silently does NOTHING: a process
+          // probe shows the CLI receiving `--allowedTools Skill(...)` and no
+          // `--settings` at all. My first attempt did exactly that and "pinned"
+          // it with a test that inspected the mocked options object, so the
+          // test passed while the guard was absent from the real command line.
+          //
+          // WHY BOTH ARE REQUIRED, and why canUseTool is not the containment:
+          // the SDK compiles `skills: [name]` into `--allowedTools Skill(name)`,
+          // and allowlisted tools execute WITHOUT consulting canUseTool. So a
+          // mounted bundle could otherwise reach execution two ways —
+          //   * inline shell commands inside a skill  -> disableSkillShellExecution
+          //   * plugin/skill HOOKS, which spawn commands on their own -> disableAllHooks
+          // Both are outside submitRun and outside the app gate, on the LIVE
+          // path. With them set, a mounted bundle is INSTRUCTIONS ONLY, which
+          // is all a curated bundle is for.
+          settings: {
+            disableSkillShellExecution: true,
+            disableAllHooks: true,
+          },
           ...(bundle ? { plugins: [bundle.plugin], skills: bundle.skills } : {}),
           ...(resume ? { resume } : {}),
           canUseTool: async (toolName: string, inp: Record<string, unknown>) =>

@@ -170,6 +170,14 @@ export function parseSkillFrontmatter(source: string): BundledSkill | null {
   let name: string | null = null;
   let description: string | null = null;
   for (const line of match[1].split(/\r?\n/)) {
+    // A curated skill is INSTRUCTIONS. Frontmatter declaring executable
+    // machinery — hooks, or its own tool allowlist — is REFUSED rather than
+    // ignored. disableAllHooks/disableSkillShellExecution already stop these at
+    // the SDK, so this is defence in depth at the artifact boundary: the bundle
+    // we build should not CONTAIN a skill that wants to execute, and silently
+    // accepting one would rest the whole guarantee on a single runtime flag
+    // (review round 2).
+    if (/^\s*(hooks|allowed-tools|allowedtools)\s*:/i.test(line)) return null;
     const kv = /^(name|description)\s*:\s*(.*)$/.exec(line.trim());
     if (!kv) continue;
     const value = kv[2].trim().replace(/^["']|["']$/g, "");

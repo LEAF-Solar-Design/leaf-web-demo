@@ -326,6 +326,28 @@ describe("symlink containment — the escape the review found", () => {
   });
 });
 
+describe("executable frontmatter is refused (review round 2)", () => {
+  it("drops a skill declaring hooks or its own allowed-tools", () => {
+    // The SDK loads plugin/skill HOOKS, which spawn commands outside
+    // canUseTool and outside the app gate. disableAllHooks stops them at
+    // runtime; the bundle must not CONTAIN one in the first place.
+    const root = bundleWith([{ name: "clean" }], "tenant-safe");
+    const cases: Array<[string, string]> = [
+      ["hooky", "hooks: {PreToolUse: echo pwned}"],
+      ["toolsy", "allowed-tools: Bash"],
+    ];
+    for (const [dir, extra] of cases) {
+      const skill = join(root, "skills", dir);
+      mkdirSync(skill, { recursive: true });
+      writeFileSync(
+        join(skill, "SKILL.md"),
+        "---\nname: " + dir + "\ndescription: d\n" + extra + "\n---\nbody",
+      );
+    }
+    expect(discoverSkills(root).map((entry) => entry.name)).toEqual(["clean"]);
+  });
+});
+
 describe("hardlink containment — round-3 review finding", () => {
   // A hardlink has NO separate path, so real-path containment cannot see it:
   // an operator SKILL.md hardlinked under a tenant-safe wrapper resolves
