@@ -110,3 +110,37 @@ describe('parseMarkdown', () => {
     assert.ok(para, 'html-looking text survives as literal paragraph text')
   })
 })
+
+describe('link scheme allowlist — obfuscation resistance', () => {
+  const hrefsOf = (spans) => spans.filter((s) => s.type === 'link').map((s) => s.href)
+
+  it('blocks unsafe schemes regardless of case', () => {
+    // The model controls this string, so `javascript:` must not survive in any
+    // casing. A blocked link degrades to the literal characters it was written
+    // as, carrying its own label.
+    for (const scheme of ['javascript', 'JAVASCRIPT', 'JaVaScRiPt', 'data', 'DATA', 'vbscript', 'file', 'blob']) {
+      const spans = parseInline(`[click](${scheme}:payload)`)
+      assert.deepEqual(hrefsOf(spans), [], `${scheme}: became a link`)
+      assert.match(textOf(spans), /click/)
+    }
+  })
+
+  it('blocks schemes padded with leading whitespace', () => {
+    for (const pad of [' ', '\t', '  ']) {
+      const spans = parseInline(`[click](${pad}javascript:alert(1))`)
+      assert.deepEqual(hrefsOf(spans), [], 'whitespace-padded scheme became a link')
+    }
+  })
+
+  it('still allows the safe schemes, in any case', () => {
+    assert.deepEqual(hrefsOf(parseInline('[a](https://example.com)')), ['https://example.com'])
+    assert.deepEqual(hrefsOf(parseInline('[a](HTTP://example.com)')), ['HTTP://example.com'])
+    assert.deepEqual(hrefsOf(parseInline('[a](mailto:x@y.z)')), ['mailto:x@y.z'])
+  })
+
+  it('never emits raw HTML for an html-shaped payload', () => {
+    const spans = parseInline('<img src=x onerror="alert(1)">')
+    assert.ok(spans.every((s) => s.type === 'text'), 'html-shaped input produced a non-text span')
+    assert.match(textOf(spans), /<img src=x onerror="alert\(1\)">/)
+  })
+})

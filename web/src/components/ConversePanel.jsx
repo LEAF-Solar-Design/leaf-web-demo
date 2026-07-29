@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { openStream, postMessage, approve, classifyAgentError } from '../converse.js'
 import Markdown from './Markdown.jsx'
+import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -31,33 +32,11 @@ function fmtUsage(u) {
   return parts.join(' · ')
 }
 
-// Full tool args/result for an expanded chip. Objects pretty-print; strings
-// pass through. Bounded because a tool result can be large and the transcript
-// must stay scrollable — the drawer, not the chip, is the place for everything.
-const DETAIL_MAX_CHARS = 2000
-function fmtDetail(value) {
-  let text
-  if (typeof value === 'string') text = value
-  else {
-    try {
-      text = JSON.stringify(value, null, 2)
-    } catch {
-      text = String(value)
-    }
-  }
-  if (text.length <= DETAIL_MAX_CHARS) return text
-  return `${text.slice(0, DETAIL_MAX_CHARS)}\n… ${text.length - DETAIL_MAX_CHARS} more characters`
-}
-
-// The status strip's context reading. The fields are OPTIONAL on turn_usage:
-// a backend that has not shipped them yet renders "—" rather than NaN, so the
-// strip degrades to what is actually known instead of inventing a number.
-function contextPct(usage) {
-  const used = Number(usage?.context_used_tokens)
-  const window = Number(usage?.context_window_tokens)
-  if (!Number.isFinite(used) || !Number.isFinite(window) || window <= 0) return null
-  return Math.max(0, Math.min(100, Math.round((used / window) * 100)))
-}
+// Status-strip readings and expanded-chip formatting live in usage.js so they
+// are unit-testable and so the EXACT wire-contract field names (models[],
+// total_cost_usd) live in one place. Absent values render "—", never a
+// fabricated zero: Number(null) is 0, which would otherwise report a confident
+// 0% context and ~$0.000 cost for a turn that simply never sent them.
 
 // Honest, calm stop-reason notes (turn_complete). end_turn renders nothing;
 // llm_quota_exhausted is the banner's job, not a per-turn note.
@@ -420,17 +399,11 @@ export default function ConversePanel({
             optional: an unknown value shows "—", never a fabricated number. */}
         <span className="converse-status" aria-label="session status">
           <span className="dim">model</span>{' '}
-          <span className="route-tool">{model.latestUsage?.model || '—'}</span>
+          <span className="route-tool">{orDash(usageModel(model.latestUsage))}</span>
           <span className="dim"> · context </span>
-          <span className="route-tool">
-            {contextPct(model.latestUsage) === null ? '—' : `${contextPct(model.latestUsage)}%`}
-          </span>
+          <span className="route-tool">{orDash(contextPct(model.latestUsage), (p) => `${p}%`)}</span>
           <span className="dim"> · </span>
-          <span className="route-tool">
-            {Number.isFinite(Number(model.latestUsage?.session_cost_usd))
-              ? `~$${Number(model.latestUsage.session_cost_usd).toFixed(3)}`
-              : '—'}
-          </span>
+          <span className="route-tool">{orDash(usageCost(model.latestUsage), (c) => `~$${c.toFixed(3)}`)}</span>
         </span>
         <button type="button" className="chip-neutral" onClick={onDismiss}>Hide</button>
       </div>

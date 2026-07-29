@@ -121,7 +121,12 @@ export default function PromptBox({
       return
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { // isComposing: IME confirm-Enter must not dispatch
-      if (routeActive || scopeOpen) return // the resolver / decision strip owns Enter
+      // The resolver / decision strip owns Enter — but we must still swallow
+      // it. An <input> had no default to suppress; a <textarea> inserts a
+      // newline, so returning bare would type into the prompt during the
+      // resolver's own handoff (including RoutePanel's ~350 ms cooldown, where
+      // it also declines the key).
+      if (routeActive || scopeOpen) { e.preventDefault(); return }
       e.preventDefault()
       onDispatch()
     }
@@ -256,6 +261,12 @@ export default function PromptBox({
           <textarea
             ref={inputRef}
             rows={1}
+            // The well's styling hangs off `.bar-input input` (an ELEMENT
+            // selector), so a <textarea> matches none of it — width, border
+            // reset, background, colour, font and the 16 px mobile zoom guard
+            // all vanish without this class. styles.css already carries the
+            // `.bar-field` alternate for exactly this swap.
+            className="bar-field"
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}

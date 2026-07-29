@@ -1331,7 +1331,7 @@ footer .warn-txt { color: var(--status-warning); }
   font-family: var(--sans); font-size: 13px; color: var(--foreground);
 }
 .bar-placeholder { flex: 1; font-size: 13px; color: #52525b; } /* "Find, act, or build..." */
-.bar-input input::placeholder { color: #52525b; }
+.bar-input input::placeholder, .bar-input .bar-field::placeholder { color: #52525b; }
 .bar-controls { display: flex; align-items: center; gap: 9px; padding: 0 13px 12px; }
 .bar-add {
   width: 20px; height: 20px; display: inline-flex; align-items: center;
