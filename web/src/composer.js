@@ -177,14 +177,22 @@ export function pickerTrigger(value, selectionStart = String(value ?? '').length
     ? Math.max(0, Math.min(selectionStart, text.length))
     : text.length
   const prefix = text.slice(0, caret)
-  if (prefix.startsWith('/') && !/\s/.test(prefix.slice(1))) {
-    return { kind: 'slash', query: prefix.slice(1), start: 0 }
+  if (text.startsWith('/') && !/\s/.test(text.slice(1))) {
+    return { kind: 'slash', query: prefix.slice(1), start: 0, end: caret }
   }
   const at = prefix.lastIndexOf('@')
   if (at === -1 || (at > 0 && !/\s/.test(prefix[at - 1]))) return null
   const query = prefix.slice(at + 1)
   if (/\s/.test(query)) return null
-  return { kind: 'resource', query, start: at }
+  return { kind: 'resource', query, start: at, end: caret }
+}
+
+export function replacePickerTrigger(value, trigger, insertion) {
+  const text = String(value ?? '')
+  if (!trigger || !Number.isInteger(trigger.start) || !Number.isInteger(trigger.end)) return text
+  const start = Math.max(0, Math.min(trigger.start, text.length))
+  const end = Math.max(start, Math.min(trigger.end, text.length))
+  return `${text.slice(0, start)}${String(insertion ?? '')}${text.slice(end)}`
 }
 
 // A busy text turn may be parked once. Confirmations and ephemeral credential

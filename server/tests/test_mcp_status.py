@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -75,3 +76,25 @@ def test_missing_store_environment_degrades_to_empty_collection(client, monkeypa
 
     assert response.status_code == 200
     assert response.json() == {"servers": []}
+
+
+def test_drops_descriptors_that_embed_their_auth_token(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("LEAF_MCP_BRIDGE_DIR", str(tmp_path))
+    sentinel = "token-abcdefghijklmnopqrstuvwxyz"
+    _path(tmp_path, "demo-tenant").write_text(json.dumps([
+        {"name": f"name-{sentinel}", "url": "https://name.example.test", "authToken": sentinel},
+        {"name": "host-leak", "url": f"https://host-{sentinel}.example.test", "authToken": sentinel},
+        {"name": "safe", "url": "https://safe.example.test", "authToken": sentinel},
+    ]), encoding="utf-8")
+
+    response = _response(client, "demo-tenant")
+
+    assert response.status_code == 200
+    assert response.json() == {"servers": [{"name": "safe", "host": "safe.example.test"}]}
+    assert sentinel not in response.text
+
+
+def test_status_uses_the_active_tenant_dependency():
+    dependency = inspect.signature(mcp_status.mcp_status).parameters["tenant"].default
+
+    assert dependency.dependency is deps.require_active_tenant

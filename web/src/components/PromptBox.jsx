@@ -35,6 +35,7 @@ import {
   mergePickerEntries,
   pickerTrigger,
   rankEntries,
+  replacePickerTrigger,
   setPromptHistorySession,
   setPromptHistoryValue,
 } from '../composer.js'
@@ -85,6 +86,7 @@ export default function PromptBox({
   const [menuIdx, setMenuIdx] = useState(0)
   const [menuDismissed, setMenuDismissed] = useState(false)
   const [caret, setCaret] = useState(() => String(value ?? '').length)
+  const [isComposing, setIsComposing] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
   const [mcpServers, setMcpServers] = useState([])
   const historyRef = useRef(createPromptHistoryState(sessionId))
@@ -113,7 +115,7 @@ export default function PromptBox({
     return () => { live = false }
   }, [])
 
-  const trigger = pickerTrigger(value, caret)
+  const trigger = pickerTrigger(value, caret, isComposing)
   const afterSlash = trigger?.kind === 'slash' ? trigger.query : null
   const entrySource = useMemo(
     () => mergePickerEntries(tools, skills, mcpServers, [MCP_COMMAND]),
@@ -162,13 +164,11 @@ export default function PromptBox({
     return onDispatch(override)
   }
   const complete = (t) => {
-    if (t.kind === 'resource' && trigger) {
-      const next = `${value.slice(0, trigger.start)}${t.insertionText}${value.slice(caret)}`
-      setMenuDismissed(true)
-      changePrompt(next, trigger.start + t.insertionText.length)
-      return
-    }
-    changePrompt(`/${t.name} `)
+    if (!trigger) return
+    const insertion = t.kind === 'resource' ? t.insertionText : `/${t.name} `
+    const next = replacePickerTrigger(value, trigger, insertion)
+    setMenuDismissed(true)
+    changePrompt(next, trigger.start + insertion.length)
   }
   const pick = (t) => {
     // A command runs its own handler — it is not a tool, so routing it through
@@ -180,14 +180,14 @@ export default function PromptBox({
       if (typeof run === 'function') run(t)
       return
     }
-    if (t.kind === 'resource' && trigger) {
-      const next = `${value.slice(0, trigger.start)}${t.insertionText}${value.slice(caret)}`
+    if (trigger) {
+      const insertion = t.kind === 'resource' ? t.insertionText : `/${t.name} `
+      const next = replacePickerTrigger(value, trigger, insertion)
       setMenuDismissed(true)
-      changePrompt(next, trigger.start + t.insertionText.length)
-      return
+      changePrompt(next, trigger.start + insertion.length)
+      if (t.kind === 'resource') return
+      dispatchPrompt(`/${t.name}`)
     }
-    changePrompt(`/${t.name} `)
-    dispatchPrompt(`/${t.name}`)
   }
 
   const onKeyDown = (e) => {
@@ -402,6 +402,8 @@ export default function PromptBox({
             value={value}
             onChange={(e) => changePrompt(e.target.value, e.target.selectionStart)}
             onSelect={(e) => setCaret(e.target.selectionStart)}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
             onKeyDown={onKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}

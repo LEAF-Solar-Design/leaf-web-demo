@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -18,6 +19,8 @@ router = APIRouter()
 MAX_MCP_CONFIG_BYTES = 64 * 1024
 MAX_SERVERS = 16
 SERVER_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$", re.IGNORECASE | re.ASCII)
+MIN_REDACTABLE_SECRET_LEN = 24
+logger = logging.getLogger(__name__)
 
 
 def _tenant_hash(tenant_id: str) -> str:
@@ -77,11 +80,20 @@ def _redacted_servers(tenant_id: str, env: Any = os.environ) -> list[dict[str, s
         host = _host(config.get("url"))
         if host is None:
             return []
-        servers.append({"name": name, "host": host})
+        entry = {"name": name, "host": host}
+        auth_token = config.get("authToken")
+        if (
+            isinstance(auth_token, str)
+            and len(auth_token) >= MIN_REDACTABLE_SECRET_LEN
+            and auth_token in json.dumps(entry)
+        ):
+            logger.warning("Dropping MCP server descriptor because it contains authToken=<redacted>")
+            continue
+        servers.append(entry)
     return servers
 
 
 @router.get("/api/converse/mcp")
-def mcp_status(tenant=Depends(deps.require_tenant)) -> dict[str, list[dict[str, str]]]:
+def mcp_status(tenant=Depends(deps.require_active_tenant)) -> dict[str, list[dict[str, str]]]:
     """List the calling tenant's mounted servers without exposing credentials."""
     return {"servers": _redacted_servers(str(tenant))}
