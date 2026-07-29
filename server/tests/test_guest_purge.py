@@ -29,9 +29,12 @@ DXF = ("0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\nAB\n8\nL1\n70\n1\n"
 
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
-    monkeypatch.setenv("LEAF_GUEST_STORE_DIR", str(tmp_path / "guest"))
-    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(tmp_path / "uploads"))
-    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    # Keep every location a purge sweep can touch below this test's own root.
+    # This stays safe if a daemon leaks into a future test process.
+    state_root = tmp_path / "guest-purge"
+    monkeypatch.setenv("LEAF_GUEST_STORE_DIR", str(state_root / "guest"))
+    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(state_root / "uploads"))
+    monkeypatch.setenv("LEAF_STORE_DIR", str(state_root / "store"))
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
     guest_uploads._reset_rate_state()
     monkeypatch.setattr(
@@ -443,3 +446,15 @@ def test_a_failure_recorded_for_an_already_purged_drawing_leaves_no_lock_file(
         f"recording a failure for an already-purged drawing minted a lock file "
         f"that nothing will ever reclaim: {lock_files()}. The purge only walks "
         f"drawing directories, and this drawing's directory is gone.")
+
+
+def test_disabling_the_daemon_is_loud(monkeypatch, capsys):
+    """The disable's failure mode is SILENT DATA RETENTION — a stray env value
+    in production leaves expired guest uploads undeleted while the process
+    looks healthy. The refusal must say so where an operator will see it."""
+    import guest_uploads
+    monkeypatch.setenv("LEAF_GUEST_PURGE_DISABLED", "1")
+    assert guest_uploads.start_purge_daemon() is None
+    err = capsys.readouterr().err
+    assert "DISABLED" in err and "LEAF_GUEST_PURGE_DISABLED" in err, (
+        "the daemon was disabled without an operator-visible trace")

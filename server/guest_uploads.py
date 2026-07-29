@@ -1977,6 +1977,17 @@ def start_purge_daemon() -> Optional[threading.Thread]:
     """Idempotent daemon starter (app.py startup). Best-effort-wrapped loop —
     a purge failure logs and retries next interval; it never kills the app."""
     global _PURGE_THREAD
+    if os.environ.get("LEAF_GUEST_PURGE_DISABLED") == "1":
+        # LOUD, because the failure mode is silent data retention: a stray env
+        # value in production means expired guest uploads are never deleted
+        # while the process looks healthy. The tests set this deliberately
+        # (tests/conftest.py); an operator seeing this line in prod logs knows
+        # exactly what is off and why. (Review finding: the disable returned
+        # without a trace.)
+        print("[leaf-agent] guest-purge daemon DISABLED via "
+              "LEAF_GUEST_PURGE_DISABLED=1 — expired guest uploads will NOT "
+              "be purged by this process", file=sys.stderr, flush=True)
+        return None
     if _PURGE_THREAD is not None and _PURGE_THREAD.is_alive():
         return _PURGE_THREAD
 

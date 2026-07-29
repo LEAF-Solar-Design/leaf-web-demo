@@ -477,9 +477,27 @@ def test_disabled_flag_503_and_policy_reports_it(client, monkeypatch):
 def test_purge_daemon_starts_even_when_uploads_disabled(monkeypatch):
     """Round-1 MAJOR: disabling NEW uploads never strands already-stamped
     retention promises — the daemon runs regardless of the enable flag."""
+    class _Thread:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+    monkeypatch.setattr(guest_uploads.threading, "Thread", _Thread)
+    monkeypatch.setattr(guest_uploads, "_PURGE_THREAD", None)
+    monkeypatch.delenv("LEAF_GUEST_PURGE_DISABLED", raising=False)
     monkeypatch.setenv("LEAF_GUEST_UPLOADS_ENABLED", "0")
     thread = guest_uploads.start_purge_daemon()
     assert thread is not None and thread.is_alive()
+
+
+def test_purge_daemon_can_be_disabled_for_the_pytest_process(monkeypatch):
+    monkeypatch.setenv("LEAF_GUEST_PURGE_DISABLED", "1")
+    assert guest_uploads.start_purge_daemon() is None
 
 
 def test_invalid_upload_does_not_consume_guest_quota(client, monkeypatch):
