@@ -8,7 +8,7 @@
 //      bundle's actual contents;
 //   3. an empty/absent bundle attaches NOTHING, rather than enabling the Skill
 //      tool with nothing behind it.
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, linkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -323,6 +323,53 @@ describe("symlink containment — the escape the review found", () => {
     expect(skillBundleAttachment({
       LEAF_SKILLS_BUNDLE_PATH: wrapper, LEAF_SKILLS_TIER: "tenant-safe",
     } as NodeJS.ProcessEnv)).toBeNull();
+  });
+});
+
+describe("hardlink containment — round-3 review finding", () => {
+  // A hardlink has NO separate path, so real-path containment cannot see it:
+  // an operator SKILL.md hardlinked under a tenant-safe wrapper resolves
+  // *inside* the wrapper. Detection is by link count instead.
+  //
+  // Honest scope: anyone who can write into the bundle could simply copy the
+  // text in, so this is not the last line of defence — the bundle being a
+  // read-only build artifact is. What it does catch is the realistic case: a
+  // build pipeline that links instead of copying, exposing another tier's inode.
+  it("refuses a SKILL.md that is hardlinked from outside the bundle", () => {
+    const outside = bundleWith([{ name: "operator-only-skill" }], "operator");
+    const wrapper = bundleWith([{ name: "innocent" }], "tenant-safe");
+    const dir = join(wrapper, "skills", "operator-only-skill");
+    mkdirSync(dir, { recursive: true });
+    try {
+      linkSync(join(outside, "skills", "operator-only-skill", "SKILL.md"),
+               join(dir, "SKILL.md"));
+    } catch {
+      return; // hardlinks unavailable on this filesystem
+    }
+    expect(discoverSkills(wrapper).map((x) => x.name)).toEqual(["innocent"]);
+    const att = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: wrapper, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv);
+    expect(att?.skills ?? []).not.toContain("operator-only-skill");
+  });
+
+  it("refuses a bundle whose MANIFEST is hardlinked from another tier", () => {
+    const tenant = bundleWith([{ name: "innocent" }], "tenant-safe");
+    const wrapper = bundleWith([{ name: "operator-only-skill" }], null);
+    const manifestPath = join(wrapper, ".claude-plugin", "plugin.json");
+    rmSync(manifestPath, { force: true });
+    try {
+      linkSync(join(tenant, ".claude-plugin", "plugin.json"), manifestPath);
+    } catch {
+      return;
+    }
+    expect(readBundleTier(wrapper)).toBeNull();
+  });
+
+  it("accepts an ordinary, exclusively-linked SKILL.md", () => {
+    // The control: link-count detection must not reject normal bundles.
+    const root = bundleWith([{ name: "ordinary" }], "tenant-safe");
+    expect(discoverSkills(root).map((x) => x.name)).toEqual(["ordinary"]);
   });
 });
 

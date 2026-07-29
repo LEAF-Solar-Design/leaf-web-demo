@@ -34,7 +34,7 @@
  * OFF unless configured. No bundle, no attachment, and the session runs
  * exactly as it does today.
  */
-import { closeSync, existsSync, openSync, readSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, opendirSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
 export type SkillTier = "tenant-safe" | "operator";
@@ -81,6 +81,8 @@ const RESERVED_NAMES = new Set([
 export const MAX_SKILL_FILE_BYTES = 256 * 1024;
 /** A bundle with more entries than this is misconfigured, not curated. */
 export const MAX_SKILLS = 250;
+/** A plugin manifest is a few keys; anything larger is not one. */
+export const MAX_MANIFEST_BYTES = 64 * 1024;
 
 export function isValidSkillName(name: unknown): name is string {
   if (typeof name !== "string" || !SKILL_NAME_RE.test(name)) return false;
@@ -97,21 +99,42 @@ export function isValidSkillName(name: unknown): name is string {
  * Replaces a stat-then-read pair: between those two calls the file can be
  * swapped for a huge one (TOCTOU), leaving the size check decided against a
  * file that is no longer there. A bounded read from a single descriptor cannot
- * be beaten that way -- an oversized file is simply truncated at the cap, and
- * truncation loses the closing `---`, so its frontmatter fails to parse and the
- * skill is skipped.
+ * be beaten that way. An oversized file is simply TRUNCATED at the cap: since
+ * frontmatter sits at the top, a long body still parses and is a legitimate
+ * skill. Only frontmatter pushed BEYOND the cap loses its closing `---`, and
+ * that one fails to parse and is skipped.
  */
-function readCapped(path: string): string | null {
+function readCapped(path: string, limit: number = MAX_SKILL_FILE_BYTES): string | null {
   let fd: number | null = null;
   try {
     fd = openSync(path, "r");
-    const buf = Buffer.allocUnsafe(MAX_SKILL_FILE_BYTES);
-    const read = readSync(fd, buf, 0, MAX_SKILL_FILE_BYTES, 0);
+    const buf = Buffer.allocUnsafe(limit);
+    const read = readSync(fd, buf, 0, limit, 0);
     return buf.subarray(0, read).toString("utf8");
   } catch {
     return null;
   } finally {
     if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+/**
+ * A curated bundle's files are its own. More than one directory entry pointing
+ * at the same inode means the file also lives somewhere else, which is exactly
+ * how a hardlinked operator SKILL.md would sit inside a tenant-safe wrapper:
+ * real-path containment cannot see it, because a hardlink HAS no separate path.
+ *
+ * Worth stating plainly: an attacker who can write into the bundle could just
+ * copy the operator skill's text in, so this is not the last line of defence —
+ * the bundle being a read-only build artifact is. What this does catch is the
+ * realistic version: a build pipeline that links instead of copying, silently
+ * exposing another tier's inode.
+ */
+function isMultiplyLinked(path: string): boolean {
+  try {
+    return statSync(path).nlink > 1;
+  } catch {
+    return true; // cannot prove it is exclusive -> refuse
   }
 }
 
@@ -165,7 +188,11 @@ export function readBundleTier(bundlePath: string): SkillTier | null {
     // operator bundle's JSON would let a wrapper claim "tenant-safe".
     const manifestReal = containedRealPath(rootReal, join(bundlePath, MANIFEST));
     if (!manifestReal) return null;
-    const raw = readFileSync(manifestReal, "utf8");
+    if (isMultiplyLinked(manifestReal)) return null;
+    // Bounded like every other read on this path: a hostile manifest must not
+    // be able to allocate arbitrarily before JSON.parse ever sees it.
+    const raw = readCapped(manifestReal, MAX_MANIFEST_BYTES);
+    if (raw === null) return null;
     const tier = (JSON.parse(raw) as { leafTier?: unknown }).leafTier;
     return tier === "tenant-safe" || tier === "operator" ? tier : null;
   } catch {
@@ -192,49 +219,60 @@ export function discoverSkills(bundlePath: string): BundledSkill[] {
 
   const found: BundledSkill[] = [];
   const seen = new Set<string>();
-  let entries: string[];
+  // STREAM the directory rather than readdirSync: materialising every entry of
+  // a directory with an extreme entry count allocates before any cap applies.
+  // opendirSync hands them back one at a time, so the bound below is real.
+  let dir;
   try {
-    entries = readdirSync(skillsRoot);
+    dir = opendirSync(skillsRoot);
   } catch {
     return [];
   }
-  // Bound the WORK, not just the result: a bundle full of invalid entries would
-  // otherwise still be opened and parsed one file at a time.
   let examined = 0;
-  for (const entry of entries) {
-    if (found.length >= MAX_SKILLS || examined >= MAX_SKILLS * 2) break;
-    examined += 1;
-    // Reject the directory name too: it is what the SDK resolves plugin-
-    // qualified skills by, so `..` must never get as far as a read.
-    if (!isValidSkillName(entry)) continue;
-    // Case-only collisions (`Probe` vs `probe`) are one directory on Windows
-    // and two elsewhere; either way two allowlist entries differing only by
-    // case are ambiguous, so the first wins.
-    const key = entry.toLowerCase();
-    if (seen.has(key)) continue;
+  try {
+    for (;;) {
+      if (found.length >= MAX_SKILLS || examined >= MAX_SKILLS * 2) break;
+      const dirent = dir.readSync();
+      if (dirent === null) break;
+      const entry = dirent.name;
+      examined += 1;
+      // Reject the directory name too: it is what the SDK resolves plugin-
+      // qualified skills by, so `..` must never get as far as a read.
+      if (!isValidSkillName(entry)) continue;
+      // Case-only collisions (`Probe` vs `probe`) are one directory on Windows
+      // and two elsewhere; either way two allowlist entries differing only by
+      // case are ambiguous, so the first wins.
+      const key = entry.toLowerCase();
+      if (seen.has(key)) continue;
 
-    // Containment, not existence: the real path of BOTH the directory and its
-    // SKILL.md must live inside the bundle.
-    const dirReal = containedRealPath(skillsRoot, join(skillsRoot, entry));
-    if (!dirReal) continue;
-    const fileReal = containedRealPath(skillsRoot, join(skillsRoot, entry, "SKILL.md"));
-    if (!fileReal) continue;
-    try {
-      if (!statSync(dirReal).isDirectory()) continue;
-      const source = readCapped(fileReal);
-      if (source === null) continue;
-      const parsed = parseSkillFrontmatter(source);
-      // The frontmatter name must match its directory: a doc claiming a
-      // different name than the folder it lives in is ambiguous to resolve.
-      if (parsed && parsed.name === entry) {
-        seen.add(key);
-        found.push(parsed);
+      // Containment, not existence: the real path of BOTH the directory and
+      // its SKILL.md must live inside the bundle.
+      const dirReal = containedRealPath(skillsRoot, join(skillsRoot, entry));
+      if (!dirReal) continue;
+      const fileReal = containedRealPath(skillsRoot, join(skillsRoot, entry, "SKILL.md"));
+      if (!fileReal) continue;
+      // ...and the file must not ALSO live outside the bundle as a hardlink,
+      // which no path check can see.
+      if (isMultiplyLinked(fileReal)) continue;
+      try {
+        if (!statSync(dirReal).isDirectory()) continue;
+        const source = readCapped(fileReal);
+        if (source === null) continue;
+        const parsed = parseSkillFrontmatter(source);
+        // The frontmatter name must match its directory: a doc claiming a
+        // different name than the folder it lives in is ambiguous to resolve.
+        if (parsed && parsed.name === entry) {
+          seen.add(key);
+          found.push(parsed);
+        }
+      } catch {
+        // An unreadable skill is skipped, never fatal: one bad file must not
+        // take down every other skill in the bundle.
+        continue;
       }
-    } catch {
-      // An unreadable skill is skipped, never fatal: one bad file must not take
-      // down every other skill in the bundle.
-      continue;
     }
+  } finally {
+    try { dir.closeSync(); } catch { /* already closed */ }
   }
   return found.sort((a, b) => a.name.localeCompare(b.name));
 }
