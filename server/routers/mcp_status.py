@@ -82,9 +82,16 @@ def _redacted_servers(tenant_id: str, env: Any = os.environ) -> list[dict[str, s
             return []
         entry = {"name": name, "host": host}
         auth_token = config.get("authToken")
+        # NO length floor. The floor belongs to the REDACT-BY-REWRITE problem
+        # (a 1-char secret cannot be substring-replaced out of prose without
+        # mangling it); this check DROPS the whole entry instead, so a short
+        # token has no such downside — and mcpBridge.ts accepts tokens of any
+        # length, so a 20-char bearer embedded in a hostname leaked straight
+        # through the floor (review round 2). Any non-empty token that survives
+        # into the descriptor kills the entry.
         if (
             isinstance(auth_token, str)
-            and len(auth_token) >= MIN_REDACTABLE_SECRET_LEN
+            and auth_token
             and auth_token in json.dumps(entry)
         ):
             logger.warning("Dropping MCP server descriptor because it contains authToken=<redacted>")

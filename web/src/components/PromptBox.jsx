@@ -362,7 +362,11 @@ export default function PromptBox({
                       which. Tools keep their read/write reading, which is the
                       money-relevant distinction. */}
                   <span className="count">
-                    {t.kind === 'resource' ? 'resource' : (t.kind && t.kind !== 'tool' ? t.kind : (isWrite ? 'write' : 'read'))}
+                    {/* "server", not "resource": these entries are MCP server
+                        roots. Resource enumeration needs a harness proxy that
+                        does not exist yet, so labelling them `resource` claimed
+                        a capability this release does not ship (review round 2). */}
+                    {t.kind === 'resource' ? 'server' : (t.kind && t.kind !== 'tool' ? t.kind : (isWrite ? 'write' : 'read'))}
                   </span>
                   {i === idx && <span className="key hot">Tab</span>}
                 </div>

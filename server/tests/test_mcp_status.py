@@ -98,3 +98,21 @@ def test_status_uses_the_active_tenant_dependency():
     dependency = inspect.signature(mcp_status.mcp_status).parameters["tenant"].default
 
     assert dependency.dependency is deps.require_active_tenant
+
+
+def test_a_short_token_embedded_in_the_host_is_still_dropped(client, monkeypatch, tmp_path):
+    """Review round 2 HIGH: a 24-char floor skipped containment for short
+    tokens while mcpBridge.ts accepts any length — a 20-char bearer inside a
+    hostname went straight through. Containment must not depend on length."""
+    monkeypatch.setenv("LEAF_MCP_BRIDGE_DIR", str(tmp_path))
+    short = "s" * 20
+    _path(tmp_path, "demo-tenant").write_text(json.dumps([
+        {"name": "leaky", "url": f"https://{short}.example.test", "authToken": short},
+        {"name": "clean", "url": "https://ok.example.test", "authToken": "t" * 40},
+    ]), encoding="utf-8")
+
+    response = _response(client, "demo-tenant")
+
+    assert response.status_code == 200
+    assert short not in response.text, f"a 20-char token leaked: {response.text}"
+    assert response.json() == {"servers": [{"name": "clean", "host": "ok.example.test"}]}
