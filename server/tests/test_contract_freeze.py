@@ -165,7 +165,7 @@ CONVERSE_TS = _strip_ts_comments(
 # The full §18.3 stream vocabulary (both hops), frozen.
 S18_STREAM_TYPES = {
     "turn_started", "text_delta", "tool_call", "tool_result", "job_linked",
-    "proposed_run", "confirmation_required", "confirmation_resolved",
+    "proposed_run", "confirmation_required", "question_required", "confirmation_resolved",
     "turn_usage", "turn_complete", "session_state", "error",
 }
 # The harness NDJSON union (ports/converse.ts HarnessTurnEvent), frozen. The

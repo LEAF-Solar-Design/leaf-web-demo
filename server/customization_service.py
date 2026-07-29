@@ -181,6 +181,39 @@ def _bare_repo(tenant_id: str) -> Path:
     return resolved
 
 
+def _ensure_bare_repo(tenant_id: str) -> Path:
+    """Ask the harness to provision a first-time tenant repo, then verify it locally."""
+    try:
+        return _bare_repo(tenant_id)
+    except CustomizationServiceError as exc:
+        if exc.code != "tenant_repository_unavailable":
+            raise
+    url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
+    secret = os.environ.get("LEAF_HARNESS_SECRET", "").strip()
+    if not url or not secret:
+        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+    try:
+        import requests
+        response = requests.post(
+            f"{url}/author/repository", timeout=30,
+            headers={"X-Harness-Secret": secret},
+            json={"tenant_id": tenant_id},
+        )
+        response.raise_for_status()
+        body = response.json()
+    except Exception as exc:
+        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
+    bare = _bare_repo(tenant_id)
+    observed = _git(bare, "rev-parse", "refs/heads/main")
+    if (
+        not isinstance(body, Mapping)
+        or body.get("tenant_id") != tenant_id
+        or body.get("base_commit") != observed
+    ):
+        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+    return bare
+
+
 def _binding(tenant: Any) -> TenantBinding:
     tenant_id = _tenant_id(tenant)
     if not deps.auth_live():
@@ -314,7 +347,7 @@ class CustomizationService:
             builder_entitlement=BuilderEntitlement(tenant_id, binding.subject, True, True),
         )
         release = self._release()
-        bare = _bare_repo(tenant_id)
+        bare = _ensure_bare_repo(tenant_id)
         try:
             prior = self.store.get_change_set_by_idempotency(
                 tenant_id=tenant_id, idempotency_key=idempotency_key

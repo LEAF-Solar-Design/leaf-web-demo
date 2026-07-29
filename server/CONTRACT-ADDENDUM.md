@@ -1033,10 +1033,10 @@ no-existence-oracle rule.
 
 ### 18.3 SSE event vocabulary (the stream vocabulary, and who emits what)
 
-> **FROZEN AS THE LIVE WIRE IS (chip 5, 2026-07-23).** The 12-type table below
+> **FROZEN AS THE LIVE WIRE IS (chip 5, updated 2026-07-29).** The 13-type table below
 > is the full STREAM vocabulary. The two hops are NOT identical (the original
 > "identical on both hops" claim was the §18-era proxy design): the
-> harness→app NDJSON hop (`POST /turn`) emits exactly the 9-member
+> harness→app NDJSON hop (`POST /turn`) emits exactly the 10-member
 > `HarnessTurnEvent` union (`harness/src/ports/converse.ts`). The three
 > app-side types, precisely: `turn_started` is appended by the turn engine
 > when a turn starts (`server/turn_runner.py:213`, live payload
@@ -1067,6 +1067,7 @@ One JSON object per SSE `data:` line; the SSE event name equals `type`. Envelope
 | `job_linked` | `{job_id, tool}` | Dispatch handoff; job progress rides the existing per-job SSE (`server/routers/jobs.py:110`), not this stream. |
 | `proposed_run` | `{confirmation_id, tool, params, dwg, capability, rationale}` | `params` and `dwg` are the full server-stored target. The UI renders server truth, never a model paraphrase. |
 | `confirmation_required` | `{confirmation_id, kind, payload}` | |
+| `question_required` | `{question_id, question, options:[{label, description?}]}` | Display-only question card. It creates no approval row, spends no money, and mutates no drawing or catalog state. |
 | `confirmation_resolved` | `{confirmation_id, approved, by}` | First approval wins; other tabs observe this event. |
 | `turn_usage` | `{turns, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_tokens, total_cost_usd?, models?}` | `total_cost_usd` is an estimate (no balance API exists — `research/agentsdk-usage-visibility.md`). |
 | `turn_complete` | `{stop_reason}` | `stop_reason` ∈ `end_turn \| awaiting_approval \| cap_hit \| llm_quota_exhausted \| llm_rate_limited \| error \| timeout`. |

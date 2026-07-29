@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -61,6 +62,61 @@ def staged_change(store, tenant_id="tenant-a", suffix="a"):
         platform_release="release-a",
         workspace_contract_digest=WORKSPACE,
     )
+
+
+def test_ensure_bare_repo_provisions_first_time_tenant(tmp_path, monkeypatch):
+    bare = tmp_path / "tenant-a.git"
+    calls = []
+
+    def resolve(_tenant_id):
+        calls.append("resolve")
+        if len(calls) == 1:
+            raise CustomizationServiceError("tenant_repository_unavailable", 503)
+        return bare
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tenant_id": "tenant-a", "base_commit": BASE}
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "secret")
+    monkeypatch.setattr(customization_service, "_bare_repo", resolve)
+    monkeypatch.setattr(customization_service, "_git", lambda *args: BASE)
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: Response())
+
+    assert customization_service._ensure_bare_repo("tenant-a") == bare
+    assert calls == ["resolve", "resolve"]
+
+
+def test_ensure_bare_repo_rejects_unverified_harness_receipt(tmp_path, monkeypatch):
+    bare = tmp_path / "tenant-a.git"
+    attempts = 0
+
+    def resolve(_tenant_id):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise CustomizationServiceError("tenant_repository_unavailable", 503)
+        return bare
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tenant_id": "tenant-b", "base_commit": BASE}
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "secret")
+    monkeypatch.setattr(customization_service, "_bare_repo", resolve)
+    monkeypatch.setattr(customization_service, "_git", lambda *args: BASE)
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: Response())
+
+    with pytest.raises(CustomizationServiceError, match="tenant_repository_unavailable"):
+        customization_service._ensure_bare_repo("tenant-a")
 
 
 def publish_change(store, tenant_id="tenant-a", suffix="a"):

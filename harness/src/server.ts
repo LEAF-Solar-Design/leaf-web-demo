@@ -520,6 +520,17 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         return send(res, 200, out);
       }
 
+      if (method === "POST" && path === "/author/repository") {
+        if (!authoredExecutionEnabled()) {
+          return send(res, 403, {
+            error: { message: "tenant-authored execution is disabled" },
+          });
+        }
+        const body = await readJsonBody(req);
+        const tenant = tenantForRequest(req, body);
+        return send(res, 200, await loop.ensureRepository(tenant));
+      }
+
       if (method === "POST" && path === "/author/publish") {
         if (!authoredExecutionEnabled()) {
           return send(res, 403, {
