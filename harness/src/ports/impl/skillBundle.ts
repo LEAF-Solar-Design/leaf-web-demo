@@ -34,8 +34,8 @@
  * OFF unless configured. No bundle, no attachment, and the session runs
  * exactly as it does today.
  */
-import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, openSync, readSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 
 export type SkillTier = "tenant-safe" | "operator";
 
@@ -67,6 +67,15 @@ const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
  */
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
+/** Windows reserves these device names; a directory called CON or NUL is a
+ * portability trap, not a skill. Checked case-insensitively, before any
+ * extension. */
+const RESERVED_NAMES = new Set([
+  "con", "prn", "aux", "nul",
+  ...Array.from({ length: 9 }, (_, i) => `com${i + 1}`),
+  ...Array.from({ length: 9 }, (_, i) => `lpt${i + 1}`),
+]);
+
 /** Skill docs are prose; anything larger is not a skill and must not be read
  * into memory on a per-turn path. */
 export const MAX_SKILL_FILE_BYTES = 256 * 1024;
@@ -74,7 +83,55 @@ export const MAX_SKILL_FILE_BYTES = 256 * 1024;
 export const MAX_SKILLS = 250;
 
 export function isValidSkillName(name: unknown): name is string {
-  return typeof name === "string" && SKILL_NAME_RE.test(name);
+  if (typeof name !== "string" || !SKILL_NAME_RE.test(name)) return false;
+  // A trailing dot is silently stripped by Windows, so `x.` and `x` would name
+  // the same directory while reading as two distinct allowlist entries.
+  if (name.endsWith(".")) return false;
+  const base = name.split(".")[0].toLowerCase();
+  return !RESERVED_NAMES.has(base);
+}
+
+/**
+ * Read at most `MAX_SKILL_FILE_BYTES` from a file, in ONE open.
+ *
+ * Replaces a stat-then-read pair: between those two calls the file can be
+ * swapped for a huge one (TOCTOU), leaving the size check decided against a
+ * file that is no longer there. A bounded read from a single descriptor cannot
+ * be beaten that way -- an oversized file is simply truncated at the cap, and
+ * truncation loses the closing `---`, so its frontmatter fails to parse and the
+ * skill is skipped.
+ */
+function readCapped(path: string): string | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.allocUnsafe(MAX_SKILL_FILE_BYTES);
+    const read = readSync(fd, buf, 0, MAX_SKILL_FILE_BYTES, 0);
+    return buf.subarray(0, read).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+/** Resolve `child` and confirm it stays inside `rootReal`.
+ *
+ * THE containment check. statSync/readFileSync follow symlinks, so a
+ * tenant-safe bundle could otherwise hold `skills/x -> ~/.claude/skills/x` and
+ * pull an operator skill into the allowlist. The mounted directory is the whole
+ * security boundary, so it has to be a REAL one: comparing resolved real paths
+ * covers symlinks, junctions and `..` in a single check.
+ */
+function containedRealPath(rootReal: string, child: string): string | null {
+  try {
+    const real = realpathSync(child);
+    if (real === rootReal) return real;
+    const prefix = rootReal.endsWith(sep) ? rootReal : rootReal + sep;
+    return real.startsWith(prefix) ? real : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Pull `name` / `description` out of a SKILL.md's YAML frontmatter.
@@ -103,7 +160,12 @@ export function parseSkillFrontmatter(source: string): BundledSkill | null {
 /** The tier a bundle declares in `.claude-plugin/plugin.json` (`leafTier`). */
 export function readBundleTier(bundlePath: string): SkillTier | null {
   try {
-    const raw = readFileSync(join(bundlePath, MANIFEST), "utf8");
+    const rootReal = realpathSync(bundlePath);
+    // The manifest DECLARES the tier, so a symlinked manifest pointing at an
+    // operator bundle's JSON would let a wrapper claim "tenant-safe".
+    const manifestReal = containedRealPath(rootReal, join(bundlePath, MANIFEST));
+    if (!manifestReal) return null;
+    const raw = readFileSync(manifestReal, "utf8");
     const tier = (JSON.parse(raw) as { leafTier?: unknown }).leafTier;
     return tier === "tenant-safe" || tier === "operator" ? tier : null;
   } catch {
@@ -119,33 +181,58 @@ export function readBundleTier(bundlePath: string): SkillTier | null {
  * but unlisted one invisible. Reading the directory keeps them in step.
  */
 export function discoverSkills(bundlePath: string): BundledSkill[] {
-  const root = join(bundlePath, SKILLS_DIR);
-  if (!existsSync(root)) return [];
-  const found: BundledSkill[] = [];
-  let entries: string[];
+  let rootReal: string;
   try {
-    entries = readdirSync(root);
+    rootReal = realpathSync(resolve(bundlePath));
   } catch {
     return [];
   }
+  const skillsRoot = containedRealPath(rootReal, join(bundlePath, SKILLS_DIR));
+  if (!skillsRoot) return [];
+
+  const found: BundledSkill[] = [];
+  const seen = new Set<string>();
+  let entries: string[];
+  try {
+    entries = readdirSync(skillsRoot);
+  } catch {
+    return [];
+  }
+  // Bound the WORK, not just the result: a bundle full of invalid entries would
+  // otherwise still be opened and parsed one file at a time.
+  let examined = 0;
   for (const entry of entries) {
-    if (found.length >= MAX_SKILLS) break;
+    if (found.length >= MAX_SKILLS || examined >= MAX_SKILLS * 2) break;
+    examined += 1;
     // Reject the directory name too: it is what the SDK resolves plugin-
     // qualified skills by, so `..` must never get as far as a read.
     if (!isValidSkillName(entry)) continue;
-    const skillFile = join(root, entry, "SKILL.md");
+    // Case-only collisions (`Probe` vs `probe`) are one directory on Windows
+    // and two elsewhere; either way two allowlist entries differing only by
+    // case are ambiguous, so the first wins.
+    const key = entry.toLowerCase();
+    if (seen.has(key)) continue;
+
+    // Containment, not existence: the real path of BOTH the directory and its
+    // SKILL.md must live inside the bundle.
+    const dirReal = containedRealPath(skillsRoot, join(skillsRoot, entry));
+    if (!dirReal) continue;
+    const fileReal = containedRealPath(skillsRoot, join(skillsRoot, entry, "SKILL.md"));
+    if (!fileReal) continue;
     try {
-      if (!statSync(join(root, entry)).isDirectory()) continue;
-      if (!existsSync(skillFile)) continue;
-      if (statSync(skillFile).size > MAX_SKILL_FILE_BYTES) continue;
-      const parsed = parseSkillFrontmatter(readFileSync(skillFile, "utf8"));
-      // The frontmatter name must also match its directory: a bundle whose
-      // doc claims a different name than the folder it lives in is ambiguous
-      // to resolve and is not worth guessing about.
-      if (parsed && parsed.name === entry) found.push(parsed);
+      if (!statSync(dirReal).isDirectory()) continue;
+      const source = readCapped(fileReal);
+      if (source === null) continue;
+      const parsed = parseSkillFrontmatter(source);
+      // The frontmatter name must match its directory: a doc claiming a
+      // different name than the folder it lives in is ambiguous to resolve.
+      if (parsed && parsed.name === entry) {
+        seen.add(key);
+        found.push(parsed);
+      }
     } catch {
-      // An unreadable skill is skipped, never fatal: one bad file must not
-      // take down every other skill in the bundle.
+      // An unreadable skill is skipped, never fatal: one bad file must not take
+      // down every other skill in the bundle.
       continue;
     }
   }

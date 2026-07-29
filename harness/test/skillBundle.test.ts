@@ -8,7 +8,7 @@
 //      bundle's actual contents;
 //   3. an empty/absent bundle attaches NOTHING, rather than enabling the Skill
 //      tool with nothing behind it.
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_SKILL_FILE_BYTES,
   discoverSkills,
+  readBundleTier,
   isValidSkillName,
   parseSkillFrontmatter,
   skillBundleAttachment,
@@ -206,12 +207,27 @@ describe("hostile input (review findings)", () => {
     expect(discoverSkills(root)).toEqual([]);
   });
 
-  it("skips oversized SKILL.md instead of reading it into memory", () => {
+  it("bounds the discovery read rather than slurping a huge file", () => {
+    // The cap protects THIS pass, not the SDK (which reads the file itself on
+    // invocation). Frontmatter lives at the top, so a long body is still a
+    // legitimate skill — the property that matters is that discovery never
+    // reads more than the cap.
     const root = bundleWith([{ name: "good" }]);
     const big = join(root, "skills", "huge");
     mkdirSync(big, { recursive: true });
     writeFileSync(join(big, "SKILL.md"),
       "---\nname: huge\ndescription: d\n---\n" + "x".repeat(MAX_SKILL_FILE_BYTES + 1024));
+    expect(discoverSkills(root).map((s) => s.name)).toEqual(["good", "huge"]);
+  });
+
+  it("skips a file whose frontmatter lies BEYOND the cap", () => {
+    // Truncation loses the closing `---`, so the frontmatter cannot parse and
+    // the skill is dropped instead of being half-read.
+    const root = bundleWith([{ name: "good" }]);
+    const pushed = join(root, "skills", "pushed");
+    mkdirSync(pushed, { recursive: true });
+    writeFileSync(join(pushed, "SKILL.md"),
+      "---\nname: pushed\ndescription: " + "y".repeat(MAX_SKILL_FILE_BYTES + 64) + "\n---\n");
     expect(discoverSkills(root).map((s) => s.name)).toEqual(["good"]);
   });
 });
@@ -253,6 +269,59 @@ describe("tier binding — the fail-closed boundary", () => {
     const file = join(root, ".claude-plugin", "plugin.json");
     expect(skillBundleAttachment({
       LEAF_SKILLS_BUNDLE_PATH: file, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv)).toBeNull();
+  });
+});
+
+describe("symlink containment — the escape the review found", () => {
+  // A tenant-safe wrapper bundle whose skills/<x> is a SYMLINK to an operator
+  // skill outside the bundle. statSync and readFileSync both follow links, so
+  // without a real-path containment check the external skill lands in the
+  // allowlist and the wrapper still mounts as "tenant-safe".
+  function trySymlink(target: string, path: string, type: "dir" | "file"): boolean {
+    try { symlinkSync(target, path, type); return true; } catch { return false; }
+  }
+
+  it("does not follow a symlinked skill directory out of the bundle", () => {
+    const outside = bundleWith([{ name: "operator-only-skill" }], "operator");
+    const wrapper = bundleWith([{ name: "innocent" }], "tenant-safe");
+    const linked = join(wrapper, "skills", "operator-only-skill");
+    if (!trySymlink(join(outside, "skills", "operator-only-skill"), linked, "dir")) {
+      return; // unprivileged Windows cannot create symlinks; nothing to assert
+    }
+    const names = discoverSkills(wrapper).map((s) => s.name);
+    expect(names).toEqual(["innocent"]);
+    const att = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: wrapper, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv);
+    expect(att?.skills ?? []).not.toContain("operator-only-skill");
+  });
+
+  it("does not follow a symlinked SKILL.md out of the bundle", () => {
+    const outside = bundleWith([{ name: "operator-only-skill" }], "operator");
+    const wrapper = bundleWith([{ name: "innocent" }], "tenant-safe");
+    const dir = join(wrapper, "skills", "operator-only-skill");
+    mkdirSync(dir, { recursive: true });
+    if (!trySymlink(join(outside, "skills", "operator-only-skill", "SKILL.md"),
+                    join(dir, "SKILL.md"), "file")) {
+      return;
+    }
+    expect(discoverSkills(wrapper).map((s) => s.name)).toEqual(["innocent"]);
+  });
+
+  it("refuses a bundle whose MANIFEST is a symlink to another tier's manifest", () => {
+    // Otherwise a wrapper could borrow a tenant-safe manifest while serving
+    // operator skills.
+    const tenant = bundleWith([{ name: "innocent" }], "tenant-safe");
+    const wrapper = bundleWith([{ name: "operator-only-skill" }], null);
+    const manifestPath = join(wrapper, ".claude-plugin", "plugin.json");
+    rmSync(manifestPath, { force: true });
+    if (!trySymlink(join(tenant, ".claude-plugin", "plugin.json"), manifestPath, "file")) {
+      return;
+    }
+    expect(readBundleTier(wrapper)).toBeNull();
+    expect(skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: wrapper, LEAF_SKILLS_TIER: "tenant-safe",
     } as NodeJS.ProcessEnv)).toBeNull();
   });
 });
