@@ -117,9 +117,14 @@ def live_auth(monkeypatch):
     monkeypatch.setenv("LEAF_TENANTS_FILE", str(TENANTS_FILE))
     # Surfaces that resolve the ACTIVE platform binding (drawings, sessions,
     # and now the customization routes, issue #304) need an authority to
-    # resolve against. Bind each subject to a tenant named after its claim so
-    # every existing assertion in this module keeps addressing the same tenant,
-    # while the request now travels the resolved path rather than the raw one.
+    # resolve against, or they answer 503 in tests that never provisioned one.
+    #
+    # This binds every subject to a tenant derived from the subject and a fixed
+    # hosted_pro tier. That is NOT the claim: mint() issues org_wave5 as the
+    # tenant claim while the subject resolves to "wave5". The author tests below
+    # therefore no longer exercise the tenant or tier their names suggest; they
+    # exercise the R5 gate on the RESOLVED tenant, which is the behaviour under
+    # test. Routes that still take the raw claim are unaffected.
     import deps
     import tenancy as _tenancy
     def _resolve_authority(subject):

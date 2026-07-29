@@ -134,3 +134,73 @@ def test_a_backedge_identity_is_left_alone(monkeypatch):
     context = deps.TenantContext("tenant-a", tier="hosted_pro")
 
     assert deps.resolve_active_tenant_context(context) is context
+
+
+# --------------------------------------------------------------------------- #
+# through the real route, not around it
+# --------------------------------------------------------------------------- #
+def test_the_author_route_hands_the_service_the_resolved_tenant(
+    mismatched_identity, monkeypatch,
+):
+    """An HTTP request through /api/author must reach the service as the UUID.
+
+    The assertions above call the resolver and _binding directly and check the
+    route's source text. All of that stays green if someone special-cases the
+    author path inside require_active_tenant, e.g.
+
+        if request.url.path.startswith("/api/author"): return tenant
+
+    which restores the bug exactly. Only a real request catches it, so this
+    drives the ASGI app and records what the service was handed.
+    """
+    from fastapi.testclient import TestClient
+
+    import app as app_module
+    import customization_flags
+
+    seen = {}
+
+    class _RecordingService:
+        def stage(self, *, tenant, description, mode, idempotency_key):
+            seen["tenant"] = str(tenant)
+            seen["subject"] = getattr(tenant, "subject", None)
+            return {"change_set_id": "cs-1", "state": "staged"}
+
+    monkeypatch.setattr(
+        customization_service.CustomizationService, "configured",
+        classmethod(lambda cls: _RecordingService()),
+    )
+    # R5 is enabled for the PLATFORM tenant only. If the route were still
+    # resolving the claim, the rollout gate would refuse before the service ran.
+    monkeypatch.setattr(
+        customization_flags, "enabled",
+        lambda wave, tenant_id: tenant_id == PLATFORM,
+    )
+    monkeypatch.setattr(
+        author_router, "customization_enabled",
+        lambda wave, tenant_id: tenant_id == PLATFORM,
+    )
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    # Override the ORIGINAL callable object: require_active_tenant captured
+    # Depends(require_tenant) at import time, so monkeypatching the module
+    # attribute first would make the override key the wrong function.
+    app_module.app.dependency_overrides[deps.require_tenant] = (
+        lambda: deps.TenantContext(CLAIM, org_id=CLAIM, tier="hosted_pro",
+                                   subject=SUBJECT)
+    )
+    try:
+        client = TestClient(app_module.app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/author",
+            json={"description": "tally panels per layer", "mode": "build"},
+            headers={"Idempotency-Key": "author:probe-1"},
+        )
+    finally:
+        app_module.app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert seen.get("tenant") == PLATFORM, (
+        "the author route handed the service the raw claim, not the resolved "
+        "platform tenant"
+    )
+    assert seen.get("subject") == SUBJECT
