@@ -209,6 +209,17 @@ _cancellers: Dict[str, Any] = {}
 # reason, so a second app process would break far more than cancellation.
 _orphan_cancel_lock = threading.Lock()
 
+# A non-turn holder of the active-turn slot. routers/checkpoints.py reserves the
+# slot for a restore so a turn cannot start mid-commit; it is NOT a turn, so the
+# cancel route must refuse it (cancelling one would append a FALSE turn_complete,
+# release the reservation, and let a real turn run while the restore is still
+# writing — PR #310 review round 2, blocker 1).
+RESERVATION_PREFIX = "restore-"
+
+
+def is_reservation(turn_id: str) -> bool:
+    return str(turn_id).startswith(RESERVATION_PREFIX)
+
 
 def _register_canceller(turn_id: str, fn: Any) -> None:
     with _cancellers_lock:
@@ -647,6 +658,10 @@ def request_cancel(tenant_id: str, session_id: str, turn_id: str) -> str:
 
     if str(sess.get("active_turn_id") or "") != str(turn_id):
         return "not_active"
+
+    if is_reservation(turn_id):
+        # Not a turn: a restore owns the slot and releases it itself.
+        return "not_cancellable"
 
     with _cancellers_lock:
         canceller = _cancellers.get(turn_id)

@@ -116,6 +116,20 @@ DB_PATH = Path(os.environ.get("SESSIONS_DB", str(SERVER_DIR / "sessions.db")))
 _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
 
+# A non-turn RESERVATION of the active-turn slot (a checkpoint restore). The
+# stale takeover below judges the CURRENT HOLDER by the holder's own window,
+# not the incoming caller's — try_begin_turn used to apply the caller's
+# stale_after_s to whatever held the slot, so an ordinary 300s turn could
+# steal a 301-second-old reservation regardless of the window the restore
+# declared (PR #310 review round 4). Turns keep exactly today's behavior;
+# only a reservation holder gets the wider window.
+RESERVATION_PREFIX = "restore-"
+RESERVATION_STALE_S = 3600.0
+
+
+def is_reservation_holder(turn_id: Optional[str]) -> bool:
+    return isinstance(turn_id, str) and turn_id.startswith(RESERVATION_PREFIX)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   session_id      TEXT PRIMARY KEY,
@@ -448,7 +462,10 @@ def try_begin_turn(session_id: str, turn_id: str, stale_after_s: float,
         active = row["active_turn_id"]
         started = row["turn_started_at"]
         is_free = active is None
-        is_stale = (not is_free) and (started is None or (now - started) > stale_after_s)
+        # The HOLDER's window, not the caller's (see RESERVATION_PREFIX above).
+        holder_window = (RESERVATION_STALE_S if is_reservation_holder(active)
+                         else stale_after_s)
+        is_stale = (not is_free) and (started is None or (now - started) > holder_window)
         if not (is_free or is_stale):
             return False
         conn.execute(
@@ -993,15 +1010,22 @@ def _pg_try_begin_turn(
 ) -> bool:
     now = started_at if started_at is not None else time.time()
     stale_before = now - stale_after_s
+    # Same holder-window rule as the legacy CAS (see RESERVATION_PREFIX),
+    # SQL-side so the CAS stays one atomic statement.
+    reservation_stale_before = now - RESERVATION_STALE_S
     db = _platform_db()
     with db.transaction() as conn:
         row = conn.execute(
             "UPDATE app_sessions SET active_turn_id = %s, turn_started_at = %s,"
             " active_turn_tier = %s, active_turn_subject = %s, updated_at = %s"
             " WHERE session_id = %s AND (active_turn_id IS NULL"
-            " OR turn_started_at IS NULL OR turn_started_at < %s)"
+            " OR turn_started_at IS NULL"
+            " OR turn_started_at <"
+            "   (CASE WHEN active_turn_id LIKE 'restore-%%'"
+            "         THEN %s ELSE %s END))"
             " RETURNING session_id",
-            (turn_id, now, tier, subject, now, session_id, stale_before),
+            (turn_id, now, tier, subject, now, session_id,
+             reservation_stale_before, stale_before),
         ).fetchone()
     return row is not None
 
