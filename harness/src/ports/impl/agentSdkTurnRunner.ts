@@ -87,6 +87,7 @@ import {
   resolveMcpAttachment,
   type McpAttachment,
   type McpBridgeStore,
+  type McpServerConfig,
 } from "./mcpBridge.js";
 import { findTool } from "../../registry/registerTool.js";
 
@@ -317,6 +318,12 @@ const ASK_USER_MCP_NAME = `${MCP_TOOL_PREFIX}${ASK_USER_TOOL}`;
 // question tool only emits a transcript event, spends nothing, and mutates nothing.
 const LOCAL_MCP_TOOL_ALLOWLIST = new Set([APS_TEST_RUN_MCP_NAME, ASK_USER_MCP_NAME]);
 
+/** Tenant MCP calls always require a person to approve them. This deliberately is
+ * not a drawing.read capability, so the app's read auto-approval policy fails closed. */
+export const TENANT_MCP_EXECUTE_CAPABILITY = "mcp.execute";
+const MCP_PROTOCOL_VERSION = "2026-07-28";
+const MCP_RESULT_MAX_BYTES = 256 * 1024;
+
 /** Tools that mutate/spend real resources and therefore require operator approval
  *  before they run (leaf-backend-gaps.md §2.1: "aps_test_run / anything mutating"). */
 const DEFAULT_APPROVAL_TOOLS = new Set<string>([APS_TEST_RUN_TOOL]);
@@ -332,13 +339,60 @@ export function requiresToolConfirmation(toolName: string, approvalTools: Set<st
     || (toolName.startsWith("mcp__") && toolName !== ASK_USER_MCP_NAME);
 }
 
-const TENANT_MCP_TOOL_DENIAL = "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately";
+const TENANT_MCP_TOOL_DENIAL = "tenant MCP tool is not attached for this tenant";
 
-/** Tenant MCP servers expose listable data only until their approval flow exists. */
-export function tenantMcpToolDenial(toolName: string): { behavior: "deny"; message: string } | null {
-  return toolName.startsWith("mcp__") && !LOCAL_MCP_TOOL_ALLOWLIST.has(toolName)
+type TenantMcpTool = { serverName: string; bareToolName: string };
+
+/** Match a full SDK MCP name only against a server attached to this turn. */
+export function resolveTenantMcpTool(toolName: string, attachment: McpAttachment | null): TenantMcpTool | null {
+  if (!toolName.startsWith("mcp__") || LOCAL_MCP_TOOL_ALLOWLIST.has(toolName) || !attachment) return null;
+  for (const serverName of Object.keys(attachment).sort((a, b) => b.length - a.length)) {
+    const prefix = `mcp__${serverName}__`;
+    if (toolName.startsWith(prefix) && toolName.length > prefix.length) {
+      return { serverName, bareToolName: toolName.slice(prefix.length) };
+    }
+  }
+  return null;
+}
+
+/** Unknown tenant MCP names remain denied. A name must resolve to a mounted server
+ * before it can enter the approval flow. */
+export function tenantMcpToolDenial(
+  toolName: string,
+  attachment: McpAttachment | null = null,
+): { behavior: "deny"; message: string } | null {
+  return toolName.startsWith("mcp__")
+    && !LOCAL_MCP_TOOL_ALLOWLIST.has(toolName)
+    && !resolveTenantMcpTool(toolName, attachment)
     ? { behavior: "deny", message: TENANT_MCP_TOOL_DENIAL }
     : null;
+}
+
+/** The tenant MCP approval envelope is intentionally separate from the APS wrapper:
+ * the stored proposal carries the full remote MCP name and the session drawing. */
+export function tenantMcpApprovalEvents(
+  tool: string,
+  params: Record<string, unknown>,
+  confirmationId: string,
+  drawingId: string,
+): HarnessTurnEvent[] {
+  return [
+    {
+      type: "proposed_run",
+      data: {
+        confirmation_id: confirmationId,
+        tool,
+        params,
+        capability: TENANT_MCP_EXECUTE_CAPABILITY,
+        dwg: drawingId,
+        rationale: `The assistant wants to run tenant MCP tool "${tool}". This requires your approval.`,
+      },
+    },
+    {
+      type: "confirmation_required",
+      data: { confirmation_id: confirmationId, kind: "tool_run", payload: { tool, params } },
+    },
+  ];
 }
 
 /** Resolve a tenant attachment without exposing bridge failures to the chat turn. */
@@ -469,6 +523,9 @@ export interface AgentSdkTurnRunnerOptions {
   /** Bare tool names that require operator confirmation before they run. Defaults to
    *  {"aps_test_run"}. */
   approvalTools?: Set<string>;
+  /** Optional bridge store. Supplying one makes mount and confirm resolve the same
+   * tenant configuration, and keeps the real I/O boundary testable. */
+  mcpBridgeStore?: McpBridgeStore;
 }
 
 type CanUseTool = (
@@ -531,6 +588,142 @@ function summarizeEnvelope(envelope: ResultEnvelope): string {
   return envelope.error?.message ?? "the tool run failed with no error detail.";
 }
 
+function tenantMcpFailure(serverName: string, reason: string): { ok: false; summary: string } {
+  // Server names are validated by McpBridgeStore. Do not expose URLs, response text,
+  // exception text, or bearer tokens in this user-visible result.
+  return { ok: false, summary: `tenant MCP server ${JSON.stringify(serverName)} could not run the tool: ${reason}.` };
+}
+
+function serverNameFromFullToolName(fullToolName: string): string {
+  const rest = fullToolName.startsWith("mcp__") ? fullToolName.slice("mcp__".length) : "";
+  const separator = rest.indexOf("__");
+  return separator > 0 ? rest.slice(0, separator) : "<unavailable>";
+}
+
+async function readMcpResponse(response: Response): Promise<string | null> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MCP_RESULT_MAX_BYTES) return null;
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > MCP_RESULT_MAX_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function summarizeMcpResultContent(content: unknown): string {
+  const text = Array.isArray(content)
+    ? content
+      .map((item) => item as Record<string, unknown>)
+      .filter((item) => item.type === "text" && typeof item.text === "string")
+      .map((item) => item.text as string)
+      .join("\n")
+    : "";
+  return text.length > RESULT_SUMMARY_MAX_CHARS
+    ? `${text.slice(0, RESULT_SUMMARY_MAX_CHARS)}… (truncated)`
+    : text;
+}
+
+function redactMcpBearer(text: string, authToken: string | undefined): string {
+  return authToken ? text.split(authToken).join("<redacted>") : text;
+}
+
+/**
+ * Direct, stateless MCP tools/call transport for an already-approved tenant tool.
+ * The 2026-07-28 revision has no initialize handshake or session id. The server is
+ * resolved from the bridge at confirm time, so deleted attachments cannot be used.
+ */
+export async function executeTenantMcpTool(
+  store: McpBridgeStore,
+  tenantId: string,
+  fullToolName: string,
+  params: Record<string, unknown>,
+): Promise<{ ok: boolean; summary: string }> {
+  let configs: McpServerConfig[] | null;
+  try {
+    configs = await store.get(tenantId);
+  } catch {
+    return tenantMcpFailure("<unavailable>", "configuration is unavailable");
+  }
+
+  const config = configs
+    ?.slice()
+    .sort((a, b) => b.name.length - a.name.length)
+    .find((candidate) => fullToolName.startsWith(`mcp__${candidate.name}__`));
+  if (!config) return tenantMcpFailure(serverNameFromFullToolName(fullToolName), "the approved server is no longer attached");
+  const bareName = fullToolName.slice(`mcp__${config.name}__`.length);
+  if (!bareName) return tenantMcpFailure(config.name, "the approved tool name is invalid");
+
+  const payload = {
+    jsonrpc: "2.0",
+    id: randomUUID(),
+    method: "tools/call",
+    params: {
+      name: bareName,
+      arguments: params,
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientInfo": { name: "leaf-tenant-harness", version: "1.0.0" },
+        "io.modelcontextprotocol/clientCapabilities": {},
+      },
+    },
+  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const response = await fetch(config.url, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+        "mcp-method": "tools/call",
+        "mcp-name": bareName,
+        ...(config.authToken ? { authorization: `Bearer ${config.authToken}` } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) return tenantMcpFailure(config.name, "the server rejected the request");
+    const text = await readMcpResponse(response);
+    if (text === null) return tenantMcpFailure(config.name, "the server response exceeds 256 KB");
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return tenantMcpFailure(config.name, "the server returned an invalid response");
+    }
+    const result = body.result as Record<string, unknown> | undefined;
+    if (!result || body.error) return tenantMcpFailure(config.name, "the server reported a tool error");
+    const summary = redactMcpBearer(summarizeMcpResultContent(result.content), config.authToken);
+    return { ok: result.isError !== true, summary };
+  } catch {
+    return tenantMcpFailure(config.name, "the request failed");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /** Best-effort job id extraction. ResultEnvelope (CONTRACT section 3) has no dedicated
  *  `job_id` field today, so `job_linked` is only emitted when the broker's result
  *  payload happens to carry one - forward-compatible, never fabricated. */
@@ -545,6 +738,12 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     private readonly ports: AgentSdkTurnRunnerPorts,
     private readonly opts: AgentSdkTurnRunnerOptions = {},
   ) {}
+
+  private bridgeStore(): McpBridgeStore | null {
+    if (this.opts.mcpBridgeStore) return this.opts.mcpBridgeStore;
+    const dir = process.env.LEAF_MCP_BRIDGE_DIR;
+    return dir ? new FileMcpBridgeStore({ dir }) : null;
+  }
 
   async *runTurn(input: ConverseTurnInput, opts?: ConverseRunOptions): AsyncIterable<HarnessTurnEvent> {
     // Resolve the tenant's Agent SDK grant FIRST, before any yield: a thrown
@@ -599,6 +798,10 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
     const approvalTools = this.opts.approvalTools ?? DEFAULT_APPROVAL_TOOLS;
+    const mcpStore = this.bridgeStore();
+    const mcpAttachment = mcpStore
+      ? await resolveMcpAttachmentSafely(mcpStore, input.tenant_id)
+      : null;
 
     const childEnv = buildScrubbedEnv(grant, process.env);
     const sdk = (await dynImport(["@anthropic-ai", "claude-agent-sdk"])) as unknown as SdkModule;
@@ -654,8 +857,16 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       toolName: string,
       inp: Record<string, unknown>,
     ): Promise<{ behavior: string; message?: string; interrupt?: boolean; updatedInput?: Record<string, unknown> }> => {
-      const tenantMcpDenial = tenantMcpToolDenial(toolName);
+      const tenantTool = resolveTenantMcpTool(toolName, mcpAttachment);
+      const tenantMcpDenial = tenantMcpToolDenial(toolName, mcpAttachment);
       if (tenantMcpDenial) return tenantMcpDenial;
+      if (tenantTool) {
+        const confirmationId = randomUUID();
+        pending.push(...tenantMcpApprovalEvents(toolName, inp, confirmationId, input.drawing_id));
+        awaitingApproval = true;
+        abort.abort();
+        return { behavior: "deny", message: "tenant MCP tool requires operator approval before it can run.", interrupt: true };
+      }
       const bare = bareToolName(toolName);
       if (!requiresToolConfirmation(toolName, approvalTools)) return { behavior: "allow", updatedInput: inp };
 
@@ -693,8 +904,6 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     // supplies the bundle; `skills` is always an explicit allowlist because
     // 'all' would also pull in the CLI's bundled developer skills.
     const skillBundle = skillBundleAttachment();
-    const mcpAttachment = await resolveEnvMcpAttachment(process.env.LEAF_MCP_BRIDGE_DIR, input.tenant_id);
-
     const q = sdk.query({
       prompt: buildPrompt(input),
       options: buildTurnOptions({
@@ -772,6 +981,11 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     input: ConverseTurnInput,
     proposal: ConfirmProposal,
   ): Promise<{ ok: boolean; summary: string; jobId?: string }> {
+    if (proposal.tool.startsWith("mcp__")) {
+      const store = this.bridgeStore();
+      if (!store) return tenantMcpFailure("<unavailable>", "the approved server is no longer attached");
+      return executeTenantMcpTool(store, input.tenant_id, proposal.tool, proposal.params ?? {});
+    }
     const repo = await this.ports.tenantRepo.checkout(input.tenant_id);
     const pkg = findTool(repo.dir, proposal.tool);
     if (!pkg) {
