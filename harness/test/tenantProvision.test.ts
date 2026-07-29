@@ -32,6 +32,15 @@ function provider(base: string) {
   });
 }
 
+function providerWithBareBase(base: string, bareBase: string) {
+  return new TenantRepoProviderImpl({
+    locator: { async repoRef(tenantId: string) { return join(base, tenantId); } },
+    inPlace: true,
+    autoProvisionFrom: FIXTURE,
+    bareBase,
+  });
+}
+
 describe("TenantRepoProviderImpl auto-provision", () => {
   let base: string;
   let previousGlobalConfig: string | undefined;
@@ -79,6 +88,33 @@ describe("TenantRepoProviderImpl auto-provision", () => {
       if (previousOwnerTest === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
       else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previousOwnerTest;
     }
+  });
+
+  it("recovers an interrupted provision and refreshes an existing empty bare clone", async () => {
+    const dir = join(base, "interrupted");
+    const bareBase = join(base, "tenant-git");
+    const bareDir = join(bareBase, "interrupted.git");
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(bareBase, { recursive: true });
+    writeFileSync(
+      join(dir, "registry.json"),
+      JSON.stringify({ tools: [{ name: "preserved-tool" }] }),
+      "utf8",
+    );
+    writeFileSync(join(dir, "preserved.txt"), "keep me", "utf8");
+    git(dir, ["init", "-q", "-b", "main"]);
+    git(bareBase, ["clone", "--bare", dir, bareDir]);
+
+    const bare = await providerWithBareBase(base, bareBase).bare("interrupted");
+
+    expect(git(dir, ["show-ref", "--verify", "refs/heads/main"]).trim())
+      .toContain("refs/heads/main");
+    expect(git(bare.dir, ["show-ref", "--verify", "refs/heads/main"]).trim())
+      .toContain("refs/heads/main");
+    expect(readFileSync(join(dir, "preserved.txt"), "utf8")).toBe("keep me");
+    expect(JSON.parse(readFileSync(join(dir, "registry.json"), "utf8")))
+      .toEqual({ tools: [{ name: "preserved-tool" }] });
+    expect(git(dir, ["log", "--oneline"]).split("\n").filter(Boolean)).toHaveLength(1);
   });
 
   it("opens a bare clone from an existing foreign-owned tenant repo", async () => {
