@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildTenantMcpOptions,
   buildTurnOptions,
+  askUserEvent,
   requiresToolConfirmation,
   resolveEnvMcpAttachment,
   resolveMcpAttachmentSafely,
@@ -97,8 +98,23 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
       message: "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately",
     });
     expect(tenantMcpToolDenial("mcp__converse__aps_test_run")).toBeNull();
+    expect(tenantMcpToolDenial("mcp__converse__ask_user")).toBeNull();
+    expect(tenantMcpToolDenial("mcp__tenantsrv__ask_user")).toEqual({
+      behavior: "deny",
+      message: "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately",
+    });
     expect(requiresToolConfirmation("mcp__converse__aps_test_run", approvals)).toBe(true);
+    expect(requiresToolConfirmation("mcp__converse__ask_user", approvals)).toBe(false);
     expect(requiresToolConfirmation("Read", approvals)).toBe(false);
     expect(turnOptions(null).allowedTools).toEqual(["mcp__converse__aps_test_run"]);
+  });
+
+  it("emits a bounded question_required event and refuses seven options", () => {
+    const options = ["One", "Two"].map((label) => ({ label, description: `${label} detail` }));
+    expect(askUserEvent({ question: "Which plan?", options }, "question-1")).toEqual({
+      type: "question_required",
+      data: { question_id: "question-1", question: "Which plan?", options },
+    });
+    expect(askUserEvent({ question: "Too many?", options: Array.from({ length: 7 }, (_, i) => ({ label: String(i) })) }, "question-2")).toBeNull();
   });
 });

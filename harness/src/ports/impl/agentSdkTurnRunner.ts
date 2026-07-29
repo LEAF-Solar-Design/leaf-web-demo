@@ -108,7 +108,9 @@ interface SdkModule {
 }
 interface ZodModule {
   z: {
-    string(): unknown;
+    string(): { optional(): unknown };
+    array(schema: unknown): { min(count: number): { max(count: number): unknown } };
+    object(shape: Record<string, unknown>): unknown;
     [k: string]: unknown;
   };
 }
@@ -309,10 +311,11 @@ export const MCP_SERVER_NAME = "converse";
 const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 const APS_TEST_RUN_TOOL = "aps_test_run";
 const APS_TEST_RUN_MCP_NAME = `${MCP_TOOL_PREFIX}${APS_TEST_RUN_TOOL}`;
+const ASK_USER_TOOL = "ask_user";
+const ASK_USER_MCP_NAME = `${MCP_TOOL_PREFIX}${ASK_USER_TOOL}`;
 // Exact local MCP tool names that may bypass the tenant read-only denial. The
-// local server currently registers only aps_test_run, so no other MCP name is
-// exempted here.
-const LOCAL_MCP_TOOL_ALLOWLIST = new Set([APS_TEST_RUN_MCP_NAME]);
+// question tool only emits a transcript event, spends nothing, and mutates nothing.
+const LOCAL_MCP_TOOL_ALLOWLIST = new Set([APS_TEST_RUN_MCP_NAME, ASK_USER_MCP_NAME]);
 
 /** Tools that mutate/spend real resources and therefore require operator approval
  *  before they run (leaf-backend-gaps.md §2.1: "aps_test_run / anything mutating"). */
@@ -325,7 +328,8 @@ function bareToolName(name: string): string {
 /** Remote MCP tool names are never auto-approved. They follow the same
  * confirmation envelope as the existing write/spend wrapper. */
 export function requiresToolConfirmation(toolName: string, approvalTools: Set<string>): boolean {
-  return approvalTools.has(bareToolName(toolName)) || toolName.startsWith("mcp__");
+  return approvalTools.has(bareToolName(toolName))
+    || (toolName.startsWith("mcp__") && toolName !== ASK_USER_MCP_NAME);
 }
 
 const TENANT_MCP_TOOL_DENIAL = "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately";
@@ -392,6 +396,22 @@ export function resolveWrapperTarget(
 ): { tool: string; params: Record<string, unknown> } {
   const targetTool = typeof inp.tool === "string" && inp.tool.trim() ? inp.tool : undefined;
   return { tool: targetTool ?? bareWrapperName, params: parseWrapperParams(inp.params_json) };
+}
+
+type AskUserOption = { label: string; description?: string };
+
+/** Validate the bounded, display-only payload before it reaches the transcript. */
+export function askUserEvent(args: Record<string, unknown>, questionId: string = randomUUID()): HarnessTurnEvent | null {
+  if (typeof args.question !== "string" || !args.question.trim() || !Array.isArray(args.options)
+    || args.options.length < 2 || args.options.length > 6) return null;
+  const options: AskUserOption[] = [];
+  for (const raw of args.options) {
+    const option = raw as Record<string, unknown> | null;
+    if (!option || typeof option.label !== "string" || !option.label.trim()
+      || (option.description !== undefined && typeof option.description !== "string")) return null;
+    options.push({ label: option.label, ...(typeof option.description === "string" ? { description: option.description } : {}) });
+  }
+  return { type: "question_required", data: { question_id: questionId, question: args.question, options } };
 }
 
 /** Rewrite an event's `data.tool` from the wire-prefixed MCP name to the bare tool
@@ -578,7 +598,27 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       },
     );
 
-    const server = sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, version: "1.0.0", tools: [apsTestRunTool] });
+    const askUserTool = sdk.tool(
+      ASK_USER_TOOL,
+      "Present one bounded multiple-choice question to the user. It only records the question in the transcript. End your turn after calling it because the user's choice arrives as their next message.",
+      {
+        question: z.string(),
+        options: z.array(z.object({
+          label: z.string(),
+          description: z.string().optional(),
+        })).min(2).max(6),
+      },
+      async (a): Promise<CallToolResult> => {
+        const event = askUserEvent(a);
+        if (!event) {
+          return { content: [{ type: "text", text: "Questions must have a non-empty prompt and 2 to 6 labelled options." }], isError: true };
+        }
+        pending.push(event);
+        return { content: [{ type: "text", text: "The question was presented. End your turn. The user's choice arrives as their next message." }] };
+      },
+    );
+
+    const server = sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, version: "1.0.0", tools: [apsTestRunTool, askUserTool] });
 
     const canUseTool = async (
       toolName: string,

@@ -20,6 +20,8 @@ import {
   reconcileQueuedTurn,
   replacePickerTrigger,
   shouldRetryWithQueue,
+  chooseQuestionOption,
+  questionChoiceState,
   setPromptHistoryValue,
   LINE_PX,
   MAX_ROWS,
@@ -221,6 +223,29 @@ describe('busy queue retry', () => {
     assert.equal(shouldRetryWithQueue('busy', {
       text: 'continue', credential_grant: { kind: 'api_key' },
     }), false)
+  })
+})
+
+describe('structured question choices', () => {
+  const question = {
+    type: 'question_required', turn_id: 'turn-question',
+    data: { question_id: 'question-1', question: 'Which plan?', options: [{ label: 'Standard' }, { label: 'Premium' }] },
+  }
+
+  it('keeps a card live until the selected label starts the next normal turn', () => {
+    assert.deepEqual(questionChoiceState([question], 'question-1', 'Standard'), { answered: false })
+    assert.deepEqual(questionChoiceState([question, {
+      type: 'turn_started', turn_id: 'turn-answer', data: { text: 'Standard' },
+    }], 'question-1', 'Standard'), { answered: true })
+  })
+
+  it('sends the option label once and then makes a repeat click inert', () => {
+    const first = chooseQuestionOption(undefined, [question], 'question-1', 'Premium')
+    assert.equal(first.action, 'send')
+    assert.equal(first.text, 'Premium')
+    assert.deepEqual(chooseQuestionOption(first.state, [question], 'question-1', 'Premium'), {
+      action: 'ignore', state: first.state,
+    })
   })
 })
 
