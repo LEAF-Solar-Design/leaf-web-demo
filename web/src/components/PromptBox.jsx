@@ -39,6 +39,7 @@ import {
   setPromptHistorySession,
   setPromptHistoryValue,
   clipboardImagesToAttachments,
+  IMAGE_MEDIA_TYPES,
 } from '../composer.js'
 
 const MCP_COMMAND = {
@@ -75,6 +76,7 @@ export default function PromptBox({
   // (composer.js filterRunnable), so the picker can never offer something this
   // client would silently ignore.
   commandActions = {},
+  imageAttachmentsEnabled = false,
 }) {
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
@@ -92,11 +94,30 @@ export default function PromptBox({
   const [mcpServers, setMcpServers] = useState([])
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
+  const attachmentUrlsRef = useRef(new Set())
   const historyRef = useRef(createPromptHistoryState(sessionId))
 
   // A PromptBox instance survives session switches, so retain histories in the
   // ref but reset only navigation state when its active session changes.
   historyRef.current = setPromptHistorySession(historyRef.current, sessionId)
+
+  const releaseAttachment = (image) => {
+    if (image?.thumbnailUrl) {
+      URL.revokeObjectURL(image.thumbnailUrl)
+      attachmentUrlsRef.current.delete(image.thumbnailUrl)
+    }
+  }
+  const clearAttachments = () => setAttachments((current) => {
+    for (const image of current) releaseAttachment(image)
+    return []
+  })
+  useEffect(() => {
+    clearAttachments()
+  }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => {
+    for (const url of attachmentUrlsRef.current) URL.revokeObjectURL(url)
+    attachmentUrlsRef.current.clear()
+  }, [])
 
   // Both picker surfaces get the tenant-scoped, redacted list. Full resource
   // enumeration is a follow-up because it needs a harness proxy endpoint.
@@ -159,10 +180,6 @@ export default function PromptBox({
     setCaret(nextCaret)
     onChange(nextValue)
   }
-  const clearAttachments = () => setAttachments((current) => {
-    for (const image of current) if (image.thumbnailUrl) URL.revokeObjectURL(image.thumbnailUrl)
-    return []
-  })
   const dispatchPrompt = (override) => {
     const sent = typeof override === 'string' ? override : value
     if (sent.trim() && !routing) {
@@ -175,19 +192,27 @@ export default function PromptBox({
     })
   }
   const onPaste = (e) => {
+    if (!imageAttachmentsEnabled) {
+      if ([...(e.clipboardData?.items || [])].some((item) => item?.kind === 'file' && IMAGE_MEDIA_TYPES.has(item.type))) {
+        e.preventDefault()
+        setAttachmentError('Image paste is available in the assistant reply box.')
+      }
+      return
+    }
     const result = clipboardImagesToAttachments(e.clipboardData?.items, attachments)
     if (result.error) { e.preventDefault(); setAttachmentError(result.error); return }
     if (!result.attachments.length) return
     e.preventDefault()
     setAttachmentError(null)
-    setAttachments((current) => [...current, ...result.attachments.map((image) => ({
-      ...image, id: `${Date.now()}-${Math.random()}`,
-      thumbnailUrl: URL.createObjectURL(image.file),
-    }))])
+    setAttachments((current) => [...current, ...result.attachments.map((image) => {
+      const thumbnailUrl = URL.createObjectURL(image.file)
+      attachmentUrlsRef.current.add(thumbnailUrl)
+      return { ...image, id: `${Date.now()}-${Math.random()}`, thumbnailUrl }
+    })])
   }
   const removeAttachment = (id) => setAttachments((current) => {
     const found = current.find((image) => image.id === id)
-    if (found?.thumbnailUrl) URL.revokeObjectURL(found.thumbnailUrl)
+    releaseAttachment(found)
     return current.filter((image) => image.id !== id)
   })
   const complete = (t) => {

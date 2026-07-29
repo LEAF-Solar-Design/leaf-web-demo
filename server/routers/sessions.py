@@ -90,7 +90,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -260,12 +260,39 @@ class MessageRequest(BaseModel):
 
 _IMAGE_MEDIA_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 _MAX_IMAGES_PER_MESSAGE = 3
-_MAX_IMAGE_BASE64_BYTES = 2 * 1024 * 1024
-_MAX_IMAGES_BASE64_BYTES = 5 * 1024 * 1024
+_MAX_IMAGE_BYTES = 1024 * 1024
+_MAX_IMAGES_BYTES = 1024 * 1024
+# One decoded MiB expands to at most 1,398,104 base64 characters. Leave bounded
+# JSON framing room while refusing declared oversize bodies before FastAPI parses.
+_MAX_MESSAGE_BODY_BYTES = 1_500_000
+
+
+def _image_magic_matches(media_type: str, decoded: bytes) -> bool:
+    if media_type == "image/png":
+        return decoded.startswith(b"\x89PNG")
+    if media_type == "image/jpeg":
+        return decoded.startswith(b"\xff\xd8\xff")
+    if media_type == "image/gif":
+        return decoded.startswith(b"GIF8")
+    return decoded.startswith(b"RIFF") and decoded[8:12] == b"WEBP"
+
+
+async def _parse_message_request(request: Request) -> MessageRequest:
+    """Reject an oversized declared body before FastAPI's JSON parsing begins."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > _MAX_MESSAGE_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="request exceeds the 1MB image message cap")
+    raw = await request.body()
+    if len(raw) > _MAX_MESSAGE_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="request exceeds the 1MB image message cap")
+    try:
+        return MessageRequest.parse_obj(json.loads(raw or b"{}"))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="invalid message body") from exc
 
 
 def _validate_images(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, str]]]:
-    """Validate bounded image blocks without rewriting their base64 payloads."""
+    """Validate decoded image bytes and their claimed media type."""
     if images is None:
         return None
     if len(images) > _MAX_IMAGES_PER_MESSAGE:
@@ -281,19 +308,17 @@ def _validate_images(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Di
             raise ValueError(f"image {index} media_type must be one of: {allowed}")
         if not isinstance(data, str) or not data:
             raise ValueError(f"image {index} data must be non-empty base64")
-        # Valid base64 is ASCII, so character count is its wire-byte count.
-        # Count before decoding so an oversized invalid input still receives
-        # the useful cap error rather than spending CPU on decode work.
-        size = len(data)
-        if size > _MAX_IMAGE_BASE64_BYTES:
-            raise ValueError("each image must be at most 2MB of base64 data")
-        total_size += size
-        if total_size > _MAX_IMAGES_BASE64_BYTES:
-            raise ValueError("images must total at most 5MB of base64 data")
         try:
-            base64.b64decode(data, validate=True)
+            decoded = base64.b64decode(data, validate=True)
         except (binascii.Error, ValueError, TypeError) as exc:
             raise ValueError(f"image {index} data must be valid base64") from exc
+        if len(decoded) > _MAX_IMAGE_BYTES:
+            raise ValueError("each image must be at most 1MB decoded")
+        total_size += len(decoded)
+        if total_size > _MAX_IMAGES_BYTES:
+            raise ValueError("images must total at most 1MB decoded")
+        if not _image_magic_matches(media_type, decoded):
+            raise ValueError(f"image {index} media_type does not match its bytes")
         validated.append({"media_type": media_type, "data": data})
     return validated
 
@@ -480,6 +505,12 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
 # POST /api/sessions/{id}/messages
 # --------------------------------------------------------------------------- #
 @router.post("/api/sessions/{session_id}/messages")
+async def post_message_route(session_id: str, request: Request,
+                             req: MessageRequest = Depends(_parse_message_request),
+                             tenant=Depends(deps.require_active_tenant)):
+    return post_message(session_id, req, request, tenant)
+
+
 def post_message(session_id: str, req: MessageRequest, request: Request,
                  tenant=Depends(deps.require_active_tenant)):
     # 1. ownership guard (404-not-403, no existence leak).
@@ -508,21 +539,6 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         return error_response(
             ErrorCode.BAD_PARAMS, "exactly one of `text` or `confirm` is required",
             retryable=False, status_code=409,
-        )
-    if has_images and not has_text:
-        # An image-only message would break TWICE downstream today: the harness
-        # validator requires text-or-confirm (src/server.ts
-        # validateConverseTurnInput), so it 400s; and even if it accepted the
-        # turn, the runner does not yet fold images into the prompt, so the
-        # model would receive an EMPTY prompt — a silent no-op, worse than a
-        # refusal. Images therefore ride ALONGSIDE text until the harness half
-        # renders them (the named follow-up). Verified by reading the harness
-        # validator, not assumed.
-        return error_response(
-            ErrorCode.BAD_PARAMS,
-            "images must accompany `text` for now: the harness does not yet "
-            "render an image-only turn",
-            retryable=False, status_code=400,
         )
     if not has_confirm and not has_text and not has_images:
         # 409, not 400: this is the SAME "neither" refusal deployed clients

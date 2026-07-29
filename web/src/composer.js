@@ -10,8 +10,8 @@ export const LINE_PX = 20
 export const MAX_ROWS = 8
 export const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 export const MAX_IMAGES_PER_MESSAGE = 3
-export const MAX_IMAGE_BASE64_BYTES = 2 * 1024 * 1024
-export const MAX_IMAGES_BASE64_BYTES = 5 * 1024 * 1024
+export const MAX_IMAGE_BYTES = 1024 * 1024
+export const MAX_IMAGES_BYTES = 1024 * 1024
 
 export function base64SizeForBytes(bytes) {
   const size = Number(bytes)
@@ -32,19 +32,18 @@ export function clipboardImagesToAttachments(items, existing = []) {
   if ((existing?.length || 0) + candidates.length > MAX_IMAGES_PER_MESSAGE) {
     return { attachments: [], error: `At most ${MAX_IMAGES_PER_MESSAGE} images per message.` }
   }
-  let total = (existing || []).reduce((sum, image) => sum + base64SizeForBytes(image.bytes), 0)
+  let total = (existing || []).reduce((sum, image) => sum + (Number(image.bytes) || 0), 0)
   for (const image of candidates) {
-    const size = base64SizeForBytes(image.bytes)
-    if (size > MAX_IMAGE_BASE64_BYTES) return { attachments: [], error: 'Each image must be 2MB or smaller.' }
-    total += size
-    if (total > MAX_IMAGES_BASE64_BYTES) return { attachments: [], error: 'Images must total 5MB or smaller.' }
+    if (image.bytes > MAX_IMAGE_BYTES) return { attachments: [], error: 'Each image must be 1MB or smaller.' }
+    total += image.bytes
+    if (total > MAX_IMAGES_BYTES) return { attachments: [], error: 'Images must total 1MB or smaller.' }
   }
   return { attachments: candidates, error: null }
 }
 
 export function imageDataUrl(image) {
   if (!image || !IMAGE_MEDIA_TYPES.has(image.media_type) || typeof image.data !== 'string') return null
-  if (!image.data || image.data.length > MAX_IMAGE_BASE64_BYTES) return null
+  if (!image.data || image.data.length > base64SizeForBytes(MAX_IMAGE_BYTES)) return null
   return `data:${image.media_type};base64,${image.data}`
 }
 

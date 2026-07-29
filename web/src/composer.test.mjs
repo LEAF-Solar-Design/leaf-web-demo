@@ -28,7 +28,7 @@ import {
   MAX_ROWS,
   MAX_SEEN_QUEUED_STARTS,
   MAX_IMAGES_PER_MESSAGE,
-  MAX_IMAGE_BASE64_BYTES,
+  MAX_IMAGE_BYTES,
   base64SizeForBytes,
   clipboardImagesToAttachments,
   thumbnailImages,
@@ -74,8 +74,7 @@ describe('image attachments', () => {
 
   it('refuses image count and byte caps instead of silently truncating', () => {
     assert.match(clipboardImagesToAttachments(Array.from({ length: MAX_IMAGES_PER_MESSAGE + 1 }, () => item())).error, /At most/)
-    const over = Math.floor(MAX_IMAGE_BASE64_BYTES * 3 / 4) + 1
-    assert.match(clipboardImagesToAttachments([item('image/jpeg', over)]).error, /2MB/)
+    assert.match(clipboardImagesToAttachments([item('image/jpeg', MAX_IMAGE_BYTES + 1)]).error, /1MB/)
     assert.equal(base64SizeForBytes(3), 4)
   })
 
@@ -87,7 +86,8 @@ describe('image attachments', () => {
   it('wires paste handling and clear-after-send attachment state into the composers', () => {
     assert.match(promptBoxStripped, /onPaste,/)
     const panel = readFileSync(new URL('./components/ConversePanel.jsx', import.meta.url), 'utf8')
-    assert.match(panel, /setAttachments\(\[\]\)/)
+    assert.match(panel, /const clearAttachments = \(\) => setAttachments/)
+    assert.match(panel, /URL\.revokeObjectURL/)
     assert.match(panel, /images\.length \? \{ images \}/)
   })
 })

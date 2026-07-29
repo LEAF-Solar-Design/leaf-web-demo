@@ -104,6 +104,9 @@ export interface ConverseTurnInput {
   /** Prior context, bounded, built by the turn engine. */
   messages: Array<{ role: "user" | "assistant"; text: string }>;
   text?: string;
+  /** Inline vision blocks for this turn only. They are validated at the HTTP
+   * boundary and never added to the prior-text context. */
+  images?: Array<{ media_type: string; data: string }>;
   confirm?: {
     confirmation_id: string;
     approved: boolean;

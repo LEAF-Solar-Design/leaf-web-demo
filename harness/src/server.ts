@@ -196,9 +196,48 @@ type ConverseTurnValidation = {
   instantDrawingContext?: InstantDrawingContext;
 } | { ok: false; message: string };
 
+const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MAX_IMAGES_PER_MESSAGE = 3;
+const MAX_IMAGE_BYTES = 1024 * 1024;
+const MAX_IMAGES_BYTES = 1024 * 1024;
+
+function imageMagicMatches(mediaType: string, bytes: Buffer): boolean {
+  if (mediaType === "image/png") return bytes.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  if (mediaType === "image/jpeg") return bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
+  if (mediaType === "image/gif") return bytes.subarray(0, 4).toString("ascii") === "GIF8";
+  return bytes.subarray(0, 4).toString("ascii") === "RIFF"
+    && bytes.subarray(8, 12).toString("ascii") === "WEBP";
+}
+
+function validateImages(value: unknown): { ok: true; images: NonNullable<ConverseTurnInput["images"]> } | { ok: false; message: string } {
+  if (!Array.isArray(value)) return { ok: false, message: "images must be an array" };
+  if (value.length > MAX_IMAGES_PER_MESSAGE) return { ok: false, message: `at most ${MAX_IMAGES_PER_MESSAGE} images are allowed per message` };
+  let total = 0;
+  const images: NonNullable<ConverseTurnInput["images"]> = [];
+  for (const [offset, raw] of value.entries()) {
+    const index = offset + 1;
+    if (!isRecord(raw) || !IMAGE_MEDIA_TYPES.has(raw.media_type as string)) {
+      return { ok: false, message: `image ${index} media_type must be png, jpeg, webp, or gif` };
+    }
+    if (typeof raw.data !== "string" || !raw.data) return { ok: false, message: `image ${index} data must be non-empty base64` };
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw.data) || raw.data.length % 4 !== 0) {
+      return { ok: false, message: `image ${index} data must be valid base64` };
+    }
+    const bytes = Buffer.from(raw.data, "base64");
+    if (!bytes.length) return { ok: false, message: `image ${index} data must be non-empty base64` };
+    if (bytes.length > MAX_IMAGE_BYTES) return { ok: false, message: "each image must be at most 1MB decoded" };
+    total += bytes.length;
+    if (total > MAX_IMAGES_BYTES) return { ok: false, message: "images must total at most 1MB decoded" };
+    const media_type = raw.media_type as string;
+    if (!imageMagicMatches(media_type, bytes)) return { ok: false, message: `image ${index} media_type does not match its bytes` };
+    images.push({ media_type, data: raw.data });
+  }
+  return { ok: true, images };
+}
+
 /**
  * Minimal validation of ConverseTurnInput: the four required id fields, and at
- * least one of `text` / `confirm` to drive the turn. Deliberately does not
+ * least one of `text` / `images` / `confirm` to drive the turn. Deliberately does not
  * validate deeper into `confirm.proposal` — that is the runner's job. `messages`
  * defaults to [] when absent/malformed (the turn engine always sends it, but a
  * missing array here should not be a reason to reject the whole request).
@@ -216,8 +255,17 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
   const hasText = typeof body.text === "string" && body.text.length > 0;
   const rawConfirm = body.confirm;
   const hasConfirm = typeof rawConfirm === "object" && rawConfirm !== null;
-  if (!hasText && !hasConfirm) {
-    return { ok: false, message: "one of text or confirm is required" };
+  let images: NonNullable<ConverseTurnInput["images"]> | undefined;
+  if (body.images !== undefined) {
+    const validated = validateImages(body.images);
+    if (!validated.ok) return validated;
+    images = validated.images;
+  }
+  if (!hasText && !hasConfirm && !images?.length) {
+    return { ok: false, message: "one of text, images, or confirm is required" };
+  }
+  if (hasConfirm && images?.length) {
+    return { ok: false, message: "confirm turns cannot include images" };
   }
 
   const messages = Array.isArray(body.messages)
@@ -226,6 +274,7 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
 
   const input: ConverseTurnInput = { tenant_id, session_id, turn_id, drawing_id, messages };
   if (hasText) input.text = body.text as string;
+  if (images?.length) input.images = images;
   if (hasConfirm) input.confirm = rawConfirm as ConverseTurnInput["confirm"];
 
   // Per-session "mount your LLM" fields — OPTIONAL and additive. Validated here

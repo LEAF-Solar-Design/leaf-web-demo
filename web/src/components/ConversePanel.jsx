@@ -94,6 +94,7 @@ export default function ConversePanel({
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
+  const attachmentUrlsRef = useRef(new Set())
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
   const queueStateRef = useRef(createQueuedTurnState())
@@ -101,12 +102,26 @@ export default function ConversePanel({
     queueStateRef.current = next
     setQueuedTurn(next.queuedTurn)
   }
+  const releaseAttachment = (image) => {
+    if (image?.thumbnailUrl) {
+      URL.revokeObjectURL(image.thumbnailUrl)
+      attachmentUrlsRef.current.delete(image.thumbnailUrl)
+    }
+  }
+  const clearAttachments = () => setAttachments((current) => {
+    for (const image of current) releaseAttachment(image)
+    return []
+  })
+  useEffect(() => () => {
+    for (const url of attachmentUrlsRef.current) URL.revokeObjectURL(url)
+    attachmentUrlsRef.current.clear()
+  }, [])
 
   // Stream lifecycle: one open stream per session, replay from seq 0 (the
   // transcript is durable — a remount recovers the whole conversation).
   useEffect(() => {
     if (!sessionId) return undefined
-    setEvents([]); setLocalTurns([]); setSendErr(null)
+    setEvents([]); setLocalTurns([]); setSendErr(null); clearAttachments()
     setDecidedLocal({}); setDeciding(null)
     setQuestionChoices({ sendingQuestionIds: [] })
     jobSeenRef.current = new Set()
@@ -170,6 +185,7 @@ export default function ConversePanel({
         if (type === 'turn_started') {
           t.started = true
           t.images = thumbnailImages(data.images)
+          t.imageDescriptors = (data.images || []).filter((image) => !image?.data)
         quota = false; grant = false // a fresh turn clears the paused banners
       } else if (type === 'text_delta') {
         const last = t.feed[t.feed.length - 1]
@@ -313,11 +329,7 @@ export default function ConversePanel({
 
   const send = async (nextText = input) => {
     const text = String(nextText).trim()
-    // Images ride ALONGSIDE text: the server refuses image-only turns because
-    // the harness cannot render one yet (an image-only turn would 400 at the
-    // harness validator, or reach the model as an empty prompt). Refusing here
-    // keeps the client from offering a send it knows the server will reject.
-    if (!text || busy) return false
+    if ((!text && !attachments.length) || busy) return false
     let delivered = false
     setSending(true); setSendErr(null)
     const accept = (res, images) => {
@@ -334,7 +346,7 @@ export default function ConversePanel({
         setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text, images }])
       }
       setInput('')
-      setAttachments([])
+      clearAttachments()
       setAttachmentError(null)
     }
     try {
@@ -369,14 +381,15 @@ export default function ConversePanel({
     if (!result.attachments.length) return
     e.preventDefault()
     setAttachmentError(null)
-    setAttachments((current) => [...current, ...result.attachments.map((image) => ({
-      ...image, id: `${Date.now()}-${Math.random()}`,
-      thumbnailUrl: URL.createObjectURL(image.file),
-    }))])
+    setAttachments((current) => [...current, ...result.attachments.map((image) => {
+      const thumbnailUrl = URL.createObjectURL(image.file)
+      attachmentUrlsRef.current.add(thumbnailUrl)
+      return { ...image, id: `${Date.now()}-${Math.random()}`, thumbnailUrl }
+    })])
   }
   const removeAttachment = (id) => setAttachments((current) => {
     const found = current.find((image) => image.id === id)
-    if (found?.thumbnailUrl) URL.revokeObjectURL(found.thumbnailUrl)
+    releaseAttachment(found)
     return current.filter((image) => image.id !== id)
   })
 
@@ -629,9 +642,12 @@ export default function ConversePanel({
             {userTextByTurn.get(t.turnId) && (
               <div className="converse-msg user">{userTextByTurn.get(t.turnId)}</div>
             )}
-            {(t.images || localImagesByTurn.get(t.turnId))?.map((src, index) => (
+            {(t.images?.length ? t.images : localImagesByTurn.get(t.turnId))?.map((src, index) => (
               <img key={`${t.turnId}-image-${index}`} src={src} alt="User attached image" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
             ))}
+            {t.imageDescriptors?.length > 0 && (
+              <div className="converse-note"><span className="dim">{t.imageDescriptors.length} image attachment{t.imageDescriptors.length === 1 ? '' : 's'} sent. Preview is unavailable after reload.</span></div>
+            )}
             {t.feed.map(renderFeedItem)}
             {(t.usage || (t.stopReason && STOP_NOTES[t.stopReason])) && (
               <div className="converse-turnfoot">

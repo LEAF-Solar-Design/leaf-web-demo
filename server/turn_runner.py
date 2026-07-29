@@ -503,7 +503,14 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     if text is not None:
         user_data["text"] = text
     if images:
-        user_data["images"] = images
+        # The harness receives full bytes on this turn's wire request. The
+        # durable event intentionally keeps only replay-safe metadata, so every
+        # later transcript fetch and prior-context build cannot multiply image
+        # payloads. The client renders an honest placeholder after reload.
+        user_data["images"] = [
+            {"media_type": image["media_type"], "bytes": len(base64.b64decode(image["data"]))}
+            for image in images
+        ]
     if queued_id is not None:
         # The promoted-from-queue identity, TRANSCRIPT-ONLY (additive event
         # field; the frozen harness wire payload below never carries it). The

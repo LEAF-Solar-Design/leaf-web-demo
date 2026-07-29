@@ -67,4 +67,11 @@ describe('App.jsx wiring', () => {
     assert.match(mutatedStripped, conversePanelSessionBinding)
     assert.doesNotMatch(mutatedStripped, promptBoxSessionBinding)
   })
+
+  it('disables image paste in the catalog command bar instead of dropping an attachment', () => {
+    assert.match(stripped, /imageAttachmentsEnabled:\s*false/)
+    const promptBox = readFileSync(new URL('./components/PromptBox.jsx', import.meta.url), 'utf8')
+    assert.match(promptBox, /if \(!imageAttachmentsEnabled\)/)
+    assert.match(promptBox, /Image paste is available in the assistant reply box/)
+  })
 })
