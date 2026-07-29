@@ -445,7 +445,7 @@ def test_a_lost_cas_is_retried_at_the_next_terminal(monkeypatch, turn_stub):
         "tenant-p", sid, {"cid-park": {"capability": "drawing.read"}}, None, "demo")
 
     with turn_runner._pending_policy_lock:
-        assert turn_runner._pending_policy.get(sid) == "cid-park", (
+        assert turn_runner._pending_policy.get(sid) == ["cid-park"], (
             "a lost CAS did not park the decision — nothing will retry it")
     assert session_store.get_approval("cid-park")["consumed"] is False
 
@@ -465,3 +465,47 @@ def _clean_parked():
     yield
     with turn_runner._pending_policy_lock:
         turn_runner._pending_policy.clear()
+
+
+def test_two_overlapping_strands_are_both_retried(monkeypatch, turn_stub):
+    """Review round 3 HIGH: terminals overlap (the CAS is released before
+    auto-confirm runs), so two of them can each park a different id. A single
+    slot let the second overwrite the first and the displaced row was lost."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    for cid in ("cid-two-a", "cid-two-b"):
+        session_store.create_approval(
+            confirmation_id=cid, session_id=sid, tenant_id="tenant-p",
+            turn_id=f"t-{cid}", tool="panel_count", params={},
+            capability="drawing.read", rationale="r", kind="run_capability",
+            payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    # Both terminals lose the CAS: each must park its own id.
+    assert session_store.try_begin_turn(sid, "orphan-two", 300)
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-two-a": {"capability": "drawing.read"}}, None, "demo")
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-two-b": {"capability": "drawing.read"}}, None, "demo")
+
+    with turn_runner._pending_policy_lock:
+        parked = list(turn_runner._pending_policy.get(sid) or ())
+    assert parked == ["cid-two-a", "cid-two-b"], (
+        f"a second strand displaced the first: {parked}")
+
+    # Draining: each later terminal finishes one, and none is lost.
+    session_store.end_turn(sid, "orphan-two")
+    turn_runner._auto_confirm_reads("tenant-p", sid, {}, None, "demo")
+    assert _wait_until(
+        lambda: session_store.get_approval("cid-two-a")["consumed"] is True)
+    assert _wait_until(
+        lambda: session_store.get_session(sid)["active_turn_id"] is None)
+    turn_runner._auto_confirm_reads("tenant-p", sid, {}, None, "demo")
+    assert _wait_until(
+        lambda: session_store.get_approval("cid-two-b")["consumed"] is True), (
+        "the second stranded decision was never retried")

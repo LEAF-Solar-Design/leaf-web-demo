@@ -297,7 +297,13 @@ POLICY_DECIDER = "policy:auto_approve_reads"
 # `_queued`. A process restart drops the retry, exactly as it drops active
 # relays and queued prompts; the durable row remains and an operator can see it.
 _pending_policy_lock = threading.Lock()
-_pending_policy: Dict[str, str] = {}
+_pending_policy: Dict[str, List[str]] = {}
+# Per session. A LIST, not one slot: terminals overlap (the CAS is released
+# before auto-confirm runs), so two of them can each park a different id, and a
+# single slot let the second overwrite the first — the displaced row stayed
+# policy-decided and unconsumed with nothing able to rediscover it (review
+# round 3). Bounded: a session cannot accumulate unbounded stranded decisions.
+MAX_PENDING_POLICY = 16
 
 
 class TurnBusy(Exception):
@@ -975,10 +981,11 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
         # A decision parked by an earlier lost CAS outranks this turn's own
         # proposals: it is already decided and the user is waiting on it.
         with _pending_policy_lock:
-            parked = _pending_policy.get(session_id)
-        candidates = ([parked] if parked else []) + [
+            parked = list(_pending_policy.get(session_id) or ())
+        candidates = parked + [
             cid for cid, data in proposals.items()
-            if data.get("capability") in READONLY_AUTO_CAPABILITIES]
+            if data.get("capability") in READONLY_AUTO_CAPABILITIES
+            and cid not in parked]
         if not candidates:
             return
         # Entitlement gate at ACTION time, the kicker's rule: an unevaluable
@@ -990,12 +997,34 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
         except Exception:  # noqa: BLE001
             return
 
-        cid = candidates[0]
+        for cid in candidates:
+            if _try_one_policy_confirm(tenant_id, session_id, cid, tier):
+                return  # one turn started; the rest keep for a later terminal
+    except Exception as exc:  # noqa: BLE001
+        try:
+            print(f"[leaf-agent] policy auto-confirm CRASHED "
+                  f"({type(exc).__name__}) session={session_id!r}",
+                  file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
+                            tier: Optional[str]) -> bool:
+    """One candidate. True iff a confirm turn STARTED (the caller then stops:
+    at most one auto-started turn per terminal). False means "not this one" —
+    ineligible, raced, or the CAS was lost — and the caller tries the next, so
+    a fresh proposal can never starve an already-decided strand and a strand
+    can never displace one either (review round 3)."""
+    try:
 
         def _forget_parked() -> None:
             with _pending_policy_lock:
-                if _pending_policy.get(session_id) == cid:
-                    del _pending_policy[session_id]
+                rest = [c for c in (_pending_policy.get(session_id) or ()) if c != cid]
+                if rest:
+                    _pending_policy[session_id] = rest
+                else:
+                    _pending_policy.pop(session_id, None)
 
         approval = session_store.get_approval(cid)
         if (approval is None
@@ -1006,16 +1035,16 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
                 or approval.get("capability") not in READONLY_AUTO_CAPABILITIES):
             # Consumed / expired / vanished: a parked retry for it is dead.
             _forget_parked()
-            return
+            return False
         if approval.get("decided") and approval.get("decided_by") != POLICY_DECIDER:
             # Only OUR OWN unfinished decision may be resumed; a human's
             # decision is theirs to redeem.
-            return
+            return False
         stored_payload = approval.get("payload")
         stored_dwg = (stored_payload.get("dwg")
                       if isinstance(stored_payload, dict) else None)
         if not (isinstance(stored_dwg, str) and stored_dwg):
-            return  # the router's rule: no stored drawing binding, no confirm
+            return False  # the router's rule: no dwg binding, no confirm
 
         if not approval.get("decided"):
             # GATE FIRST (routers/agent.py's load-bearing ordering). A gate
@@ -1031,18 +1060,18 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
                     print(f"[leaf-agent] policy auto-confirm: gate write failed "
                           f"({type(exc).__name__}) session={session_id!r}",
                           file=sys.stderr, flush=True)
-                    return
+                    return False
                 if not granted:
                     print(f"[leaf-agent] policy auto-confirm: gate refused "
                           f"({reason}) session={session_id!r}",
                           file=sys.stderr, flush=True)
-                    return
+                    return False
             elif gate_status != "absent":
                 # corrupt / io_error: fail closed, leave it to a human.
                 print(f"[leaf-agent] policy auto-confirm: gate unreadable "
                       f"({gate_status}) session={session_id!r}",
                       file=sys.stderr, flush=True)
-                return
+                return False
             # `absent` = the legacy pair flow with no gate record; the session
             # row is the whole story there, as on the human path.
 
@@ -1063,11 +1092,11 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
                       f"confirmation_id={cid!r} session={session_id!r} - a "
                       f"human approval repairs this; a denial cannot",
                       file=sys.stderr, flush=True)
-                return
+                return False
             if outcome != "recorded":
                 # 'already_decided' / 'not_found': a human (or another thread)
                 # got here first - stand down, theirs wins.
-                return
+                return False
 
         try:
             consumed = session_store.consume_approval(cid, session_id, tenant_id)
@@ -1086,6 +1115,7 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
         try:
             start_turn(tenant_id, session_id, confirm=confirm_payload, tier=tier)
             _forget_parked()
+            return True
         except TurnBusy:
             # Provably unredeemed (the CAS is start_turn's first act): return
             # the consume so a LATER terminal can finish this same decision
@@ -1100,7 +1130,10 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
             # _pending_policy). Returning the consume alone left the decision
             # with nothing to rediscover it.
             with _pending_policy_lock:
-                _pending_policy[session_id] = cid
+                slot = _pending_policy.setdefault(session_id, [])
+                if cid not in slot:
+                    slot.append(cid)
+                    del slot[:-MAX_PENDING_POLICY]
             print(f"[leaf-agent] policy auto-confirm lost the CAS on "
                   f"session {session_id!r}; approval {cid!r} parked for the "
                   f"next terminal", file=sys.stderr, flush=True)
@@ -1125,13 +1158,15 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
             print(f"[leaf-agent] policy auto-confirm start FAILED "
                   f"({exc.error_code}) session={session_id!r}",
                   file=sys.stderr, flush=True)
+        return False
     except Exception as exc:  # noqa: BLE001
         try:
-            print(f"[leaf-agent] policy auto-confirm CRASHED "
+            print(f"[leaf-agent] policy auto-confirm candidate CRASHED "
                   f"({type(exc).__name__}) session={session_id!r}",
                   file=sys.stderr, flush=True)
         except Exception:  # noqa: BLE001
             pass
+        return False
 
 
 def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
