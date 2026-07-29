@@ -182,8 +182,15 @@ export class FileMcpBridgeStore implements McpBridgeStore {
       fd = null;
       renameSync(temp, path);
     } finally {
-      if (fd !== null) closeSync(fd);
-      rmSync(temp, { force: true });
+      // Each cleanup step swallows its OWN failure: a throw here would REPLACE
+      // the original write/fsync/rename error (masking the actual fault), and
+      // a failing closeSync would skip the rmSync below it — leaving the
+      // plaintext-token temp file on disk (review round 2, finding 1). Both
+      // are best-effort; the try body's error is the one that must surface.
+      if (fd !== null) {
+        try { closeSync(fd); } catch { /* already closed / EIO — best effort */ }
+      }
+      try { rmSync(temp, { force: true }); } catch { /* EBUSY/EPERM — best effort */ }
     }
   }
 }
