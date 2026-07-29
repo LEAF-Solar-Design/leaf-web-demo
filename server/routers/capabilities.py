@@ -35,7 +35,7 @@ def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSON
 @router.get("/api/capabilities")
 def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  x_ops_secret: Optional[str] = Header(default=None),
-                 tenant=Depends(deps.require_tenant)) -> Any:
+                 tenant=Depends(deps.require_active_tenant)) -> Any:
     """Capability catalog, TENANT-SCOPED for the folded portion (wave 4): globals for
     everyone, only the requesting tenant's OWN repo tools folded in."""
     include_internal = (x_internal_role or "").strip().lower() == "qa"
@@ -64,7 +64,7 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
 
 
 @router.get("/api/converse/registry")
-def converse_registry_route(tenant=Depends(deps.require_tenant)) -> Any:
+def converse_registry_route(tenant=Depends(deps.require_active_tenant)) -> Any:
     """The composer's `/` picker: commands + skills + tools in one catalog.
 
     Tenant-scoped through the SAME `deps.all_tools(tenant)` the capability

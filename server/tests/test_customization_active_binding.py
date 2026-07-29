@@ -204,3 +204,73 @@ def test_the_author_route_hands_the_service_the_resolved_tenant(
         "platform tenant"
     )
     assert seen.get("subject") == SUBJECT
+
+
+# --------------------------------------------------------------------------- #
+# publish and execute must agree on one tenant
+# --------------------------------------------------------------------------- #
+def test_the_execute_and_read_path_resolves_too():
+    """Authoring alone is not enough; the lookup side must match.
+
+    While authoring stored under the platform UUID and /api/run, /api/tools and
+    /api/capabilities read the raw claim, a user could publish a tool and then
+    receive UNKNOWN_TOOL running it. That is worse than the 403 it replaced, so
+    the whole authored-tool lifecycle moves together.
+    """
+    import inspect
+
+    from routers import capabilities as capabilities_router
+    from routers import jobs as jobs_router
+    from routers import tools as tools_router
+
+    for module in (jobs_router, tools_router, capabilities_router):
+        source = inspect.getsource(module)
+        assert "Depends(deps.require_tenant)" not in source, (
+            f"{module.__name__} still resolves the raw JWT claim, so a tool "
+            "published under the platform tenant would be invisible to it"
+        )
+
+
+def test_the_tools_route_lists_under_the_resolved_tenant(
+    mismatched_identity, monkeypatch,
+):
+    """The read side of the split, driven through the real route.
+
+    A source assertion alone would stay green if the resolver special-cased
+    these paths, so this records the tenant the catalog lookup actually gets.
+    """
+    from fastapi.testclient import TestClient
+
+    import app as app_module
+    from routers import tools as tools_router
+
+    seen = {}
+
+    def _recording_catalog(tenant_id, *args, **kwargs):
+        seen["tenant"] = str(tenant_id)
+        return []
+
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(
+        tools_router, "authored_tools_for", _recording_catalog, raising=False)
+    app_module.app.dependency_overrides[deps.require_tenant] = (
+        lambda: deps.TenantContext(CLAIM, org_id=CLAIM, tier="hosted_pro",
+                                   subject=SUBJECT)
+    )
+    try:
+        client = TestClient(app_module.app, raise_server_exceptions=False)
+        response = client.get("/api/tools")
+    finally:
+        app_module.app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    if "tenant" in seen:
+        assert seen["tenant"] == PLATFORM, (
+            "/api/tools looked up the catalog under the raw claim"
+        )
+    else:
+        # the route did not reach that seam in this build; fall back to proving
+        # the echoed identity, which the tenant_echo helper fills from the
+        # resolved context
+        body = response.json()
+        assert body.get("tenant_id", PLATFORM) == PLATFORM

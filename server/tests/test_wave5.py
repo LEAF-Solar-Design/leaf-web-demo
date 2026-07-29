@@ -115,33 +115,17 @@ def live_auth(monkeypatch):
     monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", NS)
     monkeypatch.setenv("LEAF_AUTH0_JWKS_FILE", str(_JWKS_FILE))
     monkeypatch.setenv("LEAF_TENANTS_FILE", str(TENANTS_FILE))
-    # Surfaces that resolve the ACTIVE platform binding (drawings, sessions,
-    # and now the customization routes, issue #304) need an authority to
-    # resolve against, or they answer 503 in tests that never provisioned one.
-    #
-    # This binds every subject to a tenant derived from the subject and a fixed
-    # hosted_pro tier. That is NOT the claim: mint() issues org_wave5 as the
-    # tenant claim while the subject resolves to "wave5". The author tests below
-    # therefore no longer exercise the tenant or tier their names suggest; they
-    # exercise the R5 gate on the RESOLVED tenant, which is the behaviour under
-    # test. Routes that still take the raw claim are unaffected.
+    # This module is about the TIER MATRIX and entitlements, not identity
+    # resolution, and its assertions read the tier out of the JWT claim. Now
+    # that the authored-tool surfaces resolve the active platform binding
+    # (issue #304), a real resolver would replace both the tenant and the tier
+    # with the platform org's, and every tier assertion here would be testing
+    # the stub instead of the matrix. Neutralise resolution so this module keeps
+    # testing what its names say. The resolution behaviour itself is covered by
+    # tests/test_customization_active_binding.py, which uses a genuine
+    # claim/binding mismatch.
     import deps
-    import tenancy as _tenancy
-    def _resolve_authority(subject):
-        return (str(subject).split("|")[-1], "hosted_pro")
-
-    # the real function is lru_cache-wrapped and callers reset it
-    _resolve_authority.cache_clear = lambda: None
-    monkeypatch.setattr(
-        deps, "resolve_active_platform_tenant_authority", _resolve_authority)
-    _tenancy.reset_store()
-
-    def _get_store():
-        return SimpleNamespace(resolve_workspace=lambda tenant_id: None)
-
-    # tenancy.reset_store() calls get_store.cache_clear(); the stub must offer it
-    _get_store.cache_clear = lambda: None
-    monkeypatch.setattr(_tenancy, "get_store", _get_store)
+    monkeypatch.setattr(deps, "resolve_active_tenant_context", lambda tenant: tenant)
     yield
 
 

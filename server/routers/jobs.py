@@ -326,7 +326,7 @@ def _checkout_identity(tenant_id: Any, drawing_id: str,
 
 
 @router.post("/api/run")
-def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_tenant),
+def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_active_tenant),
         x_org_id: Optional[str] = Header(default=None),
         x_project_id: Optional[str] = Header(default=None),
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
@@ -540,7 +540,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
 
 
 @router.get("/api/jobs/{job_id}")
-def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
+def get_job(job_id: str, tenant=Depends(deps.require_active_tenant)):
     tenant_id = _bound_tenant_id(tenant)
     rec = _job_for_tenant(job_id, tenant_id)
     # 404 (never 403) both when the job is unknown AND when it belongs to another
@@ -589,7 +589,7 @@ def terminal_callback(job_id: str, callback: TerminalCallback,
 
 
 @router.get("/api/jobs/{job_id}/stream")
-async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
+async def stream_job(job_id: str, tenant=Depends(deps.require_active_tenant)):
     """SSE: emit each (status, progress) transition; close after terminal.
 
     Async generator (B1): a sync generator here is consumed via AnyIO's
@@ -630,7 +630,7 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
 
 
 @router.get("/api/jobs")
-def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
+def list_jobs(limit: int = 20, tenant=Depends(deps.require_active_tenant)):
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
     canonical = jobs.platform_link.list_canonical_jobs(_bound_tenant_id(tenant), limit=limit)
@@ -642,7 +642,7 @@ def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
 
 @router.get("/api/platform/capabilities")
 def platform_capabilities(
-    tenant=Depends(deps.require_tenant),
+    tenant=Depends(deps.require_active_tenant),
     x_org_id: Optional[str] = Header(default=None),
     x_project_id: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
@@ -691,7 +691,7 @@ def platform_capabilities(
 
 
 @router.post("/api/jobs/{job_id}/close")
-def close_job(job_id: str, tenant_id: str = Depends(deps.require_tenant)):
+def close_job(job_id: str, tenant_id: str = Depends(deps.require_active_tenant)):
     """Tab-close / session-end signal: mark this in-flight job's owner gone so the
     orphan reaper fails it (and its APS WorkItem can be reaped broker-side).
     Idempotent. 404s (not 403) on a job owned by another tenant — never leaks

@@ -32,7 +32,7 @@ def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSON
 
 
 @router.get("/api/tools")
-def tools(tenant=Depends(deps.require_tenant)) -> Any:
+def tools(tenant=Depends(deps.require_active_tenant)) -> Any:
     """Flat tool list, TENANT-SCOPED for the folded portion (wave 4): the engine
     registry + write seed + authored globals are visible to everyone; only the
     requesting tenant's OWN repo tools are folded in (tenant A's authored tools are
@@ -48,7 +48,7 @@ def tools(tenant=Depends(deps.require_tenant)) -> Any:
 
 
 @router.get("/api/entitlements")
-def get_entitlements(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def get_entitlements(tenant=Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     """The requesting tenant's tier-driven capability policy (§17):
     §10-enveloped ``{tier, entitlements: {run_read, run_write, build}, source: "policy"}``.
 
