@@ -25,7 +25,16 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
-import { autoGrowHeight, filterRunnable, rankEntries } from '../composer.js'
+import {
+  appendPromptHistory,
+  autoGrowHeight,
+  createPromptHistoryState,
+  filterRunnable,
+  historyKeydown,
+  rankEntries,
+  setPromptHistorySession,
+  setPromptHistoryValue,
+} from '../composer.js'
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
@@ -48,7 +57,7 @@ function laneDotClass(lane, hit) {
 
 export default function PromptBox({
   value, onChange, onDispatch, routing, hintLane, projectName, inputRef, routeActive,
-  onOpenAuthor, tools = [],
+  onOpenAuthor, tools = [], sessionId = null,
   // action name -> handler, for registry entries of kind "command". An entry
   // whose action has no handler here is filtered out of the menu entirely
   // (composer.js filterRunnable), so the picker can never offer something this
@@ -65,6 +74,11 @@ export default function PromptBox({
   const scopeMenu = useExit(scopeOpen) // 180 ms M1 exit fade
   const [menuIdx, setMenuIdx] = useState(0)
   const [menuDismissed, setMenuDismissed] = useState(false)
+  const historyRef = useRef(createPromptHistoryState(sessionId))
+
+  // A PromptBox instance survives session switches, so retain histories in the
+  // ref but reset only navigation state when its active session changes.
+  historyRef.current = setPromptHistorySession(historyRef.current, sessionId)
 
   // "/..." with no space yet = completing a tool name; a space after the name
   // means the user moved on to args, so the menu stands down.
@@ -93,19 +107,30 @@ export default function PromptBox({
 
   // Tab: complete the name into the input (trailing space closes the menu and
   // starts args mode). Enter: complete and hand off to dispatch in one act.
-  const complete = (t) => onChange(`/${t.name} `)
+  const changePrompt = (nextValue) => {
+    historyRef.current = setPromptHistoryValue(historyRef.current, nextValue)
+    onChange(nextValue)
+  }
+  const dispatchPrompt = (override) => {
+    const sent = typeof override === 'string' ? override : value
+    if (sent.trim() && !routing) {
+      historyRef.current = appendPromptHistory(historyRef.current, sent, sessionId)
+    }
+    return onDispatch(override)
+  }
+  const complete = (t) => changePrompt(`/${t.name} `)
   const pick = (t) => {
     // A command runs its own handler — it is not a tool, so routing it through
     // onDispatch would send "/stop" to the prompt router as if the tenant had
     // a tool by that name. filterRunnable guarantees the handler exists.
     if (t.kind === 'command') {
-      onChange('')
+      changePrompt('')
       const run = commandActions[t.client_action]
       if (typeof run === 'function') run(t)
       return
     }
-    onChange(`/${t.name} `)
-    onDispatch(`/${t.name}`)
+    changePrompt(`/${t.name} `)
+    dispatchPrompt(`/${t.name}`)
   }
 
   const onKeyDown = (e) => {
@@ -134,6 +159,23 @@ export default function PromptBox({
       insertNewline(e.target)
       return
     }
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.isComposing) {
+      const result = historyKeydown(historyRef.current, {
+        key: e.key,
+        value,
+        selectionStart: e.target.selectionStart,
+        sessionId,
+      })
+      historyRef.current = result.state
+      if (result.handled) {
+        e.preventDefault()
+        changePrompt(result.value)
+        requestAnimationFrame(() => {
+          try { e.target.setSelectionRange(result.selectionStart, result.selectionStart) } catch { /* detached */ }
+        })
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { // isComposing: IME confirm-Enter must not dispatch
       // The resolver / decision strip owns Enter — but we must still swallow
       // it. An <input> had no default to suppress; a <textarea> inserts a
@@ -142,7 +184,7 @@ export default function PromptBox({
       // it also declines the key).
       if (routeActive || scopeOpen) { e.preventDefault(); return }
       e.preventDefault()
-      onDispatch()
+      dispatchPrompt()
     }
     // Shift+Enter deliberately falls through: the textarea inserts the newline
     // itself, so the caret lands where the user expects without us rebuilding
@@ -152,10 +194,10 @@ export default function PromptBox({
   // Ctrl+J has no native newline behavior to fall through to, so splice one in
   // at the caret and restore the selection on the next frame.
   const insertNewline = (el) => {
-    if (!el || typeof el.selectionStart !== 'number') { onChange(`${value}\n`); return }
+    if (!el || typeof el.selectionStart !== 'number') { changePrompt(`${value}\n`); return }
     const start = el.selectionStart
     const end = el.selectionEnd
-    onChange(`${value.slice(0, start)}\n${value.slice(end)}`)
+    changePrompt(`${value.slice(0, start)}\n${value.slice(end)}`)
     requestAnimationFrame(() => {
       try { el.setSelectionRange(start + 1, start + 1) } catch { /* detached */ }
     })
@@ -288,7 +330,7 @@ export default function PromptBox({
             // `.bar-field` alternate for exactly this swap.
             className="bar-field"
             value={value}
-            onChange={(e) => onChange(e.target.value)}
+            onChange={(e) => changePrompt(e.target.value)}
             onKeyDown={onKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
@@ -327,7 +369,7 @@ export default function PromptBox({
           <button
             type="button"
             className="chip-act"
-            onClick={onDispatch}
+            onClick={() => dispatchPrompt()}
             disabled={routing || !value.trim()}
           >
             {routing ? 'Routing…' : 'Run'}

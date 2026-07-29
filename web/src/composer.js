@@ -15,6 +15,104 @@ export function autoGrowHeight(value, { linePx = LINE_PX, maxRows = MAX_ROWS } =
   return `${Math.min(lines, maxRows) * linePx}px`
 }
 
+// Prompt history stays in the browser for this page lifetime only. The caller
+// supplies the active session id, so a conversation can never recall text from
+// another session. Keeping this as plain data makes the keyboard contract easy
+// to test without a DOM or React renderer.
+const DEFAULT_HISTORY_SESSION = '__default__'
+
+function historySessionKey(sessionId) {
+  return sessionId == null ? DEFAULT_HISTORY_SESSION : String(sessionId)
+}
+
+export function createPromptHistoryState(sessionId = null) {
+  return {
+    sessionId,
+    histories: {},
+    historyIndex: null,
+    draft: null,
+    value: '',
+  }
+}
+
+export function promptHistoryFor(state, sessionId = state?.sessionId) {
+  return state?.histories?.[historySessionKey(sessionId)] || []
+}
+
+export function setPromptHistorySession(state, sessionId) {
+  if (state.sessionId === sessionId) return state
+  return { ...state, sessionId, historyIndex: null, draft: null }
+}
+
+export function setPromptHistoryValue(state, value) {
+  return { ...state, value: String(value ?? '') }
+}
+
+export function appendPromptHistory(state, prompt, sessionId = state.sessionId) {
+  const text = String(prompt ?? '')
+  const keyed = setPromptHistorySession(state, sessionId)
+  if (!text.trim()) return { ...keyed, historyIndex: null, draft: null }
+  const key = historySessionKey(sessionId)
+  return {
+    ...keyed,
+    histories: { ...keyed.histories, [key]: [...promptHistoryFor(keyed, sessionId), text] },
+    historyIndex: null,
+    draft: null,
+  }
+}
+
+export function caretOnFirstLine(value, selectionStart = String(value ?? '').length) {
+  return !String(value ?? '').slice(0, selectionStart).includes('\n')
+}
+
+export function caretOnLastLine(value, selectionStart = String(value ?? '').length) {
+  return !String(value ?? '').slice(selectionStart).includes('\n')
+}
+
+// `event` deliberately accepts the small shape PromptBox needs instead of a
+// DOM event: { key, value, selectionStart, sessionId }. A handled result owns
+// the arrow key; an unhandled result must fall through to textarea behaviour.
+export function historyKeydown(state, event = {}) {
+  const sessionId = event.sessionId ?? state.sessionId
+  const keyed = setPromptHistorySession(state, sessionId)
+  const value = String(event.value ?? keyed.value ?? '')
+  const selectionStart = Number.isFinite(event.selectionStart)
+    ? Math.max(0, Math.min(event.selectionStart, value.length))
+    : value.length
+  const current = { ...keyed, value }
+  const history = promptHistoryFor(current, sessionId)
+  const result = (next, handled) => ({
+    handled,
+    value: next.value,
+    selectionStart: next.value.length,
+    state: next,
+  })
+
+  if (event.key === 'ArrowUp') {
+    if (!history.length || !caretOnFirstLine(value, selectionStart)) return result(current, false)
+    const historyIndex = current.historyIndex == null
+      ? history.length - 1
+      : Math.max(0, current.historyIndex - 1)
+    return result({
+      ...current,
+      value: history[historyIndex],
+      historyIndex,
+      draft: current.historyIndex == null ? value : current.draft,
+    }, true)
+  }
+
+  if (event.key === 'ArrowDown') {
+    if (current.historyIndex == null || !caretOnLastLine(value, selectionStart)) return result(current, false)
+    if (current.historyIndex >= history.length - 1) {
+      return result({ ...current, value: current.draft ?? '', historyIndex: null, draft: null }, true)
+    }
+    const historyIndex = current.historyIndex + 1
+    return result({ ...current, value: history[historyIndex], historyIndex }, true)
+  }
+
+  return result(current, false)
+}
+
 // The slash menu's entry kinds, in the order the picker groups them. Commands
 // act on the session, skills author or run a procedure, tools are the tenant's
 // registered capabilities — the same three-way split the terminal client shows.
