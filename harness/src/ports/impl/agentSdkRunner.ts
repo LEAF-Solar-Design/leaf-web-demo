@@ -131,6 +131,60 @@ const AUTHOR_TOOL_NAMES = [
   "mcp__author__validate_tool",
   "mcp__author__aps_test_run",
 ];
+
+// --------------------------------------------------------------------------- //
+// Optional read-only registry attachment
+// --------------------------------------------------------------------------- //
+/**
+ * Attach the tenant's tool-registry MCP face (leaf-tool-registry,
+ * https://studio.leafdesign.ai/api/mcp) to the author session -- READ-ONLY
+ * consultation so the model version-bumps an existing tool instead of
+ * authoring a duplicate. OFF unless all three env vars are set on the harness
+ * process:
+ *
+ *   LEAF_REGISTRY_MCP_URL     the face's URL
+ *   LEAF_REGISTRY_MCP_TOKEN   the face's edge bearer (CW_STUDIO_PUBLIC_TOKEN)
+ *   LEAF_REGISTRY_MCP_TENANT  the studio deployment UUID for this tenant
+ *
+ * Secret discipline mirrors the grant: the bearer rides ONLY the per-server
+ * headers option (never childEnv, never logged). The face exposes only query
+ * tools (registry_list / registry_get), so the mutating surface of the author
+ * session is unchanged: still exactly the three author tools. Per-tenant
+ * mapping (platform tenant -> studio deployment) is a follow-up; this v1
+ * serves the single-tenant/demo wiring.
+ */
+export type RegistryMcpAttachment = {
+  serverConfig: { type: "http"; url: string; headers: Record<string, string> };
+  toolNames: string[];
+};
+
+export const REGISTRY_TOOL_NAMES = [
+  "mcp__registry__registry_list",
+  "mcp__registry__registry_get",
+];
+
+export function registryMcpAttachment(env: NodeJS.ProcessEnv = process.env): RegistryMcpAttachment | null {
+  const url = env.LEAF_REGISTRY_MCP_URL?.trim();
+  const token = env.LEAF_REGISTRY_MCP_TOKEN?.trim();
+  const tenant = env.LEAF_REGISTRY_MCP_TENANT?.trim();
+  if (!url || !token || !tenant) return null;
+  return {
+    serverConfig: {
+      type: "http",
+      url,
+      headers: { Authorization: `Bearer ${token}`, Cookie: `tenant_id=${tenant}` },
+    },
+    toolNames: [...REGISTRY_TOOL_NAMES],
+  };
+}
+
+/** Consultation guide appended to the prompt only when the registry is attached. */
+const REGISTRY_GUIDE = `
+=== Registry (read-only) ===
+Before authoring, call registry_list to see this tenant's already-registered
+tools. If an equivalent tool already exists, version-bump/extend it instead of
+authoring a duplicate; use registry_get(pack) for its recorded versions.
+`;
 export const AUTHOR_FS_ACTIONS = ["read", "list", "exists"] as const;
 
 /**
@@ -347,11 +401,14 @@ export class AgentSdkRunner implements AgentRunner {
       tools: [fsTool, validateTool, apsTestRun],
     });
 
-    // 4) One design-time session restricted to EXACTLY the three tools.
+    // 4) One design-time session restricted to EXACTLY the three author tools,
+    //    plus (when configured) the READ-ONLY registry consultation pair.
     const abort = new AbortController();
-    const allowed = new Set(AUTHOR_TOOL_NAMES);
+    const registry = registryMcpAttachment();
+    const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
+    const allowed = new Set(allowedNames);
     const q = sdk.query({
-      prompt: `${input.systemPrompt}\n${RUNNER_GUIDE}\n\nAuthor a tool for this request:\n${input.description}`,
+      prompt: `${input.systemPrompt}\n${RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
       options: {
         env: childEnv,
         model: this.opts.model,
@@ -360,13 +417,13 @@ export class AgentSdkRunner implements AgentRunner {
         permissionMode: "default",
         cwd: input.repoDir,
         abortController: abort,
-        mcpServers: { author: server },
-        allowedTools: AUTHOR_TOOL_NAMES,
+        mcpServers: registry ? { author: server, registry: registry.serverConfig } : { author: server },
+        allowedTools: allowedNames,
         canUseTool: async (toolName: string, inp: Record<string, unknown>) => {
           if (allowed.has(toolName)) return { behavior: "allow", updatedInput: inp };
           return {
             behavior: "deny",
-            message: `tool ${toolName} is not permitted in the design-time author session (only fs_tenant_repo, validate_tool, aps_test_run).`,
+            message: `tool ${toolName} is not permitted in the design-time author session (only fs_tenant_repo, validate_tool, aps_test_run${registry ? ", and read-only registry_list/registry_get" : ""}).`,
           };
         },
       },
