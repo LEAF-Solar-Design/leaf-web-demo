@@ -502,18 +502,24 @@ export default function ConversePanel({
           <span className="converse-question-options">
             {item.options.map((option, optionIndex) => {
               const label = typeof option?.label === 'string' ? option.label : ''
-              const answered = questionChoiceState(events, item.id).answered
+              // Resolution is FIRST-subsequent-turn (composer.js): only the
+              // option the user actually sent reads "selected"; a card the
+              // user moved past (dismissed) simply inerts — the renderer must
+              // never invent a historical selection (review round 2).
+              const resolved = questionChoiceState(events, item.id)
+              const inert = resolved.answered || resolved.dismissed
+              const isSelected = resolved.selectedLabel === label.trim()
               const sendingChoice = questionChoices.sendingQuestionIds.includes(item.id)
               return (
                 <button
                   key={`${item.id}-${optionIndex}`}
                   type="button"
                   className="chip-act"
-                  disabled={!label || answered || sendingChoice || busy}
+                  disabled={!label || inert || sendingChoice || busy}
                   onClick={() => answerQuestion(item.id, label)}
                   title={option?.description || undefined}
                 >
-                  {answered ? `${label} selected` : label}
+                  {isSelected ? `${label} selected` : label}
                 </button>
               )
             })}

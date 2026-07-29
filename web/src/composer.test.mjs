@@ -233,14 +233,27 @@ describe('structured question choices', () => {
     data: { question_id: 'question-1', question: 'Which plan?', options: [{ label: 'Standard' }, { label: 'Premium' }] },
   }
 
-  it('keeps a card live until an option starts the next normal turn, then inerts every option', () => {
-    assert.deepEqual(questionChoiceState([question], 'question-1'), { answered: false })
+  it('resolves by the FIRST subsequent turn and remembers WHICH label', () => {
+    assert.deepEqual(questionChoiceState([question], 'question-1'),
+      { answered: false, selectedLabel: null, dismissed: false })
     assert.deepEqual(questionChoiceState([question, {
       type: 'turn_started', turn_id: 'turn-answer', data: { text: 'Standard' },
-    }], 'question-1'), { answered: true })
-    assert.deepEqual(questionChoiceState([question, {
-      type: 'turn_started', turn_id: 'turn-answer', data: { text: 'Standard' },
-    }], 'question-1', 'Premium'), { answered: true })
+    }], 'question-1'), { answered: true, selectedLabel: 'Standard', dismissed: false })
+  })
+
+  it('a LATER unrelated message matching a label cannot retro-answer the card', () => {
+    // Review round 2: scanning every later turn let an ordinary "Premium"
+    // typed much later invent a historical selection on replay. Only the
+    // first subsequent turn resolves.
+    const state = questionChoiceState([question,
+      { type: 'turn_started', turn_id: 'turn-next', data: { text: 'unrelated question about panels' } },
+      { type: 'turn_started', turn_id: 'turn-later', data: { text: 'Premium' } },
+    ], 'question-1')
+    assert.deepEqual(state, { answered: false, selectedLabel: null, dismissed: true })
+    // dismissed cards are inert to clicks
+    assert.equal(chooseQuestionOption(undefined, [question,
+      { type: 'turn_started', turn_id: 'turn-next', data: { text: 'moved on' } },
+    ], 'question-1', 'Premium').action, 'ignore')
   })
 
   it('sends the option label once and then makes a repeat click inert', () => {

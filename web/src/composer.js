@@ -205,26 +205,39 @@ export function shouldRetryWithQueue(errorKind, { text, confirm, credential_gran
     && credential_grant == null
 }
 
-// A question is answered only when any of its labels becomes a later durable user
-// turn. This keeps the whole card live through the POST and makes replay authoritative.
+// THE FIRST subsequent user turn resolves a question — never a later one.
+// Scanning every later turn let an unrelated message that happened to say
+// "Yes" retro-answer an old card on replay, and the renderer then invented a
+// historical selection (review round 2). The rule: the turn the user sends
+// right after the question IS the answer moment. If its text matches an
+// option (trimmed), that option — and only that option — is selected; if it
+// does not match, the user moved on and the card is dismissed-inert. Replay
+// is authoritative either way.
 export function questionChoiceState(events, questionId) {
   const questionAt = (events || []).findIndex((event) => (
     event?.type === 'question_required' && event.data?.question_id === questionId
   ))
-  if (questionAt === -1) return { answered: false }
+  if (questionAt === -1) return { answered: false, selectedLabel: null, dismissed: false }
   const labels = new Set((events[questionAt].data?.options || [])
     .map((option) => typeof option?.label === 'string' ? option.label.trim() : '')
     .filter(Boolean))
-  const answered = (events || []).slice(questionAt + 1).some(
-    (event) => event?.type === 'turn_started' && labels.has(String(event.data?.text ?? '').trim()),
+  const firstReply = (events || []).slice(questionAt + 1).find(
+    (event) => event?.type === 'turn_started'
+      && typeof event.data?.text === 'string' && event.data.text.trim(),
   )
-  return { answered }
+  if (!firstReply) return { answered: false, selectedLabel: null, dismissed: false }
+  const replyText = firstReply.data.text.trim()
+  if (labels.has(replyText)) {
+    return { answered: true, selectedLabel: replyText, dismissed: false }
+  }
+  return { answered: false, selectedLabel: null, dismissed: true }
 }
 
 // A click has one normal send action. The caller keeps this small state only
 // while the post is in flight; durable turn_started data decides the final state.
 export function chooseQuestionOption(state = { sendingQuestionIds: [] }, events, questionId, optionLabel) {
-  if (questionChoiceState(events, questionId).answered
+  const resolved = questionChoiceState(events, questionId)
+  if (resolved.answered || resolved.dismissed
     || state.sendingQuestionIds.includes(questionId)) return { action: 'ignore', state }
   return {
     action: 'send',
