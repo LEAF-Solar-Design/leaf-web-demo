@@ -175,7 +175,7 @@ def resolve_executor_id(
     task_id = task_arn.rsplit("/", 1)[-1]
     if not re.fullmatch(r"[0-9a-f]{32}", task_id):
         raise ValueError("ECS task metadata contains an invalid task ARN")
-    return f"ecs-{task_id}"
+    return f"executor-ecs-{task_id}"
 
 
 def _ecs_metadata_document(

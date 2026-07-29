@@ -177,7 +177,7 @@ class RegistrationTests(unittest.TestCase):
             "ECS_CONTAINER_METADATA_URI_V4": "http://169.254.170.2/v4/container-id",
         }, opener=opener)
 
-        self.assertEqual("ecs-0123456789abcdef0123456789abcdef", value)
+        self.assertEqual("executor-ecs-0123456789abcdef0123456789abcdef", value)
         opener.assert_called_once_with("http://169.254.170.2/v4/container-id/task", timeout=2.0)
 
     def test_executor_endpoint_discovery_fails_closed(self) -> None:
