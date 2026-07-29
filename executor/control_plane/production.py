@@ -23,6 +23,9 @@ from .service import ControlPlane
 from .store import PostgresStore
 
 
+_DEFAULT_ROOT_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt"
+
+
 class ProductionConfigurationError(RuntimeError):
     """Raised when production composition cannot be made safe."""
 
@@ -95,7 +98,7 @@ def _postgres_url(environ: Mapping[str, str]) -> str:
         )
     if "sslrootcert" not in query:
         separator = "&" if parsed.query else "?"
-        return f"{value}{separator}sslrootcert=system"
+        return f"{value}{separator}sslrootcert={_DEFAULT_ROOT_CERT_FILE}"
     return value
 
 

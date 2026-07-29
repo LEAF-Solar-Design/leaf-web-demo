@@ -34,6 +34,7 @@ def main() -> None:
     assert "ARG LEAF_SOURCE_SHA" in text
     assert "LEAF_SOURCE_SHA must be an exact lowercase 40-character commit" in text
     assert "ca-certificates" in text
+    assert "/etc/ssl/certs/ca-certificates.crt" in (ROOT / "executor" / "control_plane" / "production.py").read_text(encoding="utf-8")
     assert "org.opencontainers.image.revision=$LEAF_SOURCE_SHA" in text
     assert "USER 65532:65532" in text
     for required_env in ("HOME=/tmp", "TMPDIR=/tmp", "XDG_CACHE_HOME=/tmp", "PYTHONDONTWRITEBYTECODE=1"):
