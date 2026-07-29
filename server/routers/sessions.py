@@ -96,6 +96,7 @@ import deps
 import emf_metrics
 import entitlements
 import instant_execution
+import session_policy
 import session_store
 import turn_runner
 from envelopes import (ErrorCode, err_envelope, error_obj, error_response,
@@ -228,6 +229,10 @@ class CreateSessionRequest(BaseModel):
     # Per-session "mount your LLM" model choice (persisted). Validated against the
     # allowlist; overrides the runner env default for this session's turns.
     model: Optional[str] = None
+    # Per-session approval policy (session_policy.POLICIES). Absent (default)
+    # leaves the stored policy untouched — a repeat idempotent POST without the
+    # field never resets an earlier choice. confirm_all is the implicit default.
+    policy: Optional[str] = None
 
 
 class MessageRequest(BaseModel):
@@ -396,7 +401,16 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
     the allowlist) is persisted as the session's per-session model choice."""
     if req.model is not None and not turn_runner.is_allowed_model(req.model):
         return _invalid_model_response(req.model)
+    if req.policy is not None and not session_policy.is_valid_policy(req.policy):
+        allowed = ", ".join(sorted(session_policy.POLICIES))
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            f"policy {req.policy!r} is not allowed; choose one of: {allowed}",
+            retryable=False, status_code=400,
+        )
     sess = session_store.get_or_create_session(str(tenant), req.drawing_id, req.model)
+    if req.policy is not None:
+        session_policy.set_policy(sess["session_id"], str(tenant), req.policy)
     instant = instant_execution.prepare_session(
         str(tenant), sess["session_id"], req.drawing_id,
     )
@@ -406,6 +420,7 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
             "status": sess["status"],
             "created_at": sess["created_at"],
             "model": sess.get("model"),
+            "policy": session_policy.get_policy(sess["session_id"], str(tenant)),
             # Safe readiness only. The executor endpoint and signed lease stay
             # on the authenticated app-to-harness back-edge.
             "instant_ready": bool(instant["ready"]),
@@ -663,7 +678,7 @@ def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_tenan
         return _session_not_found(session_id)
 
     try:
-        outcome = turn_runner.request_cancel(str(tenant), session_id, turn_id)
+        outcome = turn_runner.request_cancel(tenant, session_id, turn_id)
     except turn_runner.TurnRejected as exc:
         return _turn_rejected_response(exc)
 

@@ -66,10 +66,13 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+import agent_gate
 import agent_ledger
 import broker_client
+import emf_metrics
 import entitlements
 import instant_execution
+import session_policy
 import session_store
 from envelopes import ErrorCode
 
@@ -263,6 +266,50 @@ _queued: Dict[str, Dict[str, Any]] = {}
 # LOUD stderr line says so (the next enqueue-time kick is the backstop).
 _KICK_MAX_ATTEMPTS = 64
 
+# Capabilities eligible for policy auto-approval. EXACT membership against the
+# vocabulary the HARNESS actually mints - `Capability = "drawing.read" |
+# "drawing.write"` (harness/src/ports/index.ts). `drawing.write` and a MISSING
+# capability are ineligible: fail closed, unknown means confirm.
+#
+# The first cut of this set said `run_read`, which is an ENTITLEMENT key
+# (entitlements.py: run_read/run_write/build), NOT a proposal capability - so
+# it matched nothing in production while its tests fabricated the value and
+# passed (review round 1, blocker 1). Widening this set is a money-safety
+# decision, never a convenience edit, and any new member must be quoted from
+# the harness Capability union.
+READONLY_AUTO_CAPABILITIES = frozenset({"drawing.read"})
+
+# The decided_by stamp for a policy decision. It is also the RESUME KEY: a
+# decision carrying this actor and still unconsumed is one THIS policy made and
+# may finish, which is what makes a lost CAS retryable instead of a permanent
+# strand (review round 1, finding 3).
+POLICY_DECIDER = "policy:auto_approve_reads"
+
+# session_id -> confirmation_id of a policy decision that was recorded but
+# whose confirm turn could not start (a lost CAS). Every terminal retries it.
+#
+# Without this the "resumable decision" was unreachable code: each relay owns a
+# FRESH `proposals` map populated only by its own turn's events, so a later
+# terminal had no way to rediscover the stranded id and the row stayed decided
+# -by-policy forever - a human could not re-decide it, and under live auth
+# could not consume it either (review round 2, finding 1).
+#
+# In-process, by the same single-writer argument as `_cancellers` and
+# `_queued`. A process restart drops the retry, exactly as it drops active
+# relays and queued prompts; the durable row remains and an operator can see it.
+_pending_policy_lock = threading.Lock()
+_pending_policy: Dict[str, List[str]] = {}
+# Per session. A LIST, not one slot: terminals overlap (the CAS is released
+# before auto-confirm runs), so two of them can each park a different id, and a
+# single slot let the second overwrite the first — the displaced row stayed
+# policy-decided and unconsumed with nothing able to rediscover it (review
+# round 3).
+#
+# The cap is enforced BEFORE a row is decided, never by evicting one after:
+# an eviction would strand whichever end it dropped. At the cap the policy
+# simply stops deciding and the chips stay manual.
+MAX_PENDING_POLICY = 16
+
 
 class TurnBusy(Exception):
     """try_begin_turn lost the CAS — a turn is already active for this session."""
@@ -398,6 +445,10 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     # so protected authoring resolves the author from this record instead.
     if subject is None:
         subject = getattr(tenant_id, "subject", None)
+    # For the terminal-time policy auto-confirm (same posture as the queue
+    # kicker's enqueue-time snapshot): resolve while the principal object is
+    # still in hand, before it is flattened to a plain string.
+    entitlement_tier = entitlements.resolve_tier(tenant_id)
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
@@ -471,6 +522,13 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # slot's `starting` claim is still held, so the nested kick returns
         # immediately.
         session_store.end_turn(session_id, turn_id)
+        # BOTH follow-ups, like every other slot releaser (review round 9: the
+        # queue kick alone left a policy decision parked against this exact
+        # release with nothing to retry it). tier/entitlement_tier are the
+        # snapshots this start_turn already took. Re-entrancy is bounded the
+        # same way as the kick: a nested attempt on a cid that is mid-flight
+        # sees its transient consumed/claimed state and stands down.
+        _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier)
         _kick_queued(session_id)
 
     def _rejected(*args: Any, **kwargs: Any) -> TurnRejected:
@@ -583,7 +641,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         resp.close()
         raise _rejected(502, ErrorCode.BROKER_UNREACHABLE, msg)
 
-    _spawn_relay(tenant_id, session_id, turn_id, resp, max_s)
+    _spawn_relay(tenant_id, session_id, turn_id, resp, max_s,
+                 tier=tier, entitlement_tier=entitlement_tier)
     return turn_id
 
 
@@ -634,7 +693,7 @@ def _eof_terminal(deadline: float) -> tuple:
     return None, None
 
 
-def request_cancel(tenant_id: str, session_id: str, turn_id: str) -> str:
+def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
     """Interrupt an in-flight turn. Returns "cancelled" or "not_active".
 
     Two paths, and the fallback is the point:
@@ -653,6 +712,13 @@ def request_cancel(tenant_id: str, session_id: str, turn_id: str) -> str:
     turn is refused rather than silently accepted, so a stale client cannot
     terminalize the turn that replaced the one it was looking at.
     """
+    # Snapshot BEFORE flattening (the router passes the live principal): the
+    # orphan branch below runs the terminal follow-ups, and the policy retry's
+    # entitlement check must see the caller's real tier — a flattened string
+    # resolves to the demo tier, which under live auth would run the retry
+    # with entitlements the tenant may not hold.
+    tier = getattr(tenant_id, "tier", None)
+    entitlement_tier = entitlements.resolve_tier(tenant_id)
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
@@ -686,7 +752,9 @@ def request_cancel(tenant_id: str, session_id: str, turn_id: str) -> str:
             pass
         session_store.end_turn(session_id, turn_id)
     # This path has no relay, so no _finalize_terminal will run for the turn —
-    # the queued prompt (if any) must be kicked here or it waits forever.
+    # BOTH follow-ups run here or a parked policy decision / queued prompt
+    # waits forever (review rounds 3 and 9).
+    _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier)
     _kick_queued(session_id)
     return "cancelled"
 
@@ -765,6 +833,24 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
     if sess is not None and sess.get("active_turn_id") is None:
         _kick_queued(session_id)
     return ("queued", queued_id)
+
+
+def drain_session_followups(tenant_id: Any, session_id: str) -> None:
+    """The terminal-time follow-ups, for a slot released OUTSIDE a relay.
+
+    A relay's _finalize_terminal runs the policy park drain/retry and then the
+    queue kick. A NON-turn releaser — the checkpoint restore's reservation —
+    used to call only _kick_queued, so a policy decision parked while the
+    reservation held the slot had nothing to retry it until an unrelated later
+    terminal or expiry (PR #311 round 8: the round-2 unreachable-resume,
+    recreated by new main content). Every slot releaser runs BOTH follow-ups,
+    in the relay's order. Accepts the live principal so tier and entitlement
+    resolve exactly as start_turn would.
+    """
+    tier = getattr(tenant_id, "tier", None)
+    entitlement_tier = entitlements.resolve_tier(tenant_id)
+    _auto_confirm_reads(str(tenant_id), session_id, {}, tier, entitlement_tier)
+    _kick_queued(session_id)
 
 
 def _kick_queued(session_id: str) -> None:
@@ -903,8 +989,323 @@ def _kick_queued(session_id: str) -> None:
           file=sys.stderr, flush=True)
 
 
+def _auto_confirm_reads(tenant_id: str, session_id: str,
+                        proposals: Dict[str, Dict[str, Any]],
+                        tier: Optional[str],
+                        entitlement_tier: Optional[str]) -> None:
+    """Policy auto-approval: under `auto_approve_reads`, decide and confirm the
+    turn's FIRST `drawing.read` proposal at its terminal. NEVER raises - it
+    runs on relay threads whose cleanup must complete.
+
+    GATE-FIRST, exactly like the human path (routers/agent.py): the section 18
+    gate record is the AUTHORITY the resume turn consults, and the session row
+    is the mirror. Deciding only the mirror leaves the gate pending, so the
+    resumed tool never dispatches (review round 1, blocker 2). So this grants
+    the gate first, then the session row - same order, same failure posture: a
+    gate that will not grant means no confirm turn and no session decision.
+
+    RESUMABLE, so a lost race cannot strand the user's approval: a row already
+    decided by THIS policy and not yet consumed is finished on a later
+    terminal. Without that, a TurnBusy left the row decided-by-policy forever -
+    a human could not re-decide it (already decided) and under live auth could
+    not consume it either (consume binds decided_by to the acting subject).
+
+    Every other gate the human path enforces is re-enforced from the STORED
+    row, never the relay's in-memory copy: session+tenant match, unexpired,
+    unconsumed, eligible capability, stored dwg binding.
+    """
+    try:
+        # A decision parked by an earlier lost CAS outranks this turn's own
+        # proposals: it is already decided and the user is waiting on it.
+        with _pending_policy_lock:
+            parked = list(_pending_policy.get(session_id) or ())
+
+        try:
+            allowed = (
+                session_policy.get_policy(session_id, tenant_id) == "auto_approve_reads"
+                and entitlements.entitlements_for(
+                    entitlement_tier).get("converse", False))
+        except Exception:  # noqa: BLE001
+            allowed = False
+        if not allowed:
+            # Policy off (or entitlement lost) means STOP AUTO-RUNNING —
+            # including decisions parked while it was on. The entries are
+            # DROPPED, not finished (finishing one is still an auto-run), and
+            # the rows themselves are time-bounded: an approval carries
+            # expires_at (SESSIONS_APPROVAL_TTL_S), so a policy-decided row
+            # nobody can consume simply expires. Without this drain a parked
+            # entry was never inspected again while the new policy was active
+            # (review round 6, finding 2).
+            if parked:
+                with _pending_policy_lock:
+                    _pending_policy.pop(session_id, None)
+                print(f"[leaf-agent] policy auto-confirm: policy off for "
+                      f"{session_id!r}; dropping {len(parked)} parked "
+                      f"decision(s) {parked!r} — the rows expire by TTL",
+                      file=sys.stderr, flush=True)
+            return
+
+        candidates = parked + [
+            cid for cid, data in proposals.items()
+            if data.get("capability") in READONLY_AUTO_CAPABILITIES
+            and cid not in parked]
+        if not candidates:
+            return
+
+        for cid in candidates:
+            if _try_one_policy_confirm(tenant_id, session_id, cid, tier):
+                return  # one turn started; the rest keep for a later terminal
+    except Exception as exc:  # noqa: BLE001
+        try:
+            print(f"[leaf-agent] policy auto-confirm CRASHED "
+                  f"({type(exc).__name__}) session={session_id!r}",
+                  file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
+                            tier: Optional[str]) -> bool:
+    """One candidate. True iff a confirm turn STARTED (the caller then stops:
+    at most one auto-started turn per terminal). False means "not this one" —
+    ineligible, raced, or the CAS was lost — and the caller tries the next, so
+    a fresh proposal can never starve an already-decided strand and a strand
+    can never displace one either (review round 3)."""
+    try:
+
+        def _forget_parked() -> None:
+            with _pending_policy_lock:
+                rest = [c for c in (_pending_policy.get(session_id) or ()) if c != cid]
+                if rest:
+                    _pending_policy[session_id] = rest
+                else:
+                    _pending_policy.pop(session_id, None)
+
+        approval = session_store.get_approval(cid)
+        if (approval is None
+                or str(approval.get("session_id")) != str(session_id)
+                or str(approval.get("tenant_id")) != str(tenant_id)
+                or approval.get("expired")
+                or approval.get("capability") not in READONLY_AUTO_CAPABILITIES):
+            # Expired / vanished / foreign: a parked retry for it is dead.
+            _forget_parked()
+            return False
+        if approval.get("consumed"):
+            # CONSUMED IS TRANSIENT, not terminal: a winner sits between its
+            # consume and its own outcome handling (success forgets the slot;
+            # TurnBusy unconsumes and keeps it). A loser that released here
+            # freed capacity while the row was decided — the round-6 leak: a
+            # third row decided beyond the cap, and the winner's entry
+            # orphaned. Only a row consumed under a HUMAN's decision is
+            # terminally out of the policy's hands.
+            if approval.get("decided_by") != POLICY_DECIDER:
+                _forget_parked()
+            return False
+        if approval.get("decided") and approval.get("decided_by") != POLICY_DECIDER:
+            # Only OUR OWN unfinished decision may be resumed; a human's
+            # decision is theirs to redeem.
+            return False
+        # RESERVE THE SLOT before doing anything that can end in a park, and
+        # for EVERY candidate — decided (a resume) or not. Two lock
+        # acquisitions (read the length, append later) let N concurrent
+        # terminals all observe room and all park, and a resume path that took
+        # no slot at all appended unconditionally on TurnBusy; both blew the
+        # cap (review round 5). Taking the slot in the SAME acquisition as the
+        # check is what makes the bound real. Released on every exit that does
+        # not leave work pending.
+        with _pending_policy_lock:
+            tracked = _pending_policy.setdefault(session_id, [])
+            if cid not in tracked:
+                if len(tracked) >= MAX_PENDING_POLICY:
+                    if not tracked:
+                        _pending_policy.pop(session_id, None)
+                    print(f"[leaf-agent] policy auto-confirm: {session_id!r} "
+                          f"already has {len(tracked)} unfinished policy "
+                          f"decisions; leaving {cid!r} for a human",
+                          file=sys.stderr, flush=True)
+                    return False
+                tracked.append(cid)
+
+        stored_payload = approval.get("payload")
+        stored_dwg = (stored_payload.get("dwg")
+                      if isinstance(stored_payload, dict) else None)
+        if not (isinstance(stored_dwg, str) and stored_dwg):
+            _forget_parked()
+            return False  # the router's rule: no dwg binding, no confirm
+
+        if not approval.get("decided"):
+            # CAPACITY FIRST, so an eviction can never strand a decision.
+            # Deciding a row we have no room to track would recreate the exact
+            # defect the park exists to fix: dropping the oldest loses a
+            # decided-unconsumed row, and dropping the newest loses the one we
+            # just decided (review round 4). An undecided row left alone is
+            # simply a normal manual chip — the fail-closed outcome.
+            # GATE FIRST (routers/agent.py's load-bearing ordering). A gate
+            # record that is corrupt/unreadable, or that refuses the grant,
+            # means this chip stays manual - never decide the mirror against a
+            # gate we could not grant.
+            _gate_rec, gate_status = agent_gate.read_pending_strict(cid)
+            if gate_status == "ok":
+                try:
+                    granted, _rec, reason = agent_gate.grant_approval(
+                        cid, by=POLICY_DECIDER)
+                except Exception as exc:  # noqa: BLE001
+                    _forget_parked()  # nothing decided: release the reservation
+                    print(f"[leaf-agent] policy auto-confirm: gate write failed "
+                          f"({type(exc).__name__}) session={session_id!r}",
+                          file=sys.stderr, flush=True)
+                    return False
+                if not granted:
+                    _forget_parked()
+                    print(f"[leaf-agent] policy auto-confirm: gate refused "
+                          f"({reason}) session={session_id!r}",
+                          file=sys.stderr, flush=True)
+                    return False
+            elif gate_status != "absent":
+                # corrupt / io_error: fail closed, leave it to a human.
+                _forget_parked()
+                print(f"[leaf-agent] policy auto-confirm: gate unreadable "
+                      f"({gate_status}) session={session_id!r}",
+                      file=sys.stderr, flush=True)
+                return False
+            # `absent` = the legacy pair flow with no gate record; the session
+            # row is the whole story there, as on the human path.
+
+            try:
+                outcome = session_store.decide_approval(cid, True, by=POLICY_DECIDER)
+            except Exception as exc:  # noqa: BLE001
+                # The gate is granted and the mirror is not. This window is
+                # IDENTICAL to the human path's (routers/agent.py grants the
+                # gate, then writes the session row) - it is inherent to two
+                # stores with no shared transaction, not new here. It is
+                # RECOVERABLE in the safe direction: a human approving later
+                # re-grants an already-granted gate (a no-op) and writes the
+                # mirror. It is NOT recoverable by a human DENIAL, which cannot
+                # ungrant the gate - so it is reported loudly rather than
+                # swallowed.
+                print(f"[leaf-agent] policy auto-confirm: GATE GRANTED BUT "
+                      f"SESSION ROW NOT DECIDED ({type(exc).__name__}) "
+                      f"confirmation_id={cid!r} session={session_id!r} - a "
+                      f"human approval repairs this; a denial cannot",
+                      file=sys.stderr, flush=True)
+                # The GATE is granted, so this row is not "untouched" — keep the
+                # reservation so a later terminal retries the mirror write.
+                return False
+            if outcome != "recorded":
+                # A racer got here first — stand down. WHO owns the slot now
+                # decides whether to release it: the slot belongs to the CID,
+                # not to this thread. If the winner was OUR OWN policy (another
+                # terminal racing the same cid), that winner is mid-flight and
+                # still needs the reservation — a loser that released it here
+                # freed capacity while the row was decided, letting a THIRD row
+                # be decided beyond the cap (round 5's decided>tracked). Only a
+                # row now owned by a HUMAN (or vanished) releases.
+                current = session_store.get_approval(cid)
+                if current is None or current.get("decided_by") != POLICY_DECIDER:
+                    _forget_parked()
+                return False
+
+        try:
+            consumed = session_store.consume_approval(cid, session_id, tenant_id)
+        except session_store.ApprovalConsumeError:
+            # The slot belongs to the cid: a consume race means a WINNER (our
+            # own policy on another thread, or a human confirm) holds the row
+            # mid-flight — leave the reservation to the winner's handlers.
+            return False
+        confirm_payload = {
+            "confirmation_id": cid,
+            "approved": bool(consumed.get("approved")),
+            "proposal": {
+                "tool": consumed.get("tool"),
+                "params": consumed.get("params"),
+                "capability": consumed.get("capability"),
+                "dwg": stored_dwg,
+            },
+        }
+        try:
+            start_turn(tenant_id, session_id, confirm=confirm_payload, tier=tier)
+            _forget_parked()
+            return True
+        except TurnBusy:
+            # Provably unredeemed (the CAS is start_turn's first act): return
+            # the consume so a LATER terminal can finish this same decision
+            # (see RESUMABLE above). The decision itself stands - it is ours,
+            # and re-granting an already-granted gate would be the divergence
+            # the gate-first ordering exists to prevent.
+            # The give-back gets THREE tries, and a persistent failure is
+            # reported on the ALARMABLE channel (the router's precedent for a
+            # destroyed approval): the row stays consumed-by-policy, unusable
+            # by a human under live auth, until its TTL expires — at which
+            # point the top check's `expired` branch releases the slot.
+            # Bounded and visible, never silent (review round 6, finding 1).
+            released = False
+            for _ in range(3):
+                try:
+                    released = bool(session_store.unconsume_approval(
+                        cid, session_id, tenant_id))
+                except Exception:  # noqa: BLE001
+                    released = False
+                if released:
+                    break
+            if not released:
+                try:
+                    emf_metrics.emit_approval_give_back_failed(
+                        "policy_auto_confirm", confirmation_id=cid,
+                        session_id=session_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f"[leaf-agent] policy auto-confirm give-back FAILED for "
+                      f"{cid!r} on session {session_id!r} — the row stays "
+                      f"consumed until its TTL expires",
+                      file=sys.stderr, flush=True)
+            # PARK it, so a later terminal actually retries (see
+            # _pending_policy). Returning the consume alone left the decision
+            # with nothing to rediscover it.
+            # NOTHING to add: the slot was RESERVED above and is still held —
+            # a lost CAS simply means we do not release it. The old
+            # unconditional append here could re-add an id whose reservation
+            # had already been released on another path, pushing the list past
+            # its cap (review round 5); the bound only holds if the reservation
+            # is the ONE place the list grows.
+            print(f"[leaf-agent] policy auto-confirm lost the CAS on "
+                  f"session {session_id!r}; approval {cid!r} parked for the "
+                  f"next terminal", file=sys.stderr, flush=True)
+        except TurnRejected as exc:
+            if exc.pre_harness:
+                try:
+                    session_store.unconsume_approval(cid, session_id, tenant_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            if exc.turn_id is not None:
+                # No HTTP caller to answer: close the transcript the failed
+                # start opened, the queue kicker's rule.
+                try:
+                    session_store.append_event(
+                        session_id, exc.turn_id, "error",
+                        {"error": {"error_code": exc.error_code,
+                                   "message": exc.message},
+                         "stop_reason": "error"})
+                except Exception:  # noqa: BLE001
+                    pass
+            _forget_parked()  # a harness rejection is not retried in a loop
+            print(f"[leaf-agent] policy auto-confirm start FAILED "
+                  f"({exc.error_code}) session={session_id!r}",
+                  file=sys.stderr, flush=True)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        try:
+            print(f"[leaf-agent] policy auto-confirm candidate CRASHED "
+                  f"({type(exc).__name__}) session={session_id!r}",
+                  file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
 def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
-                 resp: "requests.Response", max_s: float) -> None:
+                 resp: "requests.Response", max_s: float,
+                 tier: Optional[str] = None,
+                 entitlement_tier: Optional[str] = None) -> None:
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
     # watchdog's own wait is anchored here too, so neither path can drift from
     # the other.
@@ -996,6 +1397,11 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
             session_store.end_turn(session_id, turn_id)
         except Exception:  # noqa: BLE001
             pass
+        # Policy auto-confirm runs FIRST (it continues the interaction the
+        # user is already in); if it starts a confirm turn, the queue kicker
+        # below sees busy and parks correctly. Both never raise.
+        _auto_confirm_reads(tenant_id, session_id, proposals,
+                            tier, entitlement_tier)
         # The session is free — hand it to the queued prompt, if one is
         # waiting. Runs on the terminalizing thread (drain, watchdog, or a
         # cancel); _kick_queued never raises, and start_turn's blocking span

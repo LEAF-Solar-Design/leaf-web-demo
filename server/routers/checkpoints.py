@@ -232,8 +232,9 @@ def restore_checkpoint(session_id: str, checkpoint_id: str,
         return deps.tenant_echo(with_envelope_fields(body), tenant)
     finally:
         session_store.end_turn(session_id, restore_turn_id)
-        # Releasing the slot is a terminal for queue purposes: a prompt that
-        # was parked behind this reservation has no other event coming, and
-        # every real terminal path kicks (PR #310 review round 2, finding 2).
-        # _kick_queued never raises.
-        turn_runner._kick_queued(session_id)
+        # Releasing the slot is a TERMINAL for follow-up purposes: a queued
+        # prompt parked behind this reservation has no other event coming
+        # (PR #310 round 2), and neither does a policy decision parked when
+        # its auto-confirm lost the CAS to this very reservation (PR #311
+        # round 8). Run both follow-ups, in the relay's order; never raises.
+        turn_runner.drain_session_followups(tenant, session_id)
