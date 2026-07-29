@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { autoGrowHeight, filterRunnable, rankEntries, LINE_PX, MAX_ROWS } from './composer.js'
+import {
+  appendPromptHistory,
+  autoGrowHeight,
+  createPromptHistoryState,
+  filterRunnable,
+  historyKeydown,
+  promptHistoryFor,
+  rankEntries,
+  setPromptHistoryValue,
+  LINE_PX,
+  MAX_ROWS,
+} from './composer.js'
 
 const names = (entries) => entries.map((e) => e.name)
 
@@ -126,5 +137,74 @@ describe('filterRunnable', () => {
   it('rejects a non-function handler (a truthy value is not dispatchable)', () => {
     assert.deepEqual(names(filterRunnable(entries, { help: 'yes' })),
       ['orwell-writing', 'count_panels'])
+  })
+})
+
+describe('prompt history', () => {
+  const send = (state, text, sessionId = state.sessionId) => appendPromptHistory(state, text, sessionId)
+  const key = (state, keyName, value, selectionStart, sessionId = state.sessionId) => historyKeydown(state, {
+    key: keyName, value, selectionStart, sessionId,
+  })
+
+  it('recalls newest first from an empty composer and stops at the oldest entry', () => {
+    let state = createPromptHistoryState('session-a')
+    state = send(state, 'first prompt')
+    state = send(state, 'newest prompt')
+
+    let result = key(state, 'ArrowUp', '', 0)
+    assert.equal(result.handled, true)
+    assert.equal(result.value, 'newest prompt')
+
+    result = key(result.state, 'ArrowUp', result.value, result.selectionStart)
+    assert.equal(result.value, 'first prompt')
+
+    result = key(result.state, 'ArrowUp', result.value, result.selectionStart)
+    assert.equal(result.handled, true)
+    assert.equal(result.value, 'first prompt')
+  })
+
+  it('leaves ArrowUp to the textarea when the caret is not on its first line', () => {
+    let state = createPromptHistoryState('session-a')
+    state = send(state, 'older prompt')
+    const value = 'line one\nline two'
+    const result = key(state, 'ArrowUp', value, value.length)
+    assert.equal(result.handled, false)
+    assert.equal(result.value, value)
+  })
+
+  it('restores the exact pre-navigation draft when Down moves past newest history', () => {
+    let state = createPromptHistoryState('session-a')
+    state = send(state, 'first prompt')
+    state = send(state, 'newest prompt')
+    const draft = 'two\nline draft'
+
+    let result = key(state, 'ArrowUp', draft, 0)
+    result = key(result.state, 'ArrowDown', result.value, result.selectionStart)
+    assert.equal(result.value, draft)
+    assert.equal(result.state.historyIndex, null)
+  })
+
+  it('appends sent prompts, resets navigation, and never mutates recalled history', () => {
+    let state = createPromptHistoryState('session-a')
+    state = send(state, 'original')
+    let result = key(state, 'ArrowUp', '', 0)
+    state = setPromptHistoryValue(result.state, 'edited recall')
+    state = send(state, 'next prompt')
+
+    assert.equal(state.historyIndex, null)
+    assert.deepEqual(promptHistoryFor(state), ['original', 'next prompt'])
+  })
+
+  it('keeps different session histories separate', () => {
+    let state = createPromptHistoryState('session-a')
+    state = send(state, 'only in a')
+    state = send(state, 'only in b', 'session-b')
+
+    const a = key(state, 'ArrowUp', '', 0, 'session-a')
+    assert.equal(a.value, 'only in a')
+    const b = key(a.state, 'ArrowUp', '', 0, 'session-b')
+    assert.equal(b.value, 'only in b')
+    const c = key(b.state, 'ArrowUp', '', 0, 'session-c')
+    assert.equal(c.handled, false)
   })
 })
