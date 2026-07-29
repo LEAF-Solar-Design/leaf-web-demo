@@ -551,3 +551,61 @@ def test_at_capacity_the_policy_stops_deciding_instead_of_evicting(monkeypatch, 
     for cid in ("cid-cap-a", "cid-cap-b"):
         assert session_store.get_approval(cid)["decided"] is True
     session_store.end_turn(sid, "orphan-cap")
+
+
+def test_concurrent_terminals_cannot_exceed_the_cap(monkeypatch, turn_stub):
+    """Review round 5 HIGH: checking the length and appending later are two
+    lock acquisitions, so N concurrent terminals all saw room, all decided, and
+    all parked — over the cap, with rows decided that should have stayed
+    manual. The slot must be TAKEN in the same acquisition as the check."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    monkeypatch.setattr(turn_runner, "MAX_PENDING_POLICY", 2)
+
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    ids = [f"cid-conc-{i}" for i in range(5)]
+    for cid in ids:
+        session_store.create_approval(
+            confirmation_id=cid, session_id=sid, tenant_id="tenant-p",
+            turn_id=f"t-{cid}", tool="panel_count", params={},
+            capability="drawing.read", rationale="r", kind="run_capability",
+            payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    # Hold the session so every terminal loses the CAS, and widen the window
+    # the old code was vulnerable in: between reading the capacity and parking.
+    # A DELAY, not a barrier — only the threads that pass the capacity check
+    # reach this point, so a barrier sized to the thread count can never
+    # complete (it raised BrokenBarrierError and manufactured a different
+    # failure). The delay is enough: with a check-without-take, every thread
+    # observes room before any of them parks.
+    assert session_store.try_begin_turn(sid, "orphan-conc", 300)
+    real_decide = session_store.decide_approval
+
+    def _slow_decide(cid, approved, by=None):
+        time.sleep(0.15)
+        return real_decide(cid, approved, by=by)
+    monkeypatch.setattr(turn_runner.session_store, "decide_approval", _slow_decide)
+
+    threads = [threading.Thread(
+        target=turn_runner._auto_confirm_reads,
+        args=("tenant-p", sid, {cid: {"capability": "drawing.read"}}, None, "demo"))
+        for cid in ids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    with turn_runner._pending_policy_lock:
+        parked = list(turn_runner._pending_policy.get(sid) or ())
+    assert len(parked) <= 2, f"the cap was exceeded under concurrency: {parked}"
+    decided = [c for c in ids if session_store.get_approval(c)["decided"]]
+    assert len(decided) <= 2, (
+        f"more rows were decided than the cap can track: {decided}")
+    assert set(decided) <= set(parked), (
+        f"a decided row is not tracked: decided={decided} parked={parked}")
+    session_store.end_turn(sid, "orphan-conc")

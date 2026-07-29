@@ -1034,20 +1034,52 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
         if (approval is None
                 or str(approval.get("session_id")) != str(session_id)
                 or str(approval.get("tenant_id")) != str(tenant_id)
-                or approval.get("consumed")
                 or approval.get("expired")
                 or approval.get("capability") not in READONLY_AUTO_CAPABILITIES):
-            # Consumed / expired / vanished: a parked retry for it is dead.
+            # Expired / vanished / foreign: a parked retry for it is dead.
             _forget_parked()
+            return False
+        if approval.get("consumed"):
+            # CONSUMED IS TRANSIENT, not terminal: a winner sits between its
+            # consume and its own outcome handling (success forgets the slot;
+            # TurnBusy unconsumes and keeps it). A loser that released here
+            # freed capacity while the row was decided — the round-6 leak: a
+            # third row decided beyond the cap, and the winner's entry
+            # orphaned. Only a row consumed under a HUMAN's decision is
+            # terminally out of the policy's hands.
+            if approval.get("decided_by") != POLICY_DECIDER:
+                _forget_parked()
             return False
         if approval.get("decided") and approval.get("decided_by") != POLICY_DECIDER:
             # Only OUR OWN unfinished decision may be resumed; a human's
             # decision is theirs to redeem.
             return False
+        # RESERVE THE SLOT before doing anything that can end in a park, and
+        # for EVERY candidate — decided (a resume) or not. Two lock
+        # acquisitions (read the length, append later) let N concurrent
+        # terminals all observe room and all park, and a resume path that took
+        # no slot at all appended unconditionally on TurnBusy; both blew the
+        # cap (review round 5). Taking the slot in the SAME acquisition as the
+        # check is what makes the bound real. Released on every exit that does
+        # not leave work pending.
+        with _pending_policy_lock:
+            tracked = _pending_policy.setdefault(session_id, [])
+            if cid not in tracked:
+                if len(tracked) >= MAX_PENDING_POLICY:
+                    if not tracked:
+                        _pending_policy.pop(session_id, None)
+                    print(f"[leaf-agent] policy auto-confirm: {session_id!r} "
+                          f"already has {len(tracked)} unfinished policy "
+                          f"decisions; leaving {cid!r} for a human",
+                          file=sys.stderr, flush=True)
+                    return False
+                tracked.append(cid)
+
         stored_payload = approval.get("payload")
         stored_dwg = (stored_payload.get("dwg")
                       if isinstance(stored_payload, dict) else None)
         if not (isinstance(stored_dwg, str) and stored_dwg):
+            _forget_parked()
             return False  # the router's rule: no dwg binding, no confirm
 
         if not approval.get("decided"):
@@ -1057,14 +1089,6 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # decided-unconsumed row, and dropping the newest loses the one we
             # just decided (review round 4). An undecided row left alone is
             # simply a normal manual chip — the fail-closed outcome.
-            with _pending_policy_lock:
-                tracked = _pending_policy.get(session_id) or []
-                if cid not in tracked and len(tracked) >= MAX_PENDING_POLICY:
-                    print(f"[leaf-agent] policy auto-confirm: {session_id!r} "
-                          f"already has {len(tracked)} unfinished policy "
-                          f"decisions; leaving {cid!r} for a human",
-                          file=sys.stderr, flush=True)
-                    return False
             # GATE FIRST (routers/agent.py's load-bearing ordering). A gate
             # record that is corrupt/unreadable, or that refuses the grant,
             # means this chip stays manual - never decide the mirror against a
@@ -1075,17 +1099,20 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                     granted, _rec, reason = agent_gate.grant_approval(
                         cid, by=POLICY_DECIDER)
                 except Exception as exc:  # noqa: BLE001
+                    _forget_parked()  # nothing decided: release the reservation
                     print(f"[leaf-agent] policy auto-confirm: gate write failed "
                           f"({type(exc).__name__}) session={session_id!r}",
                           file=sys.stderr, flush=True)
                     return False
                 if not granted:
+                    _forget_parked()
                     print(f"[leaf-agent] policy auto-confirm: gate refused "
                           f"({reason}) session={session_id!r}",
                           file=sys.stderr, flush=True)
                     return False
             elif gate_status != "absent":
                 # corrupt / io_error: fail closed, leave it to a human.
+                _forget_parked()
                 print(f"[leaf-agent] policy auto-confirm: gate unreadable "
                       f"({gate_status}) session={session_id!r}",
                       file=sys.stderr, flush=True)
@@ -1110,16 +1137,30 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                       f"confirmation_id={cid!r} session={session_id!r} - a "
                       f"human approval repairs this; a denial cannot",
                       file=sys.stderr, flush=True)
+                # The GATE is granted, so this row is not "untouched" — keep the
+                # reservation so a later terminal retries the mirror write.
                 return False
             if outcome != "recorded":
-                # 'already_decided' / 'not_found': a human (or another thread)
-                # got here first - stand down, theirs wins.
+                # A racer got here first — stand down. WHO owns the slot now
+                # decides whether to release it: the slot belongs to the CID,
+                # not to this thread. If the winner was OUR OWN policy (another
+                # terminal racing the same cid), that winner is mid-flight and
+                # still needs the reservation — a loser that released it here
+                # freed capacity while the row was decided, letting a THIRD row
+                # be decided beyond the cap (round 5's decided>tracked). Only a
+                # row now owned by a HUMAN (or vanished) releases.
+                current = session_store.get_approval(cid)
+                if current is None or current.get("decided_by") != POLICY_DECIDER:
+                    _forget_parked()
                 return False
 
         try:
             consumed = session_store.consume_approval(cid, session_id, tenant_id)
         except session_store.ApprovalConsumeError:
-            return  # raced a human confirm - theirs wins
+            # The slot belongs to the cid: a consume race means a WINNER (our
+            # own policy on another thread, or a human confirm) holds the row
+            # mid-flight — leave the reservation to the winner's handlers.
+            return False
         confirm_payload = {
             "confirmation_id": cid,
             "approved": bool(consumed.get("approved")),
@@ -1147,13 +1188,12 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # PARK it, so a later terminal actually retries (see
             # _pending_policy). Returning the consume alone left the decision
             # with nothing to rediscover it.
-            with _pending_policy_lock:
-                slot = _pending_policy.setdefault(session_id, [])
-                if cid not in slot:
-                    # No truncation: capacity was reserved before this row was
-                    # ever decided, so the cap cannot be exceeded here and no
-                    # decided row is ever evicted.
-                    slot.append(cid)
+            # NOTHING to add: the slot was RESERVED above and is still held —
+            # a lost CAS simply means we do not release it. The old
+            # unconditional append here could re-add an id whose reservation
+            # had already been released on another path, pushing the list past
+            # its cap (review round 5); the bound only holds if the reservation
+            # is the ONE place the list grows.
             print(f"[leaf-agent] policy auto-confirm lost the CAS on "
                   f"session {session_id!r}; approval {cid!r} parked for the "
                   f"next terminal", file=sys.stderr, flush=True)
