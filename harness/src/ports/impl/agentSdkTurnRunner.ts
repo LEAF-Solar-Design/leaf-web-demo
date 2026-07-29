@@ -78,6 +78,7 @@ import type {
   TenantRepoProvider,
 } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { skillBundleAttachment } from "./skillBundle.js";
 import { findTool } from "../../registry/registerTool.js";
 
 // --------------------------------------------------------------------------- //
@@ -509,6 +510,14 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       return { behavior: "deny", message: `"${bare}" requires operator approval before it can run.`, interrupt: true };
     };
 
+    // Curated skill bundle for this tier, when one is mounted. `settingSources`
+    // stays [] — it CANNOT name a curated directory (its type is
+    // 'user' | 'project' | 'local', and 'user' is ~/.claude), so keeping it
+    // empty is exactly what excludes the operator's own skills. `plugins`
+    // supplies the bundle; `skills` is always an explicit allowlist because
+    // 'all' would also pull in the CLI's bundled developer skills.
+    const skillBundle = skillBundleAttachment();
+
     const q = sdk.query({
       prompt: buildPrompt(input),
       options: {
@@ -519,7 +528,13 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         permissionMode: "default",
         abortController: abort,
         mcpServers: { [MCP_SERVER_NAME]: server },
+        // Skills reach the model through the SDK's own `skills` option, which
+        // enables the Skill tool itself — so this list stays the APS tool only
+        // and the money-gated canUseTool envelope below is unchanged.
         allowedTools: [APS_TEST_RUN_MCP_NAME],
+        ...(skillBundle
+          ? { plugins: [skillBundle.plugin], skills: skillBundle.skills }
+          : {}),
         canUseTool,
       },
     });
