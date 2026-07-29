@@ -674,6 +674,17 @@ def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_tenan
             retryable=False, status_code=409,
         )
 
+    if outcome == "not_cancellable":
+        # A checkpoint restore holds the slot. It is not a turn and releases
+        # itself; cancelling it would append a false terminal event and let a
+        # real turn start while the restore is still writing the drawing.
+        return error_response(
+            ErrorCode.TURN_IN_PROGRESS,
+            f"a checkpoint restore is in progress on session {session_id!r}; "
+            f"it cannot be cancelled and will release shortly",
+            retryable=True, status_code=409,
+        )
+
     return JSONResponse(
         status_code=202,
         content=deps.tenant_echo(

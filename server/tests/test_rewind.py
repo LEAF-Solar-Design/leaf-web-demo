@@ -25,6 +25,7 @@ import pytest  # noqa: E402
 
 import checkpoints  # noqa: E402
 import session_store  # noqa: E402
+import turn_runner  # noqa: E402
 from routers import checkpoints as checkpoints_router  # noqa: E402
 
 
@@ -87,6 +88,7 @@ def drawing(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "store", types.SimpleNamespace(
         ANONYMOUS_HOLDER="anonymous", load_manifest=manifest,
+        authority_mode=lambda: "legacy",
         resolve_version=resolve,
         CheckoutDenied=_CheckoutDenied, CheckoutParamError=_CheckoutParamError,
         checkout_active=lambda *a, **k: False,
@@ -283,3 +285,55 @@ def test_restore_reports_audit_append_failure_after_drawing_commit(client, drawi
     assert restored.json()["event_recorded"] is False
     assert restored.json()["event_seq"] is None
     assert drawing["head"] == 3
+
+
+def test_a_restore_reservation_cannot_be_cancelled_as_a_turn(client, drawing):
+    """Review round 2, blocker 1: the reservation sits in the active-turn slot,
+    so the ordinary cancel route saw a cancellable turn — appending a FALSE
+    turn_complete, releasing the reservation, and letting a real turn run while
+    the restore was still writing."""
+    session = _session()
+    sid = session["session_id"]
+    checkpoint = _checkpoint(client, session)
+    reservation = f"restore-{checkpoint['checkpoint_id']}"
+    assert session_store.try_begin_turn(sid, reservation, 300)
+    try:
+        outcome = turn_runner.request_cancel(session["tenant_id"], sid, reservation)
+        assert outcome == "not_cancellable", (
+            "the cancel path terminalized a restore reservation")
+        # the slot is still held and no false terminal event was written
+        assert session_store.get_session(sid)["active_turn_id"] == reservation
+        assert [e["type"] for e in session_store.recent_events(sid, 50)] == []
+    finally:
+        session_store.end_turn(sid, reservation)
+
+
+def test_releasing_a_restore_reservation_kicks_a_queued_prompt(client, drawing, monkeypatch):
+    """Review round 2, finding 2: a prompt parked behind the reservation had no
+    other event coming — every real terminal kicks the queue, so this must too."""
+    session = _session()
+    sid = session["session_id"]
+    kicked = []
+    monkeypatch.setattr(turn_runner, "_kick_queued", lambda s: kicked.append(s))
+    checkpoint = _checkpoint(client, session)
+    _restore(client, session, checkpoint)
+    assert kicked == [sid], (
+        "releasing the restore reservation did not kick the queue")
+
+
+def test_restore_refuses_the_postgres_authority_explicitly(client, drawing, monkeypatch):
+    """Review round 2, blocker 3: under the PostgreSQL authority a restore can
+    only produce a confusing 409/403 from deep in the store, because publishing
+    needs an active checkout and a restore names no session. Refuse up front,
+    honestly, and mutate nothing."""
+    session = _session()
+    checkpoint = _checkpoint(client, session)
+    before = dict(drawing["blobs"])
+    monkeypatch.setattr(checkpoints_router, "store_authority_mode", lambda: "postgres")
+
+    restored = _restore(client, session, checkpoint)
+
+    assert restored.status_code == 409, restored.text
+    assert "not yet supported" in restored.json()["error"]["message"]
+    assert drawing["blobs"] == before
+    assert session_store.events_after(session["session_id"], 0) == []
