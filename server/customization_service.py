@@ -35,6 +35,7 @@ from uuid import uuid4
 from psycopg import Error as PostgresError
 
 import deps
+from fastapi import HTTPException
 import entitlements
 import platform_link
 from customization_authority import (
@@ -181,6 +182,21 @@ def _bare_repo(tenant_id: str) -> Path:
     return resolved
 
 
+def _active_context(tenant: Any) -> Any:
+    """The caller's ACTIVE platform identity, or a fail-closed error.
+
+    deps.resolve_active_tenant_context raises HTTPException; converting it here
+    keeps the route's §10 error envelope instead of FastAPI's default body.
+    """
+    try:
+        return deps.resolve_active_tenant_context(tenant)
+    except HTTPException as exc:
+        raise CustomizationServiceError(
+            "tenant_identity_binding_unavailable",
+            exc.status_code if exc.status_code in (403, 503) else 503,
+        ) from exc
+
+
 def _binding(tenant: Any) -> TenantBinding:
     tenant_id = _tenant_id(tenant)
     if not deps.auth_live():
@@ -198,30 +214,30 @@ def _binding(tenant: Any) -> TenantBinding:
             binding = platform_store.resolve_active_identity_binding("auth0", subject)
             if binding is None:
                 raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
-            # Compare against the ACTIVE binding, not the raw JWT claim. As
-            # deps.resolve_active_tenant_context puts it, "JWT tenant and org
-            # claims can outlive an account move", and every tenant provisioned
-            # through POST /api/orgs carries a human-readable claim while its
-            # platform id is a UUID — so comparing the resolved binding against
-            # the presented claim refused EVERY authenticated author call.
-            # Resolving here rather than in the route dependency keeps a
-            # disabled tenant's fast 404 ahead of any authority lookup.
-            try:
-                active = deps.resolve_active_tenant_context(tenant)
-                expected_org = str(
-                    getattr(active, "org_id", "") or _tenant_id(active))
-            except Exception:  # noqa: BLE001
-                # Resolution is an ALLOWANCE, never a relaxation: falling back
-                # to the presented claim can only refuse more, never admit more,
-                # so an authority hiccup degrades to the previous behaviour
-                # instead of opening the check.
-                expected_org = str(getattr(tenant, "org_id", "") or tenant_id)
+            # Resolve the ACTIVE binding rather than trusting the presented
+            # claim. As deps.resolve_active_tenant_context puts it, "JWT tenant
+            # and org claims can outlive an account move", and every tenant
+            # provisioned through POST /api/orgs carries a human-readable claim
+            # while its platform id is a UUID — so comparing the resolved
+            # binding against the presented claim refused EVERY authenticated
+            # author call.
+            #
+            # There is deliberately NO fallback to the claim. Resolution also
+            # asserts the org is ACTIVE (deps.resolve_active_platform_tenant_
+            # authority), which the comparison alone does not, so degrading to
+            # the claim would ADMIT a request against an inactive org. An
+            # authority outage must fail closed instead.
+            active = _active_context(tenant)
+            expected_org = str(getattr(active, "org_id", "") or _tenant_id(active))
             if str(binding.platform_tenant_id) != expected_org:
                 raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
             role = platform_store.active_identity_role(
                 binding.platform_tenant_id, binding.binding_id
             )
-            return TenantBinding(tenant_id, subject, role, True)
+            # Return the RESOLVED tenant. Handing back the raw claim would let
+            # authorization pass on the subject's current role in one tenant
+            # while the mutation targeted the tenant named by a stale claim.
+            return TenantBinding(_tenant_id(active), subject, role, True)
         except CustomizationServiceError:
             raise
         except (PostgresError, OSError, RuntimeError, ValueError) as exc:
@@ -323,7 +339,13 @@ class CustomizationService:
         if mode != "build" or not isinstance(description, str) or not description.strip():
             raise CustomizationServiceError("invalid_stage_request", 422)
         binding = _binding(tenant)
-        tier = entitlements.resolve_tier(tenant)
+        # Everything after authorization targets the RESOLVED tenant, so the
+        # identity that was authorized and the identity being mutated are the
+        # same one. The rollout gate above deliberately stays on the presented
+        # id so a disabled tenant still gets its cheap 404 before any authority
+        # lookup.
+        tenant_id = binding.tenant_id
+        tier = entitlements.resolve_tier(_active_context(tenant))
         if not entitlements.entitlements_for(tier).get("build", False):
             raise CustomizationServiceError("builder_entitlement_missing", 403)
         self._authority().authorize_stage(

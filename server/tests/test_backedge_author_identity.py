@@ -230,6 +230,25 @@ def test_the_elevation_helper_applies_the_staleness_bound(session, monkeypatch):
 # --------------------------------------------------------------------------- #
 # postgres parity — the SQL guards, not just the tuple comparison
 # --------------------------------------------------------------------------- #
+def test_every_production_caller_applies_the_staleness_bound():
+    """Both callers, not just the elevation helper.
+
+    The internal gate resolves the same subject for grant binding; dropping the
+    bound there alone would leave a stale turn authorizing new grants.
+    """
+    import inspect
+
+    from routers import agent as agent_router
+
+    gate_src = inspect.getsource(agent_router.internal_gate)
+    assert "active_turn_subject(" in gate_src
+    assert "turn_runner.turn_max_s()" in gate_src, (
+        "the internal gate resolves a subject without a staleness bound"
+    )
+    helper_src = inspect.getsource(deps.backedge_author_identity)
+    assert "turn_max_s()" in helper_src
+
+
 def test_postgres_subject_lookup_guards_session_turn_and_tenant():
     """The Postgres statement must carry the same three-way guard as SQLite.
 
@@ -241,8 +260,12 @@ def test_postgres_subject_lookup_guards_session_turn_and_tenant():
 
     sql = inspect.getsource(session_store._pg_active_turn_subject)
     assert "active_turn_subject" in sql
-    for guard in ("session_id = %s", "active_turn_id = %s", "tenant_id = %s"):
-        assert guard in sql, f"postgres subject lookup lost its {guard!r} guard"
+    # The whole conjunction, not three separate substrings: checking the parts
+    # individually still passes when an AND is flipped to an OR.
+    assert (
+        "WHERE session_id = %s AND active_turn_id = %s AND tenant_id = %s"
+        in " ".join(sql.split()).replace('" "', "")
+    ), "postgres subject lookup lost or loosened its three-way guard"
     # and it must read the start time, or it cannot apply the staleness bound
     assert "turn_started_at" in sql
     assert "_turn_is_stale" in sql
@@ -255,49 +278,67 @@ def test_postgres_terminal_event_releases_the_subject():
     import inspect
 
     sql = inspect.getsource(session_store._pg_append_event)
-    terminal = sql[sql.index("turn_complete"):]
+    terminal = " ".join(sql[sql.index("turn_complete"):].split()).replace('" "', "")
     assert "active_turn_subject = NULL" in terminal
+    # and it must still only clear the turn it names
+    assert "WHERE session_id = %s AND active_turn_id = %s" in terminal, (
+        "the postgres terminal clear lost its active-turn guard"
+    )
 
 
 # --------------------------------------------------------------------------- #
 # the raw claim is not the identity
 # --------------------------------------------------------------------------- #
-def test_the_binding_check_uses_the_resolved_org_not_the_raw_claim():
-    """_binding must compare the active binding against the RESOLVED org.
+def test_the_binding_check_resolves_and_never_falls_back_to_the_claim():
+    """_binding must resolve the active identity, with NO claim fallback.
 
-    A JWT claim can outlive an account move, and every tenant provisioned
-    through POST /api/orgs carries a human-readable claim while its platform id
-    is a UUID. Comparing the resolved binding against the presented claim
-    refused every authenticated author call. Observed on staging: claim
-    "acceptance-tenant-a-20260728" against active binding
-    "bccb0d64-04c9-4108-bcc1-f27b8bb3924d".
+    Resolution does more than translate an id: it also asserts the org is
+    ACTIVE. Degrading to the presented claim on an authority failure would
+    therefore ADMIT a request against an inactive org, so "the fallback can
+    only refuse more" was wrong and the fallback is gone.
 
-    Resolution belongs here and not in the route dependency: resolving in the
-    dependency would run the platform authority before the customization gate,
-    turning a disabled tenant's fast 404 into a 503 whenever that authority is
-    unavailable.
+    Observed on staging before the fix: claim "acceptance-tenant-a-20260728"
+    compared against active binding "bccb0d64-04c9-4108-bcc1-f27b8bb3924d".
     """
     import inspect
 
     import customization_service
     from routers import author as author_router
 
-    binding_src = inspect.getsource(customization_service._binding)
-    assert "resolve_active_tenant_context" in binding_src, (
-        "_binding compares against the raw JWT claim"
+    src = inspect.getsource(customization_service._binding)
+    assert "_active_context" in src, "_binding no longer resolves the identity"
+    assert 'getattr(tenant, "org_id"' not in src, (
+        "_binding still reads the unresolved claim for its org comparison"
     )
-    # The raw claim survives only as the fallback when resolution fails, and
-    # that fallback can only refuse more, never admit more.
-    resolved_at = binding_src.index("resolve_active_tenant_context")
-    fallback_at = binding_src.index('getattr(tenant, "org_id"')
-    assert fallback_at > resolved_at, (
-        "_binding reads the unresolved claim before trying to resolve it"
+    assert "except Exception" not in src, (
+        "a swallowed resolver failure would re-open the claim fallback"
     )
-    assert "except Exception" in binding_src[resolved_at:fallback_at], (
-        "the raw claim must be reachable only as a resolution failure fallback"
-    )
-    # And the routes stay on the cheap dependency so the gate runs first.
+    # Resolution stays out of the route dependency so a disabled tenant keeps
+    # its cheap 404 ahead of any authority lookup.
     assert "Depends(deps.require_tenant)" in inspect.getsource(author_router)
+
+
+def test_authorization_and_mutation_target_the_same_tenant():
+    """_binding returns the RESOLVED tenant, and stage mutates under it.
+
+    Returning the raw claim would let authorization pass on the subject's
+    current role in one tenant while the change set was written under the
+    tenant named by a stale claim.
+    """
+    import inspect
+
+    import customization_service
+
+    binding_src = inspect.getsource(customization_service._binding)
+    assert "TenantBinding(_tenant_id(active)" in binding_src, (
+        "_binding hands back the raw claim instead of the resolved tenant"
+    )
+    stage_src = inspect.getsource(customization_service.CustomizationService.stage)
+    assert "tenant_id = binding.tenant_id" in stage_src, (
+        "stage mutates under the presented id rather than the authorized one"
+    )
+    # and the entitlement decision uses the resolved tenant's tier
+    assert "resolve_tier(_active_context(tenant))" in stage_src
 
 
 def test_the_active_resolver_leaves_a_backedge_identity_alone(monkeypatch):

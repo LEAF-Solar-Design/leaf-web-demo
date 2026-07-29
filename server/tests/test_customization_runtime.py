@@ -373,6 +373,13 @@ def test_database_binding_uses_collision_safe_platform_alias(monkeypatch):
     monkeypatch.setattr(
         store, "active_identity_role", lambda tenant_id, binding_id: "owner"
     )
+    # _binding now resolves the ACTIVE identity rather than trusting the claim,
+    # and resolution asserts the org is active, so the org lookup is part of the
+    # path under test.
+    monkeypatch.setattr(
+        store, "get_org",
+        lambda tenant_id: SimpleNamespace(status="active", tier="hosted_pro"),
+    )
     tenant = customization_service.deps.TenantContext(
         "tenant-a", org_id="tenant-a", subject="auth0|user"
     )
