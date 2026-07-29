@@ -5,16 +5,16 @@
 FROM python:3.12-slim
 
 ARG LEAF_SOURCE_SHA
-ARG AWS_RDS_CA_BUNDLE_URL=https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
 
-RUN python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')" "$LEAF_SOURCE_SHA" \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')" "$LEAF_SOURCE_SHA" \
     && addgroup --system --gid 65532 leaf \
     && adduser --system --uid 65532 --ingroup leaf --home /nonexistent --no-create-home leaf \
     && mkdir -p /run/leaf/secrets \
     && chown 65532:65532 /run/leaf/secrets \
     && chmod 0700 /run/leaf/secrets
-
-RUN python -c "from pathlib import Path; from urllib.request import urlopen; url='$AWS_RDS_CA_BUNDLE_URL'; data=urlopen(url, timeout=30).read(); assert b'-----BEGIN CERTIFICATE-----' in data; path=Path('/etc/ssl/certs/aws-rds-global-bundle.pem'); path.write_bytes(data); path.chmod(0o444)"
 
 COPY executor/control_plane/requirements.txt /tmp/control-plane-requirements.txt
 COPY executor/runtime/requirements.txt /tmp/runtime-requirements.txt
