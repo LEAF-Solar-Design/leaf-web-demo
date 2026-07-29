@@ -89,13 +89,19 @@ def create_checkpoint(session_id: str, tenant_id: str, drawing_id: str,
     return _row_to_checkpoint(row)
 
 
-def list_checkpoints(session_id: str) -> List[Dict[str, Any]]:
+def list_checkpoints(session_id: str, tenant_id: str) -> List[Dict[str, Any]]:
+    """Session AND tenant scoped. The router's ownership guard runs first, but
+    the STORAGE boundary must hold on its own — a future caller that skips the
+    guard, or a session id colliding across tenants, must still read nothing
+    foreign (review round 1, the same defense-in-depth every session_store
+    query keeps)."""
     with _lock:
         conn = _db()
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT * FROM session_checkpoints WHERE session_id = ?"
+            "SELECT * FROM session_checkpoints"
+            " WHERE session_id = ? AND tenant_id = ?"
             " ORDER BY created_at ASC, checkpoint_id ASC",
-            (session_id,),
+            (session_id, str(tenant_id)),
         ).fetchall()
     return [_row_to_checkpoint(row) for row in rows]

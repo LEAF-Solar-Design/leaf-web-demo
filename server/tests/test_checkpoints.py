@@ -22,6 +22,7 @@ if str(SERVER_DIR) not in sys.path:
 import pytest  # noqa: E402
 
 import session_store  # noqa: E402
+import checkpoints  # noqa: E402
 from routers import checkpoints as checkpoints_router  # noqa: E402
 
 
@@ -146,3 +147,23 @@ def test_drawing_version_reads_the_current_head_without_bootstrapping(monkeypatc
 
     assert _REAL_DRAWING_VERSION("tenant-a", "drawing-a") == 9
     assert calls == [(backend, "tenant-a", "drawing-a")]
+
+
+def test_storage_boundary_filters_by_tenant_not_just_session():
+    """Review round 1 MAJOR: the STORE itself must scope by tenant — the
+    router's guard is the first wall, not the only one. A caller reading the
+    same session_id under a different tenant_id gets nothing."""
+    session = _session()
+    created = checkpoints.create_checkpoint(
+        session_id=session["session_id"], tenant_id="tenant-a",
+        drawing_id=session["drawing_id"], drawing_version="7",
+        transcript_seq=0, label=None)
+    assert created is not None
+
+    own = checkpoints.list_checkpoints(session["session_id"], "tenant-a")
+    foreign = checkpoints.list_checkpoints(session["session_id"], "tenant-b")
+
+    assert [c["checkpoint_id"] for c in own] == [created["checkpoint_id"]]
+    assert foreign == [], (
+        "the storage layer returned another tenant's checkpoints — the "
+        "tenant filter is missing from the SELECT")

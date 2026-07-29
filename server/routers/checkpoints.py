@@ -98,5 +98,5 @@ def create_checkpoint(session_id: str, req: CreateCheckpointRequest,
 def list_checkpoints(session_id: str, tenant=Depends(deps.require_active_tenant)):
     if _require_owned_session(session_id, tenant) is None:
         return _session_not_found(session_id)
-    body = {"checkpoints": checkpoints.list_checkpoints(session_id)}
+    body = {"checkpoints": checkpoints.list_checkpoints(session_id, str(tenant))}
     return deps.tenant_echo(with_envelope_fields(body), tenant)
