@@ -678,7 +678,7 @@ def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_tenan
         return _session_not_found(session_id)
 
     try:
-        outcome = turn_runner.request_cancel(str(tenant), session_id, turn_id)
+        outcome = turn_runner.request_cancel(tenant, session_id, turn_id)
     except turn_runner.TurnRejected as exc:
         return _turn_rejected_response(exc)
 

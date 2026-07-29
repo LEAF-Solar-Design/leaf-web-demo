@@ -731,3 +731,64 @@ def test_a_reservation_release_retries_the_parked_decision(monkeypatch, turn_stu
         "the reservation's release never retried the parked policy decision")
     with turn_runner._pending_policy_lock:
         assert sid not in turn_runner._pending_policy
+
+
+def test_a_sync_rejections_release_retries_the_park(monkeypatch):
+    """Review round 9: start_turn's synchronous rejection released the slot
+    with only the queue kick — a parked policy decision had nothing to retry
+    it. The no-URL rejection is deterministic: the direct turn rejects, its
+    release drains, the parked cid is attempted (also no URL, pre-harness) and
+    honestly unwound — the park must be EMPTY afterwards, not stranded."""
+    monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
+    monkeypatch.delenv("LEAF_CONVERSE_HARNESS_URL", raising=False)
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-syncrej", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-sr", tool="panel_count", params={},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+    assert session_store.try_begin_turn(sid, "orphan-sr", 300)
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-syncrej": {"capability": "drawing.read"}}, None, "demo")
+    with turn_runner._pending_policy_lock:
+        assert turn_runner._pending_policy.get(sid) == ["cid-syncrej"]
+    session_store.end_turn(sid, "orphan-sr")
+
+    with pytest.raises(turn_runner.TurnRejected):
+        turn_runner.start_turn("tenant-p", sid, text="direct")
+
+    with turn_runner._pending_policy_lock:
+        assert sid not in turn_runner._pending_policy, (
+            "the synchronous rejection's release never retried the park")
+
+
+def test_an_orphan_cancel_retries_the_park(monkeypatch, turn_stub):
+    """Review round 9: the orphan-cancel release ran only the queue kick."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-orphret", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-or", tool="panel_count", params={},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+    assert session_store.try_begin_turn(sid, "orphan-ret", 300)
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-orphret": {"capability": "drawing.read"}}, None, "demo")
+    with turn_runner._pending_policy_lock:
+        assert turn_runner._pending_policy.get(sid) == ["cid-orphret"]
+
+    assert turn_runner.request_cancel("tenant-p", sid, "orphan-ret") == "cancelled"
+
+    assert _wait_until(
+        lambda: session_store.get_approval("cid-orphret")["consumed"] is True), (
+        "the orphan cancel's release never retried the parked decision")

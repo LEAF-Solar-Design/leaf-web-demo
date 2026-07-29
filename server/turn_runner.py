@@ -522,6 +522,13 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # slot's `starting` claim is still held, so the nested kick returns
         # immediately.
         session_store.end_turn(session_id, turn_id)
+        # BOTH follow-ups, like every other slot releaser (review round 9: the
+        # queue kick alone left a policy decision parked against this exact
+        # release with nothing to retry it). tier/entitlement_tier are the
+        # snapshots this start_turn already took. Re-entrancy is bounded the
+        # same way as the kick: a nested attempt on a cid that is mid-flight
+        # sees its transient consumed/claimed state and stands down.
+        _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier)
         _kick_queued(session_id)
 
     def _rejected(*args: Any, **kwargs: Any) -> TurnRejected:
@@ -686,7 +693,7 @@ def _eof_terminal(deadline: float) -> tuple:
     return None, None
 
 
-def request_cancel(tenant_id: str, session_id: str, turn_id: str) -> str:
+def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
     """Interrupt an in-flight turn. Returns "cancelled" or "not_active".
 
     Two paths, and the fallback is the point:
@@ -705,6 +712,13 @@ def request_cancel(tenant_id: str, session_id: str, turn_id: str) -> str:
     turn is refused rather than silently accepted, so a stale client cannot
     terminalize the turn that replaced the one it was looking at.
     """
+    # Snapshot BEFORE flattening (the router passes the live principal): the
+    # orphan branch below runs the terminal follow-ups, and the policy retry's
+    # entitlement check must see the caller's real tier — a flattened string
+    # resolves to the demo tier, which under live auth would run the retry
+    # with entitlements the tenant may not hold.
+    tier = getattr(tenant_id, "tier", None)
+    entitlement_tier = entitlements.resolve_tier(tenant_id)
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
@@ -738,7 +752,9 @@ def request_cancel(tenant_id: str, session_id: str, turn_id: str) -> str:
             pass
         session_store.end_turn(session_id, turn_id)
     # This path has no relay, so no _finalize_terminal will run for the turn —
-    # the queued prompt (if any) must be kicked here or it waits forever.
+    # BOTH follow-ups run here or a parked policy decision / queued prompt
+    # waits forever (review rounds 3 and 9).
+    _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier)
     _kick_queued(session_id)
     return "cancelled"
 
