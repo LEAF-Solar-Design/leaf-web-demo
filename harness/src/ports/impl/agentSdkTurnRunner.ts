@@ -3,6 +3,8 @@
  * (leaf-backend-gaps.md §2.1, ports/converse.ts FROZEN). This is the riskiest lane in
  * the sessions build: everything else (turn engine, store, approvals router) runs
  * against a scripted fake; this file is what eventually talks to the real SDK.
+ * Tenant MCP servers mount read-only in this release: their tools, resources, and
+ * prompts are listable, but tenant tool execution approval ships separately.
  *
  * === SDK reality, read from node_modules/@anthropic-ai/claude-agent-sdk/*.d.ts
  * (v0.3.214) before writing a line of mapping code below - not assumed ===
@@ -79,6 +81,13 @@ import type {
 } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
 import { skillBundleAttachment } from "./skillBundle.js";
+import {
+  describeConfig,
+  FileMcpBridgeStore,
+  resolveMcpAttachment,
+  type McpAttachment,
+  type McpBridgeStore,
+} from "./mcpBridge.js";
 import { findTool } from "../../registry/registerTool.js";
 
 // --------------------------------------------------------------------------- //
@@ -296,10 +305,14 @@ export function mapSdkMessage(raw: unknown, toolUseNames: Map<string, string> = 
 // fixture-tested, and (b) the live smoke gate the lane brief calls out separately.
 // =========================================================================== //
 
-const MCP_SERVER_NAME = "converse";
+export const MCP_SERVER_NAME = "converse";
 const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 const APS_TEST_RUN_TOOL = "aps_test_run";
 const APS_TEST_RUN_MCP_NAME = `${MCP_TOOL_PREFIX}${APS_TEST_RUN_TOOL}`;
+// Exact local MCP tool names that may bypass the tenant read-only denial. The
+// local server currently registers only aps_test_run, so no other MCP name is
+// exempted here.
+const LOCAL_MCP_TOOL_ALLOWLIST = new Set([APS_TEST_RUN_MCP_NAME]);
 
 /** Tools that mutate/spend real resources and therefore require operator approval
  *  before they run (leaf-backend-gaps.md §2.1: "aps_test_run / anything mutating"). */
@@ -307,6 +320,52 @@ const DEFAULT_APPROVAL_TOOLS = new Set<string>([APS_TEST_RUN_TOOL]);
 
 function bareToolName(name: string): string {
   return name.startsWith(MCP_TOOL_PREFIX) ? name.slice(MCP_TOOL_PREFIX.length) : name;
+}
+
+/** Remote MCP tool names are never auto-approved. They follow the same
+ * confirmation envelope as the existing write/spend wrapper. */
+export function requiresToolConfirmation(toolName: string, approvalTools: Set<string>): boolean {
+  return approvalTools.has(bareToolName(toolName)) || toolName.startsWith("mcp__");
+}
+
+const TENANT_MCP_TOOL_DENIAL = "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately";
+
+/** Tenant MCP servers expose listable data only until their approval flow exists. */
+export function tenantMcpToolDenial(toolName: string): { behavior: "deny"; message: string } | null {
+  return toolName.startsWith("mcp__") && !LOCAL_MCP_TOOL_ALLOWLIST.has(toolName)
+    ? { behavior: "deny", message: TENANT_MCP_TOOL_DENIAL }
+    : null;
+}
+
+/** Resolve a tenant attachment without exposing bridge failures to the chat turn. */
+export async function resolveMcpAttachmentSafely(
+  store: McpBridgeStore,
+  tenantId: string,
+  report: (message: string) => void = console.error,
+): Promise<McpAttachment | null> {
+  try {
+    return await resolveMcpAttachment(store, tenantId, report);
+  } catch {
+    // The store error can include arbitrary corrupted input. Keep diagnostics tied to
+    // the bridge's redacted formatter rather than rendering the error or configuration.
+    report(`[leaf-mcp] skipping tenant MCP attachment after bridge failure: ${describeConfig({ name: "<unavailable>", url: "" })}`);
+    return null;
+  }
+}
+
+/** Env-gated bridge construction. When unset, no store is constructed or read. */
+export async function resolveEnvMcpAttachment(
+  bridgeDir: string | undefined,
+  tenantId: string,
+  report: (message: string) => void = console.error,
+): Promise<McpAttachment | null> {
+  if (!bridgeDir) return null;
+  try {
+    return await resolveMcpAttachmentSafely(new FileMcpBridgeStore({ dir: bridgeDir }), tenantId, report);
+  } catch {
+    report(`[leaf-mcp] skipping tenant MCP attachment after bridge setup failure: ${describeConfig({ name: "<unavailable>", url: "" })}`);
+    return null;
+  }
 }
 
 /** Parse the wrapper's `params_json` field (see makeApsTestRun / apsTestRun.ts: the
@@ -362,6 +421,51 @@ export interface AgentSdkTurnRunnerOptions {
   /** Bare tool names that require operator confirmation before they run. Defaults to
    *  {"aps_test_run"}. */
   approvalTools?: Set<string>;
+}
+
+type CanUseTool = (
+  toolName: string,
+  input: Record<string, unknown>,
+) => Promise<{ behavior: string; message?: string; interrupt?: boolean; updatedInput?: Record<string, unknown> }>;
+
+/** The bridge contributes no SDK option while it is disabled or has no tenant config. */
+export function buildTenantMcpOptions(attachment: McpAttachment | null): { mcpServers?: McpAttachment } {
+  return attachment ? { mcpServers: attachment } : {};
+}
+
+export interface BuildTurnOptionsInput {
+  childEnv: NodeJS.ProcessEnv;
+  model: string | undefined;
+  maxTurns: number;
+  abortController: AbortController;
+  server: unknown;
+  skillBundle: ReturnType<typeof skillBundleAttachment>;
+  mcpAttachment: McpAttachment | null;
+  canUseTool: CanUseTool;
+}
+
+/** Assemble SDK options in one testable place. Tenant bridge servers are optional;
+ * the local converse server remains authoritative if a key collides. */
+export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, unknown> {
+  const { skillBundle } = input;
+  const tenantMcp = buildTenantMcpOptions(input.mcpAttachment);
+  return {
+    env: input.childEnv,
+    model: input.model,
+    maxTurns: input.maxTurns,
+    settingSources: [],
+    permissionMode: "default",
+    abortController: input.abortController,
+    // Load-bearing order: the local money-gated server wins any tenant key collision.
+    mcpServers: { ...(tenantMcp.mcpServers ?? {}), [MCP_SERVER_NAME]: input.server },
+    // Skills reach the model through the SDK's own `skills` option, which enables the
+    // Skill tool itself. This allowlist remains the existing APS MCP tool only.
+    allowedTools: [APS_TEST_RUN_MCP_NAME],
+    ...(skillBundle
+      ? { plugins: [skillBundle.plugin], skills: skillBundle.skills }
+      : {}),
+    canUseTool: input.canUseTool,
+  };
 }
 
 function summarizeEnvelope(envelope: ResultEnvelope): string {
@@ -480,8 +584,10 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       toolName: string,
       inp: Record<string, unknown>,
     ): Promise<{ behavior: string; message?: string; interrupt?: boolean; updatedInput?: Record<string, unknown> }> => {
+      const tenantMcpDenial = tenantMcpToolDenial(toolName);
+      if (tenantMcpDenial) return tenantMcpDenial;
       const bare = bareToolName(toolName);
-      if (!approvalTools.has(bare)) return { behavior: "allow", updatedInput: inp };
+      if (!requiresToolConfirmation(toolName, approvalTools)) return { behavior: "allow", updatedInput: inp };
 
       // `inp` here is the WRAPPER's (aps_test_run) own call args - {tool, params_json}
       // - not the tool the user actually wants to run. The proposal (and therefore the
@@ -517,26 +623,23 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     // supplies the bundle; `skills` is always an explicit allowlist because
     // 'all' would also pull in the CLI's bundled developer skills.
     const skillBundle = skillBundleAttachment();
+    const mcpAttachment = await resolveEnvMcpAttachment(process.env.LEAF_MCP_BRIDGE_DIR, input.tenant_id);
 
     const q = sdk.query({
       prompt: buildPrompt(input),
-      options: {
-        env: childEnv,
+      options: buildTurnOptions({
+        childEnv,
         model: this.opts.model,
         maxTurns,
-        settingSources: [],
-        permissionMode: "default",
         abortController: abort,
-        mcpServers: { [MCP_SERVER_NAME]: server },
+        server,
+        skillBundle,
+        mcpAttachment,
         // Skills reach the model through the SDK's own `skills` option, which
         // enables the Skill tool itself — so this list stays the APS tool only
         // and the money-gated canUseTool envelope below is unchanged.
-        allowedTools: [APS_TEST_RUN_MCP_NAME],
-        ...(skillBundle
-          ? { plugins: [skillBundle.plugin], skills: skillBundle.skills }
-          : {}),
         canUseTool,
-      },
+      }),
     });
 
     let turnCount = 0;

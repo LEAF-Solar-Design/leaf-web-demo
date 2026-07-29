@@ -42,6 +42,14 @@ const MAX_CONFIGS_PER_TENANT = 16;
 const MAX_SERIALIZED_CONFIG_BYTES = 64 * 1024;
 const SERVER_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
+// "converse" remains the exact local server name used in existing diagnostics.
+export const RESERVED_MCP_SERVER_NAMES = new Set(["converse"]);
+const RESERVED_LOCAL_MCP_NAMESPACE = /^converse(__.*)?$/i;
+
+function isReservedServerName(name: string): boolean {
+  return RESERVED_MCP_SERVER_NAMES.has(name.toLowerCase()) || RESERVED_LOCAL_MCP_NAMESPACE.test(name);
+}
+
 function tenantHash(tenantId: string): string {
   return createHash("sha256").update(tenantId).digest("hex");
 }
@@ -68,7 +76,7 @@ function validationError(config: McpServerConfig): Error {
   return new Error(`mcp_bridge_invalid_config: ${describeConfig(config)}`);
 }
 
-function validateConfigs(configs: McpServerConfig[]): void {
+function validateConfigs(configs: McpServerConfig[], allowReservedServerNames = false): void {
   if (!Array.isArray(configs)) {
     throw new Error("mcp_bridge_invalid_configs: expected an array");
   }
@@ -82,6 +90,7 @@ function validateConfigs(configs: McpServerConfig[]): void {
       typeof config.name !== "string" ||
       !SERVER_NAME.test(config.name) ||
       config.name.endsWith(".") ||
+      (!allowReservedServerNames && isReservedServerName(config.name)) ||
       typeof config.url !== "string" ||
       (config.authToken !== undefined && typeof config.authToken !== "string")
     ) {
@@ -152,7 +161,9 @@ export class FileMcpBridgeStore implements McpBridgeStore {
     if (!existsSync(path)) return null;
     try {
       const configs = JSON.parse(readFileSync(path, "utf8")) as McpServerConfig[];
-      validateConfigs(configs);
+      // Old or tampered files can contain a now-reserved name. Keep the record
+      // readable so resolveMcpAttachment can skip it without mounting it.
+      validateConfigs(configs, true);
       return cloneConfigs(configs);
     } catch {
       throw new Error(`mcp_bridge_read_failed: tenant=${tenantHash(tenantId)}`);
@@ -199,17 +210,22 @@ export class FileMcpBridgeStore implements McpBridgeStore {
 export async function resolveMcpAttachment(
   store: McpBridgeStore,
   tenantId: string,
+  report: (message: string) => void = console.error,
 ): Promise<McpAttachment | null> {
   const configs = await store.get(tenantId);
   if (!configs?.length) return null;
 
   const attachment: McpAttachment = {};
   for (const config of configs) {
+    if (isReservedServerName(config.name)) {
+      report(`[leaf-mcp] skipping reserved tenant MCP server: ${describeConfig(config)}`);
+      continue;
+    }
     attachment[config.name] = {
       type: "http",
       url: config.url,
       ...(config.authToken ? { headers: { Authorization: `Bearer ${config.authToken}` } } : {}),
     };
   }
-  return attachment;
+  return Object.keys(attachment).length ? attachment : null;
 }

@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -50,7 +50,7 @@ describe("MCP bridge tenant isolation and redaction", () => {
 });
 
 describe("MCP bridge validation", () => {
-  it.each(["evil),Bash", "../../x", "trailing."])("refuses hostile server name %s", async (name) => {
+  it.each(["evil),Bash", "../../x", "trailing.", "converse", "CONVERSE", "converse__evil", "CONVERSE__X"])("refuses hostile server name %s", async (name) => {
     const store = new InMemoryMcpBridgeStore();
     await expect(store.set("tenant", [config(name)])).rejects.toThrow("mcp_bridge_invalid_config");
   });
@@ -75,6 +75,20 @@ describe("MCP bridge validation", () => {
 });
 
 describe("file-backed MCP bridge store", () => {
+  it("skips a stored reserved namespace without leaking its bearer in diagnostics", async () => {
+    const dir = scratch();
+    const tenantId = "pre-validation-tenant";
+    const store = new FileMcpBridgeStore({ dir });
+    await store.set(tenantId, [config("seed", "safe-token")]);
+    const [filename] = readdirSync(dir);
+    writeFileSync(join(dir, filename), JSON.stringify([config("converse__evil")]) + "\n", "utf8");
+
+    const diagnostics: string[] = [];
+    expect(await resolveMcpAttachment(new FileMcpBridgeStore({ dir }), tenantId, (message) => diagnostics.push(message))).toBeNull();
+    expect(diagnostics.join("\n")).toContain('authToken="<redacted>"');
+    expect(diagnostics.join("\n")).not.toContain(SENTINEL);
+  });
+
   it("round-trips configs without using the raw tenant id as a filename", async () => {
     const dir = scratch();
     const tenantId = "tenant-with-a-private-name";
