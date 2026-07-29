@@ -94,6 +94,29 @@ class BootstrapTests(unittest.TestCase):
             for target in written.values():
                 self.assertTrue(target.exists())
 
+    def test_requested_owner_is_applied_to_directory_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = self.environment("executor")
+            environment["LEAF_INSTANT_SECRET_OWNER_UID"] = "65532"
+            environment["LEAF_INSTANT_SECRET_OWNER_GID"] = "65532"
+
+            with mock.patch("executor.bootstrap.os.chown", create=True) as chown:
+                written = materialize("executor", environ=environment, output_directory=root)
+
+            self.assertEqual(set(EXECUTOR_FILES), set(written))
+            chown.assert_any_call(root, 65532, 65532)
+            for target in written.values():
+                chown.assert_any_call(mock.ANY, 65532, 65532)
+                self.assertTrue(target.exists())
+
+    def test_secret_owner_requires_uid_and_gid_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = self.environment("executor")
+            environment["LEAF_INSTANT_SECRET_OWNER_UID"] = "65532"
+            with self.assertRaisesRegex(BootstrapError, "set together"):
+                materialize("executor", environ=environment, output_directory=temporary)
+
     @unittest.skipIf(os.name == "nt", "Windows symlink creation can require elevated developer mode")
     def test_symlink_output_directory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -67,7 +67,9 @@ def materialize(
         raise BootstrapError("instant execution secret directory must be absolute")
     if root.exists() and root.is_symlink():
         raise BootstrapError("instant execution secret directory must not be a symlink")
+    owner = _secret_owner(source)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _own_path(root, owner)
     _harden_directory(root)
     if not stat.S_ISDIR(root.stat().st_mode):
         raise BootstrapError("instant execution secret path is not a directory")
@@ -93,6 +95,7 @@ def materialize(
                     stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
+                _own_path(temporary, owner)
                 _harden_file(temporary)
                 os.replace(temporary, target)
                 written[variable] = target
@@ -122,6 +125,32 @@ def _harden_file(target: Path) -> None:
     except PermissionError as exc:
         if exc.errno != errno.EPERM:
             raise
+
+
+def _secret_owner(source: Mapping[str, str]) -> tuple[int, int] | None:
+    raw_uid = source.get("LEAF_INSTANT_SECRET_OWNER_UID")
+    raw_gid = source.get("LEAF_INSTANT_SECRET_OWNER_GID")
+    if raw_uid is None and raw_gid is None:
+        return None
+    if not raw_uid or not raw_gid:
+        raise BootstrapError("secret owner UID and GID must be set together")
+    try:
+        uid = int(raw_uid, 10)
+        gid = int(raw_gid, 10)
+    except ValueError as exc:
+        raise BootstrapError("secret owner UID and GID must be decimal integers") from exc
+    if uid < 1 or gid < 1:
+        raise BootstrapError("secret owner UID and GID must be positive")
+    return uid, gid
+
+
+def _own_path(target: Path, owner: tuple[int, int] | None) -> None:
+    if owner is None:
+        return
+    chown = getattr(os, "chown", None)
+    if chown is None:
+        raise BootstrapError("secret owner was requested but os.chown is unavailable")
+    chown(target, owner[0], owner[1])
 
 
 def _decode(variable: str, raw: str, kind: str) -> bytes:
