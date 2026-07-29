@@ -122,6 +122,30 @@ export async function postMessage(sessionId, { text, confirm, classifier_hint } 
   throw tagged(res, body, `POST /api/sessions/${sessionId}/messages -> ${res.status}`)
 }
 
+// --- Slash-menu registry --------------------------------------------------
+// Commands + skills + tools in one tenant-scoped catalog (server:
+// converse_registry.build_registry). Every entry carries `kind` — which is
+// what web/src/composer.js rankEntries groups on — and `client_action`, which
+// filterRunnable uses to drop anything this client cannot dispatch.
+//
+// Resolves to an empty list on ANY failure: the picker degrades to the tools
+// the catalog lane already supplies rather than the composer erroring. A menu
+// is not worth breaking the input over.
+export async function fetchRegistry() {
+  try {
+    const res = await fetch(`${API_BASE}/api/converse/registry`, {
+      headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+    })
+    noteUnauthorized(res, '/api/converse/registry')
+    if (!res.ok) return { entries: [], counts: {} }
+    const body = await res.json().catch(() => null)
+    const entries = Array.isArray(body?.entries) ? body.entries : []
+    return { entries, counts: body?.counts || {} }
+  } catch {
+    return { entries: [], counts: {} }
+  }
+}
+
 // --- Interrupt (Esc / Stop) -----------------------------------------------
 // Ends the session's ACTIVE turn. The server terminalizes it as
 // `turn_complete{stop_reason:'interrupted'}` — an event this client already

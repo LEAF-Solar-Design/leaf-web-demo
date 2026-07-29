@@ -33,6 +33,22 @@ def is_internal(tool: Dict[str, Any], rules: Dict[str, Any]) -> bool:
     return any(name.startswith(p) for p in rules.get("qa_prefixes", []))
 
 
+def filter_internal(tools: List[Dict[str, Any]],
+                    include_internal: bool = False) -> List[Dict[str, Any]]:
+    """Drop internal/QA tools using the SAME rules `build_catalog` applies.
+
+    `build_catalog` filters as a side effect of grouping into families, so a
+    caller that wants a flat tool list (the converse slash-menu registry) had
+    no way to inherit that filtering and would otherwise ship internal/QA
+    tools straight into a tenant's picker. One predicate, one config, both
+    callers.
+    """
+    if include_internal:
+        return list(tools)
+    rules = _load_config().get("filter_rules", {})
+    return [t for t in tools if isinstance(t, dict) and not is_internal(t, rules)]
+
+
 def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any]) -> str:
     if tool.get("family_id"):
         return str(tool["family_id"])

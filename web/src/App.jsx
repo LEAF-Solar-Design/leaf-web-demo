@@ -46,7 +46,7 @@ import { shouldStartTour } from './demo/tourEntry.js'
 import DemoTour from './demo/DemoTour.jsx'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
-import { THRESHOLDS, classifyAgentError } from './converse.js'
+import { THRESHOLDS, classifyAgentError, fetchRegistry } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import useJobController from './controllers/useJobController.js'
 import useDrawingVersionController from './controllers/useDrawingVersionController.js'
@@ -255,6 +255,18 @@ export default function App() {
   const authorSectionRef = useRef(null)
   const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
   const barInputRef = useRef(null)      // ⌘K focuses the command bar input
+
+  // Slash-menu registry: commands + skills + tools in one tenant-scoped
+  // catalog. Fetched once; resolves to [] on any failure, in which case the
+  // picker falls back to the catalog lane's runnable tools — today's
+  // behaviour exactly, so a registry outage costs the menu nothing.
+  const [registryEntries, setRegistryEntries] = useState([])
+  useEffect(() => {
+    let live = true
+    fetchRegistry().then((r) => { if (live) setRegistryEntries(r.entries || []) })
+    return () => { live = false }
+  }, [])
+
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
   const toastSeqRef = useRef(0)         // monotonic toast ids
@@ -476,6 +488,25 @@ export default function App() {
   // Unknown linkage (mock, or the endpoint undeployed -> grant === null) never
   // gates — authoring stays byte-identical to today (template path unaffected).
   const claudeNotLinked = !mock && !!grant && grant.linked === false
+
+  // Handlers for registry entries of kind "command". This map IS the gate:
+  // composer.js filterRunnable drops any command whose action is missing here,
+  // so the picker cannot list something that would do nothing. A command
+  // becomes visible the moment its handler lands — `/stop` stays hidden until
+  // the composer can reach the converse panel's interrupt, which is the next
+  // chip rather than a promise made in a menu.
+  //
+  // Placed after the catalog-controller destructuring that binds
+  // `onPromptChange` (the canonical way to set the well's text — it also
+  // invalidates a stale route) and before the JSX that reads this map.
+  const slashCommandActions = useMemo(() => ({
+    help: () => {
+      // The menu IS the help: reopen it on a bare slash and put the caret back
+      // in the well so the next keystroke filters.
+      onPromptChange('/')
+      barInputRef.current?.focus()
+    },
+  }), [onPromptChange])
 
   // --- single-writer checkout (item 3) ---
   // The holder is a per-session display identity, never the tenant. A copied tab
@@ -2277,7 +2308,11 @@ export default function App() {
             inputRef={barInputRef}
             routeActive={!!route}
             onOpenAuthor={onOpenAuthor}
-            tools={slashTools}
+            // The registry supersedes the tools-only list when it loaded (its
+            // entries carry `kind`, which is what groups the picker); a failed
+            // fetch falls back to exactly today's list.
+            tools={registryEntries.length ? registryEntries : slashTools}
+            commandActions={slashCommandActions}
           />
         </div>
 
