@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header
@@ -45,6 +46,39 @@ SUMMARY_LAYER_CAP = 50
 # would fork the chain without it.
 _RESTORE_LOCK = threading.Lock()
 CACHED_DEMO_DRAWING_ID = "rooftop_demo"
+
+
+@dataclass(frozen=True)
+class RestoredDrawingVersion:
+    """The committed restore version and the state needed by route callers."""
+
+    version: int
+    parent_version: int
+    restored_head_readable: bool
+
+
+class RestoreSourceUnavailable(Exception):
+    """The requested immutable source version is absent."""
+
+
+class RestoreSourceUnreadable(Exception):
+    """The requested source cannot safely become a readable new head."""
+
+
+class RestoreDrawingUnavailable(Exception):
+    """The drawing disappeared or became malformed before commit."""
+
+
+class RestoreCommitRejected(Exception):
+    """The store rejected the restore before it committed."""
+
+
+class RestoreMutationsDisabled(Exception):
+    """A storage cutover has drained drawing mutations."""
+
+
+class RestoreCheckoutDenied(Exception):
+    """The store refused the restore under its checkout fence."""
 
 
 def _mutation_gate() -> Optional[JSONResponse]:
@@ -486,6 +520,80 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
 
 
+def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int,
+                            *, actor: str, holder: Optional[str] = None,
+                            fence: Optional[int] = None,
+                            backend: Any = None) -> RestoredDrawingVersion:
+    """Copy one readable immutable version forward through the safe write path.
+
+    Both drawing-version and checkpoint restores use this service so every
+    restore validates intake, holds the cutover guard, uses the store's
+    parent-head compare-and-set, enforces the checkout fence, and publishes the
+    new version's intake cache.
+    """
+    import store
+
+    backend = backend if backend is not None else _backend(tenant_id)
+    try:
+        source_v, source_key = store.resolve_version(
+            backend, tenant_id, drawing_id, int(target_version))
+        source_bytes = backend.get(source_key)
+    except (KeyError, ValueError) as exc:
+        raise RestoreSourceUnavailable(str(exc)) from exc
+
+    try:
+        _, source_intake = write_loop.read_intake(
+            backend, tenant_id, drawing_id, source_v)
+        if not isinstance(source_intake, dict):
+            raise ValueError("intake payload is not an object")
+    except write_loop.ProofStateUnreadable:
+        raise
+    except (KeyError, ValueError) as exc:
+        raise RestoreSourceUnreadable(str(exc)) from exc
+
+    try:
+        blob_is_intake = isinstance(json.loads(source_bytes.decode("utf-8")), dict)
+    except (UnicodeDecodeError, ValueError):
+        blob_is_intake = False
+
+    with _RESTORE_LOCK:
+        try:
+            with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+                if not commit_enabled:
+                    raise RestoreMutationsDisabled
+                try:
+                    manifest = store.load_manifest(backend, tenant_id, drawing_id)
+                except (KeyError, ValueError) as exc:
+                    raise RestoreDrawingUnavailable(str(exc)) from exc
+                parent_version = int(manifest["head"])
+                put_holder = holder if holder is not None else store.ANONYMOUS_HOLDER
+                try:
+                    new_version = write_loop._put_bytes_version(
+                        backend, tenant_id, drawing_id, source_bytes,
+                        parent_version=parent_version,
+                        meta={"tool": actor, "note": f"{actor} of version {target_version}"},
+                        holder=put_holder, fence=fence,
+                        require_parent_is_head=True,
+                    )
+                except ValueError as exc:
+                    raise RestoreCommitRejected(str(exc)) from exc
+                restored_head_readable = True
+                try:
+                    write_loop.publish_intake_cache(
+                        backend, tenant_id, drawing_id, new_version,
+                        source_bytes, source_intake)
+                except Exception:  # noqa: BLE001 - the immutable head committed
+                    restored_head_readable = blob_is_intake
+        except store.CheckoutDenied as exc:
+            raise RestoreCheckoutDenied(str(exc)) from exc
+
+    return RestoredDrawingVersion(
+        version=int(new_version),
+        parent_version=parent_version,
+        restored_head_readable=restored_head_readable,
+    )
+
+
 @router.post("/api/drawings/{drawing_id}/versions/{version}/restore")
 def restore_version(drawing_id: str, version: int,
                     tenant_id: str = Depends(deps.require_active_tenant),
@@ -522,149 +630,52 @@ def restore_version(drawing_id: str, version: int,
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
                               status_code=400)
 
-    # The RAW stored payload, verbatim — never a re-serialization. In live
-    # representation (APS_LIVE=1) a version's payload is DWG bytes and the
-    # intake rides a sibling cache key; re-serializing parsed intake here
-    # would store JSON where the next APS write expects a DWG. Copying the
-    # blob byte-for-byte also keeps the restored version's sha256 equal to
-    # its source, which the tests pin.
     try:
-        source_v, source_key = store.resolve_version(
-            backend, str(tenant_id), drawing_id, int(version))
-        source_bytes = backend.get(source_key)
-    except (KeyError, ValueError) as exc:
+        restored = restore_drawing_version(
+            str(tenant_id), drawing_id, int(version), actor="restore",
+            holder=holder, fence=fence, backend=backend)
+    except RestoreSourceUnavailable as exc:
         return error_response(ErrorCode.BAD_PARAMS,
                               f"version {version} unavailable: {exc}",
                               retryable=False, status_code=404)
-
-    # Readability + source-binding pre-check through the ONE reader every
-    # consumer uses: write_loop.read_intake enforces the cache/marker digest
-    # proof for PostgreSQL-backed uploads (a cache swapped for other content
-    # is rejected there, where a raw backend.get would accept it), and its
-    # result must be an intake-shaped DICT — `null`, a list, or a bare
-    # string parse as JSON but leave every consumer broken. The validated
-    # intake is also what the mirror below writes: the cache is DERIVED data
-    # (canonical re-serialization is its normal form); byte-fidelity applies
-    # to the immutable version BLOB, which is copied verbatim above.
-    try:
-        _, source_intake = write_loop.read_intake(
-            backend, str(tenant_id), drawing_id, source_v)
-        if not isinstance(source_intake, dict):
-            raise ValueError("intake payload is not an object")
     except write_loop.ProofStateUnreadable as exc:
         return error_response(ErrorCode.INTERNAL, str(exc), retryable=True,
                               status_code=503)
-    except (KeyError, ValueError) as exc:
+    except RestoreSourceUnreadable as exc:
         return error_response(
             ErrorCode.BAD_PARAMS,
             f"version {version} is not readable as intake ({exc}); "
             "restoring it would produce an unusable head",
             retryable=False, status_code=422)
-    # Whether the BLOB alone is readable (mock representation: the blob IS
-    # the intake). Decides restored_head_readable if the cache mirror fails.
-    try:
-        blob_is_intake = isinstance(json.loads(source_bytes.decode("utf-8")), dict)
-    except (UnicodeDecodeError, ValueError):
-        blob_is_intake = False
-
-    with _RESTORE_LOCK:
-        # Serializes concurrent restores IN THIS PROCESS so both re-read a
-        # fresh head and the chain stays linear (the legacy filesystem
-        # authority accepts any parent_version — reproduced: two racing
-        # restores fork the chain). Cross-PROCESS arbitration is the store's:
-        # under the PostgreSQL authority (production) a stale parent is
-        # refused under its row lock (409 below), and under an ACTIVE
-        # checkout the holder check refuses either writer. The one shape no
-        # lock covers is legacy-authority, no-checkout, restore racing the
-        # broker's OWN write from another process — the same unarbitrated
-        # window every pair of legacy mutators (write vs undo, write vs
-        # write across processes) already shares; the legacy authority is
-        # the APS_LIVE=0 mock tier, deployed single-writer by contract.
-        try:
-            with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-                if not commit_enabled:
-                    return error_response(
-                        ErrorCode.INTERNAL,
-                        "drawing mutations are temporarily disabled for a storage cutover",
-                        retryable=True, status_code=503,
-                    )
-                # Manifest read INSIDE lock+guard. KeyError -> 404; a manifest
-                # that turned CORRUPT since the shared preflight surfaces the
-                # same 400 the whole mutating family gives (undo/redo's
-                # documented preflight idiom), never a retryable shape.
-                try:
-                    m = store.load_manifest(backend, str(tenant_id), drawing_id)
-                except KeyError as exc:
-                    return error_response(ErrorCode.BAD_PARAMS,
-                                          f"drawing unavailable: {exc}",
-                                          retryable=False, status_code=404)
-                except ValueError as exc:
-                    return error_response(ErrorCode.BAD_PARAMS, str(exc),
-                                          retryable=False, status_code=400)
-                head_v = int(m["head"])
-                # Single-writer identity for the put. A (None, None) preflight
-                # means "no active lease to prove" — but passing None lets the
-                # store SKIP its ownership check entirely, so a checkout
-                # acquired between preflight and put would be bypassed.
-                # ANONYMOUS_HOLDER is the store's fail-closed spelling of the
-                # same statement (da/store.py ~1548): if a checkout is ACTIVE
-                # at put time the store refuses ATOMICALLY under its own lock,
-                # exactly like the product write path. No window remains.
-                put_holder = holder if holder is not None else store.ANONYMOUS_HOLDER
-                try:
-                    new_v = write_loop._put_bytes_version(
-                        backend, str(tenant_id), drawing_id, source_bytes,
-                        parent_version=head_v,
-                        meta={"tool": "restore", "note": f"restore of version {version}"},
-                        holder=put_holder, fence=fence,
-                        # Restore's CONTRACT is parent = current head. The
-                        # store re-checks that inside ITS OWN critical
-                        # section (compare-and-set), so a broker write that
-                        # lands between our fresh head read and this put is
-                        # refused as a stale parent (409 below) instead of
-                        # silently branching the DAG. The PostgreSQL
-                        # authority enforces the same discipline intrinsically
-                        # under its row lock.
-                        require_parent_is_head=True,
-                    )
-                except ValueError as exc:
-                    # The store refused THIS put under its own lock (stale
-                    # parent from a concurrent write, or the PostgreSQL
-                    # authority's checkout precondition). The commit did not
-                    # happen, so a retry is safe.
-                    return error_response(ErrorCode.BAD_PARAMS,
-                                          f"restore could not commit: {exc}",
-                                          retryable=True, status_code=409)
-                # The head is COMMITTED past this point: nothing below may
-                # convert into a retryable error (a retry would append a
-                # duplicate head). Mirror the VALIDATED intake (canonical
-                # serialization of read_intake's source-bound result) to the
-                # new head's cache; any failure here (filesystem, OSS
-                # transport) is swallowed and reported via
-                # restored_head_readable instead of a post-commit 500.
-                restored_head_readable = True
-                try:
-                    write_loop.publish_intake_cache(
-                        backend, str(tenant_id), drawing_id, new_v,
-                        source_bytes, source_intake)
-                except Exception:  # noqa: BLE001 — committed head; see above
-                    # Without a cache, the head is readable only when the
-                    # BLOB is itself intake (mock representation) — a live
-                    # DWG head is not, and the response says so.
-                    restored_head_readable = blob_is_intake
-        except store.CheckoutDenied as exc:
-            return _denied(checkout_capability.CapabilityRejected(str(exc)))
+    except RestoreMutationsDisabled:
+        return error_response(
+            ErrorCode.INTERNAL,
+            "drawing mutations are temporarily disabled for a storage cutover",
+            retryable=True, status_code=503,
+        )
+    except RestoreDrawingUnavailable as exc:
+        if isinstance(exc.__cause__, KeyError):
+            return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
+                                  retryable=False, status_code=404)
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400)
+    except RestoreCommitRejected as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"restore could not commit: {exc}",
+                              retryable=True, status_code=409)
+    except RestoreCheckoutDenied as exc:
+        return _denied(checkout_capability.CapabilityRejected(str(exc)))
 
     view = deps.tenant_echo({
         "drawing_id": drawing_id,
         "restored_from": int(version),
-        "new_version": {"drawing_id": drawing_id, "version": new_v, "parent": head_v},
-        "head": new_v,
-        "latest": new_v,
+        "new_version": {"drawing_id": drawing_id, "version": restored.version,
+                        "parent": restored.parent_version},
+        "head": restored.version,
+        "latest": restored.version,
         # False only in the narrow committed-but-mirror-failed live case: the
         # head exists and is immutable, but its intake cache could not be
         # written, so viewers cannot read it until the cache is repaired.
-        "restored_head_readable": restored_head_readable,
+        "restored_head_readable": restored.restored_head_readable,
     }, tenant_id)
     return with_envelope_fields(view)
 
