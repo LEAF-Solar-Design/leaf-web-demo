@@ -22,6 +22,15 @@ _FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.DOTALL)
 _FRONTMATTER_FIELD_RE = re.compile(r"^(name|description)\s*:\s*(.*)$")
 
 
+def _dedupe_key(name: str) -> str:
+    """The collision key for case-only duplicates (`Probe` vs `probe`): one
+    directory on Windows/macOS, two on Linux — ambiguous either way, so they
+    fold to one key and the first wins. Extracted so the FOLD itself is a
+    testable unit on every platform (a case-insensitive filesystem cannot even
+    construct the on-disk pair)."""
+    return name.lower()
+
+
 def is_valid_skill_name(name: object) -> bool:
     """Return whether *name* is a safe, portable skill slug."""
     if not isinstance(name, str) or not SKILL_NAME_RE.fullmatch(name):
@@ -41,22 +50,37 @@ def _contained_real_path(root_real: Path, child: Path) -> Optional[Path]:
     return child_real
 
 
-def _read_manifest_tier(root: Path, root_real: Path) -> Optional[str]:
-    manifest_dir = root / ".claude-plugin"
-    manifest = manifest_dir / "plugin.json"
-    if manifest_dir.is_symlink() or manifest.is_symlink():
-        return None
-    manifest_real = _contained_real_path(root_real, manifest)
-    if manifest_real is None:
-        return None
+def _is_multiply_linked(path: Path) -> bool:
+    """Mirror the harness loader's hardlink refusal: a curated bundle's files
+    are its own, and nlink > 1 means the file also lives somewhere else — the
+    one escape real-path containment structurally cannot see. A stat that
+    cannot prove exclusivity refuses."""
     try:
-        if not manifest_real.is_file():
+        return os.stat(path).st_nlink > 1
+    except OSError:
+        return True
+
+
+def _read_manifest_tier(root: Path, root_real: Path) -> Optional[str]:
+    # ONE try over everything — is_symlink and the containment resolve hit the
+    # filesystem too, and json.loads on a hostile 64 KiB deeply-nested body
+    # raises RecursionError, not JSONDecodeError. The route's contract is
+    # never-500, so every failure here IS the answer "no valid tier".
+    try:
+        manifest_dir = root / ".claude-plugin"
+        manifest = manifest_dir / "plugin.json"
+        if manifest_dir.is_symlink() or manifest.is_symlink():
+            return None
+        manifest_real = _contained_real_path(root_real, manifest)
+        if manifest_real is None:
+            return None
+        if not manifest_real.is_file() or _is_multiply_linked(manifest_real):
             return None
         source = _read_capped(manifest_real, MAX_MANIFEST_BYTES)
         if source is None:
             return None
         value = json.loads(source)
-    except json.JSONDecodeError:
+    except (OSError, RecursionError, ValueError):
         return None
     tier = value.get("leafTier") if isinstance(value, dict) else None
     return tier if tier in {"tenant-safe", "operator"} else None
@@ -108,11 +132,14 @@ def discover_bundle(bundle_path: str, expected_tier: str) -> list[dict[str, str]
     if _read_manifest_tier(root, root_real) != expected_tier:
         return []
 
-    skills_root = root / "skills"
-    if skills_root.is_symlink():
-        return []
-    skills_root_real = _contained_real_path(root_real, skills_root)
-    if skills_root_real is None or not skills_root_real.is_dir():
+    try:
+        skills_root = root / "skills"
+        if skills_root.is_symlink():
+            return []
+        skills_root_real = _contained_real_path(root_real, skills_root)
+        if skills_root_real is None or not skills_root_real.is_dir():
+            return []
+    except OSError:
         return []
 
     found: list[dict[str, str]] = []
@@ -124,19 +151,21 @@ def discover_bundle(bundle_path: str, expected_tier: str) -> list[dict[str, str]
                     break
                 if not is_valid_skill_name(entry.name):
                     continue
-                key = entry.name.lower()
+                key = _dedupe_key(entry.name)
                 if key in seen:
                     continue
-                skill_dir = skills_root_real / entry.name
-                skill_file = skill_dir / "SKILL.md"
-                if skill_dir.is_symlink() or skill_file.is_symlink():
-                    continue
-                skill_dir_real = _contained_real_path(skills_root_real, skill_dir)
-                skill_file_real = _contained_real_path(root_real, skill_file)
-                if skill_dir_real is None or skill_file_real is None:
-                    continue
                 try:
+                    skill_dir = skills_root_real / entry.name
+                    skill_file = skill_dir / "SKILL.md"
+                    if skill_dir.is_symlink() or skill_file.is_symlink():
+                        continue
+                    skill_dir_real = _contained_real_path(skills_root_real, skill_dir)
+                    skill_file_real = _contained_real_path(root_real, skill_file)
+                    if skill_dir_real is None or skill_file_real is None:
+                        continue
                     if not skill_dir_real.is_dir() or not skill_file_real.is_file():
+                        continue
+                    if _is_multiply_linked(skill_file_real):
                         continue
                     source = _read_capped(skill_file_real, MAX_SKILL_FILE_BYTES)
                 except OSError:

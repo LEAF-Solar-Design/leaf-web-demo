@@ -137,6 +137,53 @@ def test_duplicate_listing_entries_are_deduped(monkeypatch, tmp_path):
     ], "a duplicated listing entry produced a duplicated catalog entry"
 
 
+def test_dedupe_key_folds_case(monkeypatch):
+    """The fold itself, unit-level and platform-independent: `Probe` and
+    `probe` MUST collide. Falsifiable — an exact-case key makes this fail."""
+    assert skills_catalog._dedupe_key("Probe") == skills_catalog._dedupe_key("probe")
+    assert skills_catalog._dedupe_key("safe") == skills_catalog._dedupe_key("SAFE")
+
+
+def test_hostile_manifest_never_500s(tmp_path):
+    """Review round 1 MAJOR: the never-500 contract must survive a manifest
+    that parses into a RecursionError (deeply nested but under the byte cap)
+    and a filesystem that raises on the symlink probe."""
+    bundle = _bundle(tmp_path / "bundle", "tenant-safe", {"safe": "Safe"})
+    manifest = bundle / ".claude-plugin" / "plugin.json"
+    depth = 30000
+    manifest.write_text("[" * depth + "]" * depth, encoding="utf-8")
+    assert skills_catalog.discover_bundle(str(bundle), "tenant-safe") == []
+
+    # a route-level probe too: hostile manifest -> 200 []
+    os.environ["LEAF_SKILLS_BUNDLE_PATH"] = str(bundle)
+    try:
+        response = _client().get("/api/skills")
+        assert response.status_code == 200
+        assert response.json() == {"skills": []}
+    finally:
+        os.environ.pop("LEAF_SKILLS_BUNDLE_PATH", None)
+
+
+def test_hardlinked_skill_file_is_skipped(tmp_path):
+    """Review round 1 MEDIUM: mirror the harness's nlink refusal — a
+    hardlinked SKILL.md resolves INSIDE the bundle, so only the link count
+    can see it."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "SKILL.md"
+    secret.write_text(
+        "---\nname: linked\ndescription: Op\n---\n", encoding="utf-8")
+    bundle = _bundle(tmp_path / "bundle", "tenant-safe", {"safe": "Safe"})
+    linked_dir = bundle / "skills" / "linked"
+    linked_dir.mkdir()
+    try:
+        os.link(secret, linked_dir / "SKILL.md")
+    except OSError as exc:
+        pytest.skip(f"hardlink creation not permitted here: {exc}")
+    names = [s_["name"] for s_ in skills_catalog.discover_bundle(str(bundle), "tenant-safe")]
+    assert names == ["safe"], f"hardlinked skill leaked into the catalog: {names}"
+
+
 def test_missing_env_returns_200_empty(monkeypatch):
     monkeypatch.delenv("LEAF_SKILLS_BUNDLE_PATH", raising=False)
     monkeypatch.delenv("LEAF_SKILLS_OPERATOR_BUNDLE_PATH", raising=False)
