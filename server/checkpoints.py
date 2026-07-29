@@ -105,3 +105,22 @@ def list_checkpoints(session_id: str, tenant_id: str) -> List[Dict[str, Any]]:
             (session_id, str(tenant_id)),
         ).fetchall()
     return [_row_to_checkpoint(row) for row in rows]
+
+
+def get_checkpoint(session_id: str, tenant_id: str,
+                   checkpoint_id: str) -> Optional[Dict[str, Any]]:
+    """Return one checkpoint only when its session and tenant both match.
+
+    The tenant predicate is deliberately part of the storage query, matching
+    ``list_checkpoints``. Route ownership checks are useful, but callers that
+    reach this function directly must not be able to resolve foreign metadata.
+    """
+    with _lock:
+        conn = _db()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM session_checkpoints"
+            " WHERE checkpoint_id = ? AND session_id = ? AND tenant_id = ?",
+            (checkpoint_id, session_id, str(tenant_id)),
+        ).fetchone()
+    return _row_to_checkpoint(row) if row is not None else None
