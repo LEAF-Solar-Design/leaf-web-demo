@@ -122,6 +122,26 @@ export async function postMessage(sessionId, { text, confirm, classifier_hint } 
   throw tagged(res, body, `POST /api/sessions/${sessionId}/messages -> ${res.status}`)
 }
 
+// --- Interrupt (Esc / Stop) -----------------------------------------------
+// Ends the session's ACTIVE turn. The server terminalizes it as
+// `turn_complete{stop_reason:'interrupted'}` — an event this client already
+// renders — so nothing new arrives on the wire and the transcript keeps the
+// work done so far.
+//
+// A 409 means the turn already ended on its own (it is no longer the active
+// turn) — the user's intent is satisfied either way, so this resolves rather
+// than throwing: an interrupt that races completion is not an error the user
+// should see.
+export async function cancelTurn(sessionId, turnId) {
+  const { res, body } = await post(
+    `/api/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/cancel`,
+    {},
+  )
+  if (res.status === 202) return body || { turn_id: turnId, status: 'cancelled' }
+  if (res.status === 409) return { turn_id: turnId, status: 'already_ended' }
+  throw tagged(res, body, `POST /api/sessions/${sessionId}/turns/${turnId}/cancel -> ${res.status}`)
+}
+
 // --- Split-turn approval (wire §7) ----------------------------------------
 // Step (a) only: record the decision. The caller then posts the confirm
 // MESSAGE (postMessage with {confirm}) to start the resume turn — the server

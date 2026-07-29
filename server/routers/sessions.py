@@ -596,6 +596,44 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
 
 
 # --------------------------------------------------------------------------- #
+# POST /api/sessions/{id}/turns/{turn_id}/cancel
+# --------------------------------------------------------------------------- #
+@router.post("/api/sessions/{session_id}/turns/{turn_id}/cancel")
+def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_tenant)):
+    """Interrupt the session's active turn (the composer's Esc / Stop).
+
+    Terminal state is `turn_complete{stop_reason:"interrupted"}` — the SAME
+    event the client already renders, so no new wire type is introduced and a
+    stale client simply sees the turn end. Cancelling a turn that is not the
+    session's current active turn is a 409 rather than a silent success: a
+    client holding a stale turn_id must not be able to end the turn that
+    replaced it.
+    """
+    # ownership guard first (404-not-403, no existence leak) — mirrors post_message.
+    if _require_owned_session(session_id, tenant) is None:
+        return _session_not_found(session_id)
+
+    try:
+        outcome = turn_runner.request_cancel(str(tenant), session_id, turn_id)
+    except turn_runner.TurnRejected as exc:
+        return _turn_rejected_response(exc)
+
+    if outcome == "not_active":
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            f"turn {turn_id!r} is not the active turn for session {session_id!r}",
+            retryable=False, status_code=409,
+        )
+
+    return JSONResponse(
+        status_code=202,
+        content=deps.tenant_echo(
+            with_envelope_fields({"turn_id": turn_id, "status": "cancelled"}), tenant
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # GET /api/sessions/{id}/stream (SSE)
 # --------------------------------------------------------------------------- #
 @router.get("/api/sessions/{session_id}/stream")
