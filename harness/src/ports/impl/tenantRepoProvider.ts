@@ -380,6 +380,27 @@ function repoExists(dir: string): boolean {
   return existsSync(join(dir, "registry.json"));
 }
 
+function repoHasMain(dir: string): boolean {
+  if (!existsSync(join(dir, ".git"))) return false;
+  try {
+    return /^[0-9a-f]{40}$/i.test(
+      git(dir, ["rev-parse", "--verify", "refs/heads/main"]).trim(),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function repoHead(dir: string): string | null {
+  if (!existsSync(join(dir, ".git"))) return null;
+  try {
+    const head = git(dir, ["rev-parse", "--verify", "HEAD"]).trim();
+    return /^[0-9a-f]{40}$/i.test(head) ? head : null;
+  } catch {
+    return null;
+  }
+}
+
 function resetWorkingTree(dir: string): void {
   git(dir, ["reset", "--hard", "HEAD"]);
   git(dir, ["clean", "-fd"]);
@@ -476,16 +497,27 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   /**
-   * Materialize a brand-new tenant repo from the pristine fixture: copy + ensure the
-   * __pycache__ .gitignore + `git init` + ONE seed commit. Idempotent-safe: callers
-   * only invoke it when `repoExists(dir)` is false.
+   * Materialize a brand-new tenant repo, or finish a prior interrupted provision.
+   * A failed Git command can leave registry.json and an empty .git directory on EFS,
+   * so registry.json alone is not proof that refs/heads/main exists.
    */
   private provision(dir: string): void {
     const fixture = this.opts.autoProvisionFrom!;
     const identity = this.opts.seedIdentity ?? HARNESS_IDENTITY;
     mkdirSync(dir, { recursive: true });
     trustSharedRepo(dir);
-    cpSync(fixture, dir, { recursive: true });
+    if (repoHasMain(dir)) return;
+
+    const existingHead = repoHead(dir);
+    if (existingHead) {
+      git(dir, ["update-ref", "refs/heads/main", existingHead], identity);
+      git(dir, ["symbolic-ref", "HEAD", "refs/heads/main"], identity);
+      return;
+    }
+
+    if (!repoExists(dir)) {
+      cpSync(fixture, dir, { recursive: true });
+    }
     // ensure the __pycache__ .gitignore exists (keeps the tenant mushy repo pyc-free,
     // matching the broker's sys.dont_write_bytecode discipline).
     const gitignore = join(dir, ".gitignore");
@@ -493,7 +525,11 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     if (!current.split(/\r?\n/).some((l) => l.trim() === "__pycache__/")) {
       writeFileSync(gitignore, current + (current && !current.endsWith("\n") ? "\n" : "") + GITIGNORE_PYCACHE, "utf8");
     }
-    git(dir, ["init", "-q", "-b", "main"], identity);
+    if (!existsSync(join(dir, ".git"))) {
+      git(dir, ["init", "-q", "-b", "main"], identity);
+    } else {
+      git(dir, ["symbolic-ref", "HEAD", "refs/heads/main"], identity);
+    }
     git(dir, ["add", "-A"], identity);
     git(
       dir,
@@ -559,19 +595,19 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
    * the source of a staged change or publish.
    */
   async bare(tenantId: string): Promise<TenantBareRepo> {
+    const ref = await this.opts.locator.repoRef(tenantId);
+    if (existsSync(ref)) trustSharedRepo(ref);
+    if (this.opts.inPlace && this.opts.autoProvisionFrom && !repoHasMain(ref)) {
+      this.provision(ref);
+    }
     const existing = this.bareRepos.get(tenantId);
     if (existing) {
       // Refresh branch heads without ever reusing a mutable checkout. Private
       // refs remain local so a later publish sees the exact staged receipt.
       trustSharedRepo(existing.dir);
       if (existing.sourceRef && existsSync(existing.sourceRef)) trustSharedRepo(existing.sourceRef);
-      git(existing.dir, ["fetch", "--prune", "origin"]);
+      git(existing.dir, ["fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
       return existing;
-    }
-    const ref = await this.opts.locator.repoRef(tenantId);
-    if (existsSync(ref)) trustSharedRepo(ref);
-    if (this.opts.inPlace && this.opts.autoProvisionFrom && !repoExists(ref)) {
-      this.provision(ref);
     }
     if (!/^[A-Za-z0-9._-]+$/.test(tenantId)) {
       throw new Error("tenantId must be a single safe path component");
@@ -585,7 +621,7 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
       if (!alreadyExists) {
         git(this.opts.bareBase, ["clone", "--bare", ref, dir]);
       } else {
-        git(dir, ["fetch", "--prune", "origin"]);
+        git(dir, ["fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
       }
     } else {
       const base = this.opts.workBase ?? tmpdir();
