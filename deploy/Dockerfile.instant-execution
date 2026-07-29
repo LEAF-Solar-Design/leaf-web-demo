@@ -28,6 +28,7 @@ WORKDIR /opt/leaf
 # Copy runtime package code, not repository-wide source, tests, or host state.
 COPY --chown=65532:65532 executor/bootstrap.py /opt/leaf/executor/bootstrap.py
 COPY --chown=65532:65532 executor/control_plane/*.py /opt/leaf/executor/control_plane/
+COPY --chown=65532:65532 executor/control_plane/migrations/ /opt/leaf/executor/control_plane/migrations/
 COPY --chown=65532:65532 executor/runtime/*.py /opt/leaf/executor/runtime/
 COPY --chown=65532:65532 executor/contracts/*.py /opt/leaf/executor/contracts/
 COPY --chown=65532:65532 executor/contracts/schemas/ /opt/leaf/executor/contracts/schemas/

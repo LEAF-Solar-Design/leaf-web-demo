@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from executor.control_plane import migrate_main
 from executor.control_plane import production
 from executor.control_plane.reaper_main import run_reaper
 
@@ -201,6 +202,62 @@ class ReaperEntrypointTests(unittest.TestCase):
     def test_reaper_rejects_an_unbounded_interval(self):
         with self.assertRaisesRegex(ValueError, "between 1 and 300"):
             run_reaper(object(), interval_seconds=301, max_cycles=1)
+
+
+class MigrationEntrypointTests(unittest.TestCase):
+    def test_migration_runner_applies_packaged_sql_in_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            migrations = Path(temporary)
+            (migrations / "002_second.sql").write_text("SELECT 2", encoding="utf-8")
+            (migrations / "001_first.sql").write_text("SELECT 1", encoding="utf-8")
+            executed = []
+
+            class Connection:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *unused):
+                    return False
+
+                def execute(self, sql):
+                    executed.append(sql)
+
+            class Psycopg:
+                @staticmethod
+                def connect(database_url):
+                    self = Connection()
+                    self.database_url = database_url
+                    return self
+
+            settings = production.ProductionSettings(
+                database_url="postgresql://control-db.internal/control_plane?sslmode=verify-full",
+                redis_url="rediss://cache.internal:6380/0",
+                control_api_secret="a" * 32,
+                host_lifecycle_secret="h" * 32,
+                runtime_control_secret="b" * 32,
+                runtime_tls_server_name="executor.instant.internal",
+                executor_cidrs=("10.20.0.0/16",),
+                executor_port=8088,
+                runtime_ca_file=Path("ca.pem"),
+                runtime_client_cert_file=Path("cert.pem"),
+                runtime_client_key_file=Path("key.pem"),
+                signing_seed_file=Path("seed"),
+                signing_key_id="control-plane-v1",
+                reaper_interval_seconds=30,
+                reaper_idle_timeout_seconds=None,
+            )
+            with mock.patch.dict("sys.modules", {"psycopg": Psycopg}), \
+                    mock.patch.object(migrate_main, "load_production_settings", return_value=settings):
+                applied = migrate_main.apply_migrations(migrations_directory=migrations)
+
+        self.assertEqual(applied, ["001_first.sql", "002_second.sql"])
+        self.assertEqual(executed, ["SELECT 1", "SELECT 2"])
+
+    def test_migration_runner_fails_if_no_sql_was_packaged(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(migrate_main, "load_production_settings"):
+            with self.assertRaisesRegex(production.ProductionConfigurationError, "no control-plane migrations"):
+                migrate_main.apply_migrations(migrations_directory=Path(temporary))
 
 
 if __name__ == "__main__":
