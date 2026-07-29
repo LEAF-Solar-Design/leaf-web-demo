@@ -29,9 +29,12 @@ DXF = ("0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\nAB\n8\nL1\n70\n1\n"
 
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
-    monkeypatch.setenv("LEAF_GUEST_STORE_DIR", str(tmp_path / "guest"))
-    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(tmp_path / "uploads"))
-    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    # Keep every location a purge sweep can touch below this test's own root.
+    # This stays safe if a daemon leaks into a future test process.
+    state_root = tmp_path / "guest-purge"
+    monkeypatch.setenv("LEAF_GUEST_STORE_DIR", str(state_root / "guest"))
+    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(state_root / "uploads"))
+    monkeypatch.setenv("LEAF_STORE_DIR", str(state_root / "store"))
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
     guest_uploads._reset_rate_state()
     monkeypatch.setattr(

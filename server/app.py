@@ -134,11 +134,10 @@ app.include_router(site.router)  # public site-facing namespace for the leaf_web
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
 
 # §19 retention promise-keeper: the purge daemon deletes expired guest drawings
-# at their STAMPED expiry. Started UNCONDITIONALLY (review round 1, MAJOR):
-# LEAF_GUEST_UPLOADS_ENABLED=0 stops NEW uploads, but retention promises
-# already stamped on existing guest drawings must still be kept — disabling
-# the feature never strands data past its promised deletion. A sweep failure
-# logs and retries; it never kills the app.
+# at their STAMPED expiry. It starts by default even when
+# LEAF_GUEST_UPLOADS_ENABLED=0 stops NEW uploads, because existing retention
+# promises must still be kept. LEAF_GUEST_PURGE_DISABLED=1 is reserved for the
+# pytest process. A sweep failure logs and retries; it never kills the app.
 import guest_uploads  # noqa: E402
 
 # Validate an explicit shared upload authority before serving traffic. The

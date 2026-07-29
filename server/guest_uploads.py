@@ -1977,6 +1977,8 @@ def start_purge_daemon() -> Optional[threading.Thread]:
     """Idempotent daemon starter (app.py startup). Best-effort-wrapped loop —
     a purge failure logs and retries next interval; it never kills the app."""
     global _PURGE_THREAD
+    if os.environ.get("LEAF_GUEST_PURGE_DISABLED") == "1":
+        return None
     if _PURGE_THREAD is not None and _PURGE_THREAD.is_alive():
         return _PURGE_THREAD
 

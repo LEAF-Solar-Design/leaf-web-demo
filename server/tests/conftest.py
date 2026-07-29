@@ -21,6 +21,9 @@ _TEST_STATE = Path(tempfile.mkdtemp(prefix="leaf-server-pytest-"))
 os.environ.setdefault("SESSIONS_DB", str(_TEST_STATE / "sessions.db"))
 os.environ.setdefault("JOBS_DB", str(_TEST_STATE / "jobs.db"))
 os.environ.setdefault("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+# app.py starts the guest-purge daemon at import time. It must stay out of the
+# shared pytest process because its delayed sweeps otherwise race test stores.
+os.environ.setdefault("LEAF_GUEST_PURGE_DISABLED", "1")
 
 
 def _jobs_connection_is_closed(conn: sqlite3.Connection) -> bool:
