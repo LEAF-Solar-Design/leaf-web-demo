@@ -59,6 +59,7 @@ import agent_gate
 import deps
 import entitlements
 import session_store
+import turn_runner
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
@@ -128,7 +129,8 @@ def internal_gate(req: GateRequest,
     # authority tuple the tier lookup above uses, so the gate never trusts a
     # subject asserted over the wire.
     turn_subject = session_store.active_turn_subject(
-        authority_session_id, authority_turn_id, req.tenant_id)
+        authority_session_id, authority_turn_id, req.tenant_id,
+        turn_runner.turn_max_s())
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
                              req.action, req.args, tier_caps, tier=tier,
                              subject=turn_subject)

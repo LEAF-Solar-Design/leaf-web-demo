@@ -409,6 +409,22 @@ def recent_events(session_id: str, limit: int) -> List[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # turn CAS
 # --------------------------------------------------------------------------- #
+def _turn_is_stale(started_at: Any, max_age_s: Optional[float]) -> bool:
+    """Whether try_begin_turn would consider this turn stale enough to seize.
+
+    Same rule as the CAS below (a missing start time is stale), so identity
+    reads and turn acquisition can never disagree about which turn is live.
+    """
+    if max_age_s is None:
+        return False
+    if started_at is None:
+        return True
+    try:
+        return (time.time() - float(started_at)) > float(max_age_s)
+    except (TypeError, ValueError):
+        return True
+
+
 def try_begin_turn(session_id: str, turn_id: str, stale_after_s: float,
                    tier: Optional[str] = None,
                    subject: Optional[str] = None) -> bool:
@@ -463,21 +479,28 @@ def active_turn_tier(session_id: str, turn_id: str,
     return str(value) if value is not None else None
 
 
-def active_turn_subject(session_id: str, turn_id: str,
-                        tenant_id: str) -> Optional[str]:
+def active_turn_subject(session_id: str, turn_id: str, tenant_id: str,
+                        max_age_s: Optional[float] = None) -> Optional[str]:
     """Return the authenticated subject bound to this exact active turn.
 
-    Same guard as active_turn_tier: session, active turn, and tenant must all
-    match, so a completed or superseded turn yields None and the caller fails
-    closed. Deliberately NOT exposed through the session projections — this is
-    identity data, not session state.
+    Session, active turn, and tenant must all match, so a completed or
+    superseded turn yields None and the caller fails closed. The turn must also
+    be younger than `max_age_s`: try_begin_turn treats an older turn as stale
+    and lets a new one take it over, so a turn past that bound is one nothing is
+    guarding. Without the age check, an app restart that skipped the watchdog
+    would leave the last turn's author resolvable indefinitely.
+
+    Deliberately NOT exposed through the session projections — this is identity
+    data, not session state.
     """
     rows = _query(
-        "SELECT active_turn_subject FROM sessions"
+        "SELECT active_turn_subject, turn_started_at FROM sessions"
         " WHERE session_id = ? AND active_turn_id = ? AND tenant_id = ?",
         (session_id, turn_id, tenant_id),
     )
     if not rows:
+        return None
+    if _turn_is_stale(rows[0]["turn_started_at"], max_age_s):
         return None
     value = rows[0]["active_turn_subject"]
     return str(value) if value is not None else None
@@ -920,7 +943,8 @@ def _pg_append_event(
         if type in ("turn_complete", "error") and turn_id is not None:
             conn.execute(
                 "UPDATE app_sessions SET active_turn_id = NULL,"
-                " turn_started_at = NULL, active_turn_tier = NULL"
+                " turn_started_at = NULL, active_turn_tier = NULL,"
+                " active_turn_subject = NULL"
                 " WHERE session_id = %s AND active_turn_id = %s",
                 (session_id, turn_id),
             )
@@ -994,16 +1018,19 @@ def _pg_active_turn_tier(
 
 def _pg_active_turn_subject(
     session_id: str, turn_id: str, tenant_id: str,
+    max_age_s: Optional[float] = None,
 ) -> Optional[str]:
     db = _platform_db()
     with db.cursor() as cur:
         cur.execute(
-            "SELECT active_turn_subject FROM app_sessions"
+            "SELECT active_turn_subject, turn_started_at FROM app_sessions"
             " WHERE session_id = %s AND active_turn_id = %s AND tenant_id = %s",
             (session_id, turn_id, tenant_id),
         )
         row = cur.fetchone()
     if not row:
+        return None
+    if _turn_is_stale(row["turn_started_at"], max_age_s):
         return None
     value = row["active_turn_subject"]
     return str(value) if value is not None else None
@@ -1272,15 +1299,16 @@ def active_turn_tier(
 
 def active_turn_subject(
     session_id: str, turn_id: str, tenant_id: str,
+    max_age_s: Optional[float] = None,
 ) -> Optional[str]:
     mode = _store_mode()
     if mode == "postgres":
-        return _pg_active_turn_subject(session_id, turn_id, tenant_id)
-    legacy = _legacy_active_turn_subject(session_id, turn_id, tenant_id)
+        return _pg_active_turn_subject(session_id, turn_id, tenant_id, max_age_s)
+    legacy = _legacy_active_turn_subject(session_id, turn_id, tenant_id, max_age_s)
     if mode in _SHADOW_READ_MODES:
         _shadow_equal(
             "active turn subject", legacy,
-            _pg_active_turn_subject(session_id, turn_id, tenant_id),
+            _pg_active_turn_subject(session_id, turn_id, tenant_id, max_age_s),
         )
     return legacy
 

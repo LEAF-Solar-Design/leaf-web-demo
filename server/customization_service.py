@@ -198,7 +198,24 @@ def _binding(tenant: Any) -> TenantBinding:
             binding = platform_store.resolve_active_identity_binding("auth0", subject)
             if binding is None:
                 raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
-            expected_org = str(getattr(tenant, "org_id", "") or tenant_id)
+            # Compare against the ACTIVE binding, not the raw JWT claim. As
+            # deps.resolve_active_tenant_context puts it, "JWT tenant and org
+            # claims can outlive an account move", and every tenant provisioned
+            # through POST /api/orgs carries a human-readable claim while its
+            # platform id is a UUID — so comparing the resolved binding against
+            # the presented claim refused EVERY authenticated author call.
+            # Resolving here rather than in the route dependency keeps a
+            # disabled tenant's fast 404 ahead of any authority lookup.
+            try:
+                active = deps.resolve_active_tenant_context(tenant)
+                expected_org = str(
+                    getattr(active, "org_id", "") or _tenant_id(active))
+            except Exception:  # noqa: BLE001
+                # Resolution is an ALLOWANCE, never a relaxation: falling back
+                # to the presented claim can only refuse more, never admit more,
+                # so an authority hiccup degrades to the previous behaviour
+                # instead of opening the check.
+                expected_org = str(getattr(tenant, "org_id", "") or tenant_id)
             if str(binding.platform_tenant_id) != expected_org:
                 raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
             role = platform_store.active_identity_role(

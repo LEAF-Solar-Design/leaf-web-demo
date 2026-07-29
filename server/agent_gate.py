@@ -893,7 +893,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                 args_hash=canonical_args_hash(args),
                 audit_event=allow_event,
                 session_grant_target=(
-                    grant_target(args) if act.policy == "confirm-once" else None),
+                    grant_target(args, subject)
+                    if act.policy == "confirm-once" else None),
                 rate_category=rate_category,
                 rate_limit=rate_limit,
                 rate_rejected_event=_rate_rejected_event(),

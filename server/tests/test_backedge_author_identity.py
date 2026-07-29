@@ -177,3 +177,134 @@ def test_idempotency_keys_do_not_collide_across_users():
         shared, deps.TenantContext("t", subject=ALICE))
     # Unchanged when there is no subject to scope by.
     assert _subject_scoped_key(shared, deps.TenantContext("t")) == shared
+
+
+# --------------------------------------------------------------------------- #
+# staleness
+# --------------------------------------------------------------------------- #
+def test_a_stale_turn_stops_resolving_its_author(session):
+    """try_begin_turn hands a stale turn to the next caller, so a turn past that
+    bound is one nothing is guarding. Its author must stop resolving with it,
+    or an app restart that skipped the watchdog would leave the last turn's
+    identity usable indefinitely."""
+    session_id = session["session_id"]
+    session_store.try_begin_turn(session_id, "turn-1", 60, subject=ALICE)
+
+    # Inside the bound it resolves; past it, nothing.
+    assert session_store.active_turn_subject(
+        session_id, "turn-1", "tenant-a", 300) == ALICE
+    assert session_store.active_turn_subject(
+        session_id, "turn-1", "tenant-a", 0) is None
+
+
+def test_a_turn_with_no_start_time_is_treated_as_stale(session):
+    session_id = session["session_id"]
+    session_store.try_begin_turn(session_id, "turn-1", 60, subject=ALICE)
+    session_store._exec(
+        "UPDATE sessions SET turn_started_at = NULL WHERE session_id = ?",
+        (session_id,),
+    )
+
+    assert session_store.active_turn_subject(
+        session_id, "turn-1", "tenant-a", 300) is None
+
+
+def test_an_unbounded_read_keeps_the_old_behaviour(session):
+    """max_age_s=None is the explicit opt out, used by callers with no bound."""
+    session_id = session["session_id"]
+    session_store.try_begin_turn(session_id, "turn-1", 60, subject=ALICE)
+
+    assert session_store.active_turn_subject(
+        session_id, "turn-1", "tenant-a") == ALICE
+
+
+def test_the_elevation_helper_applies_the_staleness_bound(session, monkeypatch):
+    session_id = session["session_id"]
+    session_store.try_begin_turn(session_id, "turn-1", 60, subject=ALICE)
+    monkeypatch.setenv("TURN_MAX_S", "0")
+
+    assert deps.backedge_author_identity(
+        backedge(), session_id, "turn-1").subject is None
+
+
+# --------------------------------------------------------------------------- #
+# postgres parity — the SQL guards, not just the tuple comparison
+# --------------------------------------------------------------------------- #
+def test_postgres_subject_lookup_guards_session_turn_and_tenant():
+    """The Postgres statement must carry the same three-way guard as SQLite.
+
+    The suite above runs on SQLite, so without this a Postgres-only mutation
+    (dropping `active_turn_id` from the WHERE clause) would leave every test
+    green while letting a superseded tuple resolve the current subject.
+    """
+    import inspect
+
+    sql = inspect.getsource(session_store._pg_active_turn_subject)
+    assert "active_turn_subject" in sql
+    for guard in ("session_id = %s", "active_turn_id = %s", "tenant_id = %s"):
+        assert guard in sql, f"postgres subject lookup lost its {guard!r} guard"
+    # and it must read the start time, or it cannot apply the staleness bound
+    assert "turn_started_at" in sql
+    assert "_turn_is_stale" in sql
+
+
+def test_postgres_terminal_event_releases_the_subject():
+    """SQLite clears the subject with the terminal event; Postgres must too, or
+    the two authorities disagree and dual-write shadow comparison blocks the
+    next turn."""
+    import inspect
+
+    sql = inspect.getsource(session_store._pg_append_event)
+    terminal = sql[sql.index("turn_complete"):]
+    assert "active_turn_subject = NULL" in terminal
+
+
+# --------------------------------------------------------------------------- #
+# the raw claim is not the identity
+# --------------------------------------------------------------------------- #
+def test_the_binding_check_uses_the_resolved_org_not_the_raw_claim():
+    """_binding must compare the active binding against the RESOLVED org.
+
+    A JWT claim can outlive an account move, and every tenant provisioned
+    through POST /api/orgs carries a human-readable claim while its platform id
+    is a UUID. Comparing the resolved binding against the presented claim
+    refused every authenticated author call. Observed on staging: claim
+    "acceptance-tenant-a-20260728" against active binding
+    "bccb0d64-04c9-4108-bcc1-f27b8bb3924d".
+
+    Resolution belongs here and not in the route dependency: resolving in the
+    dependency would run the platform authority before the customization gate,
+    turning a disabled tenant's fast 404 into a 503 whenever that authority is
+    unavailable.
+    """
+    import inspect
+
+    import customization_service
+    from routers import author as author_router
+
+    binding_src = inspect.getsource(customization_service._binding)
+    assert "resolve_active_tenant_context" in binding_src, (
+        "_binding compares against the raw JWT claim"
+    )
+    # The raw claim survives only as the fallback when resolution fails, and
+    # that fallback can only refuse more, never admit more.
+    resolved_at = binding_src.index("resolve_active_tenant_context")
+    fallback_at = binding_src.index('getattr(tenant, "org_id"')
+    assert fallback_at > resolved_at, (
+        "_binding reads the unresolved claim before trying to resolve it"
+    )
+    assert "except Exception" in binding_src[resolved_at:fallback_at], (
+        "the raw claim must be reachable only as a resolution failure fallback"
+    )
+    # And the routes stay on the cheap dependency so the gate runs first.
+    assert "Depends(deps.require_tenant)" in inspect.getsource(author_router)
+
+
+def test_the_active_resolver_leaves_a_backedge_identity_alone(monkeypatch):
+    """The harness path must survive the swap: no subject and no org means the
+    resolver returns the context untouched, so it never tries to look up a
+    platform binding for a caller that has no user."""
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    context = deps.TenantContext("tenant-a", tier="hosted_pro")
+
+    assert deps.resolve_active_tenant_context(context) is context

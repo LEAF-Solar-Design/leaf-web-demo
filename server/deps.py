@@ -596,8 +596,10 @@ def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
         return tenant
     try:
         import session_store
+        import turn_runner
         subject = session_store.active_turn_subject(
-            str(authority_session_id), str(authority_turn_id), str(tenant))
+            str(authority_session_id), str(authority_turn_id), str(tenant),
+            turn_runner.turn_max_s())
     except Exception:  # noqa: BLE001 - an authority outage must not elevate
         return tenant
     if not subject:

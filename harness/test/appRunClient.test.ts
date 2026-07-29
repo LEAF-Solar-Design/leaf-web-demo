@@ -50,7 +50,7 @@ describe("HttpAppRunClient authoring identity", () => {
       baseUrl: "https://app.invalid",
       dispatchSecret: "test-secret",
       fetchImpl: async (_input, init) => {
-        sink.headers = new Headers(init?.headers as HeadersInit);
+        sink.headers = new Headers(init?.headers ?? {});
         return new Response(JSON.stringify({ change_set_id: "cs-1" }), {
           status: 200,
           headers: { "content-type": "application/json" },
