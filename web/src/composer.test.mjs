@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
+
+import esbuild from 'esbuild'
 
 import {
   acceptQueuedTurn,
@@ -9,10 +12,13 @@ import {
   createQueuedTurnState,
   filterRunnable,
   historyKeydown,
+  mergePickerEntries,
   mergeSkillEntries,
+  pickerTrigger,
   promptHistoryFor,
   rankEntries,
   reconcileQueuedTurn,
+  replacePickerTrigger,
   shouldRetryWithQueue,
   setPromptHistoryValue,
   LINE_PX,
@@ -21,6 +27,8 @@ import {
 } from './composer.js'
 
 const names = (entries) => entries.map((e) => e.name)
+const promptBoxSource = readFileSync(new URL('./components/PromptBox.jsx', import.meta.url), 'utf8')
+const promptBoxStripped = esbuild.transformSync(promptBoxSource, { loader: 'jsx' }).code
 
 describe('autoGrowHeight', () => {
   it('leaves the single-line well to CSS', () => {
@@ -161,6 +169,47 @@ describe('skill entry sources', () => {
       ...registry,
       { kind: 'skill', name: 'roof-analysis', description: 'analyse roof geometry' },
     ])
+  })
+})
+
+describe('MCP picker sources', () => {
+  it('merges resource roots and preserves their exact mention insertion text', () => {
+    assert.deepEqual(mergePickerEntries(
+      [{ kind: 'command', name: 'help' }], [], [{ name: 'roof-mcp', host: 'mcp.example.test' }],
+      [{ kind: 'command', name: 'mcp', client_action: 'mcp' }],
+    ), [
+      { kind: 'command', name: 'help' },
+      { kind: 'command', name: 'mcp', client_action: 'mcp' },
+      { kind: 'resource', name: 'roof-mcp', description: 'mcp.example.test', insertionText: '@roof-mcp:' },
+    ])
+  })
+})
+
+describe('pickerTrigger', () => {
+  it('opens a resource picker only at a word boundary and ignores email interiors', () => {
+    assert.deepEqual(pickerTrigger('@roof'), { kind: 'resource', query: 'roof', start: 0, end: 5 })
+    assert.deepEqual(pickerTrigger('use @roof'), { kind: 'resource', query: 'roof', start: 4, end: 9 })
+    assert.equal(pickerTrigger('a@b'), null)
+  })
+
+  it('uses the caret and stays inert while an IME composes', () => {
+    assert.deepEqual(pickerTrigger('@roof later', 5), { kind: 'resource', query: 'roof', start: 0, end: 5 })
+    assert.equal(pickerTrigger('@roof', 5, true), null)
+    const slashWithArgs = '/tool args'
+    assert.equal(pickerTrigger(slashWithArgs, 2), null)
+    assert.equal(slashWithArgs, '/tool args')
+    assert.equal(replacePickerTrigger('@roof later', { start: 0, end: 5 }, '@roof-mcp:'),
+      '@roof-mcp: later')
+
+    assert.match(promptBoxStripped, /pickerTrigger\(value, caret, isComposing\)/)
+    assert.match(promptBoxStripped, /replacePickerTrigger\(value, trigger, insertion\)/)
+    const unwired = promptBoxSource.replace(
+      'pickerTrigger(value, caret, isComposing)',
+      'pickerTrigger(value, caret)',
+    )
+    assert.notEqual(unwired, promptBoxSource, 'the falsification mutation must target picker IME wiring')
+    assert.doesNotMatch(esbuild.transformSync(unwired, { loader: 'jsx' }).code,
+      /pickerTrigger\(value, caret, isComposing\)/)
   })
 })
 

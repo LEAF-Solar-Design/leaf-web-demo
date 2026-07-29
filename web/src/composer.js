@@ -120,6 +120,7 @@ export const REGISTRY_GROUPS = [
   { kind: 'command', label: 'Commands' },
   { kind: 'skill', label: 'Skills' },
   { kind: 'tool', label: 'Tools' },
+  { kind: 'resource', label: 'Resources' },
 ]
 
 // The registry is the richer source when it knows about a skill. The skills
@@ -136,6 +137,62 @@ export function mergeSkillEntries(registryEntries, skills) {
     merged.push({ ...skill, kind: 'skill' })
   }
   return merged
+}
+
+// Static client commands and server-backed MCP roots both join the same picker
+// source. A root is deliberately not a live MCP resource enumeration: that
+// needs a harness proxy endpoint. Its insertion text scopes the follow-up.
+export function mergePickerEntries(registryEntries, skills, resources, staticEntries = []) {
+  const merged = mergeSkillEntries(registryEntries, skills)
+  const names = new Set(merged
+    .filter((entry) => entry && typeof entry.name === 'string' && entry.name)
+    .map((entry) => `${entry.kind || ''}:${entry.name}`))
+  for (const entry of staticEntries) {
+    if (!entry?.name || names.has(`${entry.kind || ''}:${entry.name}`)) continue
+    names.add(`${entry.kind || ''}:${entry.name}`)
+    merged.push(entry)
+  }
+  for (const server of resources || []) {
+    if (!server || typeof server.name !== 'string' || !server.name) continue
+    const key = `resource:${server.name}`
+    if (names.has(key)) continue
+    names.add(key)
+    merged.push({
+      kind: 'resource',
+      name: server.name,
+      description: server.host || '',
+      insertionText: `@${server.name}:`,
+    })
+  }
+  return merged
+}
+
+// The slash picker remains a leading command only. Mentions may start at a
+// word boundary, but never inside an address such as a@b. Callers pass IME
+// state so candidate confirmation cannot open or steal the picker.
+export function pickerTrigger(value, selectionStart = String(value ?? '').length, isComposing = false) {
+  if (isComposing) return null
+  const text = String(value ?? '')
+  const caret = Number.isFinite(selectionStart)
+    ? Math.max(0, Math.min(selectionStart, text.length))
+    : text.length
+  const prefix = text.slice(0, caret)
+  if (text.startsWith('/') && !/\s/.test(text.slice(1))) {
+    return { kind: 'slash', query: prefix.slice(1), start: 0, end: caret }
+  }
+  const at = prefix.lastIndexOf('@')
+  if (at === -1 || (at > 0 && !/\s/.test(prefix[at - 1]))) return null
+  const query = prefix.slice(at + 1)
+  if (/\s/.test(query)) return null
+  return { kind: 'resource', query, start: at, end: caret }
+}
+
+export function replacePickerTrigger(value, trigger, insertion) {
+  const text = String(value ?? '')
+  if (!trigger || !Number.isInteger(trigger.start) || !Number.isInteger(trigger.end)) return text
+  const start = Math.max(0, Math.min(trigger.start, text.length))
+  const end = Math.max(start, Math.min(trigger.end, text.length))
+  return `${text.slice(0, start)}${String(insertion ?? '')}${text.slice(end)}`
 }
 
 // A busy text turn may be parked once. Confirmations and ephemeral credential
