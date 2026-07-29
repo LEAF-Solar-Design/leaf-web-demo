@@ -8,25 +8,30 @@
 //      bundle's actual contents;
 //   3. an empty/absent bundle attaches NOTHING, rather than enabling the Skill
 //      tool with nothing behind it.
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  MAX_SKILL_FILE_BYTES,
   discoverSkills,
+  isValidSkillName,
   parseSkillFrontmatter,
   skillBundleAttachment,
 } from "../src/ports/impl/skillBundle.js";
 
 const made: string[] = [];
 
-function bundleWith(skills: Array<{ name: string; description?: string; body?: string }>): string {
+function bundleWith(
+  skills: Array<{ name: string; description?: string; body?: string }>,
+  tier: string | null = "tenant-safe",
+): string {
   const root = mkdtempSync(join(tmpdir(), "leaf-skills-"));
   made.push(root);
   mkdirSync(join(root, ".claude-plugin"), { recursive: true });
   writeFileSync(join(root, ".claude-plugin", "plugin.json"),
-    JSON.stringify({ name: "leaf-test", version: "0.0.1" }));
+    JSON.stringify({ name: "leaf-test", version: "0.0.1", ...(tier ? { leafTier: tier } : {}) }));
   for (const s of skills) {
     const dir = join(root, "skills", s.name);
     mkdirSync(dir, { recursive: true });
@@ -84,24 +89,28 @@ describe("skillBundleAttachment", () => {
   it("is OFF when unconfigured — the session runs exactly as today", () => {
     expect(skillBundleAttachment({} as NodeJS.ProcessEnv)).toBeNull();
     expect(skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: "  " } as NodeJS.ProcessEnv)).toBeNull();
+    // A path without a tier is also unconfigured — both halves are required.
+    const some = bundleWith([{ name: "probe" }]);
+    expect(skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: some } as NodeJS.ProcessEnv)).toBeNull();
   });
 
   it("is OFF when the configured path does not exist", () => {
     expect(skillBundleAttachment({
       LEAF_SKILLS_BUNDLE_PATH: join(tmpdir(), "leaf-absent-bundle"),
+      LEAF_SKILLS_TIER: "tenant-safe",
     } as NodeJS.ProcessEnv)).toBeNull();
   });
 
   it("is OFF for an empty bundle — never enable the Skill tool with nothing behind it", () => {
     const root = bundleWith([]);
     expect(skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: root,
+      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe",
     } as NodeJS.ProcessEnv)).toBeNull();
   });
 
   it("emits a local plugin with MCP discovery skipped (the harness owns MCP)", () => {
     const root = bundleWith([{ name: "probe" }]);
-    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root } as NodeJS.ProcessEnv);
+    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv);
     expect(att?.plugin).toEqual({ type: "local", path: root, skipMcpDiscovery: true });
   });
 
@@ -109,7 +118,7 @@ describe("skillBundleAttachment", () => {
     // 'all' would also enable the CLI's bundled developer skills (run, review,
     // security-review) inside a tenant session. This is the guard.
     const root = bundleWith([{ name: "one" }, { name: "two" }]);
-    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root } as NodeJS.ProcessEnv);
+    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv);
     expect(Array.isArray(att?.skills)).toBe(true);
     expect(att?.skills).not.toBe("all");
     expect(att?.skills).toEqual(["one", "two"]);
@@ -117,7 +126,7 @@ describe("skillBundleAttachment", () => {
 
   it("derives the allowlist from disk, so it cannot drift from the bundle", () => {
     const root = bundleWith([{ name: "only-this-one" }]);
-    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root } as NodeJS.ProcessEnv);
+    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv);
     expect(att?.skills).toEqual(["only-this-one"]);
   });
 
@@ -126,13 +135,125 @@ describe("skillBundleAttachment", () => {
     // and are readable. So two tiers must be two DIRECTORIES, and the
     // attachment must carry exactly the one it was pointed at.
     const tenant = bundleWith([{ name: "tenant-safe-skill" }]);
-    const operator = bundleWith([{ name: "tenant-safe-skill" }, { name: "operator-only-skill" }]);
-    const tenantAtt = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: tenant } as NodeJS.ProcessEnv);
-    const operatorAtt = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: operator } as NodeJS.ProcessEnv);
+    const operator = bundleWith([{ name: "tenant-safe-skill" }, { name: "operator-only-skill" }], "operator");
+    const tenantAtt = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: tenant, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv);
+    const operatorAtt = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: operator, LEAF_SKILLS_TIER: "operator" } as NodeJS.ProcessEnv);
     expect(tenantAtt?.skills).toEqual(["tenant-safe-skill"]);
     expect(tenantAtt?.plugin.path).toBe(tenant);
     expect(operatorAtt?.skills).toContain("operator-only-skill");
     expect(operatorAtt?.plugin.path).toBe(operator);
+  });
+});
+
+describe("hostile input (review findings)", () => {
+  // The reviewer got BOTH of these accepted by the first version. The SDK
+  // expands `skills` names into comma-delimited tool patterns, so `safe),Bash`
+  // is not cosmetic — it can widen the allowlist the money-gate relies on.
+  const HOSTILE = [
+    "../../operator",
+    "safe),Bash",
+    "a b",
+    "name;rm -rf /",
+    "with/slash",
+    "with\backslash",
+    "",
+    ".",
+    "..",
+    "-leading-dash",
+    "x".repeat(200),
+  ];
+
+  it("refuses hostile skill names outright", () => {
+    for (const name of HOSTILE) {
+      expect(isValidSkillName(name), `accepted ${JSON.stringify(name)}`).toBe(false);
+    }
+    expect(isValidSkillName("orwell-writing")).toBe(true);
+    expect(isValidSkillName("leaf_fixture.probe-2")).toBe(true);
+  });
+
+  it("never lets a hostile name reach the allowlist", () => {
+    const root = bundleWith([{ name: "good" }]);
+    // Hand-plant a directory whose frontmatter name is hostile.
+    const evil = join(root, "skills", "evil");
+    mkdirSync(evil, { recursive: true });
+    writeFileSync(join(evil, "SKILL.md"), "---\nname: safe),Bash\ndescription: x\n---\n");
+    const att = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv);
+    expect(att?.skills).toEqual(["good"]);
+    for (const name of att?.skills ?? []) expect(isValidSkillName(name)).toBe(true);
+  });
+
+  it("ignores a directory whose name is hostile, without reading it", () => {
+    const root = bundleWith([{ name: "good" }]);
+    const traversal = join(root, "skills", "..");
+    // `..` resolves to the bundle root; discoverSkills must skip it by NAME.
+    expect(existsSync(traversal)).toBe(true);
+    const found = discoverSkills(root).map((s) => s.name);
+    expect(found).toEqual(["good"]);
+  });
+
+  it("takes the FIRST name, so a duplicate key cannot override the validated one", () => {
+    expect(parseSkillFrontmatter("---\nname: good\nname: safe),Bash\ndescription: d\n---\n"))
+      .toEqual({ name: "good", description: "d" });
+  });
+
+  it("requires the frontmatter name to match its directory", () => {
+    const root = bundleWith([]);
+    const dir = join(root, "skills", "claims-one-thing");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), "---\nname: something-else\ndescription: d\n---\n");
+    expect(discoverSkills(root)).toEqual([]);
+  });
+
+  it("skips oversized SKILL.md instead of reading it into memory", () => {
+    const root = bundleWith([{ name: "good" }]);
+    const big = join(root, "skills", "huge");
+    mkdirSync(big, { recursive: true });
+    writeFileSync(join(big, "SKILL.md"),
+      "---\nname: huge\ndescription: d\n---\n" + "x".repeat(MAX_SKILL_FILE_BYTES + 1024));
+    expect(discoverSkills(root).map((s) => s.name)).toEqual(["good"]);
+  });
+});
+
+describe("tier binding — the fail-closed boundary", () => {
+  it("refuses to mount an operator bundle in a tenant-tier process", () => {
+    const operator = bundleWith([{ name: "operator-only-skill" }], "operator");
+    const att = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: operator, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv);
+    expect(att).toBeNull();
+  });
+
+  it("refuses a bundle that declares no tier at all", () => {
+    const untagged = bundleWith([{ name: "probe" }], null);
+    expect(skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: untagged, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it("refuses an unknown process tier", () => {
+    const root = bundleWith([{ name: "probe" }]);
+    expect(skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "superuser",
+    } as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it("mounts when the tiers agree, echoing the tier", () => {
+    const root = bundleWith([{ name: "probe" }], "operator");
+    const att = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "operator",
+    } as NodeJS.ProcessEnv);
+    expect(att?.tier).toBe("operator");
+    expect(att?.skills).toEqual(["probe"]);
+  });
+
+  it("refuses a bundle path that is a FILE, not a directory", () => {
+    const root = bundleWith([{ name: "probe" }]);
+    const file = join(root, ".claude-plugin", "plugin.json");
+    expect(skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: file, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv)).toBeNull();
   });
 });
 
