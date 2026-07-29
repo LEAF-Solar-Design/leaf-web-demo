@@ -698,6 +698,20 @@ def _result(decision: str, *, reason: str, policy: Optional[str] = None,
     return out
 
 
+def _plan_first_session(tenant_id: str, session_id: str) -> bool:
+    """True when this session's approval policy is plan_first.
+
+    Imported lazily so agent_gate keeps its import graph, and wrapped so a
+    policy read can never break the gate chain: any failure answers False,
+    which is exactly today's behavior.
+    """
+    try:
+        import session_policy
+        return session_policy.get_policy(str(session_id), str(tenant_id)) == "plan_first"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
          args: Optional[Dict[str, Any]], tier_caps: Dict[str, bool], *,
          tier: Optional[str] = None,
@@ -1003,6 +1017,20 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             return _allow("allow_via_approval", confirmation_id=str(confirmation_id))
         return _awaiting(record)
 
+    # PLAN-FIRST: the session policy can force an otherwise-auto action to
+    # confirm. Resolved HERE, in the gate, for two load-bearing reasons: only
+    # the app may mint an approvable confirmation_id (a locally minted one
+    # renders a chip that POST /api/agent/approvals/{id} answers 404), and the
+    # gate already holds the session identity it needs. The harness therefore
+    # needs NO new field and cannot assert the policy — otherwise a
+    # tenant-controlled turn body could weaken its own gating.
+    #
+    # It only ever NARROWS: an `auto` action becomes a confirmation; deny stays
+    # deny; an action already requiring approval is unchanged. An unreadable
+    # policy leaves today's behavior, which is right for a TIGHTENING feature —
+    # failing it closed would block every read on a storage blip.
+    if act.policy == "auto" and _plan_first_session(tenant_id, session_id):
+        return _create_and_await()
     if act.policy == "auto":
         return _allow("allow")
 
