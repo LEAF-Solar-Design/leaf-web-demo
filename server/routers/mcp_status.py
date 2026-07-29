@@ -89,10 +89,14 @@ def _redacted_servers(tenant_id: str, env: Any = os.environ) -> list[dict[str, s
         # length, so a 20-char bearer embedded in a hostname leaked straight
         # through the floor (review round 2). Any non-empty token that survives
         # into the descriptor kills the entry.
+        # Compare against the VALUES, not their JSON serialization: json.dumps
+        # escapes non-ASCII, so a token of "e-acute" was compared against
+        # "é..." and never matched, leaking straight through the check
+        # (review round 3).
         if (
             isinstance(auth_token, str)
             and auth_token
-            and auth_token in json.dumps(entry)
+            and any(auth_token in str(value) for value in entry.values())
         ):
             logger.warning("Dropping MCP server descriptor because it contains authToken=<redacted>")
             continue

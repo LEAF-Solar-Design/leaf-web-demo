@@ -116,3 +116,22 @@ def test_a_short_token_embedded_in_the_host_is_still_dropped(client, monkeypatch
     assert response.status_code == 200
     assert short not in response.text, f"a 20-char token leaked: {response.text}"
     assert response.json() == {"servers": [{"name": "clean", "host": "ok.example.test"}]}
+
+
+def test_a_unicode_token_in_the_host_is_dropped(client, monkeypatch, tmp_path):
+    """Review round 3 HIGH: json.dumps escapes non-ASCII, so comparing the raw
+    token against the SERIALIZED entry never matched a Unicode token."""
+    monkeypatch.setenv("LEAF_MCP_BRIDGE_DIR", str(tmp_path))
+    token = "sécrét-token-value"
+    _path(tmp_path, "demo-tenant").write_text(json.dumps([
+        {"name": "leaky", "url": f"https://{token}.example.test", "authToken": token},
+        {"name": "clean", "url": "https://ok.example.test", "authToken": "t" * 40},
+    ]), encoding="utf-8")
+
+    response = _response(client, "demo-tenant")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert token not in json.dumps(body, ensure_ascii=False), (
+        f"a unicode token leaked: {body}")
+    assert body == {"servers": [{"name": "clean", "host": "ok.example.test"}]}
