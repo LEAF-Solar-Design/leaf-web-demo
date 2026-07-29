@@ -251,6 +251,19 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
   return { ok: true, input };
 }
 
+/** The plan-first sidecar (x-leaf-approval-policy). Unlike the instant
+ * assignment — DATA that must be trusted, hence its authentication throw —
+ * this header can only NARROW: present and equal to "plan_first", the runner
+ * empties its per-turn auto-approval; absent, malformed or anything else is
+ * today's behavior. Ignoring rather than throwing keeps auth-off local demos
+ * working, and an attacker who can set harness headers gains nothing (absence
+ * is already the widest state). */
+export function planFirstOption(req: IncomingMessage): { planFirst?: boolean } {
+  return req.headers["x-leaf-approval-policy"] === "plan_first"
+    ? { planFirst: true }
+    : {};
+}
+
 function instantTurnOptions(req: IncomingMessage, authenticated: boolean): Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> {
   const encoded = req.headers["x-leaf-instant-assignment"];
   if (typeof encoded !== "string" || !encoded) return {};
@@ -299,7 +312,7 @@ async function streamTurn(
   res: ServerResponse,
   runner: ConverseRunner,
   input: ConverseTurnInput,
-  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext">,
+  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> & { planFirst?: boolean },
 ): Promise<void> {
   const turnAbort = new AbortController();
   const iterator = runner.runTurn(input, { signal: turnAbort.signal, ...instant })[Symbol.asyncIterator]();
@@ -542,7 +555,8 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         // first event — is caught by THIS function's own try/catch below, not silently
         // dropped: async-function `return somePromise` does not route through a local
         // catch, only `await` does.
-        await streamTurn(req, res, ports.converseRunner, validated.input, instantTurnOptions(req, auth.enabled));
+        await streamTurn(req, res, ports.converseRunner, validated.input,
+          { ...instantTurnOptions(req, auth.enabled), ...planFirstOption(req) });
         return;
       }
 

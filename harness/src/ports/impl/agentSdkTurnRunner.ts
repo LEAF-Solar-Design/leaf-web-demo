@@ -490,6 +490,7 @@ export interface BuildTurnOptionsInput {
   skillBundle: ReturnType<typeof skillBundleAttachment>;
   mcpAttachment: McpAttachment | null;
   canUseTool: CanUseTool;
+  planFirst?: boolean;
 }
 
 /** Assemble SDK options in one testable place. Tenant bridge servers are optional;
@@ -507,8 +508,14 @@ export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, u
     // Load-bearing order: the local money-gated server wins any tenant key collision.
     mcpServers: { ...(tenantMcp.mcpServers ?? {}), [MCP_SERVER_NAME]: input.server },
     // Skills reach the model through the SDK's own `skills` option, which enables the
-    // Skill tool itself. This allowlist remains the existing APS MCP tool only.
-    allowedTools: [APS_TEST_RUN_MCP_NAME],
+    // Skill tool itself. This allowlist remains the existing APS MCP tool only —
+    // EXCEPT under plan_first, where it is EMPTY: the SDK auto-approves
+    // allowlisted names before canUseTool runs, so emptying the list is the only
+    // way the APS tool reaches the confirmation lifecycle. Safe because the
+    // tenant-denial exemption (LOCAL_MCP_TOOL_ALLOWLIST) is derived from the
+    // CONSTANTS, not this array — the APS tool confirms rather than being
+    // denied. plan_first only ever narrows.
+    allowedTools: input.planFirst ? [] : [APS_TEST_RUN_MCP_NAME],
     ...(skillBundle
       ? { plugins: [skillBundle.plugin], skills: skillBundle.skills }
       : {}),
@@ -548,16 +555,17 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     const grant = await this.ports.oauth.getGrant(input.tenant_id);
 
     if (input.confirm) {
-      yield* this.runConfirm(input, grant, opts?.signal);
+      yield* this.runConfirm(input, grant, opts?.signal, opts?.planFirst === true);
       return;
     }
-    yield* this.driveSession(input, grant, opts?.signal);
+    yield* this.driveSession(input, grant, opts?.signal, opts?.planFirst === true);
   }
 
   private async *runConfirm(
     input: ConverseTurnInput,
     grant: AgentGrant,
     external?: AbortSignal,
+    planFirst?: boolean,
   ): AsyncGenerator<HarnessTurnEvent> {
     const { approved, proposal } = input.confirm!;
     if (!approved) {
@@ -579,13 +587,14 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       ...input.messages,
       { role: "assistant" as const, text: `Ran "${proposal.tool}". Result: ${outcome.summary}` },
     ];
-    yield* this.driveSession({ ...input, messages: continuationMessages }, grant, external);
+    yield* this.driveSession({ ...input, messages: continuationMessages }, grant, external, planFirst);
   }
 
   private async *driveSession(
     input: ConverseTurnInput,
     grant: AgentGrant,
     external?: AbortSignal,
+    planFirst?: boolean,
   ): AsyncGenerator<HarnessTurnEvent> {
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
@@ -696,6 +705,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         server,
         skillBundle,
         mcpAttachment,
+        planFirst: planFirst === true,
         // Skills reach the model through the SDK's own `skills` option, which
         // enables the Skill tool itself — so this list stays the APS tool only
         // and the money-gated canUseTool envelope below is unchanged.

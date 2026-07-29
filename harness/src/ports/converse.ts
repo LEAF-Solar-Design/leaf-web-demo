@@ -145,6 +145,11 @@ export interface ConverseRunOptions {
   /** Authenticated app-to-harness metadata, kept outside the frozen turn input. */
   instantAssignment?: InstantSessionAssignment;
   instantDrawingContext?: InstantDrawingContext;
+  /** Plan-first session policy (x-leaf-approval-policy sidecar): the runner
+   * empties its per-turn auto-approval so EVERY execution — including the APS
+   * test-run the allowlist normally auto-approves — rides the proposal/
+   * confirmation lifecycle. Only ever NARROWS; absent means today's behavior. */
+  planFirst?: boolean;
 }
 
 /**
