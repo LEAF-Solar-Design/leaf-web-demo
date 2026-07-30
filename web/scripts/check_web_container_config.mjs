@@ -8,9 +8,9 @@ const intake = readFileSync('src/site/intakeCache.js', 'utf8')
 
 assert.doesNotMatch(index, /https:\/\/fonts\.googleapis\.com/,
   'the deployable page must not fetch an external font stylesheet')
-assert.match(api, /const API_BASE = import\.meta\.env(?:\?\.)?VITE_API_BASE \?\? ''/,
+assert.match(api, /const API_BASE = import\.meta\.env\??\.VITE_API_BASE \?\? ''/,
   'the browser API must default to the current origin')
-assert.match(intake, /const API_BASE = import\.meta\.env\.VITE_API_BASE \?\? ''/,
+assert.match(intake, /const API_BASE = import\.meta\.env\??\.VITE_API_BASE \?\? ''/,
   'stage startup requests must default to the current origin')
 assert.match(dockerfile, /^ARG VITE_API_BASE=$/m,
   'the deployable web image must default to same-origin API requests')
