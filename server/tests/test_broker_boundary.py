@@ -160,6 +160,14 @@ def test_broker_forces_staged_write_source_to_dry_run(monkeypatch, tmp_path):
     monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
     monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
     monkeypatch.setattr(broker, "_cap_preflight", lambda _tenant, _tool: None)
+    original_run_tool_dynamic = broker.run_tool_dynamic
+    observed_runner_calls = []
+
+    def observed_run_tool_dynamic(*args, **kwargs):
+        observed_runner_calls.append(dict(kwargs))
+        return original_run_tool_dynamic(*args, **kwargs)
+
+    monkeypatch.setattr(broker, "run_tool_dynamic", observed_run_tool_dynamic)
     tool = {
         "name": "candidate-writer",
         "version": "1.0.0",
@@ -188,6 +196,9 @@ def test_broker_forces_staged_write_source_to_dry_run(monkeypatch, tmp_path):
     )
 
     assert status == 200
+    assert len(observed_runner_calls) == 1
+    assert observed_runner_calls[0]["tenant_id"] == "tenant-a"
+    assert observed_runner_calls[0]["test_source"] == source
     assert env["result"]["dry_run"] is True
     assert "new_version" not in env["result"]
     backend = broker.write_loop.default_backend(aps_live=False)

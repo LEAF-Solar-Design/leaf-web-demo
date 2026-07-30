@@ -490,6 +490,9 @@ def test_staged_source_receipt_binds_exact_submitted_bytes(
     assert env["execution_provenance"]["source_sha256"] == hashlib.sha256(
         staged.encode("utf-8")
     ).hexdigest()
+    assert env["execution_provenance"]["tenant_hash"] == hashlib.sha256(
+        b"tenant-a"
+    ).hexdigest()
 
 
 def test_staged_write_receipt_binds_request_tenant(
