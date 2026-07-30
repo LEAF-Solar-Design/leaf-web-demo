@@ -37,9 +37,10 @@ export class BrokerApsClientHttp implements BrokerApsClient {
 
   async runTool(req: BrokerRunRequest): Promise<ResultEnvelope> {
     const brokerSecret = (process.env.LEAF_BROKER_SECRET ?? "").trim();
+    const ledgerEventKey = req.ledgerEventKey?.trim() || `harness:${randomUUID()}`;
     const body = {
       tenant_id: req.tenantId,
-      ledger_event_key: req.ledgerEventKey ?? `harness:${randomUUID()}`,
+      ledger_event_key: ledgerEventKey,
       tool: req.tool,
       params: req.params,
       dwg: req.dwg,

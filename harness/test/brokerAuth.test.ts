@@ -27,6 +27,7 @@ describe("harness broker caller authentication", () => {
     });
     await client.runTool({
       tenantId: "tenant",
+      ledgerEventKey: "   ",
       tool: {
         name: "read",
         version: "1",
@@ -50,6 +51,7 @@ describe("harness broker caller authentication", () => {
       aps_live: false,
       test_source: "def run(intake, params):\n    return ({}, None)\n",
     });
+    expect(JSON.stringify(body)).not.toContain("broker-secret");
   });
 
   it("generates a distinct broker ledger event key for each call", async () => {
@@ -89,7 +91,7 @@ describe("harness broker caller authentication", () => {
     expect(bodies[0]?.ledger_event_key).not.toBe(bodies[1]?.ledger_event_key);
   });
 
-  it("preserves an explicitly supplied broker ledger event key", async () => {
+  it("normalizes and preserves an explicitly supplied broker ledger event key", async () => {
     let body: Record<string, unknown> = {};
     const client = new BrokerApsClientHttp({
       fetchImpl: async (_url, init) => {
@@ -103,7 +105,7 @@ describe("harness broker caller authentication", () => {
 
     await client.runTool({
       tenantId: "tenant",
-      ledgerEventKey: "author-stage:fixed-key",
+      ledgerEventKey: "  author-stage:fixed-key  ",
       tool: {
         name: "read",
         version: "1",
