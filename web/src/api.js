@@ -874,9 +874,27 @@ export async function authorTool(mock, description) {
     // a calm "upgrade to build" gate, not a red failure.
     err.entitlementRequired = res.status === 403 && !!(body && body.entitlement_required)
     if (err.entitlementRequired) { err.required = body.required || 'build'; err.tier = body.tier || null }
+    tagAuthorQuota(err, res.status, body)
     throw err
   }
   return body
+}
+
+// Daily authoring-quota rejection (HTTP 429 {quota_kind:"daily_author", tier,
+// limit, used}). A plan boundary that lifts at 00:00 UTC, not a failure, so the
+// AuthorPanel renders it as a calm gate like the build-entitlement one. Applied
+// by BOTH author error paths: the legacy POST /api/author client and the R5
+// POST /api/author/stage client the app actually calls, which is the one a user
+// reaches by pressing Generate. Distinct from the run lane's 402 spend cap and
+// its daily RUN quota, neither of which reaches these routes.
+function tagAuthorQuota(err, status, body) {
+  err.quotaExceeded = status === 429 && !!(body && body.quota_kind === 'daily_author')
+  if (err.quotaExceeded) {
+    err.tier = body.tier || null
+    err.limit = Number.isFinite(Number(body.limit)) ? Number(body.limit) : null
+    err.used = Number.isFinite(Number(body.used)) ? Number(body.used) : null
+  }
+  return err
 }
 
 function customizationError(method, path, status, body) {
@@ -887,7 +905,7 @@ function customizationError(method, path, status, body) {
   err.body = body
   err.grantRequired = isGrantRequired(body)
   err.entitlementRequired = status === 403 && !!(body && body.entitlement_required)
-  return err
+  return tagAuthorQuota(err, status, body)
 }
 
 function requestId() {

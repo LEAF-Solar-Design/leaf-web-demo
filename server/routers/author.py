@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+import author_quota
 import deps
 import entitlements
 from customization_authority import AuthorityError, PublishRequest
@@ -45,6 +46,12 @@ AUTHORED_DIR = SERVER_DIR / "authored"
 # it while the §10 `error` object still carries a valid enum code (BAD_PARAMS). See
 # CONTRACT-ADDENDUM §16.
 GRANT_REQUIRED = "GRANT_REQUIRED"
+
+# The single authoring-quota principal used when auth is off. An unauthenticated
+# deployment has no verified tenant to meter — the id arrives in a request header
+# the caller controls — so the open lane shares one budget rather than handing a
+# fresh one to every id someone invents.
+ANONYMOUS_QUOTA_PRINCIPAL = "_anonymous"
 
 # Bound the tool-description so an unbounded body can't exhaust the author /
 # templater / harness pipeline (security-audit F15). An over-cap body is rejected at
@@ -488,6 +495,62 @@ def _customization_error(
     }))
 
 
+def _quota_exceeded_response(tenant_id: str,
+                             exc: author_quota.AuthorQuotaExceeded) -> JSONResponse:
+    """The 429 the daily authoring cap answers with, in the same wire shape the
+    daily RUN quota already uses (only ``quota_kind`` differs)."""
+    usage = author_quota.usage_policy()
+    body = usage.daily_author_envelope(tenant_id, exc.tier, exc.limit, exc.used)
+    body["degraded_mode"] = False  # the wire schema requires a boolean
+    return JSONResponse(status_code=429, content=body)
+
+
+def _quota_store_error(exc: author_quota.AuthorQuotaStoreError) -> JSONResponse:
+    """A configured quota that cannot be evaluated REFUSES (503). Failing open
+    would silently restore the unbounded state this gate exists to end. Type only
+    in the log: a store error message can carry a connection string, and the code
+    is absent from _CALLER_DRIVEN_CODES on purpose, so this warns."""
+    return _customization_error(CustomizationServiceError(
+        "author_quota_unavailable", 503, f"cause={type(exc).__name__}"))
+
+
+def _legacy_quota_denied(tenant: Any) -> JSONResponse | None:
+    """Charge one attempt for the LEGACY (auth-off) authoring path.
+
+    The R5 lane charges inside ``CustomizationService.stage``, immediately before
+    the harness call, so nothing it refuses first can spend a slot. The legacy
+    path has no such chokepoint — it calls the harness directly from
+    ``_legacy_author`` — so it is metered here, after its own gates.
+
+    With auth off the tenant id is an unverified request header, not a principal:
+    a caller can mint a new one per request and hand itself a fresh budget
+    forever. Such a deployment has no authenticated identity to meter, so the
+    whole open lane shares ONE anonymous budget.
+    """
+    tenant_id = ANONYMOUS_QUOTA_PRINCIPAL if not deps.auth_live() else str(tenant)
+    try:
+        tier = entitlements.resolve_tier(tenant)
+    except Exception:  # noqa: BLE001 - the tier is display-only in this envelope
+        tier = "unknown"
+    # Do not spend a slot on a request the Build entitlement is about to refuse
+    # inside _legacy_author. This is NOT a second gate — that one still runs and
+    # is what denies — it only keeps a deterministic 403 from consuming the
+    # budget. An unreadable policy charges anyway: on the money side the safe
+    # direction is to count.
+    try:
+        if not entitlements.entitlements_for(tier).get("build", False):
+            return None
+    except entitlements.EntitlementsError:
+        pass
+    try:
+        author_quota.enforce(tenant_id, tier)
+    except author_quota.AuthorQuotaExceeded as exc:
+        return _quota_exceeded_response(tenant_id, exc)
+    except author_quota.AuthorQuotaStoreError as exc:
+        return _quota_store_error(exc)
+    return None
+
+
 def _customization_gate(wave: int, tenant: Any) -> JSONResponse | None:
     """Reject unsafe or disabled lifecycle calls before opening SQLite."""
     if not deps.auth_live():
@@ -518,6 +581,11 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
                default=None, alias="X-Authority-Turn-Id")) -> Dict[str, Any]:
     """Use the controlled R5 path only after that tenant's rollout is enabled."""
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
+        # The legacy path also delegates to the authoring harness when
+        # LEAF_AUTHOR_HARNESS_URL is set, so it is metered by the same cap.
+        over_quota = _legacy_quota_denied(tenant)
+        if over_quota is not None:
+            return over_quota
         return _legacy_author(req, tenant)
     # A harness back-edge call authenticates as a tenant and carries no user.
     # Resolve the author from the app's own record of the turn that authorized
@@ -536,6 +604,12 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
             tenant=tenant, description=req.description, mode=req.mode,
             idempotency_key=_subject_scoped_key(idempotency_key.strip(), tenant),
         )
+    # The daily authoring cap is charged inside stage(), immediately before the
+    # harness call, so everything it refuses first costs nothing.
+    except author_quota.AuthorQuotaExceeded as exc:
+        return _quota_exceeded_response(str(tenant), exc)
+    except author_quota.AuthorQuotaStoreError as exc:
+        return _quota_store_error(exc)
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(
@@ -557,6 +631,12 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode=req.mode, idempotency_key=req.idempotency_key,
         )
+    # Same cap as /api/author: both routes reach the harness through stage(),
+    # which is where the charge lives, so neither can bypass it via the other.
+    except author_quota.AuthorQuotaExceeded as exc:
+        return _quota_exceeded_response(str(tenant), exc)
+    except author_quota.AuthorQuotaStoreError as exc:
+        return _quota_store_error(exc)
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(

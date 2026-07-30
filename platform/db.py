@@ -174,6 +174,9 @@ _AUTHORITY_REQUIRED_COLUMNS = {
     "guest_caps": {
         "guest_upload_counters": {"namespace", "counter_key", "value", "updated_at"},
     },
+    "author_quota": {
+        "author_quota_counters": {"namespace", "counter_key", "value", "updated_at"},
+    },
     "drawing": {
         "drawing_authority_cutover": {
             "id", "state", "schema_version", "source_commit", "run_id",
@@ -383,6 +386,10 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "guest_upload_counters_pkey": _catalog_contract(
             "guest_upload_counters", "PRIMARY KEY (namespace, counter_key)"),
     },
+    "author_quota": {
+        "author_quota_counters_pkey": _catalog_contract(
+            "author_quota_counters", "PRIMARY KEY (namespace, counter_key)"),
+    },
     "drawing": {
         "drawing_authority_cutover_pkey": _catalog_contract(
             "drawing_authority_cutover", "PRIMARY KEY (id)"),
@@ -568,6 +575,10 @@ _AUTHORITY_REQUIRED_INDEXES = {
         "idx_guest_upload_counters_updated": _catalog_contract(
             "guest_upload_counters", "(updated_at)"),
     },
+    "author_quota": {
+        "idx_author_quota_counters_updated": _catalog_contract(
+            "author_quota_counters", "(updated_at)"),
+    },
     "drawing": {
         "drawing_store_versions_ready_idx": _catalog_contract(
             "drawing_store_versions", "(tenant_id, drawing_id, version)",
@@ -636,6 +647,7 @@ _AUTHORITY_SELECTORS = {
     "LEAF_AGENT_STORE": {"postgres": "agent"},
     "LEAF_BROKER_STORE": {"postgres": "broker"},
     "LEAF_GUEST_CAP_STORE": {"postgres": "guest_caps"},
+    "LEAF_AUTHOR_QUOTA_STORE": {"postgres": "author_quota"},
     "LEAF_DRAWING_STORE": {"postgres": "drawing"},
     "LEAF_UPLOAD_STORE": {"postgres": "upload"},
     "LEAF_HARNESS_SESSION_STORE": {"postgres": "harness_sessions"},

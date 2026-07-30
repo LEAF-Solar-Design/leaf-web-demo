@@ -144,6 +144,7 @@ authority keeps its legacy default:
 | app and broker async jobs | `LEAF_JOBS_STORE` | `legacy` | their service-specific `DATABASE_URL` |
 | app agent gate state | `LEAF_AGENT_STORE` | `legacy` | `DATABASE_URL` |
 | app guest upload caps | `LEAF_GUEST_CAP_STORE` | `memory` | `DATABASE_URL` |
+| app daily authoring quota | `LEAF_AUTHOR_QUOTA_STORE` | `memory` | `DATABASE_URL` |
 | app drawing manifests and leases | `LEAF_DRAWING_STORE` | `legacy` | `DATABASE_URL` |
 | app upload attempts and purge leases | `LEAF_UPLOAD_STORE` | `legacy` | `DATABASE_URL` |
 | app customization changes and publication | `LEAF_CUSTOMIZATION_STORE` | `sqlite` | `DATABASE_URL` |
@@ -224,6 +225,9 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 | `LEAF_JOBS_STORE` | app | `legacy` | async job and delivery lease authority selector; PostgreSQL remains opt-in |
 | `LEAF_AGENT_STORE` | app | `legacy` | agent gate authority selector; PostgreSQL remains opt-in |
 | `LEAF_GUEST_CAP_STORE` | app | `memory` | guest daily-cap authority selector; PostgreSQL remains opt-in |
+| `LEAF_DAILY_AUTHOR_QUOTA` | app | empty | authoring attempts per tenant per UTC day on `POST /api/author` and `/api/author/stage`. Empty ⇒ **no cap** (prior behavior). Bounds SERIAL authoring sessions, which the broker's USD cap and `LEAF_DAILY_RUN_QUOTA` never see: authoring spends Anthropic and sandbox money harness-side before any broker lease. `0` is a kill switch; an unparseable value fails closed to `0`. **Setting this without an explicit local posture (`LEAF_RUNTIME_ENV` must be development/test/local — unset counts as deployed), or under live auth, also requires `LEAF_AUTHOR_QUOTA_STORE=postgres`** — the app refuses the attempt otherwise, because a per-process counter is not a cap across replicas or restarts. |
+| `LEAF_AUTHOR_QUOTA_STORE` | app | `memory` | authoring-quota counter authority selector; `postgres` requires migration `0023` and is the only mode that survives a restart or spans replicas. `memory` is for local runs, the demo, and tests |
+| `LEAF_AUTHOR_QUOTA_RETENTION_DAYS` | app | `8` | how long spent authoring-counter rows are kept before the post-charge sweep deletes them (PostgreSQL mode; 2–366) |
 | `LEAF_DRAWING_STORE` | app, broker | `legacy` | drawing manifest, version, checkout, and extraction authority selector |
 | `LEAF_UPLOAD_STORE` | app | `legacy` | upload-attempt and purge authority selector |
 | `LEAF_CUSTOMIZATION_STORE` | app, broker | `sqlite` | customization authority selector; `postgres` requires migration `0020`, a backfill, and an exact parity receipt |

@@ -10,7 +10,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 23)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 24)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
@@ -20,6 +20,7 @@ EXPECTED_SELECTOR_DEFAULTS = {
     "LEAF_AGENT_STORE": "legacy",
     "LEAF_BROKER_STORE": "legacy",
     "LEAF_GUEST_CAP_STORE": "memory",
+    "LEAF_AUTHOR_QUOTA_STORE": "memory",
     "LEAF_DRAWING_STORE": "legacy",
     "LEAF_UPLOAD_STORE": "legacy",
     "LEAF_BLOB_STORE": "legacy",
@@ -42,6 +43,7 @@ REQUIRED_COVERAGE = {
     "agent_state",
     "broker_tenants_ledger",
     "guest_caps",
+    "author_quota",
     "drawing_metadata",
     "upload_metadata",
     "harness_sessions_grants",
@@ -74,6 +76,7 @@ REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
         "broker_aps_slots", "broker_admission_resolution_audit",
     },
     "LEAF_GUEST_CAP_STORE": {"guest_upload_counters"},
+    "LEAF_AUTHOR_QUOTA_STORE": {"author_quota_counters"},
     "LEAF_DRAWING_STORE": {"drawing_store_manifests", "drawing_store_versions"},
     "LEAF_UPLOAD_STORE": {
         "drawing_store_manifests", "drawing_store_versions",

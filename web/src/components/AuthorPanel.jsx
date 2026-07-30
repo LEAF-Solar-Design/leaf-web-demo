@@ -173,6 +173,23 @@ function BuildGate() {
   )
 }
 
+// The daily authoring cap (POST /api/author returns 429 once the tenant has spent
+// its authoring attempts for the UTC day). Like BuildGate this is a plan boundary
+// enforced server-side, not a failure — so it is stated calmly and says when it
+// lifts. The counts come from the server envelope; absent counts just drop out.
+function QuotaGate({ limit, used }) {
+  const counts = Number.isFinite(limit) && Number.isFinite(used) ? ` (${used}/${limit})` : ''
+  return (
+    <div className="author-gate" role="status">
+      <div className="author-gate-body">
+        <b>You’ve used your tool authoring for today{counts}.</b>{' '}
+        Your plan includes a daily limit on authoring new tools. It resets at 00:00 UTC —
+        upgrade your plan for more.
+      </div>
+    </div>
+  )
+}
+
 // B2: the authoring agent's harness/broker was unreachable (a 502 / 503 / 504 or
 // an explicit BROKER_UNREACHABLE code on POST /api/author). This is a transient
 // infrastructure hiccup, not a user error and not a plan boundary — surface it as
@@ -215,6 +232,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const [grantGate, setGrantGate] = useState(false) // a grant-required rejection (calm gate, not red)
   const [buildGate, setBuildGate] = useState(false) // a build-entitlement rejection (calm plan gate, not red)
   const [svcGate, setSvcGate] = useState(false) // authoring service unreachable (B2; calm, not red)
+  const [quotaGate, setQuotaGate] = useState(null) // daily authoring cap reached ({limit, used}; calm, not red)
   const [authored, setAuthored] = useState(null)
   const [publishing, setPublishing] = useState(false)
   const [publishErr, setPublishErr] = useState(null)
@@ -251,7 +269,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   async function submit(override) {
     const d = (typeof override === 'string' ? override : desc).trim()
     if (!d || !buildEntitled) return
-    setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setAuthored(null)
+    setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setQuotaGate(null); setAuthored(null)
     try {
       const res = await onAuthor(d)
       setAuthored(res)
@@ -260,8 +278,10 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       //   entitlementRequired — the plan doesn't include authoring (build).
       //   grantRequired       — no Claude account linked to fund the agent.
       //   serviceDown (B2)    — the authoring agent was unreachable (502/503/504).
+      //   quotaExceeded       — the plan's daily authoring cap, lifts at 00:00 UTC.
       if (e && e.entitlementRequired) setBuildGate(true)
       else if (e && e.grantRequired) setGrantGate(true)
+      else if (e && e.quotaExceeded) setQuotaGate({ limit: e.limit, used: e.used })
       else if (isServiceDown(e)) setSvcGate(true)
       else setErr(String(e.message || e))
     } finally {
@@ -306,11 +326,13 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf stages it for review before publication.</p>
       {(!buildEntitled || buildGate)
         ? <BuildGate />
-        : svcGate
-          ? <ServiceGate />
-          : (notLinked || grantGate)
-            ? <AuthorGate onLinkClaude={onLinkClaude} />
-            : null}
+        : quotaGate
+          ? <QuotaGate limit={quotaGate.limit} used={quotaGate.used} />
+          : svcGate
+            ? <ServiceGate />
+            : (notLinked || grantGate)
+              ? <AuthorGate onLinkClaude={onLinkClaude} />
+              : null}
       {/* F1 anatomy: 12px muted label above the field */}
       <label className="field-label" htmlFor="author-desc">What should the tool do?</label>
       <textarea

@@ -30,10 +30,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from psycopg import Error as PostgresError
 
+import author_quota
 import deps
 import entitlements
 import platform_link
@@ -137,6 +139,52 @@ def _tenant_id(value: Any) -> str:
     if not is_valid_tenant_id(tenant_id):
         raise CustomizationServiceError("tenant_identity_invalid", 403)
     return tenant_id
+
+
+def _harness_config() -> tuple[str, str]:
+    """The (url, secret) pair exactly as the stage dispatch will use them —
+    one normalization, shared by the pre-charge guard and ``_harness_stage``,
+    so the two can never diverge on what "configured" means."""
+    return (os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/"),
+            os.environ.get("LEAF_HARNESS_SECRET", "").strip())
+
+
+def _harness_misconfigured() -> bool:
+    """True when no usable authoring harness is configured here.
+
+    Deterministic, so ``stage()`` refuses BEFORE charging the daily authoring
+    quota. Total by construction rather than shape-by-shape: it PREPARES the
+    same request ``_harness_stage`` will send, so everything the HTTP client
+    refuses without any network I/O — a URL that is not an http(s) origin, an
+    invalid port, a malformed IPv6 literal, a secret that is not a valid
+    header value — refuses here first, as does a blank secret (the harness's
+    caller gate 401s every dispatch; same definition of "configured" as the
+    repo-preparation fallback). The boundary: this guard owns the app's own
+    harness configuration as validated client-side at prepare time. Anything
+    past prepare (proxy/DNS/TLS/connect, a secret the harness REJECTS) is
+    transport or harness state whose outcome is ambiguous or external, and
+    such an attempt is charged like any other refused-in-flight attempt — a
+    timed-out dispatch may well have reached the harness and spent.
+    """
+    url, secret = _harness_config()
+    if not secret:
+        return True
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return True
+        # http.client's own pre-I/O gate: header values are sent Latin-1, so a
+        # secret outside that repertoire can never be dispatched by this client
+        # and is configuration error, not harness state.
+        secret.encode("latin-1")
+        import requests
+        requests.models.PreparedRequest().prepare(
+            method="POST", url=f"{url}/author/stage",
+            headers={"X-Harness-Secret": secret},
+        )
+    except Exception:  # noqa: BLE001 - anything the client refuses locally
+        return True
+    return False
 
 
 def _git_trust(*paths: Path) -> list[str]:
@@ -475,6 +523,22 @@ class CustomizationService:
             return self._receipt(change)
         if change.state is not ChangeState.STAGING:
             raise CustomizationServiceError("stage_not_available")
+        # An unconfigured or misconfigured harness answers every attempt with
+        # the same 503 without spending anything, so those deterministic
+        # refusals must also come before the charge (_harness_stage re-checks
+        # the URL and raises the identical error).
+        if _harness_misconfigured():
+            raise CustomizationServiceError("customization_harness_unavailable", 503)
+        # The daily authoring cap is charged HERE, at the last point before
+        # authoring spends money, and never refunded. Everything deterministic
+        # has already refused above — a disabled rollout, an invalid mode or
+        # blank description, a missing binding, a tier without Build, a role
+        # `authorize_stage` denies, an already-STAGED replay that returns its
+        # durable receipt without calling the harness, and a harness this
+        # deployment never configured — so none of those spends a slot. A retry
+        # that DOES reach here re-invokes the harness and so counts again,
+        # which is why the unit is an attempt and not a change-set row.
+        author_quota.enforce(tenant_id, tier)
         body = self._harness_stage(tenant_id, description, change)
         raw_receipt = body.get("receipt")
         if not isinstance(raw_receipt, Mapping):
@@ -513,14 +577,14 @@ class CustomizationService:
         return self._receipt(change, tool=body.get("tool"), preview=body.get("preview"))
 
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
-        url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
+        url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
         try:
             import requests
             response = requests.post(
                 f"{url}/author/stage", timeout=120,
-                headers={"X-Harness-Secret": os.environ.get("LEAF_HARNESS_SECRET", "").strip()},
+                headers={"X-Harness-Secret": secret},
                 json={"tenant_id": tenant_id, "description": description, "changeSetId": change.change_set_id,
                       "expectedBaseSha": change.base_commit, "platformRelease": change.desired_platform_release,
                       "workspaceContractDigest": change.workspace_contract_digest,

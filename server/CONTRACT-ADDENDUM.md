@@ -883,6 +883,44 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
   `tenant_id`/`org_id` like every other echoed body). This is a READ of policy — the actual
   gate lives in the run/author chains and cannot be bypassed via this endpoint.
 
+> **§17 daily authoring quota (2026-07-30):** `POST /api/author` and
+> `POST /api/author/stage` additionally enforce a per-tenant DAILY cap on
+> authoring ATTEMPTS, configured by `LEAF_DAILY_AUTHOR_QUOTA` (absent/empty ⇒
+> no cap, prior behavior). It stands beside the entitlement gate, not in place
+> of it: entitlement asks whether the plan includes Build at all, this asks how
+> often. It exists because authoring spend is invisible to the two caps that
+> already exist — R5 authoring runs the Agent SDK harness and enables the
+> operator-funded sandbox BEFORE any broker lease, and its broker test is
+> `aps_live=false` / `usd_est=null`, so neither the broker's USD spend cap nor
+> the daily RUN quota (§ preflight order) ever observes it, while the harness's
+> per-session ceilings bound one session and never a SERIES of them.
+> A quota unit is one attempt that reaches the harness. On the R5 lane the
+> charge lives inside `CustomizationService.stage`, immediately before the
+> harness call, so anything the service deterministically refuses first — an
+> invalid request, a missing tenant binding, a tier without Build, a role
+> `authorize_stage` denies, an already-STAGED idempotency replay answered from
+> its durable receipt, a harness with no usable configuration (a blank caller
+> secret, or a URL/secret the HTTP client itself refuses at prepare time,
+> before any network I/O) — never spends a slot; a retry under a key still in
+> STAGING re-invokes the harness and IS counted. The legacy auth-off path calls
+> the harness directly from the router, so it is metered there, after its own
+> gates. With auth OFF the tenant id is an unverified request header rather
+> than a principal, so the open lane shares one anonymous budget instead of
+> handing a fresh one to every invented id. Rejection is **HTTP 429**
+> carrying the daily-run-quota envelope shape verbatim (`error_code:
+> "quota_exceeded"`, `retryable: true`, top-level and nested `tier`/`limit`/
+> `used`), discriminated by `quota_kind: "daily_author"` rather than
+> `"daily_runs"`. The counter is `leaf_platform.counters.SharedCounterStore`
+> bound to `author_quota_counters` (migration 0023) under
+> `LEAF_AUTHOR_QUOTA_STORE=postgres`, or per-process memory otherwise; a
+> configured quota whose counter cannot be reached refuses with a 503 rather
+> than admitting unmetered. The durable store is REQUIRED wherever a
+> per-process counter would not be a real cap, keyed on deployment posture:
+> any `LEAF_RUNTIME_ENV` outside development/test/local — including UNSET,
+> since the app image bakes no posture — demands postgres regardless of auth
+> (two replicas keep two independent counts and a restart returns every tenant
+> to zero), and an explicit local posture still demands it once auth is live.
+
 > **§10 enum update (2026-07-18):** `GRANT_REQUIRED` (HTTP 401) and `ENTITLEMENT_REQUIRED` (HTTP 403) promoted into the frozen ErrorCode enum + `envelope_schema.json`. The grant-required (§16) and entitlement-denied (§17) responses now carry these dedicated `error.error_code`s instead of `BAD_PARAMS`; the additive top-level markers (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are unchanged, so existing consumers keep working.
 
 > **§17 platform-lane extension (2026-07-22):** the platform jobs lane

@@ -382,6 +382,103 @@ def daily_run_quota_check(tenant_id: str, tier: str, ledger_path,
 
 
 # --------------------------------------------------------------------------- #
+# Per-tenant DAILY AUTHORING quota — a COUNT-based cap on /api/author stage
+# ATTEMPTS per tenant per UTC day, standing ALONGSIDE the daily RUN quota above
+# and ORDER-INDEPENDENT of it.
+#
+# Why a SECOND count-based cap: R5 authoring runs the Agent SDK harness (and
+# enables the operator-funded E2B sandbox) BEFORE any broker lease, and its
+# required broker test is aps_live=false / usd_est=null — so neither the USD
+# spend cap nor the daily RUN quota above ever observes an authoring turn.
+# Per-session ceilings (agentSdkRunner maxTurns, token ceiling) bound ONE
+# session; nothing bounded SERIAL sessions, so a stranger on a build-entitled
+# tier could repeat authoring turns indefinitely on the operator's Anthropic
+# and E2B accounts. This quota is that bound.
+#
+# COUNTING RULE: a quota unit = one authoring ATTEMPT admitted at the router,
+# i.e. a request about to be handed to the harness-backed stage path. An
+# attempt REJECTED over-quota is never counted (mirroring the run quota, where
+# a denied run never counts). An idempotent RETRY counts as a fresh attempt on
+# purpose: a retry against a change set still in STAGING re-invokes the harness
+# and spends real money, so counting change-set ROWS instead of attempts would
+# let one reused idempotency key loop the harness unbounded.
+#
+# No cron (as with the run quota): the counter key carries the UTC calendar day
+# (YYYY-MM-DD), so a new day reads a fresh key and a fresh count of 0.
+#
+# This module owns POLICY (is the quota on, what is the limit, what does the
+# over-quota envelope look like). The COUNTER STORE lives in
+# server/author_quota.py, which binds leaf_platform.counters.SharedCounterStore
+# to its authority-owned table — the same durable primitive the guest upload
+# caps use.
+# --------------------------------------------------------------------------- #
+
+def daily_author_quota() -> Optional[int]:
+    """Daily authoring-attempt cap from env LEAF_DAILY_AUTHOR_QUOTA.
+
+    Absent/empty -> ``None``: the quota is OFF and authoring behaves exactly as
+    it did before this gate existed. A parseable value >= 0 -> that limit (0 is
+    a valid authoring kill switch). A negative or unparseable value -> 0: the
+    operator SET the variable intending a cap, so a typo fails CLOSED (authoring
+    blocked, loud and discoverable) rather than silently unmetered.
+
+    Unlike ``daily_run_limit_for``, this is deliberately NOT tier-keyed yet: the
+    hosted tiers that can author are exactly the ones this gate exists to bound,
+    and a per-tier table would have to invent multipliers nobody has priced. A
+    tier map lands here when the authoring SKUs are priced.
+    """
+    raw = os.environ.get("LEAF_DAILY_AUTHOR_QUOTA")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return v if v >= 0 else 0
+
+
+def author_quota_day(now_ts: Optional[float] = None) -> str:
+    """The UTC calendar day (``YYYY-MM-DD``) the counter keys on."""
+    moment = (datetime.fromtimestamp(now_ts, tz=timezone.utc)
+              if now_ts is not None else datetime.now(timezone.utc))
+    return moment.strftime("%Y-%m-%d")
+
+
+def daily_author_envelope(tenant_id: str, tier: str, limit: int, used: int,
+                          tool: Optional[str] = None) -> Dict[str, Any]:
+    """The over-quota §10 envelope for the DAILY AUTHORING cap (HTTP 429).
+
+    Deliberately the SAME wire shape the frontend already understands for the
+    daily run cap: ``quota_kind`` / ``tier`` / ``limit`` / ``used`` both
+    top-level and nested in ``error``, ``error_code == "quota_exceeded"``, and
+    ``retryable=True`` (the cap lifts at 00:00 UTC). Only the ``quota_kind``
+    VALUE differs — ``daily_author`` rather than ``daily_runs`` — so a consumer
+    can tell the two apart while ``classifyQuotaResult``'s existing
+    ``quota_exceeded`` branch still classifies it as a quota condition with no
+    frontend change."""
+    msg = (f"Daily authoring limit reached for your plan ({used}/{limit}). "
+           f"Resets 00:00 UTC. Upgrade for more.")
+    return {
+        "ok": False,
+        "tool": tool,
+        "result": None,
+        "overlay": None,
+        "cost": None,
+        "error": {"error_code": QUOTA_EXCEEDED, "message": msg, "retryable": True,
+                  "tier": tier, "limit": limit, "used": used,
+                  "quota_kind": "daily_author"},
+        "error_code": QUOTA_EXCEEDED,   # top-level convenience mirror (plan §3 shape)
+        "retryable": True,
+        "message": msg,
+        "tier": tier,
+        "limit": limit,
+        "used": used,
+        "quota_kind": "daily_author",   # disambiguates from daily_runs + spend quotas
+        "degraded_mode": None,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # attribution — local fallback: in-process append-only ledger
 # --------------------------------------------------------------------------- #
 class UsageLedger:
