@@ -899,7 +899,8 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 > harness call, so anything the service deterministically refuses first — an
 > invalid request, a missing tenant binding, a tier without Build, a role
 > `authorize_stage` denies, an already-STAGED idempotency replay answered from
-> its durable receipt — never spends a slot; a retry under a key still in
+> its durable receipt, a harness with no usable configuration (URL that is not
+> an http(s) origin, or a blank caller secret) — never spends a slot; a retry under a key still in
 > STAGING re-invokes the harness and IS counted. The legacy auth-off path calls
 > the harness directly from the router, so it is metered there, after its own
 > gates. With auth OFF the tenant id is an unverified request header rather

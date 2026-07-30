@@ -327,6 +327,28 @@ def test_enforce_fails_closed_when_the_policy_module_is_missing(monkeypatch, all
         author_quota.enforce("tenant-a", "demo")
 
 
+@pytest.mark.parametrize("url,secret,misconfigured", [
+    ("", "s3cret", True),                      # no URL at all
+    ("   ", "s3cret", True),                   # whitespace-only URL
+    ("harness.internal:8150", "s3cret", True), # no http(s) scheme -> requests refuses client-side
+    ("http://harness.internal:8150", "", True),    # blank secret -> the caller gate 401s every retry
+    ("http://harness.internal:8150", "  \r\n", True),
+    ("http://harness.internal:8150", "s3cret", False),
+    ("https://harness.internal:8150/", "s3cret", False),
+])
+def test_harness_misconfiguration_is_deterministic_and_refused(
+    monkeypatch, url, secret, misconfigured
+):
+    """The stage() admission refuses a harness that can never accept a dispatch
+    BEFORE charging the quota, so a misconfigured deployment does not burn one
+    slot per attempt while returning the same 503 forever."""
+    import customization_service
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", secret)
+    assert customization_service._harness_misconfigured() is misconfigured
+
+
 def test_service_charges_immediately_before_the_harness_call():
     """Pins the placement sol-critic's round-2 finding required: the charge must
     sit AFTER every deterministic refusal and IMMEDIATELY BEFORE the harness

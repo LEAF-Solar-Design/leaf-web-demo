@@ -914,8 +914,10 @@ def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
     )
     monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
     # A callback-completed retry presupposes a configured harness; stage()
-    # refuses an unconfigured one before charging the authoring quota.
+    # refuses an unconfigured one (URL and secret) before charging the
+    # authoring quota.
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "secret")
     monkeypatch.setattr(
         customization_service,
         "_binding",

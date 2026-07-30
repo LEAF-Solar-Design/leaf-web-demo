@@ -131,6 +131,13 @@ services:
     environment:
       APS_LIVE: "0"
       BROKER_URL: http://broker:8140
+      # The daily authoring quota (server/author_quota.py) accepts the
+      # in-process memory counter only under an EXPLICIT local posture — unset
+      # counts as deployed, because the app image bakes no posture. Compose is
+      # the local demo, so declare it here like the harness service does; an
+      # operator who injects LEAF_DAILY_AUTHOR_QUOTA through an override keeps
+      # a working memory-metered lane.
+      LEAF_RUNTIME_ENV: ${LEAF_RUNTIME_ENV:-development}
       LEAF_AUTHOR_HARNESS_URL: http://harness:8150
       # Same value as the harness service: broker_client.harness_headers() forwards
       # it as X-Harness-Secret on every app→harness call (author/tenant/turn).

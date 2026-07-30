@@ -30,6 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from psycopg import Error as PostgresError
@@ -138,6 +139,24 @@ def _tenant_id(value: Any) -> str:
     if not is_valid_tenant_id(tenant_id):
         raise CustomizationServiceError("tenant_identity_invalid", 403)
     return tenant_id
+
+
+def _harness_misconfigured() -> bool:
+    """True when no usable authoring harness is configured here.
+
+    Deterministic, so ``stage()`` refuses BEFORE charging the daily authoring
+    quota: a URL that is not an http(s) origin never leaves the box (requests
+    rejects it client-side), and a blank ``LEAF_HARNESS_SECRET`` is 401ed by
+    the harness's caller gate on every retry — the same definition of
+    "configured" the repo-preparation fallback uses. A secret the harness
+    REJECTS is different: that dispatch really reached the harness, and the
+    attempt is charged like any other refused-in-flight attempt.
+    """
+    url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return True
+    return not os.environ.get("LEAF_HARNESS_SECRET", "").strip()
 
 
 def _git_trust(*paths: Path) -> list[str]:
@@ -476,10 +495,11 @@ class CustomizationService:
             return self._receipt(change)
         if change.state is not ChangeState.STAGING:
             raise CustomizationServiceError("stage_not_available")
-        # An unconfigured harness answers every attempt with the same 503, so
-        # that deterministic refusal must also come before the charge
-        # (_harness_stage re-checks and raises the identical error).
-        if not os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/"):
+        # An unconfigured or misconfigured harness answers every attempt with
+        # the same 503 without spending anything, so those deterministic
+        # refusals must also come before the charge (_harness_stage re-checks
+        # the URL and raises the identical error).
+        if _harness_misconfigured():
             raise CustomizationServiceError("customization_harness_unavailable", 503)
         # The daily authoring cap is charged HERE, at the last point before
         # authoring spends money, and never refunded. Everything deterministic
