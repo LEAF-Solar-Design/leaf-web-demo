@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, linkSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -247,6 +247,17 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
     expect(clean).toContain("hash mismatch");
     // ...and it cannot be grown without bound by a name that changes every turn.
     expect(sanitiseLogText("x".repeat(5000)).length).toBeLessThanOrEqual(300);
+    // Not just C0/C1: U+2028 and U+2029 are LINE separators to a JavaScript or
+    // JSON log reader, and the bidi overrides reorder what a human sees.
+    for (const code of [0x2028, 0x2029, 0x202e, 0x2066, 0x200f]) {
+      const escaped = sanitiseLogText(`before${String.fromCharCode(code)}after`);
+      expect(escaped).not.toContain(String.fromCharCode(code));
+      expect(escaped).toContain(code.toString(16));
+    }
+    // Truncating AFTER expansion can cut an escape in half and hand a parser a
+    // dangling `\\x`; truncating the input first keeps every escape whole.
+    const nearLimit = "x".repeat(298) + String.fromCharCode(27) + "tail";
+    expect(sanitiseLogText(nearLimit).endsWith(String.fromCharCode(92) + "x")).toBe(false);
   });
 
   it("bounds the mount cache, and does NOT delete the snapshot it evicts", () => {
@@ -400,6 +411,18 @@ describe("loader and offline verifier cross-check", { timeout: 120_000 }, () => 
         bundleDigest: current.bundleDigest, pad: "x".repeat(70_000),
       }));
     }],
+    // A bundle with no skills: the builder cannot make one, a hand-made
+    // directory can, and the runtime refuses it. The gate has to agree.
+    ["a bundle with no skills at all", (path) => {
+      for (const name of readdirSync(join(path, "skills"))) {
+        rmSync(join(path, "skills", name), { recursive: true, force: true });
+      }
+      writeFileSync(join(path, "manifest.json"), JSON.stringify({
+        version: 1, tier: "tenant-safe",
+        files: { ".claude-plugin/plugin.json": sha256(readFileSync(join(path, ".claude-plugin", "plugin.json"))) },
+        bundleDigest: bundleDigest({ ".claude-plugin/plugin.json": sha256(readFileSync(join(path, ".claude-plugin", "plugin.json"))) }),
+      }));
+    }],
     ["a tampered bundle digest", (path) => {
       const current = manifest(path);
       writeFileSync(join(path, "manifest.json"), JSON.stringify({ version: 1, tier: "tenant-safe", files: current.files, bundleDigest: "0".repeat(64) }));
@@ -469,6 +492,37 @@ describe("frontmatter block scalars", () => {
     expect(fm("name: skill-a", "description: useful # note")?.description).toBe("useful");
     expect(fm("name: skill-a", `description: "tab${BS}there"`)?.description)
       .toBe("tab" + String.fromCharCode(9) + "here");
+  });
+
+  it("REFUSES a scalar that is not one string", () => {
+    const Q = String.fromCharCode(34);
+    // An unescaped interior quote is not one scalar; a naive parity check on the
+    // closing quote accepts it and rewrites the value.
+    expect(fm("name: skill-a", `description: ${Q}a${Q}b${Q}`)).toBeNull();
+    // ...and these are not strings at all to YAML. Emitting them as the text
+    // between the colon and the newline would say something the source did not.
+    for (const value of ["false", "null", "~", "3.14", "0x1f", "[a, b]", "{a: b}", "yes"]) {
+      expect(fm("name: skill-a", `description: ${value}`)).toBeNull();
+    }
+  });
+
+  it("uses YAML whitespace, not JavaScript whitespace, to find a comment", () => {
+    // A non-breaking space is not a YAML separator, so ` #` after one is NOT a
+    // comment. Cutting there would silently shorten a real description.
+    const NBSP = String.fromCharCode(160);
+    expect(fm("name: skill-a", `description: keep${NBSP}#this`)?.description)
+      .toBe(`keep${NBSP}#this`);
+    expect(fm("name: skill-a", "description: cut here # not this")?.description).toBe("cut here");
+  });
+
+  it("only requires exactness from the values it re-emits", () => {
+    // `name` and `description` are rewritten into the mounted document; nothing
+    // else is. Refusing a skill because an unrelated key holds `false` would
+    // reject a third of the real corpus and protect nothing.
+    const parsed = fm("name: skill-a", "description: real prose", "some-flag: false",
+                      "version: 3.14", "tags: [a, b]");
+    expect(parsed?.name).toBe("skill-a");
+    expect(parsed?.description).toBe("real prose");
   });
 
   it("REFUSES an inline scalar it cannot decode", () => {

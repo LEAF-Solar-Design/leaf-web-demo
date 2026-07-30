@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { bundleDigest, sha256 } from "./common.mjs";
+import { bundleDigest, parseBundledSkillName, sha256 } from "./common.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BUILD = path.join(HERE, "build.mjs");
@@ -260,4 +260,21 @@ test("builder rejects an oversized SKILL.md", async (t) => {
   const built = run(BUILD, ["--source", work.source, "--curation", work.curation, "--tier", "tenant-safe", "--out", work.out]);
   assert.notEqual(built.status, 0);
   assert.match(built.stderr, /NOT-READY: SKILL.md for large-skill exceeds 262144 bytes/);
+});
+
+// Called DIRECTLY, because the enclosing directory validator happens to reject
+// these names first — which makes a disagreement with the loader invisible
+// rather than absent. The exported function has to carry the rule itself.
+test("parseBundledSkillName applies the loader's name rule", () => {
+  const doc = (name) => `---
+name: ${name}
+description: real prose
+---
+body
+`;
+  for (const bad of ["CON", "probe.", "bad/name", "com1"]) {
+    assert.throws(() => parseBundledSkillName(doc(bad), "fixture"),
+      /invalid skill name/, `${bad} was accepted`);
+  }
+  assert.equal(parseBundledSkillName(doc("good-name"), "fixture"), "good-name");
 });

@@ -83,24 +83,37 @@ function plainTopLevelKey(line: string): string | null {
  * newlines, and a blank line is a paragraph break in both.
  */
 /**
- * Decode a one-line YAML scalar, or refuse.
+ * YAML scalars that are NOT strings. A plain `false`, `null`, `3.14` or `[a, b]`
+ * is a boolean, a null, a number or a sequence, so reproducing it as the text
+ * between the colon and the newline would put something in the mounted document
+ * that the source did not say.
+ */
+const NON_STRING_PLAIN =
+  /^(null|~|true|false|yes|no|on|off|[-+]?\d+(\.\d*)?([eE][-+]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|-?\.inf|\.nan|\[.*\]|\{.*\})$/i;
+
+/**
+ * Decode a one-line YAML scalar, or return null meaning "present, but we will
+ * not guess at it".
  *
- * Stripping the outer quotes is not decoding. `"a\nb"` is a newline to YAML and
- * a backslash-n to a naive strip; `'it''s'` is one apostrophe, not two; and in a
- * plain scalar ` #` begins a comment that is not part of the value. Each of
- * those silently changes the text we then re-emit as the mounted description.
- * The three forms below are decoded properly and anything else refuses.
+ * Stripping the outer quotes is not decoding: `"a\nb"` is a newline to YAML and
+ * a backslash-n to a naive strip, `'it''s'` is one apostrophe, and in a plain
+ * scalar ` #` begins a comment. YAML separates on SPACE AND TAB only, so
+ * JavaScript's `\s` — which includes NBSP and U+2028 — would cut a value where
+ * YAML does not.
  */
 function readInlineScalar(raw: string): string | null {
-  if (raw.startsWith('"')) {
-    if (raw.length < 2 || !/(^|[^\\])(\\\\)*"$/.test(raw)) return null;
+  const value = raw.replace(/^[ \t]+|[ \t]+$/g, "");
+  if (value.startsWith('"')) {
+    if (value.length < 2 || !/(^|[^\\])(\\\\)*"$/.test(value)) return null;
     let out = "";
-    for (let i = 1; i < raw.length - 1; i += 1) {
-      const ch = raw[i]!;
+    for (let i = 1; i < value.length - 1; i += 1) {
+      const ch = value[i]!;
+      // An unescaped quote before the end means this is not one scalar at all.
+      if (ch === '"') return null;
       if (ch !== "\\") { out += ch; continue; }
-      const esc = raw[++i];
+      const esc = value[++i];
       if (esc === "u") {
-        const hex = raw.slice(i + 1, i + 5);
+        const hex = value.slice(i + 1, i + 5);
         if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
         out += String.fromCharCode(parseInt(hex, 16));
         i += 4;
@@ -117,26 +130,24 @@ function readInlineScalar(raw: string): string | null {
     }
     return out;
   }
-  if (raw.startsWith("'")) {
-    if (raw.length < 2 || !raw.endsWith("'")) return null;
-    const inner = raw.slice(1, -1);
-    // In a single-quoted scalar the ONLY escape is a doubled quote, so any
-    // lone quote left after collapsing pairs means the value is not what it looks like.
+  if (value.startsWith("'")) {
+    if (value.length < 2 || !value.endsWith("'")) return null;
+    const inner = value.slice(1, -1);
+    // A doubled quote is the only escape here, so a lone one means the value is
+    // not what it looks like.
     if (inner.replace(/''/g, "").includes("'")) return null;
     return inner.replace(/''/g, "'");
   }
-  // Plain scalar: ` #` starts a comment, which is not part of the value.
-  const comment = raw.search(/(^|\s)#/);
-  const text = (comment === -1 ? raw : raw.slice(0, comment)).trim();
-  // A plain scalar cannot open with an indicator that means something else.
-  return /^[&*!%@`]/.test(text) ? null : text;
+  const comment = value.search(/(^|[ \t])#/);
+  const text = (comment === -1 ? value : value.slice(0, comment)).replace(/[ \t]+$/, "");
+  if (text === "" || /^[&*!%@`]/.test(text) || NON_STRING_PLAIN.test(text)) return null;
+  return text;
 }
 
-function readScalar(lines: string[], index: number, raw: string): { value: string; next: number } | null {
-  const header = raw.trim();
+function readScalar(lines: string[], index: number, raw: string): { value: string | null; next: number } {
+  const header = raw.replace(/^[ \t]+|[ \t]+$/g, "");
   if (!/^[>|]/.test(header)) {
-    const value = readInlineScalar(header);
-    return value === null ? null : { value, next: index + 1 };
+    return { value: readInlineScalar(header), next: index + 1 };
   }
   // ONLY the four plain headers, and then only a block whose text we can
   // reproduce CHARACTER FOR CHARACTER. Everything else refuses. An explicit
@@ -147,7 +158,7 @@ function readScalar(lines: string[], index: number, raw: string): { value: strin
   // approximating any of them silently rewrites the description the model reads
   // to decide a skill applies. Refusing is the honest option and it is loud:
   // the bundle does not build.
-  if (!/^[>|]-?$/.test(header)) return null;
+  const reproducible = /^[>|]-?$/.test(header);
   const folded = header.startsWith(">");
   const chomped = header.endsWith("-");
   const content: string[] = [];
@@ -164,14 +175,17 @@ function readScalar(lines: string[], index: number, raw: string): { value: strin
   // exactly one newline), so they carry no content and a blank line before the
   // next key is ordinary formatting. Blank lines BETWEEN text lines are content.
   while (content.length && content[content.length - 1]!.trim() === "") content.pop();
+  // An unreproducible block still has a knowable EXTENT, and the caller has to
+  // resume after it either way or a key hiding below would never be inspected.
+  if (!reproducible) return { value: null, next: cursor };
   if (!content.length) return { value: "", next: cursor };
   const base = content[0]!.length - content[0]!.trimStart().length;
   const parts: string[] = [];
   for (const line of content) {
-    if (line.trim() === "") return null;                       // interior blank
-    if (/\t/.test(line.slice(0, base + 1))) return null;       // tab indentation
-    if (line.length - line.trimStart().length !== base) return null;  // uneven
-    if (/\s$/.test(line)) return null;                         // trailing space
+    if (line.trim() === "") return { value: null, next: cursor };  // interior blank
+    if (/\t/.test(line.slice(0, base + 1))) return { value: null, next: cursor };  // tab indent
+    if (line.length - line.trimStart().length !== base) return { value: null, next: cursor };
+    if (/\s$/.test(line)) return { value: null, next: cursor };  // trailing space
     parts.push(line.slice(base));
   }
   // Clip (`>` / `|`) keeps exactly one trailing newline; strip (`-`) keeps none.
@@ -191,10 +205,19 @@ export function parseSkillFrontmatter(source: string): BundledSkill | null {
     if (EXECUTABLE_KEYS.has(key.toLowerCase())) return null;
     const line = lines[index]!;
     const scalar = readScalar(lines, index, line.slice(line.indexOf(":") + 1));
-    if (!scalar) return null;
     index = scalar.next - 1;
-    if (key === "name" && name === null) name = scalar.value;
-    if (key === "description" && description === null) description = scalar.value;
+    // Only `name` and `description` are re-emitted into the mounted document,
+    // so only those two must be reproducible. Refusing a skill because some
+    // unrelated key holds `false` would reject a third of the real corpus for
+    // nothing; refusing one we would have to GUESS at is the whole point.
+    if (key === "name" && name === null) {
+      if (scalar.value === null) return null;
+      name = scalar.value;
+    }
+    if (key === "description" && description === null) {
+      if (scalar.value === null) return null;
+      description = scalar.value;
+    }
   }
   // A description is REQUIRED, not decorative: it is the only text the model
   // reads when deciding whether a skill applies, so a skill without one is
@@ -249,6 +272,10 @@ export function verifyBundle(bundlePath: string, options: { expectedDigest?: str
     if (!lstatSync(skillsDir).isDirectory()) return reject("skills is not a directory");
     const skillNames = readdirSync(skillsDir).sort();
     if (skillNames.length > MAX_SKILLS) return reject("bundle exceeds skill limit");
+    // An empty bundle is not a valid artifact, and this belongs HERE rather
+    // than at mount time: the offline verifier checks the same shape, so a
+    // rule only the mount applies is a rule the build gate cannot mirror.
+    if (skillNames.length === 0) return reject("bundle contains no skills");
     const seen = new Set<string>();
     for (const name of skillNames) {
       if (!isValidSkillName(name) || seen.has(name.toLowerCase())) return reject(`invalid skill name: ${name}`);
@@ -419,9 +446,16 @@ const mounts = new Map<string, SkillBundleAttachment>();
 const warned = new Set<string>();
 
 /** The most distinct refusals to report before going quiet. */
-/** C0 and C1 control characters: cursor moves and escape sequences a log
- *  reader would interpret rather than display. */
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
+/**
+ * Everything a log reader might act on rather than display: C0 and C1
+ * controls (cursor moves, escape sequences), U+2028 and U+2029 which are
+ * LINE SEPARATORS to a JavaScript or JSON reader and so can forge a log
+ * entry, and the bidi overrides U+200E, U+200F, U+202A-202E and U+2066-2069,
+ * which reorder visible text so a reader sees something other than what is
+ * written.
+ */
+const CONTROL_CHARACTERS =
+  /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
 const MAX_WARNINGS = 32;
 
@@ -445,10 +479,15 @@ const MAX_WARNINGS = 32;
  * only works on filesystems that accept one.
  */
 export function sanitiseLogText(reason: string): string {
-  return reason
-    .replace(CONTROL_CHARACTERS, (ch) =>
-      "\\x" + ch.charCodeAt(0).toString(16).padStart(2, "0"))
-    .slice(0, 300);
+  // TRUNCATE FIRST. Slicing after expansion can cut an escape in half and
+  // leave a trailing `\\x` for a parser to trip over; slicing the input means
+  // every escape in the output is whole.
+  return reason.slice(0, 300).replace(CONTROL_CHARACTERS, (ch) => {
+    const code = ch.charCodeAt(0);
+    return code > 0xff
+      ? "\\u" + code.toString(16).padStart(4, "0")
+      : "\\x" + code.toString(16).padStart(2, "0");
+  });
 }
 
 function refuse(path: string, reason: string): null {
@@ -521,7 +560,6 @@ function mountFor(
   if (verified.tier !== tier) {
     return refuse(path, `${path}: bundle tier ${verified.tier} does not match LEAF_SKILLS_TIER ${tier}`);
   }
-  if (verified.skills.length === 0) return refuse(path, `${path}: bundle contains no skills`);
   const mountPath = materialiseVerifiedBundle(verified);
   if (!mountPath) return refuse(path, `${path}: the verified snapshot could not be written`);
   return {

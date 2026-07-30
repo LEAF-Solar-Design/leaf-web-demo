@@ -95,34 +95,30 @@ export function parseSkillName(markdown, label) {
 }
 
 /**
- * The name a BUNDLED SKILL.md declares, refusing any executable key. This is
- * the bundle-side parser: the source-side `parseSkillName` stays permissive so
- * an executable skill sitting in the source tree does not break every build,
- * it just cannot be bundled.
+ * YAML scalars that are NOT strings. Byte-for-byte the loader's list.
  */
+const NON_STRING_PLAIN =
+  /^(null|~|true|false|yes|no|on|off|[-+]?\d+(\.\d*)?([eE][-+]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|-?\.inf|\.nan|\[.*\]|\{.*\})$/i;
+
 /**
- * Byte-for-byte the loader's `readScalar` (harness/src/ports/impl/skillBundle.ts).
- * It has to be: with `name: >-` on the next line the loader folds to the real
- * name while a line-only reader returns ">-", and the two sides then disagree
- * about the same file. Returns null for any block form we cannot reproduce
- * exactly, which both sides treat as a refusal.
- */
-/**
- * Byte-for-byte the loader's `readInlineScalar`. Stripping the outer quotes is
- * not decoding: a double-quoted `\n` is a newline, `'it''s'` is one apostrophe,
- * and in a plain scalar ` #` begins a comment. A difference here is a bundle
- * the build gate calls READY and production refuses.
+ * Byte-for-byte the loader's `readInlineScalar`
+ * (harness/src/ports/impl/skillBundle.ts). Stripping the outer quotes is not
+ * decoding, YAML separates on space and tab only, and a plain `false` is a
+ * boolean rather than the text "false". Any difference here is a bundle the
+ * build gate calls READY and production refuses.
  */
 export function readInlineScalar(raw) {
-  if (raw.startsWith('"')) {
-    if (raw.length < 2 || !/(^|[^\\])(\\\\)*"$/.test(raw)) return null;
+  const value = raw.replace(/^[ \t]+|[ \t]+$/g, "");
+  if (value.startsWith('"')) {
+    if (value.length < 2 || !/(^|[^\\])(\\\\)*"$/.test(value)) return null;
     let out = "";
-    for (let i = 1; i < raw.length - 1; i += 1) {
-      const ch = raw[i];
+    for (let i = 1; i < value.length - 1; i += 1) {
+      const ch = value[i];
+      if (ch === '"') return null;
       if (ch !== "\\") { out += ch; continue; }
-      const esc = raw[++i];
+      const esc = value[++i];
       if (esc === "u") {
-        const hex = raw.slice(i + 1, i + 5);
+        const hex = value.slice(i + 1, i + 5);
         if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
         out += String.fromCharCode(parseInt(hex, 16));
         i += 4;
@@ -138,24 +134,29 @@ export function readInlineScalar(raw) {
     }
     return out;
   }
-  if (raw.startsWith("'")) {
-    if (raw.length < 2 || !raw.endsWith("'")) return null;
-    const inner = raw.slice(1, -1);
+  if (value.startsWith("'")) {
+    if (value.length < 2 || !value.endsWith("'")) return null;
+    const inner = value.slice(1, -1);
     if (inner.replace(/''/g, "").includes("'")) return null;
     return inner.replace(/''/g, "'");
   }
-  const comment = raw.search(/(^|\s)#/);
-  const text = (comment === -1 ? raw : raw.slice(0, comment)).trim();
-  return /^[&*!%@`]/.test(text) ? null : text;
+  const comment = value.search(/(^|[ \t])#/);
+  const text = (comment === -1 ? value : value.slice(0, comment)).replace(/[ \t]+$/, "");
+  if (text === "" || /^[&*!%@`]/.test(text) || NON_STRING_PLAIN.test(text)) return null;
+  return text;
 }
 
+/**
+ * Byte-for-byte the loader's `readScalar`. Always reports the EXTENT of the
+ * value so the caller resumes where YAML would; `value: null` means the text is
+ * present but not exactly reproducible.
+ */
 export function readScalar(lines, index, raw) {
-  const header = raw.trim();
+  const header = raw.replace(/^[ \t]+|[ \t]+$/g, "");
   if (!/^[>|]/.test(header)) {
-    const value = readInlineScalar(header);
-    return value === null ? null : { value, next: index + 1 };
+    return { value: readInlineScalar(header), next: index + 1 };
   }
-  if (!/^[>|]-?$/.test(header)) return null;
+  const reproducible = /^[>|]-?$/.test(header);
   const folded = header.startsWith(">");
   const chomped = header.endsWith("-");
   const content = [];
@@ -166,18 +167,20 @@ export function readScalar(lines, index, raw) {
     content.push(line);
   }
   while (content.length && content[content.length - 1].trim() === "") content.pop();
+  if (!reproducible) return { value: null, next: cursor };
   if (!content.length) return { value: "", next: cursor };
   const base = content[0].length - content[0].trimStart().length;
   const parts = [];
   for (const line of content) {
-    if (line.trim() === "") return null;
-    if (/\t/.test(line.slice(0, base + 1))) return null;
-    if (line.length - line.trimStart().length !== base) return null;
-    if (/\s$/.test(line)) return null;
+    if (line.trim() === "") return { value: null, next: cursor };
+    if (/\t/.test(line.slice(0, base + 1))) return { value: null, next: cursor };
+    if (line.length - line.trimStart().length !== base) return { value: null, next: cursor };
+    if (/\s$/.test(line)) return { value: null, next: cursor };
     parts.push(line.slice(base));
   }
   return { value: parts.join(folded ? " " : "\n") + (chomped ? "" : "\n"), next: cursor };
 }
+
 
 /**
  * Named for the value it returns, but it applies every rule the RUNTIME
@@ -198,12 +201,24 @@ export function parseBundledSkillName(markdown, label) {
       fail(`${label} declares the executable frontmatter key ${JSON.stringify(key)}`);
     }
     const scalar = readScalar(lines, index, line.slice(line.indexOf(":") + 1));
-    if (!scalar) fail(`${label} uses a YAML scalar this pipeline cannot reproduce exactly`);
     index = scalar.next - 1;
-    if (key === "name" && name === null) name = scalar.value;
-    if (key === "description" && description === null) description = scalar.value;
+    // Same scoping as the loader: only the two values that get re-emitted
+    // have to be reproducible.
+    if (key === "name" && name === null) {
+      if (scalar.value === null) fail(`${label} name is a YAML form this pipeline cannot reproduce`);
+      name = scalar.value;
+    }
+    if (key === "description" && description === null) {
+      if (scalar.value === null) fail(`${label} description is a YAML form this pipeline cannot reproduce`);
+      description = scalar.value;
+    }
   }
   if (name === null) fail(`${label} lacks a frontmatter name`);
+  // The SAME name rule the loader applies. Without it this function accepted
+  // `CON`, `probe.` and `bad/name` that production rejects — the directory
+  // validator happens to catch them today, which makes the disagreement
+  // invisible rather than absent.
+  if (!isValidSkillName(name)) fail(`${label} declares an invalid skill name: ${name}`);
   // The runtime refuses a skill with no usable description, because that text
   // is the only thing the model reads when deciding the skill applies.
   if (!description) fail(`${label} lacks a usable frontmatter description`);
@@ -353,6 +368,11 @@ export async function validateBundleStructure(bundlePath) {
   await assertPlainFile(path.join(bundlePath, "manifest.json"), "manifest.json", MAX_MANIFEST_BYTES);
 
   const names = (await fs.readdir(skillsDir)).sort();
+  // ZERO skills is not a valid bundle. The runtime refuses it, so certifying
+  // one here would recreate exactly the gate-versus-runtime disagreement this
+  // pair of implementations exists to prevent. The builder cannot produce one,
+  // but a hand-made directory can.
+  if (names.length === 0) fail("bundle contains no skills");
   const seen = new Set();
   const files = [".claude-plugin/plugin.json"];
   for (const name of names) {
