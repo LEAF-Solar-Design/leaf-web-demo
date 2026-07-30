@@ -82,9 +82,16 @@ def test_every_contract_pattern_is_detected(tmp_path):
         "ALTER TABLE t RENAME COLUMN a TO b;",
         "ALTER TABLE t ALTER COLUMN c TYPE BIGINT;",
         "ALTER TABLE t ALTER COLUMN c SET DATA TYPE BIGINT;",
+        "ALTER TABLE t ALTER c TYPE BIGINT;",  # PG allows omitting COLUMN
         "ALTER TABLE t ALTER COLUMN c SET NOT NULL;",
         "TRUNCATE t;",
         "DELETE FROM t WHERE stale;",
+        "DROP MATERIALIZED VIEW mv;",
+        "DROP SCHEMA old_schema;",
+        "DROP SEQUENCE seq;",
+        "DROP TYPE old_enum;",
+        "DROP FUNCTION fn(int);",
+        "REVOKE SELECT ON t FROM app_role;",
     ]
     for i, sql in enumerate(statements):
         root = _dir(tmp_path / f"case{i}", {"0023_x.sql": sql + "\n"})

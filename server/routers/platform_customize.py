@@ -66,6 +66,15 @@ class CosignRequest(BaseModel):
         extra = "forbid"
 
 
+class LandRequest(BaseModel):
+    """The fresh per-invocation approval on the API lane: landing must NAME
+    the exact commit (mirrors the catalog's always-confirm posture)."""
+    commit_sha: str = Field(..., min_length=40, max_length=40)
+
+    class Config:
+        extra = "forbid"
+
+
 def _error(exc: lane.PlatformCustomizeError,
            cause: BaseException | None = None) -> JSONResponse:
     """Opaque reason code out, operator detail into the log (author.py idiom)."""
@@ -149,13 +158,15 @@ def status(change_id: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any
 
 
 @router.post("/api/platform/customize/{change_id}/land")
-def land(change_id: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def land(change_id: str, req: LandRequest,
+         tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     admitted = _gate(tenant)
     if isinstance(admitted, JSONResponse):
         return admitted
     tenant_id, _tier = admitted
     try:
-        return lane.land(change_id=change_id, tenant_id=tenant_id)
+        return lane.land(change_id=change_id, tenant_id=tenant_id,
+                         ack_commit_sha=req.commit_sha)
     except lane.PlatformCustomizeError as exc:
         return _error(exc)
     except Exception as exc:  # noqa: BLE001

@@ -153,8 +153,19 @@ def test_fundamental_path_requires_cosign(lane_env):
     assert view["state"] == "awaiting_cosign"
     assert view["fundamental_paths"] == ["server/auth.py"]
     with pytest.raises(lane.PlatformCustomizeError) as exc:
-        lane.land(change_id=view["change_id"], tenant_id=TENANT)
+        lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                  ack_commit_sha=view["commit_sha"])
     assert exc.value.code == "cosign_required"
+
+
+def test_case_variant_spelling_still_classifies_fundamental(lane_env):
+    """Windows/macOS resolve `Server/auth.py` to the protected file; a case
+    variant must classify as fundamental, not slip past the manifest
+    (sol-critic round 1, finding 1)."""
+    assert lane.classify_fundamental(["Server/auth.py"]) == ["Server/auth.py"]
+    assert lane.classify_fundamental(["SERVER/AUTH0-ACTIONS/x.js"]) == [
+        "SERVER/AUTH0-ACTIONS/x.js"]
+    assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
 def test_absent_manifest_makes_everything_fundamental(lane_env, monkeypatch):
@@ -202,8 +213,34 @@ def test_cosign_deny_is_terminal(lane_env):
                          commit_sha=view["commit_sha"], approve=False)
     assert denied["state"] == "denied"
     with pytest.raises(lane.PlatformCustomizeError) as exc:
-        lane.land(change_id=view["change_id"], tenant_id=TENANT)
+        lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                  ack_commit_sha=view["commit_sha"])
     assert exc.value.code == "change_not_landable"
+
+
+def test_cosign_verdict_is_one_shot_even_against_a_stale_record(lane_env):
+    """The O_EXCL marker, not the rewritable record, is the transition
+    authority: once a verdict is claimed, a racing writer that re-creates the
+    awaiting state cannot mint a second verdict (round 1, finding 5)."""
+    view = _propose(edits=[{"path": "server/auth.py", "content": "AUTH = 4\n"}])
+    cid = view["change_id"]
+    lane.cosign(change_id=cid, approver_subject="auth0|reviewer",
+                commit_sha=view["commit_sha"], approve=False)
+    # simulate a stale writer restoring the pending state on the record file
+    record = lane.load_record(cid)
+    record["state"] = "awaiting_cosign"
+    lane._write_record(record)
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.cosign(change_id=cid, approver_subject="auth0|reviewer2",
+                    commit_sha=view["commit_sha"], approve=True)
+    assert exc.value.code == "cosign_not_pending"
+    # and the durable marker still says denied, so landing stays refused
+    record["state"] = "approved"
+    lane._write_record(record)
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.land(change_id=cid, tenant_id=TENANT,
+                  ack_commit_sha=view["commit_sha"])
+    assert exc.value.code == "cosign_required"
 
 
 def test_approval_secret_verification_is_strict(lane_env, monkeypatch):
@@ -221,18 +258,30 @@ def test_approval_secret_verification_is_strict(lane_env, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_land_without_push_reports_pending_handoff(lane_env):
     view = _propose()
-    landed = lane.land(change_id=view["change_id"], tenant_id=TENANT)
+    landed = lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                       ack_commit_sha=view["commit_sha"])
     assert landed["state"] == "landed"
     assert landed["push"] == {"pushed": False, "remote": None,
                               "at": landed["push"]["at"]}
     assert landed["landing_path"]["rollback"] == "previous ECS task-definition revision"
     assert "sol-critic review gate" in landed["landing_path"]["pipeline"]
     # idempotent
-    again = lane.land(change_id=view["change_id"], tenant_id=TENANT)
+    again = lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                      ack_commit_sha=view["commit_sha"])
     assert again["state"] == "landed"
 
 
-def test_land_pushes_only_the_lane_ref(lane_env, tmp_path, monkeypatch):
+def test_land_requires_exact_commit_ack(lane_env):
+    """The API lane's fresh approval: landing must NAME the exact bytes
+    (round 1, finding 3)."""
+    view = _propose()
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                  ack_commit_sha="0" * 40)
+    assert exc.value.code == "land_ack_mismatch"
+
+
+def test_land_pushes_only_the_lane_ref_sha_pinned(lane_env, tmp_path, monkeypatch):
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -240,19 +289,22 @@ def test_land_pushes_only_the_lane_ref(lane_env, tmp_path, monkeypatch):
     _git(repo, "remote", "add", "origin", str(remote))
     monkeypatch.setenv("LEAF_PLATFORM_REPO_PUSH", "1")
     view = _propose()
-    landed = lane.land(change_id=view["change_id"], tenant_id=TENANT)
+    landed = lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                       ack_commit_sha=view["commit_sha"])
     assert landed["push"]["pushed"] is True
     remote_refs = subprocess.run(
         ["git", "--git-dir", str(remote), "for-each-ref",
-         "--format=%(refname)"], check=True, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.split()
-    assert remote_refs == [f"refs/heads/{view['branch']}"]  # never main
+         "--format=%(refname) %(objectname)"], check=True, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip().splitlines()
+    # exactly the lane ref, at exactly the recorded commit — never main
+    assert remote_refs == [f"refs/heads/{view['branch']} {view['commit_sha']}"]
 
 
 def test_land_refuses_foreign_tenant(lane_env):
     view = _propose()
     with pytest.raises(lane.PlatformCustomizeError) as exc:
-        lane.land(change_id=view["change_id"], tenant_id=OTHER_TENANT)
+        lane.land(change_id=view["change_id"], tenant_id=OTHER_TENANT,
+                  ack_commit_sha=view["commit_sha"])
     assert exc.value.code == "change_not_found"
 
 
@@ -263,8 +315,25 @@ def test_land_refuses_diverged_branch(lane_env):
     _git(repo, "update-ref", f"refs/heads/{view['branch']}",
          _git(repo, "rev-parse", "refs/heads/main"))
     with pytest.raises(lane.PlatformCustomizeError) as exc:
-        lane.land(change_id=view["change_id"], tenant_id=TENANT)
+        lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                  ack_commit_sha=view["commit_sha"])
     assert exc.value.code == "branch_diverged"
+
+
+def test_push_remote_refuses_credential_bearing_url(lane_env, monkeypatch):
+    """URL userinfo would end up in git argv/stderr and thence operator logs
+    (round 1, finding 7)."""
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_REMOTE",
+                       "https://user:tok3n@github.com/org/repo.git")
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.push_remote()
+    assert exc.value.code == "push_remote_invalid"
+    assert "tok3n" not in exc.value.detail
+
+
+def test_git_error_detail_redacts_userinfo():
+    assert lane._redact("push https://u:secret@host/x failed") == \
+        "push https://[redacted]@host/x failed"
 
 
 # --------------------------------------------------------------------------- #
@@ -314,6 +383,34 @@ def test_gate_requires_internal_mode_and_allowlist(lane_env, monkeypatch):
     monkeypatch.setenv("LEAF_CUSTOMIZATION_INTERNAL_TENANTS", "someone_else")
     out = _admitted(tenant, monkeypatch)
     assert json.loads(out.body)["reason_code"] == "platform_customize_disabled"
+
+
+def test_cosigned_fundamental_change_lands_with_ack(lane_env):
+    view = _propose(edits=[{"path": "server/auth.py", "content": "AUTH = 9\n"}])
+    lane.cosign(change_id=view["change_id"], approver_subject="auth0|reviewer",
+                commit_sha=view["commit_sha"], approve=True)
+    landed = lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                       ack_commit_sha=view["commit_sha"])
+    assert landed["state"] == "landed"
+
+
+def test_admin_elevation_requires_both_claim_and_allowlist(monkeypatch):
+    """W14 (round 1, finding 2): the stored org tier is the billing authority;
+    `admin` is a subject-level elevation needing BOTH the verified token claim
+    AND the server-owned allowlist. Either alone grants nothing."""
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "auth0|op-1, auth0|op-2")
+    elevate = deps.admin_elevated_tier
+    assert elevate("admin", "auth0|op-1", "hosted_pro") == "admin"
+    assert elevate("admin", "auth0|op-2", "restricted") == "admin"
+    # claim without allowlist -> stored tier
+    assert elevate("admin", "auth0|stranger", "hosted_pro") == "hosted_pro"
+    # allowlist without claim -> stored tier
+    assert elevate("hosted_pro", "auth0|op-1", "hosted_pro") == "hosted_pro"
+    assert elevate(None, "auth0|op-1", "restricted") == "restricted"
+    # no subject / empty env -> stored tier
+    assert elevate("admin", None, "hosted_pro") == "hosted_pro"
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "")
+    assert elevate("admin", "auth0|op-1", "hosted_pro") == "hosted_pro"
 
 
 def test_r7_flag_is_internal_only():

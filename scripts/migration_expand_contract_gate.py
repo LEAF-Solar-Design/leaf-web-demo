@@ -59,14 +59,23 @@ CONTRACT_PATTERNS = [
     ("DROP TABLE", re.compile(r"\bDROP\s+TABLE\b", re.IGNORECASE)),
     ("DROP COLUMN", re.compile(r"\bDROP\s+COLUMN\b", re.IGNORECASE)),
     ("DROP INDEX", re.compile(r"\bDROP\s+INDEX\b", re.IGNORECASE)),
-    ("DROP VIEW", re.compile(r"\bDROP\s+VIEW\b", re.IGNORECASE)),
+    ("DROP VIEW", re.compile(
+        r"\bDROP\s+(?:MATERIALIZED\s+)?VIEW\b", re.IGNORECASE)),
+    ("DROP SCHEMA", re.compile(r"\bDROP\s+SCHEMA\b", re.IGNORECASE)),
+    ("DROP SEQUENCE", re.compile(r"\bDROP\s+SEQUENCE\b", re.IGNORECASE)),
+    ("DROP TYPE", re.compile(r"\bDROP\s+TYPE\b", re.IGNORECASE)),
+    ("DROP FUNCTION", re.compile(r"\bDROP\s+FUNCTION\b", re.IGNORECASE)),
     ("DROP CONSTRAINT", re.compile(r"\bDROP\s+CONSTRAINT\b", re.IGNORECASE)),
     ("RENAME", re.compile(r"\bRENAME\s+(?:TO|COLUMN)\b", re.IGNORECASE)),
+    # PostgreSQL allows omitting the COLUMN keyword: `ALTER TABLE t ALTER c
+    # TYPE ...`. Match both spellings.
     ("ALTER COLUMN TYPE", re.compile(
-        r"\bALTER\s+COLUMN\s+\S+\s+(?:SET\s+DATA\s+)?TYPE\b", re.IGNORECASE)),
+        r"\bALTER\s+(?:COLUMN\s+)?\S+\s+(?:SET\s+DATA\s+)?TYPE\b",
+        re.IGNORECASE)),
     ("SET NOT NULL", re.compile(r"\bSET\s+NOT\s+NULL\b", re.IGNORECASE)),
     ("TRUNCATE", re.compile(r"\bTRUNCATE\b", re.IGNORECASE)),
     ("DELETE FROM", re.compile(r"\bDELETE\s+FROM\b", re.IGNORECASE)),
+    ("REVOKE", re.compile(r"\bREVOKE\b", re.IGNORECASE)),
 ]
 
 

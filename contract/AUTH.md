@@ -46,7 +46,7 @@ the **access token**:
 ```
 https://leafdesign.ai/tenant_id   (string, required)  e.g. "org_acme_solar"
 https://leafdesign.ai/org_id      (string | null)      e.g. "org_acme_solar"
-https://leafdesign.ai/tier        (string enum)        "self_hosted" | "hosted_starter" | "hosted_pro"
+https://leafdesign.ai/tier        (string enum)        the §11.2 claim-mintable subset: "restricted" | "self_hosted" | "hosted_starter" | "hosted_pro" | "admin"
 ```
 
 Namespace prefix is configurable via `LEAF_TENANT_CLAIM_NS` (default

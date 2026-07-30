@@ -105,8 +105,29 @@ def push_enabled() -> bool:
         "1", "true", "yes", "on"}
 
 
+_USERINFO_RE = re.compile(r"://[^/@\s]+@")
+
+
 def push_remote() -> str:
-    return os.environ.get("LEAF_PLATFORM_REPO_REMOTE", "").strip() or "origin"
+    """The push remote NAME or URL — refusing credential-bearing URLs.
+
+    A ``https://user:token@host/...`` remote would put the token into git's
+    argv and stderr, both of which feed operator-log detail on failure. Push
+    credentials belong in a credential helper or the remote's stored config,
+    never in this env var.
+    """
+    remote = os.environ.get("LEAF_PLATFORM_REPO_REMOTE", "").strip() or "origin"
+    if _USERINFO_RE.search(remote):
+        raise PlatformCustomizeError(
+            "push_remote_invalid", 503,
+            "LEAF_PLATFORM_REPO_REMOTE carries URL userinfo; use a credential "
+            "helper or a named remote instead")
+    return remote
+
+
+def _redact(text: str) -> str:
+    """Scrub URL userinfo out of anything destined for operator detail/logs."""
+    return _USERINFO_RE.sub("://[redacted]@", text)
 
 
 def fundamental_file() -> Path:
@@ -171,8 +192,9 @@ def _run_git(cmd: list[str], *, cwd: Optional[Path], where: str,
         stderr = str(getattr(exc, "stderr", "") or "").strip()
         raise PlatformCustomizeError(
             "platform_repo_unavailable", 503,
-            f"git_failed: {' '.join(cmd[-3:])} in {where} ({type(exc).__name__})"
-            + (f": {stderr}" if stderr else ""),
+            _redact(f"git_failed: {' '.join(cmd[-3:])} in {where} "
+                    f"({type(exc).__name__})"
+                    + (f": {stderr}" if stderr else "")),
         ) from exc
     return result.stdout.strip()
 
@@ -273,7 +295,19 @@ def _load_fundamental_patterns() -> Optional[list[str]]:
     return patterns
 
 
+def _fold(path: str) -> str:
+    """Case-fold + NFC for CLASSIFICATION ONLY (never for writing).
+
+    Windows and macOS checkouts resolve ``Server/entitlements.py`` to the same
+    file as ``server/entitlements.py``, so a case-variant spelling must
+    classify as the protected path, not slip past it. Folding can only WIDEN
+    the fundamental set — the fail-closed direction.
+    """
+    return unicodedata.normalize("NFC", path).casefold()
+
+
 def _matches(pattern: str, path: str) -> bool:
+    pattern, path = _fold(pattern), _fold(path)
     return path.startswith(pattern[:-2]) if pattern.endswith("/**") else path == pattern
 
 
@@ -469,6 +503,41 @@ def verify_approval_secret(presented: Optional[str]) -> bool:
         return False
 
 
+def _marker_path(change_id: str, kind: str) -> Path:
+    if not _CHANGE_ID_RE.fullmatch(str(change_id)):
+        raise PlatformCustomizeError("change_id_invalid", 422)
+    return state_dir() / f"{change_id}.{kind}.json"
+
+
+def _claim_marker(change_id: str, kind: str, payload: dict[str, Any]) -> bool:
+    """Atomically claim a one-shot transition (O_EXCL). False = already taken.
+
+    The marker, not the record, is the transition authority: two racing
+    writers both read the same record state, but only ONE can create the
+    marker file, so approve-vs-deny and double-land races collapse to a
+    single winner regardless of record rewrite ordering.
+    """
+    try:
+        fd = os.open(str(_marker_path(change_id, kind)),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(json.dumps(payload, sort_keys=True).encode("utf-8"))
+    return True
+
+
+def _read_marker(change_id: str, kind: str) -> Optional[dict[str, Any]]:
+    try:
+        raw = json.loads(_marker_path(change_id, kind).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PlatformCustomizeError(
+            "change_record_unavailable", 503, f"marker {kind}: {exc}")
+    return raw if isinstance(raw, dict) else None
+
+
 def cosign(*, change_id: str, approver_subject: str, commit_sha: str,
            approve: bool) -> dict[str, Any]:
     """Record the out-of-band co-sign verdict, bound to the exact commit.
@@ -477,7 +546,15 @@ def cosign(*, change_id: str, approver_subject: str, commit_sha: str,
     function enforces the bindings: the record must be awaiting co-sign, the
     presented commit sha must equal the staged one (approving "the change"
     without naming its bytes is not an approval), and the approver must not be
-    the proposing subject.
+    the proposing subject. The verdict itself is claimed via a one-shot O_EXCL
+    marker, so concurrent approve/deny requests resolve to exactly one winner.
+
+    TRUST NOTE: possession of the approval secret IS the co-sign authority
+    (the operator-held credential the harness and admin sessions never see —
+    same boundary as the R6 lane). ``approver_subject`` is the secret-holder's
+    ATTESTED audit label, not an authenticated identity; the self-approval
+    check is hygiene against honest mistakes, not a boundary against a
+    secret-holder who lies.
     """
     record = load_record(change_id)
     if record.get("state") != AWAITING_COSIGN:
@@ -489,23 +566,33 @@ def cosign(*, change_id: str, approver_subject: str, commit_sha: str,
         raise PlatformCustomizeError("cosign_approver_missing", 422)
     if approver == record.get("author_subject"):
         raise PlatformCustomizeError("cosign_self_approval", 403)
-    record["cosign"] = {
+    verdict = {
         "approver_subject": approver,
+        "approver_attestation": "approval-secret-holder",
         "commit_sha": commit_sha,
         "verdict": "approved" if approve else "denied",
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if not _claim_marker(change_id, "cosign", verdict):
+        raise PlatformCustomizeError("cosign_not_pending", 409)
+    record["cosign"] = verdict
     record["state"] = APPROVED if approve else DENIED
     _write_record(record)
     return public_view(record)
 
 
-def land(*, change_id: str, tenant_id: str) -> dict[str, Any]:
-    """Hand the approved branch to the standing pipeline (optionally pushing).
+def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, Any]:
+    """Hand the approved change to the standing pipeline (optionally pushing).
 
-    Push is refspec-pinned to the lane ref on BOTH sides and never forced; with
-    push disabled the receipt says so and the branch stays local for an
-    operator-driven push. Landing is idempotent per record.
+    ``ack_commit_sha`` is the fresh per-invocation approval on this API lane:
+    the caller must name the EXACT commit they are landing (mirroring the
+    catalog's always-confirm posture — a bare "land it" that names no bytes is
+    not an approval). The push sources the RECORDED COMMIT SHA, never the
+    mutable branch ref, so a ref moved between verification and push cannot
+    smuggle different bytes (the branch-diverged check stays as an early
+    honest error). Push never forces; the landed transition is a one-shot
+    O_EXCL marker, so concurrent lands collapse to one push; landing is
+    idempotent per record afterward.
     """
     record = load_record(change_id)
     if record.get("tenant_id") != str(tenant_id):
@@ -516,19 +603,40 @@ def land(*, change_id: str, tenant_id: str) -> dict[str, Any]:
         code = ("cosign_required" if record.get("state") == AWAITING_COSIGN
                 else "change_not_landable")
         raise PlatformCustomizeError(code, 409)
+    commit_sha = str(record.get("commit_sha", ""))
+    if not isinstance(ack_commit_sha, str) or ack_commit_sha != commit_sha:
+        raise PlatformCustomizeError("land_ack_mismatch", 409)
+    # Fundamental changes must ALSO show the durable approved verdict marker —
+    # the record alone could have been rewritten by a stale writer.
+    if record.get("fundamental_paths"):
+        marker = _read_marker(change_id, "cosign")
+        if not marker or marker.get("verdict") != "approved" \
+                or marker.get("commit_sha") != commit_sha:
+            raise PlatformCustomizeError("cosign_required", 409)
 
     ref = _assert_branch_only(str(record.get("branch_ref", "")))
     git_dir = repo_dir()
     observed = _git(git_dir, "rev-parse", "--verify", ref + "^{commit}")
-    if observed != record.get("commit_sha"):
+    if observed != commit_sha:
         raise PlatformCustomizeError(
             "branch_diverged", 409,
-            f"ref={ref} observed={observed} recorded={record.get('commit_sha')}")
+            f"ref={ref} observed={observed} recorded={commit_sha}")
 
+    # DELIVER, then mark. A pre-push marker would wedge the change if the push
+    # failed (marker consumed, nothing delivered). SHA-pinned pushes of the
+    # same commit are idempotent ("everything up-to-date"), so a rare double
+    # push is harmless; the marker exists to serialize the RECORD transition.
     pushed = False
     if push_enabled():
-        _git(git_dir, "push", push_remote(), f"{ref}:{ref}", timeout=120)
+        # SHA-pinned refspec: the pushed bytes are exactly the recorded
+        # commit, regardless of where the local ref points by now.
+        _git(git_dir, "push", push_remote(), f"{commit_sha}:{ref}", timeout=120)
         pushed = True
+
+    if not _claim_marker(change_id, "landed", {
+            "commit_sha": commit_sha,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}):
+        return public_view(load_record(change_id))
 
     record["push"] = {"pushed": pushed, "remote": push_remote() if pushed else None,
                       "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}

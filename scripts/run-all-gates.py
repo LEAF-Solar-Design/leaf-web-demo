@@ -313,7 +313,7 @@ def build_suites() -> List[Suite]:
         # fundamental-path co-sign, landing handoff. Own process: it builds
         # real git repos and toggles the R7 rollout env.
         Suite("server-platform-customize", "server tests/test_platform_customize.py",
-              "pytest", SERVER, _py_pytest("tests/test_platform_customize.py"), 28),
+              "pytest", SERVER, _py_pytest("tests/test_platform_customize.py"), 35),
         Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
               # Four section-18 tests are intentionally parked because the
               # section-2.1 lane replaced that surface. Pin the complete reason

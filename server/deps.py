@@ -712,6 +712,7 @@ def require_tenant(
     subject = payload.get("sub") if isinstance(payload.get("sub"), str) else None
     platform_tenant_id, platform_tier = resolve_active_platform_tenant_authority(subject)
     require_matching_platform_tenant_claim(claims, platform_tenant_id)
+    platform_tier = admin_elevated_tier(claims.get("tier"), subject, platform_tier)
     ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
     return TenantContext(
         platform_tenant_id,
@@ -721,6 +722,36 @@ def require_tenant(
         subject=subject,
         authority_resolved=True,
     )
+
+
+def admin_subjects() -> frozenset:
+    """The server-owned admin allowlist (W14): Auth0 subjects an operator
+    listed in LEAF_PLATFORM_ADMIN_SUBJECTS (comma-separated). Read at call
+    time like every other policy seam. Empty/unset = nobody."""
+    raw = os.environ.get("LEAF_PLATFORM_ADMIN_SUBJECTS", "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def admin_elevated_tier(claim_tier: Any, subject: Optional[str],
+                        stored_tier: str) -> str:
+    """W14 admin elevation — BOTH factors required, else the stored tier.
+
+    The stored org tier stays the billing authority (claims are hints that can
+    outlive an account move, and tier-sync would overwrite an org-row grant on
+    the next billing event, so the org row can never carry `admin`). `admin`
+    is a SUBJECT-level operator grant instead, and it takes two independent
+    operator acts to hold: the VERIFIED token must carry tier="admin" (minted
+    only from the operator-set root `app_metadata.leaf_admin === true` flag —
+    the Action never derives it from a plan), AND the subject must appear on
+    the server-owned LEAF_PLATFORM_ADMIN_SUBJECTS allowlist. Either alone
+    grants nothing: a forged/stale claim fails the allowlist, and an
+    allowlisted subject without the flag never presents the claim. Removal of
+    either revokes.
+    """
+    if (claim_tier == "admin" and isinstance(subject, str)
+            and subject.strip() and subject in admin_subjects()):
+        return "admin"
+    return stored_tier
 
 
 def resolve_active_tenant_context(tenant: Any) -> Any:
