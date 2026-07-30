@@ -26,11 +26,21 @@ def internal_tenants() -> frozenset[str]:
 
 
 def enabled(rung: int, tenant_id: str) -> bool:
-    """Return whether R5 or R6 is available to this tenant.
+    """Return whether R5, R6, or R7 is available to this tenant.
 
-    R7 deliberately has no implementation or route. R6 is conditional on R5,
-    so a partial rollout cannot expose publishing without trusted staging.
+    R6 is conditional on R5, so a partial rollout cannot expose publishing
+    without trusted staging.
+
+    R7 (W14 admin self-edit lane) is INTERNAL-ONLY by construction: the mode
+    value ``all`` deliberately reads as off, because platform self-edit is an
+    allowlisted-admin-accounts lane and must never be one env typo away from
+    "every tenant". It needs LEAF_CUSTOMIZATION_R7_MODE=internal AND the
+    tenant on LEAF_CUSTOMIZATION_INTERNAL_TENANTS. The entitlement layer
+    (tier `admin` carrying `platform_customize`) gates independently on top.
     """
+    if rung == 7:
+        return (mode("LEAF_CUSTOMIZATION_R7_MODE") is RolloutMode.INTERNAL
+                and str(tenant_id) in internal_tenants())
     if rung not in (5, 6):
         return False
     selected = mode(f"LEAF_CUSTOMIZATION_R{rung}_MODE")

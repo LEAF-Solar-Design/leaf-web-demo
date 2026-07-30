@@ -80,9 +80,21 @@ def test_shipped_catalog_loads_with_v1_shape():
         "additionalProperties": False,
     }
 
+    # W14 mount: R7 ships ENABLED in the catalog but stays dark behind three
+    # independent operator gates (admin-tier entitlement, R7 internal-mode
+    # allowlist, always-confirm). The pins below are what a weakened edit
+    # would have to break.
     cust = pol.actions["customize_platform"]
-    assert cust.enabled is False
+    assert cust.enabled is True
     assert cust.rung == 7
+    assert cust.required_capability == "platform_customize"
+    assert cust.policy == "always-confirm"
+    assert cust.tenant_tightenable is False
+    assert cust.dispatch["routes"] == [
+        "POST /api/platform/customize",
+        "GET /api/platform/customize/*",
+        "POST /api/platform/customize/*/land",
+    ]
 
     write = pol.actions["run_write_tool"]
     assert write.policy == "always-confirm"
@@ -298,7 +310,7 @@ def test_tier_override_cannot_loosen_tightenable_false_action(tmp_path):
 
 def test_tier_override_cannot_reenable_disabled_action(tmp_path):
     raw = _shipped_raw()
-    raw["tier_overrides"] = {"demo": {"customize_platform": {"enabled": True}}}
+    raw["tier_overrides"] = {"demo": {"undo_drawing_version": {"enabled": True}}}
     with pytest.raises(PolicyError, match="re-enable"):
         agent_policy.load_policy(_write(tmp_path, raw))
 
@@ -402,7 +414,8 @@ def test_tenant_overlay_cannot_reenable():
     pol = agent_policy.load_policy(SHIPPED)
     with pytest.raises(PolicyError, match="TIGHTEN"):
         agent_policy.effective_action(
-            pol, "customize_platform", tenant_overlay={"customize_platform": {"enabled": True}})
+            pol, "undo_drawing_version",
+            tenant_overlay={"undo_drawing_version": {"enabled": True}})
 
 
 def test_tenant_overlay_unknown_field_rejected():

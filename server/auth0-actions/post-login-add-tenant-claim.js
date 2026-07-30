@@ -113,6 +113,17 @@ function deriveClaims(event) {
     tier = 'restricted';
   }
 
+  // Admin override (W14 admin self-edit lane, contract/AUTH.md §11.2) — fires
+  // LAST, outranking the lapse override: `admin` is an OPERATOR grant, not a
+  // billing state, and revoking it means removing the flag, not lapsing a
+  // subscription. The flag lives at the app_metadata ROOT (like
+  // leaf_platform_tenant_id) so leaf_website subscription PATCHes replacing
+  // app_metadata.leaf can never mint or erase it; strict === true means a
+  // truthy-but-wrong value ("yes", 1) mints nothing.
+  if (appMetadata.leaf_admin === true) {
+    tier = 'admin';
+  }
+
   return { tenant_id: tenantId, org_id: orgId, tier: tier };
 }
 
@@ -161,6 +172,10 @@ if (require.main === module) {
       event: { user: { app_metadata: { leaf: { organization_id: 'org_canceled', plan: 'pro', subscription_active: true, subscription_status: 'canceled' } } } } },
     { name: 'pro plan, subscription_active=true, subscription_status=active -> unaffected',
       event: { user: { app_metadata: { leaf: { organization_id: 'org_good', plan: 'pro', subscription_active: true, subscription_status: 'active' } } } } },
+    { name: 'operator-set leaf_admin=true -> admin (outranks plan and lapse)',
+      event: { user: { app_metadata: { leaf_admin: true, leaf_platform_tenant_id: 'admin-tenant-1', leaf: { plan: 'pro', subscription_active: false } } } } },
+    { name: 'leaf_admin="yes" (not strict true) -> mints nothing special',
+      event: { user: { app_metadata: { leaf_admin: 'yes', leaf: { organization_id: 'org_x', plan: 'pro' } } } } },
   ];
   for (const s of samples) {
     const c = deriveClaims(s.event);

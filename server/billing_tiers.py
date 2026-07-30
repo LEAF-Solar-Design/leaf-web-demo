@@ -39,14 +39,24 @@ from typing import Dict, FrozenSet, Optional
 # Every tier the entitlement policy knows (entitlements.json keys).
 TIER_VOCABULARY: FrozenSet[str] = frozenset({
     "demo", "guest", "restricted", "self_hosted", "hosted_starter", "hosted_pro",
+    "admin",
 })
 
 # The subset a VERIFIED IDENTITY can carry (Auth0 claim / stored org tier).
 # `demo` and `guest` are server-resolved off-auth identities — never minted
 # into a JWT claim and never stored as an org's billing tier.
+# `admin` is claim-mintable but OPERATOR-GRANTED only: the Action mints it
+# solely from a root-level `app_metadata.leaf_admin === true` flag an operator
+# set by hand — it is NEVER a PLAN_TIER value and `derive_tier` never returns
+# it, so no billing state can produce an admin identity (W14, contract/AUTH.md
+# §11.2).
 CLAIM_TIERS: FrozenSet[str] = frozenset({
-    "restricted", "self_hosted", "hosted_starter", "hosted_pro",
+    "restricted", "self_hosted", "hosted_starter", "hosted_pro", "admin",
 })
+
+# The tier the admin override mints. Kept as a named constant so the freeze
+# gate and the Action text-pin reference one spelling.
+ADMIN_TIER = "admin"
 
 # --------------------------------------------------------------------------- #
 # plan -> tier (MUST equal the Action's PLAN_TIER — parity-gated).
@@ -98,7 +108,8 @@ def derive_tier(
       False`` or a status in ``LAPSED_STATUSES`` — absent fields (legacy
       metadata) leave the plan-derived tier intact, byte-for-byte the Action's
       backward-compat rule.
-    * Always returns a member of ``CLAIM_TIERS``.
+    * Always returns a member of ``CLAIM_TIERS``; NEVER ``admin`` — the admin
+      override is the Action's operator-flag path, not a billing derivation.
     """
     plan_key = (plan or "").strip().lower()
     tier = PLAN_TIER.get(plan_key, DEFAULT_TIER)

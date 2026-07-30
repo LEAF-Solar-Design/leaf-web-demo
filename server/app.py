@@ -47,6 +47,7 @@ from routers import (
     mcp_status,
     ops,
     ops_metrics,
+    platform_customize as platform_customize_router,
     prompt,
     session,
     sessions,
@@ -124,6 +125,7 @@ app.include_router(mcp_status.router)
 app.include_router(deployment_identity.router)
 app.include_router(demand.router)  # public waitlist capture, no auth required
 app.include_router(author.router)
+app.include_router(platform_customize_router.router)  # W14 admin self-edit lane (R7): admin-tier + internal-mode gated, branch-only
 app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoints
 app.include_router(prompt.router)  # M3: NL prompt router (MATRIX gap #2 — one prompt box -> lanes)
 app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET /api/usage)

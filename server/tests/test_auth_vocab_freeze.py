@@ -36,8 +36,11 @@ import entitlements as ents  # noqa: E402
 FROZEN_NS = "https://leafdesign.ai/"
 FROZEN_TIERS = {
     "demo", "guest", "restricted", "self_hosted", "hosted_starter", "hosted_pro",
+    "admin",  # W14 admin self-edit lane — §11 promotion ritual, 2026-07-30
 }
-FROZEN_CLAIM_TIERS = {"restricted", "self_hosted", "hosted_starter", "hosted_pro"}
+FROZEN_CLAIM_TIERS = {
+    "restricted", "self_hosted", "hosted_starter", "hosted_pro", "admin",
+}
 FROZEN_CAPABILITIES = {
     "run_read", "run_write", "solve", "build",
     "converse", "agent_write_autopilot", "deploy", "platform_customize",
@@ -99,6 +102,41 @@ def test_action_plan_tier_values_stay_claim_mintable():
         "the Post-Login Action must never mint a tier outside the claim subset "
         "(demo/guest are server-resolved identities, not claims)"
     )
+
+
+def test_admin_tier_is_never_plan_derived():
+    """`admin` is operator-granted (W14): no billing plan maps to it and the
+    derivation function can never return it — a billing state must never be
+    able to produce a staff identity."""
+    assert "admin" not in set(bt.PLAN_TIER.values())
+    assert bt.DEFAULT_TIER != "admin"
+    assert bt.ADMIN_TIER == "admin"
+    action = bt.load_action_billing_constants()
+    assert "admin" not in set(action["PLAN_TIER"].values())
+    for plan in [None, "", "free", "pro", "enterprise", "admin", "nonsense"]:
+        for active in [None, True, False]:
+            assert bt.derive_tier(plan, active) != "admin"
+
+
+def test_action_admin_override_is_strict_root_flag():
+    # Text pin (same idiom as the platform-lane literal below): the hand-pasted
+    # Action must mint `admin` only from the STRICT root-level flag.
+    text = (SERVER_DIR / "auth0-actions" /
+            "post-login-add-tenant-claim.js").read_text(encoding="utf-8")
+    assert "appMetadata.leaf_admin === true" in text
+    assert "tier = 'admin';" in text
+
+
+def test_admin_is_the_only_platform_customize_tier():
+    """The W14 mount: exactly one tier carries platform_customize, and it is
+    `admin` — in the JSON policy and the hardcoded mirror alike."""
+    policy = json.loads((SERVER_DIR / "entitlements.json").read_text(encoding="utf-8"))
+    granting = {tier for tier, caps in policy.items()
+                if not tier.startswith("_") and caps.get("platform_customize") is True}
+    assert granting == {"admin"}
+    granting_hc = {tier for tier, caps in ents._HARDCODED_DEFAULTS.items()
+                   if caps.get("platform_customize") is True}
+    assert granting_hc == {"admin"}
 
 
 def test_platform_lane_fallback_literal_is_restricted():
