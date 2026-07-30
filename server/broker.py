@@ -1179,6 +1179,10 @@ class BrokerRunRequest(BaseModel):
     params: Dict[str, Any] = {}
     dwg: str = "rooftop_demo"
     aps_live: bool = False
+    # Exact validate_tool output for a design-time staged broker test. The
+    # broker accepts it only when aps_live=false and executes it only inside the
+    # configured sandbox. It is never written to the ledger.
+    test_source: Optional[str] = None
     # None -> head (unchanged); otherwise pin to an immutable drawing version.
     dwg_version: Optional[int] = None
     # Required in PostgreSQL mode. Use one durable key across job redeliveries.
@@ -1211,6 +1215,10 @@ def _broker_request_fingerprint(req: BrokerRunRequest) -> str:
         "dwg": req.dwg,
         "aps_live": bool(req.aps_live),
         "dwg_version": req.dwg_version,
+        "test_source_sha256": (
+            hashlib.sha256(req.test_source.encode("utf-8")).hexdigest()
+            if req.test_source is not None else None
+        ),
     }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -2378,6 +2386,22 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         return (err_envelope(ErrorCode.BAD_PARAMS, "tool package missing 'name'", retryable=False),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
+    if req.test_source is not None:
+        if req.aps_live:
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "staged test source is forbidden for APS_LIVE=1",
+                retryable=False,
+                tool=tool.get("name"),
+            ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+        if not req.test_source.strip():
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "staged test source must not be empty",
+                retryable=False,
+                tool=tool.get("name"),
+            ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+
     # Phase 0 production gate: tracked builtins and APS-only tools remain
     # available, but a tenant-controlled Python file cannot load in this
     # credential-bearing process. Enabling authored execution without a
@@ -2419,6 +2443,8 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
 
     params = dict(req.params or {})
     degraded = False
+    run_dynamic = functools.partial(
+        run_tool_dynamic, test_source=req.test_source)
 
     # QA latency hook is NOT a tool param — pull it out before validation so it never
     # reaches the tool or the schema check. F12: it is HONORED only when QA hooks are
@@ -2480,14 +2506,14 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             backend = write_loop.default_backend(aps_live=False)
             _start_admitted_execution(req, admission, aps_submission=False)
             return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
-                                             t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
+                                             t0=t0, run_tool_dynamic_fn=run_dynamic,
                                              degraded=True, version=base_version,
                                              holder=req.checkout_holder,
                                              fence=req.checkout_fence)
         backend = write_loop.default_backend(aps_live=False)
         _start_admitted_execution(req, admission, aps_submission=False)
         return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
-                                         t0=t0, run_tool_dynamic_fn=run_tool_dynamic,
+                                         t0=t0, run_tool_dynamic_fn=run_dynamic,
                                          version=base_version,
                                          holder=req.checkout_holder,
                                          fence=req.checkout_fence)
@@ -2629,8 +2655,8 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # no APS credential / token reachability and no egress (tool_loader._run_in_sandbox). With
     # LEAF_SANDBOX unset this is the unchanged in-process path.
     _start_admitted_execution(req, admission, aps_submission=False)
-    env = run_tool_dynamic(tool, intake, params, aps_live=False, da=None, t0=t0,
-                           tenant_id=req.tenant_id)
+    env = run_dynamic(tool, intake, params, aps_live=False, da=None, t0=t0,
+                      tenant_id=req.tenant_id)
     if not env.get("ok"):
         code = (env.get("error") or {}).get("error_code", ErrorCode.INTERNAL)
         return env, DEFAULT_HTTP_STATUS.get(code, 500)

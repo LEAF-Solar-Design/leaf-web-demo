@@ -467,6 +467,28 @@ def test_tool_provider_requires_complete_matching_audit_receipt(
     assert "no-egress receipt incomplete" in refused_public["error"]["message"]
 
 
+def test_staged_source_receipt_binds_exact_submitted_bytes(
+        tenant_repo, fake_helper, monkeypatch):
+    tool = tenant_repo("counter", "def run(intake, params):\n    return ({'old': True}, None)\n")
+    staged = BENIGN_SRC.replace("'n': len(layers)", "'n': len(layers) + 7")
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "e2b")
+    monkeypatch.setattr(
+        tool_loader, "_microvm_cmd",
+        lambda: [sys.executable, str(fake_helper("strict_ok"))],
+    )
+
+    env = tool_loader.run_tool_dynamic(
+        tool, {"layers": ["A", "B"]}, {}, aps_live=False, da=None,
+        tenant_id="tenant-a", test_source=staged,
+    )
+
+    assert env["ok"] is True
+    assert env["result"]["n"] == 9
+    assert env["execution_provenance"]["source_sha256"] == hashlib.sha256(
+        staged.encode("utf-8")
+    ).hexdigest()
+
+
 def test_microvm_refuses_input_job_and_result_replay_tampering(
         tenant_repo, fake_helper, monkeypatch):
     tool = tenant_repo("counter", BENIGN_SRC)

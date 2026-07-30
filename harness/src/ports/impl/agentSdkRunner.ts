@@ -381,7 +381,7 @@ export class AgentSdkRunner implements AgentRunner {
           const params = typeof a.params_json === "string" && a.params_json.trim()
             ? JSON.parse(a.params_json)
             : {};
-          const env = await input.toolset.apsTestRun(candidate, params);
+          const env = await input.toolset.apsTestRun(candidate, params, candidateSubmission?.code);
           const accepted = acceptBrokerTestResult(env);
           candidateTested = accepted.ok;
           candidateExecutionReceipt = accepted.receipt;

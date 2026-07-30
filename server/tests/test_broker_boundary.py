@@ -88,6 +88,50 @@ def test_storage_cutover_gate_blocks_broker_write_before_preflight(monkeypatch):
     assert env["error"]["retryable"] is True
 
 
+def test_staged_source_is_hashed_not_recorded_in_request_fingerprint():
+    source_a = "def run(intake, params):\n    return ({'value': 'secret-a'}, None)\n"
+    base = dict(
+        tenant_id="tenant-a",
+        tool={"name": "candidate", "entry": "tools/candidate/tool.py"},
+        params={},
+        aps_live=False,
+    )
+    first = broker._broker_request_fingerprint(
+        broker.BrokerRunRequest(**base, test_source=source_a))
+    second = broker._broker_request_fingerprint(
+        broker.BrokerRunRequest(**base, test_source=source_a.replace("secret-a", "secret-b")))
+
+    assert first != second
+    assert "secret-a" not in first
+
+
+def test_broker_refuses_staged_source_on_live_aps_before_runner(monkeypatch):
+    monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    monkeypatch.setattr(broker, "_cap_preflight", lambda _tenant, _tool: None)
+    monkeypatch.setattr(
+        broker, "run_tool_dynamic",
+        lambda *args, **kwargs: pytest.fail("live staged source reached the runner"),
+    )
+    tool = {
+        "name": "candidate",
+        "entry": "tools/candidate/tool.py",
+        "params_schema": {"type": "object"},
+    }
+    env, status = broker._execute(
+        broker.BrokerRunRequest(
+            tenant_id="tenant-a", tool=tool, params={}, aps_live=True,
+            test_source="def run(intake, params):\n    return ({}, None)\n",
+        ),
+        tool,
+        "candidate",
+        0.0,
+        {},
+    )
+
+    assert status == 400
+    assert env["error"]["error_code"] == "BAD_PARAMS"
+
+
 def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_path):
     from contextlib import contextmanager
 

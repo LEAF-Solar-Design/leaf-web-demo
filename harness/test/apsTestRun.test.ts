@@ -45,4 +45,18 @@ describe("design-time APS test runs", () => {
 
     expect(broker.calls[0]!.params).toEqual({ layer: "Panels" });
   });
+
+  it("binds the exact validated source into a design-time broker test", async () => {
+    const broker = new FakeBrokerApsClient();
+    const run = makeApsTestRun(broker, "demo-tenant");
+    const source = "def run(intake, params):\n    return ({}, None)\n";
+
+    await run(tool("drawing.write"), { drawing_id: "cat-workbench" }, source);
+
+    expect(broker.calls[0]).toMatchObject({
+      apsLive: false,
+      testSource: source,
+      params: { drawing_id: "cat-workbench", dry_run: true },
+    });
+  });
 });

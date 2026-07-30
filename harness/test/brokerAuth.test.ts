@@ -13,9 +13,11 @@ describe("harness broker caller authentication", () => {
   it("trims and sends the broker secret without exposing it in the body", async () => {
     process.env.LEAF_BROKER_SECRET = "  broker-secret\r\n";
     let headers: unknown;
+    let body: unknown;
     const client = new BrokerApsClientHttp({
       fetchImpl: async (_url, init) => {
         headers = init?.headers;
+        body = JSON.parse(String(init?.body));
         return new Response(JSON.stringify({ ok: true }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -38,7 +40,13 @@ describe("harness broker caller authentication", () => {
       params: {},
       dwg: "drawing",
       apsLive: false,
+      testSource: "def run(intake, params):\n    return ({}, None)\n",
     });
     expect(headers).toMatchObject({ "X-Broker-Secret": "broker-secret" });
+    expect(body).toMatchObject({
+      tenant_id: "tenant",
+      aps_live: false,
+      test_source: "def run(intake, params):\n    return ({}, None)\n",
+    });
   });
 });
