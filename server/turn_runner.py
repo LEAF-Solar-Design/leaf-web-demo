@@ -1276,6 +1276,43 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
             pass
 
 
+def _return_policy_consume(cid: str, session_id: str, tenant_id: str) -> bool:
+    """Give a policy-consumed approval back — with ONE attempt, never a retry.
+
+    Round 12: the previous version retried three times blindly, and a blind
+    retry can break single-redeem. Under dual-write a release can SUCCEED in
+    one store and raise in the other, so an attempt that reports failure may
+    have actually freed the row; another caller can then legitimately consume
+    it, and a later blind retry flips THAT consume back off while its turn is
+    running. The store has no consume generation to CAS against (`consumed` is
+    a bare 0/1 in both backends), so the only provably safe number of attempts
+    is one: at the moment of the first call the consumed row is still OURS —
+    nobody else can consume a consumed=1 row, and nothing else gives this cid
+    back — and no earlier partial release can have opened the window.
+
+    A failed single attempt is the documented, safe direction: the row stays
+    consumed-by-policy until its TTL expires, visibly (the alarmable metric
+    plus stderr — review round 6). A consume-generation token that would make
+    retries safe belongs to the approval-lifecycle redesign PR, alongside the
+    explicit redemption ack.
+
+    Returns True iff the row was flipped back this call."""
+    try:
+        if bool(session_store.unconsume_approval(cid, session_id, tenant_id)):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        emf_metrics.emit_approval_give_back_failed(
+            "policy_auto_confirm", confirmation_id=cid, session_id=session_id)
+    except Exception:  # noqa: BLE001
+        pass
+    print(f"[leaf-agent] policy auto-confirm give-back FAILED for {cid!r} on "
+          f"session {session_id!r} — the row stays consumed until its TTL "
+          f"expires", file=sys.stderr, flush=True)
+    return False
+
+
 def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                             tier: Optional[str]) -> bool:
     """One candidate. True iff a confirm turn STARTED (the caller then stops:
@@ -1444,32 +1481,7 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # (see RESUMABLE above). The decision itself stands - it is ours,
             # and re-granting an already-granted gate would be the divergence
             # the gate-first ordering exists to prevent.
-            # The give-back gets THREE tries, and a persistent failure is
-            # reported on the ALARMABLE channel (the router's precedent for a
-            # destroyed approval): the row stays consumed-by-policy, unusable
-            # by a human under live auth, until its TTL expires — at which
-            # point the top check's `expired` branch releases the slot.
-            # Bounded and visible, never silent (review round 6, finding 1).
-            released = False
-            for _ in range(3):
-                try:
-                    released = bool(session_store.unconsume_approval(
-                        cid, session_id, tenant_id))
-                except Exception:  # noqa: BLE001
-                    released = False
-                if released:
-                    break
-            if not released:
-                try:
-                    emf_metrics.emit_approval_give_back_failed(
-                        "policy_auto_confirm", confirmation_id=cid,
-                        session_id=session_id)
-                except Exception:  # noqa: BLE001
-                    pass
-                print(f"[leaf-agent] policy auto-confirm give-back FAILED for "
-                      f"{cid!r} on session {session_id!r} — the row stays "
-                      f"consumed until its TTL expires",
-                      file=sys.stderr, flush=True)
+            _return_policy_consume(cid, session_id, tenant_id)
             # PARK it, so a later terminal actually retries (see
             # _pending_policy). Returning the consume alone left the decision
             # with nothing to rediscover it.
@@ -1487,31 +1499,9 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # was widened to refund 400/401/413/429/431 but this third consume
             # site kept the narrower test, so a policy auto-confirm hitting a
             # missing grant (401) or an oversized forward (413) burned the
-            # approval permanently. Same give-back discipline as the TurnBusy
-            # leg above: bounded retries, and a persistent failure is visible,
-            # never silent.
+            # approval permanently.
             if exc.approval_unredeemed:
-                released = False
-                for _ in range(3):
-                    try:
-                        released = bool(session_store.unconsume_approval(
-                            cid, session_id, tenant_id))
-                    except Exception:  # noqa: BLE001
-                        released = False
-                    if released:
-                        break
-                if not released:
-                    try:
-                        emf_metrics.emit_approval_give_back_failed(
-                            "policy_auto_confirm", confirmation_id=cid,
-                            session_id=session_id)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    print(f"[leaf-agent] policy auto-confirm give-back FAILED "
-                          f"for {cid!r} on session {session_id!r} after an "
-                          f"unredeemed rejection — the row stays consumed "
-                          f"until its TTL expires",
-                          file=sys.stderr, flush=True)
+                _return_policy_consume(cid, session_id, tenant_id)
             if exc.turn_id is not None:
                 # No HTTP caller to answer: close the transcript the failed
                 # start opened, the queue kicker's rule.

@@ -847,3 +847,48 @@ def test_policy_auto_confirm_gives_the_approval_back_on_an_unredeemed_rejection(
     # CAS parks; retrying a refusing harness would loop against it).
     with turn_runner._pending_policy_lock:
         assert sid not in turn_runner._pending_policy
+
+
+def test_give_back_never_retries_an_ambiguous_release(monkeypatch, turn_stub):
+    """Round 12: under dual-write, an unconsume can SUCCEED in one store and
+    raise in the other — so an attempt that reports failure may have freed the
+    row. Another caller can then legitimately consume it, and a blind retry
+    would flip THAT consume back off mid-turn, breaking single-redeem. With no
+    consume generation in the store to CAS against, the only safe number of
+    attempts is ONE: at the first call the consumed row is provably ours."""
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_store.create_approval(
+        confirmation_id="cid-ambig", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-am", tool="panel_count", params={},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+    session_store.decide_approval("cid-ambig", True, by="policy:auto_approve_reads")
+    session_store.consume_approval("cid-ambig", sid, "tenant-p",
+                                   decided_by="policy:auto_approve_reads")
+
+    calls = {"n": 0}
+    real_unconsume = session_store.unconsume_approval
+
+    def partial_release(cid, session_id, tenant_id):
+        # The dual-write failure mode: the release LANDS, then the call raises.
+        calls["n"] += 1
+        real_unconsume(cid, session_id, tenant_id)
+        raise RuntimeError("legacy-store write failed after the postgres write")
+
+    monkeypatch.setattr(turn_runner.session_store, "unconsume_approval", partial_release)
+    released = turn_runner._return_policy_consume("cid-ambig", sid, "tenant-p")
+    monkeypatch.setattr(turn_runner.session_store, "unconsume_approval", real_unconsume)
+
+    assert released is False, "an ambiguous release must report failure, not guess"
+    assert calls["n"] == 1, (
+        "the give-back retried an ambiguous release — a retry after an "
+        "effective-but-reported-failed release is what un-spends a LATER "
+        "caller's consume and breaks single-redeem"
+    )
+    # ...and the row the partial release actually freed is consumable by the
+    # next caller, whose consume nothing will ever claw back.
+    again = session_store.consume_approval("cid-ambig", sid, "tenant-p",
+                                           decided_by="policy:auto_approve_reads")
+    assert again["consumed"] is True
+    assert session_store.get_approval("cid-ambig")["consumed"] is True
