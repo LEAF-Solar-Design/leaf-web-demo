@@ -69,6 +69,7 @@ function bannerFor(e) {
   if (kind === 'entitlement') return { kind, message: 'Chat isn’t included in your plan.' }
   if (kind === 'approval_stale') return { kind, message: 'That request was already decided — ask the assistant to propose it again.' }
   if (kind === 'confirmation_expired') return { kind, message: 'That confirmation expired — ask the assistant to propose it again.' }
+  if (kind === 'too_large') return { kind, message: 'That message is too large — try fewer or smaller images.' }
   return { kind, message: 'Couldn’t reach the assistant — your built tools keep working.' }
 }
 

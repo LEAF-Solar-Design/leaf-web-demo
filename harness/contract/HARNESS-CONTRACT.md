@@ -80,8 +80,17 @@ timing-safe compare; FAIL-CLOSED when enabled with no secret configured).
 - **Request body ceilings** (added 2026-07-29). Every route bounds its request
   body before parsing and answers `413 { error: { message } }` with
   `connection: close` when the body exceeds it. A chunked body declares no
-  length, so the ceiling is enforced per chunk as the body arrives, and the
-  refused remainder is never drained — hence the close.
+  length, so the ceiling is enforced per chunk as the body arrives.
+
+  Once over the ceiling the body stops being buffered but keeps being read and
+  discarded, and the 413 is written when the body has finished arriving. Both
+  halves matter. Nothing accumulates, so memory is bounded by the ceiling
+  itself; and because `connection: close` makes node half-close the socket as
+  soon as the response is written, answering earlier would hand a still-
+  uploading peer a broken pipe and it would report a network failure rather
+  than the envelope. What bounds a slow or endless sender is not a byte budget
+  but `requestTimeout` (120s, versus node's 300s default), which applies to
+  every request rather than only refused ones.
 
   | Route | Ceiling | Why |
   |---|---|---|

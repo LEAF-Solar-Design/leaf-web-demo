@@ -663,6 +663,40 @@ function decodeBody(body: string): string {
   return out;
 }
 
+/**
+ * Same, but DECLARING a Content-Length so refusal happens before any byte is
+ * read. That branch discards from zero, which is what made a large declared
+ * body reset instead of answering.
+ */
+function rawDeclaredPost(port: number, path: string, totalBytes: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1");
+    const chunk = "x".repeat(64 * 1024);
+    let response = "";
+    let sent = 0;
+
+    socket.on("data", (d: Buffer) => { response += d.toString("utf8"); });
+    socket.on("close", () => resolve(response));
+    socket.on("error", () => { if (!response) reject(new Error("socket error before any response")); });
+
+    socket.once("connect", () => {
+      socket.write(
+        `POST ${path} HTTP/1.1\r\n` +
+        `Host: 127.0.0.1:${port}\r\n` +
+        `Content-Type: application/json\r\n` +
+        `Content-Length: ${totalBytes}\r\n\r\n`,
+      );
+      const pump = (): void => {
+        while (sent < totalBytes && !socket.destroyed) {
+          sent += chunk.length;
+          if (!socket.write(chunk)) { socket.once("drain", pump); return; }
+        }
+      };
+      pump();
+    });
+  });
+}
+
 describe("POST /turn - request body ceiling", () => {
   it("answers an over-limit CHUNKED body with the 413 envelope, not a connection reset", async () => {
     let runnerCalled = false;
@@ -767,4 +801,96 @@ describe("POST /turn - a turn is a user message or a confirmation, not both", ()
       expect(runnerCalled).toBe(false);
     });
   }
+});
+
+// Realistic budget: these push 9-40 MiB through a loopback socket, so the 5s
+// default is a statement about the transfer, not about the code under test.
+describe("body ceiling - an oversized DECLARED body on an 8 MiB route", { timeout: 60_000 }, () => {
+  // Round 8's sharpest case. Refusal on the declared Content-Length happens
+  // before the first byte arrives, so counting the drain allowance from the
+  // moment of refusal counted the WHOLE body as drain. On an 8 MiB route every
+  // oversized body is over 8 MiB, so a 4 MiB allowance was always blown and
+  // every one of them was cut off instead of answered. Measuring the allowance
+  // from the CAP is what fixes it.
+  // `/run-registered` rather than `/author`: with authored execution disabled
+  // (the default here) /author answers 403 BEFORE reading the body at all, so
+  // it exercises a pre-existing "reply without reading" path instead of the
+  // ceiling. That path has the same client-side symptom and is worth its own
+  // look, but it is not what this test is about.
+  const routes = ["/run-registered"];
+
+  it.each(routes)("answers %s with the 413 envelope, not a reset", async (route) => {
+    const { server: s } = listen(basePorts());
+    server = s;
+    const addr = s.address() as AddressInfo;
+
+    const response = await rawDeclaredPost(addr.port, route, 9 * 1024 * 1024);
+
+    expect(response).not.toBe("");
+    expect(response.split("\r\n")[0]).toContain("413");
+    expect(response.toLowerCase()).toContain("connection: close");
+    const body = response.slice(response.indexOf("\r\n\r\n") + 4);
+    expect(JSON.parse(decodeBody(body))).toMatchObject({
+      error: { message: "request body exceeds the harness cap" },
+    });
+  });
+
+  it("stops reading a body past the allowance instead of buffering it", async () => {
+    // Beyond cap + allowance the peer is past anything a client legitimately
+    // sends, and HTTP cannot promise it reads an early response while it is
+    // still uploading. What IS promised: the read is bounded and the server
+    // stays healthy. Asserting a delivered envelope here would be asserting
+    // something the protocol does not guarantee.
+    const { server: s, baseUrl } = listen(basePorts());
+    server = s;
+    const addr = s.address() as AddressInfo;
+
+    await rawDeclaredPost(addr.port, "/turn", 40 * 1024 * 1024).catch(() => "");
+
+    // The server did not fall over, and the next request is answered normally.
+    const res = await postTurn(baseUrl, validBody());
+    expect(res.status).toBe(501);   // no converseRunner wired in basePorts()
+    await res.text();
+  });
+});
+
+describe("body ceiling - the connection outlives the upload", { timeout: 60_000 }, () => {
+  it("does not answer or close until the oversized body has finished arriving", async () => {
+    // The ordering that makes a 413 readable. `connection: close` means node
+    // half-closes the socket the moment the response is written, so answering
+    // while the peer is still uploading hands it a broken pipe and it reports a
+    // network failure instead of the envelope — and the app turns that into
+    // BROKER_UNREACHABLE. This asserts the property directly rather than
+    // through a client's reaction to it, which is timing-dependent.
+    const { server: s } = listen(basePorts());
+    server = s;
+    const addr = s.address() as AddressInfo;
+
+    const declared = 3_000_000;      // over the 2,000,000 /turn ceiling
+    const socket = connect(addr.port, "127.0.0.1");
+    let response = "";
+    let sawFin = false;
+    socket.on("data", (d: Buffer) => { response += d.toString("utf8"); });
+    socket.on("end", () => { sawFin = true; });
+    socket.on("error", () => { /* only meaningful after the assertions below */ });
+
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    socket.write(
+      `POST /turn HTTP/1.1\r\nHost: 127.0.0.1:${addr.port}\r\n` +
+      `Content-Type: application/json\r\nContent-Length: ${declared}\r\n\r\n`,
+    );
+    socket.write("x".repeat(64 * 1024));      // a first slice, then stall
+    await delay(400);
+
+    // Mid-upload: nothing answered, nothing closed. The peer can still write.
+    expect(response).toBe("");
+    expect(sawFin).toBe(false);
+    expect(socket.writable).toBe(true);
+
+    // Finish the body; NOW the answer is safe and must arrive.
+    socket.write("x".repeat(declared - 64 * 1024));
+    await waitUntil(() => response.includes("\r\n\r\n"), 20_000);
+    expect(response.split("\r\n")[0]).toContain("413");
+    socket.destroy();
+  });
 });

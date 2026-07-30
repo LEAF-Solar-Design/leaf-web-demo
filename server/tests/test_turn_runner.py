@@ -92,6 +92,7 @@ class _TurnStub(http.server.BaseHTTPRequestHandler):
     CHUNK_DELAY_S: float = 0.0                 # sleep between chunks (proves incremental streaming)
     SEND_TERMINATOR: bool = True               # False -> never send the final 0-chunk (hang)
     LAST_BODY: Optional[Dict[str, Any]] = None
+    LAST_RAW: Optional[bytes] = None
 
     def _write_chunk(self, raw: bytes) -> None:
         self.wfile.write(f"{len(raw):x}\r\n".encode("ascii") + raw + b"\r\n")
@@ -100,6 +101,10 @@ class _TurnStub(http.server.BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("content-length", 0) or 0)
         body = self.rfile.read(length)
+        # The RAW bytes, kept so a test can assert how the app ENCODED them
+        # and not merely what they decode to. The ASCII-escaping defect was
+        # invisible to anything that only looked at the parsed object.
+        type(self).LAST_RAW = body
         try:
             type(self).LAST_BODY = json.loads(body or b"{}")
         except Exception:
@@ -141,6 +146,7 @@ def turn_stub():
     _TurnStub.CHUNK_DELAY_S = 0.0
     _TurnStub.SEND_TERMINATOR = True
     _TurnStub.LAST_BODY = None
+    _TurnStub.LAST_RAW = None
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TurnStub)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -1413,3 +1419,72 @@ def test_prior_messages_applies_the_byte_bound_on_the_real_path():
     assert len(messages) <= turn_runner.MAX_PRIOR_MESSAGES
     # 24 x 120KB of raw history folded down to the budget
     assert _ctx_bytes(messages) < 24 * 120_000
+
+
+# --------------------------------------------------------------------------- #
+# The forwarded body must not balloon on non-ASCII text.
+# --------------------------------------------------------------------------- #
+def test_forwarded_body_is_utf8_not_ascii_escaped(monkeypatch, turn_stub):
+    r"""Round 8 finding: `requests.post(json=...)` uses ensure_ascii=True, so
+    every non-ASCII character is escaped to \uXXXX. One emoji becomes 12 bytes
+    and one CJK character 6, which means a body the app legitimately accepted at
+    1.5 MB could reach the harness at ~4.5 MB and blow a ceiling sized against
+    the byte count the app checked."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+
+    sess = _new_session("tenant-utf8")
+    text = "\u4e2d\u6587" * 2000          # 4000 CJK characters
+    turn_runner.start_turn("tenant-utf8", sess["session_id"], text=text)
+    _wait_until(lambda: stub.LAST_RAW is not None)
+
+    raw = stub.LAST_RAW
+    assert raw is not None
+    # The value survives intact...
+    assert stub.LAST_BODY["text"] == text
+    # ...and it was sent as UTF-8, not as escapes. 4000 CJK characters are
+    # 12,000 UTF-8 bytes but 24,000 bytes of \uXXXX.
+    assert b"\\u4e2d" not in raw
+    assert text.encode("utf-8") in raw
+    # The forwarded size tracks the text size instead of doubling it.
+    assert len(raw) < 2 * len(text.encode("utf-8"))
+
+
+def test_an_oversized_turn_gives_the_approval_back(monkeypatch, turn_stub):
+    """Round 8 finding: the route consumes the approval before start_turn. A
+    harness 413 happens before ConverseLoop, so nothing redeemed it — but
+    without `pre_harness` the router keeps it spent and the proposal is burned
+    permanently, with no way to retry."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 413
+    stub.IMMEDIATE_BODY = {"error": {"message": "request body exceeds the harness cap"}}
+
+    sess = _new_session("tenant-413-confirm")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-413-confirm", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == 413
+    # THE assertion: this is what lets routers/sessions.py hand the approval back.
+    assert exc.pre_harness is True
+
+
+def test_several_huge_messages_are_each_clipped(monkeypatch):
+    """The policy is clip-then-drop, and the comment used to claim at most one
+    message is ever truncated. Four 200 KiB messages are four clipped
+    survivors, so the claim was wrong and this pins what actually happens."""
+    messages = [{"role": "user", "text": f"m{i} " + "z" * 200_000} for i in range(10)]
+    fitted = turn_runner._fit_prior_context(messages)
+
+    assert _ctx_bytes(fitted) <= turn_runner.MAX_PRIOR_CONTEXT_BYTES
+    assert len(fitted) > 1, "several survive, they are not collapsed to one"
+    for msg in fitted:
+        assert len(msg["text"].encode("utf-8")) <= turn_runner.MAX_PRIOR_MESSAGE_BYTES
+        assert msg["text"].startswith(turn_runner._TRUNCATION_MARKER)
+    # ...and an ordinary-sized message is still returned byte-for-byte.
+    small = [{"role": "user", "text": "ordinary"}]
+    assert turn_runner._fit_prior_context(small) == small

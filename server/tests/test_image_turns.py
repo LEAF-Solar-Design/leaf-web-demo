@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import sys
 import tempfile
@@ -77,7 +78,7 @@ def test_images_ride_alongside_text_into_the_event_and_the_wire(client, monkeypa
         status_code = 200
 
     def post(*args, **kwargs):
-        captured.update(kwargs["json"])
+        captured.update(json.loads(kwargs["data"]))
         return Response()
 
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.test")
@@ -100,7 +101,7 @@ def test_image_only_reaches_the_harness_and_stores_only_a_descriptor(client, mon
         status_code = 200
 
     def post(*args, **kwargs):
-        captured.update(kwargs["json"])
+        captured.update(json.loads(kwargs["data"]))
         return Response()
 
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.test")

@@ -167,15 +167,23 @@ function harnessAuthDenial(
  *     1,500,000  the app's own inbound cap (_MAX_MESSAGE_BODY_BYTES), which
  *                already covers text AND base64 images — they arrive in one body
  *     + 262,144  prior context (turn_runner.MAX_PRIOR_CONTEXT_BYTES)
- *     +  ~2,000  ids, credential grant, and JSON framing the app adds
+ *     + 237,856  ids, drawing_id, credential grant, a confirm proposal the
+ *                server adds, and JSON framing
  *     ---------
- *       1,764,144 worst case, so 2,000,000 with real headroom.
+ *       2,000,000
  *
- * Sizing this to the image budget alone (1,500,000) was wrong: it equalled the
- * app's inbound cap with nothing left for the history the app appends AFTER the
- * boundary check, so a legal 1 MiB image plus ordinary history hit the ceiling.
- * This number is only meaningful because prior context is byte-bounded; if that
- * bound moves, this one moves with it.
+ * Two things this depends on, both of which have already been wrong once:
+ *
+ * 1. Prior context is BYTE-bounded. It used to be count-bounded only, which
+ *    left this number sized against nothing.
+ * 2. The app forwards UTF-8, not ASCII-escaped JSON. `requests`' default
+ *    encoder escapes non-ASCII to \uXXXX, which turns one emoji into 12 bytes
+ *    and would let a legal 1.5 MB body arrive here as ~4.5 MB. turn_runner
+ *    now encodes with ensure_ascii=False for exactly this reason.
+ *
+ * If either changes, this number changes with it. Sizing it to the image budget
+ * alone (1,500,000) was the original mistake: that equalled the app's inbound
+ * cap with nothing left for what the app appends AFTER its own boundary check.
  *
  * Every other route gets a generous default, because a customization publish
  * carries a staged receipt and a registered run carries arbitrary tool params:
@@ -184,8 +192,8 @@ function harnessAuthDenial(
  */
 const MAX_TURN_BODY_BYTES = 2_000_000;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
-/** How much of an over-cap body to read and throw away so the 413 can be delivered. */
-const MAX_DRAIN_BYTES = 4 * 1024 * 1024;
+/** How long one peer may hold a socket while sending (node's default is 300s). */
+const REQUEST_TIMEOUT_MS = 120_000;
 
 function readJsonBody(
   req: IncomingMessage,
@@ -195,22 +203,32 @@ function readJsonBody(
     const chunks: Buffer[] = [];
     let seen = 0;
     let refused = false;
-    let discarded = 0;
     const tooLarge = (): AuthorLoopError =>
       new AuthorLoopError("request body exceeds the harness cap", 413);
 
-    // Over the cap, STOP BUFFERING but keep consuming, and answer when the
-    // request ends. Memory is the thing being defended and discarding costs
-    // none of it, whereas the two shortcuts both break the answer: destroying
-    // the socket races the 413 (the client reads a connection reset), and
-    // simply ignoring the rest leaves node to close on a still-writing client,
-    // which resets it just the same. That reset is not cosmetic — the app maps
-    // a dropped connection to BROKER_UNREACHABLE, so the caller is told the
+    // Over the cap: STOP BUFFERING, keep reading, and answer at `end`.
+    //
+    // Memory is what the ceiling defends, and discarding costs none of it. The
+    // reason to keep reading at all is that WHEN the 413 is written decides
+    // whether the client ever reads it: the response carries
+    // `connection: close`, node half-closes as soon as it is written, and a
+    // peer still uploading gets a broken pipe and reports a network failure
+    // instead of the envelope. That reset is not cosmetic — the app maps a
+    // dropped connection to BROKER_UNREACHABLE, so the caller is told the
     // harness is down when it actually answered "your payload is too big".
     //
-    // The drain is bounded: a client that keeps pushing megabytes past the cap
-    // has already been told no, and forfeits the tidy envelope.
+    // Two smarter-looking versions of this were both worse. Destroying the
+    // socket at a byte allowance reset every oversized DECLARED request on the
+    // 8 MiB routes, because refusal there happens before the first byte and the
+    // whole body counts against the allowance. Answering early and pausing
+    // deadlocked: node will not finish a response whose request nobody is
+    // reading, so the socket never closed at all.
+    //
+    // What bounds this is not a byte budget but `requestTimeout` on the server
+    // (see `listen`), which is the honest control for "a peer is holding a
+    // socket too long" and applies to every request, not just refused ones.
     const refuse = (): void => {
+      if (refused) return;
       refused = true;
       chunks.length = 0;
     };
@@ -219,24 +237,17 @@ function readJsonBody(
     if (Number.isFinite(declared) && declared > maxBytes) refuse();
 
     req.on("data", (c: Buffer) => {
-      if (refused) {
-        discarded += c.length;
-        if (discarded > MAX_DRAIN_BYTES) {
-          req.destroy();
-          reject(tooLarge());
-        }
-        return;
-      }
+      if (refused) return;                 // read and drop; nothing accumulates
       seen += c.length;
-      if (seen > maxBytes) {
-        // Measured as it arrives, not afterwards: a chunked body declares no
-        // length, so buffering first and checking later defeats the point.
-        refuse();
-        return;
-      }
+      // Measured as it arrives, not afterwards: a chunked body declares no
+      // length, so buffering first and checking later defeats the point.
+      if (seen > maxBytes) return refuse();
       chunks.push(c);
     });
     req.on("end", () => {
+      // The body has finished arriving, so closing the connection now cannot
+      // break the peer's write side — this is the point at which a 413 is
+      // actually readable by the client that caused it.
       if (refused) return reject(tooLarge());
       const raw = Buffer.concat(chunks).toString("utf8").trim();
       if (!raw) return resolve({});
@@ -782,6 +793,12 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
       const server = createHttpServer((req, res) => {
         void handler(req, res);
       });
+      // How long any one peer may hold a socket while sending. This is the
+      // bound on an over-cap body being read and discarded, and on a slow
+      // writer generally — node's default is 300s, which is a long time to
+      // occupy a connection for a request already known to be refused. 8 MiB
+      // in 120s is 70 KB/s, far below anything a real client does.
+      server.requestTimeout = REQUEST_TIMEOUT_MS;
       server.listen(port);
       return server;
     },

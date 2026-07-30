@@ -190,9 +190,14 @@ def _harness_url() -> str:
 # with nothing to be sized against: a legitimate 1 MiB image plus ordinary
 # history could exceed it, and the resulting 413 surfaced as BROKER_UNREACHABLE.
 #
-# Whole messages are dropped oldest-first to fit, rather than every message
-# being clipped, so what survives is verbatim. Only a single message that alone
-# exceeds the per-message cap is truncated, with a visible marker.
+# TWO bounds, applied in this order: each message is clipped to
+# MAX_PRIOR_MESSAGE_BYTES (tail kept, with a visible marker), then WHOLE
+# messages are dropped from the oldest end until the total fits
+# MAX_PRIOR_CONTEXT_BYTES. So an ordinary message — anything under the
+# per-message cap, which is all of them in practice — survives verbatim or not
+# at all, and only genuinely huge ones are truncated. An earlier version of this
+# comment claimed at most one message is ever clipped; that was wrong, since
+# four 200 KiB messages are four clipped messages.
 PRIOR_EVENTS_WINDOW = 400
 MAX_PRIOR_MESSAGES = 20
 MAX_PRIOR_MESSAGE_BYTES = 64 * 1024
@@ -443,7 +448,11 @@ def _clip(text: str) -> str:
 def _fit_prior_context(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """Clip each message to MAX_PRIOR_MESSAGE_BYTES, then drop whole messages
     from the OLDEST end until the total fits MAX_PRIOR_CONTEXT_BYTES. Newest
-    context is the context worth keeping, so the budget is spent from the end."""
+    context is the context worth keeping, so the budget is spent from the end.
+
+    Note that clipping applies to EVERY message that is individually over the
+    per-message cap, not just the newest one: several huge messages produce
+    several clipped survivors."""
     kept: List[Dict[str, str]] = []
     total = 0
     for msg in reversed(messages):
@@ -651,8 +660,17 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         encoded = json.dumps(instant_assignment, separators=(",", ":")).encode("utf-8")
         harness_headers["x-leaf-instant-assignment"] = base64.urlsafe_b64encode(encoded).decode("ascii")
 
+    # Encoded HERE rather than via `json=`, because requests' default encoder
+    # sets ensure_ascii=True and escapes every non-ASCII character to \uXXXX.
+    # That turns one emoji into 12 bytes and one CJK character into 6, so a
+    # 1,499,999-byte browser body could arrive at the harness as ~4.5 MB and
+    # blow a ceiling sized against the byte count the app actually accepted.
+    # UTF-8 is valid JSON, is what the browser sent, and makes the forwarded
+    # size track the inbound size instead of a 6x worst case.
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    harness_headers["content-type"] = "application/json"
     try:
-        resp = requests.post(f"{harness_url}/turn", json=payload,
+        resp = requests.post(f"{harness_url}/turn", data=body,
                              headers=harness_headers,
                              stream=True, timeout=(5, max_s))
     except requests.exceptions.ConnectTimeout as exc:
@@ -713,11 +731,16 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # "broker unreachable" for a broker that answered perfectly well, and
         # sent the caller looking for an outage instead of a smaller payload.
         _release_cas()
-        body = _safe_json(resp) or {}
-        msg = (body.get("message") or (body.get("error") or {}).get("message")
+        rejected = _safe_json(resp) or {}
+        msg = (rejected.get("message") or (rejected.get("error") or {}).get("message")
                or "the turn payload exceeded the harness body ceiling")
         resp.close()
-        raise _rejected(413, ErrorCode.BAD_PARAMS, msg)
+        # pre_harness: a 413 is the harness refusing the BODY before it parses
+        # one, so ConverseLoop never ran and no confirmation was redeemed.
+        # Without this the router keeps the approval spent, and an oversized
+        # confirm turn burns the proposal permanently with nothing to show for
+        # it — the caller cannot even retry, because the approval is gone.
+        raise _rejected(413, ErrorCode.BAD_PARAMS, msg, pre_harness=True)
 
     if resp.status_code >= 400:
         _release_cas()

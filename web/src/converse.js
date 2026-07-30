@@ -70,6 +70,11 @@ export function classifyAgentError(err) {
   // only a fresh proposal can proceed).
   if (err?.status === 410) return 'confirmation_expired'
   if (err?.status === 409 && code === 'bad_params') return 'approval_stale'
+  // 413 is also BAD_PARAMS, and falling through to 'unreachable' told the user
+  // we could not reach the assistant when the assistant had answered clearly:
+  // the payload is too big. That is a thing the user can act on (send fewer or
+  // smaller images), and an outage is not.
+  if (err?.status === 413) return 'too_large'
   if (err?.status === 401 || code === 'grant_required' || !!(err?.body && err.body.grant_required)) return 'grant'
   if (err?.status === 403 || code === 'entitlement_required' || !!(err?.body && err.body.entitlement_required)) return 'entitlement'
   return 'unreachable'
